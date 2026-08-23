@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -278,6 +279,181 @@ func TestProxy_DeniesTheGitHubAPIHosts(t *testing.T) {
 					"this whole arrangement exists to delete")
 			}
 		})
+	}
+}
+
+// TestProxy_ConnectDenialStatusLineCarriesReason pins the denial's delivery
+// channel: the reason must ride the status LINE, not just the body, because a
+// client tunneling through a proxy discards the body of a refused CONNECT and
+// Go's transport surfaces only the text after the status code. This is
+// exactly how `gh run view` — which follows the run object's absolute
+// api.github.com jobs_url out of the injector channel — used to die with a
+// bare "Forbidden" and nothing to act on.
+//
+// It also pins which hosts carry a remedy: the GitHub API hosts point at the
+// exec verbs, github.com points at the run's git path, and a host with no
+// sanctioned alternative gets the bare allowlist reason and no invented one.
+func TestProxy_ConnectDenialStatusLineCarriesReason(t *testing.T) {
+	cases := []struct {
+		host        string
+		wantPhrase  []string
+		absentInAll string
+	}{
+		{host: "api.github.com", wantPhrase: []string{
+			"not on the sandbox egress allowlist",
+			"tfac gh --help",
+		}},
+		{host: "github.com", wantPhrase: []string{
+			"not on the sandbox egress allowlist",
+			"credential proxy",
+		}},
+		{host: "evil.example.com",
+			wantPhrase:  []string{"not on the sandbox egress allowlist"},
+			absentInAll: "exec verbs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.host, func(t *testing.T) {
+			addr := newTestServer(t, Config{AllowedHosts: DefaultRegistryHosts()}, nil, nil, nil)
+			resp := rawConnect(t, addr, tc.host+":443", "")
+			statusLine, _, _ := strings.Cut(resp, "\r\n")
+			for _, want := range tc.wantPhrase {
+				if !strings.Contains(statusLine, want) {
+					t.Errorf("status line %q should carry %q — the body of a refused CONNECT is never read", statusLine, want)
+				}
+			}
+			if tc.absentInAll != "" && strings.Contains(resp, tc.absentInAll) {
+				t.Errorf("denial for %s mentions %q; a host with no sanctioned alternative must not point at one:\n%s",
+					tc.host, tc.absentInAll, resp)
+			}
+		})
+	}
+}
+
+// TestGitHubHostsForUpstreams pins the derivation from the run's channel
+// upstreams to the guidance host set, across the three host classes TF
+// supports (github.com, GHES path-mount, GHE Cloud data residency) and the
+// empty/partial inputs a run without one of the channels produces. The point
+// of deriving is that there is no second host list to drift: a GHES org's
+// denials explain the GHES hostname because that is what its channels are
+// built from.
+func TestGitHubHostsForUpstreams(t *testing.T) {
+	cases := []struct {
+		name     string
+		api, git string
+		wantAPI  []string
+		wantGit  []string
+	}{
+		{name: "both empty is the public family",
+			wantAPI: []string{"api.github.com", "uploads.github.com"},
+			wantGit: []string{"github.com", "codeload.github.com"}},
+		{name: "public upstreams spelled out",
+			api: "https://api.github.com", git: "https://github.com",
+			wantAPI: []string{"api.github.com", "uploads.github.com"},
+			wantGit: []string{"github.com", "codeload.github.com"}},
+		{name: "GHES names one host on both sides",
+			api: "https://ghes.corp.example.com/api/v3", git: "https://ghes.corp.example.com",
+			wantAPI: []string{"ghes.corp.example.com"},
+			wantGit: []string{"ghes.corp.example.com"}},
+		{name: "GHES with no gh channel still covers the API side from the git host",
+			git:     "https://ghes.corp.example.com",
+			wantAPI: []string{"ghes.corp.example.com"},
+			wantGit: []string{"ghes.corp.example.com"}},
+		{name: "GHES with no git channel still covers the git side from the API host",
+			api:     "https://ghes.corp.example.com/api/v3",
+			wantAPI: []string{"ghes.corp.example.com"},
+			wantGit: []string{"ghes.corp.example.com"}},
+		{name: "data residency derives the web host from the api. prefix",
+			api:     "https://api.tenant.ghe.com",
+			wantAPI: []string{"api.tenant.ghe.com"},
+			wantGit: []string{"tenant.ghe.com"}},
+		{name: "data residency derives the API host from the tenant host",
+			git:     "https://tenant.ghe.com",
+			wantAPI: []string{"api.tenant.ghe.com"},
+			wantGit: []string{"tenant.ghe.com"}},
+		{name: "a bare host with no scheme parses",
+			api:     "ghes.corp.example.com",
+			wantAPI: []string{"ghes.corp.example.com"},
+			wantGit: []string{"ghes.corp.example.com"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := GitHubHostsForUpstreams(tc.api, tc.git)
+			if !slices.Equal(got.API, tc.wantAPI) || !slices.Equal(got.Git, tc.wantGit) {
+				t.Errorf("GitHubHostsForUpstreams(%q, %q) = API %v / Git %v; want API %v / Git %v",
+					tc.api, tc.git, got.API, got.Git, tc.wantAPI, tc.wantGit)
+			}
+		})
+	}
+}
+
+// TestProxy_GHESDenialCarriesGuidance pins the per-run half of the guidance:
+// on a GHES deployment, gh's absolute-URL follow-ups name the GHES hostname,
+// so the remedy must ride THAT host's denial — and the public github.com
+// family, which is not this org's GitHub, must get the bare allowlist reason
+// rather than a remedy pointing at channels that don't serve it.
+func TestProxy_GHESDenialCarriesGuidance(t *testing.T) {
+	addr := newTestServer(t, Config{
+		AllowedHosts: DefaultRegistryHosts(),
+		GitHub: GitHubHostsForUpstreams(
+			"https://ghes.corp.example.com/api/v3", "https://ghes.corp.example.com"),
+	}, nil, nil, nil)
+
+	resp := rawConnect(t, addr, "ghes.corp.example.com:443", "")
+	statusLine, _, _ := strings.Cut(resp, "\r\n")
+	for _, want := range []string{
+		"not on the sandbox egress allowlist",
+		"tfac gh --help",
+		"worktree's existing remotes",
+	} {
+		if !strings.Contains(statusLine, want) {
+			t.Errorf("GHES denial status line %q should carry %q — the GHES host serves both channel sides", statusLine, want)
+		}
+	}
+
+	if resp := rawConnect(t, addr, "api.github.com:443", ""); strings.Contains(resp, "exec verbs") {
+		t.Errorf("a GHES org's denial for api.github.com points at the exec verbs, which do not serve that host:\n%s", resp)
+	}
+}
+
+// TestProxy_GoClientSurfacesDenialReason drives the report's exact shape end
+// to end: a Go http.Client behind the proxy (what gh is) asking for a GitHub
+// API URL must fail with an error that names the policy and the verb to use
+// instead — not the canonical "Forbidden" the transport reduces a normal 403
+// CONNECT response to.
+func TestProxy_GoClientSurfacesDenialReason(t *testing.T) {
+	addr := newTestServer(t, Config{AllowedHosts: DefaultRegistryHosts()}, nil, nil, nil)
+	proxyURL, err := url.Parse("http://" + addr)
+	if err != nil {
+		t.Fatalf("parse proxy addr: %v", err)
+	}
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+		Timeout:   2 * time.Second,
+	}
+	_, err = client.Get("https://api.github.com/repos/o/r/actions/runs/1/jobs?per_page=100")
+	if err == nil {
+		t.Fatal("GET through the proxy succeeded; api.github.com must be refused")
+	}
+	for _, want := range []string{"not on the sandbox egress allowlist", "tfac gh --help"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("client error %q should carry %q for the agent to act on", err.Error(), want)
+		}
+	}
+}
+
+// TestReasonPhrase_SingleLineAndBounded pins the response-splitting backstop:
+// whatever composes the reason, the phrase that reaches the status line is one
+// bounded line with control bytes neutralized.
+func TestReasonPhrase_SingleLineAndBounded(t *testing.T) {
+	got := reasonPhrase("a\r\nSet-Cookie: x\nb\x00c")
+	if strings.ContainsAny(got, "\r\n\x00") {
+		t.Errorf("reasonPhrase left control bytes in %q", got)
+	}
+	if got != "a  Set-Cookie: x b c" {
+		t.Errorf("reasonPhrase = %q; control bytes should map to spaces", got)
+	}
+	if long := reasonPhrase(strings.Repeat("x", 4096)); len(long) > 512 {
+		t.Errorf("reasonPhrase length = %d; must stay well under the client's 4 KiB line buffer", len(long))
 	}
 }
 

@@ -200,7 +200,12 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		git.SharedOriginCAPath = agentproc.SandboxGHInjectorCertPath
 	}
 
-	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, git, r.recordEgressDenial, r.llmSource, req.IdentityConfigPairs...)
+	// The egress denial guidance reads the same two values every GitHub lane
+	// was just built from, so the hosts a refusal explains are this run's
+	// actual GitHub — GHES and data-residency deployments included, not just
+	// the public github.com family.
+	ghHosts := egressproxy.GitHubHostsForUpstreams(apiUpstream, gitUpstream)
+	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, git, ghHosts, r.recordEgressDenial, r.llmSource, req.IdentityConfigPairs...)
 	if err != nil {
 		return nil, err
 	}

@@ -1,13 +1,14 @@
 <github>
 `gh` is the real GitHub CLI and it is already authenticated for this run.
-Use it the way you know it — `gh pr view`, `gh pr diff`, `gh pr list`, `gh issue view`, `gh run view`, `gh api`, etc.
+Use it the way you know it — `gh pr view`, `gh pr diff`, `gh pr list`, `gh issue view`, `gh api`, etc.
 
-Five things differ from using `gh` on your own machine:
+Six things differ from using `gh` on your own machine:
 
 - **Open pull requests as drafts** — `gh pr create --draft` — unless your mission explicitly asks for one ready to review. A human marks it ready. Push the branch before you call `pr create`, or GitHub will reject it.
 - **`gh pr review` is refused.** It can only leave one top-level comment — it cannot attach a comment to a specific line — and it posts straight to GitHub, so nothing you write with it becomes a review Triage Factory can stage, revise, or route for approval. The verbs below do everything it does and more.
 - **Do not merge a pull request** unless your mission says to explicitly. Opening the PR is the deliverable; merging, even if able, is somebody's decision. A merge — `gh pr merge`, or the same call made through `gh api` — is interrupted the first time you attempt it and asks you to quote the line of your mission that authorizes it.
 - **`gh repo create` is refused.** Triage Factory scopes polling, task routing, and this run's credential to a set of repositories chosen before the run started, and a repository created mid-run belongs to none of it. If your mission needs one that does not exist, say so in your final message and stop there.
+- **CI runs and logs go through `tfac`, not `gh run`.** `gh run view` and `gh run download` follow absolute `api.github.com` URLs out of the API's own responses, and those connections cannot leave this sandbox — they fail with a 403 naming the egress allowlist. Use `tfac gh actions list-runs --pr <N>` to list a PR's workflow runs, and `tfac gh actions download-logs <run_id>` to download and extract a run's full logs — its JSON result names the extraction directory as `dest_dir`; Read/Grep the files there (one top-level directory per job).
 - On a large pull request, `gh pr diff` will overflow the tool result and spill to a file. This is expected. `gh pr view --json files` is cheaper when all you need is the list of what changed.
 
 The two refusals above — reviews and repository creation — are enforced on the channel `gh` reaches GitHub through, not on the command you typed: the same act written as `gh api`, as an inline GraphQL mutation, or as a raw `curl` is refused identically, and no flag or argument opts out. Reaching for a second spelling after a refusal (manifests as a 403) only wastes turns.
