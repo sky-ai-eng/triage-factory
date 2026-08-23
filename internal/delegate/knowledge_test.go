@@ -178,6 +178,130 @@ func TestStageTeamKnowledge_NoTeamOrNoStoreStagesNothing(t *testing.T) {
 	}
 }
 
+// TestStageTeamKnowledge_RebuildsRatherThanAccumulates: a blueprint's steps
+// share one run tree, so a second launch stages into a directory the first one
+// already filled. A document deleted from the knowledge base in between must be
+// gone from the tree — a leftover is invisible in the manifest (which is
+// rendered from what was copied) and present on disk, which is the worst
+// combination, because the framework block tells the agent to walk the tree.
+func TestStageTeamKnowledge_RebuildsRatherThanAccumulates(t *testing.T) {
+	kb := kbstore.NewLocalAt(t.TempDir())
+	writeKB(t, kb, kbTeam, kbstore.RootPrivate, "keep.md", "still true")
+	writeKB(t, kb, kbTeam, kbstore.RootPrivate, "notes/retracted.md", "wrong, deleted later")
+	s := stagingSpawner(t, kb, fakeTeams{})
+
+	cwd := t.TempDir()
+	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/private/keep.md", "team/private/notes/retracted.md"}) {
+		t.Fatalf("first launch staged %v", got)
+	}
+
+	// The document is retracted between the two steps.
+	if _, err := kb.Delete(context.Background(), kbOrg, kbTeam, kbstore.Ref{Root: kbstore.RootPrivate, Path: "notes/retracted.md"}); err != nil {
+		t.Fatalf("delete from the KB: %v", err)
+	}
+
+	manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/private/keep.md"}) {
+		t.Fatalf("second launch left %v; a retracted document must not stay readable", got)
+	}
+	if strings.Contains(manifest, "retracted.md") {
+		t.Errorf("the manifest names a retracted document;\n%s", manifest)
+	}
+	// The folder it lived in goes too — an object store has no empty folders,
+	// so leaving one here would make the tree depend on the deployment mode.
+	if _, err := os.Stat(filepath.Join(cwd, scratchDirName, knowledgeDirName, "team", "private", "notes")); !os.IsNotExist(err) {
+		t.Errorf("an emptied folder survived the rebuild (err=%v)", err)
+	}
+}
+
+// TestStageTeamKnowledge_PublishBetweenLaunchesDoesNotDuplicate is the sharp
+// half of the same rule. The root a document sits under is a claim about who
+// else can see it, so a tree carrying the same file under both roots teaches
+// the agent something false about material it may go on to quote.
+func TestStageTeamKnowledge_PublishBetweenLaunchesDoesNotDuplicate(t *testing.T) {
+	kb := kbstore.NewLocalAt(t.TempDir())
+	writeKB(t, kb, kbTeam, kbstore.RootPrivate, "runbooks/deploy.md", "steps")
+	s := stagingSpawner(t, kb, fakeTeams{})
+
+	cwd := t.TempDir()
+	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/private/runbooks/deploy.md"}) {
+		t.Fatalf("first launch staged %v", got)
+	}
+
+	// A human publishes it while the workflow run is between steps.
+	if _, err := kb.Move(context.Background(), kbOrg, kbTeam,
+		kbstore.Ref{Root: kbstore.RootPrivate, Path: "runbooks"},
+		kbstore.Ref{Root: kbstore.RootShared, Path: "runbooks"}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/shared/runbooks/deploy.md"}) {
+		t.Fatalf("after a publish the tree holds %v; the document must appear under exactly one root", got)
+	}
+}
+
+// TestStageTeamKnowledge_DiscardsWhatTheAgentLeft pins the promise the
+// framework block makes to the agent: nothing it writes under the knowledge
+// tree is kept. Without the rebuild that held only for the first launch into a
+// run root.
+func TestStageTeamKnowledge_DiscardsWhatTheAgentLeft(t *testing.T) {
+	kb := kbstore.NewLocalAt(t.TempDir())
+	writeKB(t, kb, kbTeam, kbstore.RootShared, "conventions.md", "ours")
+	s := stagingSpawner(t, kb, fakeTeams{})
+
+	cwd := t.TempDir()
+	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+
+	scribble := filepath.Join(cwd, scratchDirName, knowledgeDirName, "team", "shared", "my-edit.md")
+	if err := os.WriteFile(scribble, []byte("the agent's own"), 0o644); err != nil {
+		t.Fatalf("write the agent's file: %v", err)
+	}
+
+	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/shared/conventions.md"}) {
+		t.Fatalf("tree = %v; an agent's own file under the knowledge tree is discarded", got)
+	}
+}
+
+// TestStageTeamKnowledge_RebuildKeepsRepoOwnedPaths: the rebuild is a walk
+// rather than one RemoveAll for exactly this case. For a GitHub PR run the run
+// tree IS the checkout, so deleting a tracked file here would ride the agent's
+// next commit into its pull request — a rebuild that "cleaned up" a
+// contributor's file would be worse than the staleness it fixes.
+func TestStageTeamKnowledge_RebuildKeepsRepoOwnedPaths(t *testing.T) {
+	kb := kbstore.NewLocalAt(t.TempDir())
+	writeKB(t, kb, kbTeam, kbstore.RootShared, "other.md", "fine")
+	s := stagingSpawner(t, kb, fakeTeams{})
+
+	cwd := t.TempDir()
+	tracked := filepath.Join(cwd, scratchDirName, knowledgeDirName, "team", "shared", "committed.md")
+	if err := os.MkdirAll(filepath.Dir(tracked), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(tracked, []byte("the repo's own"), 0o644); err != nil {
+		t.Fatalf("write tracked file: %v", err)
+	}
+	owned := repoFiles{
+		scratchDirName + "/" + knowledgeDirName + "/team/shared/committed.md": true,
+	}
+
+	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, owned)
+
+	body, err := os.ReadFile(tracked)
+	if err != nil {
+		t.Fatalf("the repo-owned file was removed by the rebuild: %v", err)
+	}
+	if string(body) != "the repo's own" {
+		t.Errorf("the repo-owned file was rewritten: %q", body)
+	}
+	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/shared/committed.md", "team/shared/other.md"}) {
+		t.Fatalf("tree = %v", got)
+	}
+}
+
 // TestStageTeamKnowledge_LeavesRepoOwnedPathsAlone: for a GitHub PR run the run
 // tree IS the checkout, and an infrastructure write onto a tracked path would
 // ride the agent's next commit into its pull request.
