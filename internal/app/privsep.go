@@ -51,12 +51,14 @@ var startCapBrokerFn = startCapBroker
 
 // startCapBrokerIfSandboxing starts the cap-broker subprocess and routes
 // internal/sandbox's privileged-ops and launch implementation through it
-// whenever this host will actually sandbox runs (multi mode + Linux —
-// agentproc.WillSandbox) AND this role hosts sandboxes. The broker is the
-// ONLY sandbox launch path, so a broker that can't start is FATAL: the
-// error propagates to app.New rather than falling back to a less-isolated
-// in-process launch. Local mode (and non-Linux) never sandboxes, so this is
-// a no-op there — the sandbox is never reached, and no broker is needed.
+// whenever this host will actually run the native runtime's resident
+// tool-host jail (multi mode + Linux — agentproc.WillSandbox) AND this role
+// hosts sandboxes. The broker is the ONLY sandbox launch path, so a broker
+// that can't start is FATAL: the error propagates to app.New rather than
+// falling back to a less-isolated in-process launch. Local mode (and
+// non-Linux) never sandboxes — the SDK loop (agentproc.Run/RunInteractive)
+// always spawns directly, jail or no — so this is a no-op there and no
+// broker is needed.
 //
 // The control role is excluded even in multi mode on Linux: a control pod
 // never launches a sandbox — sandboxed work homes to executors and the

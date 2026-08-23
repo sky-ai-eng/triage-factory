@@ -37,7 +37,7 @@ func TestComplete_LocalMode_DelegatesToSubprocess(t *testing.T) {
 	r := NewRecorder(fs)
 	result, err := r.Complete(context.Background(), CompleteOptions{
 		OrgID:        "org-1",
-		Job:          JobClassifier,
+		Job:          JobRepoProfiler,
 		Message:      "combined local prompt",
 		SystemPrompt: "should be ignored in local mode",
 		UserMessage:  "should be ignored in local mode",

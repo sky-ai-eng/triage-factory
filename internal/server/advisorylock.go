@@ -9,14 +9,14 @@ import (
 )
 
 // acquireKeyedLock serializes a read-merge-write critical section keyed on
-// key (a project id, an org id, ...) across the whole deployment, not just
-// this process (TFAC-579).
+// key (an org id, ...) across the whole deployment, not just this process
+// (TFAC-579).
 //
 // In multi mode (Postgres) it takes a session-scoped pg_advisory_lock on a
 // dedicated connection checked out from s.db for the duration of the
-// critical section — closing the gap projectMutexes/githubAppRegMu can't:
-// two control pods, each with their own in-process sync.Map, can freely
-// interleave the same project's or org's read-merge-write. The lock is
+// critical section — closing the gap githubAppRegMu can't: two control
+// pods, each with their own in-process sync.Map, can freely interleave the
+// same org's read-merge-write. The lock is
 // session- not transaction-scoped because the guarded sections here span
 // several independent s.tx.WithTx calls (and, for the knowledge-upload
 // handler, file I/O in between) rather than one transaction — a
@@ -90,13 +90,11 @@ func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64,
 //	2 — ee/slack/store/pg                         (Slack api_app_id, xact)
 //	5 — internal/db/postgres/tasks.go             (entity id, xact;
 //	    entityTaskCreationLockSalt)
-//	7 — this file                                 (project id, session)
 //	8 — this file                                 (org id, session)
 //
 // internal/auth/auth_provision.go's user lock hashes with FNV-1a in Go —
 // a separate un-salted keyspace, listed here only so the next auditor
 // doesn't go hunting for its salt.
 const (
-	projectRMWLockSalt      int64 = 7
 	githubAppRegRMWLockSalt int64 = 8
 )

@@ -393,7 +393,7 @@ export default function OrgSettings({
         summary={ghAccessSummary}
         defaultExpanded={draft.githubAppStaged}
       >
-        <GitHubAccessControl ctx={ctx} baseUrl={baseline.org.github_url} reload={load} />
+        <GitHubAccessControl ctx={ctx} reload={load} />
       </SettingsSection>
 
       {/* ── Clone protocol (PAT + local only) ── */}

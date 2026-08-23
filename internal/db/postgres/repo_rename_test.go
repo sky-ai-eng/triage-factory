@@ -93,11 +93,6 @@ func pgCategoryAReferences(t *testing.T, h *pgtest.Harness, orgID string) []stri
 		{"conversation_worktrees", `
 			SELECT conversation_id::text || '|' || repository_id::text || '|' || ref
 			  FROM conversation_worktrees WHERE org_id = $1`},
-		{"project_pinned_repos", `
-			SELECT pr.project_id::text || '|' || pr.repository_id::text || '|' || pr."position"::text
-			  FROM project_pinned_repos pr
-			  JOIN projects p ON p.id = pr.project_id
-			 WHERE p.org_id = $1`},
 	}
 	var out []string
 	for _, q := range queries {

@@ -82,7 +82,7 @@ func EventType(kind string) attribute.KeyValue { return keyEventType.String(kind
 //     deduped, filtered).
 //   - Runtime — which agent loop drove a run ("sdk", "native").
 //   - Job — which background system job a span belongs to ("scorer",
-//     "profiler", "classifier").
+//     "repo_profiler").
 //   - Provider — an LLM vendor ("anthropic", "bedrock"), derived from
 //     which credential shape resolved; never a hostname or a model id.
 //   - Transport — how a call reached its upstream where a subsystem has

@@ -1,11 +1,13 @@
 package agentproc
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestBuildSandboxEnv_NoGitConfig enforces the invariant documented on
@@ -173,6 +175,24 @@ func TestAgentVisibleHelpers_LocalPassthrough(t *testing.T) {
 func TestWillSandbox_TracksGate(t *testing.T) {
 	if WillSandbox() != shouldSandbox() {
 		t.Errorf("WillSandbox() = %v, want it to mirror shouldSandbox() = %v", WillSandbox(), shouldSandbox())
+	}
+}
+
+// TestRefuseMultiModeSDKLoop pins the fail-closed gate Run and RunInteractive
+// both call before spawning anything: multi mode refuses with
+// errSDKLoopInMultiMode (the SDK loop has no isolation to offer there — its
+// only wrapper on Linux is the bubblewrap courtesy sandbox, not a tenant
+// boundary), and local mode — the SDK loop's only legitimate caller — is a
+// no-op.
+func TestRefuseMultiModeSDKLoop(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	if err := refuseMultiModeSDKLoop(); !errors.Is(err, errSDKLoopInMultiMode) {
+		t.Errorf("refuseMultiModeSDKLoop() in multi mode = %v, want errSDKLoopInMultiMode", err)
+	}
+
+	runmode.SetForTest(t, runmode.ModeLocal)
+	if err := refuseMultiModeSDKLoop(); err != nil {
+		t.Errorf("refuseMultiModeSDKLoop() in local mode = %v, want nil", err)
 	}
 }
 

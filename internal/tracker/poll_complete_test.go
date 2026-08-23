@@ -20,7 +20,7 @@ import (
 // on what the poll-completion sentinel means for a partial cycle: it fires
 // only once discovery has covered every repo passed in (a full wrap), never
 // when ErrRateLimited cuts the fan-out short partway through. Downstream
-// subscribers (scorer, classifier, profiler, reconciler, poll-tracker) all
+// subscribers (scorer, profiler, reconciler, poll-tracker) all
 // key off system:poll:completed to kick a pass over the org — firing it on a
 // partial cold-start cycle would have them churn on incomplete data every
 // time a large tracked set can't finish within one rate budget.

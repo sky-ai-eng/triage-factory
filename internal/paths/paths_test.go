@@ -179,8 +179,6 @@ func TestResolvers_LocalLayout(t *testing.T) {
 		{"OrgRoot", OrgRoot(realOrg), "/s"},
 		{"BareCacheRoot", BareCacheRoot(realOrg), filepath.Join("/s", "repos")},
 		{"BareCacheDir", BareCacheDir(realOrg, "octo", "cat"), filepath.Join("/s", "repos", "octo", "cat.git")},
-		{"ProjectsRoot", ProjectsRoot(realOrg), filepath.Join("/s", "projects")},
-		{"ProjectKBDir", ProjectKBDir(realOrg, "p1"), filepath.Join("/s", "projects", "p1")},
 		{"SandboxRootfsDir", SandboxRootfsDir("abc"), filepath.Join("/s", "sandbox", "rootfs-abc")},
 		{"SDKDir", SDKDir(), filepath.Join("/s", "sdk")},
 		{"DBPath", DBPath(), filepath.Join("/s", "triagefactory.db")},
@@ -204,8 +202,6 @@ func TestResolvers_MultiLayout(t *testing.T) {
 		{"OrgRoot", OrgRoot(realOrg), orgBase},
 		{"BareCacheRoot", BareCacheRoot(realOrg), filepath.Join(orgBase, "repos")},
 		{"BareCacheDir", BareCacheDir(realOrg, "octo", "cat"), filepath.Join(orgBase, "repos", "octo", "cat.git")},
-		{"ProjectsRoot", ProjectsRoot(realOrg), filepath.Join(orgBase, "projects")},
-		{"ProjectKBDir", ProjectKBDir(realOrg, "p1"), filepath.Join(orgBase, "projects", "p1")},
 		// Class 2/3 — host-global / local, NO org segment.
 		{"SandboxRootfsDir", SandboxRootfsDir("abc"), filepath.Join("/s", "sandbox", "rootfs-abc")},
 		{"SDKDir", SDKDir(), filepath.Join("/s", "sdk")},
@@ -290,9 +286,6 @@ func TestMultiOrg_Isolation(t *testing.T) {
 
 	if a, b := BareCacheDir(realOrg, "o", "r"), BareCacheDir(otherOrg, "o", "r"); a == b {
 		t.Errorf("BareCacheDir must differ across orgs, both = %q", a)
-	}
-	if a, b := ProjectKBDir(realOrg, "p"), ProjectKBDir(otherOrg, "p"); a == b {
-		t.Errorf("ProjectKBDir must differ across orgs, both = %q", a)
 	}
 	// Each org's clone actually lives under its own /orgs/<id>/ subtree.
 	if got := BareCacheDir(realOrg, "o", "r"); !strings.Contains(got, filepath.Join("orgs", realOrg)) {

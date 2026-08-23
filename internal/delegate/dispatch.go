@@ -1279,7 +1279,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	// ClaimID travels with it: the rehydrate inside ensureWorkspace re-stamps
 	// worktree_path, and that stamp is a fenced engagement write.
 	convForWS := &domain.Conversation{ID: conv.ID, ClaimID: conv.ClaimID, WorktreePath: br.WorktreePath, BlueprintRunID: br.ID}
-	cfg := runConfig{orgID: orgID, projectID: lookupEntityProjectID(s.entities, orgID, task.EntityID)}
+	cfg := runConfig{orgID: orgID}
 	switch task.EntitySource {
 	case "github":
 		owner, repo, prNumber := parseGitHubTask(task)

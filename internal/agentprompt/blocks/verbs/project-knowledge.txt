@@ -1,3 +1,0 @@
-<project_knowledge>
-If `_tfac/project-knowledge/` in your run root (the absolute path <run_context> names) contains markdown files, they are project-level reference documentation curated by the human team — architecture notes, conventions, gotchas. Skim the filenames and read the ones that look relevant to your mission. They may have drifted from the current code, so treat them as orienting context, not ground truth — when project knowledge and what you read in the code disagree, the code wins.
-</project_knowledge>

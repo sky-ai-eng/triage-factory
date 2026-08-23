@@ -10,7 +10,7 @@ import (
 
 // systemLLMRunStore is the Postgres impl of db.SystemLLMRunStore. Wired
 // against the admin pool in postgres.New: the writers (scorer,
-// repo-profiler, project-classifier) are boot-launched background
+// repo-profiler) are boot-launched background
 // goroutines with no JWT-claims context, so an app-pool INSERT under the
 // system_llm_runs_all RLS policy would be rejected — same reason
 // repositories' `...System` writes and the PendingFirings/EventQueue

@@ -84,12 +84,16 @@ func TestMigrate_RepoRowIDsPreservesReferences(t *testing.T) {
 		}
 	}
 
+	// Stop exactly at the conversion under test — not goose.Up to head — so
+	// this test stays pinned to what 202608160002 itself did and is immune to
+	// later migrations dropping tables it reads (e.g. projects/project_pinned_repos,
+	// removed by 202608260005).
 	gooseMu.Lock()
 	goose.SetBaseFS(treeFS)
-	upErr := goose.Up(database, dir)
+	upErr := goose.UpTo(database, dir, 202608160002)
 	gooseMu.Unlock()
 	if upErr != nil {
-		t.Fatalf("goose.Up: %v", upErr)
+		t.Fatalf("goose.UpTo conversion version: %v", upErr)
 	}
 
 	scalar := func(query string, args ...any) string {

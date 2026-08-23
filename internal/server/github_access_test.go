@@ -820,9 +820,7 @@ func TestGitHubPATPut_WithApp409(t *testing.T) {
 	s := newTestServer(t)
 	seedLocalApp(t, s, true)
 
-	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
-		"base_url": "https://github.com", "pat": "ghp_new",
-	})
+	rec := bindOrgGitHubPAT(t, s, "https://github.com", "ghp_new")
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("pat bind with app = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -867,9 +865,7 @@ func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 	}
 
 	gh := githubUserStub(t, "acme-bot")
-	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
-		"base_url": gh.URL, "pat": "ghp_first",
-	}); rec.Code != http.StatusOK {
+	if rec := bindOrgGitHubPAT(t, s, gh.URL, "ghp_first"); rec.Code != http.StatusOK {
 		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if got := orgPATLogin(t, s); got != "acme-bot" {
@@ -878,9 +874,7 @@ func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 
 	// Rotation: same route, a token that authenticates as someone else.
 	rotated := githubUserStub(t, "acme-bot-2")
-	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
-		"base_url": rotated.URL, "pat": "ghp_second",
-	}); rec.Code != http.StatusOK {
+	if rec := bindOrgGitHubPAT(t, s, rotated.URL, "ghp_second"); rec.Code != http.StatusOK {
 		t.Fatalf("pat rotate = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if got := orgPATLogin(t, s); got != "acme-bot-2" {
@@ -912,9 +906,7 @@ func TestOrgSettingsGet_EnvOverlaidPATIsSettled(t *testing.T) {
 
 	// A real bind first, so there IS a recorded login to (wrongly) show.
 	gh := githubUserStub(t, "acme-bot")
-	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
-		"base_url": gh.URL, "pat": "ghp_bound",
-	}); rec.Code != http.StatusOK {
+	if rec := bindOrgGitHubPAT(t, s, gh.URL, "ghp_bound"); rec.Code != http.StatusOK {
 		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if view := orgCredentialView(t, s); view.Login != "acme-bot" || view.PATEnvProvided {
@@ -989,4 +981,129 @@ func orgPATLogin(t *testing.T, s *Server) string {
 // patRoute is the org's GitHub-PAT credential resource in local mode.
 func patRoute() string {
 	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/pat"
+}
+
+// commitGitHubHost saves the org's GitHub base URL through the settings route,
+// the one door that owns that column.
+func commitGitHubHost(t *testing.T, s *Server, baseURL string) {
+	t.Helper()
+	if rec := patchOrgSettings(t, s, map[string]any{"github_base_url": baseURL}); rec.Code != http.StatusOK {
+		t.Fatalf("commit github host %q = %d: %s", baseURL, rec.Code, rec.Body.String())
+	}
+}
+
+// bindOrgGitHubPAT binds a token the way the product does: commit the host as
+// config, then bind the credential, which validates against the committed
+// value. A test standing up a fake GitHub host has to commit it for the same
+// reason a user does — the route takes no host of its own.
+func bindOrgGitHubPAT(t *testing.T, s *Server, baseURL, pat string) *httptest.ResponseRecorder {
+	t.Helper()
+	commitGitHubHost(t, s, baseURL)
+	return doJSON(t, s, http.MethodPut, patRoute(), map[string]any{"pat": pat})
+}
+
+// --- the host the bind validates against ---------------------------------
+
+// TestGitHubPATPut_ValidatesAgainstTheCommittedHost pins where the bind gets
+// its host: the org's saved GitHub URL, read fresh on every call. Two live
+// stubs stand in for two GitHub deployments, and the committed host moves
+// between the two binds — so a bind that followed anything stickier than the
+// current setting (a cached value, the credential's own copy of the host) would
+// probe the wrong server and resolve the wrong account.
+//
+// It also pins the two things that follow from the host being config rather
+// than credential: the bind writes no host, and the settings row's concurrency
+// token doesn't move — the setup wizard commits the URL a step earlier and
+// holds that token across the bind.
+func TestGitHubPATPut_ValidatesAgainstTheCommittedHost(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	first, firstHits := recordingGitHubStub(t, "first-bot")
+	second, secondHits := recordingGitHubStub(t, "second-bot")
+
+	commitGitHubHost(t, s, first.URL)
+	versionAfterCommit := orgSettingsVersion(t, s)
+
+	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{"pat": "ghp_one"}); rec.Code != http.StatusOK {
+		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := orgPATLogin(t, s); got != "first-bot" {
+		t.Errorf("bound login = %q, want the committed host's account", got)
+	}
+	if *firstHits == 0 {
+		t.Error("the committed host was never probed")
+	}
+	if n := *secondHits; n != 0 {
+		t.Errorf("an uncommitted host was probed %d time(s)", n)
+	}
+
+	// The bind stores the credential, not the host — github_base_url still
+	// holds exactly what the settings route put there, at the same version.
+	if got := orgGitHubHost(t, s); got != first.URL {
+		t.Errorf("github_base_url = %q, want the committed %q untouched by the bind", got, first.URL)
+	}
+	if got := orgSettingsVersion(t, s); got != versionAfterCommit {
+		t.Errorf("settings version moved %d → %d; the bind writes no settings column", versionAfterCommit, got)
+	}
+
+	// Move the workspace to the other deployment and rotate. The bind must
+	// follow the setting, not the host the previous credential was bound to.
+	before := *firstHits
+	commitGitHubHost(t, s, second.URL)
+	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{"pat": "ghp_two"}); rec.Code != http.StatusOK {
+		t.Fatalf("pat rebind = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := orgPATLogin(t, s); got != "second-bot" {
+		t.Errorf("rebound login = %q, want the newly committed host's account", got)
+	}
+	if *secondHits == 0 {
+		t.Error("the newly committed host was never probed")
+	}
+	if *firstHits != before {
+		t.Errorf("the previous host was probed again (%d → %d) — the bind followed the credential's host, not the org's", before, *firstHits)
+	}
+}
+
+// recordingGitHubStub is githubUserStub plus a request counter, so a test can
+// assert which of two hosts the backend actually reached.
+func recordingGitHubStub(t *testing.T, login string) (*httptest.Server, *int) {
+	t.Helper()
+	var (
+		mu   sync.Mutex
+		hits int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/api/v3/user":
+			_ = json.NewEncoder(w).Encode(map[string]any{"login": login})
+		case "/api/v3/user/emails":
+			writeGitHubPrimaryEmail(w, login+"@example.com")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// orgGitHubHost reads the org's saved GitHub base URL back off the settings
+// resource — the same value the setup wizard and Settings render.
+func orgGitHubHost(t *testing.T, s *Server) string {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodGet, orgSettingsPath(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET org settings = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		GitHubBaseURL string `json:"github_base_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode org settings: %v", err)
+	}
+	return out.GitHubBaseURL
 }

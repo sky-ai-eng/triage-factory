@@ -22,10 +22,10 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 	h.Reset(t)
 
 	expectedTables := []string{
-		"orgs", "teams", "users", "user_github_identities", "user_jira_identities", "memberships", "org_memberships", "sessions", "project_knowledge",
+		"orgs", "teams", "users", "user_github_identities", "user_jira_identities", "memberships", "org_memberships", "sessions",
 		"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
 		"team_github_groups", "team_github_repos",
-		"prompts", "projects", "events_catalog", "entities", "entity_links", "events",
+		"prompts", "events_catalog", "entities", "entity_links", "events",
 		"event_handlers", "tasks", "task_events", "conversations", "claims", "artifacts",
 		"messages", "claim_credentials", "conversation_memory", "conversation_memory_entities", "pending_firings", "conversation_worktrees",
 		"swipe_events", "poller_state", "repositories",
@@ -33,7 +33,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		// app-encrypted ciphertext in a normal RLS table.
 		"org_secrets",
 		// system_llm_runs: per-call cost + token accounting for the headless
-		// system jobs (scorer/repo-profiler/classifier). TFAC-451.
+		// system jobs (scorer/repo-profiler). TFAC-451.
 		"system_llm_runs",
 		// access_change_log: low-volume audit log of governance actions
 		// (membership/role grants/changes/revokes, credential bind/rotate). TFAC-471.
@@ -67,19 +67,6 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		}
 		if n == 0 {
 			t.Errorf("tf.%s missing", fn)
-		}
-	}
-
-	for _, fn := range []string{"update_project_knowledge"} {
-		var n int
-		if err := h.AdminDB.QueryRow(
-			`SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
-			 WHERE n.nspname = 'public' AND p.proname = $1`, fn,
-		).Scan(&n); err != nil {
-			t.Fatalf("probe function public.%s: %v", fn, err)
-		}
-		if n == 0 {
-			t.Errorf("public.%s missing", fn)
 		}
 	}
 
@@ -779,127 +766,10 @@ func TestRLS_TeamSettingsIsTeamMemberOnly(t *testing.T) {
 	}
 }
 
-// TestProjectKnowledge_OCC — two transactions both try to update
-// project_knowledge with expected_version=1. One succeeds, one raises
-// SQLSTATE 40001. Also asserts last_updated_by is derived from the
-// JWT-claims user, not accepted from the caller.
-func TestProjectKnowledge_OCC(t *testing.T) {
-	h := Shared(t)
-	h.Reset(t)
-
-	org, user, _ := SeedOrgWithUser(t, h, "alice")
-	projectID := seedProject(t, h, org, user, "demo")
-	var pkID string
-	if err := h.AdminDB.QueryRow(`
-		INSERT INTO project_knowledge (org_id, project_id, key, content)
-		VALUES ($1, $2, 'overview', 'v1') RETURNING id
-	`, org, projectID).Scan(&pkID); err != nil {
-		t.Fatalf("seed KB: %v", err)
-	}
-
-	// First update — should succeed, returns version=2.
-	var newVer int
-	err := h.WithUser(t, user, org, func(tx *sql.Tx) error {
-		return tx.QueryRow(
-			`SELECT update_project_knowledge($1, $2, $3, NULL)`,
-			pkID, 1, "v2",
-		).Scan(&newVer)
-	})
-	if err != nil {
-		t.Fatalf("first update: %v", err)
-	}
-	if newVer != 2 {
-		t.Errorf("first new_version = %d, want 2", newVer)
-	}
-
-	// last_updated_by must equal the JWT-claims user, not anything
-	// the caller could pass.
-	var lastBy string
-	if err := h.AdminDB.QueryRow(
-		`SELECT last_updated_by FROM project_knowledge WHERE id = $1`, pkID,
-	).Scan(&lastBy); err != nil {
-		t.Fatalf("read last_updated_by: %v", err)
-	}
-	if lastBy != user {
-		t.Errorf("last_updated_by = %s, want %s (derived from current_user_id)", lastBy, user)
-	}
-
-	// Second update with stale expected_version=1 — must raise 40001.
-	err = h.WithUser(t, user, org, func(tx *sql.Tx) error {
-		return tx.QueryRow(
-			`SELECT update_project_knowledge($1, $2, $3, NULL)`,
-			pkID, 1, "v3",
-		).Scan(&newVer)
-	})
-	if err == nil {
-		t.Fatalf("stale-version update did not error — OCC broken")
-	}
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "40001" {
-		t.Errorf("err = %v, want SQLSTATE 40001 serialization_failure", err)
-	}
-}
-
-// TestProjectKnowledge_ConversationValidation — passing a
-// p_updated_by_conversation that belongs to another user fails because
-// conversations RLS hides it. Without this gate, a caller could attribute
-// their KB write to someone else's conversation, polluting audit chronology.
-func TestProjectKnowledge_ConversationValidation(t *testing.T) {
-	h := Shared(t)
-	h.Reset(t)
-
-	orgA, alice, _ := SeedOrgWithUser(t, h, "alice")
-	_, bob, _ := SeedOrgWithUser(t, h, "bob")
-
-	projectID := seedProject(t, h, orgA, alice, "demo")
-	var pkID string
-	if err := h.AdminDB.QueryRow(`
-		INSERT INTO project_knowledge (org_id, project_id, key, content)
-		VALUES ($1, $2, 'overview', 'v1') RETURNING id
-	`, orgA, projectID).Scan(&pkID); err != nil {
-		t.Fatalf("seed KB: %v", err)
-	}
-
-	// Seed bob's conversation in his own org. Use AdminDB so we don't have to
-	// build the full task/event/prompt chain.
-	bobOrg := SeedOrg(t, h, "bob-other-org", bob)
-	bobTeam := SeedTeam(t, h, bobOrg, "default")
-	AddOrgMember(t, h, bob, bobOrg, bobTeam, "owner", "admin")
-	bobEntity := seedEntity(t, h, bobOrg, "github", "octo/repo#99")
-	bobTask := seedTask(t, h, bobOrg, bob, bobEntity, "github:pr:opened")
-	bobPrompt := seedPrompt(t, h, bobOrg, bob, "p1")
-	bobBR := seedBlueprintRun(t, h, bobOrg, bob, bobTask)
-	var bobConversation string
-	if err := h.AdminDB.QueryRow(`
-		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id, status)
-		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4, $5, 'running') RETURNING id
-	`, bobOrg, bob, bobTask, bobPrompt, bobBR).Scan(&bobConversation); err != nil {
-		t.Fatalf("seed bob conversation: %v", err)
-	}
-
-	// Alice tries to attribute her KB update to bob's conversation. RLS on
-	// conversations hides bob's row from alice's session, so the EXISTS check
-	// inside the function fails.
-	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		var v int
-		return tx.QueryRow(
-			`SELECT update_project_knowledge($1, $2, $3, $4)`,
-			pkID, 1, "v2-with-stolen-conversation", bobConversation,
-		).Scan(&v)
-	})
-	if err == nil {
-		t.Fatalf("update with stolen conversation did not error — conversation validation broken")
-	}
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
-		t.Errorf("err = %v, want SQLSTATE 42501", err)
-	}
-}
-
 // TestRLS_TeamVisibilityIsTeamScoped — a row with visibility='team'
 // must only be visible to members of that specific team_id, not to
-// every org member. Covers all four tables that use this pattern:
-// prompts, projects, event_handlers (rule + trigger kinds).
+// every org member. Covers all three tables that use this pattern:
+// prompts, event_handlers (rule + trigger kinds).
 //
 // Subtle bug this guards against: in the EXISTS subquery,
 // `m.team_id = team_id` is ambiguous — SQL name resolution binds the
@@ -907,7 +777,7 @@ func TestProjectKnowledge_ConversationValidation(t *testing.T) {
 // making the predicate `m.team_id = m.team_id` which is always true
 // for any membership row the EXISTS scans. The correct form
 // qualifies the outer table explicitly: `m.team_id = <outer>.team_id`.
-// All four policies had this footgun; this test exercises each.
+// All three policies had this footgun; this test exercises each.
 func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -931,19 +801,13 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 	`, orgA, alice, teamA).Scan(&teamBlueprintID); err != nil {
 		t.Fatalf("seed team blueprint: %v", err)
 	}
-	var teamPromptID, teamProjectID, teamRuleID, teamTriggerID string
+	var teamPromptID, teamRuleID, teamTriggerID string
 
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO prompts (org_id, creator_user_id, team_id, name, body)
 		VALUES ($1, $2, $3, 'team-prompt', '') RETURNING id
 	`, orgA, alice, teamA).Scan(&teamPromptID); err != nil {
 		t.Fatalf("seed team prompt: %v", err)
-	}
-	if err := h.AdminDB.QueryRow(`
-		INSERT INTO projects (org_id, creator_user_id, team_id, visibility, name)
-		VALUES ($1, $2, $3, 'team', 'team-proj') RETURNING id
-	`, orgA, alice, teamA).Scan(&teamProjectID); err != nil {
-		t.Fatalf("seed team project: %v", err)
 	}
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, name, default_priority, sort_order)
@@ -964,7 +828,6 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 			label, query, id string
 		}{
 			{"prompts", `SELECT 1 FROM prompts WHERE id = $1`, teamPromptID},
-			{"projects", `SELECT 1 FROM projects WHERE id = $1`, teamProjectID},
 			{"event_handlers/rule", `SELECT 1 FROM event_handlers WHERE id = $1`, teamRuleID},
 			{"event_handlers/trigger", `SELECT 1 FROM event_handlers WHERE id = $1`, teamTriggerID},
 		} {
@@ -987,7 +850,6 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 			label, query, id string
 		}{
 			{"prompts", `SELECT COUNT(*) FROM prompts WHERE id = $1`, teamPromptID},
-			{"projects", `SELECT COUNT(*) FROM projects WHERE id = $1`, teamProjectID},
 			{"event_handlers/rule", `SELECT COUNT(*) FROM event_handlers WHERE id = $1`, teamRuleID},
 			{"event_handlers/trigger", `SELECT COUNT(*) FROM event_handlers WHERE id = $1`, teamTriggerID},
 		} {
@@ -1465,7 +1327,7 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 	h.Reset(t)
 
 	orgA, alice, _ := SeedOrgWithUser(t, h, "alice")
-	orgB, bob, _ := SeedOrgWithUser(t, h, "bob")
+	orgB, _, _ := SeedOrgWithUser(t, h, "bob")
 
 	entityB := seedEntity(t, h, orgB, "github", "octo/repo#1")
 
@@ -1491,16 +1353,6 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 	`, orgA, entityB)
 	if err == nil {
 		t.Fatalf("cross-org event INSERT succeeded — composite FK broken")
-	}
-
-	// And a project in orgA referencing a blueprint in orgB.
-	bobBlueprint := seedBlueprint(t, h, orgB, bob, "bob-blueprint")
-	_, err = h.AdminDB.Exec(`
-		INSERT INTO projects (org_id, creator_user_id, name, spec_authorship_blueprint_id)
-		VALUES ($1, $2, 'p', $3)
-	`, orgA, alice, bobBlueprint)
-	if err == nil {
-		t.Fatalf("cross-org project→blueprint INSERT succeeded — composite FK broken")
 	}
 }
 
@@ -1862,7 +1714,6 @@ func TestSearchPathHardening_AllSensitiveFunctions(t *testing.T) {
 		{"tf", "user_is_team_admin"},
 		{"tf", "user_owns_org"},
 		{"tf", "user_is_org_admin_via_team"},
-		{"public", "update_project_knowledge"},
 		{"tf", "set_updated_at"},
 		{"tf", "guard_org_owners"},
 		{"tf", "guard_org_owner_transfer"},
@@ -2048,19 +1899,6 @@ func seedBlueprintRun(t *testing.T, h *Harness, orgID, creatorID, taskID string)
 		VALUES ($1, $2, $3, $4, 'manual', 'running', '/tmp/wt', '[]') RETURNING id
 	`, orgID, creatorID, bpID, taskID).Scan(&id); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
-	}
-	return id
-}
-
-func seedProject(t *testing.T, h *Harness, orgID, creatorID, name string) string {
-	t.Helper()
-	var id string
-	// team_id resolved inline from the org's first team (team-default).
-	if err := h.AdminDB.QueryRow(`
-		INSERT INTO projects (org_id, creator_user_id, team_id, name)
-		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3) RETURNING id
-	`, orgID, creatorID, name).Scan(&id); err != nil {
-		t.Fatalf("seed project: %v", err)
 	}
 	return id
 }
@@ -2383,7 +2221,6 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
 	taskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
 	promptID := seedPrompt(t, h, orgA, alice, "p1")
-	projectID := seedProject(t, h, orgA, alice, "proj-a")
 	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
 	var conversationID string
 	if err := h.AdminDB.QueryRow(`
@@ -2407,7 +2244,7 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	// but the outer guard short-circuits before that even matters.
 	err := h.WithUser(t, mallory, orgA, func(tx *sql.Tx) error {
 		// SELECT — mallory must see ZERO rows on every swept table.
-		for _, tbl := range []string{"tasks", "conversations", "prompts", "projects", "event_handlers"} {
+		for _, tbl := range []string{"tasks", "conversations", "prompts", "event_handlers"} {
 			var n int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + tbl).Scan(&n); err != nil {
 				return fmt.Errorf("count %s: %w", tbl, err)
@@ -2424,14 +2261,12 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 			"tasks":          `UPDATE tasks          SET status        = 'pwned' WHERE id = $1`,
 			"conversations":  `UPDATE conversations  SET park_reason   = 'pwned' WHERE id = $1`,
 			"prompts":        `UPDATE prompts        SET body          = 'pwned' WHERE id = $1`,
-			"projects":       `UPDATE projects       SET description   = 'pwned' WHERE id = $1`,
 			"event_handlers": `UPDATE event_handlers SET name          = 'pwned' WHERE id = $1`,
 		}
 		ids := map[string]string{
 			"tasks":          taskID,
 			"conversations":  conversationID,
 			"prompts":        promptID,
-			"projects":       projectID,
 			"event_handlers": ehID,
 		}
 		for tbl, stmt := range updates {
@@ -2466,7 +2301,7 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	// the rows we just protected from mallory. Pins that the defense
 	// doesn't over-deny.
 	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		for _, tbl := range []string{"tasks", "conversations", "prompts", "projects", "event_handlers"} {
+		for _, tbl := range []string{"tasks", "conversations", "prompts", "event_handlers"} {
 			var n int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + tbl).Scan(&n); err != nil {
 				return fmt.Errorf("count %s: %w", tbl, err)
@@ -2552,12 +2387,6 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 			label: "prompts",
 			stmt: `INSERT INTO prompts (org_id, creator_user_id, visibility, name, body)
 				VALUES ($1, $2, 'org', 'evil-org-prompt', '')`,
-			args: []any{orgA, carol},
-		},
-		{
-			label: "projects",
-			stmt: `INSERT INTO projects (org_id, creator_user_id, visibility, name)
-				VALUES ($1, $2, 'org', 'evil-org-project')`,
 			args: []any{orgA, carol},
 		},
 	}

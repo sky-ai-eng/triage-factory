@@ -23,7 +23,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -85,10 +84,10 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	}
 
 	// Ambient context the agent reads from disk, identical to the SDK path:
-	// prior task memories and the project knowledge base, staged before the jail
-	// starts so they are present at first read. The sequencing below mirrors
-	// runAgent's exactly — a native step and an SDK step of the same blueprint
-	// share one run tree, so the two paths must agree on who may write in it.
+	// prior task memories, staged before the jail starts so they are present at
+	// first read. The sequencing below mirrors runAgent's exactly — a native
+	// step and an SDK step of the same blueprint share one run tree, so the two
+	// paths must agree on who may write in it.
 	handedOff := sandbox.RunTreeHandedOff(claudeCwd)
 	var owned repoFiles
 	if !handedOff {
@@ -106,12 +105,6 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, cfg.blueprintRunID, memoryOwned)
 
 	priorMemory := s.prepareInheritedMemory(stagingCtx, orgID, conversationID, claudeCwd, owned, handedOff)
-
-	if handedOff {
-		delegateLog.Debug("run tree already handed to the sandbox identity; project knowledge-base not refreshed for this step", "conversation", conversationID, "cwd", claudeCwd)
-	} else {
-		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID, owned)
-	}
 	stagingSpan.End()
 
 	// Composed before the jail is launched, so the fallible half fails the claim
@@ -132,7 +125,6 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		ConversationID:       conversationID,
 		MemoryNamespace:      namespace,
 		Worktree:             claudeCwd,
-		SDKDir:               paths.SDKDir(),
 		ExtraEnv:             s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID),
 		PrebuiltNetwork:      cfg.sidecar.runNetwork(),
 		PrebuiltProxyEnv:     cfg.sidecar.jailEnv(),

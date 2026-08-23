@@ -121,9 +121,7 @@ func TestSetupWizard_AuditsBothOrgCredentials(t *testing.T) {
 	gh := githubUserStub(t, "acme-bot")
 	jiraStub := jiraMyselfStub(t, `{"accountId":"org-bot","displayName":"Org Bot"}`, nil)
 
-	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
-		"base_url": gh.URL, "pat": "ghp_test",
-	}); rec.Code != http.StatusOK {
+	if rec := bindOrgGitHubPAT(t, s, gh.URL, "ghp_test"); rec.Code != http.StatusOK {
 		t.Fatalf("github pat bind = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	if rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(), map[string]any{
@@ -161,9 +159,7 @@ func TestGitHubPATPut_AuditsSet(t *testing.T) {
 		t.Fatalf("seed creds: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
-		"base_url": gh.URL, "pat": "ghp_new",
-	})
+	rec := bindOrgGitHubPAT(t, s, gh.URL, "ghp_new")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -175,19 +171,18 @@ func TestGitHubPATPut_AuditsSet(t *testing.T) {
 	if row.Host != gh.URL {
 		t.Errorf("host = %q, want %q", row.Host, gh.URL)
 	}
-	// The bind persists the host too, so a caller never needs a second config
-	// save to keep the credential and the host it was validated against in sync.
 	stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT)
 	if stored != "ghp_new" {
 		t.Errorf("stored PAT = %q, want the rotated one", stored)
 	}
 }
 
-// TestGitHubPATPut_RequiresBothHalves: a token without a host (or a host
-// without a token) is not a credential. Rejecting it is what lets this route
-// drop the "leave blank to keep current" ambiguity the bulk field carried —
-// blank no longer means anything here, because you just don't call it.
-func TestGitHubPATPut_RequiresBothHalves(t *testing.T) {
+// TestGitHubPATPut_RequiresAToken: the token is the whole body, and it is
+// required. Rejecting a blank one is what lets this route drop the "leave blank
+// to keep current" ambiguity the bulk field carried — blank no longer means
+// anything here, because you just don't call it. The host is not part of the
+// body at all, so naming one is a decode error, not a value the route weighs.
+func TestGitHubPATPut_RequiresAToken(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -197,9 +192,13 @@ func TestGitHubPATPut_RequiresBothHalves(t *testing.T) {
 		body  map[string]any
 		field string
 	}{
-		{"no host", map[string]any{"pat": "ghp_x"}, "base_url"},
-		{"no token", map[string]any{"base_url": "https://github.com"}, "pat"},
-		{"blank token", map[string]any{"base_url": "https://github.com", "pat": "   "}, "pat"},
+		{"no token", map[string]any{}, "pat"},
+		{"blank token", map[string]any{"pat": "   "}, "pat"},
+		// The host is org config with one writer. A caller that tries to name
+		// one here is refused by strict decoding rather than quietly ignored,
+		// so a client built against the old shape fails loudly instead of
+		// binding against a host it thinks it chose.
+		{"host in the body", map[string]any{"base_url": "https://github.com", "pat": "ghp_x"}, "base_url"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := doJSON(t, s, http.MethodPut, patRoute(), tc.body)
@@ -265,9 +264,7 @@ func TestGitHubPATPut_AppRegisteredDuringValidation_409(t *testing.T) {
 	}))
 	t.Cleanup(gh.Close)
 
-	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
-		"base_url": gh.URL, "pat": "ghp_new",
-	})
+	rec := bindOrgGitHubPAT(t, s, gh.URL, "ghp_new")
 
 	mu.Lock()
 	err := seedErr

@@ -23,7 +23,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
-	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
@@ -43,12 +42,11 @@ type Server struct {
 	blueprints       db.BlueprintStore       // used by event-handler + project test fixtures
 	tasks            db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
 	conversations    db.ConversationStore    // conversation lifecycle + transcript
-	repos            db.RepositoryStore      // repositories CRUD for repos/settings/projects handlers
-	projects         db.ProjectStore         // projects CRUD for projects/backfill/project_entities handlers
+	repos            db.RepositoryStore      // repositories CRUD for repos/settings handlers
 	events           db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
 	taskMemory       db.TaskMemoryStore      // conversation_memory writes (human verdict capture on review/PR submit, task-disposition cleanup)
 	secrets          db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
-	teams            db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, projects, prompts)
+	teams            db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, prompts)
 	orgs             db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
 	jiraRules        db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
 	githubApps       db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
@@ -82,12 +80,6 @@ type Server struct {
 	// the local s.ws.CloseUserConnections closes anything.
 	wsBackplane WSKicker
 	spawner     *delegate.Spawner
-	// kb is the multi-mode knowledge-base blob seam. Wired via
-	// SetKBStore after construction; nil in local mode, where the KB handlers
-	// stay on their byte-identical on-disk path and never consult it. The
-	// handlers gate on runmode.ModeMulti, so a nil here in local mode is never
-	// dereferenced.
-	kb *kbstore.Store
 	// reconciler backs the Tier-2 conversation-scoped artifact refresh endpoint
 	// (TFAC-464) — the same Reconciler the background Tier-1 Manager runs.
 	// Wired via SetReconciler after construction; nil until then, so the
@@ -116,9 +108,9 @@ type Server struct {
 	// ghResolver picks the right GitHub credential (org App installation
 	// token → PAT) per request, given the org + target account. The per-repo
 	// handler operations migrated off the old process-global PAT client —
-	// review diff/submit, pending-PR submit, branches, dashboard, and the
-	// project-bundle probe — resolve through it, and there is no longer a
-	// process-global PAT client. (A few handlers still build a request-scoped
+	// review diff/submit, pending-PR submit, branches, dashboard — resolve
+	// through it, and there is no longer a process-global PAT client. (A few
+	// handlers still build a request-scoped
 	// PAT client directly where they intentionally need the PAT identity — the
 	// repo picker's PAT fallback and GitHub-teams discovery.) Built in New from
 	// the stores, so it's never nil — handlers don't need a guard.
@@ -245,30 +237,15 @@ type Server struct {
 	// script-src as `'sha256-<hash>'` directives.
 	inlineScriptHashes []string
 
-	// projectMutexes serializes PATCH-style read-merge-write
-	// operations per project ID so two concurrent autosaves from
-	// different widgets (e.g. pinned-repos editor and tracker
-	// picker) can't lost-update each other. SQLite serializes
-	// individual writes via MaxOpenConns=1, but that's not enough
-	// here — handler A reads pre-A state, handler B reads pre-A
-	// state, A writes, B writes B's merge over pre-A state, and
-	// A's contribution is lost. Holding the per-project mutex
-	// across the read+write window closes that hole.
-	//
-	// TFAC-579: this map is now only the LOCAL-mode half of
+	// githubAppRegMu serializes per-org GitHub App registration so
+	// two concurrent callbacks can't both pass the existence check,
+	// both call GitHub's conversion endpoint, and leave an orphan
+	// App. TFAC-579: this map is now only the LOCAL-mode half of
 	// acquireKeyedLock — sufficient at N=1 (there's no second process to
 	// race), but not across control pods in multi mode, where
 	// acquireKeyedLock instead takes a Postgres session-scoped advisory
 	// lock. Both call sites go through acquireKeyedLock; nothing reaches
 	// into this map directly anymore.
-	projectMutexes sync.Map // map[string]*sync.Mutex
-
-	// githubAppRegMu serializes per-org GitHub App registration so
-	// two concurrent callbacks can't both pass the existence check,
-	// both call GitHub's conversion endpoint, and leave an orphan
-	// App. Same sync.Map pattern as projectMutexes, and the same
-	// TFAC-579 local-mode-only caveat: acquireKeyedLock backs multi mode
-	// with a real cross-pod advisory lock instead.
 	githubAppRegMu sync.Map // map[orgID]*sync.Mutex
 
 	// webhookSecretMu guards the three fields below — the short-TTL per-org
@@ -465,7 +442,6 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		tasks:            stores.Tasks,
 		conversations:    stores.Conversations,
 		repos:            stores.Repos,
-		projects:         stores.Projects,
 		events:           stores.Events,
 		taskMemory:       stores.TaskMemory,
 		secrets:          stores.Secrets,
@@ -1010,28 +986,6 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/artifacts/refresh", ag.handleArtifactRefresh)
 	s.apiMutating("POST /api/agent/conversations/list", ag.handleConversations)
 
-	// Projects. Pure CRUD over the projects table; per-project entity
-	// classification lands separately.
-	s.apiMutating("POST /api/projects", s.handleProjectCreate)
-	s.apiMutating("POST /api/projects/list", s.handleProjectList)
-	s.api("GET /api/projects/{id}", s.handleProjectGet)
-	s.apiMutating("PATCH /api/projects/{id}", s.handleProjectUpdate)
-	s.apiMutating("DELETE /api/projects/{id}", s.handleProjectDelete)
-	s.api("GET /api/projects/{id}/export/preview", s.handleProjectExportPreview)
-	s.api("GET /api/projects/{id}/export", s.handleProjectExport)
-	s.apiMutating("POST /api/projects/import", s.handleProjectImport)
-	s.apiMutating("POST /api/projects/{id}/knowledge/list", s.handleProjectKnowledge)
-	s.apiMutating("POST /api/projects/{id}/knowledge", s.handleProjectKnowledgeUpload)
-	s.api("GET /api/projects/{id}/knowledge/{path}", s.handleProjectKnowledgeFile)
-	s.apiMutating("DELETE /api/projects/{id}/knowledge/{path}", s.handleProjectKnowledgeDelete)
-	// Project-creation backfill popup.
-	bf := &backfillHandler{tx: s.tx, ws: s.ws}
-	s.apiMutating("POST /api/projects/{id}/backfill-candidates/list", bf.handleBackfillCandidates)
-	s.apiMutating("POST /api/projects/{id}/backfill", bf.handleBackfill)
-	// Project entities panel.
-	pe := &projectEntitiesHandler{tx: s.tx}
-	s.apiMutating("POST /api/projects/{id}/entities/list", pe.handleProjectEntities)
-
 	// Websocket: wrapped via s.api so the handshake sees claims in
 	// r.Context() (sentinel in local mode, real values in multi).
 	// handleWS pulls (userID, orgID) out and threads them into the
@@ -1502,15 +1456,6 @@ func (s *Server) SetStatic(f fs.FS) {
 // SetSpawner sets the delegation spawner for agent conversations.
 func (s *Server) SetSpawner(sp *delegate.Spawner) {
 	s.spawner = sp
-}
-
-// SetKBStore wires the knowledge-base blob store into the server so the
-// /api/projects/{id}/knowledge/* handlers serve the KB from the object store
-// in multi mode. Wired post-construction (mirrors SetSpawner) once the shared
-// storage.Storage exists. Left nil in local mode — the handlers branch on
-// runmode and never dereference it there.
-func (s *Server) SetKBStore(kb *kbstore.Store) {
-	s.kb = kb
 }
 
 // SetOnGitHubChanged registers a callback for GitHub config changes (creds, URL, repos).

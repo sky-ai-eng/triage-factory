@@ -75,9 +75,11 @@ func currentArchRootfs() (url, sha string, err error) {
 // tarball sha) so a fresh extraction picks up the new package set
 // on the next sandbox launch.
 //
-//   - nodejs/npm — agent SDK runtime. pnpm is not an apk package, so
-//     installToolchain (rootfs_linux.go) npm-global-installs the pinned
-//     pnpm on top at build time — see installPnpm and pnpmVersion below.
+//   - nodejs/npm — developer toolchain for an agent working on a JS/TS
+//     repo (npm install, npm test, node scripts). pnpm is not an apk
+//     package, so installToolchain (rootfs_linux.go) npm-global-installs
+//     the pinned pnpm on top at build time — see installPnpm and
+//     pnpmVersion below.
 //   - git — every delegate flow does status/diff/commit/push.
 //   - ripgrep — agent's primary code-search tool; faster than grep
 //     on large repos.

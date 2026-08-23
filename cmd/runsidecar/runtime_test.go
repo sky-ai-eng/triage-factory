@@ -130,8 +130,10 @@ func TestRuntime_RejectsAnotherSidecarsBundle(t *testing.T) {
 func TestRuntime_GitHubAPIProxyInjectsBundleToken(t *testing.T) {
 	// Fake api.github.com that reports back the Authorization it received.
 	gotAuth := make(chan string, 1)
+	gotPath := make(chan string, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth <- r.Header.Get("Authorization")
+		gotPath <- r.URL.Path
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
@@ -140,12 +142,15 @@ func TestRuntime_GitHubAPIProxyInjectsBundleToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// Relay a bundle carrying an LLM key (so the LLM proxy starts) and a
-	// repo-scoped GitHub token.
+	// Relay a bundle carrying an LLM key (so the LLM proxy starts), a
+	// repo-scoped GitHub token, and the host that token belongs to — the
+	// sidecar takes the proxy's upstream from BaseURL, so the fake server
+	// stands in for a GHES host and is reached at its /api/v3 mount.
 	bundle := &credbundle.Bundle{
 		LLM: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
 		GitHub: &credbundle.GitHubCreds{
 			Mode:       "app",
+			BaseURL:    upstream.URL,
 			RepoTokens: map[string]credbundle.RepoToken{"acme/widgets": {Token: "ghs_REALINSTALLTOKEN"}},
 		},
 	}
@@ -155,9 +160,8 @@ func TestRuntime_GitHubAPIProxyInjectsBundleToken(t *testing.T) {
 
 	var res sidecarproto.StartProxiesResult
 	if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{
-		HostVethIP:        "127.0.0.1",
-		GitHubAPIEnabled:  true,
-		GitHubAPIUpstream: upstream.URL,
+		HostVethIP:       "127.0.0.1",
+		GitHubAPIEnabled: true,
 	}, &res); err != nil {
 		t.Fatalf("start proxies: %v", err)
 	}
@@ -181,6 +185,11 @@ func TestRuntime_GitHubAPIProxyInjectsBundleToken(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("upstream never received the proxied request")
+	}
+	// The bundle's BaseURL is what decided where the request landed: a
+	// non-github host is a GHES base, so its REST root is the /api/v3 mount.
+	if got := <-gotPath; got != "/api/v3/repos/acme/widgets/pulls/1" {
+		t.Errorf("upstream path = %q, want the bundle-derived GHES REST mount", got)
 	}
 }
 
@@ -604,36 +613,32 @@ func TestRuntime_JiraAPIProxyReportsDeployment(t *testing.T) {
 	}
 }
 
-// TestRuntime_SandboxLLMSplitsTheJailFromTheEngine drives the cell shrink over
-// the real supervision channel, both ways, because the two halves are one
-// decision: what the jail is pointed at, and what the executor's own engine
-// dials. Asserting only the first would let the coordinates disappear for
-// everyone and the run fail at its first model call.
-func TestRuntime_SandboxLLMSplitsTheJailFromTheEngine(t *testing.T) {
+// TestRuntime_SandboxNeverGetsLLMChannel pins the cell-shrink's now-only
+// case over the real supervision channel: the jail is never pointed at a
+// provider — no jail's spec, mounts, argv, or env names a provider channel —
+// while the executor's own (native) engine still gets the coordinates to
+// dial it.
+func TestRuntime_SandboxNeverGetsLLMChannel(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
 
-	start := func(t *testing.T, sandboxLLM bool) sidecarproto.StartProxiesResult {
-		t.Helper()
-		orch, rt := dialRuntime(t)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		bundle := &credbundle.Bundle{LLM: map[string]string{
-			"ANTHROPIC_API_KEY":  "sk-ant-real",
-			"ANTHROPIC_BASE_URL": upstream.URL,
-		}}
-		if err := orch.Call(ctx, sidecarproto.KindSealedBundle,
-			sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, bundle)}, nil); err != nil {
-			t.Fatalf("relay bundle: %v", err)
-		}
-		var res sidecarproto.StartProxiesResult
-		if err := orch.Call(ctx, sidecarproto.KindStartProxies,
-			sidecarproto.StartProxiesBody{HostVethIP: "127.0.0.1", SandboxLLM: sandboxLLM}, &res); err != nil {
-			t.Fatalf("start proxies: %v", err)
-		}
-		return res
+	orch, rt := dialRuntime(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	bundle := &credbundle.Bundle{LLM: map[string]string{
+		"ANTHROPIC_API_KEY":  "sk-ant-real",
+		"ANTHROPIC_BASE_URL": upstream.URL,
+	}}
+	if err := orch.Call(ctx, sidecarproto.KindSealedBundle,
+		sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, bundle)}, nil); err != nil {
+		t.Fatalf("relay bundle: %v", err)
+	}
+	var res sidecarproto.StartProxiesResult
+	if err := orch.Call(ctx, sidecarproto.KindStartProxies,
+		sidecarproto.StartProxiesBody{HostVethIP: "127.0.0.1"}, &res); err != nil {
+		t.Fatalf("start proxies: %v", err)
 	}
 	has := func(env []string, key string) bool {
 		for _, kv := range env {
@@ -644,20 +649,39 @@ func TestRuntime_SandboxLLMSplitsTheJailFromTheEngine(t *testing.T) {
 		return false
 	}
 
-	t.Run("engine outside the jail", func(t *testing.T) {
-		res := start(t, false)
-		if has(res.Env, "ANTHROPIC_BASE_URL") || has(res.Env, "ANTHROPIC_API_KEY") {
-			t.Errorf("sandbox env still names the LLM proxy: %v", res.Env)
-		}
-		if !has(res.LLMEnv, "ANTHROPIC_BASE_URL") {
-			t.Errorf("the executor got no provider address to dial: %v", res.LLMEnv)
-		}
-	})
+	if has(res.Env, "ANTHROPIC_BASE_URL") || has(res.Env, "ANTHROPIC_API_KEY") {
+		t.Errorf("sandbox env names the LLM proxy: %v", res.Env)
+	}
+	if !has(res.LLMEnv, "ANTHROPIC_BASE_URL") {
+		t.Errorf("the executor got no provider address to dial: %v", res.LLMEnv)
+	}
+}
 
-	t.Run("engine inside the jail", func(t *testing.T) {
-		res := start(t, true)
-		if !has(res.Env, "ANTHROPIC_BASE_URL") || !has(res.Env, "ANTHROPIC_API_KEY") {
-			t.Errorf("sandbox env lost the LLM proxy the in-jail runtime dials: %v", res.Env)
-		}
-	})
+// TestGitHubUpstreamsFromBundle pins the one derivation every GitHub lane in
+// this process reads. The host arrives sealed beside the token it belongs to,
+// so nothing here can be pointed at a host the credential was not resolved
+// for — and a bundle with no GitHub half still answers, because the lanes it
+// would feed are simply never started.
+func TestGitHubUpstreamsFromBundle(t *testing.T) {
+	for _, tt := range []struct {
+		name, base, wantGit, wantAPI string
+		noGitHub                     bool
+	}{
+		{name: "public", base: "https://github.com", wantGit: "https://github.com", wantAPI: "https://api.github.com"},
+		{name: "unconfigured", base: "", wantGit: "https://github.com", wantAPI: "https://api.github.com"},
+		{name: "no_github_half", noGitHub: true, wantGit: "https://github.com", wantAPI: "https://api.github.com"},
+		{name: "ghes", base: "https://ghes.acme.com", wantGit: "https://ghes.acme.com", wantAPI: "https://ghes.acme.com/api/v3"},
+		{name: "data_residency", base: "https://octocorp.ghe.com", wantGit: "https://octocorp.ghe.com", wantAPI: "https://api.octocorp.ghe.com"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			b := &credbundle.Bundle{}
+			if !tt.noGitHub {
+				b.GitHub = &credbundle.GitHubCreds{Mode: "app", BaseURL: tt.base}
+			}
+			git, api := githubUpstreams(b)
+			if git != tt.wantGit || api != tt.wantAPI {
+				t.Errorf("githubUpstreams = (%q, %q), want (%q, %q)", git, api, tt.wantGit, tt.wantAPI)
+			}
+		})
+	}
 }

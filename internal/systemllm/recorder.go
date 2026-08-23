@@ -1,13 +1,13 @@
 // Package systemllm records per-call cost + token accounting for the calls TF
-// makes on its own behalf — the headless jobs (scorer, repo-profiler,
-// project-classifier) and the model-availability probe — into the
-// system_llm_runs table. It sits one layer above agentproc + db so the
-// runtime stays storage-agnostic (agentproc takes a SecretsReader rather
-// than importing db, by deliberate convention) while the recording logic
-// — which needs both the Run outcome/usage and the db store — lives in
-// one place instead of being duplicated at each call site.
+// makes on its own behalf — the headless jobs (scorer, repo-profiler) and the
+// model-availability probe — into the system_llm_runs table. It sits one
+// layer above agentproc + db so the runtime stays storage-agnostic
+// (agentproc takes a SecretsReader rather than importing db, by deliberate
+// convention) while the recording logic — which needs both the Run
+// outcome/usage and the db store — lives in one place instead of being
+// duplicated at each call site.
 //
-// The three jobs run their whole completion through here (Complete). The probe
+// The two jobs run their whole completion through here (Complete). The probe
 // makes its own inference call, because the model it must send is the exact id
 // under test rather than the one this package pins, and comes back only for
 // RecordDirect — the ledger row is the shared part.
@@ -36,10 +36,9 @@ const recordTimeout = 5 * time.Second
 const (
 	JobScorer       = "scorer"
 	JobRepoProfiler = "repo_profiler"
-	JobClassifier   = "classifier"
 	// JobProbe is a model-availability probe: one minimal request TF spends to
 	// learn whether an org's credentials can invoke a given model. It is not a
-	// background job like the three above — a person pressed a button — but it
+	// background job like the two above — a person pressed a button — but it
 	// is TF-initiated spend against the org's account, so it belongs in the
 	// same ledger and rolls up under system_overhead like every other call TF
 	// makes for itself. A probe that stayed off the ledger would be the one
@@ -53,8 +52,8 @@ const (
 //
 // breaker is the multi-mode direct-API path's shared circuit breaker (see
 // breaker.go) — one Recorder is constructed once per process and handed to
-// all three system jobs (scorer, repo-profiler, classifier), so it doubles
-// as the natural shared home for state that needs to be visible across all
+// both system jobs (scorer, repo-profiler), so it doubles
+// as the natural shared home for state that needs to be visible across both
 // of them. The availability probe holds the same Recorder for the ledger row
 // and deliberately does not consult that breaker: a person pressed a button,
 // and answering them with a skip a cooldown decided on would look like the

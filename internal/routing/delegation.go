@@ -793,7 +793,7 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 			return
 		case <-ticker.C:
 			// Per-org iteration mirrors the established poller /
-			// classifier pattern. In local mode this collapses to N=1
+			// scorer pattern. In local mode this collapses to N=1
 			// over the sentinel org (the only row in orgs); in multi
 			// mode it fans across every active tenant. OrgsStore is
 			// a required NewRouter parameter — if it were nil the

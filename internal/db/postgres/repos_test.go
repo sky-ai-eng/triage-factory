@@ -288,7 +288,7 @@ func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 	// read's SELECT is exactly the drift this test is here to catch, and a nil
 	// pointer on both sides would hide it.
 	profiled := time.Now().UTC().Truncate(time.Second)
-	var created, updated, branched, seeded domain.Repository
+	var created, updated, branched domain.Repository
 	write("Upsert (insert arm)", func(tx db.TxStores) error {
 		var e error
 		created, e = tx.Repos.Upsert(ctx, orgID, domain.Repository{
@@ -331,13 +331,6 @@ func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 		t.Fatal("UpdateCloneStatusByRef returned no row for a repository the caller can see")
 	}
 	dbtest.AssertWriteReturnedStoredRow(t, "UpdateCloneStatusByRef (app pool)", *stamped, read(created.ID))
-
-	write("SeedCloneURL", func(tx db.TxStores) error {
-		var e error
-		seeded, e = tx.Repos.SeedCloneURL(ctx, orgID, created.ID, "https://example.test/acme/api.git")
-		return e
-	})
-	dbtest.AssertWriteReturnedStoredRow(t, "SeedCloneURL (app pool)", seeded, read(created.ID))
 }
 
 func repoIDs(profiles []domain.Repository) []string {

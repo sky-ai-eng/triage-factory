@@ -84,11 +84,11 @@ type CompleteResult struct {
 // configured Anthropic/Bedrock provider directly from this process — no
 // subprocess, no sandbox.
 func (r *Recorder) Complete(ctx context.Context, opts CompleteOptions) (*CompleteResult, error) {
-	// One logical span over both branches, so a scoring batch, repo
-	// profile, or classification vote has the same shape whichever mode ran
-	// it and the mode is a filter rather than the reason two deployments'
-	// traces can't be compared. This is also where all three system jobs
-	// spend their time, so it doubles as their per-batch LLM span.
+	// One logical span over both branches, so a scoring batch or repo
+	// profile has the same shape whichever mode ran it and the mode is a
+	// filter rather than the reason two deployments' traces can't be
+	// compared. This is also where both system jobs spend their time, so
+	// it doubles as their per-batch LLM span.
 	ctx, span := tracer.Start(ctx, "systemllm.complete",
 		trace.WithAttributes(telemetry.OrgID(opts.OrgID), telemetry.Job(opts.Job)))
 	defer span.End()

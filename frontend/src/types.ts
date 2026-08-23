@@ -939,11 +939,6 @@ export interface SlackChannelsResponse {
   channels: SlackChannelView[]
 }
 
-/** Project.visibility — see domain.Project.Visibility. Multi-mode only:
- *  local mode's projects are always "team" and never expose a control for
- *  this. */
-export type ProjectVisibility = 'private' | 'team' | 'org'
-
 /** RepoOption is one repository as a picker offers it: the registry row id
  *  it submits and the "owner/repo" name it shows. The split is the whole
  *  addressing contract in one type — a repository is keyed by id and read by
@@ -951,94 +946,6 @@ export type ProjectVisibility = 'private' | 'team' | 'org'
 export interface RepoOption {
   id: string
   slug: string
-}
-
-export interface Project {
-  id: string
-  name: string
-  description: string
-  /** The team that owns this project (domain.Project.TeamID). The
-   *  pinned-repos editor sources its options from this team's tracked
-   *  set, since the PATCH validator only accepts repos this team tracks.
-   *  Empty for a private/org project created without one (see
-   *  visibility) — pinned repos and tracker keys aren't available then. */
-  team_id: string
-  /** Who can read/write this project: "private" (creator only), "team"
-   *  (the owning team's write-members), or "org" (every org member
-   *  reads; only org admins create/downgrade into it). The
-   *  projects_{select,insert,update} RLS policies are the actual
-   *  enforcement — the UI's job is to gray out choices the viewer
-   *  doesn't have, not to be the source of truth. */
-  visibility: ProjectVisibility
-  /** The user who created the project (domain.Project.CreatorUserID).
-   *  Only the creator may set visibility to "private" (mirrors the
-   *  projects_update RLS policy's private branch) — the edit surface
-   *  compares this against the viewer's own id to gray that option out
-   *  for anyone else. */
-  creator_user_id: string
-  /** The pinned repositories as registry row ids — the ids `/api/repos`
-   *  serves and the ids a PATCH sends back. A repository's "owner/repo"
-   *  name is a display property read off the repo, never a key that
-   *  round-trips through here: a rename mid-session would strand every
-   *  pin that did. */
-  pinned_repository_ids: string[]
-  jira_project_key: string
-  linear_project_key: string
-  /** The blueprint used for this project's ticket-authorship dispatch.
-   *  Empty string = use the seeded `system-ticket-spec` default. */
-  spec_authorship_blueprint_id: string
-  created_at: string
-  updated_at: string
-}
-
-export interface ProjectExportPreviewFile {
-  path: string
-  size_bytes: number
-}
-
-export interface ProjectExportPreview {
-  files: ProjectExportPreviewFile[]
-  total_size: number
-  // Non-fatal gaps: content that exists but couldn't be included (e.g.
-  // a session transcript unreadable by the server process). The bundle
-  // still exports; the user should know it ships without this.
-  warnings?: string[]
-}
-
-export interface ProjectImportWarning {
-  code: string
-  repo?: string
-  message: string
-}
-
-export interface ProjectImportResult {
-  project: Project
-  warnings: ProjectImportWarning[]
-}
-
-export interface KnowledgeFile {
-  path: string
-  /** RFC 6838 content type detected from the filename extension —
-   *  drives the panel's render switch (markdown / image / text /
-   *  no-preview). "application/octet-stream" for unknown extensions. */
-  mime_type: string
-  /** Inlined for text-shaped files under ~256KB; empty otherwise.
-   *  Frontend lazy-fetches the raw endpoint when content is empty
-   *  and a preview is needed. */
-  content: string
-  updated_at: string
-  size_bytes: number
-}
-
-export interface KnowledgeUploadResult {
-  /** Sanitized server-side filename (may differ from the client's
-   *  original if path components were stripped). Empty when the
-   *  upload failed. */
-  path?: string
-  /** Original filename as the client sent it — used in error toasts
-   *  so the user can match a failure back to the file they dropped. */
-  original: string
-  error?: string
 }
 
 export interface ToastPayload {
@@ -1190,22 +1097,6 @@ export type WSEvent =
       type: 'permission_resolved'
       conversation_id: string
       data: { tool_call_id: string }
-    }
-  | {
-      // The executor syncer (multi mode) always carries a `pending` field: the
-      // batch's in-flight filenames on start — the panel renders ghost rows for
-      // them so a large-video upload reads as progress — and an empty array on
-      // completion, which is how the panel tells a sync signal apart from the
-      // control pod's own upload/delete broadcast (that, and local mode, send
-      // data: null and only trigger a refetch, never touching ghost rows).
-      type: 'project_knowledge_updated'
-      project_id: string
-      data: { pending?: string[] } | null
-    }
-  | {
-      type: 'entities_assigned_to_project'
-      project_id: string
-      data: { entity_ids: string[] }
     }
   | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }

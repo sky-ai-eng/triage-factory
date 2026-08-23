@@ -101,7 +101,6 @@ func TestIntegration_StepSkillsMount_TwoStepBoundary(t *testing.T) {
 		lr, _, werr := sandbox.Wrap(ctx, sandbox.Config{
 			ConversationID: treeRootKey,
 			Worktree:       wtDir,
-			SDKDir:         t.TempDir(),
 			Argv: []string{"/bin/sh", "-c",
 				`echo "--- listing"; ls -1 "$HOME/.claude/skills"; echo "--- content"; cat "$HOME/.claude/skills/` + slug + `/SKILL.md"`},
 			Env: []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/work"},

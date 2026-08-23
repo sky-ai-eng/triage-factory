@@ -93,7 +93,6 @@ func sqliteCategoryAReferences(t *testing.T, conn *sql.DB) []string {
 	queries := []struct{ label, query string }{
 		{"team_github_repos", `SELECT team_id || '|' || repository_id FROM team_github_repos`},
 		{"conversation_worktrees", `SELECT conversation_id || '|' || repository_id || '|' || ref FROM conversation_worktrees`},
-		{"project_pinned_repos", `SELECT project_id || '|' || repository_id || '|' || position FROM project_pinned_repos`},
 	}
 	var out []string
 	for _, q := range queries {

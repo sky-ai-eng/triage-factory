@@ -16,23 +16,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
-// TrustedSDKDir is the broker-owned agent-SDK install directory (where
-// EnsureSDK writes wrapper.mjs + node_modules). The broker resolves this
-// itself instead of trusting the SDKDir a caller sends over the RPC:
-// buildSpec bind-mounts /sdk from here and the pinned argv execs
-// /sdk/wrapper.mjs, so if the source were caller-supplied a compromised
-// orchestrator could point it at an attacker-authored wrapper and the
-// pinned entrypoint would run attacker code. Resolving it broker-side is
-// what makes "the broker owns the command" actually true — same principle
-// as resolving the rootfs by catalog name rather than accepting a path.
-func TrustedSDKDir() string {
-	return paths.SDKDir()
-}
-
-// TrustedGitHooksDir mirrors TrustedSDKDir for the git-hooks bind mount
+// TrustedGitHooksDir is the broker-owned git-hooks bind-mount source
 // (destination githooks.SandboxDir): the broker resolves the host hooks
 // dir itself rather than trusting the orchestrator's claimed source for
-// this fixed, global destination.
+// this fixed, global destination — same principle as resolving the rootfs
+// by catalog name rather than accepting a path.
 func TrustedGitHooksDir() string {
 	return paths.HooksDir()
 }
@@ -49,7 +37,7 @@ const TrustedTFBinaryDestination = "/usr/local/bin/triagefactory"
 // cmd/capbroker's execSelfCommand: `exec.Command(self, "cap-broker", ...)`
 // where self is the orchestrator's own os.Executable()), so calling
 // os.Executable() again from inside the broker process always resolves to
-// the identical path — no RPC field needed, mirroring TrustedSDKDir.
+// the identical path — no RPC field needed, mirroring TrustedGitHooksDir.
 func TrustedTFBinaryPath() (string, error) {
 	return os.Executable()
 }
@@ -125,8 +113,8 @@ func TrustedToolHostBinaryPath() string { return trustedToolHostBinaryPath }
 const TrustedAgentHostSocketDestination = "/run/tf.sock"
 
 // TrustedAgentHostSocketPath is the broker's own derivation of "this run's
-// own agenthost socket" host-side path. Unlike TrustedSDKDir/
-// TrustedGitHooksDir/TrustedTFBinaryPath, the broker did not create this
+// own agenthost socket" host-side path. Unlike TrustedGitHooksDir/
+// TrustedTFBinaryPath, the broker did not create this
 // file — cmd/exec/agenthost.Start does, host-side, before the launch RPC —
 // so the broker VALIDATES a launch's mount source against this derivation
 // rather than resolving/overriding it.
@@ -477,31 +465,20 @@ func validateNetnsPath(conversationID, p string) error {
 	return nil
 }
 
-// validateArgv enforces a pinned entrypoint. Two are permitted, one per
-// runtime, and the orchestrator may vary only the arguments after it:
+// validateArgv enforces a pinned entrypoint: the native runtime's resident
+// tool host plus its `serve` verb. The orchestrator may vary only the
+// arguments after it (the socket path and working directory).
 //
-//   - the SDK runtime's node binary + wrapper, whose remaining arguments
-//     steer the unprivileged agent;
-//   - the native runtime's resident tool host + its `serve` verb, whose
-//     remaining arguments name the socket path and working directory.
-//
-// Both entrypoints are programs the broker itself resolves the source of
-// (TrustedSDKDir, TrustedToolHostBinaryPath), which is what "the broker owns
-// the command" means: adding a second pin adds a second broker-owned
-// program, not a caller-chosen one.
+// The entrypoint is a program the broker itself resolves the source of
+// (TrustedToolHostBinaryPath), which is what "the broker owns the command"
+// means: a second pin would add a second broker-owned program, not a
+// caller-chosen one.
 func validateArgv(argv []string) error {
-	if len(argv) >= 2 && argv[0] == sandboxNodeBinary && argv[1] == sandboxWrapperEntry {
-		return nil
-	}
 	if len(argv) >= 2 && argv[0] == TrustedToolHostBinaryDestination && argv[1] == toolHostServeVerb {
 		return nil
 	}
-	if len(argv) < 2 {
-		return fmt.Errorf("sandbox: argv must start with a pinned entrypoint (%s %s, or %s %s)",
-			sandboxNodeBinary, sandboxWrapperEntry, TrustedToolHostBinaryDestination, toolHostServeVerb)
-	}
-	return fmt.Errorf("sandbox: argv entrypoint %q %q is not a pinned entrypoint (%q %q, or %q %q); the broker owns the command",
-		argv[0], argv[1], sandboxNodeBinary, sandboxWrapperEntry, TrustedToolHostBinaryDestination, toolHostServeVerb)
+	return fmt.Errorf("sandbox: argv entrypoint %v is not the pinned entrypoint (%q %q); the broker owns the command",
+		argv, TrustedToolHostBinaryDestination, toolHostServeVerb)
 }
 
 // ValidateLaunchParams is the broker's RPC-boundary gate. It runs before
@@ -538,9 +515,7 @@ func ValidateLaunchParams(p LaunchParams) error {
 	// Worktree (/work) is a bind-mount SOURCE the privileged broker mounts;
 	// require a clean absolute path at the boundary so a relative or
 	// non-clean value can't resolve to an unintended host location or fail
-	// late inside runsc. SDKDir is deliberately NOT trusted here — the broker
-	// overrides it with TrustedSDKDir() before building the spec, so whatever
-	// the orchestrator sends is discarded (see the launchRun override).
+	// late inside runsc.
 	if err := validateAbsCleanPath("worktree", p.Worktree); err != nil {
 		return err
 	}
@@ -706,7 +681,7 @@ func realPath(p string) (string, error) {
 //     not. These runs are org-blind by construction (the tree doesn't outlive
 //     the run), so hasScope is false and no OTHER mount may claim an org scope
 //     either — there is nothing for it to be consistent with.
-//   - The org-scoped state-root tree: paths.ProjectKBDir(orgID, projectID),
+//   - The org-scoped state-root tree: paths.BareCacheDir(orgID, owner, repo),
 //     i.e. <StateRoot>/orgs/<orgID>/… in multi mode. orgPrefix is
 //     <StateRoot>/orgs/<orgID>; every other mount under this run must live
 //     under this same prefix.
@@ -766,7 +741,7 @@ func worktreeScope(conversationID, memoryNamespace, worktree string) (orgPrefix 
 // this run's own scope. It requires Source/Destination to be clean
 // absolute paths and Options within the small honored set (as before),
 // then classifies each mount by DESTINATION against the broker-owned
-// trusted set — mirroring TrustedSDKDir rather than trusting shape alone:
+// trusted set — mirroring TrustedGitHooksDir rather than trusting shape alone:
 //
 //   - TrustedTFBinaryDestination / githooks.SandboxDir (global, fixed):
 //     the Source MUST equal the broker's own resolution
@@ -1106,7 +1081,6 @@ func PrepareBundle(ctx context.Context, p LaunchParams) (string, error) {
 	cfg := Config{
 		ConversationID: conversationID,
 		Worktree:       p.Worktree,
-		SDKDir:         p.SDKDir,
 		Argv:           p.Args,
 		Env:            envVarsToStrings(p.Env),
 		ExtraMounts:    p.Mounts,

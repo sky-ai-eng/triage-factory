@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
@@ -186,27 +187,32 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		sharedOriginHost = r.sharedOriginHost()
 	}
 
+	// One host for every GitHub lane, read off the bundle that carries the
+	// tokens for it. The web base and the REST mount are the same fact in two
+	// shapes, so they are derived together, here, from the one value the brain
+	// sealed — nothing about the host travels in the frame.
+	gitUpstream, apiUpstream := githubUpstreams(bundle)
+
 	var git *agentproc.GitProxyConfig
 	if req.GitEnabled {
-		git = r.gitProxyConfig(req.GitUpstream)
+		git = r.gitProxyConfig(gitUpstream)
 		git.SharedOriginHost = sharedOriginHost
 		git.SharedOriginCAPath = agentproc.SandboxGHInjectorCertPath
 	}
 
-	// The egress denial guidance reads the same upstream strings the gh
-	// injector and git proxy are built from, so the hosts a refusal explains
-	// are this run's actual GitHub — GHES and data-residency deployments
-	// included, not just the public github.com family.
-	ghHosts := egressproxy.GitHubHostsForUpstreams(req.GHChannelUpstream, req.GitUpstream)
-	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, req.SandboxLLM, git, ghHosts, r.recordEgressDenial, r.llmSource, req.IdentityConfigPairs...)
+	// The egress denial guidance reads the same two values every GitHub lane
+	// was just built from, so the hosts a refusal explains are this run's
+	// actual GitHub — GHES and data-residency deployments included, not just
+	// the public github.com family.
+	ghHosts := egressproxy.GitHubHostsForUpstreams(apiUpstream, gitUpstream)
+	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, git, ghHosts, r.recordEgressDenial, r.llmSource, req.IdentityConfigPairs...)
 	if err != nil {
 		return nil, err
 	}
 
-	// The LLM coordinates travel back whoever dials them: the jail got them in
-	// env only if this run asked for it, and the orchestrator's own engine
-	// reads them here. Either way the proxy holds the key and the caller holds
-	// a per-run placeholder.
+	// The LLM coordinates travel back to the orchestrator's own engine only —
+	// no jail is ever pointed at the proxy. The proxy holds the key; the
+	// caller holds a per-run placeholder.
 	result := sidecarproto.StartProxiesResult{Env: env, LLMEnv: handle.LLMEnv()}
 	// Surface the git proxy's address + per-run placeholder so the orchestrator
 	// routes its OWN pre-sandbox clone through this same proxy — the real token
@@ -225,7 +231,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// any failure here, tear down what already bound so a half-started run
 	// leaks no listener.
 	if req.GitHubAPIEnabled {
-		srv, url, token, aerr := r.startGitHubAPIProxy(req.HostVethIP, req.GitHubAPIUpstream)
+		srv, url, token, aerr := r.startGitHubAPIProxy(req.HostVethIP, apiUpstream)
 		if aerr != nil {
 			_ = handle.Shutdown(ctx)
 			return nil, aerr
@@ -252,7 +258,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// jail holds only a placeholder — and, when the broker handed one down, the
 	// shared origin the sandbox's git was just routed at (see ghChannelWanted).
 	if ghChannelWanted(req) {
-		host, token, gerr := r.startGHInjector(req.HostVethIP, req.GHChannelUpstream, req.AgentHost.ConversationID, handle.GitHandler())
+		host, token, gerr := r.startGHInjector(req.HostVethIP, apiUpstream, req.AgentHost.ConversationID, handle.GitHandler())
 		if gerr != nil {
 			_ = handle.Shutdown(ctx)
 			if r.githubAPI != nil {
@@ -368,6 +374,20 @@ func ghChannelWanted(req sidecarproto.StartProxiesBody) bool {
 	return req.GHChannelEnabled && req.AgentHost != nil && req.AgentHost.ConversationID != ""
 }
 
+// githubUpstreams derives this run's two GitHub hosts from the sealed bundle:
+// the web base the git proxy forwards to, and the REST mount the API proxy and
+// the gh injector prepend. A bundle with no GitHub half (a Jira-only org) — or
+// one whose org never configured a base — answers github.com / api.github.com,
+// which is what an org on the public host has anyway. Neither is ever empty, so
+// no lane below carries a default of its own.
+func githubUpstreams(b *credbundle.Bundle) (git, api string) {
+	base := ""
+	if b.GitHub != nil {
+		base = b.GitHub.BaseURL
+	}
+	return ghbase.ResolveBaseURL(base), ghbase.APIBase(base)
+}
+
 // startGHInjector stands up the real-gh credential-injector proxy: generates the
 // per-run self-signed TLS cert (private key stays here), writes the public cert
 // to the per-run path the orchestrator bind-mounts into the jail
@@ -387,9 +407,6 @@ func ghChannelWanted(req sidecarproto.StartProxiesBody) bool {
 // the channel still works for `gh api` and explicitly-scoped commands, and
 // inference stays broken exactly as it was.
 func (r *credRuntime) startGHInjector(hostVethIP, upstream, conversationID string, gitHandler http.Handler) (string, string, error) {
-	if upstream == "" {
-		upstream = "https://api.github.com"
-	}
 	cert, certPEM, err := ghinjector.GenerateCert(hostVethIP)
 	if err != nil {
 		return "", "", fmt.Errorf("runsidecar: generate gh-injector cert: %w", err)
@@ -537,11 +554,8 @@ func ghWriteFactsToWire(f *ghwrite.GraphQLFacts) *agentproc.GraphQLWriteFacts {
 // startGitHubAPIProxy binds a GitHub-REST credential proxy on the veth IP.
 // Its per-repo TokenSource reads the held bundle, so the real installation
 // token never leaves the sidecar; the returned placeholder is what the
-// orchestrator's ghclient presents. upstream defaults to api.github.com.
+// orchestrator's ghclient presents. upstream is the bundle-derived REST mount.
 func (r *credRuntime) startGitHubAPIProxy(hostVethIP, upstream string) (*apiproxy.Server, string, string, error) {
-	if upstream == "" {
-		upstream = "https://api.github.com"
-	}
 	token, err := randomToken()
 	if err != nil {
 		return nil, "", "", err

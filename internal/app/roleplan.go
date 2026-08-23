@@ -32,8 +32,14 @@ import "github.com/sky-ai-eng/triage-factory/internal/runmode"
 //   - The instance registry (Register + heartbeat), the worktree cache
 //     reaper, git-hooks materialization, and orphaned-worktree cleanup run
 //     in every role: registry membership is fleet-wide, and every role
-//     keeps a per-pod worktree cache under its own TF_STATE_ROOT —
-//     control's for project-bundle imports, executor's for run worktrees.
+//     keeps a per-pod worktree cache under its own TF_STATE_ROOT — run
+//     worktrees on an executor (or, at role=all, on the single local-mode
+//     process). A multi-mode control pod never writes into its own copy —
+//     the dispatcher that materializes run worktrees is executor/all-only
+//     (see the dispatcher field below) — so the reaper there sweeps an
+//     empty directory; it still runs uniformly rather than special-cased
+//     per role, since a no-op sweep costs nothing and keeps the eviction
+//     path exercised in local dev.
 type subsystemPlan struct {
 	role runmode.DeployRole
 
@@ -46,7 +52,7 @@ type subsystemPlan struct {
 
 	// brain marks this role as BRAIN-CAPABLE: control + all construct the
 	// leader-elected background brain's objects (pollers + tracker, the
-	// event router, the AI managers — scorer/profiler/classifier/
+	// event router, the AI managers — scorer/profiler/
 	// reconciler/marketplace-stats —, the
 	// poll-completion bus subscribers) and participate in the
 	// background-brain lease election. An executor never does.
@@ -59,9 +65,9 @@ type subsystemPlan struct {
 	// in multi mode, the brain starts only while this pod actually holds
 	// the "background-brain" lease, and stops on demotion. A standby
 	// control pod still builds every brain object (buildAI/buildRouting) —
-	// config-save handlers and the delegation spawner's classifier wait
-	// need them to relay Trigger/PollSoon calls to whichever pod IS the
-	// holder — it just never starts their background loops.
+	// config-save handlers need them to relay Trigger/PollSoon calls to
+	// whichever pod IS the holder — it just never starts their background
+	// loops.
 	brain bool
 
 	// dispatcher starts the delegated-run dispatcher (claims + executes

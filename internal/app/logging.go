@@ -7,7 +7,6 @@ import "github.com/sky-ai-eng/triage-factory/internal/logging"
 // "[prefix]" log tags. One var per distinct component the package emits under:
 //
 //	ai             scorer-manager construction
-//	classify       project-classifier construction + start
 //	app            DB-pool teardown + run-credential/model resolution
 //	poll-tracker   poll-completion sentinel handling
 //	auth           JWKS verifier readiness (multi mode)
@@ -21,7 +20,6 @@ import "github.com/sky-ai-eng/triage-factory/internal/logging"
 //	reachcache     reachable-repo cache manager construction
 var (
 	aiLog          = logging.Component("ai")
-	classifyLog    = logging.Component("classify")
 	appLog         = logging.Component("app")
 	pollTrackerLog = logging.Component("poll-tracker")
 	authLog        = logging.Component("auth/app")

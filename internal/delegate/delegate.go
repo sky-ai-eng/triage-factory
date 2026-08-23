@@ -39,18 +39,17 @@ import (
 //     is the source of truth for cleanup, which iterates the table at
 //     runAgent terminal.
 type runConfig struct {
-	orgID     string  // tenant scope for every store call inside this conversation's goroutine — set once in Delegate from opts.OrgID, then read everywhere via cfg.orgID instead of being threaded positionally
-	claimID   string  // the engagement driving this conversation — the claims row ClaimNextConversation minted, threaded through so teardown can stamp the claim's measured sandbox cost by id (an active-claim lookup would race the release). Empty on paths with no claimed conversation in scope, which record no actuals.
-	teamID    string  // the conversation's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed conversation row; read at construction to populate agenthost.ConversationInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Also stamped on the conversation-bearing terminal paths (dispatchClaimedConversation / handlePreAgentFailure); empty only on the CancelBlueprintRun / paused-cleanup paths that have a task but no claimed conversation in scope.
-	scope     string  // what the agent is scoped to (repo, PR, issue)
-	toolsRef  string  // tool documentation to inject
-	wtPath    string  // initial cwd: GitHub PR worktree, or Jira run-root
-	hasWT     bool    // GitHub PR has a real worktree to clean up via RemoveAt; Jira's worktrees are tracked in conversation_worktrees and cleaned by iterating that table
-	runRoot   string  // run-root path: GitHub PR runs == wtPath; Jira lazy runs == the throwaway parent of materialized worktrees. Always set so $TRIAGE_FACTORY_CONVERSATION_ROOT resolves uniformly for the memory-gate retry.
-	owner     string  // resolved GitHub owner (empty for Jira lazy runs)
-	repo      string  // resolved GitHub repo (empty for Jira lazy runs)
-	prNumber  int     // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-run branch + push remote the bare repo would otherwise accumulate
-	projectID *string // entity's project assignment (nil for un-assigned); used to copy the project's knowledge-base into ./_tfac/project-knowledge/
+	orgID    string // tenant scope for every store call inside this conversation's goroutine — set once in Delegate from opts.OrgID, then read everywhere via cfg.orgID instead of being threaded positionally
+	claimID  string // the engagement driving this conversation — the claims row ClaimNextConversation minted, threaded through so teardown can stamp the claim's measured sandbox cost by id (an active-claim lookup would race the release). Empty on paths with no claimed conversation in scope, which record no actuals.
+	teamID   string // the conversation's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed conversation row; read at construction to populate agenthost.ConversationInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Also stamped on the conversation-bearing terminal paths (dispatchClaimedConversation / handlePreAgentFailure); empty only on the CancelBlueprintRun / paused-cleanup paths that have a task but no claimed conversation in scope.
+	scope    string // what the agent is scoped to (repo, PR, issue)
+	toolsRef string // tool documentation to inject
+	wtPath   string // initial cwd: GitHub PR worktree, or Jira run-root
+	hasWT    bool   // GitHub PR has a real worktree to clean up via RemoveAt; Jira's worktrees are tracked in conversation_worktrees and cleaned by iterating that table
+	runRoot  string // run-root path: GitHub PR runs == wtPath; Jira lazy runs == the throwaway parent of materialized worktrees. Always set so $TRIAGE_FACTORY_CONVERSATION_ROOT resolves uniformly for the memory-gate retry.
+	owner    string // resolved GitHub owner (empty for Jira lazy runs)
+	repo     string // resolved GitHub repo (empty for Jira lazy runs)
+	prNumber int    // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-run branch + push remote the bare repo would otherwise accumulate
 
 	// prSkeleton is the rendered PR history block folded into the run's
 	// static task context. Empty for a non-PR run, and empty (never fatal)
@@ -707,12 +706,6 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 		}
 	}
 
-	// Block briefly so the project classifier (post-poll
-	// runner) can decide this entity before we read project_id for KB
-	// injection. Nil-safe — tests and pre-classifier configurations
-	// skip the wait.
-	s.awaitClassification(ctx, orgID, task.EntityID)
-
 	return runConfig{
 		orgID:      orgID,
 		scope:      fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
@@ -723,7 +716,6 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 		owner:      owner,
 		repo:       repo,
 		prNumber:   prNumber,
-		projectID:  lookupEntityProjectID(s.entities, orgID, task.EntityID),
 		prSkeleton: renderPRSkeleton(ctx, ghClient, owner, repo, prNumber),
 	}, nil
 }
@@ -797,18 +789,13 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID,
 		delegateLog.Warn("set worktree_path for Jira conversation failed; resume will reject this conversation", "conversation", conversationID, "error", err)
 	}
 
-	// Block briefly so the project classifier can decide this
-	// entity before we read project_id for KB injection. Nil-safe.
-	s.awaitClassification(ctx, orgID, task.EntityID)
-
 	return runConfig{
-		orgID:     orgID,
-		scope:     fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
-		toolsRef:  s.toolsReferenceFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindJira),
-		wtPath:    runRoot,
-		hasWT:     false,
-		runRoot:   runRoot,
-		projectID: lookupEntityProjectID(s.entities, orgID, task.EntityID),
+		orgID:    orgID,
+		scope:    fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
+		toolsRef: s.toolsReferenceFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindJira),
+		wtPath:   runRoot,
+		hasWT:    false,
+		runRoot:  runRoot,
 		// owner/repo intentionally empty: the agent picks per-ticket via `workspace add`
 	}, nil
 }
@@ -819,9 +806,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID,
 // the run-root is the agent's session cwd — the same resume load-bearing
 // invariant documented on setupJira above.
 //
-// Two differences from Jira:
-//   - Slack threads are not project-classifier targets, so
-//     awaitClassification is skipped and projectID stays nil.
+// One difference from Jira:
 //   - The tools reference layers in an ee-registered Slack verb doc (if
 //     any registered via agentprompt.RegisterToolsReference) on top of the GH
 //     template — GH tools are included because the agent acquires repos on
@@ -849,8 +834,7 @@ func (s *Spawner) setupSlack(ctx context.Context, orgID, conversationID, claimID
 		wtPath:   runRoot,
 		hasWT:    false,
 		runRoot:  runRoot,
-		// owner/repo/projectID intentionally empty/nil: the agent picks
-		// repos per-thread via `workspace add`, and Slack threads are not
-		// project-classifier targets (no awaitClassification call above).
+		// owner/repo intentionally empty: the agent picks repos per-thread
+		// via `workspace add`.
 	}, nil
 }

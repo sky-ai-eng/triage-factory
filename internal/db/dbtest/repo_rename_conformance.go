@@ -24,7 +24,7 @@ type RepoRenameFactory func(t *testing.T) (stores db.Stores, orgID string, seed 
 // RepoRenameSeeder is the bag of fixtures the conformance suite cannot build
 // through a store interface.
 type RepoRenameSeeder struct {
-	// TeamID owns the tracked-repo rows, the project, and the artifacts.
+	// TeamID owns the tracked-repo rows and the artifacts.
 	TeamID string
 
 	// Conversation inserts a conversation row so a worktree ledger entry has
@@ -49,8 +49,8 @@ type RepoRenameSeeder struct {
 
 	// ReferenceRows returns every category-A repository reference the org
 	// holds, as the rows actually store them: the registry row id each of
-	// team_github_repos, conversation_worktrees and project_pinned_repos
-	// points at, tagged by table and sorted. It is deliberately raw — the
+	// team_github_repos and conversation_worktrees points at, tagged by
+	// table and sorted. It is deliberately raw — the
 	// point is to observe the stored value rather than the slug a store read
 	// would resolve it back to, because a rename that rewrote one of these
 	// would still read back correctly and only this snapshot would notice.
@@ -120,15 +120,6 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		if len(worktrees) != 1 || worktrees[0].RepoID != renameNewSlug {
 			t.Errorf("worktree ledger = %+v, want one row at %s", worktrees, renameNewSlug)
-		}
-
-		// The project's pinned repos, order preserved.
-		proj, err := s.Projects.Get(ctx, orgID, fx.projectID)
-		if err != nil || proj == nil {
-			t.Fatalf("Projects.Get: %v, %v", proj, err)
-		}
-		if len(proj.PinnedRepos) != 2 || proj.PinnedRepos[0] != renameNewSlug || proj.PinnedRepos[1] != renameNeighbourSlug {
-			t.Errorf("pinned repos = %v, want [%s %s]", proj.PinnedRepos, renameNewSlug, renameNeighbourSlug)
 		}
 
 		// The entity's composite source id — same row, new name.
@@ -594,11 +585,11 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// the move absorbs it. The alternative is a rename that fails forever
 		// over a row nothing points at.
 		//
-		// This case is down to placement pins alone. The tracked set, the
-		// worktree ledger and a project's pinned repos reference the registry
-		// row by id now, so "a reference to a repository with no row" is not a
-		// state any of them can reach — the foreign key is what refuses it,
-		// rather than a rewrite having to clean up after it.
+		// This case is down to placement pins alone. The tracked set and the
+		// worktree ledger reference the registry row by id now, so "a
+		// reference to a repository with no row" is not a state either can
+		// reach — the foreign key is what refuses it, rather than a rewrite
+		// having to clean up after it.
 		s, orgID, seed := mk(t)
 		fx := seedRenameFixture(t, s, orgID, seed, "orphan")
 
@@ -629,11 +620,11 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 
 	t.Run("Rename_rewrites_no_row_that_references_the_repository_by_id", func(t *testing.T) {
 		// The inverse of the rewrite case above, and the proof the conversion
-		// did its job. Every reference in category A — the tracked set, the
-		// worktree ledger, a project's pinned repos — points at the registry
-		// row's id, so a rename must move the slug on that one row and leave
-		// all three byte-identical. If any of them still stored a slug, the
-		// snapshot would differ and this would fail.
+		// did its job. Every reference in category A — the tracked set and the
+		// worktree ledger — points at the registry row's id, so a rename must
+		// move the slug on that one row and leave both byte-identical. If
+		// either still stored a slug, the snapshot would differ and this
+		// would fail.
 		s, orgID, seed := mk(t)
 		fx := seedRenameFixture(t, s, orgID, seed, "byid")
 
@@ -712,7 +703,6 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 type renameFixture struct {
 	externalID          string
 	conversationID      string
-	projectID           string
 	entityID            string
 	prArtifactID        string
 	branchArtifactID    string
@@ -755,15 +745,6 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	}); err != nil {
 		t.Fatalf("seed worktree: %v", err)
 	}
-
-	projectIDRow, err := s.Projects.Create(ctx, orgID, seed.TeamID, domain.Project{
-		Name:        "Platform " + suffix,
-		PinnedRepos: []string{renameOldSlug, renameNeighbourSlug},
-	})
-	if err != nil {
-		t.Fatalf("seed project: %v", err)
-	}
-	projectID := projectIDRow.ID
 
 	entity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", renameOldSlug+"#18", "pr", "A pull request",
 		"https://github.com/"+renameOldSlug+"/pull/18")
@@ -840,7 +821,6 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	return renameFixture{
 		externalID:          externalID,
 		conversationID:      conversationID,
-		projectID:           projectID,
 		entityID:            entity.ID,
 		prArtifactID:        prArtifact.ID,
 		branchArtifactID:    branchArtifact.ID,

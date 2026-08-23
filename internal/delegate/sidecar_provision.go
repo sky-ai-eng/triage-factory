@@ -13,7 +13,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -206,28 +205,6 @@ func (rs *runSidecar) GitCloneAuth(cloneURL string) worktree.CloneAuth {
 	return worktree.CloneAuthViaGitProxy(rs.res.GitProxyURL, cloneHostBase(cloneURL), rs.res.GitProxyToken)
 }
 
-// loopRunsInJail reports whether this runtime's agent loop executes inside the
-// sandbox — which is the same question as whether the jail needs a channel to
-// a model provider. The SDK spawns its loop in there and has to reach one; the
-// native engine runs in this process and only its tools are jailed, so its cell
-// is built with no LLM channel at all: nothing to dial, nothing to authenticate
-// with, one fewer thing for hostile text in that jail to aim at.
-//
-// Written as named engines with a closed default because the answer is a
-// CAPABILITY. Spelled "anything but native" instead, an engine nobody has
-// taught this yet would be handed a provider channel by default, and the
-// mistake would be silent — an over-provisioned jail looks exactly like a
-// correct one. This way the same mistake withholds a channel instead, and a
-// runtime that genuinely needs one fails at its first model call, loudly, in
-// the place that has to be taught.
-//
-// A function rather than an expression at the call site so the rule has one
-// statement and a test can reach it; the grant itself is otherwise only
-// exercised by a bring-up that needs a real broker and a real network.
-func loopRunsInJail(runtime string) bool {
-	return runtime == domain.ConversationRuntimeSDK
-}
-
 // bringUpRunSidecar stands up the run network, launches the credential
 // sidecar, provisions it (publishing the sidecar's public key so the brain
 // seals THIS run's bundle to it, without the orchestrator ever unsealing), and
@@ -311,7 +288,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	)
 	if storesSet {
 		auditHost = agenthost.NewLocal(stores, info)
-		git = s.managedGitGate(ctx, info, stores, auditHost)
+		git = s.managedGitGate(info, stores, auditHost)
 	}
 
 	// The commit identity's git config pairs (author/committer) fold into the
@@ -325,7 +302,6 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	relaySrv := agenthost.NewRelayServer(stores, info, git)
 	params := agentproc.SidecarBringUpParams{
 		HostVethIP: net.HostIP,
-		SandboxLLM: loopRunsInJail(conv.Runtime),
 		Git:        git,
 		// The org-bound op server the sidecar's relay envelope dispatches to:
 		// the git proxy's push authz/audit (backed by the same git gate) plus
@@ -335,14 +311,15 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		IdentityPairs: githooks.IdentityConfigPairs(identity.Name, identity.Email),
 		// Every delegated run may touch a GitHub repo (clone/push + GetPR +
 		// agenthost gh verbs), so the git + GitHub-REST proxies are always on.
-		GitHubAPIEnabled:  true,
-		GitHubAPIUpstream: s.githubAPIUpstreamFor(ctx, orgID),
+		// No upstream travels with them: the host each lane forwards to is the
+		// one sealed into this run's bundle beside the token, so a base-URL
+		// change between provisioning and bring-up cannot point a token
+		// resolved for one host at another.
+		GitHubAPIEnabled: true,
 		// The real-gh channel's injector: the sandboxed gh binary reaches it via
 		// GH_HOST. On for every delegated run (same rationale as the REST proxy);
 		// the injector needs GitHub creds, which resolveGitHub already provisions.
-		// Same REST-base upstream as the GitHub-REST proxy.
-		GHChannelEnabled:  true,
-		GHChannelUpstream: s.githubAPIUpstreamFor(ctx, orgID),
+		GHChannelEnabled: true,
 		// Jira REST only for Jira runs (their bundle carries a Jira credential;
 		// a non-Jira org's bundle carries none and the proxy would fail to bind).
 		// Upstream left empty — the sidecar derives it from the bundle's Jira URL.
@@ -502,33 +479,14 @@ func (s *Spawner) relayCredentialRefreshes(subject string, getter credBundleGett
 	}
 }
 
-// githubAPIUpstreamFor resolves the REST API base the sidecar's GitHub proxy
-// forwards to — api.github.com, a GHES {base}/api/v3, or a .ghe.com api host —
-// derived from the org's non-secret configured GitHub base via the same
-// APIBase mapping the client uses. Empty (resolver unwired / read error)
-// defaults to api.github.com inside the sidecar.
-func (s *Spawner) githubAPIUpstreamFor(ctx context.Context, orgID string) string {
-	s.mu.Lock()
-	resolver := s.ghResolver
-	s.mu.Unlock()
-	if resolver == nil {
-		return ""
-	}
-	base, err := resolver.BaseURLFor(ctx, orgID)
-	if err != nil {
-		delegateLog.Warn("resolve github base for sidecar api proxy failed; defaulting to api.github.com", "org", orgID, "error", err)
-		return ""
-	}
-	return ghclient.APIBase(base)
-}
-
 // managedGitGate builds the shared DB-backed policy and audit half of managed
 // Git. Local's loopback proxy calls it directly; the multi sidecar relays to it.
-// It carries the non-secret org base as the insteadOf upstream, plus the
-// DB-backed Authorize (team-tracks + conversation_worktrees ledger + ref allowlist), the
-// RecordDenial audit, and the RecordPush capture. No TokenSource /
-// ProbeCredentials — the sidecar resolves and probes the real token from its
-// own unsealed bundle. Returns nil when the resolver is unwired.
+// It carries the DB-backed Authorize (team-tracks + conversation_worktrees
+// ledger + ref allowlist), the RecordDenial audit, and the RecordPush capture.
+// No TokenSource / ProbeCredentials — the sidecar resolves and probes the real
+// token from its own unsealed bundle — and no Upstream: the sidecar reads the
+// host off that same bundle, so only local's caller, which has no bundle, fills
+// one in. Returns nil when the resolver is unwired.
 //
 // RecordPush is load-bearing on the executor: the pre-push hook stands down in
 // the sandbox (the sidecar's StartRunProxies sets PushCaptureProxy), so the
@@ -539,18 +497,12 @@ func (s *Spawner) githubAPIUpstreamFor(ctx context.Context, orgID string) string
 // auditHost is the caller's — not built here — because the run's acting GitHub
 // credential is not known until the sidecar reports it, and the caller is the
 // half that holds both the client and that answer.
-func (s *Spawner) managedGitGate(ctx context.Context, info agenthost.ConversationInfo, stores db.Stores, auditHost *agenthost.LocalClient) *agentproc.GitProxyConfig {
+func (s *Spawner) managedGitGate(info agenthost.ConversationInfo, stores db.Stores, auditHost *agenthost.LocalClient) *agentproc.GitProxyConfig {
 	s.mu.Lock()
 	resolver := s.ghResolver
 	s.mu.Unlock()
 	if resolver == nil {
 		return nil
-	}
-	upstream := ""
-	if base, err := resolver.BaseURLFor(ctx, info.OrgID); err != nil {
-		delegateLog.Warn("resolve git host base for sidecar git proxy failed; leaving upstream empty (sidecar defaults to github.com)", "org", info.OrgID, "error", err)
-	} else {
-		upstream = base
 	}
 	// Captured while the engagement's root is still live — the gate is built
 	// during bring-up, but every callback below fires mid-run, on a git
@@ -559,7 +511,6 @@ func (s *Spawner) managedGitGate(ctx context.Context, info agenthost.Conversatio
 	engagement := s.engagementSpanContext(info.ConversationID)
 	recordPush := gitPushRecorder(auditHost, info)
 	return &agentproc.GitProxyConfig{
-		Upstream: upstream,
 		Authorize: func(ctx context.Context, owner, repo string) (gitproxy.Decision, error) {
 			// The push gate is synchronous in front of the agent's git — a
 			// slow one stalls a push with no other signal that it did.

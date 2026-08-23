@@ -90,12 +90,10 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	// ...then leaves an uncommitted edit (rides in the patch).
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nuncommitted edit\n")
 
-	// Ephemeral _tfac is snapshotted; entity-memory / project-knowledge /
-	// ci-logs are excluded (they re-materialize from the DB / project KB, or
-	// re-download from GitHub).
+	// Ephemeral _tfac is snapshotted; entity-memory / ci-logs are excluded
+	// (they re-materialize from the DB, or re-download from GitHub).
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "build.log"), "scratch note")
 	writeFile(t, filepath.Join(wtPath, "_tfac", "entity-memory", "ns", "x.md"), "memory")
-	writeFile(t, filepath.Join(wtPath, "_tfac", "project-knowledge", "kb.md"), "kb")
 	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "42", "build.log"), "ci log line")
 
 	const sessionID = "sess-cold"
@@ -138,7 +136,6 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	assertFileContains(t, filepath.Join(got, "README.md"), "uncommitted edit")   // patch
 	assertFileContains(t, filepath.Join(got, "_tfac", "notes", "build.log"), "scratch note")
 	assertMissing(t, filepath.Join(got, "_tfac", "entity-memory", "ns", "x.md"))
-	assertMissing(t, filepath.Join(got, "_tfac", "project-knowledge", "kb.md"))
 	assertMissing(t, filepath.Join(got, "_tfac", "ci-logs", "42", "build.log"))
 	// The one exclusion the agent can notice: it gets an explanation in place
 	// of the logs, not a directory that silently emptied.

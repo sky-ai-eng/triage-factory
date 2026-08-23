@@ -40,7 +40,7 @@ import (
 // (in principle) a lease manager promoting twice without an intervening
 // demotion, which shouldn't happen but costs nothing to guard.
 //
-// What's deliberately NOT started here: the scorer/classifier/profiler/
+// What's deliberately NOT started here: the scorer/profiler/
 // reconciler Managers themselves. They're always constructed (buildAI,
 // gated on a.plan.brain — true for every brain-capable role, holder or
 // not) but never explicitly "started" — each is a per-org Manager that

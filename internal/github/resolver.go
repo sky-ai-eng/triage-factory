@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
@@ -397,7 +398,7 @@ func (r *resolver) githubBaseFor(ctx context.Context, orgID string) (string, err
 // than swallowed because the fallback order turns on it.
 func (r *resolver) baseFrom(ctx context.Context, orgID string, set domain.OrgSettings, setErr error) (string, error) {
 	if setErr == nil && set.GitHubBaseURL != "" {
-		return ResolveBaseURL(set.GitHubBaseURL), nil
+		return ghbase.ResolveBaseURL(set.GitHubBaseURL), nil
 	}
 
 	secretURL, secErr := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubURL)
@@ -405,7 +406,7 @@ func (r *resolver) baseFrom(ctx context.Context, orgID string, set domain.OrgSet
 		return "", fmt.Errorf("resolve github base for org %s: read %s secret: %w", orgID, integrations.KeyGitHubURL, secErr)
 	}
 	if secretURL != "" {
-		return ResolveBaseURL(secretURL), nil
+		return ghbase.ResolveBaseURL(secretURL), nil
 	}
 
 	// Both sources read cleanly and the secret is empty. If the settings
@@ -414,7 +415,7 @@ func (r *resolver) baseFrom(ctx context.Context, orgID string, set domain.OrgSet
 	if setErr != nil {
 		return "", fmt.Errorf("resolve github base for org %s: read settings: %w", orgID, setErr)
 	}
-	return DefaultBaseURL, nil
+	return ghbase.DefaultBaseURL, nil
 }
 
 // orgGitHubContext is the pair of facts a resolution needs from the org's
@@ -1019,7 +1020,7 @@ func (r *resolver) minterFor(ctx context.Context, orgID string, app *domain.OrgG
 	return githubapp.NewMinter(githubapp.Config{
 		PrivateKey: key,
 		AppID:      appID,
-		APIBase:    APIBase(base),
+		APIBase:    ghbase.APIBase(base),
 	})
 }
 

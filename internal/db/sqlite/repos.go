@@ -371,35 +371,6 @@ func (s *repoStore) UpdateBaseBranch(ctx context.Context, orgID, id, baseBranch 
 	return scanUpdatedRepository(row, id)
 }
 
-func (s *repoStore) SeedCloneURL(ctx context.Context, orgID, id, cloneURL string) (domain.Repository, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return domain.Repository{}, err
-	}
-	// A blank seed is nothing to write, but the row still has to come back —
-	// so it is folded to the empty string the SET expression already ignores
-	// rather than short-circuited before the statement. The alternative is
-	// returning a row this method never read, which is the lie the whole
-	// returned-row rule exists to stop.
-	if strings.TrimSpace(cloneURL) == "" {
-		cloneURL = ""
-	}
-	// The never-clobber rule is in the SET expression rather than the WHERE,
-	// so the statement matches on "does this id exist" alone — with the rule in
-	// the WHERE, a URL already on file and a row that is gone would both return
-	// no row, and only one of them is an error. SQL evaluates every SET
-	// right-hand side against the pre-update row, so clone_url here is the
-	// stored value.
-	row := s.q.QueryRowContext(ctx, `
-		UPDATE repositories
-		   SET clone_url  = COALESCE(NULLIF(clone_url, ''), NULLIF(?, '')),
-		       updated_at = CASE WHEN (clone_url IS NULL OR clone_url = '') AND ? != ''
-		                         THEN datetime('now') ELSE updated_at END
-		 WHERE id = ?
-		RETURNING `+repoProfileFullColumns,
-		cloneURL, cloneURL, id)
-	return scanUpdatedRepository(row, id)
-}
-
 func (s *repoStore) Get(ctx context.Context, orgID, id string) (*domain.Repository, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

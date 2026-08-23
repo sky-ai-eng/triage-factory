@@ -3,11 +3,31 @@ package agentproc
 import (
 	"bufio"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// TestRun_RefusesMultiMode pins that Run never reaches the point of
+// installing/spawning the SDK when runmode is multi — it returns
+// errSDKLoopInMultiMode immediately, before ensureSDKTraced, so this runs
+// safely with no node/runsc on PATH. Multi mode has no isolation to offer
+// the SDK loop (its only wrapper on Linux is the bubblewrap courtesy
+// sandbox, not a tenant boundary), so a stray call here must fail closed
+// rather than spawn unsandboxed on the host.
+func TestRun_RefusesMultiMode(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	outcome, err := Run(context.Background(), RunOptions{}, nil)
+	if !errors.Is(err, errSDKLoopInMultiMode) {
+		t.Fatalf("Run() in multi mode err = %v, want errSDKLoopInMultiMode", err)
+	}
+	if outcome != nil {
+		t.Errorf("Run() in multi mode returned non-nil Outcome %+v, want nil (nothing spawned)", outcome)
+	}
+}
 
 // captureSink records what consumeStream delivered, so a test can
 // assert the regression-case message survived the stream reader.

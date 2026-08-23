@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 )
 
@@ -98,7 +99,7 @@ func (f *fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, er
 	if f.baseURL != "" {
 		return f.baseURL, nil
 	}
-	return ghclient.DefaultBaseURL, nil
+	return ghbase.DefaultBaseURL, nil
 }
 
 // OrgIdentityFor satisfies the ghclient.Resolver interface. Returns the

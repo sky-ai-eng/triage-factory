@@ -195,7 +195,7 @@ func TestAssigneeCentric_AssigneeOnOneTeam_OwnedByThatTeam(t *testing.T) {
 }
 
 // TestAssigneeCentric_AssigneeOnTwoTeams_NullOwnerVisibleBoth: one Atlassian
-// account bound to two TF users on two teams → the tier-4 union is > 1, so the
+// account bound to two TF users on two teams → the tier-3 union is > 1, so the
 // router can't pick a single owner: team_id is NULL and the task is visible to
 // both teams.
 func TestAssigneeCentric_AssigneeOnTwoTeams_NullOwnerVisibleBoth(t *testing.T) {
@@ -205,7 +205,7 @@ func TestAssigneeCentric_AssigneeOnTwoTeams_NullOwnerVisibleBoth(t *testing.T) {
 
 	teamA := seedTeam(t, database, "team-a")
 	teamB := seedTeam(t, database, "team-b")
-	// One account bound to two TF users, one per team — the tier-4 union > 1.
+	// One account bound to two TF users, one per team — the tier-3 union > 1.
 	seedJiraUserOnTeam(t, database, teamA, "acct-shared", "aidan-a")
 	seedJiraUserOnTeam(t, database, teamB, "acct-shared", "aidan-b")
 	seedSystemJiraRule(t, database, teamA, domain.EventJiraIssueAssigned)
@@ -404,7 +404,7 @@ func TestAssigneeCentric_OverrideOwningTeam(t *testing.T) {
 	}
 }
 
-// TestAssigneeCentric_PriorTaskAnchorsOwner (tier 3): once an entity has an
+// TestAssigneeCentric_PriorTaskAnchorsOwner (tier 2): once an entity has an
 // owned assignee-centric task, a later assignee-centric event whose assignee
 // maps elsewhere anchors to the same team.
 func TestAssigneeCentric_PriorTaskAnchorsOwner(t *testing.T) {
@@ -427,7 +427,7 @@ func TestAssigneeCentric_PriorTaskAnchorsOwner(t *testing.T) {
 	// First: an assignment to aidan (team A) establishes A as the owner.
 	emitJiraAssigned(router, entityID, "acct-aidan")
 
-	// Then: a status_changed whose assignee is bob (team B). Tier 3 (prior
+	// Then: a status_changed whose assignee is bob (team B). Tier 2 (prior
 	// owned assignee-centric task) anchors it to A, not bob's team B.
 	statusMeta, _ := json.Marshal(events.JiraIssueStatusChangedMetadata{
 		Assignee: "bob", AssigneeAccountID: "acct-bob", IssueKey: "SKY-anchor", Project: "SKY", NewStatus: "In Progress",

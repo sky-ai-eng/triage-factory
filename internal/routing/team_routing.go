@@ -143,7 +143,7 @@ func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, t
 }
 
 // trackingTeams filters an identity-derived team set — the owner ladder's
-// tier-4 result (a PR author's / Jira assignee's member teams) — down to the
+// tier-3 result (a PR author's / Jira assignee's member teams) — down to the
 // teams that actually track the event's entity. It applies the same team↔repo
 // (GitHub) / team↔project (Jira) gate matchHandlers applies to handlers, closing
 // the one path that reached the visibility/owner set ungated: a team the author
@@ -309,12 +309,12 @@ func (r *Router) reviewRequestVisibilityTeams(ctx context.Context, orgID string,
 // event (first hit wins). It returns the single owning team plus the set of
 // teams the ladder produced:
 //
-//	owner == team, ownerSet == {team}   — a structural owner (tier 1 override
-//	                                       or tier 2 project), a prior owned
-//	                                       author-centric task (tier 3), or a
-//	                                       single-team author (tier 4);
+//	owner == team, ownerSet == {team}   — a structural owner (tier 1
+//	                                       owning_team_id override), a prior
+//	                                       owned author-centric task (tier 2),
+//	                                       or a single-team author (tier 3);
 //	owner == "",   ownerSet == {A,B,…}  — the author maps to multiple teams
-//	                                       (tier 4 ambiguous): no single owner,
+//	                                       (tier 3 ambiguous): no single owner,
 //	                                       visible to all of them, NULL owner;
 //	owner == "",   ownerSet == nil      — nothing resolved (external/non-TF
 //	                                       author, or no member team tracks the
@@ -324,23 +324,22 @@ func (r *Router) reviewRequestVisibilityTeams(ctx context.Context, orgID string,
 // A non-nil error is none of those three: it means the ladder could not find
 // out, and the caller must route nothing rather than pick an answer. Every tier
 // propagates, because each one's failure mode is a demotion — a failed tier 1 or
-// 3 read used to fall through to the tier below, quietly handing the entity to
-// whichever team the NEXT rung named, and a failed tier 4 read used to look
-// exactly like an external author. Both outcomes stick: tier 3 anchors every
+// 2 read used to fall through to the tier below, quietly handing the entity to
+// whichever team the NEXT rung named, and a failed tier 3 read used to look
+// exactly like an external author. Both outcomes stick: tier 2 anchors every
 // later event on the entity to whatever the first one landed on.
 //
-// The identity tier (tier 4) is gated to teams that track the entity's repo (see
+// The identity tier (tier 3) is gated to teams that track the entity's repo (see
 // trackingTeams), so a team the author belongs to but which tracks nothing never
-// becomes an owner candidate or lands in the visibility set. Tiers 1–3 (a
-// structural project/override owner, a prior owned task) are already repo-relevant
+// becomes an owner candidate or lands in the visibility set. Tiers 1–2 (a
+// structural override owner, a prior owned task) are already repo-relevant
 // by construction and stay ungated — matching the forward-only tracking-change
 // rule, which never retroactively reassigns an already-owned entity.
 //
 // Claims-free ...System lookups throughout: the router runs on the eventbus
 // goroutine with no JWT context.
 func (r *Router) authorCentricOwner(ctx context.Context, orgID string, evt domain.Event, entityID string, scopeCache map[string]bool) (owner string, ownerSet []string, err error) {
-	// Tiers 1+2 — structural owner (owning_team_id override, else a
-	// team-visibility project's team). One store query.
+	// Tier 1 — structural owner (owning_team_id override). One store query.
 	if r.entities != nil {
 		t, err := r.entities.OwningTeamForEntitySystem(ctx, orgID, entityID)
 		if err != nil {
@@ -352,7 +351,7 @@ func (r *Router) authorCentricOwner(ctx context.Context, orgID string, evt domai
 		}
 	}
 
-	// Tier 3 — the most recent prior owned author-centric task on the entity.
+	// Tier 2 — the most recent prior owned author-centric task on the entity.
 	// review_requested is excluded by construction (not in the type set) and
 	// NULL-owned priors are excluded by the store's team_id filter, so this
 	// can't fall into the review-first trap or be anchored by an unowned task.
@@ -367,7 +366,7 @@ func (r *Router) authorCentricOwner(ctx context.Context, orgID string, evt domai
 		}
 	}
 
-	// Tier 4 — the PR author's identity → TF user(s) → teams, gated to the teams
+	// Tier 3 — the PR author's identity → TF user(s) → teams, gated to the teams
 	// that actually track this repo. Without the gate a team the author merely
 	// belongs to (e.g. an unconfigured team that tracks no repos) would enter the
 	// set as an ambiguous co-owner and surface the entity on that team's board,
@@ -456,10 +455,10 @@ func (r *Router) authorTeams(ctx context.Context, orgID string, evt domain.Event
 //
 //	owner == team, ownerSet == {team}   — a structural owner (tier 1
 //	                                       owning_team_id override), a prior
-//	                                       owned assignee-centric task (tier 3),
-//	                                       or a single-team assignee (tier 4);
+//	                                       owned assignee-centric task (tier 2),
+//	                                       or a single-team assignee (tier 3);
 //	owner == "",   ownerSet == {A,B,…}  — the assignee maps to multiple teams
-//	                                       (tier 4 ambiguous): no single owner,
+//	                                       (tier 3 ambiguous): no single owner,
 //	                                       visible to all of them, NULL owner;
 //	owner == "",   ownerSet == nil      — nothing resolved (the assignee isn't a
 //	                                       TF user, the issue is unassigned, or no
@@ -467,20 +466,16 @@ func (r *Router) authorTeams(ctx context.Context, orgID string, evt domain.Event
 //	                                       no task unless an explicit watch rule
 //	                                       pulls a team in.
 //
-// As with the GitHub author ladder, the identity tier (tier 4) is gated to teams
-// that track the entity's Jira project (trackingTeams); tiers 1 and 3 stay
+// As with the GitHub author ladder, the identity tier (tier 3) is gated to teams
+// that track the entity's Jira project (trackingTeams); tiers 1 and 2 stay
 // ungated (already project-relevant, forward-only).
 //
-// Tiers 1 and 3 are provider-agnostic and shared with authorCentricOwner; only
-// the identity tier (4) differs — the Jira assignee account id instead of the
-// PR author login. Tier 2 (a team-visibility project's team) is DELIBERATELY
-// ABSENT: Jira projects are multi-team-tracked via jira_project_status_rules,
-// so a project confers no single owner — the assignee identity is the owner
-// signal. OwningTeamForEntitySystem (tier 1) would also return a team-visibility
-// project's team, but Jira entities are never attached to a `projects` row (that
-// table pins GitHub repos; the classifier assigns it for GitHub entities only),
-// so its project sub-tier is inert here and only the owning_team_id override can
-// fire.
+// Tiers 1 and 2 are provider-agnostic and shared with authorCentricOwner; only
+// the identity tier (3) differs — the Jira assignee account id instead of the
+// PR author login. OwningTeamForEntitySystem (tier 1) resolves only the
+// owning_team_id override; Jira projects are multi-team-tracked via
+// jira_project_status_rules, so a project confers no single owner and the
+// assignee identity is the owner signal instead.
 //
 // A non-nil error means the ladder could not find out, exactly as in
 // authorCentricOwner — see there for why a degraded read is worse than a
@@ -501,7 +496,7 @@ func (r *Router) assigneeCentricJiraOwner(ctx context.Context, orgID string, evt
 		}
 	}
 
-	// Tier 3 — the most recent ACTIVE owned assignee-centric task on the
+	// Tier 2 — the most recent ACTIVE owned assignee-centric task on the
 	// entity. Unlike GitHub (a PR's authorship is stable for life, so a closed
 	// CI task still anchors its owner), a Jira issue is reassignable: a CLOSED
 	// prior task — e.g. one the reassignment close-check just retired when the
@@ -522,7 +517,7 @@ func (r *Router) assigneeCentricJiraOwner(ctx context.Context, orgID string, evt
 		}
 	}
 
-	// Tier 4 — the issue assignee's identity → TF user(s) → teams, gated to the
+	// Tier 3 — the issue assignee's identity → TF user(s) → teams, gated to the
 	// teams that actually track this Jira project (same reason as the GitHub
 	// author ladder: a team the assignee merely belongs to but that tracks none
 	// of this project must not become a co-owner in the visibility set). An empty
@@ -739,7 +734,7 @@ func orderTeamsByRulePriority(vis map[string]struct{}, matchedRules []domain.Eve
 // latestActiveOwnedTaskTeam returns the owning team of the most recently
 // created ACTIVE task on the entity whose event_type is in types and whose
 // owner (team_id) is non-NULL, or "" when none qualifies. It is the
-// active-only tier-3 anchor for the assignee-centric Jira ladder — the
+// active-only tier-2 anchor for the assignee-centric Jira ladder — the
 // reassignable-entity counterpart to the all-statuses
 // OwnerTeamForLatestTaskInTypesSystem the GitHub ladder uses. A store failure
 // returns an error rather than "" so the ladder is not demoted a rung by a

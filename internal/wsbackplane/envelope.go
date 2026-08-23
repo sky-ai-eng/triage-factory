@@ -17,7 +17,6 @@ import (
 type wireEvent struct {
 	Type           string          `json:"type"`
 	ConversationID string          `json:"conversation_id,omitempty"`
-	ProjectID      string          `json:"project_id,omitempty"`
 	OrgID          string          `json:"org_id,omitempty"`
 	UserID         string          `json:"user_id,omitempty"`
 	Data           json.RawMessage `json:"data"`
@@ -31,7 +30,6 @@ func newWireEvent(evt websocket.Event) (wireEvent, error) {
 	return wireEvent{
 		Type:           evt.Type,
 		ConversationID: evt.ConversationID,
-		ProjectID:      evt.ProjectID,
 		OrgID:          evt.OrgID,
 		UserID:         evt.UserID,
 		Data:           data,
@@ -47,7 +45,6 @@ func (w wireEvent) toEvent() websocket.Event {
 	return websocket.Event{
 		Type:           w.Type,
 		ConversationID: w.ConversationID,
-		ProjectID:      w.ProjectID,
 		OrgID:          w.OrgID,
 		UserID:         w.UserID,
 		Data:           data,

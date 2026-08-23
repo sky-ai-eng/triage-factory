@@ -329,9 +329,7 @@ func TestSetupWizardSequence_KicksThePoller(t *testing.T) {
 	})
 
 	gh := githubUserStub(t, "acme-bot")
-	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
-		"base_url": gh.URL, "pat": "ghp_test",
-	}); rec.Code != http.StatusOK {
+	if rec := bindOrgGitHubPAT(t, s, gh.URL, "ghp_test"); rec.Code != http.StatusOK {
 		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	<-ghDone

@@ -24,8 +24,6 @@ import TeamSettings from './pages/team/TeamSettings'
 import Marketplace from './pages/Marketplace'
 import Repos from './pages/Repos'
 import Factory from './pages/Factory'
-import Projects from './pages/Projects'
-import ProjectDetail from './pages/ProjectDetail'
 import Fleet from './pages/Fleet'
 import Usage from './pages/Usage'
 import Overview from './pages/Overview'
@@ -162,8 +160,6 @@ function LocalRoutes() {
         <Route path="/prs" element={<PRDashboard />} />
         <Route path="/prompts" element={<Prompts />} />
         <Route path="/repos" element={<Repos />} />
-        <Route path="/projects" element={<Projects />} />
-        <Route path="/projects/:id" element={<ProjectDetail />} />
         <Route path="/usage" element={<Usage />} />
         {/* Fleet console (TFAC-589) — mounted in both modes; the page itself
             gates on operator + FeatureFleet and bounces home when absent. */}
@@ -254,8 +250,6 @@ function MultiRoutes() {
                 useActiveTeam like every other surface. */}
             <Route path="prompts" element={<Prompts />} />
             <Route path="repos" element={<Repos />} />
-            <Route path="projects" element={<Projects />} />
-            <Route path="projects/:id" element={<ProjectDetail />} />
             <Route path="usage" element={<Usage />} />
             <Route path="fleet" element={<Fleet />} />
             {/* Org surface (TFAC-417) — multi-mode only; mounted under the

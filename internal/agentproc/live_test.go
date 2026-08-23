@@ -1,10 +1,29 @@
 package agentproc
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// TestRunInteractive_RefusesMultiMode mirrors TestRun_RefusesMultiMode for
+// the streaming-input entry point: multi mode must fail closed with
+// errSDKLoopInMultiMode before spawning anything, never fall through to an
+// unsandboxed direct spawn on the host.
+func TestRunInteractive_RefusesMultiMode(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	lr, err := RunInteractive(context.Background(), RunOptions{}, nil, nil)
+	if !errors.Is(err, errSDKLoopInMultiMode) {
+		t.Fatalf("RunInteractive() in multi mode err = %v, want errSDKLoopInMultiMode", err)
+	}
+	if lr != nil {
+		t.Errorf("RunInteractive() in multi mode returned a non-nil LiveRun, want nil (nothing spawned)")
+	}
+}
 
 // nopWriteCloser stands in for the wrapper's stdin pipe in unit tests
 // that don't spawn a subprocess.

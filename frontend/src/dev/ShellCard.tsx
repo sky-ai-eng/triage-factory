@@ -107,9 +107,7 @@ export function ShellCard() {
           needs={known ? needs : null}
           running={known ? 3 : null}
           queued={known ? 18 : null}
-          counts={
-            known ? { projects: 12, repos: 8, pulls: 23, usage: '$41', fleet: 6, gov: 2 } : {}
-          }
+          counts={known ? { repos: 8, pulls: 23, usage: '$41', fleet: 6, gov: 2 } : {}}
           user={multi ? { name: 'Aidan', email: 'aidan@allchin.com' } : null}
         >
           <div className="gal-page">

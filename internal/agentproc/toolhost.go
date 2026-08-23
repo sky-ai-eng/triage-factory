@@ -45,10 +45,6 @@ type ToolHostOptions struct {
 	// Worktree is the host path bind-mounted at /work and the working
 	// directory every tool call resolves against.
 	Worktree string
-	// SDKDir is bind-mounted at /sdk. Still required by the spec builder and
-	// still mounted here; removing it from the native rootfs is a later
-	// phase, and mounting an unused directory changes nothing observable.
-	SDKDir string
 	// ExtraEnv is host-path-bearing env translated for the sandbox, exactly
 	// as the SDK path translates it.
 	ExtraEnv []string
@@ -238,17 +234,18 @@ func (j *ToolHostJail) recordActualsOnce() {
 // LaunchToolHost starts the resident tool host as the jail's main process
 // for a native engagement.
 //
-// The shape mirrors the SDK path's sandbox branch — same rootfs, same
-// worktree mount and chown, same prebuilt network, same TF-binary/git-hooks/
-// gh-channel mounts — with two differences: the pinned entrypoint is the
-// tool host rather than node + the SDK wrapper, and a per-run directory is
-// mounted read-write for the socket. Everything TF-side still arrives via
-// bind mounts and env, never baked into or assumed of the rootfs.
+// The rootfs, worktree mount and chown, prebuilt network, and TF-binary/
+// git-hooks/gh-channel mounts are the same shape every sandboxed launch
+// uses; what's specific to this one is the pinned entrypoint (the tool
+// host's binary + `serve` verb, not an agent process) and a per-run
+// directory mounted read-write for its socket. Everything TF-side still
+// arrives via bind mounts and env, never baked into or assumed of the
+// rootfs.
 func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (_ *ToolHostJail, err error) {
-	// The native runtime's jail launch, the twin of newSandboxCommand's span
-	// on the SDK path. The loop this hands off to is out of the tracing
-	// epic's scope, but everything up to and including the jail coming up is
-	// shared setup and belongs in the engagement's trace either way.
+	// The native runtime's jail launch. The loop this hands off to is out of
+	// the tracing epic's scope, but everything up to and including the jail
+	// coming up is shared setup and belongs in the engagement's trace either
+	// way.
 	var launchSpan trace.Span
 	ctx, launchSpan = tracer.Start(ctx, "agent.jail.launch", trace.WithAttributes(telemetry.Runtime("native")))
 	defer func() {
@@ -313,7 +310,6 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (_ *ToolHostJail,
 		ConversationID:  opts.ConversationID,
 		MemoryNamespace: opts.MemoryNamespace,
 		Worktree:        opts.Worktree,
-		SDKDir:          opts.SDKDir,
 		Argv:            argv,
 		Env:             env,
 		ExtraMounts:     mounts,

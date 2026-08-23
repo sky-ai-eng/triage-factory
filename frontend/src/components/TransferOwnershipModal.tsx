@@ -27,7 +27,7 @@ interface TransferOwnershipModalProps {
 // TransferOwnershipModal is the owner-only member picker for handing off org
 // ownership (TFAC-420). Pick a member, confirm, and the backend promotes them
 // to owner, repoints the founder sentinel, and demotes the former owner to
-// admin. Styling mirrors ProjectBackfillModal (the shared modal shell).
+// admin.
 export default function TransferOwnershipModal({
   candidates,
   reason,

@@ -30,19 +30,15 @@ func (a *App) pollSoon(source, orgID string) {
 	a.publishCtl(ctlbus.Message{Kind: "pollsoon", Source: source, OrgID: orgID})
 }
 
-// triggerScorer/triggerProfiler/triggerClassifier/triggerReach relay a
-// background Manager's Trigger(orgID) the same way pollSoon relays PollSoon.
-// Wired as the server's SetScorerTrigger/SetProfilerTrigger/SetReachTrigger
-// callbacks and the spawner's classifier-wait trigger
-// (internal/app/subsystems.go) — every one of those callers may run on a
-// standby control pod, and the classifier one may also run on an executor
-// (which has no local classifier object at all). The reach one is driven by a
-// REQUEST — a picker read finding the mirror stale, the refresh control, a
-// credential save — which is exactly the shape that lands wherever the load
-// balancer put it.
+// triggerScorer/triggerProfiler/triggerReach relay a background Manager's
+// Trigger(orgID) the same way pollSoon relays PollSoon. Wired as the
+// server's SetScorerTrigger/SetProfilerTrigger/SetReachTrigger callbacks —
+// every one of those callers may run on a standby control pod. The reach one
+// is driven by a REQUEST — a picker read finding the mirror stale, the
+// refresh control, a credential save — which is exactly the shape that
+// lands wherever the load balancer put it.
 func (a *App) triggerScorer(orgID string)               { a.triggerManager("scorer", orgID, false) }
 func (a *App) triggerProfiler(orgID string, force bool) { a.triggerManager("profiler", orgID, force) }
-func (a *App) triggerClassifier(orgID string)           { a.triggerManager("classifier", orgID, false) }
 func (a *App) triggerReach(orgID string, force bool)    { a.triggerManager("reach", orgID, force) }
 
 // sourcesChanged relays an org admin's event-source pause/resume the way
@@ -96,10 +92,6 @@ func (a *App) dispatchManagerTrigger(manager, orgID string, force bool) {
 	case "scorer":
 		if a.scorer != nil {
 			a.scorer.Trigger(orgID)
-		}
-	case "classifier":
-		if a.classifier != nil {
-			a.classifier.Trigger(orgID)
 		}
 	case "profiler":
 		if a.profiler != nil {

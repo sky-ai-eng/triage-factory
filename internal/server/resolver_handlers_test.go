@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,14 +15,13 @@ import (
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// TFAC-327: the review diff/submit, pending-PR submit, branches, and
-// project-bundle probe handlers were migrated off the PAT-only process-global
+// TFAC-327: the review diff/submit, pending-PR submit, and branches
+// handlers were migrated off the PAT-only process-global
 // GitHub client onto the credential resolver, so App-only orgs (no PAT) reach
 // GitHub through the org's App installation token instead of 503/400-ing on a
 // nil global client. These tests drive each call site against an App-only org
@@ -205,42 +203,6 @@ func TestRepoBranches_NoCredentials_NotConfigured(t *testing.T) {
 	}
 	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 	assertLogged(t, logs, "github not configured")
-}
-
-// --- project-bundle probe ---
-
-func TestProjectBundleProbe_AppOnlyOrg_ResolvesPerRepo(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	stub := httptest.NewServer(newAppAPIMux()) // GET /repos/{owner}/{repo} returns clone_url
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-
-	probe := projectBundleGitHubProbe{resolver: srv.ghResolver, orgID: runmode.LocalDefaultOrgID}
-	url, err := probe.CloneURLForRepo(context.Background(), "acme", "api")
-	if err != nil {
-		t.Fatalf("CloneURLForRepo: %v", err)
-	}
-	if url != "https://example.test/acme/api.git" {
-		t.Errorf("clone url = %q, want resolved-per-repo value", url)
-	}
-}
-
-func TestProjectBundleProbe_NoCredentials_SurfacesError(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-
-	probe := projectBundleGitHubProbe{resolver: srv.ghResolver, orgID: runmode.LocalDefaultOrgID}
-	_, err := probe.CloneURLForRepo(context.Background(), "acme", "api")
-	if err == nil {
-		t.Fatal("CloneURLForRepo with no credentials = nil error, want a failure")
-	}
-	// preflightPinnedRepos folds this error into the existing MissingReposError
-	// import-failure shape (covered by projectbundle tests); here we just pin
-	// that the no-credentials resolve surfaces rather than being swallowed.
-	if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-		t.Errorf("err = %v, want it to wrap ErrNoGitHubCredentials", err)
-	}
 }
 
 func assertLogged(t *testing.T, logs *bytes.Buffer, want string) {

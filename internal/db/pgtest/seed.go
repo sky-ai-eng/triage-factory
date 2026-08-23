@@ -57,7 +57,7 @@ func SeedTeam(t *testing.T, h *Harness, orgID, slug string) string {
 
 // SeedRepository mints a registry row for owner/repo in orgID and returns its
 // id — the value every repository reference in the schema stores.
-// team_github_repos, conversation_worktrees and project_pinned_repos all
+// team_github_repos and conversation_worktrees both
 // point at it, and none of the stores behind them will create it (the
 // executor's role holds no INSERT on repositories at all), so a fixture that
 // tracks a repository or checks one out has to bring the row into existence

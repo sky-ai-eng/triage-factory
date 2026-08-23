@@ -73,23 +73,23 @@ rather than a convenience.
 suppressing the 401 funnel is the point. Otherwise **prefer branching in a
 `catch` on `HttpError.status`**, which keeps `apiJSON`'s parse for the success
 path — a 404 → not-found state has no funnel to suppress, so it wants the catch,
-not `allow`. `contexts/AuthContext.tsx`, `hooks/useConversationDetail.ts`,
-`pages/ProjectDetail.tsx` and `hooks/useInvites.ts` are the reference shape.
+not `allow`. `contexts/AuthContext.tsx`, `hooks/useConversationDetail.ts`
+and `hooks/useInvites.ts` are the reference shape.
 
 ### Error strings
 
 **`httpErrorMessage(e, fallback)` is the only error-string helper.** It returns
 the server's `{ error }` verbatim, else the fallback. Nothing prefixes it, so
-**fallbacks are whole sentences** — `'Could not load the project.'`, not
-`'load project'`. An `HttpError`'s own `.message` embeds the raw response body
+**fallbacks are whole sentences** — `'Could not load the run.'`, not
+`'load run'`. An `HttpError`'s own `.message` embeds the raw response body
 and must never reach the UI.
 
 ```ts
 try {
-  const data = await apiJSON<Project>(`/api/projects/${encodeURIComponent(id)}`)
-  setProject(data)
+  const data = await apiJSON<Conversation>(`/api/agent/conversations/${encodeURIComponent(id)}`)
+  setConversation(data)
 } catch (err) {
-  setError(httpErrorMessage(err, 'Could not load the project.'))
+  setError(httpErrorMessage(err, 'Could not load the run.'))
 }
 ```
 

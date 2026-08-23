@@ -1,8 +1,7 @@
-// Package kbstore owns the object-store key convention for the project
-// knowledge base (KB) and is the ONLY place those keys are built. It wraps a
-// storage.Storage so the multi-mode control handlers, the classifier, and
-// project bundle import/export all address the same blobs by (orgID,
-// projectID, filename) without ever hand-assembling a key.
+// Package kbstore owns the object-store key convention for a knowledge base
+// (KB) and is the ONLY place those keys are built. It wraps a
+// storage.Storage so callers address blobs by (orgID, projectID, filename)
+// without ever hand-assembling a key.
 //
 // Key convention:
 //
@@ -14,8 +13,10 @@
 // knowledge-base/ directory — so a filename with a path separator is not a
 // valid KB name and is rejected here rather than silently nesting.
 //
-// This package is multi-mode's KB source of truth. Local mode keeps its
-// plain-file layout untouched and does not construct a Store.
+// This package is currently orphaned: its former consumers (the projects
+// panel, the classifier, project bundle import/export) were removed along
+// with the "projects" concept. It is kept deliberately, for a later ticket
+// to re-key it onto team-scoped storage and wire it into delegated runs.
 package kbstore
 
 import (
@@ -57,9 +58,9 @@ type Store struct {
 	blobs storage.Storage
 }
 
-// New wraps a storage.Storage as a KB store. The same *Store is shared by
-// every KB consumer in the process (handlers, syncer, classifier, bundle) —
-// build one storage.Storage at boot and hand it here once.
+// New wraps a storage.Storage as a KB store. Currently unused — see the
+// package doc — but a future re-key would build one storage.Storage at boot
+// and hand it here once, shared by every KB consumer in the process.
 func New(blobs storage.Storage) *Store {
 	return &Store{blobs: blobs}
 }
