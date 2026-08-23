@@ -28,6 +28,7 @@ import { Archive } from 'lucide-react'
 import { toast } from '../../../components/Toast/toastStore'
 import Slider from '../../../components/Slider'
 import ArchiveTeamModal from '../../../components/ArchiveTeamModal'
+import { fetchArchivePreview, type ArchivePreview } from '../../../lib/teamLifecycle'
 import { useTeams } from '../../../hooks/useTeams'
 import RepoPickerModal from '../../../components/RepoPickerModal'
 import GitHubTeamGroup from '../GitHubTeamGroup'
@@ -167,7 +168,11 @@ export default function TeamSettings({
   teamName?: string
 }) {
   const { refresh: refreshTeams } = useTeams()
-  const [archiveOpen, setArchiveOpen] = useState(false)
+  // The archive confirm opens already holding its consequences preview — the
+  // fetch happens on the button, and a preview that cannot be read withdraws
+  // the question instead of opening an empty dialog.
+  const [archivePreview, setArchivePreview] = useState<ArchivePreview | null>(null)
+  const [archiveReading, setArchiveReading] = useState(false)
   // The endpoint alias: local addresses the sole team as "default"; multi uses
   // the selected team's real id.
   const endpointTeamId = isLocal ? 'default' : teamId
@@ -611,11 +616,11 @@ export default function TeamSettings({
               aria-checked={autoMode}
               onClick={() => setAutoMode((v) => !v)}
               className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                autoMode ? 'bg-warm' : 'bg-black/[0.08]'
+                autoMode ? 'bg-warm' : 'bg-line-2'
               }`}
             >
               <span
-                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-raised shadow-sm transition-transform ${
                   autoMode ? 'translate-x-4' : 'translate-x-0'
                 }`}
               />
@@ -766,21 +771,30 @@ export default function TeamSettings({
           </div>
           <button
             type="button"
-            onClick={() => setArchiveOpen(true)}
-            className="shrink-0 rounded-lg border border-alarm/30 px-3 py-1.5 text-body font-medium text-alarm transition-colors hover:bg-alarm/[0.06]"
+            onClick={() => {
+              if (archiveReading) return
+              setArchiveReading(true)
+              fetchArchivePreview(teamId)
+                .then(setArchivePreview)
+                .catch(() => toast.error('Could not check the team for in-flight work. Try again.'))
+                .finally(() => setArchiveReading(false))
+            }}
+            disabled={archiveReading}
+            className="shrink-0 rounded-lg border border-alarm/30 px-3 py-1.5 text-body font-medium text-alarm transition-colors hover:bg-alarm/[0.06] disabled:opacity-50"
           >
-            Archive…
+            {archiveReading ? 'Checking…' : 'Archive…'}
           </button>
         </div>
       )}
 
-      {archiveOpen && (
+      {archivePreview && (
         <ArchiveTeamModal
           teamId={teamId}
           teamName={teamName || 'this team'}
-          onClose={() => setArchiveOpen(false)}
+          preview={archivePreview}
+          onClose={() => setArchivePreview(null)}
           onDone={(runs, sessions) => {
-            setArchiveOpen(false)
+            setArchivePreview(null)
             toast.success(
               `Team archived — stopped ${runs} ${runs === 1 ? 'delegation' : 'delegations'} and ${sessions} curator ${
                 sessions === 1 ? 'session' : 'sessions'

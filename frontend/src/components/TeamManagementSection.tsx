@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Archive, Plus, RotateCcw, Users } from 'lucide-react'
 import { useTeams } from '../hooks/useTeams'
-import { fetchArchivedTeams, restoreTeam, type ArchivedTeam } from '../lib/teamLifecycle'
+import {
+  fetchArchivedTeams,
+  fetchArchivePreview,
+  restoreTeam,
+  type ArchivedTeam,
+  type ArchivePreview,
+} from '../lib/teamLifecycle'
 import { toast } from './Toast/toastStore'
 import ArchiveTeamModal from './ArchiveTeamModal'
 
@@ -33,8 +39,31 @@ export default function TeamManagementSection() {
 
   // Which team's archive confirm is open, if any (ArchiveTeamModal,
   // reused here so the org-wide list gets the same destructive-confirm as the
-  // per-team Settings danger zone).
-  const [archiveTarget, setArchiveTarget] = useState<{ id: string; name: string } | null>(null)
+  // per-team Settings danger zone). The consequences preview is fetched
+  // BEFORE the dialog opens — what opens is already whole, and a preview that
+  // cannot be read withdraws the question instead of opening it empty.
+  const [archiveTarget, setArchiveTarget] = useState<{
+    id: string
+    name: string
+    preview: ArchivePreview
+  } | null>(null)
+  const [archiveReading, setArchiveReading] = useState<string | null>(null)
+
+  const openArchive = useCallback(
+    async (t: { id: string; name: string }) => {
+      if (archiveReading) return
+      setArchiveReading(t.id)
+      try {
+        const preview = await fetchArchivePreview(t.id)
+        setArchiveTarget({ id: t.id, name: t.name, preview })
+      } catch {
+        toast.error('Could not check the team for in-flight work. Try again.')
+      } finally {
+        setArchiveReading(null)
+      }
+    },
+    [archiveReading],
+  )
 
   const loadArchived = useCallback(async () => {
     setArchivedError(null)
@@ -104,11 +133,12 @@ export default function TeamManagementSection() {
                 <span className="text-reported text-ink-3">{t.slug}</span>
                 <button
                   type="button"
-                  onClick={() => setArchiveTarget({ id: t.id, name: t.name })}
-                  className="inline-flex items-center gap-1 text-ui font-medium text-alarm hover:text-alarm/80"
+                  onClick={() => void openArchive(t)}
+                  disabled={archiveReading !== null}
+                  className="inline-flex items-center gap-1 text-ui font-medium text-alarm hover:text-alarm/80 disabled:opacity-50"
                 >
                   <Archive size={12} />
-                  Archive…
+                  {archiveReading === t.id ? 'Checking…' : 'Archive…'}
                 </button>
               </div>
             </li>
@@ -195,6 +225,7 @@ export default function TeamManagementSection() {
         <ArchiveTeamModal
           teamId={archiveTarget.id}
           teamName={archiveTarget.name}
+          preview={archiveTarget.preview}
           onClose={() => setArchiveTarget(null)}
           onDone={(runs, sessions) => {
             toast.success(

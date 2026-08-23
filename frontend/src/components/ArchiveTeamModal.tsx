@@ -1,30 +1,34 @@
 import { useEffect, useRef, useState } from 'react'
 import { Archive, AlertTriangle } from 'lucide-react'
-import { archiveTeam, fetchArchivePreview, type ArchivePreview } from '../lib/teamLifecycle'
+import { archiveTeam, type ArchivePreview } from '../lib/teamLifecycle'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
 interface ArchiveTeamModalProps {
   teamId: string
   teamName: string
+  // The live-work counts, fetched by the opener BEFORE the dialog opens: a
+  // destructive confirm that cannot state its consequences is withdrawn, not
+  // opened empty, so the counts are a prop rather than a fetch in here.
+  preview: ArchivePreview
   // onDone fires after a successful archive (parent refreshes the team list +
   // toasts the counts). onClose is cancel / backdrop / Escape.
   onDone: (cancelledRuns: number, cancelledCuratorSessions: number) => void
   onClose: () => void
 }
 
-// ArchiveTeamModal is the org-admin destructive confirm for archiving a team
-// (TFAC-448). It loads the live-work counts up front so the warning is concrete
-// ("ends N delegations and M curator sessions now"), then performs a single
-// destructive confirm — there is no "let it finish" branch by design. Styling
-// mirrors TransferOwnershipModal (the shared destructive-modal shell).
+// ArchiveTeamModal is the org-admin destructive confirm for archiving a team.
+// It opens already knowing the live-work counts, so the warning is concrete
+// ("ends N delegations and M curator sessions now") from its first frame, then
+// performs a single destructive confirm — there is no "let it finish" branch
+// by design. Styling mirrors TransferOwnershipModal (the shared
+// destructive-modal shell).
 export default function ArchiveTeamModal({
   teamId,
   teamName,
+  preview,
   onDone,
   onClose,
 }: ArchiveTeamModalProps) {
-  const [preview, setPreview] = useState<ArchivePreview | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -34,20 +38,6 @@ export default function ArchiveTeamModal({
   const dialogRef = useRef<HTMLDivElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
   useFocusTrap(dialogRef, { initialFocus: cancelRef })
-
-  useEffect(() => {
-    let cancelled = false
-    fetchArchivePreview(teamId)
-      .then((p) => {
-        if (!cancelled) setPreview(p)
-      })
-      .catch((e) => {
-        if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [teamId])
 
   // Escape closes unless an archive is in flight.
   useEffect(() => {
@@ -72,8 +62,8 @@ export default function ArchiveTeamModal({
     }
   }
 
-  const runs = preview?.active_runs ?? 0
-  const sessions = preview?.active_curator_sessions ?? 0
+  const runs = preview.active_runs
+  const sessions = preview.active_curator_sessions
 
   return (
     <div
@@ -105,23 +95,15 @@ export default function ArchiveTeamModal({
           </div>
 
           <p className="mt-3 text-body leading-relaxed text-ink-2">
-            {loadError ? (
-              <span className="text-alarm">{loadError}</span>
-            ) : preview === null ? (
-              'Checking for in-flight work…'
-            ) : (
-              <>
-                Archiving ends{' '}
-                <strong className="font-semibold text-ink-1">
-                  {runs} active {runs === 1 ? 'delegation' : 'delegations'}
-                </strong>{' '}
-                and{' '}
-                <strong className="font-semibold text-ink-1">
-                  {sessions} curator {sessions === 1 ? 'session' : 'sessions'}
-                </strong>{' '}
-                now. The team disappears for everyone and all writes are blocked.
-              </>
-            )}
+            Archiving ends{' '}
+            <strong className="font-semibold text-ink-1">
+              {runs} active {runs === 1 ? 'delegation' : 'delegations'}
+            </strong>{' '}
+            and{' '}
+            <strong className="font-semibold text-ink-1">
+              {sessions} curator {sessions === 1 ? 'session' : 'sessions'}
+            </strong>{' '}
+            now. The team disappears for everyone and all writes are blocked.
           </p>
 
           <div className="mt-3 flex items-start gap-2 rounded-xl border border-alarm/20 bg-alarm/[0.04] px-3 py-2.5">
@@ -148,9 +130,7 @@ export default function ArchiveTeamModal({
           <button
             type="button"
             onClick={submit}
-            // Stay disabled until the preview resolves so the user can't confirm
-            // before seeing the active-work counts (the warning the modal exists for).
-            disabled={submitting || loadError !== null || preview === null}
+            disabled={submitting}
             className="rounded-xl bg-alarm px-5 py-2 text-body font-medium text-ground transition-colors hover:bg-alarm/90 disabled:opacity-40"
           >
             {submitting ? 'Archiving…' : 'Archive team'}

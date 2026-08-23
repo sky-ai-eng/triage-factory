@@ -4,47 +4,59 @@ import ArchiveTeamModal from './ArchiveTeamModal'
 import * as lifecycle from '../lib/teamLifecycle'
 
 vi.mock('../lib/teamLifecycle', () => ({
-  fetchArchivePreview: vi.fn(),
   archiveTeam: vi.fn(),
 }))
 
-const preview = lifecycle.fetchArchivePreview as unknown as ReturnType<typeof vi.fn>
 const archive = lifecycle.archiveTeam as unknown as ReturnType<typeof vi.fn>
+
+// The modal opens already holding its consequences preview — the opener
+// fetches it first and withdraws on failure (that arm is pinned in the
+// openers' own tests). What is left to pin here is that the counts it was
+// handed are the counts it states, and what confirm does.
+const PREVIEW = {
+  team_id: 't1',
+  name: 'Platform',
+  archived: false,
+  active_runs: 3,
+  active_curator_sessions: 1,
+}
 
 describe('ArchiveTeamModal', () => {
   beforeEach(() => {
-    preview.mockReset()
     archive.mockReset()
   })
 
-  it('surfaces the active-work counts from the preview', async () => {
-    preview.mockResolvedValue({
-      team_id: 't1',
-      name: 'Platform',
-      archived: false,
-      active_runs: 3,
-      active_curator_sessions: 1,
-    })
-    render(<ArchiveTeamModal teamId="t1" teamName="Platform" onDone={vi.fn()} onClose={vi.fn()} />)
+  it('states the active-work counts it was handed, whole from the first frame', () => {
+    render(
+      <ArchiveTeamModal
+        teamId="t1"
+        teamName="Platform"
+        preview={PREVIEW}
+        onDone={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
 
-    expect(await screen.findByText(/3 active delegations/)).toBeInTheDocument()
+    expect(screen.getByText(/3 active delegations/)).toBeInTheDocument()
     // Singular curator session, pluralization respected.
     expect(screen.getByText(/1 curator session\b/)).toBeInTheDocument()
+    // Nothing to wait for: the confirm is live immediately.
+    expect(screen.getByRole('button', { name: /Archive team/ })).toBeEnabled()
   })
 
   it('archives on confirm and reports the cancelled counts', async () => {
-    preview.mockResolvedValue({
-      team_id: 't1',
-      name: 'Platform',
-      archived: false,
-      active_runs: 2,
-      active_curator_sessions: 0,
-    })
     archive.mockResolvedValue({ cancelled_runs: 2, cancelled_curator_sessions: 0 })
     const onDone = vi.fn()
-    render(<ArchiveTeamModal teamId="t1" teamName="Platform" onDone={onDone} onClose={vi.fn()} />)
+    render(
+      <ArchiveTeamModal
+        teamId="t1"
+        teamName="Platform"
+        preview={{ ...PREVIEW, active_runs: 2, active_curator_sessions: 0 }}
+        onDone={onDone}
+        onClose={vi.fn()}
+      />,
+    )
 
-    await screen.findByText(/2 active delegations/)
     fireEvent.click(screen.getByRole('button', { name: /Archive team/ }))
 
     await waitFor(() => {
@@ -53,12 +65,24 @@ describe('ArchiveTeamModal', () => {
     })
   })
 
-  it('disables the confirm and shows the error when the preview fails to load', async () => {
-    preview.mockRejectedValue(new Error('boom'))
-    render(<ArchiveTeamModal teamId="t1" teamName="Platform" onDone={vi.fn()} onClose={vi.fn()} />)
+  it('surfaces the refusal inline when the archive itself fails', async () => {
+    archive.mockRejectedValue(new Error('still winding down'))
+    const onDone = vi.fn()
+    render(
+      <ArchiveTeamModal
+        teamId="t1"
+        teamName="Platform"
+        preview={PREVIEW}
+        onDone={onDone}
+        onClose={vi.fn()}
+      />,
+    )
 
-    expect(await screen.findByText('boom')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Archive team/ })).toBeDisabled()
-    expect(archive).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: /Archive team/ }))
+
+    expect(await screen.findByText('still winding down')).toBeInTheDocument()
+    expect(onDone).not.toHaveBeenCalled()
+    // The confirm recovers for a retry rather than wedging disabled.
+    expect(screen.getByRole('button', { name: /Archive team/ })).toBeEnabled()
   })
 })
