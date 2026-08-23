@@ -175,7 +175,7 @@ export default function DiffFile({
         {/* Stats */}
         <div className="flex items-center gap-2 shrink-0">
           {stats.additions > 0 && (
-            <span className="text-reported font-medium text-ink-2">+{stats.additions}</span>
+            <span className="text-reported font-medium text-warm">+{stats.additions}</span>
           )}
           {stats.deletions > 0 && (
             <span className="text-reported font-medium text-alarm">-{stats.deletions}</span>

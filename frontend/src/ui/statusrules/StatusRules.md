@@ -7,7 +7,7 @@ the tray to unmap it.
 ```tsx
 import StatusRules from './StatusRules'
 
-<StatusRules
+;<StatusRules
   value={rules}
   onChange={saveRules}
   statuses={connection.statuses}
@@ -87,8 +87,13 @@ would rather not drag; it simply was not reachable. Now it is.
 - **Under `interactive={false}` all of this is absent**, not disabled: no role, no
   tab stop, no cursor. A board a viewer may only read has nothing to reach.
 
-Reordering *within* a column has no keyboard path because it has no meaning —
+Reordering _within_ a column has no keyboard path because it has no meaning —
 members are a set, and ★ is set by pressing the chip.
+
+One gap is real and known: **a chip that has landed cannot be moved to a
+different column or back to the tray from the keyboard** — the click path runs
+tray → column only, and Enter on a placed chip is taken by ★. Remapping a
+landed status is drag-only for now.
 
 ## Dragging
 

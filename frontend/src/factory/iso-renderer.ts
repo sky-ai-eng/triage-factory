@@ -67,17 +67,14 @@ import {
 
 const DEFAULT_FLOOR_SIZE = 4800
 // Closest the camera can get before its near plane starts clipping
-// objects in the scene. Expressed as a max zoom multiplier so the
-// physical limit derives from the initial view (radius_min =
-// initial_radius / max_zoom). 9× lets the front-facing status panel
-// and run-chip cluster on the console top read clearly at peak zoom.
+// objects in the scene. Expressed as a zoom multiplier over the
+// floor's full-extent ortho bounds (radius_min = full_extent_radius
+// / max_zoom), independent of where the camera starts. 9× lets the
+// front-facing status panel and run-chip cluster on the console top
+// read clearly at peak zoom.
 const MAX_ZOOM = 9
 // Initial zoom level relative to the floor's full-extent ortho
 // bounds. >1 is zoomed in (smaller visible area).
-//
-// Note this also sets how far IN the camera can go: radius_min is
-// derived from the initial radius (see MAX_ZOOM above), so opening
-// wider moves the closest approach out by the same proportion.
 const INITIAL_ZOOM = 1.5
 // Camera target's y offset below the floor center, so the action
 // fills more of the lower half of the screen by default. ~10 cells

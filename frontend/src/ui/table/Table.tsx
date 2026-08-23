@@ -646,8 +646,9 @@ export function Table({
     [sorted],
   )
 
-  // Committing early (a second action, or the bar's own Do it now) must not
-  // leave a timer running against a snapshot nobody can reach any more.
+  // A second action arriving while the window is open commits it early, and
+  // that must not leave a timer running against a snapshot nobody can reach
+  // any more.
   const finish = useCallback(() => {
     commitPending('window')
     setPending(null)
