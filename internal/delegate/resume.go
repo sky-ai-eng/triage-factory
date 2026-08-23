@@ -482,12 +482,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	}
 	sink := newConversationSink(s, orgID, conversationID, opts.claimID, triggerType, creatorUserID)
 
-	// Off-allowlist tool calls route the same way the initial run does:
-	// gVisor-sandboxed delegated runs auto-approve (the sandbox + the static
-	// allowlist + the enumerated agenthost RPC surface are the actual
-	// boundary, not a prompt nobody is there to answer); local-mode resumes
-	// keep the presence-gated browser round-trip since the allowlist is
-	// their only boundary. opts.TeamID falls back to defaults when empty.
+	// Off-allowlist tool calls route the same way the initial run does: a
+	// gVisor-jailed SDK run auto-approves (the sandbox + the static allowlist +
+	// the enumerated agenthost RPC surface are the actual boundary, not a
+	// prompt nobody is there to answer); an unjailed one keeps the
+	// presence-gated browser round-trip since the allowlist is its only
+	// boundary. opts.TeamID falls back to defaults when empty.
 	var perms agentproc.PermissionHandler
 	if agentproc.WillSandbox() {
 		perms = s.AutoApprovePermissionHandler(conversationID)

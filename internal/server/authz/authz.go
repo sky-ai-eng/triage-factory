@@ -4,31 +4,12 @@
 // that translate a failed check into the right 403/404, the resolve-error
 // renderer they share, and the SQL those checks run.
 //
-// That SQL comes in two shapes, both executing on the app pool inside
-// db.WithTx so they see the caller's claims:
-//
-//   - RLS-function probes — tf.team_in_current_org, tf.user_is_team_admin,
-//     tf.user_has_org_access, tf.user_can_write_team, tf.user_owns_org, … —
-//     which call the same helpers the row policies call, so a gate and the
-//     policy behind it can't drift apart. There is nothing to route through a
-//     store: the answer lives in a SQL function, not a table.
-//   - Plain reads of four columns that no RLS helper exposes:
-//     teams.deleted_at (the archive block), a count of org_memberships, and a
-//     count-plus-caller's-role over memberships. They stay here rather than
-//     behind db.Stores because each is an authorization input read in the same
-//     claims transaction as the probe it accompanies — the membership pair in
-//     particular has to be one transaction under one claims context, and its
-//     role arm resolves the caller through tf.current_user_id() rather than an
-//     argument. Routing them through the store layer means minting
-//     multi-mode-only methods whose SQLite twins are unreachable stubs (every
-//     caller short-circuits local mode before the read) and moving an
-//     authorization check onto a different pool — a trade worth making
-//     deliberately, not as a side effect.
-//
-// RequireTaskWrite is a third thing again: it mirrors the tasks_update policy
-// arm-for-arm over tasks/task_teams, composing tf.* helpers inline. It reads
-// tables, but what it encodes is the policy, so it is written out here where it
-// can be diffed against the policy it shadows.
+// The gates hold no SQL. Every fact they need about a caller comes from the
+// membership seam (membership.go), which is where the deployment shape is
+// decided and where the reads themselves live — they stay in this package
+// rather than behind db.Stores because each is an authorization input read in
+// the same claims transaction as the probe it accompanies, and moving one onto
+// a different pool is a trade to make deliberately.
 //
 // It imports the httpx kernel for responses + request identity and depends
 // otherwise only on leaf packages (db, runmode), so handler subpackages can
@@ -49,18 +30,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// Checker performs the org/team authorization checks. The gate and count
-// helpers short-circuit local mode to "allowed" (N=1 has a single implicit
-// owner, and the Postgres-only RLS plumbing has nothing to read). The two raw
-// probes — UserHasOrgAccess and UserIsOrgAdmin — do NOT short-circuit; they
-// always run the tf.* helpers via db.WithTx, so they're multi-mode only and
-// rely on their gate callers (and on local-mode routing never mounting an
-// {org_id} path) to avoid being reached under local SQLite.
+// Checker performs the org/team authorization checks: the friendly front gates
+// that turn a failed check into the right 403 or 404, and the raw probes a
+// handler composing its own decision calls directly.
 //
-// It needs only the raw pool (for both SQL shapes the package doc describes)
-// and the transactional store runner (for ResolveTeamID's default-team lookup,
-// the one check with a store method behind it); handlers hold a single
-// *Checker instead of re-deriving these checks against their own store fields.
+// No method here asks what mode it is in. Every fact about who the caller is
+// comes from the membership seam, resolved once for this deployment, so a gate
+// states its rule — "an admin may do this" — and the seam states what that
+// means where the process is running. Adding a gate that needs a new fact is a
+// change to that interface, which the local implementation has to answer before
+// anything builds.
+//
+// It holds the pool the seam reads from and the transactional store runner for
+// ResolveTeamID's default-team lookup, the one check with a store method behind
+// it; handlers hold a single *Checker instead of re-deriving these checks
+// against their own store fields.
 type Checker struct {
 	db *sql.DB
 	tx db.TxRunner
@@ -69,6 +53,15 @@ type Checker struct {
 // New builds a Checker over the raw pool and the transactional store runner.
 func New(database *sql.DB, tx db.TxRunner) *Checker {
 	return &Checker{db: database, tx: tx}
+}
+
+// members is the seam every gate reads its facts through, resolved per call so
+// the zero-value Checker several tests build behaves like a real one.
+func (az *Checker) members() membership {
+	if runmode.Current() == runmode.ModeLocal {
+		return localMembership{}
+	}
+	return pgMembership{db: az.db}
 }
 
 // DefaultTeamAlias is the literal a {team_id} path segment may carry instead of
@@ -116,17 +109,7 @@ func (az *Checker) ResolveTeamID(ctx context.Context, orgID, userID, raw string)
 // VerifyTeamInOrg confirms that team_id belongs to the active org.
 // Returns 404 (not 403) to avoid leaking team existence across orgs.
 func (az *Checker) VerifyTeamInOrg(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
-	if runmode.Current() == runmode.ModeLocal {
-		return true
-	}
-	var belongs bool
-	err := db.WithTx(r.Context(), az.db, db.Claims{Sub: userID, OrgID: orgID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(r.Context(),
-				`SELECT tf.team_in_current_org($1::uuid)`, teamID,
-			).Scan(&belongs)
-		},
-	)
+	belongs, err := az.members().teamInOrg(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		httpx.InternalError(w, "authz", fmt.Errorf("team-in-org check %s/%s: %w", teamID, orgID, err))
 		return false
@@ -151,32 +134,17 @@ const archivedTeamMessage = "team is archived: restore it before making changes"
 // backstop covering the task / prompt / delegate write paths). Writes a 403
 // "team is archived" and returns false when archived; returns true otherwise.
 //
-// Local mode short-circuits to allowed — N=1 never archives its sole team. A
-// missing row is treated as not-archived (true): VerifyTeamInOrg is the
-// authority on existence and runs first, and a vanished team's write fails
-// downstream regardless. The read runs under the caller's claims; teams_select
-// RLS gates on org access (not deleted_at), so an archived team is still visible
-// to the probe.
+// A missing team is treated as not-archived: VerifyTeamInOrg is the authority on
+// existence and runs first, and a vanished team's write fails downstream
+// regardless. teams_select RLS gates on org access, not deleted_at, so an
+// archived team is still visible to the read.
 func (az *Checker) VerifyTeamNotArchived(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
-	if runmode.Current() == runmode.ModeLocal {
-		return true
-	}
-	var archived sql.NullBool
-	err := db.WithTx(r.Context(), az.db, db.Claims{Sub: userID, OrgID: orgID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(r.Context(),
-				`SELECT deleted_at IS NOT NULL FROM teams WHERE id = $1::uuid`, teamID,
-			).Scan(&archived)
-		},
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return true
-	}
+	archived, err := az.members().teamArchived(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		httpx.InternalError(w, "authz", fmt.Errorf("team-archived check %s/%s: %w", teamID, orgID, err))
 		return false
 	}
-	if archived.Valid && archived.Bool {
+	if archived {
 		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
 			Reason: httpx.ReasonTeamArchived, Message: archivedTeamMessage,
 		})
@@ -188,17 +156,7 @@ func (az *Checker) VerifyTeamNotArchived(w http.ResponseWriter, r *http.Request,
 // RequireTeamAdmin checks the user is an admin of the given team.
 // Returns 403 on non-admin.
 func (az *Checker) RequireTeamAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
-	if runmode.Current() == runmode.ModeLocal {
-		return true
-	}
-	var isAdmin bool
-	err := db.WithTx(r.Context(), az.db, db.Claims{Sub: userID, OrgID: orgID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(r.Context(),
-				`SELECT tf.user_is_team_admin($1::uuid)`, teamID,
-			).Scan(&isAdmin)
-		},
-	)
+	isAdmin, err := az.members().userIsTeamAdmin(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		httpx.InternalError(w, "authz", fmt.Errorf("team-admin check %s/%s/%s: %w", userID, orgID, teamID, err))
 		return false
@@ -213,9 +171,6 @@ func (az *Checker) RequireTeamAdmin(w http.ResponseWriter, r *http.Request, orgI
 // RequireOrgAdminRole checks the user is an admin of the given org.
 // Returns 403 on non-admin.
 func (az *Checker) RequireOrgAdminRole(w http.ResponseWriter, r *http.Request, orgID, userID string) bool {
-	if runmode.Current() == runmode.ModeLocal {
-		return true
-	}
 	isAdmin, err := az.UserIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
 		httpx.InternalError(w, "authz", fmt.Errorf("org-admin check %s/%s: %w", userID, orgID, err))
@@ -228,114 +183,36 @@ func (az *Checker) RequireOrgAdminRole(w http.ResponseWriter, r *http.Request, o
 	return true
 }
 
-// OrgMemberCount returns the number of members in the org. Local mode is
-// always single-member (one synthetic user), so it short-circuits to 1
-// without touching Postgres — db.WithTx's set_config is Postgres-only and
-// there are no org_memberships rows in the local SQLite schema anyway.
+// OrgMemberCount returns the number of members in the org.
 func (az *Checker) OrgMemberCount(ctx context.Context, orgID, userID string) (int, error) {
-	if runmode.Current() == runmode.ModeLocal {
-		return 1, nil
-	}
-	var n int
-	err := db.WithTx(ctx, az.db, db.Claims{Sub: userID, OrgID: orgID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM org_memberships WHERE org_id = $1::uuid`, orgID,
-			).Scan(&n)
-		},
-	)
-	return n, err
+	return az.members().orgMemberCount(ctx, orgID, userID)
 }
 
 // TeamMemberCountAndRole returns the team's member count and the caller's
-// role in it ("admin" / "member", or "" when not a member). Local mode is
-// the degenerate single-member case: one user who is implicitly the admin.
-// The OrgID claim is required — teams/memberships RLS gates on
-// tf.current_org_id(), so a Sub-only claim would only ever see the
-// caller's own membership row and miscount.
+// role in it ("admin" / "member", or "" when not a member).
 func (az *Checker) TeamMemberCountAndRole(ctx context.Context, orgID, userID, teamID string) (int, string, error) {
-	if runmode.Current() == runmode.ModeLocal {
-		return 1, "admin", nil
-	}
-	var (
-		n    int
-		role string
-	)
-	err := db.WithTx(ctx, az.db, db.Claims{Sub: userID, OrgID: orgID},
-		func(tx *sql.Tx) error {
-			if e := tx.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM memberships WHERE team_id = $1::uuid`, teamID,
-			).Scan(&n); e != nil {
-				return e
-			}
-			e := tx.QueryRowContext(ctx,
-				`SELECT role FROM memberships
-				  WHERE team_id = $1::uuid AND user_id = tf.current_user_id()`, teamID,
-			).Scan(&role)
-			if errors.Is(e, sql.ErrNoRows) {
-				return nil
-			}
-			return e
-		},
-	)
-	return n, role, err
+	return az.members().teamMemberCountAndRole(ctx, orgID, userID, teamID)
 }
 
-// UserHasOrgAccess reports whether the user is a member of the org. The check
-// runs inside a claims-context transaction so it resolves through the
-// tf.user_has_org_access SQL helper, which internally reads request.jwt.claims
-// via tf.current_user_id(). The claims-context transaction means a
-// missing/wrong claim → NULL → no membership, even if a future bug allowed a
-// wrong userID argument to land here. Once the app pool is wired the same query
-// runs under RLS without further edits.
+// UserHasOrgAccess reports whether the user is a member of the org. The raw
+// probe behind RequireOrgMember, for a handler composing its own decision.
 func (az *Checker) UserHasOrgAccess(ctx context.Context, userID, orgID string) (bool, error) {
-	var ok bool
-	err := db.WithTx(ctx, az.db, db.Claims{Sub: userID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx,
-				`SELECT tf.user_has_org_access($1::uuid)`, orgID,
-			).Scan(&ok)
-		},
-	)
-	return ok, err
+	return az.members().userHasOrgAccess(ctx, userID, orgID)
 }
 
-// UserIsOrgAdmin returns true when the calling user holds an 'owner' or
-// 'admin' role in the given org. Mirrors UserHasOrgAccess but delegates to
-// tf.user_is_org_admin instead of tf.user_has_org_access. Used by endpoints
-// that gate on org-admin privilege (GitHub App registration, team management,
-// etc.).
+// UserIsOrgAdmin returns true when the calling user holds an 'owner' or 'admin'
+// role in the given org. Used by endpoints that gate on org-admin privilege
+// (GitHub App registration, team management).
 func (az *Checker) UserIsOrgAdmin(ctx context.Context, userID, orgID string) (bool, error) {
-	var ok bool
-	err := db.WithTx(ctx, az.db, db.Claims{Sub: userID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx,
-				`SELECT tf.user_is_org_admin($1::uuid)`, orgID,
-			).Scan(&ok)
-		},
-	)
-	return ok, err
+	return az.members().userIsOrgAdmin(ctx, userID, orgID)
 }
 
 // UserIsTeamAdmin returns true when the calling user holds the 'admin' role in
-// the given team. The raw-probe sibling of RequireTeamAdmin (which writes a 403
-// front gate); endpoints that need to OR team-admin with another right — the
-// team roster's "team admin OR org admin" mutate gate — call this and compose
-// the decision themselves. The OrgID claim is required: tf.user_is_team_admin
-// reads memberships under RLS, which gates on tf.current_org_id(), so a
-// Sub-only claim would miscount. Like the other raw probes it always runs the
-// tf.* helper via db.WithTx (no local-mode short-circuit), so callers gate
-// local mode out before reaching it.
+// the given team. The raw-probe sibling of RequireTeamAdmin, for endpoints that
+// OR team-admin with another right — the team roster's "team admin OR org
+// admin" mutate gate — and compose the decision themselves.
 func (az *Checker) UserIsTeamAdmin(ctx context.Context, userID, orgID, teamID string) (bool, error) {
-	var ok bool
-	err := db.WithTx(ctx, az.db, db.Claims{Sub: userID, OrgID: orgID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx,
-				`SELECT tf.user_is_team_admin($1::uuid)`, teamID,
-			).Scan(&ok)
-		},
-	)
-	return ok, err
+	return az.members().userIsTeamAdmin(ctx, orgID, userID, teamID)
 }
 
 // viewOnlyMessage is the 403 body the team-write gates return. The viewer role
@@ -348,22 +225,9 @@ const viewOnlyMessage = "view-only access: your role on this team is read-only"
 // UserCanWriteTeam reports whether the calling user may perform team-scoped
 // writes on the given team — a member with the 'admin' or 'member' role, i.e.
 // NOT a viewer. The write-path sibling of the membership-only check the read
-// gates use, delegating to the tf.user_can_write_team SQL helper that backs the
-// team-scoped write RLS policies (TFAC-447). Like the other raw probes it always
-// runs the tf.* helper via db.WithTx (no local-mode short-circuit), so callers
-// must gate local mode out before reaching it. The OrgID claim is required:
-// tf.user_can_write_team reads memberships under RLS, which gates on
-// tf.current_org_id().
+// gates use, behind the same helper the team-scoped write RLS policies enforce.
 func (az *Checker) UserCanWriteTeam(ctx context.Context, userID, orgID, teamID string) (bool, error) {
-	var ok bool
-	err := db.WithTx(ctx, az.db, db.Claims{Sub: userID, OrgID: orgID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx,
-				`SELECT tf.user_can_write_team($1::uuid)`, teamID,
-			).Scan(&ok)
-		},
-	)
-	return ok, err
+	return az.members().userCanWriteTeam(ctx, orgID, userID, teamID)
 }
 
 // RequireTeamWrite is the friendly front gate for a team-scoped write: it writes
@@ -371,13 +235,8 @@ func (az *Checker) UserCanWriteTeam(ctx context.Context, userID, orgID, teamID s
 // a member) of teamID. The team-scoped write RLS policies enforce this at the
 // row level regardless; this gate exists so a viewer reaching a write handler
 // gets a clean, role-named 403 instead of a generic RLS-blocked error (a
-// silently-zero-rows UPDATE or a WITH CHECK violation surfaced as a 500). Local
-// mode short-circuits to allowed — N=1 has a single implicit owner and no
-// viewers.
+// silently-zero-rows UPDATE or a WITH CHECK violation surfaced as a 500).
 func (az *Checker) RequireTeamWrite(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
-	if runmode.Current() == runmode.ModeLocal {
-		return true
-	}
 	canWrite, err := az.UserCanWriteTeam(r.Context(), userID, orgID, teamID)
 	if err != nil {
 		httpx.InternalError(w, "authz", fmt.Errorf("team-write check %s/%s/%s: %w", userID, orgID, teamID, err))
@@ -401,38 +260,14 @@ func (az *Checker) RequireTeamWrite(w http.ResponseWriter, r *http.Request, orgI
 // Crucially it does NOT mask a 404: when the task isn't visible to the caller at
 // all (no read access, or it doesn't exist) the gate returns true and lets the
 // handler's own not-found path render the 404 — so a viewer probing for a
-// task they can't see never learns whether it exists. Local mode short-circuits
-// to allowed.
+// task they can't see never learns whether it exists.
 func (az *Checker) RequireTaskWrite(w http.ResponseWriter, r *http.Request, orgID, userID, taskID string) bool {
-	if runmode.Current() == runmode.ModeLocal {
-		return true
-	}
 	if _, err := uuid.Parse(taskID); err != nil {
 		// A malformed id is "not found" downstream, not a role failure — let
 		// the handler's own uuid/preload path render it (404 parity).
 		return true
 	}
-	var visible, canWrite bool
-	err := db.WithTx(r.Context(), az.db, db.Claims{Sub: userID, OrgID: orgID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(r.Context(), `
-				SELECT
-				  EXISTS (SELECT 1 FROM tasks t WHERE t.id = $1::uuid AND t.org_id = $2::uuid) AS visible,
-				  EXISTS (
-				    SELECT 1 FROM tasks t
-				    WHERE t.id = $1::uuid AND t.org_id = $2::uuid AND (
-				      (t.visibility = 'private' AND t.creator_user_id = tf.current_user_id())
-				      OR (t.visibility = 'org' AND tf.user_is_org_admin(t.org_id))
-				      OR (t.visibility = 'team' AND (
-				           (t.team_id IS NOT NULL AND tf.user_can_write_team(t.team_id))
-				           OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tf.user_can_write_team(tt.team_id))
-				      ))
-				    )
-				  ) AS can_write`,
-				taskID, orgID,
-			).Scan(&visible, &canWrite)
-		},
-	)
+	visible, canWrite, err := az.members().taskWritable(r.Context(), orgID, userID, taskID)
 	if err != nil {
 		httpx.InternalError(w, "authz", fmt.Errorf("task-write check %s/%s/%s: %w", userID, orgID, taskID, err))
 		return false
@@ -447,22 +282,11 @@ func (az *Checker) RequireTaskWrite(w http.ResponseWriter, r *http.Request, orgI
 }
 
 // UserOwnsOrg returns true when the calling user is the founder/owner of the
-// given org — the holder of orgs.owner_user_id. Mirrors UserIsOrgAdmin but
-// delegates to tf.user_owns_org rather than tf.user_is_org_admin, because
-// ownership transfer is owner-only: a plain org admin can't reassign the
-// founder sentinel. Like the other raw probes it always runs the tf.* helper
-// via db.WithTx (no local-mode short-circuit), so callers must gate local mode
-// out before reaching it.
+// given org — the holder of orgs.owner_user_id. Distinct from UserIsOrgAdmin
+// because ownership transfer is owner-only: a plain org admin can't reassign
+// the founder sentinel.
 func (az *Checker) UserOwnsOrg(ctx context.Context, userID, orgID string) (bool, error) {
-	var ok bool
-	err := db.WithTx(ctx, az.db, db.Claims{Sub: userID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx,
-				`SELECT tf.user_owns_org($1::uuid)`, orgID,
-			).Scan(&ok)
-		},
-	)
-	return ok, err
+	return az.members().userOwnsOrg(ctx, userID, orgID)
 }
 
 // writeForbidden answers a visible-but-refused action: the caller may see the
@@ -493,10 +317,6 @@ func (az *Checker) RequireOrgMember(w http.ResponseWriter, r *http.Request) (org
 	}
 	userID = claims.Subject
 
-	if runmode.Current() == runmode.ModeLocal {
-		return rawOrgID, userID, true
-	}
-
 	hasAccess, err := az.UserHasOrgAccess(r.Context(), userID, rawOrgID)
 	if err != nil {
 		httpx.InternalError(w, "authz", fmt.Errorf("member check %s/%s: %w", userID, rawOrgID, err))
@@ -525,10 +345,6 @@ func (az *Checker) RequireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgI
 		return
 	}
 	userID = claims.Subject
-
-	if runmode.Current() == runmode.ModeLocal {
-		return rawOrgID, userID, true
-	}
 
 	isAdmin, err := az.UserIsOrgAdmin(r.Context(), userID, rawOrgID)
 	if err != nil {

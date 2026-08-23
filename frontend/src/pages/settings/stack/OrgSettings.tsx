@@ -215,13 +215,17 @@ export default function OrgSettings({
   // this screen holds goes stale the moment a connect succeeds — and the next
   // section's save would 409 against a change this same screen just made.
   // Best-effort: on a failed re-read the held token stands, and the save
-  // path's conflict → reload recovers.
-  const refreshOrgVersion = useCallback(async () => {
-    if (!orgId) return
+  // path's conflict → reload recovers. It also RETURNS the token, for the one
+  // caller that has to write with it in the same turn — state updates are not
+  // readable until the next render, so a follow-up PATCH cannot pick it up from
+  // the draft.
+  const refreshOrgVersion = useCallback(async (): Promise<number | undefined> => {
+    if (!orgId) return undefined
     const fresh = await fetchOrgSettings(orgId)
-    if (!fresh) return
+    if (!fresh) return undefined
     setBaseline((b) => ({ ...b, org: { ...b.org, version: fresh.version } }))
     setDraft((d) => ({ ...d, org: { ...d.org, version: fresh.version } }))
+    return fresh.version
   }, [orgId])
 
   // revertOrg resets the named org fields in the draft back to the baseline —
@@ -306,9 +310,12 @@ export default function OrgSettings({
     baseline.anthropicConnected ? 'Anthropic' : '',
     baseline.bedrockConnected ? 'Amazon Bedrock' : '',
   ].filter(Boolean)
+  // Nothing bound is two different states, and the stored source is what tells
+  // them apart: an org running on the machine's credentials is configured, and
+  // one that brings its own and has bound none is not.
   const claudeSummary = connectedProviders.length
     ? `Configured · ${connectedProviders.join(' + ')}`
-    : isLocal
+    : baseline.anthropicKeySource === 'system'
       ? 'System Claude credentials'
       : 'Not configured'
   const bedrockSelected = claudeWantsByok && draft.claudeProvider === 'bedrock'
@@ -891,7 +898,7 @@ export default function OrgSettings({
                 claudeProvider: 'bedrock',
                 bedrockConnected: true,
                 bedrockStoredMethod: draft.org.bedrock_auth_method,
-                anthropicKeySource: isLocal ? 'byok' : s.anthropicKeySource,
+                anthropicKeySource: 'byok',
                 org: { ...s.org, ...storedConfig, ...clearSecrets },
               })
               setBaseline(apply)
@@ -900,11 +907,42 @@ export default function OrgSettings({
               return true
             }
 
+            // "System credentials" is a stored selection with a precondition:
+            // the removals first (two, because they are two credentials), then
+            // the settings write that records the choice — which the backend
+            // refuses while any provider material is still bound. The choice is
+            // what a reload reads back; the removals only make it legal.
+            if (useSystem) {
+              const removed = await disconnectLLM(orgId)
+              if (!removed.ok) {
+                toast.error(removed.error)
+                return false
+              }
+              const version = (await refreshOrgVersion()) ?? draft.org.version
+              const saved = await patchOrgSettings(orgId, version, { llm_auth_method: 'system' })
+              if (!saved.ok) {
+                toast.error(saved.error)
+                return false
+              }
+              const apply = (s: WizardState): WizardState => ({
+                ...s,
+                anthropicConnected: false,
+                anthropicKeySource: 'system',
+                bedrockConnected: false,
+                bedrockStoredMethod: null,
+                org: { ...s.org, anthropic_api_key: '', version: saved.settings.version },
+              })
+              setBaseline(apply)
+              setDraft(apply)
+              toast.success('Using system Claude credentials')
+              return true
+            }
+
             const key = draft.org.anthropic_api_key.trim()
             // BYOK + blank + already configured is a no-op: nothing was typed,
             // so there is nothing to rotate. The bind requires a key, so there
             // is no blank call to make by accident.
-            if (!useSystem && key === '') {
+            if (key === '') {
               if (baseline.anthropicConnected) {
                 patch({ org: { ...draft.org, anthropic_api_key: '' } })
                 return true
@@ -912,32 +950,28 @@ export default function OrgSettings({
               toast.error('Paste an Anthropic API key.')
               return false
             }
-            // "System credentials" is a removal of BOTH providers' material —
-            // two deletes, since they are two credentials.
-            const r = useSystem ? await disconnectLLM(orgId) : await connectAnthropic(orgId, key)
+            const r = await connectAnthropic(orgId, key)
             if (!r.ok) {
               toast.error(r.error)
               return false
             }
-            // Bind and removal alike rewrite the key refs on the settings row.
+            // The bind rewrote the key ref on the settings row, and recorded
+            // that the org is on its own credentials — an org holding a key is
+            // not running on the machine's, so nothing asks it to say so twice.
             await refreshOrgVersion()
-            const nowConfigured = !useSystem
-            const nextSource = isLocal ? (useSystem ? 'system' : 'byok') : draft.anthropicKeySource
-            // Binding an Anthropic key leaves stored Bedrock material alone;
-            // only "system credentials" removes it, and it does that by
-            // disconnecting both providers explicitly.
+            // Binding an Anthropic key leaves stored Bedrock material alone:
+            // both providers stay connected, and each run resolves the one its
+            // model is served by.
             const apply = (s: WizardState): WizardState => ({
               ...s,
-              anthropicConnected: nowConfigured,
-              anthropicKeySource: nextSource,
+              anthropicConnected: true,
+              anthropicKeySource: 'byok',
               claudeProvider: 'anthropic',
-              bedrockConnected: useSystem ? false : s.bedrockConnected,
-              bedrockStoredMethod: useSystem ? null : s.bedrockStoredMethod,
               org: { ...s.org, anthropic_api_key: '' },
             })
             setBaseline(apply)
             setDraft(apply)
-            toast.success(useSystem ? 'Using system Claude credentials' : 'Claude API key saved')
+            toast.success('Claude API key saved')
             return true
           } finally {
             setSavingKey('claude', false)

@@ -259,15 +259,16 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     // stored one.
     jiraDeployment: integrations.jiraConnected ? integrations.jiraDeployment : null,
     tracker: integrations.jiraConnected ? 'jira' : 'none',
-    // Claude credentials: a stored credential (either provider) resumes as
-    // BYOK (in either mode); multi is always BYOK-effective (no system-creds
-    // option); a fresh local org defaults to "system" (the local default), so
-    // the source step auto-resolves and a zero-config local setup uses the
-    // subscription/env path. The provider radio resumes on whichever provider
-    // is stored — they're mutually exclusive server-side.
+    // Claude credentials: the source resumes from the org's STORED selection,
+    // not from whether a credential happens to be bound — an org that chose to
+    // bring its own key and has not bound one yet is a different state from one
+    // running on the machine's, and re-guessing it here is what made the two
+    // indistinguishable. The GET already resolves the mode, so multi arrives as
+    // 'byok' and a fresh local install as 'system' (the column default), which
+    // is what lets the source step auto-resolve with nothing asked. The
+    // provider radio resumes on whichever provider is stored.
     anthropicConnected: org.has_anthropic_api_key,
-    anthropicKeySource:
-      org.has_anthropic_api_key || org.has_bedrock_credentials || !ctx.isLocal ? 'byok' : 'system',
+    anthropicKeySource: org.llm_auth_method,
     claudeProvider: org.has_bedrock_credentials ? 'bedrock' : 'anthropic',
     bedrockConnected: org.has_bedrock_credentials,
     bedrockStoredMethod:
@@ -1126,25 +1127,30 @@ const orgClaudeSourceStep: WizardStep = {
   visible: (s) => s.isLocal,
   isComplete: (s) => s.anthropicKeySource !== null,
   persist: async ({ state, patch, orgId }) => {
-    // Selecting "system" means no org-level LLM credential of ANY provider, so
-    // it removes both — two DELETEs, because they are two credentials and no
-    // single write wipes both any more. Idempotent when nothing is stored.
-    // "byok" defers the write to the key step.
-    if (state.anthropicKeySource === 'system') {
-      if (!orgId) throw new Error('Settings didn’t load — retry before saving.')
-      const r = await disconnectLLM(orgId)
-      if (!r.ok) throw new Error(r.error)
-      // The removal cleared the key refs on the settings row, moving its
-      // concurrency token — pick up the fresh one so a revisited org step's
-      // save doesn't conflict with this write.
-      const version = await freshOrgVersion(orgId, state.org.version)
-      patch({
-        anthropicConnected: false,
-        bedrockConnected: false,
-        bedrockStoredMethod: null,
-        org: { ...state.org, anthropic_api_key: '', version },
-      })
-    }
+    // "byok" defers everything to the key step: the bind records the source
+    // itself, because an org holding its own key is not running on the
+    // machine's and nothing should ask it to say so twice.
+    if (state.anthropicKeySource !== 'system') return
+    if (!orgId) throw new Error('Settings didn’t load — retry before saving.')
+
+    // "system" is a stored selection with a precondition. The removals come
+    // first — two DELETEs, because they are two credentials and no single write
+    // wipes both any more, and both idempotent when nothing is stored — because
+    // the settings write refuses while any provider material is still bound.
+    const removed = await disconnectLLM(orgId)
+    if (!removed.ok) throw new Error(removed.error)
+    // The removals cleared the key refs on the settings row, moving its
+    // concurrency token — pick up the fresh one so this write, and a revisited
+    // org step's save, don't conflict with them.
+    const version = await freshOrgVersion(orgId, state.org.version)
+    const saved = await patchOrgSettings(orgId, version, { llm_auth_method: 'system' })
+    if (!saved.ok) throw new Error(saved.error)
+    patch({
+      anthropicConnected: false,
+      bedrockConnected: false,
+      bedrockStoredMethod: null,
+      org: { ...state.org, anthropic_api_key: '', version: saved.settings.version },
+    })
   },
   collapsedSummary: (s) =>
     s.anthropicKeySource === 'byok'

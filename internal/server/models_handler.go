@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
@@ -14,11 +15,13 @@ import (
 )
 
 // modelsHandler serves the models this deployment offers, at the two scopes
-// that shape the answer, plus the write that shapes the narrower one:
+// that shape the answer, plus the writes that shape them:
 //
 //   - GET /api/orgs/{org_id}/models — as one org sees them.
 //   - GET /api/teams/{team_id}/models — as one team may run them.
 //   - PUT /api/teams/{team_id}/models/providers — the org admin's restriction.
+//   - POST /api/orgs/{org_id}/models/{model_key}/test — verify one model.
+//   - POST /api/orgs/{org_id}/models/tests — verify one provider's candidates.
 //
 // The subject is the org or the team, never the caller, because the answer
 // depends on it: `enabled` is org state and the provider restriction is team
@@ -28,10 +31,16 @@ import (
 // Read is any member, not admin. The widest audience for this read is a team
 // admin who cannot read org settings at all but has to know what the org
 // enabled, because a team's own model choices are drawn from that set — gate it
-// on admin and the team page has nothing to draw.
+// on admin and the team page has nothing to draw. The two test routes are org
+// admin, because each one spends the org's money.
 type modelsHandler struct {
 	az *authz.Checker
 	tx db.TxRunner
+	// prober runs one paid request against the org's credentials to establish
+	// whether a model is invocable. A getter (not a captured value) because
+	// routes register before the app injects it, and nil in local mode, where
+	// the test routes report that this deployment cannot answer the question.
+	prober func() modelProber
 }
 
 // modelPricesPerMTok is a model's headline rates in dollars per million tokens.
@@ -58,21 +67,61 @@ type modelCatalogRow struct {
 	ContextWindow         int                `json:"context_window"`
 	SupportsPromptCaching bool               `json:"supports_prompt_caching"`
 	Availability          string             `json:"availability"`
-	DisplayOrder          int                `json:"display_order"`
+	// AvailabilityDetail is the provider's own refusal, present only on "red".
+	// It is what turns an unavailable badge into something an admin can act
+	// on: "not entitled in this account" and "this id does not exist" are the
+	// same badge and completely different fixes.
+	AvailabilityDetail string `json:"availability_detail,omitempty"`
+	// AvailabilityCheckedAt is when the probe behind this state ran. Absent
+	// for "unconfigured" and "unverified", which are the states no probe
+	// produced.
+	AvailabilityCheckedAt *time.Time `json:"availability_checked_at,omitempty"`
+	DisplayOrder          int        `json:"display_order"`
 }
 
 type modelCatalogResponse struct {
 	Items []modelCatalogRow `json:"items"`
 }
 
-// modelAvailabilityAssumed means TF has not confirmed this credential can
-// invoke this model — it is offering it on the strength of the catalog alone.
-// Every entry reports it today, in both modes: nothing probes yet, and a
-// deployment whose runs authenticate through a Claude Code subscription has no
-// API key to probe with. It is a field rather than an omission so that
-// confirming availability later changes what this read reports, not what it
-// reports it in.
-const modelAvailabilityAssumed = "assumed"
+// The availability vocabulary this read publishes. Four values, the same four
+// in either deployment mode: an org running on the host's credentials probes
+// through the agent runtime, which reports the provider's HTTP status on its
+// terminal event, so there is no deployment TF can only guess about.
+const (
+	// modelAvailabilityUnconfigured — this org brings its own credentials and
+	// holds none for this model's provider, so nothing can invoke it and no
+	// probe is worth spending. Not a probe result: a local, certain fact,
+	// derived from what is bound and from the org's recorded credential source
+	// — an org running on the host's has no provider to be missing.
+	//
+	// An org that brings its own and has bound NOTHING is this for every model,
+	// in either mode, and the dispatch gates agree: a run there would otherwise
+	// authenticate from whatever the operator's environment holds, spending
+	// against a credential nobody configured.
+	//
+	// It outranks every other value, INCLUDING a stored green — a credential
+	// unbound after a successful probe leaves a row that was true when written
+	// and is not true now, and the derived fact is the one that can still be
+	// checked. Least-fixable-first, the same ordering internal/eventsource
+	// uses, and the same argument modelaccess.Check already makes internally:
+	// sending someone to test a provider they never connected is sending them
+	// to do useless work.
+	modelAvailabilityUnconfigured = "unconfigured"
+	// modelAvailabilityVerified — a probe invoked this model with this org's
+	// credentials and it answered. Permanent: nothing re-probes on a timer.
+	modelAvailabilityVerified = "verified"
+	// modelAvailabilityRed — a probe was refused. Carries the provider's own
+	// message in availability_detail.
+	modelAvailabilityRed = "red"
+	// modelAvailabilityUnverified — TF can put a credential behind this model
+	// (the provider is connected, or the org runs on the host's) and no probe
+	// has concluded anything yet. It is deliberately not
+	// distinguished from "every attempt timed out": both mean nobody has
+	// established anything, and both are fixed by pressing test again — which
+	// is exactly why an unconnected provider must not land here, since testing
+	// one is refused rather than inconclusive.
+	modelAvailabilityUnverified = "unverified"
+)
 
 // handleModelsList returns the org's model catalog.
 //
@@ -91,7 +140,13 @@ const modelAvailabilityAssumed = "assumed"
 //
 // GET /api/orgs/{org_id}/models
 func (h *modelsHandler) handleModelsList(w http.ResponseWriter, r *http.Request) {
-	if _, _, ok := h.az.RequireOrgMember(w, r); !ok {
+	orgID, userID, ok := h.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+
+	avail, ok := h.availability(w, r, orgID, userID)
+	if !ok {
 		return
 	}
 
@@ -105,14 +160,18 @@ func (h *modelsHandler) handleModelsList(w http.ResponseWriter, r *http.Request)
 	catalog := modelcatalog.Entries()
 	items := make([]modelCatalogRow, 0, len(catalog))
 	for _, e := range catalog {
-		items = append(items, catalogRow(e, enabled.Has(e.Key)))
+		items = append(items, catalogRow(e, enabled.Has(e.Key), avail))
 	}
 	writeJSON(w, http.StatusOK, modelCatalogResponse{Items: items})
 }
 
 // catalogRow projects one catalog entry onto the wire shape both scopes serve,
-// so the org read and the team read cannot describe the same model differently.
-func catalogRow(e modelcatalog.Entry, enabled bool) modelCatalogRow {
+// so the org read and the team read cannot describe the same model
+// differently — availability included, which is org truth and therefore
+// identical at both scopes. A team restriction removes an entry from the team
+// read; it never changes what the remaining entries say.
+func catalogRow(e modelcatalog.Entry, enabled bool, avail availabilityIndex) modelCatalogRow {
+	state, detail, checkedAt := avail.forEntry(e)
 	return modelCatalogRow{
 		Key:         e.Key,
 		DisplayName: e.DisplayName,
@@ -126,7 +185,9 @@ func catalogRow(e modelcatalog.Entry, enabled bool) modelCatalogRow {
 		},
 		ContextWindow:         e.ContextWindow,
 		SupportsPromptCaching: e.SupportsPromptCaching,
-		Availability:          modelAvailabilityAssumed,
+		Availability:          state,
+		AvailabilityDetail:    detail,
+		AvailabilityCheckedAt: checkedAt,
 		DisplayOrder:          e.DisplayOrder,
 	}
 }
@@ -176,6 +237,11 @@ func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	avail, ok := h.availability(w, r, orgID, userID)
+	if !ok {
+		return
+	}
+
 	// TODO(TFAC-703): pass the org's org_settings.enabled_models here, as the
 	// org-scoped read will.
 	enabled := modelcatalog.Enabled(nil)
@@ -186,7 +252,7 @@ func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Requ
 		if !allowed.Has(e.Provider) {
 			continue
 		}
-		items = append(items, catalogRow(e, enabled.Has(e.Key)))
+		items = append(items, catalogRow(e, enabled.Has(e.Key), avail))
 	}
 	writeJSON(w, http.StatusOK, modelCatalogResponse{Items: items})
 }

@@ -303,7 +303,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 	// yet acks "gone" and degrades to a 409, never a lost message. In local mode
 	// the controller is local-only, so an active run absent from this (sole)
 	// process's registry is a genuine race → ErrNoLiveProcess.
-	if conv.Runtime != domain.ConversationRuntimeNative && domain.IsActiveConversationStatus(conv.Status) {
+	if undeliveredRowsFor(conv.Runtime) != inputRoleLiveQueue && domain.IsActiveConversationStatus(conv.Status) {
 		if err := s.Steer(ctx, conversationID, text); err != nil {
 			return err
 		}
@@ -473,7 +473,7 @@ func pendingUserInput(conversationID, userID, text string) *domain.Message {
 // SDK conversation takes no queued message — and its live half never reaches
 // this question, having already gone to Steer.
 func drainsUndeliveredInput(conv domain.Conversation) bool {
-	if conv.Runtime != domain.ConversationRuntimeNative {
+	if undeliveredRowsFor(conv.Runtime) != inputRoleLiveQueue {
 		return false
 	}
 	return domain.IsActiveConversationStatus(conv.Status) || conv.Status == domain.StatusQueued
@@ -567,7 +567,7 @@ func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, con
 	// conversation — so all three have to be on the row before a wake means
 	// anything. A native conversation needs none of them: its message rows ARE
 	// the resume state, replayed into a fresh invocation by the loop itself.
-	if conv.Runtime != domain.ConversationRuntimeNative {
+	if resumeSourceFor(conv.Runtime) == resumeSourceSession {
 		if conv.SessionID == "" {
 			return ResumeBlockedSessionMissing
 		}

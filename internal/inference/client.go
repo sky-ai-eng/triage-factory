@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -439,4 +441,36 @@ func isContextOverflowMessage(status *int, msg string) bool {
 		}
 	}
 	return false
+}
+
+// renderedStatusPattern matches the status marker bifrostError writes. Anchored
+// on that exact spelling rather than on a bare three-digit number, so a request
+// id or a token count in the message cannot be read as a status.
+var renderedStatusPattern = regexp.MustCompile(`\(HTTP (\d{3})\)`)
+
+// RenderedStatus reads back the HTTP status bifrostError rendered into a
+// provider error, or false when the failure carried none — a transport error
+// that never reached the provider, or a mid-stream error chunk with no code
+// attached.
+//
+// It lives beside the renderer as its matched pair. Nothing structured survives
+// the flattening (the transport error underneath is rendered, not wrapped), so
+// every caller that has to sort provider failures by class reads the text back
+// — and two of them do, for opposite purposes: the system-job breaker asks
+// whether to back off, and the availability probe asks whether the provider
+// REFUSED. One spelling of the marker, written once and parsed once, is what
+// keeps those two from drifting apart on what a status even is.
+func RenderedStatus(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	m := renderedStatusPattern.FindStringSubmatch(err.Error())
+	if m == nil {
+		return 0, false
+	}
+	status, convErr := strconv.Atoi(m[1])
+	if convErr != nil {
+		return 0, false
+	}
+	return status, true
 }

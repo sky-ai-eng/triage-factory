@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -56,6 +57,35 @@ type llmCredentialResponse struct {
 const llmCredentialAnthropic = "anthropic"
 
 func llmCredentialBedrock(method string) string { return "bedrock:" + method }
+
+// errLLMAuthMethodHasCredentials is a settings write moving the org to
+// domain.LLMAuthSystem while it still holds provider material. Lives here
+// rather than beside that handler because what makes it true is this file's
+// subject — which credentials are bound — and the fix is a DELETE on one of
+// this file's routes.
+var errLLMAuthMethodHasCredentials = errors.New("an organization running on the host's Claude credentials can hold none of its own")
+
+// onOwnCredentials records that the org's Claude credentials are now its own.
+// Every bind stamps it, because holding provider material and running on the
+// host's environment are mutually exclusive and the bind is the act that
+// settles which one this org is doing — there is nothing left to ask an admin
+// to confirm. The refs still say WHICH provider is bound; this says the org is
+// not on the host's.
+func onOwnCredentials(o *domain.OrgSettings) { o.LLMAuthMethod = domain.LLMAuthBYOK }
+
+// boundLLMProviders names the providers an org holds material for, in the words
+// an admin would use to go find them. Empty means the org has bound nothing,
+// which is the only state domain.LLMAuthSystem is true in.
+func boundLLMProviders(o domain.OrgSettings) []string {
+	var bound []string
+	if o.AnthropicAPIKeyRef != "" {
+		bound = append(bound, modelcatalog.ProviderDisplayName(modelcatalog.ProviderAnthropic))
+	}
+	if o.BedrockCredentialsRef != "" {
+		bound = append(bound, modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock))
+	}
+	return bound
+}
 
 // storedLLMCredentials lists the LLM material an org currently holds, read off
 // the settings row's two refs rather than by probing the vault: the refs are the
@@ -123,6 +153,7 @@ func (se *settingsHandler) handleAnthropicPut(w http.ResponseWriter, r *http.Req
 		// The org's Bedrock material, if any, is untouched: both providers are
 		// live at once, and each run resolves the one its model is served by.
 		orgSet.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
+		onOwnCredentials(&orgSet)
 		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}
@@ -143,12 +174,18 @@ func (se *settingsHandler) handleAnthropicPut(w http.ResponseWriter, r *http.Req
 // delete with nothing stored is a 200 and no audit row, because a removal that
 // removed nothing is not an access change.
 //
-// It removes the Anthropic key ALONE. Selecting "use the system Claude Code
-// credentials" means holding no org-level LLM credential of any provider, and
-// that is two deletes because it is two credentials; folding the Bedrock sweep
-// in here is how a route that says "anthropic" ended up wiping AWS material.
-// After it, runs whose model is served by Bedrock keep working and runs on an
-// Anthropic model are refused by name — the org disconnected the one, not both.
+// It removes the Anthropic key ALONE, and it does not move the org onto the
+// host's credentials: a delete says this key is gone, not where the next run
+// should get one, and an org that still holds Bedrock material plainly has an
+// answer already. Folding the Bedrock sweep in here is how a route that says
+// "anthropic" ended up wiping AWS material. After it, runs whose model is
+// served by Bedrock keep working and runs on an Anthropic model are refused by
+// name — the org disconnected the one, not both.
+//
+// Selecting "use the host's Claude Code credentials" is therefore a delete per
+// bound credential and then the settings write that records the selection,
+// which is what makes it a stored choice rather than an inference from what is
+// left behind.
 //
 // DELETE /api/orgs/{org_id}/llm/anthropic
 func (se *settingsHandler) handleAnthropicDelete(w http.ResponseWriter, r *http.Request) {
@@ -489,6 +526,7 @@ func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, o
 		}
 
 		orgSet.BedrockCredentialsRef = b.ref
+		onOwnCredentials(&orgSet)
 		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}

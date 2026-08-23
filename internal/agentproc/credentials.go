@@ -404,6 +404,11 @@ func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID, model
 		}
 		// Local with no SecretsReader plumbed (test path or pre-sweep
 		// caller) — degrade to inherited-env subscription fallback.
+		//
+		// TODO(TFAC-888): in local this arm is taken for EVERY run, because
+		// nothing builds a reader there — so an org that bound its own key
+		// still authenticates from the operator's environment, and the key it
+		// stored decides nothing.
 		return map[string]string{}, nil
 	}
 

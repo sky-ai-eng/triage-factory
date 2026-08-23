@@ -50,13 +50,22 @@ func (s *Spawner) checkModelProviders(ctx context.Context, orgID, teamID string,
 		allowed = teamSet.AllowedProviders
 	}
 
+	// Whether the org can authenticate anything at all, asked once before the
+	// per-model questions. A local org that has bound nothing and did not choose
+	// to run on the machine's credentials would otherwise dispatch and quietly
+	// spend against whatever the operator's shell holds.
+	creds := modelaccess.ForOrg(orgSet)
+	if err := creds.Ready(); err != nil {
+		return fmt.Errorf("cannot dispatch: %w", err)
+	}
+
 	seen := make(map[string]bool, len(models))
 	for _, m := range models {
 		if m == "" || seen[m] {
 			continue
 		}
 		seen[m] = true
-		if err := modelaccess.Check(m, orgSet, allowed); err != nil {
+		if err := creds.Check(m, allowed); err != nil {
 			return fmt.Errorf("cannot dispatch: %w", err)
 		}
 	}

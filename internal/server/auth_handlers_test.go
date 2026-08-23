@@ -125,9 +125,16 @@ type authRig struct {
 // newAuthRig boots the pg testcontainer, JWKS test server, verifier,
 // session store, and Server. The test process owns the JWKS keypair so
 // it can mint tokens that the live Verifier accepts.
+//
+// Multi mode, because everything the rig stands up is multi-only machinery —
+// GoTrue-signed JWTs, org memberships, RLS. Left at the default, the mode would
+// say local while the database is Postgres, and the authorization gates would
+// take their N=1 short-circuit against real multi-tenant rows: a cross-org test
+// then passes by not asking the question.
 func newAuthRig(t *testing.T) *authRig {
 	t.Helper()
 
+	runmode.SetForTest(t, runmode.ModeMulti)
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
@@ -700,20 +707,20 @@ func TestAuthFlow_ForceExpiryReturns401(t *testing.T) {
 // op returns 403. (Within-org existence is already disclosed by
 // membership.)
 //
-// Both bullets require a route registered with OrgMiddleware (and, for
-// bullet 6, a role-aware handler). D9 does the bulk retrofit; here we
-// mount a probe handler directly to exercise the middleware-side
-// behavior that D7 is responsible for.
+// The probe route below is mounted the way every org-scoped route in the
+// product is: withSession for the cookie, then RequireOrgMember inside the
+// handler for the org. That gate is the one thing under test — the assertions
+// are about its three answers, not about this route.
 func TestAuthFlow_OrgMiddleware_CrossOrg404AndMember200(t *testing.T) {
 	r := newAuthRig(t)
 
-	// Register a probe route on the live mux. Wrapped in withSession
-	// + withOrg matches what production org-scoped routes will look
-	// like after D9.
 	r.srv.mux.Handle("GET /api/orgs/{org_id}/probe",
-		r.srv.withSession(r.srv.withOrg(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		r.srv.withSession(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if _, _, ok := r.srv.az.RequireOrgMember(w, req); !ok {
+				return
+			}
 			w.WriteHeader(http.StatusOK)
-		}))))
+		})))
 
 	userA := r.seedUser()
 	orgA, _ := r.seedOrg(userA, "alice-org")

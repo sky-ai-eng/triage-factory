@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -365,6 +366,27 @@ func (s *projectSession) dispatch(item queueItem) {
 	// front so the user sees a clear message.
 	if model == "" {
 		s.releaseFailed(item, "curator AI model is not configured")
+		s.revertTurnContext(item, start.Consumed, 0)
+		return
+	}
+
+	// And whether the org can authenticate anything at all, on the same
+	// pre-flight footing and for the same reason: a turn that reached
+	// agentproc.Run here would hand the subprocess an empty environment and let
+	// the SDK pick up whatever the operator's shell holds, billing this org's
+	// conversation to a credential nobody configured. The delegated-run and
+	// background-job gates refuse it; a curator turn is the org's spend too.
+	if orgSet, err := s.curator.stores.Orgs.GetSettingsSystem(
+		context.WithoutCancel(msgCtx), item.orgID,
+	); err != nil {
+		// An unreadable settings row is a fault, not a configuration state —
+		// the same distinction the model read above draws, and the reason this
+		// does not quietly proceed.
+		s.releaseFailed(item, "could not read organization settings")
+		s.revertTurnContext(item, start.Consumed, 0)
+		return
+	} else if err := modelaccess.ForOrg(orgSet).Ready(); err != nil {
+		s.releaseFailed(item, err.Error())
 		s.revertTurnContext(item, start.Consumed, 0)
 		return
 	}

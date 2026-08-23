@@ -324,3 +324,52 @@ func TestParseLine_TerminalReasonMarksInterrupted(t *testing.T) {
 		})
 	}
 }
+
+// TestParseLine_APIErrorStatus pins the one field on the terminal event that
+// reports a provider's answer as a number rather than as prose.
+//
+// The lines are the shapes the runtime really emits, trimmed to the fields
+// under test. Two of them are the reason this is parsed at all: a refusal
+// arrives with subtype "success", so the subtype settles nothing, and it
+// arrives described as a temporary network issue, so the prose settles less
+// than nothing. On a clean run the field is present and null, which must read
+// as no status rather than as status zero.
+func TestParseLine_APIErrorStatus(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want int
+	}{
+		{
+			"a refusal, despite subtype success",
+			`{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","api_error_status":403,"result":"Authentication error · This may be a temporary network issue, please try again"}`,
+			403,
+		},
+		{
+			"an upstream failure",
+			`{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","api_error_status":500,"result":"API Error: 500 Internal server error"}`,
+			500,
+		},
+		{
+			"explicit null on a clean run",
+			`{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","api_error_status":null,"result":"pong"}`,
+			0,
+		},
+		{
+			"absent entirely",
+			`{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":1}`,
+			0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, res := NewStreamState().ParseLine([]byte(tc.line), "t")
+			if res == nil {
+				t.Fatal("expected Result")
+			}
+			if res.APIErrorStatus != tc.want {
+				t.Errorf("APIErrorStatus = %d, want %d", res.APIErrorStatus, tc.want)
+			}
+		})
+	}
+}

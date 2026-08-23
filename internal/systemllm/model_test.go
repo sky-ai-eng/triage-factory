@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // settingsReader is a one-method stub for the org-settings read.
@@ -107,13 +108,51 @@ func TestModelForSettings_Refusals(t *testing.T) {
 		}
 	})
 
-	t.Run("an org on ambient credentials is not refused", func(t *testing.T) {
-		// Local mode's zero-config subscription: the org has connected no
-		// provider at all, the host env is the credential, and there is nothing
-		// for a model to select between.
-		set := domain.OrgSettings{BackgroundJobsModel: anthropicModel}
+	t.Run("an org on the host's credentials is not refused", func(t *testing.T) {
+		// Local mode's zero-config subscription: it has chosen the host's
+		// environment as its credential, so there is nothing for a model to
+		// select between and nothing missing.
+		set := domain.OrgSettings{
+			BackgroundJobsModel: anthropicModel,
+			LLMAuthMethod:       domain.LLMAuthSystem,
+		}
 		if _, err := ModelForSettings(set); err != nil {
 			t.Errorf("ModelForSettings: %v", err)
+		}
+	})
+
+	// The same empty credential set, the opposite answer, because the org said
+	// it brings its own. A cycle here would otherwise authenticate from whatever
+	// the operator's shell holds and bill this org's work to a credential nobody
+	// configured — so it refuses, and names the gap rather than the model.
+	t.Run("an org bringing its own credentials with none bound is refused", func(t *testing.T) {
+		set := domain.OrgSettings{
+			BackgroundJobsModel: anthropicModel,
+			LLMAuthMethod:       domain.LLMAuthBYOK,
+		}
+		got, err := ModelForSettings(set)
+		if !errors.Is(err, ErrNoModel) {
+			t.Fatalf("err = %v, want ErrNoModel", err)
+		}
+		if !errors.Is(err, modelaccess.ErrNoCredentials) {
+			t.Errorf("err = %v, want the credential fault preserved under ErrNoModel", err)
+		}
+		if got != "" {
+			t.Errorf("resolved to %q; a refusal must name no model at all", got)
+		}
+	})
+
+	// Multi resolves to BYOK whatever the row says, so the same org is refused
+	// there even having chosen the host's credentials — a hosted deployment has
+	// none to lend.
+	t.Run("multi refuses a stored host credential source", func(t *testing.T) {
+		runmode.SetForTest(t, runmode.ModeMulti)
+		set := domain.OrgSettings{
+			BackgroundJobsModel: anthropicModel,
+			LLMAuthMethod:       domain.LLMAuthSystem,
+		}
+		if _, err := ModelForSettings(set); !errors.Is(err, modelaccess.ErrNoCredentials) {
+			t.Errorf("err = %v, want ErrNoCredentials", err)
 		}
 	})
 }

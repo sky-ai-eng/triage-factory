@@ -411,17 +411,17 @@ func TestRecordDirectCall_PricesOnTheRequestedModel(t *testing.T) {
 // columns are disjoint. Getting this backwards double-counts every cached
 // token in the accounting table without failing anything else.
 func TestDirectUsageFrom(t *testing.T) {
-	got := directUsageFrom(inference.Usage{
+	got := DirectUsageFrom(inference.Usage{
 		PromptTokens: 1000, OutputTokens: 200, CacheReadTokens: 300, CacheCreationTokens: 100,
 	})
 	want := DirectUsage{InputTokens: 600, OutputTokens: 200, CacheReadTokens: 300, CacheCreationTokens: 100}
 	if got != want {
-		t.Errorf("directUsageFrom = %+v, want %+v", got, want)
+		t.Errorf("DirectUsageFrom = %+v, want %+v", got, want)
 	}
 
 	// A provider that already reports prompt tokens exclusively (or a
 	// malformed payload) must not produce a negative count.
-	if got := directUsageFrom(inference.Usage{PromptTokens: 10, CacheReadTokens: 400}); got.InputTokens != 0 {
+	if got := DirectUsageFrom(inference.Usage{PromptTokens: 10, CacheReadTokens: 400}); got.InputTokens != 0 {
 		t.Errorf("InputTokens = %d, want 0 rather than a negative count", got.InputTokens)
 	}
 }

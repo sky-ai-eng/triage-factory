@@ -304,6 +304,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			BedrockCredentialsRef: "vault://orgs/A/bedrock",
 			MaxLLMModelTier:       "sonnet",
 			BackgroundJobsModel:   domain.ModelSonnet,
+			LLMAuthMethod:         domain.LLMAuthBYOK,
 			MaxDailyCostUSD:       12.50,
 			MaxConcurrentRuns:     8,
 			MarketplaceEnabled:    true,
@@ -650,6 +651,47 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	// llm_auth_method is the other org setting whose column DEFAULT differs per
+	// dialect — SQLite defaults a local install onto the host's credentials,
+	// Postgres onto the org's own, which is multi's only legal value. Both real
+	// values must round-trip on both dialects, and neither may store the empty
+	// string: a caller that built the struct without naming the field gets the
+	// column's own default, because "" is not a third credential source and a
+	// read left to guess at one is what this column exists to prevent.
+	t.Run("OrgSettings_LLMAuthMethod_RoundTripsAndNeverStoresBlank", func(t *testing.T) {
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+		for _, want := range []string{domain.LLMAuthBYOK, domain.LLMAuthSystem, domain.LLMAuthBYOK} {
+			in := base
+			in.LLMAuthMethod = want
+			stored, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in)
+			if err != nil {
+				t.Fatalf("UpdateSettings(%q): %v", want, err)
+			}
+			if stored.LLMAuthMethod != want {
+				t.Errorf("write returned LLMAuthMethod %q, want %q", stored.LLMAuthMethod, want)
+			}
+			got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+			if err != nil {
+				t.Fatalf("GetSettingsSystem: %v", err)
+			}
+			if got.LLMAuthMethod != want {
+				t.Errorf("read back LLMAuthMethod %q, want %q", got.LLMAuthMethod, want)
+			}
+		}
+		blank, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base)
+		if err != nil {
+			t.Fatalf("UpdateSettings(unset): %v", err)
+		}
+		if blank.LLMAuthMethod != domain.LLMAuthSystem && blank.LLMAuthMethod != domain.LLMAuthBYOK {
+			t.Errorf("an unset LLMAuthMethod stored %q, want this dialect's column default", blank.LLMAuthMethod)
+		}
+	})
+
 	t.Run("OrgSettings_Update_Overwrites", func(t *testing.T) {
 		stores, ids := factory(t)
 		first := domain.OrgSettings{
@@ -658,6 +700,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			GitHubCloneProtocol: "ssh",
 			JiraPollInterval:    5 * time.Minute,
 			MaxLLMModelTier:     "haiku",
+			LLMAuthMethod:       domain.LLMAuthBYOK,
 			MaxDailyCostUSD:     5,
 			MaxConcurrentRuns:   3,
 			// Not written by UpdateSettings; the row's default reads back.

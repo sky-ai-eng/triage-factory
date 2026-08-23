@@ -52,10 +52,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.writeNoActiveOrg(w)
 		return
 	}
-	// Multi-mode only (authDeps != nil): re-validate that the resolved
-	// active org is still one the user belongs to. Local mode's sentinel
-	// org has no membership row and never revokes, so skip it there.
-	if s.authDeps != nil && userID != "" && orgID != "" {
+	// Re-validate that the resolved active org is still one the user belongs
+	// to; a membership revoked mid-session must not keep a socket scoped to it.
+	if userID != "" && orgID != "" {
 		ok, err := s.az.UserHasOrgAccess(r.Context(), userID, orgID)
 		if err != nil {
 			internalError(w, "ws", err)

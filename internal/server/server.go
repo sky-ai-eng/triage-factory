@@ -107,6 +107,11 @@ type Server struct {
 	// via SetPlacementResolver after construction; nil until then so the
 	// endpoint 503s rather than panicking if a request races startup.
 	placement placementResolver
+	// modelProber spends one minimal request establishing whether an org's
+	// credentials can invoke a given model. Wired via SetModelProber after
+	// construction; nil in local mode, where nothing probes and the test
+	// routes say the deployment cannot answer.
+	modelProber modelProber
 	// fleetQueue backs the GET /api/fleet/queue view: per-org conversation-queue shares
 	// (active/queued + cap). Satisfied by the ConversationQueue store; a narrow
 	// interface so the handler test can inject canned shares.
@@ -1344,10 +1349,17 @@ func (s *Server) routes() {
 	// restricted that team from spending against. The restriction itself is
 	// written beside it and is org-admin-only — a team that could widen its own
 	// would not be restricted.
-	mdh := &modelsHandler{az: s.az, tx: s.tx}
+	mdh := &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return s.modelProber }}
 	s.api("GET /api/orgs/{org_id}/models", mdh.handleModelsList)
 	s.api("GET /api/teams/{team_id}/models", mdh.handleTeamModelsList)
 	s.apiMutating("PUT /api/teams/{team_id}/models/providers", mdh.handleTeamProvidersPut)
+	// The availability probes: the same verb on the item and on the
+	// collection, because "test this model" and "test this provider's
+	// candidates" are two nameable things with two response shapes. Both are
+	// POSTs for an effect no field write can express — each one calls the
+	// provider and is billed for it.
+	s.apiMutating("POST /api/orgs/{org_id}/models/{model_key}/test", mdh.handleModelTest)
+	s.apiMutating("POST /api/orgs/{org_id}/models/tests", mdh.handleModelTestSweep)
 
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
 	// login to the signed-in user (identity, not access, not login).
@@ -1646,6 +1658,14 @@ func (s *Server) SetReconciler(rc *reconcile.Reconciler) {
 // role-setup endpoint reports the method is control-service only.
 func (s *Server) SetBedrockRoleResolver(r bedrockRoleResolver) {
 	s.bedrockRole = r
+}
+
+// SetModelProber wires the model-availability prober. Called once at startup on
+// every serving process, in either mode — the transport differs (a direct call
+// in multi, the agent runtime in local) but the question and the verdicts do
+// not. Nil until wired: the test routes report the deployment cannot probe.
+func (s *Server) SetModelProber(p modelProber) {
+	s.modelProber = p
 }
 
 // SetDashboardBackfiller registers the per-user dashboard-history backfill
