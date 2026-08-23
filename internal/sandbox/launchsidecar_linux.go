@@ -15,7 +15,7 @@ import (
 // the same triagefactory binary this broker process is itself running from
 // (resolved via os.Executable, never a caller-supplied path), invoked with
 // its own subcommand. "The broker owns the command" applies here exactly as
-// it does for the pinned node/wrapper.mjs entrypoint LaunchRun execs: the
+// it does for the pinned tool-host entrypoint LaunchRun execs: the
 // orchestrator sends only ContainerID (used solely for the sidecar's own
 // process-title/log line), never a program or path.
 const sidecarSubcommand = "run-sidecar"
