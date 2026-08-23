@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -97,7 +98,7 @@ func prebuiltRunHarness(t *testing.T, secrets SecretsReader, orgID, conversation
 	if err != nil {
 		t.Fatalf("SetupRunNetwork: %v", err)
 	}
-	proxies, env, err := startProxiesForSandbox(ctx, net.HostIP, creds, true, nil, nil, nil)
+	proxies, env, err := startProxiesForSandbox(ctx, net.HostIP, creds, true, nil, egressproxy.GitHubHosts{}, nil, nil)
 	if err != nil {
 		_ = net.Close()
 		t.Fatalf("startProxiesForSandbox: %v", err)

@@ -193,7 +193,12 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		git.SharedOriginCAPath = agentproc.SandboxGHInjectorCertPath
 	}
 
-	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, req.SandboxLLM, git, r.recordEgressDenial, r.llmSource, req.IdentityConfigPairs...)
+	// The egress denial guidance reads the same upstream strings the gh
+	// injector and git proxy are built from, so the hosts a refusal explains
+	// are this run's actual GitHub — GHES and data-residency deployments
+	// included, not just the public github.com family.
+	ghHosts := egressproxy.GitHubHostsForUpstreams(req.GHChannelUpstream, req.GitUpstream)
+	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, req.SandboxLLM, git, ghHosts, r.recordEgressDenial, r.llmSource, req.IdentityConfigPairs...)
 	if err != nil {
 		return nil, err
 	}

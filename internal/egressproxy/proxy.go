@@ -135,6 +135,14 @@ type Config struct {
 	// conscious-opt-out contract as llmproxy/gitproxy.
 	AllowNonLoopback bool
 
+	// GitHub names the hostnames of this run's configured GitHub deployment.
+	// It is consulted only to pick the remedy a denial's reason carries (see
+	// deniedHostGuidance) — never to widen or narrow the allow decision. The
+	// zero value means the public github.com family; build per-run values
+	// with GitHubHostsForUpstreams so this and the run's credential channels
+	// read the same upstream strings.
+	GitHub GitHubHosts
+
 	// RecordDenial, when non-nil, is invoked once per refused CONNECT
 	// for the audit log (TFAC-483 is the intended consumer; nil skips).
 	// Delivery is asynchronous through a bounded queue drained by one
@@ -156,6 +164,11 @@ type Config struct {
 type Server struct {
 	cfg     Config
 	allowed map[string]struct{}
+
+	// The guidance sets from Config.GitHub, normalized once like allowed.
+	// Read only by deniedHostGuidance.
+	ghAPIHosts map[string]struct{}
+	ghGitHosts map[string]struct{}
 
 	// resolve + dial are seams for tests: production uses the host's
 	// resolver and a plain net.Dialer; tests substitute a fake resolver
@@ -201,10 +214,16 @@ const recordDenialTimeout = 5 * time.Second
 
 // New constructs a Server but does not listen. Call Start to bind.
 func New(cfg Config) (*Server, error) {
+	gh := cfg.GitHub
+	if len(gh.API) == 0 && len(gh.Git) == 0 {
+		gh = GitHubHostsForUpstreams("", "")
+	}
 	dialer := &net.Dialer{Timeout: dialTimeout}
 	s := &Server{
-		cfg:     cfg,
-		allowed: newHostSet(cfg.AllowedHosts),
+		cfg:        cfg,
+		allowed:    newHostSet(cfg.AllowedHosts),
+		ghAPIHosts: newHostSet(gh.API),
+		ghGitHosts: newHostSet(gh.Git),
 		resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		},
@@ -371,7 +390,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		// Hosts with a sanctioned alternative say so: the refusal is the
 		// one message guaranteed to reach whoever aimed at the host, and
 		// "no" without "use this instead" reads as a hurdle to route around.
-		if g := deniedHostGuidance(hostNorm); g != "" {
+		if g := s.deniedHostGuidance(hostNorm); g != "" {
 			reason += "; " + g
 		}
 		s.deny(w, r, reason)

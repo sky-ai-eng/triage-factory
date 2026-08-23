@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -325,6 +326,88 @@ func TestProxy_ConnectDenialStatusLineCarriesReason(t *testing.T) {
 					tc.host, tc.absentInAll, resp)
 			}
 		})
+	}
+}
+
+// TestGitHubHostsForUpstreams pins the derivation from the run's channel
+// upstreams to the guidance host set, across the three host classes TF
+// supports (github.com, GHES path-mount, GHE Cloud data residency) and the
+// empty/partial inputs a run without one of the channels produces. The point
+// of deriving is that there is no second host list to drift: a GHES org's
+// denials explain the GHES hostname because that is what its channels are
+// built from.
+func TestGitHubHostsForUpstreams(t *testing.T) {
+	cases := []struct {
+		name     string
+		api, git string
+		wantAPI  []string
+		wantGit  []string
+	}{
+		{name: "both empty is the public family",
+			wantAPI: []string{"api.github.com", "uploads.github.com"},
+			wantGit: []string{"github.com", "codeload.github.com"}},
+		{name: "public upstreams spelled out",
+			api: "https://api.github.com", git: "https://github.com",
+			wantAPI: []string{"api.github.com", "uploads.github.com"},
+			wantGit: []string{"github.com", "codeload.github.com"}},
+		{name: "GHES names one host on both sides",
+			api: "https://ghes.corp.example.com/api/v3", git: "https://ghes.corp.example.com",
+			wantAPI: []string{"ghes.corp.example.com"},
+			wantGit: []string{"ghes.corp.example.com"}},
+		{name: "GHES with no gh channel still covers the API side from the git host",
+			git:     "https://ghes.corp.example.com",
+			wantAPI: []string{"ghes.corp.example.com"},
+			wantGit: []string{"ghes.corp.example.com"}},
+		{name: "GHES with no git channel still covers the git side from the API host",
+			api:     "https://ghes.corp.example.com/api/v3",
+			wantAPI: []string{"ghes.corp.example.com"},
+			wantGit: []string{"ghes.corp.example.com"}},
+		{name: "data residency derives the web host from the api. prefix",
+			api:     "https://api.tenant.ghe.com",
+			wantAPI: []string{"api.tenant.ghe.com"},
+			wantGit: []string{"tenant.ghe.com"}},
+		{name: "a bare host with no scheme parses",
+			api:     "ghes.corp.example.com",
+			wantAPI: []string{"ghes.corp.example.com"},
+			wantGit: []string{"ghes.corp.example.com"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := GitHubHostsForUpstreams(tc.api, tc.git)
+			if !slices.Equal(got.API, tc.wantAPI) || !slices.Equal(got.Git, tc.wantGit) {
+				t.Errorf("GitHubHostsForUpstreams(%q, %q) = API %v / Git %v; want API %v / Git %v",
+					tc.api, tc.git, got.API, got.Git, tc.wantAPI, tc.wantGit)
+			}
+		})
+	}
+}
+
+// TestProxy_GHESDenialCarriesGuidance pins the per-run half of the guidance:
+// on a GHES deployment, gh's absolute-URL follow-ups name the GHES hostname,
+// so the remedy must ride THAT host's denial — and the public github.com
+// family, which is not this org's GitHub, must get the bare allowlist reason
+// rather than a remedy pointing at channels that don't serve it.
+func TestProxy_GHESDenialCarriesGuidance(t *testing.T) {
+	addr := newTestServer(t, Config{
+		AllowedHosts: DefaultRegistryHosts(),
+		GitHub: GitHubHostsForUpstreams(
+			"https://ghes.corp.example.com/api/v3", "https://ghes.corp.example.com"),
+	}, nil, nil, nil)
+
+	resp := rawConnect(t, addr, "ghes.corp.example.com:443", "")
+	statusLine, _, _ := strings.Cut(resp, "\r\n")
+	for _, want := range []string{
+		"not on the sandbox egress allowlist",
+		"gh actions download-logs",
+		"worktree's existing remotes",
+	} {
+		if !strings.Contains(statusLine, want) {
+			t.Errorf("GHES denial status line %q should carry %q — the GHES host serves both channel sides", statusLine, want)
+		}
+	}
+
+	if resp := rawConnect(t, addr, "api.github.com:443", ""); strings.Contains(resp, "exec verbs") {
+		t.Errorf("a GHES org's denial for api.github.com points at the exec verbs, which do not serve that host:\n%s", resp)
 	}
 }
 
