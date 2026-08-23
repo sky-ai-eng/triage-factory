@@ -35,7 +35,7 @@ func TestClaimCredentialsStore_Postgres_PutGet(t *testing.T) {
 
 	// No active claim yet: Put is a silent no-op and Get finds nothing —
 	// there is no engagement to seal for.
-	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-0", 1, []byte("orphan")); err != nil {
+	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-0", 1, []byte("orphan"), nil); err != nil {
 		t.Fatalf("Put with no active claim: %v", err)
 	}
 	if _, ok, err := stores.ClaimCredentials.Get(ctx, orgID, conversationID); err != nil || ok {
@@ -43,7 +43,7 @@ func TestClaimCredentialsStore_Postgres_PutGet(t *testing.T) {
 	}
 
 	seedPgActiveClaim(t, h, orgID, conversationID, "executor-1", 1)
-	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-1", 1, []byte("sealed-v1")); err != nil {
+	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-1", 1, []byte("sealed-v1"), []string{"github", "slack"}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	got, ok, err := stores.ClaimCredentials.Get(ctx, orgID, conversationID)
@@ -55,6 +55,9 @@ func TestClaimCredentialsStore_Postgres_PutGet(t *testing.T) {
 	}
 	if got.SealedAt.IsZero() {
 		t.Error("Get returned a zero SealedAt; the workspace-add freshness gate has nothing to compare")
+	}
+	if len(got.IncludeTools) != 2 || got.IncludeTools[0] != "github" || got.IncludeTools[1] != "slack" {
+		t.Errorf("IncludeTools = %v, want [github slack]", got.IncludeTools)
 	}
 
 	// Releasing the claim takes the bundle out of reach (Get resolves the
@@ -84,12 +87,12 @@ func TestClaimCredentialsStore_Postgres_PutNeverRegressesBootEpoch(t *testing.T)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	// Executor B (boot_epoch 2) reclaims and provisions first.
-	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-b", 2, []byte("sealed-for-b")); err != nil {
+	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-b", 2, []byte("sealed-for-b"), []string{"github"}); err != nil {
 		t.Fatalf("Put (epoch 2): %v", err)
 	}
 
 	// Executor A's stale, slower provision (boot_epoch 1) lands after.
-	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-a", 1, []byte("sealed-for-a")); err != nil {
+	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-a", 1, []byte("sealed-for-a"), nil); err != nil {
 		t.Fatalf("Put (epoch 1, stale): %v", err)
 	}
 
@@ -103,8 +106,9 @@ func TestClaimCredentialsStore_Postgres_PutNeverRegressesBootEpoch(t *testing.T)
 	}
 
 	// A same-epoch refresh (re-minted tokens for the same still-live claim)
-	// must still apply.
-	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-b", 2, []byte("sealed-for-b-refreshed")); err != nil {
+	// must still apply. Its empty-but-stamped manifest must come back non-nil:
+	// "nothing available" and "never stamped" are different answers.
+	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-b", 2, []byte("sealed-for-b-refreshed"), []string{}); err != nil {
 		t.Fatalf("Put (epoch 2, refresh): %v", err)
 	}
 	refreshed, ok, err := stores.ClaimCredentials.Get(ctx, orgID, conversationID)
@@ -113,6 +117,9 @@ func TestClaimCredentialsStore_Postgres_PutNeverRegressesBootEpoch(t *testing.T)
 	}
 	if string(refreshed.Sealed) != "sealed-for-b-refreshed" {
 		t.Fatalf("same-epoch refresh did not apply: got %q, want sealed-for-b-refreshed", refreshed.Sealed)
+	}
+	if refreshed.IncludeTools == nil || len(refreshed.IncludeTools) != 0 {
+		t.Errorf("IncludeTools after an empty-manifest stamp = %v, want a non-nil empty slice", refreshed.IncludeTools)
 	}
 	// created_at is replaced on every re-seal, never left at the claim's
 	// first provision — the whole basis for deciding freshness from the

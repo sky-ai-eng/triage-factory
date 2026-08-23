@@ -9094,16 +9094,27 @@ ALTER TABLE ONLY public.messages
 -- against its own current epoch BEFORE attempting to unseal — never even
 -- attempt a bundle sealed for an earlier boot.
 --
+-- include_tools is the claim's cleartext tools manifest: the event-source
+-- kinds available to the org at seal time (eventsource.AvailableKindsSystem),
+-- stamped by the brain on the same pass that seals the bundle. The executor
+-- composes the run's <tools> prompt section from it, because it cannot
+-- answer the question itself — its secret store is disabled and an
+-- event-triggered conversation has no user identity to claim as. Source-kind
+-- names only, never secret material, so it travels in cleartext like
+-- executor_id/boot_epoch. NULL = the writer stamped no answer (resolve
+-- failure, reader falls back); '[]' = a real answer of "nothing available".
+--
 -- Admin-pool only, no RLS policy (deny-by-default), no app-pool grant at
 -- all: credential-bearing sealed ciphertext, never a request-handler
 -- surface. Rows cascade with their claim.
 CREATE TABLE public.claim_credentials (
-    claim_id    uuid NOT NULL,
-    org_id      uuid NOT NULL,
-    executor_id text NOT NULL,
-    boot_epoch  bigint NOT NULL,
-    sealed      bytea NOT NULL,
-    created_at  timestamp with time zone DEFAULT now() NOT NULL
+    claim_id      uuid NOT NULL,
+    org_id        uuid NOT NULL,
+    executor_id   text NOT NULL,
+    boot_epoch    bigint NOT NULL,
+    sealed        bytea NOT NULL,
+    include_tools jsonb,
+    created_at    timestamp with time zone DEFAULT now() NOT NULL
 );
 
 ALTER TABLE ONLY public.claim_credentials

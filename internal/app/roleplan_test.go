@@ -64,7 +64,6 @@ func TestExecutorPlan_ExcludesEveryBrainAndHTTPSubsystem(t *testing.T) {
 		{"artifact reconciler manager", p.brain},
 		{"reachable-repo cache manager", p.brain},
 		{"marketplace-stats manager", p.brain},
-		{"knowledge-base watcher", p.brain},
 		{"poll-completion bus subscribers", p.brain},
 	}
 	for _, f := range forbidden {

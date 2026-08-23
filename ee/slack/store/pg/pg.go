@@ -145,6 +145,29 @@ func (s *workspaceStore) ListForOrg(ctx context.Context, orgID string) ([]slacks
 	return out, rows.Err()
 }
 
+func (s *workspaceStore) ListForOrgSystem(ctx context.Context, orgID string) ([]slackstore.Workspace, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+workspaceColumns+`
+		FROM org_slack_workspaces
+		WHERE org_id = $1
+		ORDER BY created_at DESC, workspace_id ASC
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list org_slack_workspaces: %w", err)
+	}
+	defer rows.Close()
+
+	out := []slackstore.Workspace{}
+	for rows.Next() {
+		w, err := scanWorkspace(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan org_slack_workspaces: %w", err)
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
 func (s *workspaceStore) Get(ctx context.Context, orgID, workspaceID, apiAppID string) (*slackstore.Workspace, error) {
 	w, err := scanWorkspace(s.app.QueryRowContext(ctx, `
 		SELECT `+workspaceColumns+`

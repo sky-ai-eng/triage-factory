@@ -58,6 +58,10 @@ func (s *workspaceStore) ListAllSystem(context.Context) ([]slackstore.Workspace,
 	return nil, db.ErrNotApplicableInLocal
 }
 
+func (s *workspaceStore) ListForOrgSystem(context.Context, string) ([]slackstore.Workspace, error) {
+	return nil, db.ErrNotApplicableInLocal
+}
+
 func (s *workspaceStore) GetByWorkspaceAppSystem(context.Context, string, string) (*slackstore.Workspace, error) {
 	return nil, db.ErrNotApplicableInLocal
 }

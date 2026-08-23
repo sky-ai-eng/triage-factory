@@ -1250,9 +1250,8 @@ Capacity, by contrast, *is* observed — but only through the registry
 heartbeat (weights, liveness, the memory gate), never per-key. And the
 capacity envelope is per-host and work-source-agnostic: every
 dispatched run is admitted through the same memory guardrail and
-concurrency semaphore (`Spawner.AcquireTurnSlot`), so heartbeat
-occupancy reports the host's true sandbox load, not just the
-conversation queue's share of it.
+dispatch concurrency limit, so heartbeat occupancy reports the host's
+true sandbox load, not just the conversation queue's share of it.
 
 ---
 

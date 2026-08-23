@@ -47,7 +47,7 @@ type subsystemPlan struct {
 	// brain marks this role as BRAIN-CAPABLE: control + all construct the
 	// leader-elected background brain's objects (pollers + tracker, the
 	// event router, the AI managers — scorer/profiler/classifier/
-	// reconciler/marketplace-stats —, the knowledge-base watcher, the
+	// reconciler/marketplace-stats —, the
 	// poll-completion bus subscribers) and participate in the
 	// background-brain lease election. An executor never does.
 	//

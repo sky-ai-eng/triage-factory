@@ -234,6 +234,11 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		// shipped spec-authorship blueprint by slug (id is a random UUID per
 		// team copy); store the resolved UUID. Skipped entirely for a
 		// teamless private/org project — there's no team copy to resolve.
+		//
+		// TODO(TFAC-895): GetBySystemSlug always misses now that the curator
+		// removal deleted the system-ticket-spec seed — every new project gets
+		// NULL here. TFAC-895 removes spec authorship (and this whole block)
+		// entirely, so this is left as a silent no-op rather than fixed.
 		specBlueprintID := ""
 		if teamID != "" {
 			def, defErr := tx.Blueprints.GetBySystemSlug(r.Context(), orgID, teamID, domain.SystemTicketSpecPromptID)

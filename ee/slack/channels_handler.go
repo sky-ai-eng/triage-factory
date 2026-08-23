@@ -659,14 +659,16 @@ func teamHasSlackMessageTrigger(ctx context.Context, tx db.TxStores, orgID, team
 const (
 	slackMessagePromptName = "Slack assistant"
 	slackMessagePromptBody = "A teammate reached out to the agent in a Slack thread. The task's entity is the " +
-		"thread. Parse the channel, thread_ts, sender, and message text out of the raw event metadata in " +
+		"thread. Parse the channel, ts, thread_ts, sender, and message text out of the raw event metadata in " +
 		"the task context above.\n\n" +
 		"Read the thread (`triagefactory exec slack read thread --channel <channel> --ts <thread_ts>`, or `--ts <ts>` when " +
 		"thread_ts is empty — the triggering message itself started the thread) to see the full request in " +
 		"context, gather what you need from the linked entity and any referenced repos/issues, do the work using " +
-		"the triagefactory exec subcommands available to you, and reply in that same thread with " +
+		"the triagefactory exec subcommands available to you, and reply with " +
 		"`triagefactory exec slack send` — your stdout is not visible to the user, so the send is the only way they see your " +
-		"answer."
+		"answer. Always reply in the thread: pass `--thread-ts <thread_ts>`, or `--thread-ts <ts>` when thread_ts is " +
+		"empty, which starts a thread rooted on the triggering message — never answer at the channel root, even when " +
+		"the message to you wasn't in a thread."
 )
 
 // slackMessageTriggerBreakerThreshold / MinAutonomySuitability match the
