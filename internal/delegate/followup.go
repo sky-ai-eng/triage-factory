@@ -81,8 +81,16 @@ const (
 	ResumeBlockedWorkspaceExpired = "workspace_expired"
 	// ResumeBlockedBlueprintConcluded — the workspace survives but nothing would
 	// drive it: the blueprint has moved past this step (a later one is running,
-	// or it came to rest on one), or it was cancelled.
+	// or it came to rest on one).
 	ResumeBlockedBlueprintConcluded = "blueprint_concluded"
+	// ResumeBlockedBlueprintCancelled — the workspace survives but the
+	// blueprint was called off at its own layer (its task closed or swiped, its
+	// team archived, the run cancelled outright), so nothing under it runs
+	// again. As permanent as the rung above, and split from it because the two
+	// put different sentences in front of a person: nothing here moved past
+	// anything — the work itself was ended, and the stop note on the transcript
+	// names the lifecycle event that ended it.
+	ResumeBlockedBlueprintCancelled = "blueprint_cancelled"
 	// ResumeBlockedStepHandedOff — the step concluded and its blueprint has
 	// not reacted yet. The one rung about TIMING rather than about the
 	// conversation: a beat later the answer changes.
@@ -150,6 +158,8 @@ func injectionWillFlush(status, outcome string) bool {
 // says a message COULD continue it, and this asks what the sequence it belongs
 // to has to say about that. Two refusals, one blueprint_runs read, because they
 // are two readings of the same row and a second read would let them disagree.
+// The first refusal answers under two names — called off, or moved past this
+// step — since both are permanent but say different things to a person.
 //
 // The first is drivability: waking a run nothing will claim strands it
 // mid-flight — claimed by nobody, counted as queue depth by every counter,
@@ -191,6 +201,12 @@ func (s *Spawner) blueprintFollowUpBlock(ctx context.Context, orgID string, conv
 		return ""
 	}
 	if !blueprintDrivableForClaim(br, conv.BlueprintStepIndex) {
+		// The refused set is exactly !blueprintDrivableForClaim — the split
+		// below only names which of its two arms refused, so the safety
+		// identity with the claim gate is untouched.
+		if blueprintCalledOff(br) {
+			return ResumeBlockedBlueprintCancelled
+		}
 		return ResumeBlockedBlueprintConcluded
 	}
 	if br != nil && br.Status == domain.BlueprintRunStatusRunning && conv.Status == domain.StatusCompleted {
@@ -214,12 +230,20 @@ func blueprintDrivableForClaim(br *domain.BlueprintRun, stepIndex *int) bool {
 	if br == nil {
 		return true
 	}
-	// Called off: the signal a cancel raises while the sequence still runs, and
-	// the terminal it settles on. Both, for the reason the SQL gives.
-	if br.CancelRequested || br.Status == domain.BlueprintRunStatusCancelled {
+	if blueprintCalledOff(br) {
 		return false
 	}
 	return isCurrentBlueprintStep(br, stepIndex)
+}
+
+// blueprintCalledOff reports whether the blueprint was cancelled at its own
+// layer: the signal a cancel raises while the sequence still runs, and the
+// terminal it settles on. Both, for the reason the SQL gives. Its own name
+// because two readers ask it for different ends — the claim gate mirror
+// refuses to drive a called-off blueprint's steps, and the refusal ladder
+// names the cancel as its own rung.
+func blueprintCalledOff(br *domain.BlueprintRun) bool {
+	return br != nil && (br.CancelRequested || br.Status == domain.BlueprintRunStatusCancelled)
 }
 
 // isCurrentBlueprintStep reports whether stepIndex names the step the blueprint
@@ -520,6 +544,8 @@ func blockedFollowUpError(block string) error {
 		return ErrWorkspaceExpired
 	case ResumeBlockedBlueprintConcluded:
 		return ErrConversationConcluded
+	case ResumeBlockedBlueprintCancelled:
+		return ErrBlueprintCancelled
 	case ResumeBlockedStepHandedOff:
 		return ErrStepHandedOff
 	default:

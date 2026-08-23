@@ -199,8 +199,8 @@ func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 				database := newDelegateTestDB(t)
 				s := park(t, database, "r-concluded", runtime, "cancelled", true)
 				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-concluded", runmode.LocalDefaultUserID, "msg")
-				if !errors.Is(err, ErrConversationConcluded) {
-					t.Errorf("err = %v, want ErrConversationConcluded (409)", err)
+				if !errors.Is(err, ErrBlueprintCancelled) {
+					t.Errorf("err = %v, want ErrBlueprintCancelled (409)", err)
 				}
 				if st := storedStatus(t, database, "r-concluded"); st != "open" {
 					t.Errorf("stored status = %q, want open — a refused wake must leave the row parked, not queued", st)
@@ -238,7 +238,7 @@ func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 					// Nothing about the workspace refuses a native row, so the
 					// cancelled blueprint is the only refusal there is — and it
 					// is the true one: nothing would ever drive this step again.
-					want = ErrConversationConcluded
+					want = ErrBlueprintCancelled
 				}
 				if !errors.Is(err, want) {
 					t.Errorf("err = %v, want %v", err, want)

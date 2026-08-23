@@ -124,8 +124,8 @@ func TestHandleAgentStatus_ResumableBlueprintCancelled(t *testing.T) {
 	if got["resumable"] != false {
 		t.Errorf("resumable = %v, want false", got["resumable"])
 	}
-	if got["resume_blocked_reason"] != delegate.ResumeBlockedBlueprintConcluded {
-		t.Errorf("resume_blocked_reason = %v, want %q", got["resume_blocked_reason"], delegate.ResumeBlockedBlueprintConcluded)
+	if got["resume_blocked_reason"] != delegate.ResumeBlockedBlueprintCancelled {
+		t.Errorf("resume_blocked_reason = %v, want %q", got["resume_blocked_reason"], delegate.ResumeBlockedBlueprintCancelled)
 	}
 }
 
