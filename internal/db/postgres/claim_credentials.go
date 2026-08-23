@@ -43,7 +43,7 @@ func (s *claimCredentialsStore) Put(ctx context.Context, orgID, conversationID, 
 	}
 	_, err = s.admin.ExecContext(ctx, `
 		INSERT INTO claim_credentials (claim_id, org_id, executor_id, boot_epoch, sealed, include_tools, created_at)
-		SELECT cl.id, $2::uuid, $3, $4, $5, $6, now()
+		SELECT cl.id, $2::uuid, $3, $4, $5, $6::jsonb, now()
 		FROM claims cl
 		WHERE cl.org_id = $2::uuid AND cl.conversation_id = $1::uuid AND cl.released_at IS NULL
 		ON CONFLICT (claim_id) DO UPDATE SET
