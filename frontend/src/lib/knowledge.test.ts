@@ -20,6 +20,7 @@ import {
   moveKnowledge,
   otherRoot,
   uploadKnowledge,
+  knowledgeTargetPath,
 } from './knowledge'
 
 function jsonResponse(body: unknown) {
@@ -153,5 +154,38 @@ describe('helpers', () => {
     expect(fmtBytes(2048)).toBe('2.0 KB')
     expect(fmtBytes(200 * 1024)).toBe('200 KB')
     expect(fmtBytes(3 * 1024 * 1024)).toBe('3.0 MB')
+  })
+})
+
+// knowledgeTargetPath predicts the join the SERVER performs on path_prefix and
+// the part filename. It is advisory — it only feeds the confirm dialog — but a
+// prediction that drifts from the server's rule would name the wrong document
+// as the one about to be lost, so the normalization is asserted rather than
+// assumed.
+describe('knowledgeTargetPath', () => {
+  const at = (name: string, prefix = '') => knowledgeTargetPath(new File(['x'], name), prefix)
+
+  it('is the leaf when no folder is named', () => {
+    expect(at('notes.md')).toBe('notes.md')
+  })
+
+  it('joins the folder the upload names', () => {
+    expect(at('notes.md', 'runbooks')).toBe('runbooks/notes.md')
+    expect(at('notes.md', 'runbooks/deploys')).toBe('runbooks/deploys/notes.md')
+  })
+
+  it('keeps the path a directory pick was picked under', () => {
+    const file = new File(['x'], 'deploy.md')
+    Object.defineProperty(file, 'webkitRelativePath', { value: 'runbooks/deploy.md' })
+    expect(knowledgeTargetPath(file, '')).toBe('runbooks/deploy.md')
+    expect(knowledgeTargetPath(file, 'team')).toBe('team/runbooks/deploy.md')
+  })
+
+  it('normalizes the way the server does — separators, space, stray slashes', () => {
+    expect(at('runbooks\\deploy.md')).toBe('runbooks/deploy.md')
+    expect(at('  notes.md  ')).toBe('notes.md')
+    expect(at('/notes.md/')).toBe('notes.md')
+    expect(at('notes.md', '/runbooks/')).toBe('runbooks/notes.md')
+    expect(at('notes.md', '  ')).toBe('notes.md')
   })
 })

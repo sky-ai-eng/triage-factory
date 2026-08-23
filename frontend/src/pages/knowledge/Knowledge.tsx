@@ -14,12 +14,15 @@ import {
   deleteKnowledge,
   fmtBytes,
   knowledgeFileUrl,
+  knowledgeTargetPath,
+  listKnowledge,
   moveKnowledge,
   otherRoot,
   readKnowledgeFile,
   uploadKnowledge,
 } from '../../lib/knowledge'
 import type { KnowledgeFile, KnowledgeRoot } from '../../lib/knowledge'
+import type { DialogConsequence } from '../../ui/dialog/Dialog'
 import './knowledge.css'
 
 // Knowledge — a team's knowledge base, and the one place a human curates what
@@ -92,6 +95,10 @@ function splitRowID(id: string): { teamId: string; root: KnowledgeRoot; path: st
  *  footer offers the next page when there is one. */
 const PAGE_SIZE = 200
 
+/** How long the folder field settles before the replace probe runs. The field
+ *  is typed into, and every keystroke changes where the files would land. */
+const PROBE_DEBOUNCE_MS = 250
+
 export default function Knowledge() {
   const { teams, lastActingTeamId, loaded } = useTeams()
   const { roleForTeam } = useTeamRole()
@@ -118,6 +125,7 @@ export default function Knowledge() {
   const [viewing, setViewing] = useState<KnowledgeFile | null>(null)
   const [confirmUpload, setConfirmUpload] = useState<File[] | null>(null)
   const [uploadFolder, setUploadFolder] = useState('')
+  const [replaceProbe, setReplaceProbe] = useState<{ key: string; paths: string[] } | null>(null)
   const fileInput = useRef<HTMLInputElement | null>(null)
 
   const list = usePagedList<KnowledgeFile>(
@@ -215,6 +223,71 @@ export default function Knowledge() {
     },
     [teamId, root, reload],
   )
+
+  // WHAT THE PENDING UPLOAD WOULD OVERWRITE.
+  //
+  // Replacing a document is the only write on this page with nothing behind it:
+  // delete and publish both sit under the table's undo window, and there is no
+  // version history under any of them. So the cost is named before the upload
+  // runs rather than counted in the toast afterwards, when the old bytes are
+  // already gone.
+  //
+  // It reports only collisions it has SEEN. The probe is one prefix-scoped page,
+  // so a knowledge base larger than that page under-reports rather than calling
+  // a document new — a false negative degrades to the upload's own `outcome`
+  // count, while a false positive would be a lie about what is about to be lost.
+  const probeKey = confirmUpload
+    ? [
+        teamId,
+        root,
+        uploadFolder.trim(),
+        ...confirmUpload.map((f) => knowledgeTargetPath(f, uploadFolder)),
+      ].join('\u0000')
+    : ''
+  useEffect(() => {
+    if (probeKey === '') return
+    let cancelled = false
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const page = await listKnowledge(teamId, {
+            root,
+            path_prefix: uploadFolder.trim(),
+            page_size: PAGE_SIZE,
+          })
+          if (cancelled) return
+          const held = new Set(page.items.map((f) => f.path))
+          const paths = (confirmUpload ?? [])
+            .map((f) => knowledgeTargetPath(f, uploadFolder))
+            .filter((target) => held.has(target))
+          setReplaceProbe({ key: probeKey, paths })
+        } catch {
+          // A probe that fails leaves the dialog saying nothing about
+          // replacement, which is what it said before this check existed.
+        }
+      })()
+    }, PROBE_DEBOUNCE_MS)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [probeKey, teamId, root, uploadFolder, confirmUpload])
+
+  // Keyed on the probe's own input, so a result that arrived for a different
+  // folder — or a different pick entirely — can never render against this one.
+  const replacing = replaceProbe?.key === probeKey ? replaceProbe.paths : []
+  const uploadConsequences: DialogConsequence[] =
+    replacing.length === 0
+      ? []
+      : [
+          {
+            text:
+              replacing.length === 1
+                ? `The existing ${replacing[0]} will be replaced.`
+                : `${replacing.length} existing files will be replaced.`,
+            tone: 'loss',
+          },
+        ]
 
   const teamName = team?.name ?? ''
   const header = useMemo(
@@ -442,6 +515,7 @@ export default function Knowledge() {
             </label>
           </div>
         }
+        consequences={uploadConsequences}
         confirmLabel="Add"
         onConfirm={() => {
           const files = confirmUpload ?? []

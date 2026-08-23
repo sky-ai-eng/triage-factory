@@ -114,6 +114,37 @@ export async function readKnowledgeFile(
  * drop — keeps that shape under the prefix, so an uploaded directory arrives as
  * a directory.
  */
+/**
+ * The filename an upload sends for a chosen file.
+ *
+ * A directory pick carries the path it was picked under, a plain pick carries
+ * its leaf — and the part filename is what the server joins onto `path_prefix`,
+ * so this is the one place that choice is made.
+ */
+export function uploadPartName(file: File): string {
+  const rel = (file as File & { webkitRelativePath?: string }).webkitRelativePath
+  return rel || file.name
+}
+
+/**
+ * Where a chosen file will land, given the folder the upload names.
+ *
+ * This mirrors the join the upload route performs on `path_prefix` and the part
+ * filename, and it is ADVISORY: the server does the real one, and the upload's
+ * own reply carries the authoritative `outcome` for every file. It exists so the
+ * confirm dialog can name what a replace costs BEFORE it happens — the one write
+ * on this page with no undo behind it.
+ */
+export function knowledgeTargetPath(file: File, pathPrefix: string): string {
+  const rel = trimSlashes(uploadPartName(file).trim().replace(/\\/g, '/'))
+  const prefix = trimSlashes(pathPrefix.trim())
+  return prefix ? `${prefix}/${rel}` : rel
+}
+
+function trimSlashes(s: string): string {
+  return s.replace(/^\/+/, '').replace(/\/+$/, '')
+}
+
 export async function uploadKnowledge(
   teamId: string,
   root: KnowledgeRoot,
@@ -124,8 +155,7 @@ export async function uploadKnowledge(
   form.append('root', root)
   if (pathPrefix) form.append('path_prefix', pathPrefix)
   for (const file of files) {
-    const rel = (file as File & { webkitRelativePath?: string }).webkitRelativePath
-    form.append('files', file, rel || file.name)
+    form.append('files', file, uploadPartName(file))
   }
   const resp = await apiFetch(`${base(teamId)}/files`, { method: 'POST', body: form })
   const out = (await resp.json()) as KnowledgeUploadResponse

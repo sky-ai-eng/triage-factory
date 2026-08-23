@@ -237,6 +237,89 @@ describe('Knowledge — upload', () => {
     await waitFor(() => expect(toasts.toast.success).toHaveBeenCalled())
     expect(String(toasts.toast.success.mock.calls[0][0])).toContain('replaced')
   })
+
+  // A replace is the one write on this page with nothing behind it — delete and
+  // publish are both undoable for ten seconds, and no root keeps history. So the
+  // dialog has to name what goes BEFORE the upload runs; the toast afterwards is
+  // a receipt, not a warning.
+  it('names the document a pick would replace, before the upload runs', async () => {
+    const { container } = draw()
+    await waitFor(() => expect(api.apiList).toHaveBeenCalled())
+
+    const input = container.querySelector('input[type=file]') as HTMLInputElement
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'architecture.md')] })
+    fireEvent.change(input)
+
+    await waitFor(() => expect(screen.getByText(/Add to private/)).toBeTruthy())
+    await waitFor(() =>
+      expect(screen.getByText('The existing architecture.md will be replaced.')).toBeTruthy(),
+    )
+    expect(api.apiFetch).not.toHaveBeenCalled()
+  })
+
+  it('counts them instead of naming them when a pick would replace several', async () => {
+    api.apiList.mockResolvedValue({
+      items: [
+        { root: 'private', path: 'a.md', name: 'a.md', size: 1, mod_time: '2026-08-20T00:00:00Z' },
+        { root: 'private', path: 'b.md', name: 'b.md', size: 1, mod_time: '2026-08-20T00:00:00Z' },
+      ],
+      next_page_token: '',
+      total_count: 2,
+    })
+    const { container } = draw()
+    await waitFor(() => expect(api.apiList).toHaveBeenCalled())
+
+    const input = container.querySelector('input[type=file]') as HTMLInputElement
+    Object.defineProperty(input, 'files', {
+      value: [new File(['x'], 'a.md'), new File(['y'], 'b.md'), new File(['z'], 'fresh.md')],
+    })
+    fireEvent.change(input)
+
+    await waitFor(() => expect(screen.getByText(/Add to private/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('2 existing files will be replaced.')).toBeTruthy())
+  })
+
+  it('says nothing about replacement when the pick collides with nothing', async () => {
+    const { container } = draw()
+    await waitFor(() => expect(api.apiList).toHaveBeenCalled())
+
+    const input = container.querySelector('input[type=file]') as HTMLInputElement
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'brand-new.md')] })
+    fireEvent.change(input)
+
+    await waitFor(() => expect(screen.getByText(/Add to private/)).toBeTruthy())
+    // The probe is debounced, so let it run and settle before asserting absence.
+    await waitFor(() => expect(api.apiList.mock.calls.length).toBeGreaterThan(1))
+    expect(screen.queryByText(/will be replaced/)).toBeFalsy()
+  })
+
+  // The folder field decides where the files land, so it decides what they
+  // collide with. A probe answered for the empty folder must never be rendered
+  // against a typed one.
+  it('re-resolves what would be replaced when the folder changes', async () => {
+    const { container } = draw()
+    await waitFor(() => expect(api.apiList).toHaveBeenCalled())
+
+    const input = container.querySelector('input[type=file]') as HTMLInputElement
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'deploy.md')] })
+    fireEvent.change(input)
+    await waitFor(() => expect(screen.getByText(/Add to private/)).toBeTruthy())
+
+    // At the root, `deploy.md` collides with nothing — the held document is
+    // `runbooks/deploy.md`.
+    await waitFor(() => expect(api.apiList.mock.calls.length).toBeGreaterThan(1))
+    expect(screen.queryByText(/will be replaced/)).toBeFalsy()
+
+    fireEvent.change(screen.getByPlaceholderText('runbooks/deploys'), {
+      target: { value: 'runbooks' },
+    })
+
+    await waitFor(() =>
+      expect(screen.getByText('The existing runbooks/deploy.md will be replaced.')).toBeTruthy(),
+    )
+    const probe = api.apiList.mock.calls[api.apiList.mock.calls.length - 1][1]
+    expect(probe).toMatchObject({ root: 'private', path_prefix: 'runbooks' })
+  })
 })
 
 describe('Knowledge — the move verb', () => {
