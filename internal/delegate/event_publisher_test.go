@@ -5,9 +5,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/inference"
 )
 
 // fakeEventPublisher captures every published event so tests can assert
@@ -120,16 +123,21 @@ func TestBroadcastRunFailed_UnclassifiedOmitsFailureKind(t *testing.T) {
 	}
 }
 
-// TestBroadcastMessage_ToolUsePublishesActivity pins the volume-bounding
-// rule: only Subtype=="tool_use" publishes system:conversation:activity, and the
-// tool's Description resolves from Input["description"] when present.
-func TestBroadcastMessage_ToolUsePublishesActivity(t *testing.T) {
+// TestBroadcastMessage_AssistantToolCallsPublishActivity pins the
+// volume-bounding rule: a tool-calling assistant turn publishes
+// system:conversation:activity, one event for the whole batch, and the tool's
+// Description resolves from Input["description"] when present.
+//
+// The row is built the way a producer builds one — role and tool calls, blank
+// subtype — which is the whole contract. A fixture that stamps a subtype the
+// producers do not write would pass against a gate nothing can satisfy.
+func TestBroadcastMessage_AssistantToolCallsPublishActivity(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	pub := &fakeEventPublisher{}
 	s.SetEventPublisher(pub)
 
 	s.broadcastMessage("org-a", "run-1", &domain.Message{
-		Subtype: "tool_use",
+		Role: "assistant",
 		ToolCalls: []domain.ToolCall{
 			{ID: "1", Name: "Bash", Input: map[string]any{"description": "run tests", "command": "go test ./..."}},
 			{ID: "2", Name: "Read", Input: map[string]any{"file_path": "/x"}},
@@ -138,7 +146,7 @@ func TestBroadcastMessage_ToolUsePublishesActivity(t *testing.T) {
 
 	got := pub.eventsCopy()
 	if len(got) != 1 {
-		t.Fatalf("published %d events, want 1", len(got))
+		t.Fatalf("published %d events, want 1 (one per assistant turn, not per call)", len(got))
 	}
 	evt := got[0]
 	if evt.EventType != domain.EventSystemConversationActivity {
@@ -159,19 +167,100 @@ func TestBroadcastMessage_ToolUsePublishesActivity(t *testing.T) {
 	}
 }
 
-// TestBroadcastMessage_NonToolUseSubtypesPublishNothing pins the noise
-// filter: text/thinking messages never reach the bus.
-func TestBroadcastMessage_NonToolUseSubtypesPublishNothing(t *testing.T) {
-	for _, subtype := range []string{"text", "thinking", "tool"} {
-		t.Run(subtype, func(t *testing.T) {
+// TestBroadcastMessage_NativeProducerRowPublishesActivity feeds the publisher
+// exactly what the native runtime persists: inference.MessageToRow's output
+// for a provider completion carrying a tool call. It is the guard the
+// hand-built fixture above cannot be — it fails if the mapper ever stops
+// producing a row this gate accepts, rather than agreeing with a fixture.
+func TestBroadcastMessage_NativeProducerRowPublishesActivity(t *testing.T) {
+	name, id, fnType := "bash", "call-1", "function"
+	row, err := inference.MessageToRow(schemas.ChatMessage{
+		Role: schemas.ChatMessageRoleAssistant,
+		ChatAssistantMessage: &schemas.ChatAssistantMessage{
+			ToolCalls: []schemas.ChatAssistantMessageToolCall{{
+				Index: 0,
+				Type:  &fnType,
+				ID:    &id,
+				Function: schemas.ChatAssistantMessageToolCallFunction{
+					Name:      &name,
+					Arguments: `{"command":"go test ./..."}`,
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("MessageToRow: %v", err)
+	}
+
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	pub := &fakeEventPublisher{}
+	s.SetEventPublisher(pub)
+	s.broadcastMessage("org-a", "run-1", &row)
+
+	got := pub.eventsCopy()
+	if len(got) != 1 {
+		t.Fatalf("a native tool-call row published %d events, want 1", len(got))
+	}
+	meta := decodeConversationActivity(t, got[0].MetadataJSON)
+	if len(meta.Tools) != 1 || meta.Tools[0].Name != "bash" {
+		t.Errorf("Tools = %+v, want one entry named bash", meta.Tools)
+	}
+}
+
+// TestBroadcastMessage_SDKProducerRowPublishesActivity is the native guard's
+// counterpart for the SDK runtime: a real tool_use stream through the parser,
+// whose flushed row goes to the publisher untouched.
+func TestBroadcastMessage_SDKProducerRowPublishesActivity(t *testing.T) {
+	st := agentproc.NewStreamState()
+	st.ParseLine([]byte(`{"type":"system","subtype":"init","session_id":"s"}`), "t")
+	st.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"call-1","name":"Bash","input":{"description":"run tests","command":"go test ./..."}}]}}`), "t")
+	flushed, _ := st.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","stop_reason":"tool_use","content":[]}}`), "t")
+	if len(flushed) != 1 {
+		t.Fatalf("parser flushed %d rows, want 1", len(flushed))
+	}
+
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	pub := &fakeEventPublisher{}
+	s.SetEventPublisher(pub)
+	s.broadcastMessage("org-a", "run-1", flushed[0])
+
+	got := pub.eventsCopy()
+	if len(got) != 1 {
+		t.Fatalf("an SDK tool-call row published %d events, want 1", len(got))
+	}
+	meta := decodeConversationActivity(t, got[0].MetadataJSON)
+	if len(meta.Tools) != 1 || meta.Tools[0].Name != "Bash" || meta.Tools[0].Description != "run tests" {
+		t.Errorf("Tools = %+v, want one Bash entry described \"run tests\"", meta.Tools)
+	}
+}
+
+// TestBroadcastMessage_NonToolRowsPublishNothing pins the noise filter from
+// the other side: a turn that called no tool, and a row that is not an
+// assistant turn at all, stay off the bus. The tool-result arm matters most —
+// it carries the answer to a call that already published, and publishing it
+// again would double every tool the indicator shows.
+func TestBroadcastMessage_NonToolRowsPublishNothing(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  domain.Message
+	}{
+		{"assistant text only", domain.Message{Role: "assistant", Content: "here is what I found"}},
+		{"assistant reasoning only", domain.Message{Role: "assistant", Reasoning: []domain.ReasoningDetail{{Text: "thinking"}}}},
+		{"tool result", domain.Message{Role: "tool", ToolCallID: "call-1", Content: "ok"}},
+		{"user message", domain.Message{Role: "user", Content: "please fix the flake"}},
+		{"stop note", domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "stopped"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 			pub := &fakeEventPublisher{}
 			s.SetEventPublisher(pub)
 
-			s.broadcastMessage("org-a", "run-1", &domain.Message{Subtype: subtype})
+			msg := tc.msg
+			s.broadcastMessage("org-a", "run-1", &msg)
 
 			if got := pub.eventsCopy(); len(got) != 0 {
-				t.Fatalf("subtype %q published %d events, want 0", subtype, len(got))
+				t.Fatalf("published %d events, want 0", len(got))
 			}
 		})
 	}
@@ -186,7 +275,7 @@ func TestBroadcast_NilPublisher_NoPanic(t *testing.T) {
 	s.broadcastConversationUpdate("org-a", "run-1", "running")
 	s.broadcastConversationFailed("org-a", "run-1", domain.ConversationFailureMemoryLimit)
 	s.broadcastMessage("org-a", "run-1", &domain.Message{
-		Subtype:   "tool_use",
+		Role:      "assistant",
 		ToolCalls: []domain.ToolCall{{ID: "1", Name: "Bash"}},
 	})
 }

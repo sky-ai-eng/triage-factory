@@ -1471,9 +1471,14 @@ func (s *Spawner) broadcastMessage(orgID, conversationID string, msg *domain.Mes
 			Data:           msg.ToDTO(),
 		})
 	}
-	// Only tool_use is published — text/thinking are noise for bus
-	// consumers and this bounds volume (TFAC-592).
-	if msg.Subtype != "tool_use" {
+	// Only a tool-calling assistant turn is published — a plain text or
+	// reasoning turn is noise for bus consumers, and this bounds volume.
+	//
+	// The gate is the row's shape, never a subtype. A subtype marks a row
+	// that deviates from ordinary role behavior, and a tool call is the most
+	// ordinary thing an assistant row does: every producer writes these rows
+	// with a blank one, so a subtype gate here matches nothing.
+	if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
 		return
 	}
 	tools := make([]events.ConversationActivityTool, 0, len(msg.ToolCalls))
