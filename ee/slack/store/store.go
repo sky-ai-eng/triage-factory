@@ -121,6 +121,12 @@ type WorkspaceStore interface {
 	// the admin pool (bypasses RLS). System-code-only — see the type doc.
 	ListAllSystem(ctx context.Context) ([]Workspace, error)
 
+	// ListForOrgSystem mirrors ListForOrg on the admin pool (bypasses RLS),
+	// for claims-free system callers — the availability SystemProbe the
+	// brain's include_tools stamp resolves through. System-code-only, same
+	// discipline as ListAllSystem.
+	ListForOrgSystem(ctx context.Context, orgID string) ([]Workspace, error)
+
 	// GetByWorkspaceAppSystem looks up a workspace by its (Slack team ID,
 	// Slack app ID) pair alone (no org_id to scope by), on the admin pool.
 	// The pre-auth webhook receiver's only trusted input is the payload's

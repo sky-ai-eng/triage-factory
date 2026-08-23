@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
 // This file is the Slack provider's credential half: the brain-side resolver
@@ -64,6 +65,14 @@ func (c slackBundleCreds) tokenFor(workspaceID, apiAppID string) (string, bool) 
 // bundle then carries no Slack section). Runs only on the brain, against the
 // secret-bearing stores — the sidecar never reaches a secret store.
 func slackProviderCredential(ctx context.Context, stores db.Stores, scope agenthost.ProvisionScope) (json.RawMessage, error) {
+	// An unentitled org gets no Slack tokens sealed at all. The verb dispatch
+	// gates every call on the entitlement anyway (agenthost.callExtension), so
+	// this is defense in depth rather than the enforcement point — but a
+	// lapsed licence should also mean the credential material stops flowing
+	// into bundles, not just that the verbs refuse to use it.
+	if !entitlements.For(scope.OrgID).Has(entitlements.FeatureSlack) {
+		return nil, nil
+	}
 	bundle := slackstore.FromStores(stores)
 	if bundle == nil {
 		// EE not linked, or the Slack store isn't registered (local mode) —

@@ -1291,7 +1291,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		owner, repo, prNumber := parseGitHubTask(task)
 		cfg.owner, cfg.repo, cfg.prNumber = owner, repo, prNumber
 		cfg.scope = fmt.Sprintf("Repository: %s/%s\nPR: #%d", owner, repo, prNumber)
-		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.ID, eventsource.KindGitHub)
+		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindGitHub)
 		cfg.hasWT = true
 		// Re-fetched rather than inherited from the first step: by now the
 		// PR's history includes whatever the earlier steps pushed, which is
@@ -1310,7 +1310,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		cfg.wtPath, cfg.runRoot, cfg.workspace = wt, wt, prov
 	case "jira":
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
-		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.ID, eventsource.KindJira)
+		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindJira)
 		cfg.hasWT = false
 		wt, prov, err := s.ensureWorkspace(ctx, orgID, convForWS, gitSeed{},
 			func(ctx context.Context) (string, error) {
@@ -1322,7 +1322,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		cfg.wtPath, cfg.runRoot, cfg.workspace = wt, wt, prov
 	case "slack":
 		cfg.scope = fmt.Sprintf("Slack thread: %s", task.EntitySourceID)
-		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.ID, "slack")
+		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, "slack")
 		cfg.hasWT = false
 		wt, prov, err := s.ensureWorkspace(ctx, orgID, convForWS, gitSeed{},
 			func(ctx context.Context) (string, error) {

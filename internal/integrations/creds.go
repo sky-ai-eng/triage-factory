@@ -394,6 +394,33 @@ func GitHubReady(ctx context.Context, orgs db.OrgsStore, apps db.GitHubAppsStore
 	return app != nil && app.Active && app.ClientID != "", nil
 }
 
+// GitHubReadySystem is the system/background twin of GitHubReady, for callers
+// that hold no request JWT — same derivation, read through the claims-free
+// GetSettingsSystem / GetForOrgSystem doors instead of the claims-checked
+// reads. The creds bundle it takes was loaded with LoadSystem by the same
+// caller. System-code-only, same discipline as LoadSystem.
+func GitHubReadySystem(ctx context.Context, orgs db.OrgsStore, apps db.GitHubAppsStore, orgID string, creds auth.Credentials) (bool, error) {
+	if creds.GitHubPAT != "" {
+		return true, nil
+	}
+	orgSet, err := orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("read org settings: %w", err)
+	}
+	if orgSet.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
+		if !orgSet.GitHubCredentialClass.Known() {
+			credsLog.WarnContext(ctx, "unknown github credential class; github access resolves from the pat signal alone",
+				"org", orgID, "class", orgSet.GitHubCredentialClass)
+		}
+		return false, nil
+	}
+	app, err := apps.GetForOrgSystem(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("read org github app: %w", err)
+	}
+	return app != nil && app.Active && app.ClientID != "", nil
+}
+
 // ClearGitHub removes GitHub credentials for orgID.
 func ClearGitHub(ctx context.Context, secrets db.SecretStore, orgID string) error {
 	return clearKeys(ctx, secrets, orgID, KeyGitHubURL, KeyGitHubPAT)

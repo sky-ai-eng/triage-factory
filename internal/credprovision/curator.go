@@ -129,7 +129,7 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversati
 	if err != nil {
 		return fmt.Errorf("credprovision: seal bundle for curator turn %s: %w", conversationID, err)
 	}
-	if err := m.stores.ClaimCredentials.Put(ctx, orgID, conversationID, turn.HomeInstanceID, inst.BootEpoch, sealed); err != nil {
+	if err := m.stores.ClaimCredentials.Put(ctx, orgID, conversationID, turn.HomeInstanceID, inst.BootEpoch, sealed, m.includeToolsFor(ctx, orgID, conversationID)); err != nil {
 		return fmt.Errorf("credprovision: write bundle for curator turn %s: %w", conversationID, err)
 	}
 	log.Debug("provisioned curator turn credential bundle", "conversation", conversationID, "org", orgID, "home", turn.HomeInstanceID, "boot_epoch", inst.BootEpoch)

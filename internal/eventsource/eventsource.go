@@ -160,10 +160,21 @@ func (a Availability) CanProduce(kind string) bool {
 // one as the other is what makes a status read impossible to trust.
 type Probe func(ctx context.Context, tx db.TxStores, orgID string) (State, error)
 
+// SystemProbe answers the same question as Probe for JWT-less system callers
+// reading through the admin pool — the brain-side credential provisioner
+// resolving which sources a claim's agent should be told about. Same error
+// contract as Probe: a failed read is an error, never a state.
+type SystemProbe func(ctx context.Context, stores db.Stores, orgID string) (State, error)
+
 // Registration is what a source outside core's tree declares about itself.
 type Registration struct {
 	// Probe resolves the source's state. Required.
 	Probe Probe
+	// SystemProbe resolves the same state for JWT-less system callers on the
+	// admin pool. Optional: a source that declares none is simply outside
+	// AvailableKindsSystem's answer — never advertised to an agent by the
+	// system path, which is the safe direction for a probe nobody wrote.
+	SystemProbe SystemProbe
 	// MultiOnly omits the source from local-mode reads entirely, for a source
 	// whose backing store or transport cannot exist there. Omission is the
 	// honest answer in that case: every other state is a claim about this
@@ -191,6 +202,9 @@ type Registration struct {
 // source's Probe is adapted to this shape at declaration time.
 type probeFn func(ctx context.Context, r *resolver) (State, error)
 
+// systemProbeFn is probeFn's system twin, over the system pass's resolver.
+type systemProbeFn func(ctx context.Context, r *systemResolver) (State, error)
+
 // declaration is one source's entry in the resolved vocabulary — core's
 // built-ins and every registered source alike. A registration's MultiOnly is
 // resolved away before a declaration is built: local mode omits such a source
@@ -200,6 +214,10 @@ type declaration struct {
 	// probe is nil for a source TF has declared but not built: its state is
 	// the constant StateWIP and nothing is read.
 	probe probeFn
+	// systemProbe is probe's admin-pool twin, nil where no system answer
+	// exists — an unbuilt source, or a registration that declared none. A nil
+	// systemProbe keeps the source out of AvailableKindsSystem's answer.
+	systemProbe systemProbeFn
 	// required marks a source the product is built on, which therefore has no
 	// off switch. It is not a registration option and never will be: a source
 	// declared from outside core is by construction one this deployment works
@@ -222,8 +240,8 @@ type declaration struct {
 // nobody chose. schedule is TF's own internal cron trigger: no host, no poll
 // cadence, nothing external to configure.
 var builtins = []declaration{
-	{kind: KindGitHub, probe: githubState, required: true, hasHost: true, polled: true},
-	{kind: KindJira, probe: jiraState, hasHost: true, polled: true},
+	{kind: KindGitHub, probe: githubState, systemProbe: githubStateSystem, required: true, hasHost: true, polled: true},
+	{kind: KindJira, probe: jiraState, systemProbe: jiraStateSystem, hasHost: true, polled: true},
 	{kind: KindLinear, polled: true},
 	{kind: KindSchedule},
 }
@@ -270,7 +288,7 @@ func declarations() []declaration {
 		if local && reg.MultiOnly {
 			continue
 		}
-		out = append(out, declaration{kind: kind, probe: adapt(reg.Probe), hasHost: reg.HasHost, polled: reg.Polled})
+		out = append(out, declaration{kind: kind, probe: adapt(reg.Probe), systemProbe: adaptSystem(reg.SystemProbe), hasHost: reg.HasHost, polled: reg.Polled})
 	}
 	slices.SortFunc(out, func(a, b declaration) int {
 		if (a.probe == nil) != (b.probe == nil) {
@@ -287,6 +305,16 @@ func declarations() []declaration {
 // adapt wraps a registered source's Probe in the internal shape.
 func adapt(p Probe) probeFn {
 	return func(ctx context.Context, r *resolver) (State, error) { return p(ctx, r.tx, r.orgID) }
+}
+
+// adaptSystem wraps a registered source's SystemProbe in the internal shape;
+// nil stays nil, which is how a probe-less registration stays out of the
+// system answer.
+func adaptSystem(p SystemProbe) systemProbeFn {
+	if p == nil {
+		return nil
+	}
+	return func(ctx context.Context, r *systemResolver) (State, error) { return p(ctx, r.stores, r.orgID) }
 }
 
 // Resolve answers for every source this deployment can report on for orgID.
@@ -485,6 +513,133 @@ func githubState(ctx context.Context, r *resolver) (State, error) {
 // key presence, which is why a Cloud org — which has no PAT at all — correctly
 // reports available.
 func jiraState(ctx context.Context, r *resolver) (State, error) {
+	creds, err := r.credentials(ctx)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := integrations.JiraSystemConfig(creds); ok {
+		return StateAvailable, nil
+	}
+	return StateUnconfigured, nil
+}
+
+// AvailableKindsSystem is AvailableKinds for JWT-less system callers: same
+// question, same precedence, read through the admin-pool `...System` doors
+// with no claims transaction and no user identity. It exists for the brain's
+// credential provisioner, which stamps a claim's cleartext tools manifest
+// (claim_credentials.include_tools) at seal time — the executor composing the
+// run's <tools> section cannot resolve availability itself (its secret store
+// is disabled, and an event-triggered conversation has no user to claim as),
+// so the brain answers here and ships the answer with the bundle.
+//
+// A source resolves only through a system probe: core's two have them, a
+// registered source supplies Registration.SystemProbe, and one that doesn't is
+// simply absent from the answer — never advertised on a probe nobody wrote.
+// Any probe failure fails the whole read, per the package's error contract; the
+// provisioner degrades by stamping nothing, which the executor reads as
+// "fall back", never as "nothing is available".
+func AvailableKindsSystem(ctx context.Context, stores db.Stores, orgID string) ([]string, error) {
+	r := &systemResolver{stores: stores, orgID: orgID}
+	var out []string
+	for _, d := range declarations() {
+		if d.systemProbe == nil {
+			continue
+		}
+		st, err := r.state(ctx, d)
+		if err != nil {
+			return nil, err
+		}
+		if st == StateAvailable {
+			out = append(out, d.kind)
+		}
+	}
+	return out, nil
+}
+
+// systemResolver is resolver's system twin: one pass's shared admin-pool
+// reads, with the same lazy at-most-once credential and paused-set loads.
+type systemResolver struct {
+	stores db.Stores
+	orgID  string
+
+	creds       auth.Credentials
+	credsLoaded bool
+
+	paused       map[string]bool
+	pausedLoaded bool
+}
+
+// state mirrors resolver.state's precedence exactly — wip > unlicensed >
+// disabled > unconfigured > available — over the system probes. Callers skip
+// a declaration with no systemProbe before reaching here.
+func (r *systemResolver) state(ctx context.Context, d declaration) (State, error) {
+	st, err := d.systemProbe(ctx, r)
+	if err != nil {
+		return "", fmt.Errorf("resolve event source %q: %w", d.kind, err)
+	}
+	if st == StateUnlicensed || d.required {
+		return st, nil
+	}
+	paused, err := r.pausedKinds(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve event source %q: %w", d.kind, err)
+	}
+	if paused[d.kind] {
+		return StateDisabled, nil
+	}
+	return st, nil
+}
+
+// pausedKinds mirrors resolver.pausedKinds through the claims-free door. The
+// same read-failure posture: never answered as "nothing is paused".
+func (r *systemResolver) pausedKinds(ctx context.Context) (map[string]bool, error) {
+	if r.pausedLoaded {
+		return r.paused, nil
+	}
+	kinds, err := r.stores.OrgEventSources.ListDisabledSystem(ctx, r.orgID)
+	if err != nil {
+		return nil, err
+	}
+	r.paused = make(map[string]bool, len(kinds))
+	for _, k := range kinds {
+		r.paused[k] = true
+	}
+	r.pausedLoaded = true
+	return r.paused, nil
+}
+
+// credentials mirrors resolver.credentials through LoadSystem.
+func (r *systemResolver) credentials(ctx context.Context) (auth.Credentials, error) {
+	if r.credsLoaded {
+		return r.creds, nil
+	}
+	creds, err := integrations.LoadSystem(ctx, r.stores.Secrets, r.orgID)
+	if err != nil {
+		return auth.Credentials{}, err
+	}
+	r.creds, r.credsLoaded = creds, true
+	return creds, nil
+}
+
+// githubStateSystem / jiraStateSystem are the core probes' system twins: the
+// same derivations as githubState / jiraState, cut from the LoadSystem-loaded
+// bundle and the `...System` reads.
+func githubStateSystem(ctx context.Context, r *systemResolver) (State, error) {
+	creds, err := r.credentials(ctx)
+	if err != nil {
+		return "", err
+	}
+	ready, err := integrations.GitHubReadySystem(ctx, r.stores.Orgs, r.stores.GitHubApps, r.orgID, creds)
+	if err != nil {
+		return "", err
+	}
+	if ready {
+		return StateAvailable, nil
+	}
+	return StateUnconfigured, nil
+}
+
+func jiraStateSystem(ctx context.Context, r *systemResolver) (State, error) {
 	creds, err := r.credentials(ctx)
 	if err != nil {
 		return "", err
