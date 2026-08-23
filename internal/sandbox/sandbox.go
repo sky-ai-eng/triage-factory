@@ -33,17 +33,11 @@ type Config struct {
 	// EACCES.
 	Worktree string
 
-	// SDKDir is the host path containing wrapper.mjs + node_modules.
-	// Returned by agentproc.EnsureSDK. Bind-mounted RO at /sdk
-	// inside the sandbox.
-	SDKDir string
-
-	// Argv is the command exec'd inside the sandbox. Typically
-	// ["/usr/bin/node", "/sdk/wrapper.mjs", ...BuildArgs(opts)] —
-	// /usr/bin/node is the apk-installed nodejs in the cached alpine
-	// rootfs. First element MUST be an absolute path that exists in
-	// the sandbox rootfs or via a bind mount (runsc does not invoke
-	// a shell to PATH-resolve).
+	// Argv is the command exec'd inside the sandbox — the native runtime's
+	// resident tool host (TrustedToolHostBinaryDestination + "serve" and its
+	// arguments). First element MUST be an absolute path that exists in the
+	// sandbox rootfs or via a bind mount (runsc does not invoke a shell to
+	// PATH-resolve).
 	Argv []string
 
 	// Env is the COMPLETE env exposed to the sandboxed process.

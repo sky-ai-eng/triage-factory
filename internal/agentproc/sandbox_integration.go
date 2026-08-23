@@ -12,8 +12,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// shouldSandbox decides whether the current Run invocation routes
-// through the gVisor sandbox. Both conditions must hold:
+// shouldSandbox decides whether agent execution on this host runs inside
+// the gVisor sandbox. Both conditions must hold:
 //
 //   - runmode.ModeMulti: local-mode users are trusted with their own
 //     creds; sandboxing them is friction without isolation benefit
@@ -22,6 +22,13 @@ import (
 //   - runtime.GOOS == "linux": gVisor only works on Linux. Multi mode
 //     on macOS isn't a supported config (the production runner image
 //     is alpine Linux).
+//
+// The one consumer of this gate is the native runtime's resident tool-host
+// jail (agentproc.LaunchToolHost) — a multi+Linux deployment always runs its
+// delegations that way. Run/RunInteractive (the SDK loop) never sandbox: they
+// always take the direct spawn, wrapped on Linux in the bubblewrap courtesy
+// isolation instead (opts.LocalSandbox), which is not what this predicate
+// answers.
 func shouldSandbox() bool {
 	return runmode.Current() == runmode.ModeMulti && runtime.GOOS == "linux"
 }
@@ -35,10 +42,11 @@ func shouldSandbox() bool {
 // inside the run's own host-side directory.
 const SandboxWorkRoot = "/work"
 
-// WillSandbox reports whether a Run on this host will route through the gVisor
-// sandbox (multi mode + Linux). A caller that must pre-stage sandbox-only
-// inputs branches on this. Exported form of the internal shouldSandbox gate so
-// the predicate stays single-sourced.
+// WillSandbox reports whether agent execution on this host runs inside the
+// gVisor sandbox (multi mode + Linux — the native runtime's resident
+// tool-host jail; see shouldSandbox). A caller that must pre-stage
+// sandbox-only inputs branches on this. Exported form of the internal
+// shouldSandbox gate so the predicate stays single-sourced.
 func WillSandbox() bool {
 	return shouldSandbox()
 }

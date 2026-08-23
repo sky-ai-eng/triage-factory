@@ -161,10 +161,6 @@ func run(cfg benchConfig) error {
 		return fmt.Errorf("tool-host binary missing at %s — run inside the TF runtime image (scripts/sandbox-bench.sh): %w",
 			sandbox.TrustedToolHostBinaryPath(), err)
 	}
-	if _, err := os.Stat(sandbox.TrustedSDKDir()); err != nil {
-		return fmt.Errorf("SDK dir missing at %s — the broker mounts it unconditionally; run inside the TF runtime image: %w",
-			sandbox.TrustedSDKDir(), err)
-	}
 	if cfg.loadMax == 0 {
 		cfg.loadMax = 3 * float64(numCPU())
 	}
@@ -670,7 +666,6 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
 		ConversationID:       conversationID,
 		Worktree:             worktree,
-		SDKDir:               sandbox.TrustedSDKDir(),
 		PrebuiltNetwork:      rn,
 		AgentHostSocket:      agentMount,
 		MemoryLimitMB:        cfg.memLimitMB,

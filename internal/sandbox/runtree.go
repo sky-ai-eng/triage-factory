@@ -16,7 +16,7 @@ import (
 // RunTreeRoot (worktree already imports this package for ChownRunTree /
 // RemoveRunTree, and having the broker-side validator define the trusted
 // shape independently — rather than depend on the producer's constant —
-// mirrors how TrustedSDKDir/TrustedGitHooksDir resolve elsewhere in this
+// mirrors how TrustedGitHooksDir resolves elsewhere in this
 // package). A worktree package test cross-checks the two literals stay
 // equal.
 const runTreeBasename = "triagefactory-runs"

@@ -161,7 +161,6 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 		lr, _, werr := sandbox.Wrap(ctx, sandbox.Config{
 			ConversationID: conversationID,
 			Worktree:       worktree,
-			SDKDir:         t.TempDir(),
 			Argv:           append([]string{sandboxGHBinary}, args...),
 			Env:            env,
 			ExtraMounts:    mounts,
@@ -327,7 +326,6 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	lr, _, werr := sandbox.Wrap(ctx, sandbox.Config{
 		ConversationID: conversationID,
 		Worktree:       worktree,
-		SDKDir:         t.TempDir(),
 		// No -R: the repository has to come from the tree's own remote.
 		Argv: []string{sandboxGHBinary, "pr", "list", "--limit", "1"},
 		Env:  env,

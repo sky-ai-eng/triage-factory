@@ -99,10 +99,10 @@ type runProxies struct {
 	relays []*egressrelay.Server
 
 	// llmEnv is the LLM proxy's address + per-run placeholder, in the
-	// provider vocabulary the caller reads. Always populated; whether it also
-	// reaches the jail is the sandboxLLM decision one layer up. Read via
-	// RunProxyHandle.LLMEnv by a caller whose model calls originate outside
-	// the jail.
+	// provider vocabulary the caller reads. Always populated; never folded
+	// into the sandbox env — no jail is ever pointed at the LLM proxy. Read
+	// via RunProxyHandle.LLMEnv by the native engine, which runs in the
+	// executor process, not the jail.
 	llmEnv []string
 
 	// gitProxyURL / gitProxyToken are the git proxy's own address and per-run
@@ -423,8 +423,8 @@ func (h *RunProxyHandle) GitHandler() http.Handler {
 // the orchestrator, which writes the row. nil disables egress denial recording
 // (the slog line remains) — but the production sidecar always supplies it, and
 // a test asserts as much, because this hook shipped unwired once already.
-func StartRunProxies(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, sandboxLLM bool, git *GitProxyConfig, recordEgressDenial func(ctx context.Context, denied egressproxy.DeniedConnect), llmSource func(ctx context.Context) (env map[string]string, expiry time.Time, err error), identityPairs ...[2]string) (*RunProxyHandle, []string, error) {
-	bundle, env, err := startProxiesForSandbox(ctx, hostVethIP, resolvedCreds, sandboxLLM, git, recordEgressDenial, sigV4LiveSource(llmSource), identityPairs...)
+func StartRunProxies(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, git *GitProxyConfig, recordEgressDenial func(ctx context.Context, denied egressproxy.DeniedConnect), llmSource func(ctx context.Context) (env map[string]string, expiry time.Time, err error), identityPairs ...[2]string) (*RunProxyHandle, []string, error) {
+	bundle, env, err := startProxiesForSandbox(ctx, hostVethIP, resolvedCreds, git, recordEgressDenial, sigV4LiveSource(llmSource), identityPairs...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -446,12 +446,12 @@ func StartRunProxies(ctx context.Context, hostVethIP string, resolvedCreds map[s
 // shape determines the LLM proxy's provider + upstream. See the switch
 // below for the mapping.
 //
-// sandboxLLM decides whether the returned sandbox env names that proxy. The
-// proxy is bound either way (it is where the real key lives, and the veth
-// address is reachable from the host as well as from the jail); false means
-// the model calls originate outside the jail, so the jail is given no address
-// to reach a provider at and no placeholder to present. The caller reads the
-// coordinates off RunProxyHandle.LLMEnv instead.
+// The proxy is bound unconditionally (it is where the real key lives, and
+// the veth address is reachable from the host as well as from the jail), but
+// the returned sandbox env never names it — no jail is ever pointed at a
+// provider. The caller reads the coordinates off RunProxyHandle.LLMEnv
+// instead: the native engine, which makes model calls from the executor
+// process, not the jail.
 //
 // ctx scopes the eager git-credential probe (it surfaces a
 // no-credentials condition as ErrNoGitCredentials before the
@@ -468,7 +468,7 @@ func StartRunProxies(ctx context.Context, hostVethIP string, resolvedCreds map[s
 // Caller MUST call returned.Shutdown when the run completes (normal
 // or cancelled). On error, no proxies are running and the returned
 // bundle is nil — defer Shutdown is safe but a no-op.
-func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, sandboxLLM bool, git *GitProxyConfig, recordEgressDenial func(ctx context.Context, denied egressproxy.DeniedConnect), llmSource sigV4LiveSource, identityPairs ...[2]string) (*runProxies, []string, error) {
+func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, git *GitProxyConfig, recordEgressDenial func(ctx context.Context, denied egressproxy.DeniedConnect), llmSource sigV4LiveSource, identityPairs ...[2]string) (*runProxies, []string, error) {
 	if hostVethIP == "" {
 		return nil, nil, errors.New("agentproc: startProxiesForSandbox: hostVethIP is required")
 	}
@@ -545,19 +545,15 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	// placeholder is what the agent sends, not the real key).
 	llmURL := "http://" + addr
 
-	// One computation, two destinations. The handle always carries the LLM
-	// coordinates, because whoever asked for this proxy is calling a provider
-	// through it from somewhere; the SANDBOX env carries them only when the
-	// thing making those calls is inside the jail. An engine that runs in the
-	// executor process leaves the jail with no LLM channel at all — nothing to
-	// dial, nothing to authenticate with — which is a strictly smaller cell
-	// than the one Property B already guaranteed.
+	// The handle always carries the LLM coordinates, because whoever asked
+	// for this proxy is calling a provider through it from somewhere — the
+	// native engine, in the executor process. The SANDBOX env never carries
+	// them: no jail is ever pointed at a provider, so a jail is given no LLM
+	// channel at all — nothing to dial, nothing to authenticate with — which
+	// is a strictly smaller cell than the one Property B already guaranteed.
 	bundle.llmEnv = buildSandboxProxyEnv(cfg, llmURL, token)
 
 	var env []string
-	if sandboxLLM {
-		env = append(env, bundle.llmEnv...)
-	}
 
 	// Gating egress proxy (TFAC-567): the CONNECT-only door to public
 	// package registries, so `pnpm install` / `go mod download` /

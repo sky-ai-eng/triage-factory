@@ -270,19 +270,17 @@ type LaunchParams struct {
 	Env []EnvVar
 
 	// Args is the sandbox process argv. Its first two elements MUST be the
-	// pinned entrypoint (sandboxNodeBinary + sandboxWrapperEntry); the rest
-	// are the wrapper's arguments. validateArgv enforces the pin so the
-	// orchestrator can vary arguments but never the executed program.
+	// pinned entrypoint (TrustedToolHostBinaryDestination + toolHostServeVerb);
+	// the rest are the tool host's arguments. validateArgv enforces the pin
+	// so the orchestrator can vary arguments but never the executed program.
 	Args []string
 
-	// Worktree is the host path bind-mounted read-write at /work, SDKDir
-	// the host path bind-mounted read-only at /sdk. Mounts are additional
-	// run-data bind mounts (TF binary, agenthost socket, git hooks, shared
-	// read-only repo checkouts). These are bind SOURCES into the
-	// already-unprivileged sandbox, not the rootfs and not a spec — the
+	// Worktree is the host path bind-mounted read-write at /work. Mounts are
+	// additional run-data bind mounts (TF binary, agenthost socket, git
+	// hooks, shared read-only repo checkouts). These are bind SOURCES into
+	// the already-unprivileged sandbox, not the rootfs and not a spec — the
 	// broker applies its own fixed mount options.
 	Worktree string
-	SDKDir   string
 	Mounts   []Mount
 
 	// Rlimits is the numeric resource shape; empty uses defaultRlimits.

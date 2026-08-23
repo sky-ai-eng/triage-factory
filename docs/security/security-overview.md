@@ -41,7 +41,7 @@ process inside the sandbox):
 | --- | --- | --- |
 | **T1** | Credential exfiltration | Property B (§5): no credential ever enters the sandbox environment. |
 | **T2** | In-run credential misuse | Strongly bounded: no credential is raw in the sandbox, and each is reachable only through a constrained interface (GitHub token injected only on git fetch/push to the authorized repo; Jira/GitHub API are fixed host-side `exec` verbs; the real-`gh` channel injects one repo-set-scoped token at a proxy that audits every write it forwards and refuses two families outright — submitting a review and creating a repository, in every spelling including a raw `curl`; LLM key is provider-only via the proxy, and under the native runtime the sandbox is given no LLM channel at all). Residual: within its granted scope, and outside those refused families, the agent still acts with the run's authority (push to the authorized repo, comment and label on the repos it tracks, merge a pull request it was told to — subject only to the delegated runtime's advisory merge question, which does not bind a non-`bash` client — spend the org's LLM tokens), bounded by run wall-clock. |
-| **T3** | RCE in the agent SDK escaping the SDK process | gVisor + in-sandbox hardening (non-root uid, empty caps, seccomp, no-new-privs). |
+| **T3** | RCE in the in-jail process (the native runtime's resident tool host) escaping that process | gVisor + in-sandbox hardening (non-root uid, empty caps, seccomp, no-new-privs). |
 | **T4** | RCE escaping gVisor to the host kernel | gVisor's user-mode-kernel architecture. |
 
 **Adversary B — Triage Factory itself, as third-party code.** A company with a
@@ -240,8 +240,9 @@ Why this stays true as the code changes:
 - **Allowlist, not denylist, so new inputs fail closed.** A *new* dangerous value
   a future change might introduce is refused by default:
     - rootfs is chosen by catalog *name* (unknown → rejected);
-    - the SDK path is resolved by the broker (the orchestrator's is discarded);
-    - the command's first two argv are pinned;
+    - the command's first two argv are pinned to the tool-host binary + its
+      `serve` verb, and that binary's mount source is validated against the
+      broker's own resolution, never the orchestrator's;
     - env keys are an allowlist, and mount options the closed set `{ro, rw}`;
     - rlimit types are allowlisted;
     - the run-tree ops touch only trees owned by the sandbox or orchestrator uid,

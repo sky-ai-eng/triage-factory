@@ -156,11 +156,9 @@ func minimalConfig(t *testing.T) Config {
 	if err := os.Chown(worktree, WorktreeUID, WorktreeGID); err != nil {
 		t.Skipf("can't chown worktree to UID %d (probably not root): %v", WorktreeUID, err)
 	}
-	sdkDir := t.TempDir() // empty stub for integration tests
 	return Config{
 		ConversationID: "itest" + t.Name()[:min(len(t.Name()), 6)],
 		Worktree:       worktree,
-		SDKDir:         sdkDir,
 		Argv:           []string{"/bin/echo", "hello"},
 		Env: []string{
 			"PATH=/usr/local/bin:/usr/bin:/bin",

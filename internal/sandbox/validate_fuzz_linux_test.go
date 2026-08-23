@@ -67,10 +67,11 @@ func assertLaunchParamsSafe(t *testing.T, p LaunchParams) {
 		t.Fatalf("accepted a rootfs selector %q not in the catalog", p.Rootfs.Name)
 	}
 
-	// The command is pinned: argv[0:2] is always node + the trusted wrapper,
-	// so the orchestrator varies arguments but never the executed program.
-	if len(p.Args) < 2 || p.Args[0] != sandboxNodeBinary || p.Args[1] != sandboxWrapperEntry {
-		t.Fatalf("accepted argv %q whose entrypoint is not the pinned %q %q", p.Args, sandboxNodeBinary, sandboxWrapperEntry)
+	// The command is pinned: argv[0:2] is always the trusted tool-host binary
+	// + its serve verb, so the orchestrator varies arguments but never the
+	// executed program.
+	if len(p.Args) < 2 || p.Args[0] != TrustedToolHostBinaryDestination || p.Args[1] != toolHostServeVerb {
+		t.Fatalf("accepted argv %q whose entrypoint is not the pinned %q %q", p.Args, TrustedToolHostBinaryDestination, toolHostServeVerb)
 	}
 
 	// Worktree is a bind SOURCE the privileged broker mounts: clean, absolute,
@@ -242,7 +243,7 @@ func FuzzValidateLaunchParams(f *testing.F) {
 			{Key: "PATH", Value: "/usr/bin"},
 			{Key: "ANTHROPIC_BASE_URL", Value: "http://127.0.0.1:9"},
 		},
-		Args:      []string{sandboxNodeBinary, sandboxWrapperEntry, "run"},
+		Args:      []string{TrustedToolHostBinaryDestination, toolHostServeVerb, "--connect", "/run/tf-tools/tools.sock"},
 		Worktree:  RunTreeRoot("run-1"),
 		Mounts:    []Mount{{Source: seedSocket, Destination: TrustedAgentHostSocketDestination, Options: []string{"ro"}}},
 		Rlimits:   []Rlimit{{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 4096}},

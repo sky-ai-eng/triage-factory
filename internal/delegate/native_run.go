@@ -23,7 +23,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -132,7 +131,6 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		ConversationID:       conversationID,
 		MemoryNamespace:      namespace,
 		Worktree:             claudeCwd,
-		SDKDir:               paths.SDKDir(),
 		ExtraEnv:             s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID),
 		PrebuiltNetwork:      cfg.sidecar.runNetwork(),
 		PrebuiltProxyEnv:     cfg.sidecar.jailEnv(),

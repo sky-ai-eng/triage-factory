@@ -11,8 +11,8 @@ import (
 // It exists so an observer on a timer — the executor's resource sampler — can
 // ask "what jails are live?" without holding a reference to any run. The
 // registry is process-wide rather than threaded through each caller's options
-// because newSandboxCommand is the single choke point every sandboxed launch
-// passes through (delegated runs, the toolless system jobs), so registering
+// because LaunchToolHost is the single choke point every sandboxed launch
+// passes through (the native runtime's every engagement), so registering
 // there covers every surface at once and can't drift as surfaces
 // are added. A per-surface callback would have to be wired identically at each
 // call site to say the same thing.

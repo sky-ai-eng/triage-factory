@@ -45,10 +45,6 @@ type ToolHostOptions struct {
 	// Worktree is the host path bind-mounted at /work and the working
 	// directory every tool call resolves against.
 	Worktree string
-	// SDKDir is bind-mounted at /sdk. Still required by the spec builder and
-	// still mounted here; removing it from the native rootfs is a later
-	// phase, and mounting an unused directory changes nothing observable.
-	SDKDir string
 	// ExtraEnv is host-path-bearing env translated for the sandbox, exactly
 	// as the SDK path translates it.
 	ExtraEnv []string
@@ -313,7 +309,6 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (_ *ToolHostJail,
 		ConversationID:  opts.ConversationID,
 		MemoryNamespace: opts.MemoryNamespace,
 		Worktree:        opts.Worktree,
-		SDKDir:          opts.SDKDir,
 		Argv:            argv,
 		Env:             env,
 		ExtraMounts:     mounts,
