@@ -371,7 +371,7 @@ function PublishDialog({
                   </p>
                 </div>
 
-                <div className="text-reported text-warm bg-warm border border-warm rounded-lg px-3 py-2 leading-snug">
+                <div className="text-reported text-warm bg-warm-1 border border-warm-3 rounded-lg px-3 py-2 leading-snug">
                   Publishing makes the full prompt bod{kind === 'blueprint' ? 'ies' : 'y'} visible
                   to every team in the org.
                 </div>

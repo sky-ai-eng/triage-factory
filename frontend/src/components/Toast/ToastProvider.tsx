@@ -17,13 +17,13 @@ const LEVEL_DURATION: Record<ToastLevel, number> = {
   error: 1000 * 60 * 60 * 24, // "effectively sticky" — Radix requires a number
 }
 
-// Level-tinted left edge + icon color. Matches the warm neutral palette in
-// index.css — we don't introduce new hues, just reuse the existing
-// dismiss/claim/snooze/accent variables so toasts sit naturally in the UI.
+// Level-tinted left edge + icon color, descending the severity ladder the
+// token set expresses: alarm for failure, warm for caution, ink for the calm
+// levels — success one step firmer than info.
 const LEVEL_STYLE: Record<ToastLevel, { border: string; label: string }> = {
-  info: { border: 'border-l-[var(--color-warm)]', label: 'text-[var(--color-warm)]' },
-  success: { border: 'border-l-[var(--color-claim)]', label: 'text-[var(--color-claim)]' },
-  warning: { border: 'border-l-[var(--color-snooze)]', label: 'text-[var(--color-snooze)]' },
+  info: { border: 'border-l-[var(--color-ink-2)]', label: 'text-[var(--color-ink-2)]' },
+  success: { border: 'border-l-[var(--color-ink-1)]', label: 'text-[var(--color-ink-1)]' },
+  warning: { border: 'border-l-[var(--color-warm)]', label: 'text-[var(--color-warm)]' },
   error: { border: 'border-l-[var(--color-alarm)]', label: 'text-[var(--color-alarm)]' },
 }
 

@@ -228,10 +228,10 @@ function MergeIndicator({
 
 function ReviewBadge({ review }: { review: { author: string; state: string } }) {
   const colorMap: Record<string, string> = {
-    APPROVED: 'bg-tint-2 text-ink-2 border-line-1',
+    APPROVED: 'bg-tint-3 text-ink-1 border-line-2',
     CHANGES_REQUESTED: 'bg-alarm/10 text-alarm border-alarm/20',
     DISMISSED: 'bg-tint-3 text-ink-3 border-line-1',
-    PENDING: 'bg-tint-2 text-ink-2 border-line-1',
+    PENDING: 'bg-warm-1 text-warm border-warm-3',
   }
   const colors = colorMap[review.state] || 'bg-tint-3 text-ink-3 border-line-1'
   const icon = review.state === 'APPROVED' ? '✓' : review.state === 'CHANGES_REQUESTED' ? '✗' : '○'
@@ -257,7 +257,7 @@ function ChecksBar({
       <div className="flex-1 h-1.5 rounded-full bg-tint-3 overflow-hidden flex">
         {checks.passing > 0 && (
           <div
-            className="h-full bg-tint-2"
+            className="h-full bg-ink-2"
             style={{ width: `${(checks.passing / checks.total) * 100}%` }}
           />
         )}
@@ -269,7 +269,7 @@ function ChecksBar({
         )}
         {checks.pending > 0 && (
           <div
-            className="h-full bg-tint-2"
+            className="h-full bg-warm"
             style={{ width: `${(checks.pending / checks.total) * 100}%` }}
           />
         )}

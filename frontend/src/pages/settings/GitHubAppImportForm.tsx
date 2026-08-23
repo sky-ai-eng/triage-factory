@@ -352,7 +352,7 @@ function PermissionTable({ rows }: { rows: GitHubAppPermissionRow[] }) {
               </span>
               <span className="flex w-4 justify-end">
                 {p.satisfied ? (
-                  <Check size={13} className="text-[var(--color-claim)]" />
+                  <Check size={13} className="text-warm" />
                 ) : (
                   <X
                     size={13}

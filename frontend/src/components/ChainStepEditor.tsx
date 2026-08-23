@@ -97,7 +97,7 @@ export default function ChainStepEditor({
               className={`group flex items-start gap-3 rounded-lg border bg-raised px-3 py-2.5 transition-colors ${
                 dragIndex === i
                   ? 'border-warm/40 ring-1 ring-warm/30'
-                  : 'border-line-1 hover:border-line-1'
+                  : 'border-line-1 hover:border-line-2'
               } ${busy ? 'opacity-60' : ''}`}
             >
               <div className="cursor-grab text-ink-3 text-body leading-none mt-1 select-none">

@@ -111,7 +111,7 @@ export default function ProjectVisibilitySelect({
                   ? 'cursor-not-allowed border-line-1 bg-tint-2 opacity-50'
                   : selected
                     ? 'border-warm bg-warm-2'
-                    : 'border-line-1 bg-raised hover:bg-raised'
+                    : 'border-line-1 bg-raised hover:bg-sunk'
               }
             `}
           >

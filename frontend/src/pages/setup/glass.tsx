@@ -35,7 +35,7 @@ export function GlassBackdrop() {
       <div
         className="absolute -bottom-56 -right-32 h-[42rem] w-[42rem] rounded-full blur-[160px]"
         style={{
-          background: 'radial-gradient(circle, var(--color-snooze) 0%, transparent 70%)',
+          background: 'radial-gradient(circle, var(--color-warm) 0%, transparent 70%)',
           opacity: 0.1,
         }}
       />

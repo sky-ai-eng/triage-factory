@@ -438,7 +438,7 @@ export default function Factory() {
             Gated on ≥2 teams so solo users get no empty overlay box. */}
         {teams.length >= 2 && (
           <div
-            className={`absolute top-4 left-4 rounded-md bg-raised px-1 py-0.5 shadow transition-opacity duration-300 ${
+            className={`absolute top-4 left-4 rounded-md bg-raised px-1 py-0.5 shadow transition-opacity duration-[var(--dur-content)] ${
               cinematic ? 'pointer-events-none opacity-0' : 'opacity-100'
             }`}
           >
@@ -446,7 +446,7 @@ export default function Factory() {
           </div>
         )}
         <div
-          className={`absolute right-4 bottom-4 flex items-center gap-2 transition-opacity duration-300 ${
+          className={`absolute right-4 bottom-4 flex items-center gap-2 transition-opacity duration-[var(--dur-content)] ${
             cinematic ? 'pointer-events-none opacity-0' : 'opacity-100'
           }`}
         >
@@ -455,14 +455,14 @@ export default function Factory() {
             onClick={enterCinematic}
             title="Cinematic mode"
             aria-label="Cinematic mode"
-            className="rounded-md bg-raised p-2 text-ink-1 shadow transition hover:bg-raised"
+            className="rounded-md bg-raised p-2 text-ink-1 shadow transition hover:bg-sunk"
           >
             <Clapperboard className="h-4 w-4" strokeWidth={2} aria-hidden />
           </button>
           <button
             type="button"
             onClick={() => sceneRef.current?.resetView()}
-            className="rounded-md bg-raised px-3 py-2 text-reported font-semibold text-ink-1 shadow transition hover:bg-raised"
+            className="rounded-md bg-raised px-3 py-2 text-reported font-semibold text-ink-1 shadow transition hover:bg-sunk"
           >
             Reset view
           </button>
@@ -527,7 +527,7 @@ function StationDrawer({ info }: { info: ClickedStationInfo | null }) {
   return (
     <Tooltip.Provider delayDuration={250}>
       <div
-        className={`pointer-events-none absolute inset-x-0 bottom-0 z-40 transition-transform duration-300 ease-out ${
+        className={`pointer-events-none absolute inset-x-0 bottom-0 z-40 transition-transform duration-[var(--dur-content)] ease-out ${
           open ? 'translate-y-0' : 'translate-y-full'
         }`}
         style={{ height: '46vh' }}

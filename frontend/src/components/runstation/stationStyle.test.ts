@@ -93,7 +93,7 @@ describe('stationState', () => {
       const state = stationState(conversation({ Status: 'completed', Outcome: 'abort' }))
       expect(state.key).toBe('stopped')
       expect(state.label).toBe('STOPPED')
-      expect(state.light).toBe('var(--color-snooze)')
+      expect(state.light).toBe('var(--color-warm)')
     })
 
     it('lights a mid-chain step with no recorded outcome amber too — nothing follows it', () => {

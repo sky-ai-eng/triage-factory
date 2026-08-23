@@ -139,7 +139,7 @@ function MultiTeamResolve() {
 
 function ResolveFailed({ message, retry }: { message: string; retry: () => void }) {
   return (
-    <div className="min-h-screen bg-surface flex items-center justify-center">
+    <div className="min-h-screen bg-ground flex items-center justify-center">
       <div className="max-w-sm space-y-3 text-center">
         <p className="text-[13px] text-ink-2">{message}</p>
         <button
@@ -789,11 +789,7 @@ function WizardStack({ teamId, isLocal }: { teamId: string; isLocal: boolean }) 
                             className="absolute -left-9 top-px flex h-5 w-[21px] items-center justify-center bg-ground"
                           >
                             {complete && !isActive && !wasOpen ? (
-                              <Check
-                                size={13}
-                                strokeWidth={3}
-                                className="text-[var(--color-claim)]"
-                              />
+                              <Check size={13} strokeWidth={3} className="text-warm" />
                             ) : (
                               <span
                                 className={`text-reported font-semibold tabular-nums ${
@@ -911,7 +907,7 @@ function WizardStack({ teamId, isLocal }: { teamId: string; isLocal: boolean }) 
                                       <button
                                         type="button"
                                         onClick={wiz.retry}
-                                        className="rounded-lg border border-line-1 bg-raised px-3 py-1.5 text-ui font-medium text-ink-2 transition-colors hover:bg-raised"
+                                        className="rounded-lg border border-line-1 bg-raised px-3 py-1.5 text-ui font-medium text-ink-2 transition-colors hover:bg-sunk"
                                       >
                                         Retry
                                       </button>

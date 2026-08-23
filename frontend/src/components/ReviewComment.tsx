@@ -25,12 +25,12 @@ interface Props {
 
 // Native chip styling per severity level — the diff UI renders this
 // instead of the shields.io badge (which is only applied when the review
-// is posted to GitHub). Palette tracks domain.severityBadgeColor:
-// BLOCKER→red, MAJOR→orange, MINOR→amber, CLEAN→blue.
+// is posted to GitHub). Ordered by weight: BLOCKER carries the alarm hue,
+// MAJOR and MINOR sit one warm step apart, CLEAN is neutral.
 const SEVERITY_CHIP: Record<string, string> = {
   BLOCKER: 'bg-alarm/[0.10] text-alarm border-alarm/20',
-  MAJOR: 'bg-warm/[0.10] text-warm border-warm/20',
-  MINOR: 'bg-warm/[0.12] text-warm border-warm/25',
+  MAJOR: 'bg-warm-2 text-warm border-warm-4',
+  MINOR: 'bg-warm-1 text-warm border-warm-2',
   CLEAN: 'bg-ink-3/[0.10] text-ink-3 border-ink-3/20',
 }
 

@@ -469,7 +469,7 @@ function VariantB({
             <span
               key={h}
               className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-reported border ${
-                m ? 'bg-warm/10 text-warm border-warm/25' : 'bg-ink-3 text-ink-3 border-ink-3'
+                m ? 'bg-warm/10 text-warm border-warm/25' : 'bg-tint-2 text-ink-2 border-line-2'
               }`}
               title={m ? `${m.display}${m.isSelf ? ' (you)' : ''}` : `External handle: ${h}`}
             >

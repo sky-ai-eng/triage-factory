@@ -52,7 +52,7 @@ export function stationState(conversation: Conversation): StationState {
   if (isActiveConversation(conversation)) {
     return {
       key: 'working',
-      light: 'var(--color-delegate)',
+      light: 'var(--color-cool)',
       label: 'WORKING',
       live: true,
       scanner: true,
@@ -69,7 +69,7 @@ export function stationState(conversation: Conversation): StationState {
   if (hasUnresolvedArtifacts(conversation)) {
     return {
       key: 'attention',
-      light: 'var(--color-snooze)',
+      light: 'var(--color-warm)',
       label: 'YOUR MOVE',
       live: false,
       scanner: false,
@@ -93,7 +93,7 @@ export function stationState(conversation: Conversation): StationState {
     case 'queued':
       return {
         key: 'queued',
-        light: 'var(--color-snooze)',
+        light: 'var(--color-warm)',
         label: 'QUEUED',
         live: false,
         scanner: false,
@@ -127,7 +127,7 @@ export function stationState(conversation: Conversation): StationState {
           // still open — that is a your-move amber, never a success green.
           return {
             key: 'stopped',
-            light: 'var(--color-snooze)',
+            light: 'var(--color-warm)',
             label: 'STOPPED',
             live: false,
             scanner: false,
@@ -137,7 +137,7 @@ export function stationState(conversation: Conversation): StationState {
         default:
           return {
             key: 'done',
-            light: 'var(--color-claim)',
+            light: 'var(--color-ink-2)',
             label: 'DONE',
             live: false,
             scanner: false,

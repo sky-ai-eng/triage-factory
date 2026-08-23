@@ -176,7 +176,7 @@ export default function GitHubAccessGroup({
               new origin URL.
             </p>
             {sshTestState.kind === 'ok' && (
-              <p className="text-reported text-[var(--color-claim)] mt-1.5">
+              <p className="text-reported text-warm mt-1.5">
                 ✓ SSH preflight succeeded — git@
                 {(() => {
                   try {

@@ -260,7 +260,7 @@ export function CopyLink({ url }: { url: string }) {
       <button
         type="button"
         onClick={copy}
-        className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line-1 bg-raised px-3 py-2 text-ui font-medium text-ink-2 transition-colors hover:bg-raised hover:text-ink-1"
+        className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line-1 bg-raised px-3 py-2 text-ui font-medium text-ink-2 transition-colors hover:bg-sunk hover:text-ink-1"
       >
         {copied ? <Check size={13} className="text-ink-2" /> : <Copy size={13} />}
         {copied ? 'Copied' : 'Copy'}

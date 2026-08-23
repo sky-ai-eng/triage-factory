@@ -673,7 +673,7 @@ function ApprovalAffordance({
   if (counts.total === 1 && ids.length > 0) {
     return (
       <DockButton
-        tone="var(--color-snooze)"
+        tone="var(--color-warm)"
         solid
         onClick={() =>
           actions.onOpenArtifact?.(
@@ -690,7 +690,7 @@ function ApprovalAffordance({
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger asChild>
-        <DockButton tone="var(--color-snooze)" solid>
+        <DockButton tone="var(--color-warm)" solid>
           {approvalAction(counts)} →
         </DockButton>
       </Popover.Trigger>

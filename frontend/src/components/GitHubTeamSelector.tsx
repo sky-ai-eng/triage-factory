@@ -169,7 +169,7 @@ export default function GitHubTeamSelector({
             type="button"
             onClick={onBack}
             disabled={saving}
-            className="text-body text-ink-2 hover:text-ink-1 bg-raised hover:bg-raised disabled:opacity-40 border border-line-1 rounded-xl px-4 py-2 transition-colors"
+            className="text-body text-ink-2 hover:text-ink-1 bg-raised hover:bg-sunk disabled:opacity-40 border border-line-1 rounded-xl px-4 py-2 transition-colors"
           >
             Back
           </button>
@@ -178,7 +178,7 @@ export default function GitHubTeamSelector({
               type="button"
               onClick={onSkip}
               disabled={saving}
-              className="text-body text-ink-2 hover:text-ink-1 bg-raised hover:bg-raised disabled:opacity-40 border border-line-1 rounded-xl px-4 py-2 transition-colors"
+              className="text-body text-ink-2 hover:text-ink-1 bg-raised hover:bg-sunk disabled:opacity-40 border border-line-1 rounded-xl px-4 py-2 transition-colors"
             >
               Skip
             </button>

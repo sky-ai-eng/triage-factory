@@ -40,7 +40,7 @@ export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
           </p>
         </div>
         <div className="flex items-center gap-2.5 rounded-xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/50 px-4 py-3">
-          <span className="text-[var(--color-claim)]">
+          <span className="text-warm">
             <GitHubMark />
           </span>
           <p className="text-body text-ink-2">

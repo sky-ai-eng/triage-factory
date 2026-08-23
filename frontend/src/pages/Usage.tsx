@@ -216,9 +216,9 @@ const CATEGORY_LABEL: Record<string, string> = {
 }
 
 const CATEGORY_COLOR: Record<string, string> = {
-  manual: 'var(--color-delegate)',
+  manual: 'var(--color-cool)',
   autonomous: 'var(--color-warm)',
-  curator: 'var(--color-claim)',
+  curator: 'var(--color-ink-2)',
   system_overhead: 'var(--color-ink-3)',
 }
 
@@ -227,7 +227,7 @@ function categoryLabel(category: string): string {
 }
 
 function categoryColor(category: string): string {
-  return CATEGORY_COLOR[category] ?? 'var(--color-snooze)'
+  return CATEGORY_COLOR[category] ?? 'var(--color-ink-4)'
 }
 
 // tokenTitle is the burn-bar legend hover detail. The parenthetical parts must
@@ -699,11 +699,11 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
 // slices keep their category color instead.)
 const SERIES_PALETTE = [
   'var(--color-warm)',
-  'var(--color-delegate)',
-  'var(--color-snooze)',
+  'var(--color-cool)',
+  'var(--color-ink-2)',
   'var(--color-alarm)',
   'var(--hmi-cyan)',
-  'var(--color-claim)',
+  'var(--color-ink-4)',
 ]
 
 // Explainers for the org-level (non-team) slices. These stay distinct categories
@@ -1578,7 +1578,7 @@ const ACCESS_REVOCATIONS = new Set([
 ])
 
 function accessTone(action: string): string {
-  if (action === 'credential_set') return 'var(--color-claim)'
+  if (action === 'credential_set') return 'var(--color-ink-1)'
   if (ACCESS_REVOCATIONS.has(action)) return 'var(--color-alarm)'
   return 'var(--color-warm)'
 }

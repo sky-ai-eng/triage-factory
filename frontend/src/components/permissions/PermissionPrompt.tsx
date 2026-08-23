@@ -24,7 +24,7 @@ export function PermissionPrompt({
   /** Drop the standalone bottom margin — the host (a card) supplies spacing. */
   compact?: boolean
 }) {
-  const tone = 'var(--color-snooze)' // amber — a blocking "your move"
+  const tone = 'var(--color-warm)' // a blocking "your move"
   // Single-flight: the first click wins. Without it a quick Deny→Allow puts
   // two resolves in flight and the broker honors whichever lands first —
   // non-deterministic from the user's view. Resolving resets on settle so a
@@ -90,7 +90,7 @@ export function PermissionPrompt({
           Deny
         </PromptButton>
         <PromptButton
-          tone="var(--color-claim)"
+          tone="var(--color-warm)"
           solid
           onClick={() => void resolve('allow')}
           disabled={resolving || !onResolve}

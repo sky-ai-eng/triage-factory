@@ -321,7 +321,7 @@ const CONNECTION_STATUS_DISPLAY: Record<
   SlackConnectionStatus['state'],
   { label: string; dot: string; text: string }
 > = {
-  open: { label: 'Connected', dot: 'bg-ink-3', text: 'text-ink-3' },
+  open: { label: 'Connected', dot: 'bg-ink-1', text: 'text-ink-1' },
   dialing: { label: 'Connecting…', dot: 'bg-warm', text: 'text-warm' },
   draining: { label: 'Reconnecting…', dot: 'bg-warm', text: 'text-warm' },
   backing_off: { label: 'Reconnecting…', dot: 'bg-warm', text: 'text-warm' },

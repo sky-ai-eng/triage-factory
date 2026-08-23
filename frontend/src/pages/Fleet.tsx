@@ -219,9 +219,9 @@ function Stat({
 
 type ChipTone = 'rust' | 'good' | 'attention' | 'problem' | 'neutral'
 const CHIP_CLASS: Record<ChipTone, string> = {
-  rust: 'border-warm/30 text-warm',
+  rust: 'border-cool/40 text-cool',
   good: 'border-line-1 text-ink-2',
-  attention: 'border-line-1 text-ink-2',
+  attention: 'border-warm-3 text-warm',
   problem: 'border-alarm/40 text-alarm',
   neutral: 'border-line-1 text-ink-3',
 }
@@ -547,8 +547,8 @@ function MachineCard({
   const meterColor = inst.stale
     ? 'var(--color-alarm)'
     : inst.dispatch_gated
-      ? 'var(--color-snooze)'
-      : 'var(--color-warm)'
+      ? 'var(--color-warm)'
+      : 'var(--color-cool)'
   return (
     <div className="rounded-lg border border-line-1/70 bg-raised/40 p-4 transition-colors hover:border-line-1">
       <div className="flex items-start justify-between gap-2">
@@ -623,7 +623,7 @@ function MachineCard({
             className={`flex-1 rounded-md border py-1.5 font-mono text-label uppercase tracking-[0.15em] transition-colors disabled:opacity-40 ${
               inst.draining
                 ? 'border-line-1 text-ink-2 hover:bg-tint-2'
-                : 'border-line-1 text-ink-3 hover:border-line-1 hover:text-ink-2'
+                : 'border-line-1 text-ink-3 hover:border-line-2 hover:text-ink-2'
             }`}
           >
             {inst.draining ? 'resume claims' : 'drain'}
@@ -732,7 +732,7 @@ function SandboxSeries({ claim }: { claim: FleetSandboxClaim }) {
     <div className="space-y-4 py-2">
       <div className="grid grid-cols-1 gap-x-8 gap-y-4 md:grid-cols-2">
         <Instrument label="Memory · sampled">
-          <Trace data={mem} color="var(--color-claim)" fmt={(v) => fmtMem(v)} height="h-20" />
+          <Trace data={mem} color="var(--color-ink-2)" fmt={(v) => fmtMem(v)} height="h-20" />
         </Instrument>
         <Instrument label="CPU · derived from cumulative">
           <Trace
@@ -890,7 +890,7 @@ function QueueBand({ q }: { q: FleetBacklog | null }) {
             {shortId(o.org_id)}
           </span>
           <div className="flex-1">
-            <Meter value={o.count} max={maxCount} color="var(--color-snooze)" />
+            <Meter value={o.count} max={maxCount} color="var(--color-warm)" />
           </div>
           <span className="w-24 shrink-0 text-right font-mono text-label tabular-nums text-ink-2">
             {o.count} · {fmtDuration(o.oldest_wait_seconds)}
@@ -1047,14 +1047,14 @@ export default function Fleet() {
               <Instrument label="Active runs">
                 <Trace
                   data={trace(series, 'active')}
-                  color="var(--color-delegate)"
+                  color="var(--color-cool)"
                   fmt={(v) => `${Math.round(v)} runs`}
                 />
               </Instrument>
               <Instrument label="Queue depth">
                 <Trace
                   data={trace(series, 'queued')}
-                  color="var(--color-snooze)"
+                  color="var(--color-warm)"
                   fmt={(v) => `${Math.round(v)} waiting`}
                 />
               </Instrument>
@@ -1068,7 +1068,7 @@ export default function Fleet() {
               <Instrument label="Memory free (total)">
                 <Trace
                   data={trace(series, 'memGB')}
-                  color="var(--color-claim)"
+                  color="var(--color-ink-2)"
                   fmt={(v) => `${v.toFixed(1)}GB`}
                 />
               </Instrument>

@@ -20,18 +20,18 @@ export type Tone = 'rust' | 'active' | 'good' | 'attention' | 'problem' | 'neutr
 
 export const TONE_VAR: Record<Tone, string> = {
   rust: 'var(--color-warm)',
-  active: 'var(--color-delegate)',
-  good: 'var(--color-claim)',
-  attention: 'var(--color-snooze)',
+  active: 'var(--color-cool)',
+  good: 'var(--color-ink-1)',
+  attention: 'var(--color-warm)',
   problem: 'var(--color-alarm)',
   neutral: 'var(--color-ink-3)',
 }
 
 export const TONE_TEXT: Record<Tone, string> = {
   rust: 'text-warm',
-  active: 'text-delegate',
-  good: 'text-claim',
-  attention: 'text-snooze',
+  active: 'text-cool',
+  good: 'text-ink-1',
+  attention: 'text-warm',
   problem: 'text-alarm',
   neutral: 'text-ink-3',
 }
@@ -57,8 +57,8 @@ export function conversationGlow(conversation: Conversation): Glow | null {
 export type StepState = 'done' | 'active' | 'failed' | 'current' | 'pending'
 
 export const STEP_VAR: Record<StepState, string> = {
-  done: 'var(--color-claim)',
-  active: 'var(--color-delegate)',
+  done: 'var(--color-ink-2)',
+  active: 'var(--color-cool)',
   failed: 'var(--color-alarm)',
   current: 'var(--color-warm)',
   pending: 'var(--color-ink-3)',

@@ -82,7 +82,7 @@ export default function TrackersStep({ state, patch }: StepContext) {
                   ? 'cursor-default border-line-1 bg-tint-2 opacity-55'
                   : selected
                     ? 'border-warm/50 bg-warm/[0.06] shadow-float shadow-black/[0.03]'
-                    : 'border-line-1 bg-raised hover:border-warm/30 hover:bg-raised'
+                    : 'border-line-1 bg-raised hover:border-warm/30 hover:bg-sunk'
               }`}
             >
               <span className="flex items-center gap-1.5">

@@ -272,7 +272,7 @@ export default function PendingPRSummary({
             className={`flex items-center gap-1.5 text-ui font-semibold px-4 py-2 rounded-xl transition-all duration-150 ${
               submitting || saving || editingTitle || editingBody
                 ? 'bg-warm/50 text-warm-ink cursor-not-allowed'
-                : 'text-warm-ink bg-tint-2 hover:bg-tint-2'
+                : 'bg-warm text-warm-ink hover:bg-warm/90'
             }`}
           >
             {submitting ? (

@@ -435,7 +435,7 @@ export default function ReviewSummary({
                   ? 'bg-warm/50 text-warm-ink cursor-not-allowed'
                   : `text-warm-ink ${
                       reviewEvent === 'APPROVE'
-                        ? 'bg-tint-2 hover:bg-tint-2'
+                        ? 'bg-tint-2 hover:bg-tint-3'
                         : reviewEvent === 'REQUEST_CHANGES'
                           ? 'bg-alarm hover:bg-alarm/90'
                           : 'bg-warm hover:bg-warm/90'

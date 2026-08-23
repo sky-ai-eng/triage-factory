@@ -588,11 +588,7 @@ function PriorityGauge({ value }: { value: number }) {
   // 0.0 = low priority (cool), 1.0 = urgent (hot)
   const angle = -90 + value * 180
   const needleColor =
-    value >= 0.7
-      ? 'var(--color-alarm)'
-      : value >= 0.4
-        ? 'var(--color-snooze)'
-        : 'var(--color-claim)'
+    value >= 0.7 ? 'var(--color-alarm)' : value >= 0.4 ? 'var(--color-warm)' : 'var(--color-ink-3)'
 
   return (
     <svg width="18" height="12" viewBox="0 0 28 18" fill="none" className="shrink-0 mt-0.5">
@@ -636,11 +632,7 @@ function ConfidenceGauge({ value }: { value: number }) {
         ? 'Partially automatable'
         : 'Needs human attention'
   const needleColor =
-    value >= 0.7
-      ? 'var(--color-delegate)'
-      : value >= 0.4
-        ? 'var(--color-snooze)'
-        : 'var(--color-alarm)'
+    value >= 0.7 ? 'var(--color-cool)' : value >= 0.4 ? 'var(--color-warm)' : 'var(--color-alarm)'
 
   return (
     <Tooltip.Root>

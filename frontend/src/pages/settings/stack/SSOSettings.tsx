@@ -715,11 +715,11 @@ function BlockHeader({ title, hint }: { title: string; hint: string }) {
 
 function StatusBadge({ verified }: { verified: boolean }) {
   return verified ? (
-    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-tint-2 px-2 py-0.5 text-reported font-medium text-ink-2">
+    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-tint-3 px-2 py-0.5 text-reported font-medium text-ink-1">
       <Check size={11} aria-hidden /> Verified
     </span>
   ) : (
-    <span className="inline-flex shrink-0 items-center rounded-full bg-tint-3 px-2 py-0.5 text-reported font-medium text-ink-3">
+    <span className="inline-flex shrink-0 items-center rounded-full bg-warm-1 px-2 py-0.5 text-reported font-medium text-warm">
       Pending
     </span>
   )

@@ -35,7 +35,7 @@ export default function TeamMemberPicker({ orgId, teamId, onAdded }: TeamMemberP
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="inline-flex items-center gap-1.5 rounded-full border border-line-1 bg-raised px-3.5 py-2 text-body font-medium text-ink-2 transition-colors hover:bg-raised hover:text-ink-1"
+        className="inline-flex items-center gap-1.5 rounded-full border border-line-1 bg-raised px-3.5 py-2 text-body font-medium text-ink-2 transition-colors hover:bg-sunk hover:text-ink-1"
       >
         <Plus size={14} />
         Add member

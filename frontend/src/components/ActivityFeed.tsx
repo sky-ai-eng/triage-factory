@@ -379,7 +379,7 @@ export default function ActivityFeed({
                   type="button"
                   onClick={loadMore}
                   disabled={loadingMore || superseded}
-                  className="rounded-[4px] border border-line-1 bg-raised px-3 py-1 font-mono text-label uppercase tracking-[0.12em] text-ink-3 transition-colors hover:bg-raised hover:text-ink-2 disabled:opacity-50"
+                  className="rounded-[4px] border border-line-1 bg-raised px-3 py-1 font-mono text-label uppercase tracking-[0.12em] text-ink-3 transition-colors hover:bg-sunk hover:text-ink-2 disabled:opacity-50"
                 >
                   {loadingMore ? 'loading…' : 'load more'}
                 </button>
@@ -443,7 +443,7 @@ function FeedSelect({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         aria-label={label}
-        className="rounded-[4px] border border-line-1 bg-raised px-2 py-1 font-mono text-reported text-ink-2 transition-colors hover:bg-raised focus:outline-none focus:ring-1 focus:ring-warm/40"
+        className="rounded-[4px] border border-line-1 bg-raised px-2 py-1 font-mono text-reported text-ink-2 transition-colors hover:bg-sunk focus:outline-none focus:ring-1 focus:ring-warm/40"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>

@@ -103,7 +103,7 @@ function PromptNode({
         if (e.shiftKey || e.metaKey || e.ctrlKey) return
         data.onClick?.()
       }}
-      className="bg-raised backdrop-blur border border-line-1 rounded-lg px-3 py-2.5 min-w-[200px] max-w-[240px] shadow-float hover:border-warm/30 hover:shadow-float transition-all cursor-pointer"
+      className="bg-raised backdrop-blur border border-line-1 rounded-lg px-3 py-2.5 min-w-[200px] max-w-[240px] shadow-float hover:border-warm/30 transition-all cursor-pointer"
     >
       {/* Target (left): a prompt's single input — an event (it becomes a
           blueprint's entry) OR an upstream step. Source (right): its single
@@ -1973,7 +1973,7 @@ function BindingGraphInner({
                     <button
                       onClick={() => void deleteBlueprint(boxMenu.blueprintId)}
                       disabled={deleteBlueprintGuard.pending}
-                      className="flex-1 text-reported font-semibold text-warm-ink bg-alarm hover:bg-alarm disabled:opacity-60 px-2.5 py-1 rounded-md transition-colors"
+                      className="flex-1 text-reported font-semibold text-warm-ink bg-alarm hover:bg-alarm/90 disabled:opacity-60 px-2.5 py-1 rounded-md transition-colors"
                     >
                       {deleteBlueprintGuard.pending ? 'Deleting…' : 'Delete'}
                     </button>
@@ -2053,7 +2053,7 @@ function BindingGraphInner({
               <button
                 onClick={() => void executeDeletePlan(deleteConfirm)}
                 disabled={bulkDeleteGuard.pending}
-                className="text-reported font-semibold text-warm-ink bg-alarm hover:bg-alarm disabled:opacity-60 px-3 py-1.5 rounded-md transition-colors"
+                className="text-reported font-semibold text-warm-ink bg-alarm hover:bg-alarm/90 disabled:opacity-60 px-3 py-1.5 rounded-md transition-colors"
               >
                 {bulkDeleteGuard.pending ? 'Deleting…' : 'Delete'}
               </button>

@@ -118,7 +118,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
       {hasOverride && (
         <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3 text-ui text-ink-2">
           <div className="flex items-center gap-2">
-            <Check size={14} className="text-[var(--color-claim)]" />
+            <Check size={14} className="text-warm" />
             <span className="font-medium text-ink-1">Atlassian app configured</span>
           </div>
           <p className="mt-1 break-all font-mono text-reported text-ink-3">

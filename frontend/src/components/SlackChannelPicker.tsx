@@ -67,7 +67,7 @@ const CHIP_STYLE: Record<ChipKind, { dot: string; text: string }> = {
   unclaimed: { dot: 'bg-warm', text: 'text-warm' },
   'tracked-other': { dot: 'bg-ink-3/40', text: 'text-ink-3' },
   watching: { dot: 'bg-ink-3', text: 'text-ink-3' },
-  primary: { dot: 'bg-ink-3', text: 'text-ink-3' },
+  primary: { dot: 'bg-ink-1', text: 'text-ink-1' },
 }
 
 function Chip({ label, dot, text }: { label: string; dot: string; text: string }) {

@@ -478,7 +478,7 @@ function ChartCard({ title, children }: { title: string; children: React.ReactNo
 }
 
 const COLORS = {
-  merged: 'var(--color-claim)',
+  merged: 'var(--color-ink-1)',
   closed: 'var(--color-alarm)',
   awaiting: 'var(--color-warm)',
   draft: 'var(--color-ink-3)',
@@ -547,8 +547,8 @@ function MergedTimeline({ data }: { data: { date: string; count: number }[] }) {
         <AreaChart data={formatted}>
           <defs>
             <linearGradient id="mergedGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--color-claim)" stopOpacity={0.3} />
-              <stop offset="100%" stopColor="var(--color-claim)" stopOpacity={0} />
+              <stop offset="0%" stopColor="var(--color-ink-1)" stopOpacity={0.3} />
+              <stop offset="100%" stopColor="var(--color-ink-1)" stopOpacity={0} />
             </linearGradient>
           </defs>
           <XAxis dataKey="label" hide />
@@ -571,7 +571,7 @@ function MergedTimeline({ data }: { data: { date: string; count: number }[] }) {
           <Area
             type="monotone"
             dataKey="count"
-            stroke="var(--color-claim)"
+            stroke="var(--color-ink-1)"
             strokeWidth={2}
             fill="url(#mergedGrad)"
           />
@@ -594,7 +594,7 @@ function ReviewBalance({ given, received }: { given: number; received: number })
       <div className="flex h-2.5 rounded-full overflow-hidden bg-tint-3">
         <div
           className="h-full rounded-l-full"
-          style={{ width: `${givenPct}%`, background: 'var(--color-delegate)' }}
+          style={{ width: `${givenPct}%`, background: 'var(--color-ink-2)' }}
         />
         <div
           className="h-full rounded-r-full"
