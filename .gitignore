@@ -8,6 +8,7 @@ triagefactory
 # rather than sitting there waiting to be swept into a commit.
 node_modules/
 frontend/dist/
+.pnpm-store/
 
 # IDE
 .idea/
@@ -21,6 +22,7 @@ frontend/dist/
 _scratch/
 _tfac/
 .claude/*
+.codex/*
 !.claude/settings.json
 docs/triagefactory-spec.md
 docs/oauth-smoke.html
