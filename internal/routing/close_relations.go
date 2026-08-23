@@ -66,7 +66,7 @@ type closeRelation struct {
 // uniform.
 var closeRelations = []closeRelation{
 	// CI went green → close the entity's CI-failure tasks, but only if no
-	// check is still failing at the latest SHA.
+	// check is still failing or still running at the latest SHA.
 	{
 		onEvents: []string{domain.EventGitHubPRCICheckPassed},
 		closes:   []string{domain.EventGitHubPRCICheckFailed},
@@ -307,17 +307,25 @@ func (r *Router) prSnapshotForEntity(ctx context.Context, orgID, entityID string
 	return &snap, true
 }
 
-// prepareCIPassed gates ci_check_failed closes on a fully-green snapshot: if any
-// check is still failing at the latest SHA, don't close.
+// prepareCIPassed gates ci_check_failed closes on a fully-green snapshot: if
+// any check is still failing OR still running at the latest SHA, don't close.
+//
+// Pending blocks the close because it is indistinguishable from an unresolved
+// failure: the snapshot keeps only the latest run per check name, and
+// re-running a failed check replaces its failing row with a queued/in_progress
+// one that has no conclusion yet. "Not currently failing" is not "resolved" —
+// inside that window an unrelated check's pass must not close the task, since
+// the re-run may fail again. Once the suite completes, whichever pass event
+// lands last trips this gate, so the close arrives with the check that
+// actually recovered.
 func prepareCIPassed(ctx context.Context, r *Router, orgID string, _ domain.Event, entityID string) (closeContext, bool) {
 	snap, ok := r.prSnapshotForEntity(ctx, orgID, entityID)
 	if !ok {
 		return nil, false
 	}
-	for _, cr := range snap.CheckRuns {
-		if domain.IsFailingConclusion(cr.Conclusion) {
-			return nil, false
-		}
+	switch domain.CIStatusFromCheckRuns(snap.CheckRuns) {
+	case "failure", "pending":
+		return nil, false
 	}
 	return nil, true
 }

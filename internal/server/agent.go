@@ -798,12 +798,13 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 // help — the client surfaces the clear error rather than a transient conflict.
 // A concluded conversation (ErrConversationConcluded) is 409 as well, but it
 // carries its own message: this conversation's blueprint will never drive it
-// again (it has moved past this step, or was cancelled). That is a permanent answer
-// rather than a lost race the client should re-read — surface the text, don't
-// prompt a refresh. A step that just handed off (ErrStepHandedOff) is 409 for
-// the opposite reason: the conversation concluded and its blueprint has not
-// reacted yet, so the answer genuinely does change a beat later and a refresh
-// is exactly what resolves it.
+// again (it has moved past this step). A cancelled one (ErrBlueprintCancelled)
+// is the same class — the blueprint was called off at its own layer — under
+// its own words. Both are permanent answers rather than a lost race the client
+// should re-read — surface the text, don't prompt a refresh. A step that just
+// handed off (ErrStepHandedOff) is 409 for the opposite reason: the
+// conversation concluded and its blueprint has not reacted yet, so the answer
+// genuinely does change a beat later and a refresh is exactly what resolves it.
 // A cross-pod signal whose owning executor never acked (ErrSignalAckTimeout,
 // TFAC-585) is 504 Gateway Timeout — the reply-leg contract's "conversation owner did
 // not acknowledge; the conversation may be mid-teardown" case; the UI already
@@ -819,7 +820,8 @@ func steerErrorStatus(err error) (int, string) {
 		return http.StatusGone, httpx.ReasonConflict
 	case errors.Is(err, delegate.ErrSignalAckTimeout):
 		return http.StatusGatewayTimeout, httpx.ReasonUpstreamUnavailable
-	case errors.Is(err, delegate.ErrConversationConcluded):
+	case errors.Is(err, delegate.ErrConversationConcluded),
+		errors.Is(err, delegate.ErrBlueprintCancelled):
 		return http.StatusConflict, httpx.ReasonAlreadyTerminal
 	case errors.Is(err, delegate.ErrNoLiveProcess),
 		errors.Is(err, delegate.ErrConversationNotSteerable),

@@ -29,6 +29,7 @@ func TestSteerErrorStatus(t *testing.T) {
 		{"NotSteerable", delegate.ErrConversationNotSteerable, http.StatusConflict, httpx.ReasonConflict},
 		{"NotResumable", delegate.ErrConversationNotResumable, http.StatusConflict, httpx.ReasonConflict},
 		{"Concluded", delegate.ErrConversationConcluded, http.StatusConflict, httpx.ReasonAlreadyTerminal},
+		{"BlueprintCancelled", delegate.ErrBlueprintCancelled, http.StatusConflict, httpx.ReasonAlreadyTerminal},
 		{"WorkspaceExpired", delegate.ErrWorkspaceExpired, http.StatusGone, httpx.ReasonConflict},
 		{"WorkspaceExpired wrapped", fmt.Errorf("wrap: %w", delegate.ErrWorkspaceExpired), http.StatusGone, httpx.ReasonConflict},
 		{"random server error", errors.New("db down"), http.StatusInternalServerError, httpx.ReasonInternal},

@@ -35,6 +35,7 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 		name            string
 		blueprintStatus string
 		currentStep     int // the blueprint's position; the seeded run is step 0
+		cancelRequested bool
 		removeWorkspace bool
 		wantOK          bool
 		wantReason      string
@@ -74,8 +75,19 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 			name:            "workspace intact, blueprint cancelled",
 			blueprintStatus: "cancelled",
 			wantOK:          false,
-			wantReason:      ResumeBlockedBlueprintConcluded,
-			wantErr:         ErrConversationConcluded,
+			wantReason:      ResumeBlockedBlueprintCancelled,
+			wantErr:         ErrBlueprintCancelled,
+		},
+		{
+			// The close transaction's stamp, before (or without) the finalize:
+			// cancel_requested is the durable intent, and it refuses under the
+			// cancel's own name even while the status still says running.
+			name:            "workspace intact, cancel requested on a running blueprint",
+			blueprintStatus: "running",
+			cancelRequested: true,
+			wantOK:          false,
+			wantReason:      ResumeBlockedBlueprintCancelled,
+			wantErr:         ErrBlueprintCancelled,
 		},
 	}
 	for _, runtime := range []string{"sdk", "native"} {
@@ -93,8 +105,8 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 					wt := t.TempDir()
 					seedConversation(t, database, conversationID, "sess-"+conversationID, wt)
 					setConversationStatus(t, database, conversationID, "open")
-					if _, err := database.Exec(`UPDATE blueprint_runs SET status=?, current_step_index=? WHERE id=?`,
-						tc.blueprintStatus, tc.currentStep, blueprintRunIDForConversation(t, database, conversationID)); err != nil {
+					if _, err := database.Exec(`UPDATE blueprint_runs SET status=?, current_step_index=?, cancel_requested=? WHERE id=?`,
+						tc.blueprintStatus, tc.currentStep, tc.cancelRequested, blueprintRunIDForConversation(t, database, conversationID)); err != nil {
 						t.Fatalf("set blueprint status: %v", err)
 					}
 					s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")

@@ -38,30 +38,36 @@ import (
 var ErrConversationNotResumable = errors.New("resume: conversation not in a resumable state")
 
 // ErrConversationConcluded is returned when a conversation's workspace is
-// intact but its blueprint will never drive it again, so a wake would strand it
+// intact but its blueprint has moved past this step, so a wake would strand it
 // mid-flight forever — claimed by nobody, counted as queue depth by every
-// counter. Two shapes reach it, and the message names both because a caller
-// cannot tell them apart from the outside:
+// counter. The blueprint's steps share one worktree and one snapshot blob, so
+// the tree an earlier step would resume into is no longer its own — while the
+// blueprint is still running (a later step is in that tree right now) exactly
+// as once it has stopped.
 //
-//   - the blueprint has moved past this step. Its steps share one worktree and
-//     one snapshot blob, so the tree an earlier step would resume into is no
-//     longer its own — while the blueprint is still running (a later step is in
-//     that tree right now) exactly as once it has stopped; or
-//   - the blueprint was cancelled at its own layer, so nothing under it runs
-//     again.
-//
-// One sentinel for both because they are the same answer to the only question
-// the caller is asking: this is permanent, and it is about this conversation
-// rather than about timing. Not a claim that the conversation ended of its own
-// accord — a step that concluded cleanly is exactly what reaches here once the
-// blueprint moves on. A conversation stopped by a user reaches neither: a stop
-// freezes its blueprint 'running' with the pointer on that step, precisely so
-// the parked step stays claimable.
+// Permanent, and about this conversation rather than about timing. Not a
+// claim that the conversation ended of its own accord — a step that concluded
+// cleanly is exactly what reaches here once the blueprint moves on. A
+// conversation stopped by a user reaches neither this nor
+// ErrBlueprintCancelled: a stop freezes its blueprint 'running' with the
+// pointer on that step, precisely so the parked step stays claimable.
 //
 // Its own sentinel rather than ErrConversationNotResumable, because the two say
 // different things to a person. "Not resumable" means the state moved under
 // you: refresh and look again. This means refreshing will never change it.
-var ErrConversationConcluded = errors.New("resume: this conversation can no longer be continued — its blueprint has moved past this step, or was cancelled (only the step a blueprint is currently on takes follow-ups)")
+var ErrConversationConcluded = errors.New("resume: this conversation can no longer be continued — its blueprint has moved past this step (only the step a blueprint is currently on takes follow-ups)")
+
+// ErrBlueprintCancelled is returned when a conversation's workspace is intact
+// but its blueprint was called off at its own layer — the task it rode was
+// closed or dispositioned, its team archived, or the run cancelled outright —
+// so nothing under it runs again.
+//
+// As permanent as ErrConversationConcluded, and its own sentinel for the same
+// reason that one is split from ErrConversationNotResumable: the words a
+// person needs are different. Nothing here moved past anything — the work
+// itself was ended, and the stop note on the transcript names the lifecycle
+// event that ended it.
+var ErrBlueprintCancelled = errors.New("resume: this conversation can no longer be continued — the workflow it belonged to was cancelled")
 
 // ErrStepHandedOff is returned when a conversation concluded as a step of a
 // blueprint that has not reacted to that terminal yet.

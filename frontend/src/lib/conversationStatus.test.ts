@@ -245,6 +245,18 @@ describe('resumeBlockedCopy', () => {
     )
   })
 
+  it('tells a cancelled workflow apart from one that moved past the step', () => {
+    // A cancelled workflow moved past nothing — for a single-step blueprint
+    // there is no later step to have moved to — so its copy must not claim it
+    // did. The cancel gets its own words.
+    const cancelled = resumeBlockedCopy(base({ resume_blocked_reason: 'blueprint_cancelled' }))
+    expect(cancelled).toMatch(/cancelled/i)
+    expect(cancelled).not.toMatch(/moved past/i)
+    expect(cancelled).not.toBe(
+      resumeBlockedCopy(base({ resume_blocked_reason: 'blueprint_concluded' })),
+    )
+  })
+
   it('tells a just-handed-off step apart from one the blueprint has left behind', () => {
     // Two refusals that both mention the blueprint, and the difference is the
     // whole message: one is over, the other is a moment.
