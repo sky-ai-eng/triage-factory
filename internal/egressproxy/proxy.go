@@ -349,25 +349,32 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		// absolute-form plain-HTTP proxying would add a request-parsing
 		// surface for no consumer. The body names the policy so an
 		// agent reading its failed tool output can adjust.
-		s.deny(w, r.Host, "egress proxy is CONNECT-only (HTTPS tunneling); plain-HTTP proxying is not supported")
+		s.deny(w, r, "egress proxy is CONNECT-only (HTTPS tunneling); plain-HTTP proxying is not supported")
 		return
 	}
 
 	// CONNECT authority form is host:port.
 	host, port, err := net.SplitHostPort(r.Host)
 	if err != nil {
-		s.deny(w, r.Host, fmt.Sprintf("malformed CONNECT target %q (want host:port)", r.Host))
+		s.deny(w, r, fmt.Sprintf("malformed CONNECT target %q (want host:port)", r.Host))
 		return
 	}
 	if port != connectPort {
-		s.deny(w, r.Host, fmt.Sprintf("port %s is not tunneled; only %s (HTTPS) is allowed", port, connectPort))
+		s.deny(w, r, fmt.Sprintf("port %s is not tunneled; only %s (HTTPS) is allowed", port, connectPort))
 		return
 	}
 	hostNorm := normalizeHost(host)
 	if _, ok := s.allowed[hostNorm]; !ok {
 		// Covers IP-literal targets too: the allowlist holds hostnames,
 		// so a literal never matches — default-deny, as specified.
-		s.deny(w, r.Host, fmt.Sprintf("host %q is not on the sandbox egress allowlist", host))
+		reason := fmt.Sprintf("host %q is not on the sandbox egress allowlist", host)
+		// Hosts with a sanctioned alternative say so: the refusal is the
+		// one message guaranteed to reach whoever aimed at the host, and
+		// "no" without "use this instead" reads as a hurdle to route around.
+		if g := deniedHostGuidance(hostNorm); g != "" {
+			reason += "; " + g
+		}
+		s.deny(w, r, reason)
 		return
 	}
 
@@ -375,7 +382,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var pd policyDenial
 		if errors.As(err, &pd) {
-			s.deny(w, r.Host, pd.reason)
+			s.deny(w, r, pd.reason)
 			return
 		}
 		egressLog.Warn("upstream dial failed", "target", r.Host, "error", err)
@@ -482,7 +489,18 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, upstream net.Con
 // goroutines hostage — the DoS shape the bounded queue exists to
 // kill). A full queue drops the record and counts it; the slog line
 // above is the trace that survives drops.
-func (s *Server) deny(w http.ResponseWriter, target, reason string) {
+//
+// For a CONNECT, the reason is also the status line's reason phrase.
+// A client tunneling through a proxy never reads the body of a refused
+// CONNECT: Go's transport surfaces only the text after the status code
+// (and gh is a Go client), Python's raises it as "Tunnel connection
+// failed: 403 <phrase>" — so a canonical status line reduces every
+// denial to a bare "Forbidden" with the actual reason discarded unread.
+// The phrase is the one channel that survives, which means writing the
+// response by hand: ResponseWriter always emits the canonical phrase
+// for the code.
+func (s *Server) deny(w http.ResponseWriter, r *http.Request, reason string) {
+	target := r.Host
 	egressLog.Info("egress denied", "target", target, "reason", reason)
 	if s.denials != nil {
 		select {
@@ -495,7 +513,54 @@ func (s *Server) deny(w http.ResponseWriter, target, reason string) {
 			}
 		}
 	}
+	if r.Method == http.MethodConnect && refuseConnect(w, reason) {
+		return
+	}
+	// Non-CONNECT denials (and the can't-hijack fallback) keep the plain
+	// response: those clients read the body, where the reason already is.
 	http.Error(w, "egress proxy: "+reason, http.StatusForbidden)
+}
+
+// refuseConnect writes the CONNECT refusal by hand over the hijacked conn so
+// the status line carries reason as its phrase. Reports false — response
+// unwritten, caller falls back to http.Error — when the ResponseWriter can't
+// hijack or the hijack fails.
+func refuseConnect(w http.ResponseWriter, reason string) bool {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		return false
+	}
+	conn, brw, err := hj.Hijack()
+	if err != nil {
+		return false
+	}
+	defer func() { _ = conn.Close() }()
+	body := "egress proxy: " + reason + "\n"
+	fmt.Fprintf(brw, "HTTP/1.1 403 %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		reasonPhrase(reason), len(body), body)
+	_ = brw.Flush()
+	return true
+}
+
+// reasonPhrase renders reason as a status-line reason phrase: one line of
+// SP / HTAB / visible characters (the RFC 9112 grammar), everything else
+// mapped to a space so no input can splice a header or a second status line
+// into the response head. The denial reasons are our own format strings, and
+// the one caller-controlled part — the CONNECT target — arrives %q-escaped;
+// the mapping is the backstop, not the primary defense. Capped well under
+// the 4 KiB line buffer Go's transport reads a proxy response with.
+func reasonPhrase(reason string) string {
+	const maxPhraseBytes = 512
+	clean := strings.Map(func(r rune) rune {
+		if r == '\t' || r == ' ' || (r > 0x20 && r != 0x7f) {
+			return r
+		}
+		return ' '
+	}, reason)
+	if len(clean) > maxPhraseBytes {
+		clean = strings.ToValidUTF8(clean[:maxPhraseBytes], "")
+	}
+	return clean
 }
 
 // callerAuthorized validates the Proxy-Authorization Basic credential

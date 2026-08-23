@@ -281,6 +281,95 @@ func TestProxy_DeniesTheGitHubAPIHosts(t *testing.T) {
 	}
 }
 
+// TestProxy_ConnectDenialStatusLineCarriesReason pins the denial's delivery
+// channel: the reason must ride the status LINE, not just the body, because a
+// client tunneling through a proxy discards the body of a refused CONNECT and
+// Go's transport surfaces only the text after the status code. This is
+// exactly how `gh run view` — which follows the run object's absolute
+// api.github.com jobs_url out of the injector channel — used to die with a
+// bare "Forbidden" and nothing to act on.
+//
+// It also pins which hosts carry a remedy: the GitHub API hosts point at the
+// exec verbs, github.com points at the run's git path, and a host with no
+// sanctioned alternative gets the bare allowlist reason and no invented one.
+func TestProxy_ConnectDenialStatusLineCarriesReason(t *testing.T) {
+	cases := []struct {
+		host        string
+		wantPhrase  []string
+		absentInAll string
+	}{
+		{host: "api.github.com", wantPhrase: []string{
+			"not on the sandbox egress allowlist",
+			"gh actions download-logs",
+		}},
+		{host: "github.com", wantPhrase: []string{
+			"not on the sandbox egress allowlist",
+			"credential proxy",
+		}},
+		{host: "evil.example.com",
+			wantPhrase:  []string{"not on the sandbox egress allowlist"},
+			absentInAll: "exec verbs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.host, func(t *testing.T) {
+			addr := newTestServer(t, Config{AllowedHosts: DefaultRegistryHosts()}, nil, nil, nil)
+			resp := rawConnect(t, addr, tc.host+":443", "")
+			statusLine, _, _ := strings.Cut(resp, "\r\n")
+			for _, want := range tc.wantPhrase {
+				if !strings.Contains(statusLine, want) {
+					t.Errorf("status line %q should carry %q — the body of a refused CONNECT is never read", statusLine, want)
+				}
+			}
+			if tc.absentInAll != "" && strings.Contains(resp, tc.absentInAll) {
+				t.Errorf("denial for %s mentions %q; a host with no sanctioned alternative must not point at one:\n%s",
+					tc.host, tc.absentInAll, resp)
+			}
+		})
+	}
+}
+
+// TestProxy_GoClientSurfacesDenialReason drives the report's exact shape end
+// to end: a Go http.Client behind the proxy (what gh is) asking for a GitHub
+// API URL must fail with an error that names the policy and the verb to use
+// instead — not the canonical "Forbidden" the transport reduces a normal 403
+// CONNECT response to.
+func TestProxy_GoClientSurfacesDenialReason(t *testing.T) {
+	addr := newTestServer(t, Config{AllowedHosts: DefaultRegistryHosts()}, nil, nil, nil)
+	proxyURL, err := url.Parse("http://" + addr)
+	if err != nil {
+		t.Fatalf("parse proxy addr: %v", err)
+	}
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+		Timeout:   2 * time.Second,
+	}
+	_, err = client.Get("https://api.github.com/repos/o/r/actions/runs/1/jobs?per_page=100")
+	if err == nil {
+		t.Fatal("GET through the proxy succeeded; api.github.com must be refused")
+	}
+	for _, want := range []string{"not on the sandbox egress allowlist", "gh actions download-logs"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("client error %q should carry %q for the agent to act on", err.Error(), want)
+		}
+	}
+}
+
+// TestReasonPhrase_SingleLineAndBounded pins the response-splitting backstop:
+// whatever composes the reason, the phrase that reaches the status line is one
+// bounded line with control bytes neutralized.
+func TestReasonPhrase_SingleLineAndBounded(t *testing.T) {
+	got := reasonPhrase("a\r\nSet-Cookie: x\nb\x00c")
+	if strings.ContainsAny(got, "\r\n\x00") {
+		t.Errorf("reasonPhrase left control bytes in %q", got)
+	}
+	if got != "a  Set-Cookie: x b c" {
+		t.Errorf("reasonPhrase = %q; control bytes should map to spaces", got)
+	}
+	if long := reasonPhrase(strings.Repeat("x", 4096)); len(long) > 512 {
+		t.Errorf("reasonPhrase length = %d; must stay well under the client's 4 KiB line buffer", len(long))
+	}
+}
+
 // TestProxy_SlowDenialSinkDoesNotDelayResponse pins the async-audit
 // contract: with a sink wedged on a never-closed channel, the 403
 // still returns immediately — the response path must never wait on

@@ -15,6 +15,11 @@ Its response tells you what happened: either the review was posted, or it was st
 your team configures which, and both mean your work is done.
 Read the response rather than assuming, and do not call it twice.
 
+**Investigating CI.** `tfac gh actions list-runs --pr <N>` lists a PR's recent workflow runs;
+`tfac gh actions download-logs <run_id>` downloads and extracts a run's full log archive,
+naming the extraction directory as `dest_dir` in its JSON result — Read/Grep the files there (one top-level directory per job).
+These replace `gh run view` and `gh run download`, which cannot fetch job or log data from this sandbox.
+
 **Working with issue trackers.** `tfac jira ticket view|search|create|comment|transition|assign|set-priority` covers Jira.
 If your organization has not connected a tracker these return a clear error — do not build a plan around filing a ticket unless your mission actually references one.
 

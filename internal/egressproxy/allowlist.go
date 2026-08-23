@@ -52,6 +52,35 @@ func DefaultRegistryHosts() []string {
 	}
 }
 
+// deniedHostGuidance returns the remedy sentence appended to the
+// client-visible denial reason for hosts whose refusal has a better answer
+// than "not on the list". These are the hosts the "Deliberately absent" note
+// above names, plus the API host itself: a CONNECT aimed at any of them is
+// almost always an agent (or its tooling) reaching for GitHub directly when
+// the run already has an audited channel for exactly that — most commonly
+// `gh` following an absolute api.github.com URL out of a response body
+// (`gh run view`'s jobs fetch, the release-asset verbs), which bypasses the
+// GH_HOST base-URL redirect and lands here. Empty for every other host: a
+// registry nobody allowlisted has no sanctioned alternative to point at, and
+// inventing one would send the agent to do useless work.
+//
+// The verbs are named without an invocation prefix, like ghwrite's refusal
+// explanations, because the spelling differs per runtime (`tfac gh …` in the
+// native jail, `<binary> exec gh …` under the SDK) and the agent's own
+// prompt teaches the right one. host must already be normalizeHost'd.
+func deniedHostGuidance(host string) string {
+	switch host {
+	case "api.github.com", "uploads.github.com":
+		return "GitHub API access goes through this run's credential channel, " +
+			"which direct connections (including gh following an absolute URL from an API response) bypass. " +
+			"Use the Triage Factory exec verbs instead — CI logs: `gh actions download-logs <run_id>`"
+	case "github.com", "codeload.github.com":
+		return "git reaches GitHub through this run's preconfigured credential proxy. " +
+			"Use git with the worktree's existing remotes, or the workspace exec verbs to add a checkout"
+	}
+	return ""
+}
+
 // normalizeHost canonicalizes a hostname for allowlist matching:
 // lowercase, trailing dot stripped (DNS root-anchored form
 // "registry.npmjs.org." must match its bare spelling).
