@@ -87,11 +87,3 @@ override (and remove `seaweedfs-postinit` from `triagefactory`'s `depends_on` in
 that override) if you don't want it running. Pre-create the bucket on the hosted
 side (the `seaweedfs-postinit` sidecar only ensures the bucket on the bundled
 SeaweedFS).
-
-## Knowledge base (multi mode)
-
-`internal/kbstore` wraps this same blob store, but nothing currently reads or
-writes through it: the projects-based knowledge base it served has been
-removed along with the rest of the "projects" concept. It stays orphaned
-intentionally, for a later ticket to re-key it per-team and wire it into
-delegated runs.
