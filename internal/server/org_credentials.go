@@ -28,29 +28,35 @@ import (
 // remains on POST /api/settings/org is now pure config: it touches no secret,
 // makes no outbound call, and can't destroy access as a side effect.
 //
-// The host stays config (github_base_url / jira_base_url on the settings route)
-// because the GitHub App path needs a host with no credential in sight. The
-// credential routes still take it in the body — a token is only meaningful
-// against the host it authenticates to, and validating against a host the org
-// hasn't committed to proves nothing — so the bind writes both together and the
-// unbind clears both. Only these routes may write the secret; that's the
-// property that matters.
+// The host is config, not credential: github_base_url / jira_base_url are
+// written by the settings route and only there. The GitHub App path needs a
+// host with no credential in sight, and a column with two writers is a column
+// with two validation dialects. So the credential routes take no host in the
+// body — the GitHub bind resolves the org's committed one and validates
+// against that, which is what makes a successful bind mean "this token works
+// for this workspace's GitHub" rather than "this token works for whichever
+// host the caller passed". The unbind still clears the host, because a
+// workspace with no credential is not connected to a GitHub; that is the
+// disconnect's own call, not the mirror of a write the bind makes.
+//
+// Only these routes may write the secret; that's the property that matters.
 
-// githubPATRequest is the PUT /github/pat body: the host the token
-// authenticates against and the token itself, both required. There is no
-// "leave blank to keep current" — a blank token means the caller had nothing to
-// bind and shouldn't have called at all, which is exactly the ambiguity that
-// disappears once the credential has its own route.
+// githubPATRequest is the PUT /github/pat body: the token, and nothing else.
+// The host it authenticates against is the org's own, read through the
+// resolver — a caller cannot name one, so it cannot name a different one than
+// the workspace is configured for. There is no "leave blank to keep current"
+// either: a blank token means the caller had nothing to bind and shouldn't have
+// called at all, which is exactly the ambiguity that disappears once the
+// credential has its own route.
 type githubPATRequest struct {
-	BaseURL string `json:"base_url"`
-	PAT     string `json:"pat"`
+	PAT string `json:"pat"`
 }
 
 // handleGitHubPATPut binds (or rotates) the org's GitHub bot PAT — PAT_1, the
 // token TF authenticates to GitHub with. It validates the token live against
-// base_url, then in one transaction stores the credential, persists the
-// resolved @login for the agents row, records the access-log row, and updates
-// the org's base URL. Org-admin only.
+// the org's configured GitHub host, then in one transaction stores the
+// credential, persists the resolved @login for the agents row, and records the
+// access-log row. Org-admin only.
 //
 // Deliberately NOT bound to the caller's GitHub identity: per-user identity
 // (PAT_2) is captured by its own surface, so access and identity stay
@@ -66,19 +72,6 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 
 	var req githubPATRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return
-	}
-	if strings.TrimSpace(req.BaseURL) == "" {
-		badRequestField(w, "A GitHub base URL is required.", "base_url")
-		return
-	}
-	// The same validator + canonicalizer the settings PATCH runs before writing
-	// this very column, so both doors hold one rule about what github_base_url
-	// can contain: userinfo, a query and a fragment are refused, while plain
-	// http and an IP literal with a port stay accepted (private GHES hosts).
-	baseURL, valid := normalizeBaseURL(req.BaseURL)
-	if !valid {
-		invalidBaseURLField(w, "base_url")
 		return
 	}
 	pat := strings.TrimSpace(req.PAT)
@@ -125,9 +118,20 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The org's own GitHub host, resolved the same way the switch flow beside
+	// this one resolves it. It fails closed rather than guessing: a settings or
+	// secret read it cannot complete is an error here, never a silent
+	// fall-through to github.com, because pairing a GHES token with the public
+	// host would send a tenant credential to the wrong server.
+	baseURL, err := s.ghResolver.BaseURLFor(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-access", err)
+		return
+	}
+
 	ghUser, err := auth.CaptureGitHubIdentity(ctx, baseURL, pat)
 	if err != nil {
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub: " + err.Error(), Field: "pat"})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: githubPATValidationMessage(baseURL, err), Field: "pat"})
 		return
 	}
 
@@ -177,19 +181,11 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		if err := persistOrgGitHubIdentity(ctx, tx, orgID, ghUser.Login, ghUser.PrimaryEmail); err != nil {
 			return fmt.Errorf("persist org github identity: %w", err)
 		}
-		orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
-		if err != nil {
-			return fmt.Errorf("load org settings: %w", err)
-		}
-		orgSet.GitHubBaseURL = baseURL
-		if _, err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
-			return fmt.Errorf("save org settings: %w", err)
-		}
 		// The org is now in the PAT credential system. Written here, in the same
 		// transaction as the token itself, so the class can never outlive or
 		// precede the credential it describes — a crash between two separate
-		// writes would leave the class lying. UpdateSettings above does not carry
-		// it (it deliberately doesn't own the column), hence the separate call.
+		// writes would leave the class lying. It is its own store call because
+		// UpdateSettings deliberately doesn't own the column.
 		if _, err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
 			return fmt.Errorf("set github credential class: %w", err)
 		}

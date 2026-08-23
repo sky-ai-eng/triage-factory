@@ -87,18 +87,12 @@ const appPitch = (
 
 export default function GitHubAccessControl({
   ctx,
-  baseUrl,
   reload,
 }: {
   // The StepContext OrgSettings owns — its live draft (with the githubApp*
   // fields its load seeded) + patch, reused so the account-type/register step
   // bodies render identically to /setup.
   ctx: StepContext
-  // The org's SAVED GitHub host — the baseline, deliberately not the draft the
-  // GitHub URL section above may be mid-edit. A token is bound against the host
-  // it was validated against, so a rotation must not quietly re-point the org at
-  // a URL nobody has committed to yet.
-  baseUrl: string
   // Re-run OrgSettings' load after a committed switch, so the live mode, the
   // section summary, and the clone-protocol gate all re-derive.
   reload: () => void
@@ -244,7 +238,7 @@ export default function GitHubAccessControl({
     if (!orgId || busy) return
     setBusy(true)
     setError(null)
-    const res = await connectGitHubPAT(orgId, baseUrl, pat)
+    const res = await connectGitHubPAT(orgId, pat)
     if (!res.ok) {
       setError(res.error)
       setBusy(false)

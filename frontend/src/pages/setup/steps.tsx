@@ -421,10 +421,11 @@ const githubUrlStep: WizardStep = {
     const url = normalizeBaseUrl(state.org.github_url)
     const result = await checkGitHubReachability(url)
     if (!result.reachable) throw new Error(reachabilityMessage(result))
-    // Persist the base URL now: the App-registration path reads the stored
-    // host, and the PAT path re-saves URL+creds together at the access step.
-    // The save names only the URL, so the intervals / model cap are untouched
-    // by construction.
+    // Persist the base URL now: it is what both access paths read. The App
+    // registration derives its host from the stored value, and the PAT bind
+    // validates the token against it — neither carries a host of its own, so
+    // this step is where the workspace commits to one. The save names only the
+    // URL, so the intervals / model cap are untouched by construction.
     if (!orgId) throw new Error('Settings didn’t load — retry before saving.')
     const settings = await saveOrgSlice({ state, patch, orgId }, { github_url: url })
     patch({
@@ -751,7 +752,6 @@ const githubPatStep: WizardStep = {
     // we don't write: confirm the stored credential still resolves and move on.
     // (Under the old bulk save, blank rode a "leave blank to keep current"
     // contract through the same request that could have rotated it.)
-    let version = state.org.version
     if (typedPat === '') {
       const { githubReady } = await fetchIntegrationsState()
       if (!githubReady) {
@@ -759,12 +759,12 @@ const githubPatStep: WizardStep = {
       }
     } else {
       if (!orgId) throw new Error('No organization context.')
-      const result = await connectGitHubPAT(orgId, state.org.github_url, typedPat)
+      // No host goes with the token: the GitHub URL step above already probed
+      // and saved it, and the bind validates against that saved value. So this
+      // writes no settings column and the concurrency token stays where the URL
+      // step left it.
+      const result = await connectGitHubPAT(orgId, typedPat)
       if (!result.ok) throw new Error(result.error)
-      // The bind also persisted the base URL onto the settings row, so the
-      // concurrency token moved — pick up the fresh one, or the very next org
-      // save (clone protocol / poll interval) conflicts with this connect.
-      version = await freshOrgVersion(orgId, version)
     }
     // Local-mode convenience (the "use this token as my own GitHub identity too"
     // checkbox): reuse the just-connected org PAT to also bind the operator's own
@@ -788,7 +788,7 @@ const githubPatStep: WizardStep = {
           userIdentityLogin: id.login,
           userIdentityHost: id.host,
           userGitHubPat: '',
-          org: { ...state.org, github_pat: '', version },
+          org: { ...state.org, github_pat: '' },
         })
         return
       } catch {
@@ -797,12 +797,12 @@ const githubPatStep: WizardStep = {
           githubReady: true,
           hasGitHubPat: true,
           userGitHubPat: typedPat,
-          org: { ...state.org, github_pat: '', version },
+          org: { ...state.org, github_pat: '' },
         })
         return
       }
     }
-    patch({ githubReady: true, hasGitHubPat: true, org: { ...state.org, github_pat: '', version } })
+    patch({ githubReady: true, hasGitHubPat: true, org: { ...state.org, github_pat: '' } })
   },
   collapsedSummary: connectedSummary,
   render: (ctx) => <GitHubPatStep {...ctx} />,
