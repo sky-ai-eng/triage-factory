@@ -107,12 +107,12 @@ export default function EventSourcesGroup({
   }
 
   if (!loaded) {
-    return <p className="text-[12px] text-text-tertiary">Loading event sources…</p>
+    return <p className="text-[12px] text-ink-3">Loading event sources…</p>
   }
 
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-[11px] text-text-tertiary">
+      <p className="text-[11px] text-ink-3">
         Turning a source off stops everything Triage Factory does with it: polling it, creating
         tasks from it, and giving agents access to it. It does not disconnect the integration, and
         it does not close tasks or stop runs that already exist. Sources the product is built on
@@ -124,8 +124,8 @@ export default function EventSourcesGroup({
         return (
           <div key={src.kind} className="flex items-center justify-between gap-4">
             <div className="min-w-0">
-              <p className="text-[13px] text-text-primary">{sourceLabel(src.kind)}</p>
-              <p className="mt-0.5 text-[11px] text-text-tertiary">{stateNote(src)}</p>
+              <p className="text-[13px] text-ink-1">{sourceLabel(src.kind)}</p>
+              <p className="mt-0.5 text-[11px] text-ink-3">{stateNote(src)}</p>
             </div>
             {editable && (
               <button
@@ -136,7 +136,7 @@ export default function EventSourcesGroup({
                 disabled={pending.has(src.kind)}
                 onClick={() => void setDisabled(src.kind, !off)}
                 className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors disabled:opacity-50 ${
-                  off ? 'bg-black/[0.08]' : 'bg-accent'
+                  off ? 'bg-black/[0.08]' : 'bg-warm'
                 }`}
               >
                 <span

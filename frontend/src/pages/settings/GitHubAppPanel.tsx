@@ -162,9 +162,9 @@ export default function GitHubAppPanel({
               type="button"
               onClick={() => setGhAppDetailsExpanded((v) => !v)}
               aria-expanded={ghAppDetailsExpanded}
-              className="w-full flex items-center gap-2 rounded-xl bg-tint-2 border border-line-1 px-4 py-2.5 text-left transition-colors hover:bg-tint-2"
+              className="w-full flex items-center gap-2 rounded-xl bg-tint-2 border border-line-1 px-4 py-2.5 text-left transition-colors hover:bg-tint-3"
             >
-              <div className="w-1.5 h-1.5 rounded-full bg-tint-2 shrink-0" />
+              <div className="w-1.5 h-1.5 rounded-full bg-warm shrink-0" />
               <span className="text-ui text-ink-2 flex-1">
                 Connected to GitHub via your own App ({app.slug})
               </span>

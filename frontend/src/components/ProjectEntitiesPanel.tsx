@@ -131,7 +131,7 @@ export default function ProjectEntitiesPanel({ projectId }: Props) {
                 type="button"
                 onClick={loadMore}
                 disabled={loading}
-                className="mt-1.5 w-full py-1.5 text-[11px] text-accent transition-colors hover:text-accent/70 disabled:opacity-50"
+                className="mt-1.5 w-full py-1.5 text-[11px] text-warm transition-colors hover:text-warm/70 disabled:opacity-50"
               >
                 {loading
                   ? 'Loading…'

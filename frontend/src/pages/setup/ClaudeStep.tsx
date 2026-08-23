@@ -98,7 +98,7 @@ export function ClaudeProviderCards({
             className={`flex flex-col items-start gap-1 rounded-xl border px-3.5 py-3 text-left transition-colors ${
               isSelected
                 ? 'border-warm/50 bg-warm/[0.06] shadow-float shadow-black/[0.03]'
-                : 'border-line-1 bg-tint-2 hover:border-border-strong'
+                : 'border-line-1 bg-tint-2 hover:border-line-2'
             }`}
           >
             <span className={`text-body font-medium ${isSelected ? 'text-warm' : 'text-ink-1'}`}>

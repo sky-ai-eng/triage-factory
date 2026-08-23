@@ -141,11 +141,11 @@ function ResolveFailed({ message, retry }: { message: string; retry: () => void 
   return (
     <div className="min-h-screen bg-surface flex items-center justify-center">
       <div className="max-w-sm space-y-3 text-center">
-        <p className="text-[13px] text-text-secondary">{message}</p>
+        <p className="text-[13px] text-ink-2">{message}</p>
         <button
           type="button"
           onClick={retry}
-          className="rounded-lg border border-border-subtle bg-white/50 px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:bg-white/80"
+          className="rounded-lg border border-line-1 bg-white/50 px-3 py-1.5 text-[12px] font-medium text-ink-2 transition-colors hover:bg-white/80"
         >
           Retry
         </button>

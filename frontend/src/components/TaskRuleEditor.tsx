@@ -345,7 +345,7 @@ export default function TaskRuleEditor({
                         ))}
                     </select>
                     {eventType && !canProduce(sourceKindOf(eventType)) && (
-                      <p className="text-[11px] text-text-tertiary mt-1.5 italic">
+                      <p className="text-[11px] text-ink-3 mt-1.5 italic">
                         {sourceUnavailableReason(
                           sourceKindOf(eventType),
                           stateOf(sourceKindOf(eventType)),

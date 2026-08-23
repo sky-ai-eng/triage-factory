@@ -192,7 +192,7 @@ export default function Projects() {
             type="button"
             onClick={projectList.loadMore}
             disabled={projectList.loading}
-            className="text-[13px] font-medium text-accent transition-opacity hover:opacity-80 disabled:opacity-50"
+            className="text-[13px] font-medium text-warm transition-opacity hover:opacity-80 disabled:opacity-50"
           >
             {projectList.loading
               ? 'Loading…'

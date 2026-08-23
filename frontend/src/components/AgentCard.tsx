@@ -169,10 +169,10 @@ export default function AgentCard({
                 title={isQueued ? 'Time spent waiting in the run queue' : undefined}
               >
                 {isActive && (
-                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-tint-2" />
+                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-cool" />
                 )}
                 {isQueued && (
-                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-tint-2" />
+                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-warm" />
                 )}
                 {elapsed}
               </span>
@@ -435,7 +435,7 @@ function QueuedBlock() {
         className="inline-flex items-center gap-2"
         title="Concurrent runs are capped (TF_MAX_CONCURRENT_CLAIMS, default 8). This run starts automatically when a slot frees up."
       >
-        <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-tint-2" />
+        <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-warm" />
         queued — starts when a run slot frees up
       </span>
     </div>
@@ -457,7 +457,7 @@ function ParkedBlock() {
         className="inline-flex items-center gap-2"
         title="The run stopped without concluding and its workspace is still warm. Open the run view to send it a follow-up, or return the task to the queue."
       >
-        <span className="inline-block h-1 w-1 rounded-full bg-tint-2" />
+        <span className="inline-block h-1 w-1 rounded-full bg-warm" />
         idle — stopped without concluding, resumable
       </span>
     </div>
@@ -478,7 +478,7 @@ function LiveFeed({ lines, isActive }: { lines: FeedLine[]; isActive: boolean })
       <div className="flex h-[3.5rem] items-end px-4 pb-1 font-mono text-label text-ink-3/70">
         {isActive ? (
           <span className="inline-flex items-center gap-2">
-            <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-tint-2" />
+            <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-cool" />
             awaiting agent…
           </span>
         ) : null}

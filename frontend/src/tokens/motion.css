@@ -114,7 +114,7 @@
 
 /* A blanket for CSS-driven motion. It cannot reach a sequence driven by
    setTimeout or rAF, so any component whose motion is JS-timed reads the
-   preference itself — see src/ui/lib/useReducedMotion.ts, and the
+   preference itself — see src/ui/shared/useReducedMotion.ts, and the
    reduced-motion note each such component carries in its .md. */
 @media (prefers-reduced-motion: reduce) {
   *,

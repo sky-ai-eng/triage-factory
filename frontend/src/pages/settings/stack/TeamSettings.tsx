@@ -596,8 +596,8 @@ export default function TeamSettings({
         {isLocal && (
           <div className="flex items-center justify-between gap-4">
             <div>
-              <p className="text-[13px] text-text-primary">Auto mode</p>
-              <p className="mt-0.5 text-[11px] text-text-tertiary">
+              <p className="text-[13px] text-ink-1">Auto mode</p>
+              <p className="mt-0.5 text-[11px] text-ink-3">
                 Let Claude automatically approve tool calls it determines are safe
               </p>
             </div>
@@ -608,7 +608,7 @@ export default function TeamSettings({
               aria-checked={autoMode}
               onClick={() => setAutoMode((v) => !v)}
               className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                autoMode ? 'bg-accent' : 'bg-black/[0.08]'
+                autoMode ? 'bg-warm' : 'bg-black/[0.08]'
               }`}
             >
               <span

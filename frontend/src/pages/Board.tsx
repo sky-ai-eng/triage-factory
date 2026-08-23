@@ -1812,7 +1812,7 @@ function ColumnMore({
       type="button"
       onClick={onLoadMore}
       disabled={loading}
-      className="w-full py-2 text-[12px] text-text-tertiary hover:text-text-secondary disabled:opacity-50"
+      className="w-full py-2 text-[12px] text-ink-3 hover:text-ink-2 disabled:opacity-50"
     >
       {loading ? 'Loading…' : `Load more — ${label}`}
     </button>

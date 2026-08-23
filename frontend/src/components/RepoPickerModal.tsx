@@ -360,7 +360,7 @@ export default function RepoPickerModal({
             "showing N". The refresh beside it is the answer to "I just granted
             the App another repo and it isn't here", which is otherwise a wait. */}
         <div className="flex items-center justify-between mt-2">
-          <span className="text-[11px] text-text-tertiary">
+          <span className="text-[11px] text-ink-3">
             {discovering
               ? 'Discovering repositories…'
               : `Showing ${repos.length} of ${total} repositor${total === 1 ? 'y' : 'ies'}`}
@@ -369,7 +369,7 @@ export default function RepoPickerModal({
             type="button"
             onClick={onRefresh}
             disabled={refreshing}
-            className="flex items-center gap-1.5 text-[11px] font-medium text-text-tertiary hover:text-text-primary disabled:opacity-40 transition-colors"
+            className="flex items-center gap-1.5 text-[11px] font-medium text-ink-3 hover:text-ink-1 disabled:opacity-40 transition-colors"
           >
             <RotateCw size={11} className={refreshing ? 'animate-spin' : ''} />
             {refreshing ? 'Refreshing…' : 'Refresh'}
@@ -507,7 +507,7 @@ export default function RepoPickerModal({
               type="button"
               onClick={loadMore}
               disabled={loading}
-              className="flex items-center gap-1.5 text-[12px] font-medium text-accent hover:text-accent/80 disabled:opacity-40 transition-colors"
+              className="flex items-center gap-1.5 text-[12px] font-medium text-warm hover:text-warm/80 disabled:opacity-40 transition-colors"
             >
               {loading && <RotateCw size={12} className="animate-spin" />}
               {loading ? 'Loading…' : `Show more (${total - repos.length} left)`}

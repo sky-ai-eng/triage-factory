@@ -146,22 +146,19 @@ export default function GitHubWebhookHealthNotice({
   return (
     <div
       className={`flex items-start gap-2.5 rounded-xl border px-3.5 py-3 ${
-        n.warn ? 'border-dismiss/25 bg-dismiss/[0.06]' : 'border-border-glass bg-white/[0.02]'
+        n.warn ? 'border-alarm/25 bg-alarm/[0.06]' : 'border-line-1 bg-white/[0.02]'
       }`}
     >
-      <Icon
-        size={14}
-        className={`mt-0.5 shrink-0 ${n.warn ? 'text-dismiss' : 'text-text-tertiary'}`}
-      />
+      <Icon size={14} className={`mt-0.5 shrink-0 ${n.warn ? 'text-alarm' : 'text-ink-3'}`} />
       <div className="space-y-1">
-        <p className="text-[13px] font-medium text-text-secondary">{n.headline}</p>
-        <p className="text-[12px] leading-relaxed text-text-tertiary">{n.detail}</p>
+        <p className="text-[13px] font-medium text-ink-2">{n.headline}</p>
+        <p className="text-[12px] leading-relaxed text-ink-3">{n.detail}</p>
         {canReplay && (
           <button
             type="button"
             onClick={() => void replay()}
             disabled={busy}
-            className="mt-1 inline-flex items-center gap-1.5 rounded-xl border border-border-glass px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary disabled:opacity-50"
+            className="mt-1 inline-flex items-center gap-1.5 rounded-xl border border-line-1 px-3 py-1.5 text-[12px] font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-50"
           >
             <RefreshCw size={12} className={busy ? 'animate-spin' : ''} />
             {busy ? 'Replaying…' : 'Replay missed installation events'}

@@ -135,7 +135,7 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
           />
           Select all ({events.length})
           {total !== null && total > events.length && (
-            <span className="text-text-tertiary"> of {total} parked</span>
+            <span className="text-ink-3"> of {total} parked</span>
           )}
         </label>
         <button
@@ -237,7 +237,7 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
           type="button"
           onClick={() => void loadMore()}
           disabled={loading}
-          className="w-full rounded-xl border border-border-subtle py-2 text-[12px] text-text-tertiary transition-colors hover:text-text-secondary disabled:opacity-50"
+          className="w-full rounded-xl border border-line-1 py-2 text-[12px] text-ink-3 transition-colors hover:text-ink-2 disabled:opacity-50"
         >
           {loading
             ? 'Loading…'

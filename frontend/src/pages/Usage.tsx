@@ -1316,7 +1316,7 @@ function TeamCaps({
         <button
           type="button"
           onClick={onMore}
-          className="font-mono text-[10px] uppercase tracking-[0.12em] text-text-tertiary/70 transition-colors hover:text-text-secondary"
+          className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-3/70 transition-colors hover:text-ink-2"
         >
           load more teams
         </button>

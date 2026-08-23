@@ -276,7 +276,7 @@ export default function Marketplace() {
             type="button"
             onClick={listingList.loadMore}
             disabled={listingList.loading}
-            className="text-[13px] font-medium text-accent transition-opacity hover:opacity-80 disabled:opacity-50"
+            className="text-[13px] font-medium text-warm transition-opacity hover:opacity-80 disabled:opacity-50"
           >
             {listingList.loading
               ? 'Loading…'

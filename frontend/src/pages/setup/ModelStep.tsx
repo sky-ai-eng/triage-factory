@@ -50,7 +50,7 @@ export function TeamModelStep({ state, patch }: StepContext) {
         </p>
       </div>
       {loaded && models.length === 0 ? (
-        <p className="text-[13px] text-text-tertiary">No models are available to this workspace.</p>
+        <p className="text-[13px] text-ink-3">No models are available to this workspace.</p>
       ) : (
         <ModelTierSelector
           value={state.team.default_model}
@@ -87,17 +87,15 @@ export function OrgBackgroundJobsModelStep({
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
-          Background jobs model
-        </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Background jobs model</h2>
+        <p className="text-[13px] leading-relaxed text-ink-3">
           Scoring, project classification and repo profiling all run on this one model.
           They&rsquo;re short, toolless calls, so background jobs can use any model — a cheap one is
           usually the right answer. Without a model picked, these jobs don&rsquo;t run.
         </p>
       </div>
       {loaded && models.length === 0 ? (
-        <p className="text-[13px] text-text-tertiary">No models are available to this workspace.</p>
+        <p className="text-[13px] text-ink-3">No models are available to this workspace.</p>
       ) : (
         <ModelTierSelector
           value={state.org.background_jobs_model}
@@ -112,14 +110,14 @@ export function OrgBackgroundJobsModelStep({
           models, the one claim the catalog declines to make. */}
       {allowOff &&
         (off ? (
-          <p className="text-[12px] text-text-tertiary">
+          <p className="text-[12px] text-ink-3">
             Background jobs are off. Pick a model to turn them back on.
           </p>
         ) : (
           <button
             type="button"
             onClick={() => choose('')}
-            className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
+            className="text-[11px] text-alarm transition-colors hover:text-alarm/80"
           >
             Turn background jobs off
           </button>

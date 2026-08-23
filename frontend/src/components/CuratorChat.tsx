@@ -364,7 +364,7 @@ function ChatHeader({
             <span aria-hidden>{dot}</span>
             <span>{label}</span>
             {status === 'running' && (
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-tint-2 animate-pulse ml-0.5" />
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-cool animate-pulse ml-0.5" />
             )}
           </span>
           {chat.totalCostUSD > 0 && (
@@ -518,7 +518,7 @@ function RequestBlock({
       {/* Trailing pulse when running but content is already underway */}
       {request.status === 'running' && hasAssistantContent && isLatest && (
         <div className="flex items-center gap-1.5 text-reported text-ink-3">
-          <span className="inline-block w-1.5 h-1.5 rounded-full bg-tint-2 animate-pulse" />
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-cool animate-pulse" />
           <span>thinking…</span>
         </div>
       )}
@@ -651,7 +651,7 @@ function ToolCallCard({
         )}
         {!result && (
           <span className="inline-flex items-center gap-1 text-label text-ink-3 shrink-0">
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-tint-2 animate-pulse" />
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-cool animate-pulse" />
             running
           </span>
         )}

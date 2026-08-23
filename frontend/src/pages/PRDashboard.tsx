@@ -354,7 +354,7 @@ export default function PRDashboard() {
               void loadMore()
             }}
             disabled={loading}
-            className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors disabled:opacity-50"
+            className="text-[12px] text-warm hover:text-warm/70 font-medium transition-colors disabled:opacity-50"
           >
             Load more{total !== null ? ` (${prs.length} of ${total})` : ''}
           </button>
@@ -620,7 +620,7 @@ function TotalsSummary({ stats }: { stats: Stats }) {
       </div>
       <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-reported">
         <div className="flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-tint-2" />
+          <span className="w-1.5 h-1.5 rounded-full bg-ink-1" />
           <span className="text-ink-3">{stats.merged} merged</span>
         </div>
         <div className="flex items-center gap-1.5">

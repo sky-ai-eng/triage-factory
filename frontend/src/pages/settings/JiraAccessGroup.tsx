@@ -213,7 +213,7 @@ export default function JiraAccessGroup({
            its heading row. */
         <div className="space-y-2">
           <div className="flex items-center gap-2 rounded-xl border border-line-1 bg-tint-2 px-4 py-2.5">
-            <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-tint-2" />
+            <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-warm" />
             <span className="text-ui text-ink-2">
               Connected to {value.jira_url.replace(/^https?:\/\//, '')}
             </span>
