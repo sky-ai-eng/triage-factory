@@ -555,7 +555,7 @@ func refuseConnect(w http.ResponseWriter, reason string) bool {
 	}
 	defer func() { _ = conn.Close() }()
 	body := "egress proxy: " + reason + "\n"
-	fmt.Fprintf(brw, "HTTP/1.1 403 %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+	fmt.Fprintf(brw, "HTTP/1.1 403 %s\r\nContent-Type: text/plain; charset=utf-8\r\nX-Content-Type-Options: nosniff\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 		reasonPhrase(reason), len(body), body)
 	_ = brw.Flush()
 	return true

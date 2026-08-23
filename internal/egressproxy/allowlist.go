@@ -89,9 +89,12 @@ func GitHubHostsForUpstreams(apiUpstream, gitUpstream string) GitHubHosts {
 	apiHost := upstreamHostname(apiUpstream)
 	gitHost := upstreamHostname(gitUpstream)
 	if apiHost == "" {
-		if gitHost == "" || gitHost == "github.com" {
+		switch {
+		case gitHost == "" || gitHost == "github.com":
 			apiHost = "api.github.com"
-		} else {
+		case strings.HasSuffix(gitHost, ".ghe.com") && !strings.HasPrefix(gitHost, "api."):
+			apiHost = "api." + gitHost
+		default:
 			apiHost = gitHost
 		}
 	}
