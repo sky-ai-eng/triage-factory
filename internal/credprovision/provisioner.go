@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
@@ -244,12 +245,46 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	if err != nil {
 		return fmt.Errorf("credprovision: seal bundle for conversation %s: %w", conversationID, err)
 	}
-	if err := m.stores.ClaimCredentials.Put(ctx, orgID, conversationID, claim.ExecutorID, inst.BootEpoch, sealed); err != nil {
+	if err := m.stores.ClaimCredentials.Put(ctx, orgID, conversationID, claim.ExecutorID, inst.BootEpoch, sealed, m.includeToolsFor(ctx, orgID, conversationID)); err != nil {
 		return fmt.Errorf("credprovision: write bundle for conversation %s: %w", conversationID, err)
 	}
 	log.Debug("provisioned claim credential bundle", "conversation", conversationID, "org", orgID, "executor", claim.ExecutorID, "boot_epoch", inst.BootEpoch)
 	span.SetAttributes(telemetry.Outcome("sealed"))
 	return nil
+}
+
+// includeToolsFor resolves the claim's cleartext tools manifest — the
+// event-source kinds available to the org right now — for the brain to stamp
+// beside the sealed bundle (claim_credentials.include_tools). The executor
+// composes the run's <tools> prompt section from it; it cannot resolve
+// availability itself (disabled secret store, and no user identity on an
+// event-triggered conversation), which is the whole reason the answer ships
+// with the bundle.
+//
+// nil on a failed resolve, never a partial or empty answer standing in for
+// one: the stamp is documentation, not a gate, and the executor reads an
+// absent manifest as "fall back to the run's own sources" — the same
+// degradation a failed resolve has always produced — while an empty one would
+// read as "nothing is available". A failure therefore costs nothing that
+// wasn't already the status quo, so it is logged and never fails the
+// provision.
+func (m *Manager) includeToolsFor(ctx context.Context, orgID, conversationID string) []string {
+	// Nil-safe: a partially-wired Stores bundle cannot run the availability
+	// probes, so it stamps no answer — the same degradation as a failed
+	// resolve, without reaching a nil store.
+	if m.stores.Secrets == nil || m.stores.OrgEventSources == nil {
+		return nil
+	}
+	kinds, err := eventsource.AvailableKindsSystem(ctx, m.stores, orgID)
+	if err != nil {
+		log.Warn("resolve event-source availability for the claim's tools manifest failed; the executor will fall back to the run's own sources",
+			"org", orgID, "conversation", conversationID, "error", err)
+		return nil
+	}
+	if kinds == nil {
+		kinds = []string{}
+	}
+	return kinds
 }
 
 // conversationModel reads the model the conversation runs on. It is the

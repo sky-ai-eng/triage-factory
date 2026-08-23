@@ -24,7 +24,7 @@ func TestClaimCredentialsStore_SQLite_NotApplicable(t *testing.T) {
 	orgID := runmode.LocalDefaultOrgID
 	conversationID := uuid.New().String()
 
-	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-1", 1, []byte("sealed")); !errors.Is(err, db.ErrNotApplicableInLocal) {
+	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-1", 1, []byte("sealed"), nil); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Fatalf("Put = %v, want ErrNotApplicableInLocal", err)
 	}
 	if _, ok, err := stores.ClaimCredentials.Get(ctx, orgID, conversationID); ok || !errors.Is(err, db.ErrNotApplicableInLocal) {

@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 )
 
 // ExtensionHandler executes one extension method. rt is the provider runtime
@@ -91,12 +92,13 @@ func RegisteredExtensionFeatures() []entitlements.Feature {
 
 // callExtension is the shared implementation behind LocalClient.CallExtension
 // — the single dispatch point both transports route through, so a verb
-// author cannot forget the entitlement gate: unknown namespace → error;
-// feature not held by the run's org → error; otherwise the handler runs with
-// the run's identity. In a CLI process the entitlements Provider is always
-// the Static (everything off) default (see main.go's dispatchCLI/ee.Install
-// ordering), so this always refuses there; in the daemon process the real
-// Provider decides.
+// author cannot forget the entitlement gate or the source-pause gate: unknown
+// namespace → error; feature not held by the run's org → error; namespace's
+// event source turned off by an org admin → error; otherwise the handler runs
+// with the run's identity. In a CLI process the entitlements Provider is
+// always the Static (everything off) default (see main.go's
+// dispatchCLI/ee.Install ordering), so this always refuses there; in the
+// daemon process the real Provider decides.
 func callExtension(ctx context.Context, rt Runtime, namespace, method string, args json.RawMessage) (json.RawMessage, error) {
 	reg, ok := extensionRegistry[namespace]
 	if !ok {
@@ -112,6 +114,22 @@ func callExtension(ctx context.Context, rt Runtime, namespace, method string, ar
 	}
 	if !allowed {
 		return nil, fmt.Errorf("%s: not enabled for this organization", namespace)
+	}
+	// Gate on the org's source pause the same way, and here rather than in any
+	// one provider's handler: an extension namespace IS its event-source kind
+	// (slack's verbs are the slack source's verbs), so the check every Jira
+	// verb makes at its credential funnel lands for extension verbs at their
+	// shared dispatch point. This is what cuts a paused source's verbs for a
+	// run ALREADY in flight. A namespace that names no disableable source
+	// answers false structurally (eventsource.Disableable), so the gate is
+	// inert for it. Fails closed on a read error, same tie-break as every
+	// other pause gate: a wrong refusal costs a retry.
+	off, err := rt.SourceDisabled(ctx, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("%s: check whether the source is turned off for this organization: %w", namespace, err)
+	}
+	if off {
+		return nil, eventsource.DisabledError(namespace)
 	}
 	return reg.handler(ctx, rt, method, args)
 }

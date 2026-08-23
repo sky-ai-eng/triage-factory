@@ -147,7 +147,7 @@ type fakeRunCredentials struct {
 	ok         bool
 }
 
-func (f *fakeRunCredentials) Put(_ context.Context, _, _, executorID string, bootEpoch int64, sealed []byte) error {
+func (f *fakeRunCredentials) Put(_ context.Context, _, _, executorID string, bootEpoch int64, sealed []byte, _ []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.executorID, f.sealed, f.bootEpoch, f.ok = executorID, sealed, bootEpoch, true
@@ -195,7 +195,7 @@ func TestCuratorSidecarProvisionFor(t *testing.T) {
 	// its key. Race it with the provision poll.
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		_ = creds.Put(ctx, org, conversationID, "home-exec", 5, sealed)
+		_ = creds.Put(ctx, org, conversationID, "home-exec", 5, sealed, nil)
 	}()
 
 	gotSealed, gotEpoch, err := fn(ctx, "sidecar-pubkey-b64")

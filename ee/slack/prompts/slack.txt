@@ -11,7 +11,7 @@ Verbs:
 Both reads return a JSON array of `{ts, thread_ts, sender_id, sender_name, text, files:[{id,name}]}` per message; `sender_name` is best-effort (empty when it couldn't be resolved) — never fails the read.
 
 Rules:
-- Reply in the thread that triggered you. Your event metadata carries the channel and thread timestamp — pass them back explicitly on every call (`--channel`/`--thread-ts`); there is no implicit "current channel". Don't post to a channel's root unless the task actually asks for that.
+- Always reply in a thread — even when the message that triggered you wasn't in one. Pass `--thread-ts` on every send: the event metadata's `thread_ts` when set, else the triggering message's own `ts`, which starts a thread rooted on that message. The metadata carries the channel and both timestamps — pass them back explicitly on every call (`--channel`/`--thread-ts`); there is no implicit "current channel". A send without `--thread-ts` lands at the channel root; do that only when the task explicitly asks for it.
 - Slack renders real Markdown (tables, code blocks, lists) via `send`/`edit` — write normally, no need to convert to Slack's legacy `mrkdwn` syntax.
 - These verbs are general-purpose: a GitHub- or Jira-triggered run may use them too, on any channel its team tracks — you aren't restricted to Slack-triggered runs.
 - Repos are acquired on demand, same as any other run: `triagefactory exec workspace add <owner>/<repo>`.

@@ -31,6 +31,23 @@ type SealedBundle struct {
 	// covers that row's repo by construction). Zero in local mode, which has
 	// no sealed bundles at all.
 	SealedAt time.Time
+
+	// IncludeTools is claim_credentials.include_tools — the cleartext tools
+	// manifest the brain stamps beside the ciphertext at seal time: the
+	// event-source kinds available to the claim's org
+	// (eventsource.AvailableKindsSystem), which the executor composes the
+	// run's <tools> section from. It rides this row because the executor
+	// cannot answer the question itself — its secret store is disabled and an
+	// event-triggered conversation has no user identity to claim as — while
+	// the brain answers it with full knowledge on the very pass that seals
+	// the bundle. Names only, never secret material, so it travels in
+	// cleartext like ExecutorID/BootEpoch/SealedAt above.
+	//
+	// nil means the writer stamped no answer (a resolve failure, degraded
+	// deliberately) — the reader falls back to its own floor; an empty
+	// non-nil slice is a real answer of "nothing available". The column is
+	// nullable to keep the two distinguishable.
+	IncludeTools []string
 }
 
 // ClaimCredentialsStore owns the claim_credentials table — the sealed
@@ -95,7 +112,11 @@ type ClaimCredentialsStore interface {
 	// of it only through Get, gated on the reader's own boot_epoch. Same
 	// answer as SecretStore's analogous write methods, for the same reason
 	// — a credential surface with nothing non-secret worth echoing back.
-	Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte) error
+	//
+	// includeTools is the cleartext tools manifest stamped beside the
+	// ciphertext (see SealedBundle.IncludeTools); nil stamps SQL NULL, an
+	// empty slice stamps an empty list — the two are different answers.
+	Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte, includeTools []string) error
 
 	// Get returns the sealed bundle for conversationID's active claim, or ok=false
 	// when none has been provisioned yet (or the conversation has no active claim).

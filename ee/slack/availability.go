@@ -25,8 +25,9 @@ import (
 // purchasing decision local mode never asks anyone to make.
 func init() {
 	eventsource.Register("slack", eventsource.Registration{
-		Probe:     availability,
-		MultiOnly: true,
+		Probe:       availability,
+		SystemProbe: availabilitySystem,
+		MultiOnly:   true,
 	})
 }
 
@@ -53,6 +54,31 @@ func availability(ctx context.Context, tx db.TxStores, orgID string) (eventsourc
 		return "", errors.New("slack store bundle absent from the transaction: the slack store extension is not registered")
 	}
 	workspaces, err := bundle.Workspaces.ListForOrg(ctx, orgID)
+	if err != nil {
+		return "", err
+	}
+	if len(workspaces) == 0 {
+		return eventsource.StateUnconfigured, nil
+	}
+	return eventsource.StateAvailable, nil
+}
+
+// availabilitySystem is availability's claims-free twin, registered as the
+// SystemProbe: the same three-way split, read through the admin-pool
+// workspace door for the JWT-less callers eventsource.AvailableKindsSystem
+// serves. The entitlement read is process-local either way, so only the
+// workspace read changes doors.
+func availabilitySystem(ctx context.Context, stores db.Stores, orgID string) (eventsource.State, error) {
+	if !entitlements.For(orgID).Has(entitlements.FeatureSlack) {
+		return eventsource.StateUnlicensed, nil
+	}
+	bundle := slackstore.FromStores(stores)
+	if bundle == nil {
+		// The same FAULT as the claims probe's nil-bundle arm, for the same
+		// reason: this package being linked links its store factories too.
+		return "", errors.New("slack store bundle absent from the stores: the slack store extension is not registered")
+	}
+	workspaces, err := bundle.Workspaces.ListForOrgSystem(ctx, orgID)
 	if err != nil {
 		return "", err
 	}

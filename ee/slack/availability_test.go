@@ -40,3 +40,32 @@ func TestAvailability_UnlicensedAnswersBeforeTouchingTheStore(t *testing.T) {
 		t.Errorf("state = %q, want %q", state, eventsource.StateUnlicensed)
 	}
 }
+
+// The system probe's twin arms mirror the claims probe's, over db.Stores: a
+// missing bundle is the same fault, and the entitlement still answers first
+// without touching a store.
+func TestAvailabilitySystem_MissingStoreBundleIsAFault(t *testing.T) {
+	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureSlack))
+	t.Cleanup(entitlements.Reset)
+
+	state, err := availabilitySystem(t.Context(), db.Stores{}, "00000000-0000-0000-0000-000000000001")
+	if err == nil {
+		t.Fatalf("state = %q with no error; a missing store bundle must fail the read", state)
+	}
+	if state != "" {
+		t.Errorf("state = %q alongside an error; a failed probe reports no state", state)
+	}
+}
+
+func TestAvailabilitySystem_UnlicensedAnswersBeforeTouchingTheStore(t *testing.T) {
+	entitlements.RegisterProvider(entitlements.Static())
+	t.Cleanup(entitlements.Reset)
+
+	state, err := availabilitySystem(t.Context(), db.Stores{}, "00000000-0000-0000-0000-000000000001")
+	if err != nil {
+		t.Fatalf("availabilitySystem: %v", err)
+	}
+	if state != eventsource.StateUnlicensed {
+		t.Errorf("state = %q, want %q", state, eventsource.StateUnlicensed)
+	}
+}

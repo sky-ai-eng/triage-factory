@@ -3,7 +3,9 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
@@ -34,36 +36,69 @@ var _ db.ClaimCredentialsStore = (*claimCredentialsStore)(nil)
 // NEW active claim, so the stale write keys a different row entirely and the
 // fresh claim's bundle is untouched either way. A conversation with no active
 // claim inserts nothing (silent no-op).
-func (s *claimCredentialsStore) Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte) error {
-	_, err := s.admin.ExecContext(ctx, `
-		INSERT INTO claim_credentials (claim_id, org_id, executor_id, boot_epoch, sealed, created_at)
-		SELECT cl.id, $2::uuid, $3, $4, $5, now()
+func (s *claimCredentialsStore) Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte, includeTools []string) error {
+	toolsJSON, err := marshalIncludeTools(includeTools)
+	if err != nil {
+		return err
+	}
+	_, err = s.admin.ExecContext(ctx, `
+		INSERT INTO claim_credentials (claim_id, org_id, executor_id, boot_epoch, sealed, include_tools, created_at)
+		SELECT cl.id, $2::uuid, $3, $4, $5, $6, now()
 		FROM claims cl
 		WHERE cl.org_id = $2::uuid AND cl.conversation_id = $1::uuid AND cl.released_at IS NULL
 		ON CONFLICT (claim_id) DO UPDATE SET
-			org_id      = EXCLUDED.org_id,
-			executor_id = EXCLUDED.executor_id,
-			boot_epoch  = EXCLUDED.boot_epoch,
-			sealed      = EXCLUDED.sealed,
-			created_at  = EXCLUDED.created_at
+			org_id        = EXCLUDED.org_id,
+			executor_id   = EXCLUDED.executor_id,
+			boot_epoch    = EXCLUDED.boot_epoch,
+			sealed        = EXCLUDED.sealed,
+			include_tools = EXCLUDED.include_tools,
+			created_at    = EXCLUDED.created_at
 		WHERE claim_credentials.boot_epoch <= EXCLUDED.boot_epoch
-	`, conversationID, orgID, executorID, bootEpoch, sealed)
+	`, conversationID, orgID, executorID, bootEpoch, sealed, toolsJSON)
 	return err
 }
 
 func (s *claimCredentialsStore) Get(ctx context.Context, orgID, conversationID string) (db.SealedBundle, bool, error) {
-	var b db.SealedBundle
+	var (
+		b         db.SealedBundle
+		toolsJSON sql.NullString
+	)
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT cc.executor_id, cc.boot_epoch, cc.sealed, cc.created_at
+		SELECT cc.executor_id, cc.boot_epoch, cc.sealed, cc.include_tools::text, cc.created_at
 		FROM claim_credentials cc
 		JOIN claims cl ON cl.id = cc.claim_id
 		WHERE cl.org_id = $1::uuid AND cl.conversation_id = $2::uuid AND cl.released_at IS NULL
-	`, orgID, conversationID).Scan(&b.ExecutorID, &b.BootEpoch, &b.Sealed, &b.SealedAt)
+	`, orgID, conversationID).Scan(&b.ExecutorID, &b.BootEpoch, &b.Sealed, &toolsJSON, &b.SealedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.SealedBundle{}, false, nil
 	}
 	if err != nil {
 		return db.SealedBundle{}, false, err
 	}
+	if toolsJSON.Valid {
+		if err := json.Unmarshal([]byte(toolsJSON.String), &b.IncludeTools); err != nil {
+			return db.SealedBundle{}, false, fmt.Errorf("parse claim_credentials.include_tools: %w", err)
+		}
+		// A stored '[]' must come back as a real empty answer, not as the
+		// nil that means "never stamped" — see SealedBundle.IncludeTools.
+		if b.IncludeTools == nil {
+			b.IncludeTools = []string{}
+		}
+	}
 	return b, true, nil
+}
+
+// marshalIncludeTools renders the manifest for the jsonb column: nil → SQL
+// NULL (no answer stamped), anything else → its JSON array. The nil/empty
+// distinction is the store contract's, kept here at the one place it turns
+// into column bytes.
+func marshalIncludeTools(kinds []string) (any, error) {
+	if kinds == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(kinds)
+	if err != nil {
+		return nil, fmt.Errorf("marshal claim_credentials.include_tools: %w", err)
+	}
+	return string(data), nil
 }

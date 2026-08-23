@@ -67,6 +67,10 @@ func (f *fakeWorkspaceStore) deleteRow(workspaceID, apiAppID string) {
 }
 
 func (f *fakeWorkspaceStore) Upsert(context.Context, slackstore.Workspace) error { return nil }
+func (f *fakeWorkspaceStore) ListForOrgSystem(ctx context.Context, orgID string) ([]slackstore.Workspace, error) {
+	return f.ListForOrg(ctx, orgID)
+}
+
 func (f *fakeWorkspaceStore) ListForOrg(context.Context, string) ([]slackstore.Workspace, error) {
 	return nil, nil
 }

@@ -113,6 +113,65 @@ func TestAvailability_KeysOnTheRowNotLiveSocketHealth(t *testing.T) {
 	}
 }
 
+// TestAvailabilitySystem_ThreeWaySplit walks the SAME three-way split through
+// the claims-free system door — the one the brain's include_tools stamp
+// resolves through. No WithTx anywhere: a JWT-less caller with only db.Stores
+// must get the identical answers, or the manifest an agent's <tools> section
+// is composed from would disagree with what the org availability read shows a
+// person.
+func TestAvailabilitySystem_ThreeWaySplit(t *testing.T) {
+	cases := map[string]struct {
+		licensed  bool
+		connected bool
+		want      eventsource.State
+	}{
+		"no licence":                 {licensed: false, connected: false, want: eventsource.StateUnlicensed},
+		"no licence, but connected":  {licensed: false, connected: true, want: eventsource.StateUnlicensed},
+		"licensed, no workspace":     {licensed: true, connected: false, want: eventsource.StateUnconfigured},
+		"licensed and workspace set": {licensed: true, connected: true, want: eventsource.StateAvailable},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeMulti)
+			if tc.licensed {
+				entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureSlack))
+			} else {
+				entitlements.RegisterProvider(entitlements.Static())
+			}
+			t.Cleanup(entitlements.Reset)
+
+			h := pgtest.Shared(t)
+			h.Reset(t)
+			stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+			orgID, owner, _ := pgtest.SeedOrgWithUser(t, h, "slack-availability-sys")
+
+			if tc.connected {
+				if err := stores.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
+					return slackstore.FromTx(tx).Workspaces.Upsert(t.Context(), slackstore.Workspace{
+						WorkspaceID:        "T0SYS",
+						APIAppID:           "A0SYS",
+						OrgID:              orgID,
+						WorkspaceName:      "Acme",
+						Transport:          "events_api",
+						BotUserID:          "U0BOT",
+						RegisteredByUserID: owner,
+					})
+				}); err != nil {
+					t.Fatalf("connect workspace: %v", err)
+				}
+			}
+
+			got, err := availabilitySystem(t.Context(), stores, orgID)
+			if err != nil {
+				t.Fatalf("resolve system availability: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("state = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestAvailability_RegisteredMultiOnly pins what init() declared: Slack is
 // registered under its own kind, and it is MultiOnly — the workspace store is
 // Postgres-only, so local mode omits it rather than reporting it off.

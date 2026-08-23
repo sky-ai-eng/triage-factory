@@ -52,7 +52,7 @@ type fakeClaimCredentials struct {
 	puts []putCall
 }
 
-func (f *fakeClaimCredentials) Put(_ context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte) error {
+func (f *fakeClaimCredentials) Put(_ context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte, _ []string) error {
 	f.puts = append(f.puts, putCall{orgID, conversationID, executorID, bootEpoch, sealed})
 	return nil
 }

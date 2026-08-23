@@ -3,13 +3,17 @@ package agenthost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // fakeExtensionFeature stands in for an ee/ feature's entitlement key
@@ -143,6 +147,67 @@ func TestLocalClient_CallExtension_Entitled_InvokesHandlerWithConversationInfo(t
 	}
 	if string(result) != `{"ok":true}` {
 		t.Errorf("CallExtension result = %s, want %s", result, `{"ok":true}`)
+	}
+}
+
+// TestLocalClient_CallExtension_PausedSource_Refuses pins the source-pause
+// gate at the shared dispatch point: an entitled org whose admin turned the
+// namespace's event source off gets the pause refusal, and the handler never
+// runs — the same cut the Jira credential funnel makes for a run already in
+// flight, landed here so every extension namespace inherits it.
+func TestLocalClient_CallExtension_PausedSource_Refuses(t *testing.T) {
+	t.Cleanup(ResetExtensions)
+	t.Cleanup(entitlements.Reset)
+	t.Cleanup(eventsource.Reset)
+	entitlements.RegisterProvider(entitlements.Static(fakeExtensionFeature))
+	eventsource.Register("chat", eventsource.Registration{
+		Probe: func(context.Context, db.TxStores, string) (eventsource.State, error) {
+			return eventsource.StateAvailable, nil
+		},
+	})
+	RegisterExtension("chat", fakeExtensionFeature, func(context.Context, ExtensionRuntime, string, json.RawMessage) (json.RawMessage, error) {
+		t.Fatal("handler must not run for a paused source")
+		return nil, nil
+	})
+
+	stores, _ := newTestDB(t)
+	org := runmode.LocalDefaultOrgID
+	if _, err := stores.OrgEventSources.SetDisabled(context.Background(), org, "chat", true, ""); err != nil {
+		t.Fatalf("SetDisabled: %v", err)
+	}
+	c := NewLocal(stores, ConversationInfo{OrgID: org, ConversationID: "conv-1"})
+
+	_, err := c.CallExtension(context.Background(), "chat", "do", nil)
+	if err == nil {
+		t.Fatal("expected the paused-source refusal")
+	}
+	if !errors.Is(err, eventsource.ErrDisabled) {
+		t.Errorf("error = %v, want it to wrap eventsource.ErrDisabled", err)
+	}
+}
+
+// TestLocalClient_CallExtension_UndisableableNamespace_GateInert pins the
+// other half: an extension namespace that names no disableable source (the
+// common fake here) passes the pause gate structurally, whatever rows the
+// policy table might carry.
+func TestLocalClient_CallExtension_UndisableableNamespace_GateInert(t *testing.T) {
+	t.Cleanup(ResetExtensions)
+	t.Cleanup(entitlements.Reset)
+	entitlements.RegisterProvider(entitlements.Static(fakeExtensionFeature))
+
+	ran := false
+	RegisterExtension("fake", fakeExtensionFeature, func(context.Context, ExtensionRuntime, string, json.RawMessage) (json.RawMessage, error) {
+		ran = true
+		return json.RawMessage(`{}`), nil
+	})
+
+	stores, _ := newTestDB(t)
+	c := NewLocal(stores, ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"})
+	if _, err := c.CallExtension(context.Background(), "fake", "do", nil); err != nil {
+		t.Fatalf("CallExtension: %v", err)
+	}
+	if !ran {
+		t.Error("handler did not run")
 	}
 }
 

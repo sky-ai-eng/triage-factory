@@ -489,7 +489,8 @@ func cloneHostBase(cloneURL string) string {
 }
 
 // toolsReferenceFor composes a run's <tools> section from what the ORG can
-// reach, unioned with the source the run is about.
+// reach, unioned with the source the run is about (plus GitHub, which every
+// run keeps — repos are acquired on demand).
 //
 // The union is what makes this safe to change: a run never loses the verbs for
 // its own entity source, so nothing regresses, and it gains the verbs for every
@@ -498,23 +499,54 @@ func cloneHostBase(cloneURL string) string {
 // working a pull request that referenced a ticket had no way to read, comment
 // on, or transition it.
 //
-// A failed resolve degrades to the superset every run used to get (its own
-// source plus GitHub), never to nothing. The tools block is documentation; the
-// gate that actually stops a verb is the credential funnel it resolves through,
-// which refuses with an error naming the reason. An agent told about a verb
-// that then refuses knows what happened; an agent told about no verb improvises.
+// Two resolve paths, by where the answer can actually be computed:
 //
-// creatorUserID is the caller's already-loaded conv.CreatorUserID, not a
-// conversation id to look up: every caller sits inside buildStepConfig, which
-// already holds the full conversation row for other reasons, so a second
-// fetch here to recover one field off the same row would be a synchronous
-// round trip added to the serial run-setup path for nothing it doesn't
-// already have.
-func (s *Spawner) toolsReferenceFor(ctx context.Context, orgID, creatorUserID, ownSource string) string {
-	fallback := agentprompt.ToolsReferenceForSources([]string{eventsource.KindGitHub, ownSource})
+//   - The claim's stamped tools manifest (claim_credentials.include_tools) —
+//     the brain's own availability answer, written beside the sealed bundle on
+//     the same pass that provisioned this claim. This is the ONLY complete
+//     answer an executor can get: its secret store is disabled, so it cannot
+//     probe GitHub/Jira availability, and an event-triggered conversation has
+//     no user identity to open a claims transaction as. The row is guaranteed
+//     present here on the executor path — the sidecar bring-up that precedes
+//     workspace setup blocks until the bundle lands.
+//   - The claims-bound live resolve, for the single-process local mode where
+//     no bundles exist (the manifest read answers ErrNotApplicableInLocal)
+//     and the live secret store makes the probes answerable in-process.
+//
+// A failed resolve on both paths degrades to the superset every run used to
+// get (its own source plus GitHub), never to nothing. The tools block is
+// documentation; the gate that actually stops a verb is the credential funnel
+// it resolves through, which refuses with an error naming the reason. An agent
+// told about a verb that then refuses knows what happened; an agent told about
+// no verb improvises.
+//
+// creatorUserID/conversationID are the caller's already-loaded
+// conv.CreatorUserID / conv.ID, not ids to look up: every caller sits inside
+// buildStepConfig, which already holds the full conversation row for other
+// reasons, so a fetch here to recover fields off the same row would be a
+// synchronous round trip added to the serial run-setup path for nothing it
+// doesn't already have.
+func (s *Spawner) toolsReferenceFor(ctx context.Context, orgID, creatorUserID, conversationID, ownSource string) string {
+	base := []string{eventsource.KindGitHub, ownSource}
+
+	if s.claimCredentials != nil {
+		b, found, err := s.claimCredentials.Get(ctx, orgID, conversationID)
+		switch {
+		case err != nil && !errors.Is(err, db.ErrNotApplicableInLocal):
+			delegateLog.Warn("read the claim's stamped tools manifest failed; falling back to the live availability resolve",
+				"org", orgID, "conversation", conversationID, "error", err)
+		case err == nil && found && b.IncludeTools != nil:
+			// nil means the brain stamped no answer (its resolve failed, or an
+			// older brain wrote the row) — fall through to the live resolve.
+			// An empty non-nil manifest is a real answer and stops here: the
+			// base union still documents the run's own sources.
+			return agentprompt.ToolsReferenceForSources(append(b.IncludeTools, base...))
+		}
+	}
+
 	stores, ok := s.getStores()
 	if !ok || stores.Tx == nil {
-		return fallback
+		return agentprompt.ToolsReferenceForSources(base)
 	}
 	var kinds []string
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(tx db.TxStores) error {
@@ -524,9 +556,9 @@ func (s *Spawner) toolsReferenceFor(ctx context.Context, orgID, creatorUserID, o
 	}); err != nil {
 		delegateLog.Warn("resolve event-source availability for tools reference failed; using the run's own sources",
 			"org", orgID, "error", err)
-		return fallback
+		return agentprompt.ToolsReferenceForSources(base)
 	}
-	return agentprompt.ToolsReferenceForSources(append(kinds, ownSource))
+	return agentprompt.ToolsReferenceForSources(append(kinds, base...))
 }
 
 // setupGitHub prepares a worktree for a GitHub PR task.
@@ -684,7 +716,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	return runConfig{
 		orgID:      orgID,
 		scope:      fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
-		toolsRef:   s.toolsReferenceFor(ctx, orgID, creatorUserID, eventsource.KindGitHub),
+		toolsRef:   s.toolsReferenceFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindGitHub),
 		wtPath:     wtPath,
 		hasWT:      true,
 		runRoot:    wtPath, // GitHub PR runs: worktree IS the run-root, so $TRIAGE_FACTORY_CONVERSATION_ROOT resolves to the worktree
@@ -772,7 +804,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID,
 	return runConfig{
 		orgID:     orgID,
 		scope:     fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
-		toolsRef:  s.toolsReferenceFor(ctx, orgID, creatorUserID, eventsource.KindJira),
+		toolsRef:  s.toolsReferenceFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindJira),
 		wtPath:    runRoot,
 		hasWT:     false,
 		runRoot:   runRoot,
@@ -808,7 +840,7 @@ func (s *Spawner) setupSlack(ctx context.Context, orgID, conversationID, claimID
 		delegateLog.Warn("set worktree_path for Slack conversation failed; resume will reject this conversation", "conversation", conversationID, "error", err)
 	}
 
-	toolsRef := s.toolsReferenceFor(ctx, orgID, creatorUserID, "slack")
+	toolsRef := s.toolsReferenceFor(ctx, orgID, creatorUserID, conversationID, "slack")
 
 	return runConfig{
 		orgID:    orgID,
