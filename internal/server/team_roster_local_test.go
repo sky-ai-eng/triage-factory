@@ -21,7 +21,7 @@ func TestTeamRosterList_LocalSingleMember(t *testing.T) {
 	s := newTestServer(t)
 	// Bind the identity on the host the capture paths use: the test server's
 	// org_settings leaves github_base_url unset, which resolves to github.com
-	// (db.EffectiveGitHubHost) — the same host github.ResolveBaseURL hands the
+	// (db.EffectiveGitHubHost) — the same host ghbase.ResolveBaseURL hands the
 	// PAT and Connect writers for an unconfigured org.
 	if err := s.users.UpsertGitHubIdentity(t.Context(), runmode.LocalDefaultUserID,
 		db.DefaultGitHubHost, "AidanAllchin", "", "", "pat"); err != nil {

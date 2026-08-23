@@ -25,25 +25,21 @@ export type CredentialResult =
   | { ok: true; warning?: string; login?: string }
   | { ok: false; error: string }
 
-// connectGitHubPAT binds (or rotates) the org's GitHub bot token against
-// `baseUrl`. The backend validates the token live and 422s on a bad one, so a
-// successful result IS the validation — there's no separate probe. 409 when the
-// org is on a GitHub App: switching credentials is the dedicated switch flow's
-// job, never a credential save.
+// connectGitHubPAT binds (or rotates) the org's GitHub bot token. The host is
+// not ours to send: the backend validates against whatever GitHub URL the org
+// has saved, so the URL must already be committed (the setup wizard's own step
+// does that before this call, and a connected org has one by definition). The
+// backend 422s on a token that host rejects, so a successful result IS the
+// validation — there's no separate probe. 409 when the org is on a GitHub App:
+// switching credentials is the dedicated switch flow's job, never a credential
+// save.
 //
 // Rotation and first bind are the same call: the route replaces whatever was
 // stored, and the previous credential survives untouched if this one fails
 // validation — which is what makes it safe to offer as an in-place "replace
 // this token" from Settings.
-export async function connectGitHubPAT(
-  orgId: string,
-  baseUrl: string,
-  pat: string,
-): Promise<CredentialResult> {
-  return credentialRequest(`/api/orgs/${orgId}/github/pat`, 'PUT', {
-    base_url: baseUrl.trim(),
-    pat: pat.trim(),
-  })
+export async function connectGitHubPAT(orgId: string, pat: string): Promise<CredentialResult> {
+  return credentialRequest(`/api/orgs/${orgId}/github/pat`, 'PUT', { pat: pat.trim() })
 }
 
 // disconnectGitHubPAT unbinds the org's GitHub bot token and clears the stored

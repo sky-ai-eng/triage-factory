@@ -52,9 +52,7 @@ func TestCredentialClass_PATBind(t *testing.T) {
 	s := newTestServer(t)
 	stub := newGitHubAccessStub(t, ghAccessStub{login: "octocat"})
 
-	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
-		"base_url": stub.URL, "pat": "ghp_valid",
-	})
+	rec := bindOrgGitHubPAT(t, s, stub.URL, "ghp_valid")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("bind pat = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -87,9 +85,7 @@ func TestCredentialClass_PATBindRefusedForUnknownClass(t *testing.T) {
 		t.Fatalf("seed unknown class: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
-		"base_url": stub.URL, "pat": "ghp_valid",
-	})
+	rec := bindOrgGitHubPAT(t, s, stub.URL, "ghp_valid")
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("bind pat under an unknown class = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -281,9 +277,7 @@ func TestCredentialClass_PATDisconnectKeepsClass(t *testing.T) {
 	s := newTestServer(t)
 	stub := newGitHubAccessStub(t, ghAccessStub{login: "octocat"})
 
-	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
-		"base_url": stub.URL, "pat": "ghp_valid",
-	}); rec.Code != http.StatusOK {
+	if rec := bindOrgGitHubPAT(t, s, stub.URL, "ghp_valid"); rec.Code != http.StatusOK {
 		t.Fatalf("bind pat = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	if rec := doJSON(t, s, http.MethodDelete, patRoute(), nil); rec.Code != http.StatusOK {

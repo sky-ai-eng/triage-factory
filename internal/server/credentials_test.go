@@ -227,9 +227,7 @@ func TestGitHubPATPut_PersistsOrgGitHubIdentity(t *testing.T) {
 	}))
 	defer gh.Close()
 
-	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
-		"base_url": gh.URL, "pat": "ghp_test",
-	})
+	rec := bindOrgGitHubPAT(t, s, gh.URL, "ghp_test")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pat bind status = %d, body = %s", rec.Code, rec.Body.String())
 	}

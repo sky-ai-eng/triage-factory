@@ -3,44 +3,12 @@ package db
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strconv"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 )
-
-// githubAPIBase derives the REST API base from a user-facing GitHub URL,
-// mirroring internal/github.APIBase (kept as a private copy because importing
-// internal/github here would form a cycle — the resolver imports internal/db).
-// Empty or the public host maps to api.github.com; a *.ghe.com data-residency
-// tenant maps to its api.* subdomain; any other (GHES) base gets the /api/v3
-// suffix. Keep this in lockstep with internal/github.APIBase.
-func githubAPIBase(base string) string {
-	base = strings.TrimRight(base, "/")
-	if base == "" || base == "https://github.com" {
-		return "https://api.github.com"
-	}
-	u, err := url.Parse(base)
-	if err != nil || u.Host == "" {
-		return base + "/api/v3"
-	}
-	host := u.Hostname()
-	switch {
-	case host == "github.com":
-		return "https://api.github.com"
-	case strings.HasSuffix(host, ".ghe.com"):
-		// An already-api.* host (a stored API base) must not be double-prefixed
-		// into api.api.<tenant>.ghe.com — keep in lockstep with APIBase.
-		if strings.HasPrefix(host, "api.") {
-			return u.Scheme + "://" + u.Host
-		}
-		return u.Scheme + "://api." + u.Host
-	default:
-		return base + "/api/v3"
-	}
-}
 
 // DiscoverAppInstallations reads the org's App PEM via SecretStore.GetSystem
 // (claims-free, for the system/background backfill caller), mints an
@@ -74,7 +42,7 @@ func DiscoverAppInstallations(ctx context.Context, secrets SecretStore, orgID, a
 	minter, err := githubapp.NewMinter(githubapp.Config{
 		PrivateKey: key,
 		AppID:      appID64,
-		APIBase:    githubAPIBase(baseURL),
+		APIBase:    ghbase.APIBase(baseURL),
 	})
 	if err != nil {
 		return nil, err

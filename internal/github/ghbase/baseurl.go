@@ -1,4 +1,9 @@
-package github
+// Package ghbase holds the GitHub base-URL derivations — the web base an org
+// configures, and the REST API mount that follows from it. It is a leaf:
+// stdlib only, so every package that needs the derivation can import it
+// (internal/auth and internal/db both sit below internal/github, which imports
+// them). One copy, no lockstep to keep.
+package ghbase
 
 import (
 	"net/url"
@@ -10,15 +15,8 @@ import (
 const DefaultBaseURL = "https://github.com"
 
 // ResolveBaseURL normalizes a per-org GitHub base URL into the user-facing
-// web base NewClient expects. Empty (not configured) maps to github.com;
-// a GHES base is returned trimmed of trailing slashes. This is the single
-// canonical copy shared by the App-register flow (internal/server) and the
-// credential resolver — keep new callers pointed here rather than
-// re-deriving.
-//
-// internal/db keeps its own private copy (github_app_backfill.go) because
-// importing internal/github there would form a cycle (the resolver in this
-// package imports internal/db).
+// web base github.NewClient expects. Empty (not configured) maps to
+// github.com; a GHES base is returned trimmed of trailing slashes.
 func ResolveBaseURL(orgBase string) string {
 	if orgBase != "" {
 		return strings.TrimRight(orgBase, "/")
@@ -37,10 +35,10 @@ func ResolveBaseURL(orgBase string) string {
 //   - everything else (GHES) → {base}/api/v3, the path-mounted REST root on
 //     the same (typically private) host.
 //
-// Mirrors the derivation NewClient does internally so the App JWT mint
-// endpoint and the client agree on where the API lives. internal/db keeps a
-// private copy (github_app_backfill.go) that must track this — importing
-// internal/github there would form a cycle.
+// This is the only API-mount derivation in the repo: the client, the App JWT
+// mint endpoint, the credential validator, the reachability probe and the
+// sidecar's proxies all read it, so nothing can disagree about where an org's
+// API lives.
 func APIBase(base string) string {
 	base = strings.TrimRight(base, "/")
 	if base == "" || base == DefaultBaseURL {
@@ -49,7 +47,7 @@ func APIBase(base string) string {
 	u, err := url.Parse(base)
 	if err != nil || u.Host == "" {
 		// Unparseable — fall back to the GHES path mount rather than guess a
-		// public host, preserving the historical behavior for odd inputs.
+		// public host, which keeps an odd input on the host it named.
 		return base + "/api/v3"
 	}
 	host := u.Hostname()
