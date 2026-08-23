@@ -439,7 +439,10 @@ type Outcome struct {
 }
 
 // Run spawns `claude` with the given options, pumps the stream-json
-// output through Sink, and waits for the subprocess to exit.
+// output through Sink, and waits for the subprocess to exit. Local mode
+// only: refuses with errSDKLoopInMultiMode before spawning anything if
+// runmode is multi, rather than running the SDK unsandboxed on the host —
+// see refuseMultiModeSDKLoop.
 //
 // Cancellation: when ctx is cancelled mid-run, the goroutine sends
 // SIGKILL to the entire process group (Setpgid is used so child
@@ -451,10 +454,16 @@ type Outcome struct {
 //     processes the Result (memory gate, completion JSON, etc.).
 //   - nil error + nil Outcome.Result: subprocess exited cleanly
 //     without emitting a `result` event. Treat as involuntary failure.
-//   - non-nil error: argv-build / Start failure, stream malformed
-//     mid-stream, subprocess crashed, or ctx cancelled. Outcome.Stderr
-//     is populated when the subprocess produced any.
+//   - non-nil error: the multi-mode refusal, argv-build / Start failure,
+//     stream malformed mid-stream, subprocess crashed, or ctx cancelled.
+//     Outcome is nil for the multi-mode refusal (nothing spawned); for every
+//     other non-nil error Outcome.Stderr is populated when the subprocess
+//     produced any.
 func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
+	if err := refuseMultiModeSDKLoop(); err != nil {
+		return nil, err
+	}
+
 	// Derived ctx so the stream-error path can SIGKILL the process
 	// group via cmd.Cancel without affecting the caller's ctx. Without
 	// this, a stream read failure (cap exceeded, malformed mid-stream)
@@ -480,13 +489,13 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	// and the SDK shares Claude Code's auth / config / session store so
 	// behavior is identical for the user.
 	//
-	// Local-only: agentproc.Run is the SDK loop, which multi mode never
-	// mints (its delegations are always runtime='native', driven by
-	// internal/agentloop through LaunchToolHost's jail instead). newDirectCommand
-	// spawns the direct subprocess unconditionally (its Setpgid + Cancel hook
-	// own the SIGKILL-the-process-group teardown) — on Linux this is wrapped in
-	// the bubblewrap courtesy sandbox (opts.LocalSandbox) when the caller wired
-	// one, which is not a tenant-isolation boundary.
+	// Local-only, and enforced above: refuseMultiModeSDKLoop already returned
+	// before this point if runmode is multi, so what follows only ever runs
+	// local. newDirectCommand spawns the direct subprocess unconditionally
+	// (its Setpgid + Cancel hook own the SIGKILL-the-process-group teardown)
+	// — on Linux this is wrapped in the bubblewrap courtesy sandbox
+	// (opts.LocalSandbox) when the caller wired one, which is not a
+	// tenant-isolation boundary and is why multi mode may never reach here.
 	nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
 	// TF_CLAUDE_BINARY override: point the SDK at a specific Claude binary.
 	// Validated here so a bad path fails the spawn with a clear message

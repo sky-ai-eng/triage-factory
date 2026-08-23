@@ -144,11 +144,17 @@ func InteractiveSupported() bool {
 // the wrapper signals ready. perms answers tool-permission prompts; a
 // nil perms denies every prompt. A nil sink discards stream events.
 //
-// Always the direct subprocess (the SDK loop only ever runs local — multi
-// mode's delegations are runtime='native', driven through
-// agentproc.LaunchToolHost's jail instead). The streaming-input flags are
-// set on opts before the command is built, so BuildArgs carries them.
+// Local mode only, and enforced: refuses with errSDKLoopInMultiMode before
+// spawning anything if runmode is multi (the SDK loop only ever runs local —
+// multi mode's delegations are runtime='native', driven through
+// agentproc.LaunchToolHost's jail instead) rather than running the SDK
+// unsandboxed on the host — see refuseMultiModeSDKLoop. Otherwise always the
+// direct subprocess; the streaming-input flags are set on opts before the
+// command is built, so BuildArgs carries them.
 func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms PermissionHandler) (*LiveRun, error) {
+	if err := refuseMultiModeSDKLoop(); err != nil {
+		return nil, err
+	}
 	if sink == nil {
 		sink = NoopSink{}
 	}

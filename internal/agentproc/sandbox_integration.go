@@ -2,6 +2,7 @@ package agentproc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -49,6 +50,28 @@ const SandboxWorkRoot = "/work"
 // shouldSandbox gate so the predicate stays single-sourced.
 func WillSandbox() bool {
 	return shouldSandbox()
+}
+
+// errSDKLoopInMultiMode is what Run/RunInteractive return when called in
+// multi mode. Multi-mode delegations are always runtime='native' — minted
+// that way at the dialect-keyed enqueue, never this process's to choose —
+// so a call here is a wiring bug (a regression that stamps 'sdk' again, or a
+// new call site that forgot the ratchet), not a config this process can
+// route around. Refusing loudly is the fail-closed choice: the SDK loop's
+// only isolation on Linux is the bubblewrap courtesy sandbox (not a tenant
+// boundary — see internal/agentproc/localsandbox's package doc), so silently
+// spawning it in multi mode would run a multi-tenant agent on the bare host
+// with none of the gVisor/broker/sidecar isolation multi mode requires.
+var errSDKLoopInMultiMode = errors.New("agentproc: the SDK loop (Run/RunInteractive) refuses to spawn in multi mode — multi-mode delegations run through LaunchToolHost's jail, never node directly on the host")
+
+// refuseMultiModeSDKLoop is the one guard Run and RunInteractive both call
+// before touching anything else, so the refusal is single-sourced and can't
+// drift between the two entry points.
+func refuseMultiModeSDKLoop() error {
+	if runmode.Current() == runmode.ModeMulti {
+		return errSDKLoopInMultiMode
+	}
+	return nil
 }
 
 // AgentVisibleRoot returns the absolute path the agent observes for hostRoot
