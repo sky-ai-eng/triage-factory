@@ -159,12 +159,12 @@ func (s *Server) deniedHostGuidance(host string) string {
 	case api && git:
 		return "this host serves this run's GitHub, and its API and git access go through the run's " +
 			"credential channels, which direct connections (including gh following an absolute URL from " +
-			"an API response) bypass. Use the Triage Factory exec verbs instead — CI logs: " +
-			"`tfac gh actions download-logs <run_id>` — and git with the worktree's existing remotes"
+			"an API response) bypass. Use the Triage Factory exec verbs instead (`tfac gh --help` lists " +
+			"them), and git with the worktree's existing remotes"
 	case api:
 		return "GitHub API access goes through this run's credential channel, " +
 			"which direct connections (including gh following an absolute URL from an API response) bypass. " +
-			"Use the Triage Factory exec verbs instead — CI logs: `tfac gh actions download-logs <run_id>`"
+			"Use the Triage Factory exec verbs instead — `tfac gh --help` lists them"
 	case git:
 		return "git reaches GitHub through this run's preconfigured credential proxy. " +
 			"Use git with the worktree's existing remotes, or `tfac workspace add <owner>/<repo>` for a " +

@@ -301,7 +301,7 @@ func TestProxy_ConnectDenialStatusLineCarriesReason(t *testing.T) {
 	}{
 		{host: "api.github.com", wantPhrase: []string{
 			"not on the sandbox egress allowlist",
-			"gh actions download-logs",
+			"tfac gh --help",
 		}},
 		{host: "github.com", wantPhrase: []string{
 			"not on the sandbox egress allowlist",
@@ -398,7 +398,7 @@ func TestProxy_GHESDenialCarriesGuidance(t *testing.T) {
 	statusLine, _, _ := strings.Cut(resp, "\r\n")
 	for _, want := range []string{
 		"not on the sandbox egress allowlist",
-		"gh actions download-logs",
+		"tfac gh --help",
 		"worktree's existing remotes",
 	} {
 		if !strings.Contains(statusLine, want) {
@@ -430,7 +430,7 @@ func TestProxy_GoClientSurfacesDenialReason(t *testing.T) {
 	if err == nil {
 		t.Fatal("GET through the proxy succeeded; api.github.com must be refused")
 	}
-	for _, want := range []string{"not on the sandbox egress allowlist", "gh actions download-logs"} {
+	for _, want := range []string{"not on the sandbox egress allowlist", "tfac gh --help"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("client error %q should carry %q for the agent to act on", err.Error(), want)
 		}
