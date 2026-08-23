@@ -20,8 +20,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// TFAC-327: the review diff/submit, pending-PR submit, branches, and
-// project-bundle probe handlers were migrated off the PAT-only process-global
+// TFAC-327: the review diff/submit, pending-PR submit, and branches
+// handlers were migrated off the PAT-only process-global
 // GitHub client onto the credential resolver, so App-only orgs (no PAT) reach
 // GitHub through the org's App installation token instead of 503/400-ing on a
 // nil global client. These tests drive each call site against an App-only org

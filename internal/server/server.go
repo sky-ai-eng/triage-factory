@@ -108,9 +108,9 @@ type Server struct {
 	// ghResolver picks the right GitHub credential (org App installation
 	// token → PAT) per request, given the org + target account. The per-repo
 	// handler operations migrated off the old process-global PAT client —
-	// review diff/submit, pending-PR submit, branches, dashboard, and the
-	// project-bundle probe — resolve through it, and there is no longer a
-	// process-global PAT client. (A few handlers still build a request-scoped
+	// review diff/submit, pending-PR submit, branches, dashboard — resolve
+	// through it, and there is no longer a process-global PAT client. (A few
+	// handlers still build a request-scoped
 	// PAT client directly where they intentionally need the PAT identity — the
 	// repo picker's PAT fallback and GitHub-teams discovery.) Built in New from
 	// the stores, so it's never nil — handlers don't need a guard.
