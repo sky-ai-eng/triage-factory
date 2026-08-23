@@ -8,7 +8,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
@@ -186,14 +185,13 @@ func (s *Server) handleTeamKnowledgeRead(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Stat first: it is what sizes the response, and it is also the one place
-	// a folder path is refused before a backend that happens to have real
-	// directories hands one back as a document.
-	info, err := s.knowledge().Stat(r.Context(), orgID, teamID, ref)
-	if err != nil {
-		s.writeKnowledgeError(w, "teams/kb", err)
-		return
-	}
+	// One operation, not a Stat followed by an Open. The pair would have to
+	// agree about a document that a concurrent upload can replace between
+	// them, and the only thing the Stat contributed was a Content-Length that
+	// could then describe the previous version's bytes. Go sizes a short body
+	// itself and streams a long one; neither answer is ever a wrong one.
+	// Open is also where a folder or a symlink is refused, so nothing is lost
+	// by not asking twice.
 	body, err := s.knowledge().Open(r.Context(), orgID, teamID, ref)
 	if err != nil {
 		s.writeKnowledgeError(w, "teams/kb", err)
@@ -207,7 +205,6 @@ func (s *Server) handleTeamKnowledgeRead(w http.ResponseWriter, r *http.Request)
 	// a name with a space or a non-ASCII character survives the header.
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{
 		"filename": path.Base(ref.Path),
 	}))
@@ -271,6 +268,7 @@ func (s *Server) handleTeamKnowledgeUpload(w http.ResponseWriter, r *http.Reques
 		root       kbstore.Root
 		rootSeen   bool
 		pathPrefix string
+		sawFile    bool
 		results    []knowledgeUploadResultJSON
 	)
 	for {
@@ -279,11 +277,26 @@ func (s *Server) handleTeamKnowledgeUpload(w http.ResponseWriter, r *http.Reques
 			break
 		}
 		if err != nil {
-			s.writeKnowledgeUploadReadError(w, err)
+			s.writeKnowledgeUploadReadError(w, r, orgID, teamID, root, results, err)
 			return
 		}
 
-		switch part.FormName() {
+		field := part.FormName()
+		// Both scalar fields decide WHERE the parts after them land, and the
+		// body is read as it streams — so a field arriving after a file has
+		// already been written cannot apply to it. Rejecting is the only
+		// honest answer: silently letting one upload straddle two folders
+		// (or two roots) is a caller getting a different result from the one
+		// they described, with nothing to notice it by.
+		if sawFile && (field == "root" || field == "path_prefix") {
+			s.failPartialUpload(w, r, orgID, teamID, root, results, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: fmt.Sprintf("%s must appear before the files parts — it decides where they land", field),
+				Field:   field,
+			}, http.StatusBadRequest)
+			return
+		}
+		switch field {
 		case "root":
 			value, ok := readKnowledgeFormValue(w, part, "root")
 			if !ok {
@@ -313,6 +326,7 @@ func (s *Server) handleTeamKnowledgeUpload(w http.ResponseWriter, r *http.Reques
 			// The fields the parts are written under must arrive first: the
 			// body is streamed, so a root that turned up after a file part
 			// would mean buffering the whole upload to find out where it goes.
+			sawFile = true
 			if !rootSeen {
 				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 					Reason:  httpx.ReasonInvalidField,
@@ -322,14 +336,14 @@ func (s *Server) handleTeamKnowledgeUpload(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			if len(results) >= maxKnowledgeUploadFiles {
-				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				s.failPartialUpload(w, r, orgID, teamID, root, results, httpx.ErrorItem{
 					Reason:  httpx.ReasonOutOfRange,
 					Message: fmt.Sprintf("an upload carries at most %d files", maxKnowledgeUploadFiles),
 					Field:   "files",
-				})
+				}, http.StatusBadRequest)
 				return
 			}
-			res, ok := s.storeUploadedKnowledge(w, r, orgID, teamID, root, pathPrefix, part)
+			res, ok := s.storeUploadedKnowledge(w, r, orgID, teamID, root, pathPrefix, part, results)
 			if !ok {
 				return
 			}
@@ -339,7 +353,7 @@ func (s *Server) handleTeamKnowledgeUpload(w http.ResponseWriter, r *http.Reques
 			// is a caller that thinks this route accepts something it does not.
 			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 				Reason:  httpx.ReasonInvalidField,
-				Message: fmt.Sprintf("unknown form field %q", part.FormName()),
+				Message: fmt.Sprintf("unknown form field %q", field),
 			})
 			return
 		}
@@ -615,12 +629,12 @@ func (s *Server) writeKnowledgeError(w http.ResponseWriter, scope string, err er
 // what it became. The part's own filename supplies the leaf; a browser sending
 // a folder drop puts a relative path there, and that shape is preserved under
 // the request's prefix so an uploaded directory arrives as a directory.
-func (s *Server) storeUploadedKnowledge(w http.ResponseWriter, r *http.Request, orgID, teamID string, root kbstore.Root, pathPrefix string, part *multipart.Part) (knowledgeUploadResultJSON, bool) {
+func (s *Server) storeUploadedKnowledge(w http.ResponseWriter, r *http.Request, orgID, teamID string, root kbstore.Root, pathPrefix string, part *multipart.Part, done []knowledgeUploadResultJSON) (knowledgeUploadResultJSON, bool) {
 	rel := normalizeUploadFilename(uploadPartFilename(part))
 	if rel == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		s.failPartialUpload(w, r, orgID, teamID, root, done, httpx.ErrorItem{
 			Reason: httpx.ReasonInvalidField, Message: "each files part must carry a filename", Field: "files",
-		})
+		}, http.StatusBadRequest)
 		return knowledgeUploadResultJSON{}, false
 	}
 	full := rel
@@ -628,9 +642,9 @@ func (s *Server) storeUploadedKnowledge(w http.ResponseWriter, r *http.Request, 
 		full = pathPrefix + "/" + rel
 	}
 	if err := kbstore.ValidatePath(full); err != nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		s.failPartialUpload(w, r, orgID, teamID, root, done, httpx.ErrorItem{
 			Reason: httpx.ReasonInvalidField, Message: err.Error(), Field: "files",
-		})
+		}, http.StatusBadRequest)
 		return knowledgeUploadResultJSON{}, false
 	}
 	ref := kbstore.Ref{Root: root, Path: full}
@@ -649,7 +663,7 @@ func (s *Server) storeUploadedKnowledge(w http.ResponseWriter, r *http.Request, 
 
 	counter := &countingReader{r: part}
 	if err := s.knowledge().Put(r.Context(), orgID, teamID, ref, counter); err != nil {
-		s.writeKnowledgeUploadReadError(w, err)
+		s.writeKnowledgeUploadReadError(w, r, orgID, teamID, root, done, err)
 		return knowledgeUploadResultJSON{}, false
 	}
 	return knowledgeUploadResultJSON{
@@ -663,24 +677,55 @@ func (s *Server) storeUploadedKnowledge(w http.ResponseWriter, r *http.Request, 
 
 // writeKnowledgeUploadReadError renders a fault that surfaced while reading the
 // request body. An over-cap body is the caller's fault and says so with the
-// cap; anything else is ours.
-func (s *Server) writeKnowledgeUploadReadError(w http.ResponseWriter, err error) {
+// cap; anything else is ours. Either way it goes through failPartialUpload, so
+// documents already written are reported rather than dropped from the story.
+func (s *Server) writeKnowledgeUploadReadError(w http.ResponseWriter, r *http.Request, orgID, teamID string, root kbstore.Root, done []knowledgeUploadResultJSON, err error) {
 	var tooLarge *http.MaxBytesError
-	if errors.As(err, &tooLarge) {
-		httpx.WriteErrors(w, http.StatusRequestEntityTooLarge, httpx.ErrorItem{
+	switch {
+	case errors.As(err, &tooLarge):
+		s.failPartialUpload(w, r, orgID, teamID, root, done, httpx.ErrorItem{
 			Reason:  httpx.ReasonPayloadTooLarge,
 			Message: fmt.Sprintf("an upload is at most %d bytes", maxKnowledgeUploadBytes),
 			Field:   "files",
-		})
-		return
-	}
-	if errors.Is(err, kbstore.ErrInvalidName) {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		}, http.StatusRequestEntityTooLarge)
+	case errors.Is(err, kbstore.ErrInvalidName):
+		s.failPartialUpload(w, r, orgID, teamID, root, done, httpx.ErrorItem{
 			Reason: httpx.ReasonInvalidField, Message: err.Error(), Field: "files",
-		})
-		return
+		}, http.StatusBadRequest)
+	default:
+		internalError(w, "teams/kb", err)
 	}
-	internalError(w, "teams/kb", err)
+}
+
+// failPartialUpload refuses an upload that has already written some of its
+// documents.
+//
+// A multipart body is consumed as it streams, so by the time a later part is
+// refused the earlier ones are durably in the store. Reporting a bare failure
+// would be the mirror image of the rule that forbids reporting success for work
+// that did not happen: the caller is told nothing happened while N documents
+// now exist, and has no way to learn which. So the refusal names them — every
+// path that landed, in the message — and the listing is authoritative for the
+// rest.
+//
+// The response is still the one error envelope, never a body carrying both an
+// error and a results array: two shapes for one outcome is how a client ends up
+// parsing the wrong one.
+func (s *Server) failPartialUpload(w http.ResponseWriter, r *http.Request, orgID, teamID string, root kbstore.Root, done []knowledgeUploadResultJSON, item httpx.ErrorItem, status int) {
+	if len(done) > 0 {
+		paths := make([]string, len(done))
+		for i, f := range done {
+			paths[i] = f.Root + "/" + f.Path
+		}
+		item.Message += fmt.Sprintf(
+			" — %d document(s) from this upload were already saved and were NOT rolled back: %s",
+			len(done), strings.Join(paths, ", "))
+		// The listing changed even though the request failed, so anything
+		// watching the page has to hear about it or it renders a stale tree
+		// under an error message.
+		s.knowledgeNotifier().Publish(r.Context(), orgID, teamID, root)
+	}
+	httpx.WriteErrors(w, status, item)
 }
 
 // readKnowledgeFormValue reads one non-file multipart field, bounded so a

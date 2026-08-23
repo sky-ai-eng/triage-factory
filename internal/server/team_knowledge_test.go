@@ -6,6 +6,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -456,6 +457,86 @@ func TestTeamKnowledge_BadCallsFail(t *testing.T) {
 			t.Errorf("= %d, want 404", rec.Code)
 		}
 	})
+}
+
+// TestTeamKnowledge_UploadFieldOrdering: both scalar fields decide WHERE the
+// parts after them land, and the body is consumed as it streams — so a field
+// arriving after a file cannot apply to it. Letting one upload straddle two
+// folders silently is the caller getting a different result from the one they
+// described.
+func TestTeamKnowledge_UploadFieldOrdering(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	_ = mw.WriteField("root", "private")
+	_ = mw.WriteField("path_prefix", "first")
+	part, _ := mw.CreateFormFile("files", "a.md")
+	_, _ = part.Write([]byte("a"))
+	// A second prefix, after a file has already been written.
+	_ = mw.WriteField("path_prefix", "second")
+	part, _ = mw.CreateFormFile("files", "b.md")
+	_, _ = part.Write([]byte("b"))
+	_ = mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, kbPath("/files"), &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("= %d, want 400; an upload must not straddle two folders", rec.Code)
+	}
+	assertFirstError(t, rec, httpx.ReasonInvalidField, "path_prefix")
+
+	// And the refusal names what it already wrote, because that is durable now.
+	if !strings.Contains(rec.Body.String(), "private/first/a.md") {
+		t.Errorf("the refusal does not name the document it already saved: %s", rec.Body.String())
+	}
+	// Which the listing agrees with — the request failed, the file exists.
+	items, _ := listKnowledge(t, s, map[string]any{})
+	if !equalSlices(refsOf(items), []string{"private/first/a.md"}) {
+		t.Errorf("listing = %v; want the one document the upload got to before it was refused", refsOf(items))
+	}
+}
+
+// TestTeamKnowledge_PartialUploadNamesWhatLanded is the inverse of the rule
+// against reporting success for work that did not happen: a batch that partly
+// succeeded must not be reported as if nothing had. The parts are durable as
+// they stream, so a later refusal cannot roll them back.
+func TestTeamKnowledge_PartialUploadNamesWhatLanded(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	_ = mw.WriteField("root", "private")
+	part, _ := mw.CreateFormFile("files", "good.md")
+	_, _ = part.Write([]byte("fine"))
+	// A traversal filename: refused, but only after good.md is in the store.
+	part, _ = mw.CreateFormFile("files", "../escape.md")
+	_, _ = part.Write([]byte("nope"))
+	_ = mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, kbPath("/files"), &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("= %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "private/good.md") {
+		t.Errorf("the refusal hid a document it had already saved: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "NOT rolled back") {
+		t.Errorf("the refusal does not say the saved documents survive: %s", rec.Body.String())
+	}
+	items, _ := listKnowledge(t, s, map[string]any{})
+	if !equalSlices(refsOf(items), []string{"private/good.md"}) {
+		t.Errorf("listing = %v; want the document that landed before the refusal", refsOf(items))
+	}
 }
 
 func equalSlices(a, b []string) bool {

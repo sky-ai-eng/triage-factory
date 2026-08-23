@@ -61,16 +61,30 @@ const ROOT_TABS: Array<{ root: KnowledgeRoot; label: string; blurb: string }> = 
   },
 ]
 
-/** Split a table row id back into the address it was minted from. Returns null
- *  for anything that is not one, so a malformed id is skipped rather than sent
- *  to a route that would refuse it. */
-function splitRowID(id: string): { root: KnowledgeRoot; path: string } | null {
-  const at = id.indexOf('/')
-  if (at <= 0) return null
-  const root = id.slice(0, at)
-  const path = id.slice(at + 1)
-  if ((root !== 'private' && root !== 'shared') || path === '') return null
-  return { root, path }
+/** A table row id: the whole address of the document the row draws, TEAM
+ *  INCLUDED. The team is in here rather than read from a closure at send time
+ *  because the Table defers a verb for the length of its undo window and then
+ *  calls whatever `onCommit` is current — and the team switcher stays live
+ *  throughout, since the undo bar is inline rather than modal. A commit that
+ *  resolved the team lazily would fire against whichever team was selected ten
+ *  seconds later, mutating a same-named document in a team the reader never
+ *  touched, with no error and nothing on screen to show it. Binding it into the
+ *  id makes that unrepresentable: the address a row was minted with is the
+ *  address its verb commits to. */
+function rowID(teamId: string, file: KnowledgeFile): string {
+  return teamId + '/' + file.root + '/' + file.path
+}
+
+/** Split a row id back into the address it was minted from. Returns null for
+ *  anything that is not one, so a malformed id is skipped rather than sent to a
+ *  route that would refuse it. Team ids are uuids and roots are a closed
+ *  two-value vocabulary, so the first two segments are unambiguous and
+ *  everything after them is the path — which may itself contain separators. */
+function splitRowID(id: string): { teamId: string; root: KnowledgeRoot; path: string } | null {
+  const [teamId, root, ...rest] = id.split('/')
+  const path = rest.join('/')
+  if (!teamId || (root !== 'private' && root !== 'shared') || path === '') return null
+  return { teamId, root, path }
 }
 
 /** The page's own window on the list read. Generous, because the whole point of
@@ -140,27 +154,33 @@ export default function Knowledge() {
     return list.items
       .filter((f) => !q || f.path.toLowerCase().includes(q))
       .map((f) => ({
-        id: f.root + '/' + f.path,
+        id: rowID(teamId, f),
         path: f.path,
         size: fmtBytes(f.size),
         updated: f.mod_time,
         file: f,
       }))
-  }, [list.items, filter])
+  }, [list.items, filter, teamId])
 
   const send = useCallback(
     async (action: string, ids: Array<string | number>) => {
-      // The row id IS the address — "<root>/<path>", the same spelling the
-      // per-file routes take. Parsed rather than looked up in the held items:
-      // the undo window is ten seconds long, and a refetch in the middle of it
-      // would otherwise turn a committed verb into a silent no-op.
+      // The row id IS the whole address, team included. Everything this commit
+      // needs comes out of it and nothing out of the surrounding closure: the
+      // undo window is ten seconds long, and in that time the held items can be
+      // refetched (which would turn a committed verb into a silent no-op) and
+      // the selected team can change (which would send it somewhere else
+      // entirely).
       const refs = ids.map((id) => splitRowID(String(id))).filter((r) => r !== null)
       for (const ref of refs) {
         try {
           if (action === 'publish') {
-            await moveKnowledge(teamId, ref, { root: otherRoot(ref.root), path: ref.path })
+            await moveKnowledge(
+              ref.teamId,
+              { root: ref.root, path: ref.path },
+              { root: otherRoot(ref.root), path: ref.path },
+            )
           } else {
-            await deleteKnowledge(teamId, ref.root, ref.path)
+            await deleteKnowledge(ref.teamId, ref.root, ref.path)
           }
         } catch (err) {
           toast.error(httpErrorMessage(err, 'The change could not be saved.'), ref.path)
@@ -171,7 +191,7 @@ export default function Knowledge() {
       // rows the table already took off the screen.
       if (refs.length > 0) reload()
     },
-    [teamId, reload],
+    [reload],
   )
 
   const runUpload = useCallback(
@@ -233,7 +253,15 @@ export default function Knowledge() {
               <select
                 className="kb-switch-s"
                 value={teamId}
-                onChange={(e) => setPicked(e.target.value)}
+                onChange={(e) => {
+                  setPicked(e.target.value)
+                  // The document on screen belongs to the team being left. It
+                  // is closed rather than refetched under the new team: the
+                  // header names a path, not a team, so swapping the body in
+                  // place would show one team's document under another's name
+                  // with nothing to distinguish them.
+                  setViewing(null)
+                }}
               >
                 {teams.map((t) => (
                   <option key={t.id} value={t.id}>

@@ -166,12 +166,7 @@ func (s *objectKB) Move(ctx context.Context, orgID, teamID string, from, to Ref)
 	written := make([]string, 0, len(plan))
 	for _, p := range plan {
 		if err := s.copyKey(ctx, p.src, p.dst); err != nil {
-			for _, w := range written {
-				if delErr := s.blobs.Delete(ctx, w); delErr != nil {
-					return 0, errors.Join(err, fmt.Errorf("roll back copied entry %q: %w", w, delErr))
-				}
-			}
-			return 0, err
+			return 0, s.unwindCopies(ctx, written, err)
 		}
 		written = append(written, p.dst)
 	}
@@ -184,6 +179,22 @@ func (s *objectKB) Move(ctx context.Context, orgID, teamID string, from, to Ref)
 		}
 	}
 	return len(plan), nil
+}
+
+// unwindCopies removes the destinations a failed move already wrote, so a
+// refused publish leaves the knowledge at one path rather than smeared across
+// two. EVERY entry is attempted: stopping at the first failed delete would
+// strand the rest at destination keys nothing names, and the one error naming
+// the entry that failed would be the only record they exist. Each failure joins
+// the original cause rather than replacing it — the cause is what the operator
+// has to act on, and the strandings are what they have to clean up.
+func (s *objectKB) unwindCopies(ctx context.Context, written []string, cause error) error {
+	for i := len(written) - 1; i >= 0; i-- {
+		if err := s.blobs.Delete(ctx, written[i]); err != nil {
+			cause = errors.Join(cause, fmt.Errorf("roll back copied entry %q: %w", written[i], err))
+		}
+	}
+	return cause
 }
 
 // copyKey streams one blob to a new key. The object seam has no server-side

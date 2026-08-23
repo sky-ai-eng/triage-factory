@@ -343,6 +343,37 @@ func TestLocalKB_PrunesEmptyFolders(t *testing.T) {
 	}
 }
 
+// TestLocalKB_PrunesBranchingSubtrees: emptying a folder that branches leaves
+// several empty leaves at once, and a prune that only climbs from one of them
+// stops at the first non-empty parent with the siblings still there. An object
+// store has no empty folders at all, so anything left here would make the same
+// KB list differently depending on the deployment mode.
+func TestLocalKB_PrunesBranchingSubtrees(t *testing.T) {
+	root := t.TempDir()
+	kb := NewLocalAt(root)
+	put(t, kb, testTeam, RootPrivate, "docs/sub/a.md", "a")
+	put(t, kb, testTeam, RootPrivate, "docs/other/b.md", "b")
+	put(t, kb, testTeam, RootPrivate, "keep/c.md", "c")
+
+	if n, err := kb.Delete(context.Background(), testOrg, testTeam, Ref{Root: RootPrivate, Path: "docs"}); err != nil || n != 2 {
+		t.Fatalf("Delete = %d, %v; want 2, nil", n, err)
+	}
+
+	base := filepath.Join(root, "teams", testTeam, "kb", "private")
+	for _, gone := range []string{"docs/sub", "docs/other", "docs"} {
+		if _, err := os.Stat(filepath.Join(base, filepath.FromSlash(gone))); !os.IsNotExist(err) {
+			t.Errorf("%s survived the prune (err=%v)", gone, err)
+		}
+	}
+	// A sibling that still holds a document is untouched, and so is the root.
+	if _, err := os.Stat(filepath.Join(base, "keep", "c.md")); err != nil {
+		t.Errorf("a populated sibling folder was pruned: %v", err)
+	}
+	if _, err := os.Stat(base); err != nil {
+		t.Errorf("the visibility root should survive a prune: %v", err)
+	}
+}
+
 // TestLocalKB_FolderIsNotAnEntry: local mode has real directories, so it is
 // the only backend that could hand one back as though it were a document. It
 // must not — an object store has no folder key to serve, and a KB whose
@@ -362,6 +393,107 @@ func TestLocalKB_FolderIsNotAnEntry(t *testing.T) {
 			_ = rc.Close()
 		}
 		t.Fatalf("Open on a folder = %v; want ErrNotFound", err)
+	}
+}
+
+// TestLocalKB_SymlinkIsNeverAnEntry is the security case, and it is about a
+// `..` that lives on the DISK rather than in the path string. ValidatePath
+// rejects traversal in a name; it is no defense at all against a symlink an
+// operator's sync tool, editor or repo checkout dropped in the tree. Before the
+// backend was confined, such a link was invisible to List and fully readable by
+// exact path — and a link as an INTERMEDIATE component let a delete remove a
+// file outside the knowledge base entirely.
+//
+// Every door is asserted, because a guarantee that holds on the listing and not
+// on the read is not a guarantee.
+func TestLocalKB_SymlinkIsNeverAnEntry(t *testing.T) {
+	root := t.TempDir()
+	kb := NewLocalAt(root)
+	ctx := context.Background()
+
+	// A real document, so the KB tree exists and the assertions below are
+	// about the links rather than about an empty store.
+	put(t, kb, testTeam, RootPrivate, "real.md", "ours")
+
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "id_rsa")
+	if err := os.WriteFile(secret, []byte("PRIVATE KEY MATERIAL"), 0o600); err != nil {
+		t.Fatalf("write the target file: %v", err)
+	}
+	dir := filepath.Join(root, "teams", testTeam, "kb", "private")
+	if err := os.Symlink(secret, filepath.Join(dir, "leaf.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "folder")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	for _, tc := range []struct {
+		what string
+		ref  Ref
+	}{
+		{"a symlinked leaf", Ref{Root: RootPrivate, Path: "leaf.md"}},
+		{"a file under a symlinked folder", Ref{Root: RootPrivate, Path: "folder/id_rsa"}},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			if _, err := kb.Stat(ctx, testOrg, testTeam, tc.ref); !errors.Is(err, ErrNotFound) {
+				t.Errorf("Stat = %v; want ErrNotFound — nothing outside the KB is an entry", err)
+			}
+			if rc, err := kb.Open(ctx, testOrg, testTeam, tc.ref); err == nil {
+				body, _ := io.ReadAll(rc)
+				_ = rc.Close()
+				t.Errorf("Open streamed %q from outside the knowledge base", body)
+			} else if !errors.Is(err, ErrNotFound) {
+				t.Errorf("Open = %v; want ErrNotFound", err)
+			}
+			if n, err := kb.Delete(ctx, testOrg, testTeam, tc.ref); err == nil && n > 0 {
+				t.Errorf("Delete removed %d entries through a symlink", n)
+			}
+		})
+	}
+
+	// The targets are untouched: nothing was read out of them and nothing was
+	// removed. This is the assertion the delete escape would have failed.
+	if body, err := os.ReadFile(secret); err != nil || string(body) != "PRIVATE KEY MATERIAL" {
+		t.Errorf("the file outside the KB was disturbed: %q, %v", body, err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "id_rsa")); err != nil {
+		t.Errorf("a file outside the KB was deleted through the KB: %v", err)
+	}
+
+	// And the listing still shows only the team's own document.
+	got, err := kb.List(ctx, testOrg, testTeam, Roots(), "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if !equalStrings(refStrings(got), []string{"private/real.md"}) {
+		t.Fatalf("List = %v; a symlink is not a KB entry", refStrings(got))
+	}
+}
+
+// TestLocalKB_WritesCannotEscapeEither: a symlinked folder is a write escape
+// too — MkdirAll and a rename through one would place a document outside the
+// team's tree, or replace a file that is not the KB's to replace.
+func TestLocalKB_WritesCannotEscapeEither(t *testing.T) {
+	root := t.TempDir()
+	kb := NewLocalAt(root)
+	outside := t.TempDir()
+
+	put(t, kb, testTeam, RootPrivate, "real.md", "ours")
+	dir := filepath.Join(root, "teams", testTeam, "kb", "private")
+	if err := os.Symlink(outside, filepath.Join(dir, "folder")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	err := kb.Put(context.Background(), testOrg, testTeam,
+		Ref{Root: RootPrivate, Path: "folder/planted.md"}, strings.NewReader("planted"))
+	if err == nil {
+		if _, statErr := os.Stat(filepath.Join(outside, "planted.md")); statErr == nil {
+			t.Fatalf("Put wrote a document outside the knowledge base")
+		}
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "planted.md")); statErr == nil {
+		t.Errorf("a file was planted outside the KB tree")
 	}
 }
 
@@ -388,6 +520,75 @@ func TestLocalKB_SkipsSymlinks(t *testing.T) {
 	if !equalStrings(refStrings(got), []string{"private/real.md"}) {
 		t.Fatalf("List = %v; a symlink is not a KB entry", refStrings(got))
 	}
+}
+
+// TestObjectKB_RollbackAttemptsEveryCopy: a failed multi-file move has to undo
+// ALL of its copies. Stopping at the first delete that fails would strand the
+// rest at destination keys nothing names — the one error naming the entry that
+// failed would be the only record they exist at all.
+func TestObjectKB_RollbackAttemptsEveryCopy(t *testing.T) {
+	inner := storage.NewFS(t.TempDir())
+	flaky := &flakyStorage{Storage: inner}
+	kb := NewObject(flaky)
+	ctx := context.Background()
+
+	for _, name := range []string{"a.md", "b.md", "c.md", "d.md"} {
+		put(t, kb, testTeam, RootPrivate, "docs/"+name, name)
+	}
+	// The last copy fails, so a, b and c must be rolled back. The delete that
+	// is refused is a.md — deliberately the EARLIEST, because a rollback that
+	// stops at its first failure would abandon b.md and c.md at destination
+	// keys nothing names. Failing the last one instead proves nothing: every
+	// ordering has already deleted the rest by then.
+	flaky.failPutContaining = "shared/docs/d.md"
+	flaky.failDeleteContaining = "shared/docs/a.md"
+
+	_, err := kb.Move(ctx, testOrg, testTeam,
+		Ref{Root: RootPrivate, Path: "docs"}, Ref{Root: RootShared, Path: "docs"})
+	if err == nil {
+		t.Fatal("expected the move to fail")
+	}
+
+	// Every copy the move made is gone except the one whose delete was refused,
+	// and the error names that one so an operator can clean it up.
+	left, listErr := kb.List(ctx, testOrg, testTeam, []Root{RootShared}, "")
+	if listErr != nil {
+		t.Fatalf("List: %v", listErr)
+	}
+	if !equalStrings(refStrings(left), []string{"shared/docs/a.md"}) {
+		t.Fatalf("after the rollback the destination holds %v; want only the entry whose delete was refused", refStrings(left))
+	}
+	if !strings.Contains(err.Error(), "a.md") {
+		t.Errorf("the error does not name the stranded entry: %v", err)
+	}
+
+	// And the sources are untouched: the knowledge is still readable where it was.
+	src, _ := kb.List(ctx, testOrg, testTeam, []Root{RootPrivate}, "")
+	if len(src) != 4 {
+		t.Errorf("sources = %v; a refused move must not remove any", refStrings(src))
+	}
+}
+
+// flakyStorage fails one Put and one Delete, chosen by key substring, so a
+// rollback path can be driven without a real object store.
+type flakyStorage struct {
+	storage.Storage
+	failPutContaining    string
+	failDeleteContaining string
+}
+
+func (f *flakyStorage) Put(ctx context.Context, key string, r io.Reader) error {
+	if f.failPutContaining != "" && strings.Contains(key, f.failPutContaining) {
+		return errors.New("object store refused the write")
+	}
+	return f.Storage.Put(ctx, key, r)
+}
+
+func (f *flakyStorage) Delete(ctx context.Context, key string) error {
+	if f.failDeleteContaining != "" && strings.Contains(key, f.failDeleteContaining) {
+		return errors.New("object store refused the delete")
+	}
+	return f.Storage.Delete(ctx, key)
 }
 
 func TestValidatePath(t *testing.T) {

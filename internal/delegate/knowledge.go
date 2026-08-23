@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
@@ -280,10 +281,19 @@ func (s *Spawner) copyKnowledgeFile(ctx context.Context, kb kbstore.KB, orgID, t
 	head := &headCapture{limit: 4 * knowledgeSummaryMaxLen}
 	n, copyErr := io.Copy(io.MultiWriter(out, head), src)
 	closeErr := out.Close()
-	if copyErr != nil {
-		return n, "", copyErr
-	}
-	if closeErr != nil {
+	if copyErr != nil || closeErr != nil {
+		// A failed copy leaves a truncated file behind, and the caller's next
+		// move is to log this entry and skip it — which would leave a document
+		// the manifest never mentions sitting in a tree the agent is told to
+		// walk. Half a runbook read as a whole one is worse than an absent
+		// one, so the fragment goes.
+		if rmErr := os.Remove(dst); rmErr != nil && !os.IsNotExist(rmErr) {
+			delegateLog.Warn("remove partially staged knowledge file failed; the agent may read a truncated document",
+				"path", dst, "error", rmErr)
+		}
+		if copyErr != nil {
+			return n, "", copyErr
+		}
 		return n, "", closeErr
 	}
 	return n, firstLineSummary(head.String()), nil
@@ -382,12 +392,37 @@ func firstLineSummary(head string) string {
 		if line == "" {
 			continue
 		}
-		if len(line) > knowledgeSummaryMaxLen {
-			line = strings.TrimSpace(line[:knowledgeSummaryMaxLen]) + "…"
+		if !utf8.ValidString(line) {
+			// A binary document — an uploaded diagram or screenshot — has no
+			// first line to quote. It still gets a manifest row, just without
+			// a summary; putting its bytes in the prompt instead would be
+			// noise at best and an invalid request body at worst.
+			return ""
 		}
-		return line
+		return truncateRunes(line, knowledgeSummaryMaxLen)
 	}
 	return ""
+}
+
+// truncateRunes cuts a summary to at most max BYTES without splitting a rune.
+//
+// The bound is in bytes because that is what bounds the prompt, but the cut has
+// to fall on a rune boundary: a document whose first line is not ASCII would
+// otherwise contribute a half-encoded character to <run_context>, which is
+// mojibake at best and, for anything that validates its input, a whole request
+// spoiled by one advisory line about one file.
+func truncateRunes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := 0
+	for i := range s {
+		if i > max {
+			break
+		}
+		cut = i
+	}
+	return strings.TrimSpace(s[:cut]) + "…"
 }
 
 // headCapture keeps the first bytes written through it and discards the rest —
@@ -417,4 +452,23 @@ func (h *headCapture) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (h *headCapture) String() string { return string(h.buf) }
+// String returns the captured head with a trailing partial rune dropped. The
+// capture stops at a byte count, so the last character can be half-written;
+// leaving it in would put an invalid sequence into the summary the same way an
+// unaligned truncation would.
+//
+// Bounded to the three bytes an incomplete sequence can be, rather than
+// scanning back for the first valid prefix. Invalid bytes further in belong to
+// the DOCUMENT — it is binary, or not UTF-8 — and are not this cut's to
+// rewrite; firstLineSummary declines to summarize those rather than trimming
+// its way through them.
+func (h *headCapture) String() string {
+	buf := h.buf
+	for i := 0; i < utf8.UTFMax-1 && len(buf) > 0; i++ {
+		if r, size := utf8.DecodeLastRune(buf); r != utf8.RuneError || size != 1 {
+			break
+		}
+		buf = buf[:len(buf)-1]
+	}
+	return string(buf)
+}

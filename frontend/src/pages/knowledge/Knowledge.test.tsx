@@ -269,6 +269,55 @@ describe('Knowledge — the move verb', () => {
   })
 })
 
+describe('Knowledge — the undo window', () => {
+  // The Table holds a verb for ten seconds and then calls whatever onCommit is
+  // current. The team switcher stays live the whole time (the undo bar is
+  // inline, not modal), so a commit that resolved the team lazily would fire
+  // against whichever team was selected when the window closed — silently
+  // mutating a same-named document in a team the reader never touched.
+  it('commits against the team the row was drawn under, not the one now selected', async () => {
+    teamState.teams = [
+      { id: 't1', name: 'platform', slug: 'platform' },
+      { id: 't2', name: 'growth', slug: 'growth' },
+    ]
+    vi.useFakeTimers()
+    try {
+      const { container } = draw()
+      await vi.waitFor(() => expect(screen.getByText('architecture.md')).toBeTruthy())
+
+      fireEvent.click(container.querySelectorAll('[data-trow]')[0])
+      const publish = await vi.waitFor(() => screen.getByRole('button', { name: /^publish/ }))
+      fireEvent.pointerDown(publish)
+      fireEvent.pointerUp(publish)
+
+      // Switch teams while the verb is still inside its window.
+      fireEvent.change(screen.getByRole('combobox'), { target: { value: 't2' } })
+      await vi.advanceTimersByTimeAsync(11000)
+
+      const move = api.apiFetch.mock.calls.find((c) => String(c[0]).endsWith('/kb/move'))
+      expect(move, 'the held verb was never sent').toBeTruthy()
+      expect(String(move?.[0])).toBe('/api/teams/t1/kb/move')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('closes the open document when the team changes', async () => {
+    teamState.teams = [
+      { id: 't1', name: 'platform', slug: 'platform' },
+      { id: 't2', name: 'growth', slug: 'growth' },
+    ]
+    draw()
+    await waitFor(() => expect(screen.getByText('architecture.md')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: 'architecture.md' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy())
+
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 't2' } })
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeFalsy())
+  })
+})
+
 describe('Knowledge — roles', () => {
   it('offers a viewer no write verbs at all', async () => {
     session.present = true

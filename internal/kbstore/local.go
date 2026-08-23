@@ -2,12 +2,14 @@ package kbstore
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
+	"path"
 	"sort"
 	"strings"
 
@@ -19,6 +21,21 @@ import (
 // a single-machine install has none, and the on-disk copy IS the durable copy.
 // A team's knowledge is therefore browsable and editable with an ordinary text
 // editor, which is the posture a local operator expects of their own machine.
+//
+// **Every operation goes through an os.Root opened on the team's KB directory,
+// and nothing here ever builds an absolute path.** That is the difference
+// between a rule and a guarantee. Path validation rejects `..` in a *string*,
+// which is no defense at all against a `..` that lives on the *disk*: a symlink
+// anywhere in the tree — dropped by a sync tool, or checked out with a repo —
+// turns a well-formed KB path into a read of, or a delete of, a file outside
+// the knowledge base entirely. os.Root refuses that in the kernel (openat2's
+// RESOLVE_BENEATH on Linux) rather than in a check that a rename can race.
+//
+// The confinement is the floor, not the whole rule. A symlink resolving *inside*
+// the root would still be followed, and List skips every symlink it walks past
+// — so a symlink would be invisible in a listing and readable by exact path,
+// which is precisely the kind of half-guarantee this package exists to avoid.
+// So the point reads reject a non-regular leaf outright, and the two doors agree.
 type localKB struct {
 	// dirFor resolves a team's KB root on disk. A field rather than a direct
 	// call so a test can root a whole KB in a temp dir without reaching for
@@ -35,38 +52,75 @@ func NewLocal() KB { return &localKB{dirFor: paths.TeamKBDir} }
 // for a caller that owns its own tree.
 func NewLocalAt(dir string) KB {
 	return &localKB{dirFor: func(_, teamID string) string {
-		return filepath.Join(dir, "teams", teamID, "kb")
+		return path.Join(dir, "teams", teamID, "kb")
 	}}
 }
 
-// file resolves the on-disk path for one entry after validating it. Together
-// with rootDir it is the local backend's half of the "one place builds a KB
-// address" rule; ValidatePath is what makes filepath.Join safe here, since a
-// traversal segment is refused before it can climb out of the team's tree.
-func (s *localKB) file(orgID, teamID string, ref Ref) (string, error) {
+// openRoot opens teamID's KB directory as a confined root. Every path this
+// backend touches is resolved relative to it and can never leave it.
+//
+// create says what a missing directory means. For a write it means "not yet",
+// so the tree is made; for a read it means "nothing here", which is
+// ErrNotFound rather than an error about the deployment — a team that has
+// never had a document filed is the normal first state.
+//
+// The caller closes the returned root.
+func (s *localKB) openRoot(orgID, teamID string, create bool) (*os.Root, error) {
+	dir := s.dirFor(orgID, teamID)
+	if create {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create team kb dir: %w", err)
+		}
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("open team kb: %w", err)
+	}
+	return root, nil
+}
+
+// rel is the root-relative name for one entry: "<root>/<path>", validated.
+// Slash-separated in every case — os.Root takes forward slashes on every
+// platform, so nothing here converts to an OS separator and there is no second
+// spelling of an address.
+func rel(ref Ref) (string, error) {
 	if _, err := ParseRoot(string(ref.Root)); err != nil {
 		return "", err
 	}
 	if err := ValidatePath(ref.Path); err != nil {
 		return "", err
 	}
-	return filepath.Join(s.rootDir(orgID, teamID, ref.Root), filepath.FromSlash(ref.Path)), nil
-}
-
-func (s *localKB) rootDir(orgID, teamID string, root Root) string {
-	return filepath.Join(s.dirFor(orgID, teamID), string(root))
+	return string(ref.Root) + "/" + ref.Path, nil
 }
 
 func (s *localKB) List(ctx context.Context, orgID, teamID string, roots []Root, pathPrefix string) ([]FileInfo, error) {
 	if err := ValidatePrefix(pathPrefix); err != nil {
 		return nil, err
 	}
-	out := []FileInfo{}
 	for _, root := range roots {
 		if _, err := ParseRoot(string(root)); err != nil {
 			return nil, err
 		}
-		entries, err := s.walkRoot(ctx, orgID, teamID, root)
+	}
+	if len(roots) == 0 {
+		return []FileInfo{}, nil
+	}
+
+	kbRoot, err := s.openRoot(orgID, teamID, false)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return []FileInfo{}, nil // a KB nobody has written to yet
+		}
+		return nil, err
+	}
+	defer func() { _ = kbRoot.Close() }()
+
+	out := []FileInfo{}
+	for _, root := range roots {
+		entries, err := walkRoot(ctx, kbRoot, root)
 		if err != nil {
 			return nil, err
 		}
@@ -81,35 +135,27 @@ func (s *localKB) List(ctx context.Context, orgID, teamID string, roots []Root, 
 }
 
 // walkRoot enumerates one root's regular files. A root that was never written
-// is an empty result, not an error — a team with no knowledge is the normal
-// first state, not a misconfiguration.
+// is an empty result, not an error.
 //
 // Anything that is not a plain regular file is skipped: a symlink is not
-// followed (it could point outside the team's tree, and the object backend has
-// no concept that could produce one), and a name that fails ValidatePath is
-// left out for the same round-trip reason the object backend gives.
-func (s *localKB) walkRoot(ctx context.Context, orgID, teamID string, root Root) ([]FileInfo, error) {
-	base := s.rootDir(orgID, teamID, root)
+// followed (the object backend has no concept that could produce one), and a
+// name that fails ValidatePath is left out because the per-file routes could
+// not round-trip it.
+func walkRoot(ctx context.Context, kbRoot *os.Root, root Root) ([]FileInfo, error) {
+	base := string(root)
 	var out []FileInfo
-	err := filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(kbRoot.FS(), base, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if d.IsDir() {
+		if d.IsDir() || !d.Type().IsRegular() {
 			return nil
 		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		rel, relErr := filepath.Rel(base, p)
-		if relErr != nil {
-			return relErr
-		}
-		path := filepath.ToSlash(rel)
-		if ValidatePath(path) != nil {
+		name := strings.TrimPrefix(p, base+"/")
+		if name == p || ValidatePath(name) != nil {
 			return nil
 		}
 		info, infoErr := d.Info()
@@ -119,7 +165,7 @@ func (s *localKB) walkRoot(ctx context.Context, orgID, teamID string, root Root)
 			}
 			return infoErr
 		}
-		out = append(out, FileInfo{Root: root, Path: path, Size: info.Size(), ModTime: info.ModTime()})
+		out = append(out, FileInfo{Root: root, Path: name, Size: info.Size(), ModTime: info.ModTime()})
 		return nil
 	})
 	if err != nil {
@@ -131,65 +177,151 @@ func (s *localKB) walkRoot(ctx context.Context, orgID, teamID string, root Root)
 	return out, nil
 }
 
+// resolveEntry walks name one component at a time, requiring every component
+// before the last to be a real directory, and returns the leaf's own Lstat.
+//
+// The walk is about the ERROR CLASS, not about safety — os.Root is what makes
+// an escape impossible, and it does so whether or not this runs. But it refuses
+// by returning a path-escapes-from-parent error that carries no exported
+// sentinel to match on, and a handler rendering that as a 500 would be the
+// wrong answer twice over: it is not a server fault, and telling a caller that
+// something unusual is at a path they may not read is the disclosure a 404
+// exists to prevent. Walking component-wise reaches the same verdict from
+// facts this package owns — Lstat does not follow the FINAL component, so a
+// symlink is reported as itself rather than traversed — and never has to
+// classify Go's wording.
+func resolveEntry(kbRoot *os.Root, name string) (os.FileInfo, error) {
+	segs := strings.Split(name, "/")
+	for i := 1; i < len(segs); i++ {
+		info, err := kbRoot.Lstat(strings.Join(segs[:i], "/"))
+		if err != nil {
+			return nil, mapNotExist(err)
+		}
+		if !info.IsDir() {
+			// A symlink, or a document, where a folder would have to be. Either
+			// way nothing beneath it is an entry of this knowledge base.
+			return nil, ErrNotFound
+		}
+	}
+	info, err := kbRoot.Lstat(name)
+	if err != nil {
+		return nil, mapNotExist(err)
+	}
+	return info, nil
+}
+
+// statRegular resolves one entry and refuses anything that is not a plain file.
+// A directory is a prefix rather than an entry, and a symlink is not a KB entry
+// at all — List skips both, so serving either here would make the same KB
+// answer two different questions depending on which door was used.
+func statRegular(kbRoot *os.Root, name string) (os.FileInfo, error) {
+	info, err := resolveEntry(kbRoot, name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, ErrNotFound
+	}
+	return info, nil
+}
+
+// checkWritableChain refuses a write whose path runs through something that is
+// not a folder. Reads answer ErrNotFound for the same shape (nothing is there
+// to read); a write is instead told its path is unusable, which is the fault
+// class a caller can act on.
+func checkWritableChain(kbRoot *os.Root, name string) error {
+	segs := strings.Split(name, "/")
+	for i := 1; i < len(segs); i++ {
+		part := strings.Join(segs[:i], "/")
+		info, err := kbRoot.Lstat(part)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // not created yet — MkdirAll will make it
+			}
+			return fmt.Errorf("resolve team kb path: %w", err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%w: %q is not a folder", ErrInvalidName, part)
+		}
+	}
+	return nil
+}
+
 func (s *localKB) Stat(_ context.Context, orgID, teamID string, ref Ref) (FileInfo, error) {
-	p, err := s.file(orgID, teamID, ref)
+	name, err := rel(ref)
 	if err != nil {
 		return FileInfo{}, err
 	}
-	info, err := os.Stat(p)
+	kbRoot, err := s.openRoot(orgID, teamID, false)
 	if err != nil {
-		return FileInfo{}, mapNotExist(err)
+		return FileInfo{}, err
 	}
-	if info.IsDir() {
-		// A folder is a prefix, never an entry: the object backend cannot
-		// produce one, so the two backends must agree that this path holds
-		// nothing fetchable.
-		return FileInfo{}, ErrNotFound
+	defer func() { _ = kbRoot.Close() }()
+
+	info, err := statRegular(kbRoot, name)
+	if err != nil {
+		return FileInfo{}, err
 	}
 	return FileInfo{Root: ref.Root, Path: ref.Path, Size: info.Size(), ModTime: info.ModTime()}, nil
 }
 
 func (s *localKB) Open(_ context.Context, orgID, teamID string, ref Ref) (io.ReadCloser, error) {
-	p, err := s.file(orgID, teamID, ref)
+	name, err := rel(ref)
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(p)
+	kbRoot, err := s.openRoot(orgID, teamID, false)
+	if err != nil {
+		return nil, err
+	}
+	// The root can close as soon as the file is open: the returned handle is
+	// an independent descriptor, and the confinement has already done its job
+	// by deciding which file that is.
+	defer func() { _ = kbRoot.Close() }()
+
+	if _, err := statRegular(kbRoot, name); err != nil {
+		return nil, err
+	}
+	f, err := kbRoot.Open(name)
 	if err != nil {
 		return nil, mapNotExist(err)
-	}
-	// A directory opens fine on a filesystem and reads as an error only once
-	// the caller starts streaming. An object store has no folder key at all,
-	// so the two backends agree here rather than at the first Read.
-	info, err := f.Stat()
-	if err != nil || info.IsDir() {
-		_ = f.Close()
-		if err != nil {
-			return nil, mapNotExist(err)
-		}
-		return nil, ErrNotFound
 	}
 	return f, nil
 }
 
 // Put writes through a temp file and renames into place, so a concurrent read
-// never observes a half-written document and a failed write cannot truncate
-// the one that was already there.
+// never observes a half-written document and a failed write cannot truncate the
+// one that was already there. The rename also means a Put over a symlink
+// REPLACES the link rather than writing through it.
 func (s *localKB) Put(ctx context.Context, orgID, teamID string, ref Ref, r io.Reader) error {
-	p, err := s.file(orgID, teamID, ref)
+	name, err := rel(ref)
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(p)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	kbRoot, err := s.openRoot(orgID, teamID, true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = kbRoot.Close() }()
+
+	if err := checkWritableChain(kbRoot, name); err != nil {
+		return err
+	}
+	dir := path.Dir(name)
+	if err := kbRoot.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create team kb dir: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, ".put-*")
+	tmp, tmpName, err := createTemp(kbRoot, dir)
 	if err != nil {
-		return fmt.Errorf("create temp team kb entry: %w", err)
+		return err
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() // no-op once the rename below succeeds
+	committed := false
+	defer func() {
+		if !committed {
+			_ = kbRoot.Remove(tmpName)
+		}
+	}()
+
 	if _, err := io.Copy(tmp, &ctxReader{ctx: ctx, r: r}); err != nil {
 		_ = tmp.Close()
 		return err
@@ -197,25 +329,61 @@ func (s *localKB) Put(ctx context.Context, orgID, teamID string, ref Ref, r io.R
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("flush temp team kb entry: %w", err)
 	}
-	if err := os.Rename(tmpName, p); err != nil {
+	if err := kbRoot.Rename(tmpName, name); err != nil {
 		return fmt.Errorf("commit team kb entry: %w", err)
 	}
+	committed = true
 	return nil
 }
 
+// createTemp makes an exclusively-created scratch file inside dir. os.CreateTemp
+// cannot be used here because it takes an absolute path and would leave the
+// confinement; the random suffix serves the same purpose — two concurrent
+// writes to one document must not share a scratch file.
+func createTemp(kbRoot *os.Root, dir string) (*os.File, string, error) {
+	var buf [8]byte
+	for attempt := 0; attempt < 8; attempt++ {
+		if _, err := rand.Read(buf[:]); err != nil {
+			return nil, "", fmt.Errorf("name temp team kb entry: %w", err)
+		}
+		name := path.Join(dir, ".put-"+hex.EncodeToString(buf[:]))
+		f, err := kbRoot.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return f, name, nil
+		}
+		if !os.IsExist(err) {
+			return nil, "", fmt.Errorf("create temp team kb entry: %w", err)
+		}
+	}
+	return nil, "", fmt.Errorf("create temp team kb entry: exhausted attempts in %q", dir)
+}
+
 func (s *localKB) Delete(ctx context.Context, orgID, teamID string, ref Ref) (int, error) {
-	files, err := s.subtreeFiles(ctx, orgID, teamID, ref)
+	name, err := rel(ref)
+	if err != nil {
+		return 0, err
+	}
+	kbRoot, err := s.openRoot(orgID, teamID, false)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return 0, nil // nothing filed, so the path is already gone
+		}
+		return 0, err
+	}
+	defer func() { _ = kbRoot.Close() }()
+
+	files, err := subtreeFiles(ctx, kbRoot, name)
 	if err != nil {
 		return 0, err
 	}
 	removed := 0
 	for _, f := range files {
-		if err := os.Remove(f.abs); err != nil && !os.IsNotExist(err) {
+		if err := kbRoot.Remove(f.name); err != nil && !os.IsNotExist(err) {
 			return removed, fmt.Errorf("delete team kb entry: %w", err)
 		}
 		removed++
 	}
-	s.pruneEmptyDirs(orgID, teamID, ref)
+	pruneEmptyDirs(kbRoot, name)
 	return removed, nil
 }
 
@@ -223,7 +391,21 @@ func (s *localKB) Move(ctx context.Context, orgID, teamID string, from, to Ref) 
 	if _, err := movePlanRoots(from, to); err != nil {
 		return 0, err
 	}
-	files, err := s.subtreeFiles(ctx, orgID, teamID, from)
+	fromName, err := rel(from)
+	if err != nil {
+		return 0, err
+	}
+	toName, err := rel(to)
+	if err != nil {
+		return 0, err
+	}
+	kbRoot, err := s.openRoot(orgID, teamID, true)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = kbRoot.Close() }()
+
+	files, err := subtreeFiles(ctx, kbRoot, fromName)
 	if err != nil {
 		return 0, err
 	}
@@ -236,72 +418,66 @@ func (s *localKB) Move(ctx context.Context, orgID, teamID string, from, to Ref) 
 	// out which files made it across.
 	plan := make([]movePair, 0, len(files))
 	for _, f := range files {
-		dstRef := Ref{Root: to.Root, Path: joinRelPath(to.Path, f.rel)}
-		dst, err := s.file(orgID, teamID, dstRef)
-		if err != nil {
-			return 0, err
-		}
-		if dst == f.abs {
+		dst := joinRelPath(toName, f.rel)
+		if dst == f.name {
 			return 0, fmt.Errorf("%w: %s is already at %s", ErrExists, from, to)
 		}
-		if _, err := os.Lstat(dst); err == nil {
-			return 0, fmt.Errorf("%w: %s", ErrExists, dstRef)
+		if _, err := kbRoot.Lstat(dst); err == nil {
+			return 0, fmt.Errorf("%w: %s", ErrExists, Ref{Root: to.Root, Path: strings.TrimPrefix(dst, string(to.Root)+"/")})
 		} else if !os.IsNotExist(err) {
 			return 0, fmt.Errorf("check move destination: %w", err)
 		}
-		plan = append(plan, movePair{src: f.abs, dst: dst})
+		plan = append(plan, movePair{src: f.name, dst: dst})
 	}
 
 	moved := make([]movePair, 0, len(plan))
 	for _, p := range plan {
-		if err := os.MkdirAll(filepath.Dir(p.dst), 0o700); err != nil {
-			return 0, unwindMove(moved, fmt.Errorf("create team kb dir: %w", err))
+		if err := kbRoot.MkdirAll(path.Dir(p.dst), 0o700); err != nil {
+			return 0, unwindMove(kbRoot, moved, fmt.Errorf("create team kb dir: %w", err))
 		}
-		if err := os.Rename(p.src, p.dst); err != nil {
-			return 0, unwindMove(moved, fmt.Errorf("move team kb entry: %w", err))
+		if err := kbRoot.Rename(p.src, p.dst); err != nil {
+			return 0, unwindMove(kbRoot, moved, fmt.Errorf("move team kb entry: %w", err))
 		}
 		moved = append(moved, p)
 	}
-	s.pruneEmptyDirs(orgID, teamID, from)
+	pruneEmptyDirs(kbRoot, fromName)
 	return len(plan), nil
 }
 
 // unwindMove puts back what a failed multi-file move already relocated, so the
-// team's knowledge is where it was rather than split across two paths. A
-// rename back can itself fail; that error joins the original rather than
-// replacing it, because the first one is what the operator has to act on.
-func unwindMove(moved []movePair, cause error) error {
+// team's knowledge is where it was rather than split across two paths. Every
+// entry is attempted: stopping at the first failure would strand the rest at
+// their destinations with nothing naming them. A rename back that itself fails
+// joins the original error rather than replacing it — the first one is what the
+// operator has to act on.
+func unwindMove(kbRoot *os.Root, moved []movePair, cause error) error {
 	for i := len(moved) - 1; i >= 0; i-- {
-		if err := os.Rename(moved[i].dst, moved[i].src); err != nil {
+		if err := kbRoot.Rename(moved[i].dst, moved[i].src); err != nil {
 			cause = errors.Join(cause, fmt.Errorf("roll back moved entry %q: %w", moved[i].dst, err))
 		}
 	}
 	return cause
 }
 
-// movePair is one file's before-and-after absolute path in a planned move.
+// movePair is one file's before-and-after root-relative name in a planned move.
 type movePair struct{ src, dst string }
 
-// localFile pairs an entry's absolute path with its path relative to the
-// subtree root the caller named — the two halves Move needs to rebuild the
-// same shape under a new prefix.
+// localFile pairs an entry's root-relative name with its name relative to the
+// subtree the caller addressed — the two halves Move needs to rebuild the same
+// shape under a new prefix.
 type localFile struct {
-	abs string
-	rel string
+	name string
+	rel  string
 }
 
-// subtreeFiles returns the regular files ref addresses: the file at exactly
-// that path, or every file beneath it when the path names a folder. A path
-// holding nothing yields an empty slice, which Delete reads as an answer and
-// Move as a fault.
-func (s *localKB) subtreeFiles(ctx context.Context, orgID, teamID string, ref Ref) ([]localFile, error) {
-	base, err := s.file(orgID, teamID, ref)
+// subtreeFiles returns the regular files name addresses: the file at exactly
+// that name, or every file beneath it when it names a folder. A name holding
+// nothing yields an empty slice, which Delete reads as an answer and Move as a
+// fault. Symlinks are not entries and are skipped, at the leaf and inside.
+func subtreeFiles(ctx context.Context, kbRoot *os.Root, name string) ([]localFile, error) {
+	info, err := resolveEntry(kbRoot, name)
 	if err != nil {
-		return nil, err
-	}
-	info, err := os.Lstat(base)
-	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, ErrNotFound) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read team kb path: %w", err)
@@ -310,11 +486,11 @@ func (s *localKB) subtreeFiles(ctx context.Context, orgID, teamID string, ref Re
 		if !info.Mode().IsRegular() {
 			return nil, nil
 		}
-		return []localFile{{abs: base, rel: ""}}, nil
+		return []localFile{{name: name, rel: ""}}, nil
 	}
 
 	var out []localFile
-	err = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+	err = fs.WalkDir(kbRoot.FS(), name, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -324,43 +500,54 @@ func (s *localKB) subtreeFiles(ctx context.Context, orgID, teamID string, ref Re
 		if d.IsDir() || !d.Type().IsRegular() {
 			return nil
 		}
-		rel, relErr := filepath.Rel(base, p)
-		if relErr != nil {
-			return relErr
-		}
-		out = append(out, localFile{abs: p, rel: filepath.ToSlash(rel)})
+		out = append(out, localFile{name: p, rel: strings.TrimPrefix(p, name+"/")})
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("walk team kb subtree: %w", err)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].abs < out[j].abs })
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out, nil
 }
 
-// pruneEmptyDirs removes the directories a delete or a move just emptied,
-// walking up from the affected path to (but never through) the root. The
-// object backend has no directories at all, so leaving hollow ones behind
-// would make the same KB list differently depending on the deployment mode —
-// a folder that exists on one and not the other.
-func (s *localKB) pruneEmptyDirs(orgID, teamID string, ref Ref) {
-	root := s.rootDir(orgID, teamID, ref.Root)
-	dir := filepath.Join(root, filepath.FromSlash(ref.Path))
-	// The named path may itself be a folder this call just emptied. When it is
-	// not — a single file, already gone — the walk up starts at its parent.
-	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
-		dir = filepath.Dir(dir)
+// pruneEmptyDirs removes the directories a delete or a move just emptied.
+//
+// It walks the affected subtree deepest-first and then climbs, rather than only
+// climbing: emptying a folder that branches (docs/sub/ and docs/other/) leaves
+// several empty leaves, and a climb from one of them stops at the first
+// non-empty parent with the siblings still there. The object backend has no
+// directories at all, so a hollow one left behind here would make the same KB
+// list differently depending on the deployment mode.
+//
+// os.Remove refuses a non-empty directory, which is exactly the signal to keep
+// it — a folder still holding a document stays, and so does everything above it.
+func pruneEmptyDirs(kbRoot *os.Root, name string) {
+	var dirs []string
+	if info, err := kbRoot.Lstat(name); err == nil && info.IsDir() {
+		_ = fs.WalkDir(kbRoot.FS(), name, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				dirs = append(dirs, p)
+			}
+			return nil
+		})
 	}
-	for dir != root && strings.HasPrefix(dir, root+string(filepath.Separator)) {
-		if err := os.Remove(dir); err != nil {
-			return // non-empty, or gone — either way there is nothing above to prune
-		}
-		dir = filepath.Dir(dir)
+	// Then every ancestor up to (but never including) the visibility root,
+	// which is the team's KB and not a folder in it.
+	for dir := path.Dir(name); strings.Contains(dir, "/"); dir = path.Dir(dir) {
+		dirs = append(dirs, dir)
+	}
+	// Deepest first, so a directory is only attempted once its children are.
+	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
+	for _, dir := range dirs {
+		_ = kbRoot.Remove(dir)
 	}
 }
 
 // joinRelPath rebases one subtree member under a new prefix. An empty rel is
-// the single-file case, where the destination path IS the prefix.
+// the single-file case, where the destination name IS the prefix.
 func joinRelPath(prefix, rel string) string {
 	if rel == "" {
 		return prefix

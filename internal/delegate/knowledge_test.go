@@ -1,12 +1,16 @@
 package delegate
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -353,6 +357,88 @@ func TestRunContext_CarriesTheManifest(t *testing.T) {
 		t.Errorf("the manifest rendered before the run's own facts;\n%s", got)
 	}
 }
+
+// TestStageTeamKnowledge_SummaryIsRuneSafe: the summary bound is in bytes
+// because that is what bounds the prompt, but the cut has to land on a rune
+// boundary. A document whose first line is not ASCII would otherwise
+// contribute a half-encoded character to <run_context>.
+func TestStageTeamKnowledge_SummaryIsRuneSafe(t *testing.T) {
+	kb := kbstore.NewLocalAt(t.TempDir())
+	// Multi-byte throughout, long enough that the cut lands mid-character.
+	writeKB(t, kb, kbTeam, kbstore.RootPrivate, "notes.md", strings.Repeat("日", 200)+"\ntail")
+	// And a document long enough that the head capture itself cuts a rune.
+	writeKB(t, kb, kbTeam, kbstore.RootPrivate, "long.md", strings.Repeat("é", 4000))
+	s := stagingSpawner(t, kb, fakeTeams{})
+
+	manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, t.TempDir(), nil)
+	if !utf8.ValidString(manifest) {
+		t.Fatalf("the manifest carries invalid UTF-8; it rides <run_context> to the model")
+	}
+	if !strings.Contains(manifest, "日") {
+		t.Errorf("the summary lost its content entirely;\n%s", manifest)
+	}
+}
+
+// TestStageTeamKnowledge_BinaryDocumentGetsNoSummary: an uploaded diagram has
+// no first line to quote. It still gets a manifest row — the agent should know
+// it exists — just without bytes from it in the prompt.
+func TestStageTeamKnowledge_BinaryDocumentGetsNoSummary(t *testing.T) {
+	kb := kbstore.NewLocalAt(t.TempDir())
+	if err := kb.Put(context.Background(), kbOrg, kbTeam,
+		kbstore.Ref{Root: kbstore.RootPrivate, Path: "diagram.png"},
+		bytes.NewReader([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0xfd})); err != nil {
+		t.Fatalf("seed binary: %v", err)
+	}
+	s := stagingSpawner(t, kb, fakeTeams{})
+
+	manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, t.TempDir(), nil)
+	if !utf8.ValidString(manifest) {
+		t.Fatalf("a binary document put invalid UTF-8 into the manifest")
+	}
+	if !strings.Contains(manifest, "private/diagram.png") {
+		t.Errorf("the binary document is missing from the manifest;\n%s", manifest)
+	}
+	// A summary is rendered as "<path> — <first line>", so the separator is
+	// what says whether one was quoted.
+	if strings.Contains(manifest, "private/diagram.png —") {
+		t.Errorf("the binary document was given a summary;\n%s", manifest)
+	}
+}
+
+// TestCopyKnowledgeFile_RemovesItsFragment: the caller logs and skips an entry
+// whose copy failed, so a truncated file left behind would be a document the
+// manifest never mentions sitting in a tree the agent is told to walk.
+func TestCopyKnowledgeFile_RemovesItsFragment(t *testing.T) {
+	s := stagingSpawner(t, kbstore.NewLocalAt(t.TempDir()), fakeTeams{})
+	dst := filepath.Join(t.TempDir(), "staged", "runbook.md")
+
+	_, _, err := s.copyKnowledgeFile(context.Background(), failingKB{after: 6}, kbOrg, kbTeam,
+		kbstore.Ref{Root: kbstore.RootPrivate, Path: "runbook.md"}, dst)
+	if err == nil {
+		t.Fatalf("expected the copy to fail")
+	}
+	if _, statErr := os.Stat(dst); !os.IsNotExist(statErr) {
+		t.Errorf("a truncated document survived a failed copy (err=%v)", statErr)
+	}
+}
+
+// failingKB streams a few bytes and then dies, standing in for the object
+// backend losing its connection mid-body — the way this fails in multi mode.
+type failingKB struct {
+	kbstore.KB
+	after int
+}
+
+func (f failingKB) Open(context.Context, string, string, kbstore.Ref) (io.ReadCloser, error) {
+	return io.NopCloser(io.MultiReader(
+		strings.NewReader(strings.Repeat("x", f.after)),
+		errReader{},
+	)), nil
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("connection reset mid-body") }
 
 func TestFirstLineSummary(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
