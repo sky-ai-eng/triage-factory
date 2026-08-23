@@ -2,6 +2,7 @@ package agentproc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -12,8 +13,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// shouldSandbox decides whether the current Run invocation routes
-// through the gVisor sandbox. Both conditions must hold:
+// shouldSandbox decides whether agent execution on this host runs inside
+// the gVisor sandbox. Both conditions must hold:
 //
 //   - runmode.ModeMulti: local-mode users are trusted with their own
 //     creds; sandboxing them is friction without isolation benefit
@@ -22,6 +23,13 @@ import (
 //   - runtime.GOOS == "linux": gVisor only works on Linux. Multi mode
 //     on macOS isn't a supported config (the production runner image
 //     is alpine Linux).
+//
+// The one consumer of this gate is the native runtime's resident tool-host
+// jail (agentproc.LaunchToolHost) — a multi+Linux deployment always runs its
+// delegations that way. Run/RunInteractive (the SDK loop) never sandbox: they
+// always take the direct spawn, wrapped on Linux in the bubblewrap courtesy
+// isolation instead (opts.LocalSandbox), which is not what this predicate
+// answers.
 func shouldSandbox() bool {
 	return runmode.Current() == runmode.ModeMulti && runtime.GOOS == "linux"
 }
@@ -35,12 +43,35 @@ func shouldSandbox() bool {
 // inside the run's own host-side directory.
 const SandboxWorkRoot = "/work"
 
-// WillSandbox reports whether a Run on this host will route through the gVisor
-// sandbox (multi mode + Linux). A caller that must pre-stage sandbox-only
-// inputs branches on this. Exported form of the internal shouldSandbox gate so
-// the predicate stays single-sourced.
+// WillSandbox reports whether agent execution on this host runs inside the
+// gVisor sandbox (multi mode + Linux — the native runtime's resident
+// tool-host jail; see shouldSandbox). A caller that must pre-stage
+// sandbox-only inputs branches on this. Exported form of the internal
+// shouldSandbox gate so the predicate stays single-sourced.
 func WillSandbox() bool {
 	return shouldSandbox()
+}
+
+// errSDKLoopInMultiMode is what Run/RunInteractive return when called in
+// multi mode. Multi-mode delegations are always runtime='native' — minted
+// that way at the dialect-keyed enqueue, never this process's to choose —
+// so a call here is a wiring bug (a regression that stamps 'sdk' again, or a
+// new call site that forgot the ratchet), not a config this process can
+// route around. Refusing loudly is the fail-closed choice: the SDK loop's
+// only isolation on Linux is the bubblewrap courtesy sandbox (not a tenant
+// boundary — see internal/agentproc/localsandbox's package doc), so silently
+// spawning it in multi mode would run a multi-tenant agent on the bare host
+// with none of the gVisor/broker/sidecar isolation multi mode requires.
+var errSDKLoopInMultiMode = errors.New("agentproc: the SDK loop (Run/RunInteractive) refuses to spawn in multi mode — multi-mode delegations run through LaunchToolHost's jail, never node directly on the host")
+
+// refuseMultiModeSDKLoop is the one guard Run and RunInteractive both call
+// before touching anything else, so the refusal is single-sourced and can't
+// drift between the two entry points.
+func refuseMultiModeSDKLoop() error {
+	if runmode.Current() == runmode.ModeMulti {
+		return errSDKLoopInMultiMode
+	}
+	return nil
 }
 
 // AgentVisibleRoot returns the absolute path the agent observes for hostRoot

@@ -613,36 +613,32 @@ func TestRuntime_JiraAPIProxyReportsDeployment(t *testing.T) {
 	}
 }
 
-// TestRuntime_SandboxLLMSplitsTheJailFromTheEngine drives the cell shrink over
-// the real supervision channel, both ways, because the two halves are one
-// decision: what the jail is pointed at, and what the executor's own engine
-// dials. Asserting only the first would let the coordinates disappear for
-// everyone and the run fail at its first model call.
-func TestRuntime_SandboxLLMSplitsTheJailFromTheEngine(t *testing.T) {
+// TestRuntime_SandboxNeverGetsLLMChannel pins the cell-shrink's now-only
+// case over the real supervision channel: the jail is never pointed at a
+// provider — no jail's spec, mounts, argv, or env names a provider channel —
+// while the executor's own (native) engine still gets the coordinates to
+// dial it.
+func TestRuntime_SandboxNeverGetsLLMChannel(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
 
-	start := func(t *testing.T, sandboxLLM bool) sidecarproto.StartProxiesResult {
-		t.Helper()
-		orch, rt := dialRuntime(t)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		bundle := &credbundle.Bundle{LLM: map[string]string{
-			"ANTHROPIC_API_KEY":  "sk-ant-real",
-			"ANTHROPIC_BASE_URL": upstream.URL,
-		}}
-		if err := orch.Call(ctx, sidecarproto.KindSealedBundle,
-			sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, bundle)}, nil); err != nil {
-			t.Fatalf("relay bundle: %v", err)
-		}
-		var res sidecarproto.StartProxiesResult
-		if err := orch.Call(ctx, sidecarproto.KindStartProxies,
-			sidecarproto.StartProxiesBody{HostVethIP: "127.0.0.1", SandboxLLM: sandboxLLM}, &res); err != nil {
-			t.Fatalf("start proxies: %v", err)
-		}
-		return res
+	orch, rt := dialRuntime(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	bundle := &credbundle.Bundle{LLM: map[string]string{
+		"ANTHROPIC_API_KEY":  "sk-ant-real",
+		"ANTHROPIC_BASE_URL": upstream.URL,
+	}}
+	if err := orch.Call(ctx, sidecarproto.KindSealedBundle,
+		sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, bundle)}, nil); err != nil {
+		t.Fatalf("relay bundle: %v", err)
+	}
+	var res sidecarproto.StartProxiesResult
+	if err := orch.Call(ctx, sidecarproto.KindStartProxies,
+		sidecarproto.StartProxiesBody{HostVethIP: "127.0.0.1"}, &res); err != nil {
+		t.Fatalf("start proxies: %v", err)
 	}
 	has := func(env []string, key string) bool {
 		for _, kv := range env {
@@ -653,22 +649,12 @@ func TestRuntime_SandboxLLMSplitsTheJailFromTheEngine(t *testing.T) {
 		return false
 	}
 
-	t.Run("engine outside the jail", func(t *testing.T) {
-		res := start(t, false)
-		if has(res.Env, "ANTHROPIC_BASE_URL") || has(res.Env, "ANTHROPIC_API_KEY") {
-			t.Errorf("sandbox env still names the LLM proxy: %v", res.Env)
-		}
-		if !has(res.LLMEnv, "ANTHROPIC_BASE_URL") {
-			t.Errorf("the executor got no provider address to dial: %v", res.LLMEnv)
-		}
-	})
-
-	t.Run("engine inside the jail", func(t *testing.T) {
-		res := start(t, true)
-		if !has(res.Env, "ANTHROPIC_BASE_URL") || !has(res.Env, "ANTHROPIC_API_KEY") {
-			t.Errorf("sandbox env lost the LLM proxy the in-jail runtime dials: %v", res.Env)
-		}
-	})
+	if has(res.Env, "ANTHROPIC_BASE_URL") || has(res.Env, "ANTHROPIC_API_KEY") {
+		t.Errorf("sandbox env names the LLM proxy: %v", res.Env)
+	}
+	if !has(res.LLMEnv, "ANTHROPIC_BASE_URL") {
+		t.Errorf("the executor got no provider address to dial: %v", res.LLMEnv)
+	}
 }
 
 // TestGitHubUpstreamsFromBundle pins the one derivation every GitHub lane in

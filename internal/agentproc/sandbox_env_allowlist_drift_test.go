@@ -34,7 +34,7 @@ func TestSandboxEnvAllowlistCoversEveryProducer(t *testing.T) {
 	}
 
 	// Base runtime floor (+ the run-metadata keys the base is appended with
-	// in newSandboxCommand). agentRuntimeEnv is folded in by buildSandboxEnv.
+	// in LaunchToolHost). agentRuntimeEnv is folded in by buildSandboxEnv.
 	add(buildSandboxEnv(nil))
 	add([]string{githooks.BinEnvVar + "=/usr/local/bin/triagefactory"})
 

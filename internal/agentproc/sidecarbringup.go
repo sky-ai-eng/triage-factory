@@ -100,13 +100,6 @@ type SidecarBringUpParams struct {
 	// host (the orchestrator's own clone + agenthost).
 	HostVethIP string
 
-	// SandboxLLM points the JAIL at this run's LLM proxy. Set it when the
-	// thing making model calls lives inside the jail; leave it false when the
-	// engine runs in this process, and the jail gets no provider address and
-	// no placeholder to present at one. The proxy is bound either way, and its
-	// coordinates come back on the result for whoever does dial it.
-	SandboxLLM bool
-
 	// Git, when non-nil, requests the git-over-HTTPS proxy — its presence is
 	// the whole of what BringUpRunSidecar reads out of it. Its
 	// Authorize/RecordDenial/RecordPush are NOT consumed here — those are the
@@ -220,7 +213,6 @@ func BringUpRunSidecar(ctx context.Context, sc sandbox.LaunchedSidecar, provisio
 
 	req := sidecarproto.StartProxiesBody{
 		HostVethIP:          params.HostVethIP,
-		SandboxLLM:          params.SandboxLLM,
 		GitEnabled:          params.Git != nil,
 		IdentityConfigPairs: params.IdentityPairs,
 		GitHubAPIEnabled:    params.GitHubAPIEnabled,

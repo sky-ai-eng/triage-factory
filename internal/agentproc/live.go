@@ -96,13 +96,12 @@ type LiveRun struct {
 	writeMu sync.Mutex
 	cancel  context.CancelFunc
 
-	// cleanup tears down the gVisor sandbox bring-up (sandbox + proxies +
-	// agenthost daemon + scratch dir) for a multi-mode run; it is the
-	// func newSandboxCommand returns. nil / no-op for direct (local) runs,
-	// which keeps that path byte-identical. Run exactly once, at the very
-	// end of readLoop — after cmd.Wait and the final cancel, never
-	// concurrently with the stream read (StdoutPipe forbids Wait before the
-	// reader drains; readLoop already orders this). cleanupOnce guards the
+	// cleanup is the direct-spawn path's teardown hook — a no-op, since the
+	// direct path owns nothing beyond the process itself (which cancel's
+	// SIGKILL already reclaims). Run exactly once, at the very end of
+	// readLoop — after cmd.Wait and the final cancel, never concurrently
+	// with the stream read (StdoutPipe forbids Wait before the reader
+	// drains; readLoop already orders this). cleanupOnce guards the
 	// single-shot guarantee against any double-close.
 	cleanup     func()
 	cleanupOnce sync.Once
@@ -129,13 +128,8 @@ type LiveRun struct {
 	stderr    string
 }
 
-// InteractiveSupported reports whether this host can run a LiveRun. Both
-// local/direct and multi-mode (gVisor sandbox) runs now execute through the
-// streaming-input live path: the sandbox bidirectional stdio channel was
-// validated end-to-end (TFAC-322 — 10-min idle survival, ~1.4 ms interrupt,
-// ~4 ms permission round-trip, incremental streaming, leak-free teardown), so
-// RunInteractive drives the sandbox the same way it drives a direct process.
-// Unconditionally true now; retained as the seam the delegate layer forks on
+// InteractiveSupported reports whether this host can run a LiveRun.
+// Unconditionally true; retained as the seam the delegate layer forks on
 // (runLiveAndDrive vs the one-shot runOneShot fallback) so that fallback stays
 // reachable if a future host ever needs it.
 func InteractiveSupported() bool {
@@ -150,14 +144,17 @@ func InteractiveSupported() bool {
 // the wrapper signals ready. perms answers tool-permission prompts; a
 // nil perms denies every prompt. A nil sink discards stream events.
 //
-// Multi-mode + Linux runs build the command through the gVisor sandbox via
-// the shared newSandboxCommand helper (the same bring-up as the one-shot
-// Run); the returned LiveRun owns that sandbox's teardown and frees it once,
-// after cmd.Wait, on every exit path — so idle hibernation reclaims the
-// subnet slot automatically. Local / non-Linux take the direct subprocess.
-// The streaming-input flags are set on opts before the command is built, so
-// BuildArgs carries them and the reader loop is transport-agnostic either way.
+// Local mode only, and enforced: refuses with errSDKLoopInMultiMode before
+// spawning anything if runmode is multi (the SDK loop only ever runs local —
+// multi mode's delegations are runtime='native', driven through
+// agentproc.LaunchToolHost's jail instead) rather than running the SDK
+// unsandboxed on the host — see refuseMultiModeSDKLoop. Otherwise always the
+// direct subprocess; the streaming-input flags are set on opts before the
+// command is built, so BuildArgs carries them.
 func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms PermissionHandler) (*LiveRun, error) {
+	if err := refuseMultiModeSDKLoop(); err != nil {
+		return nil, err
+	}
 	if sink == nil {
 		sink = NoopSink{}
 	}
@@ -180,48 +177,21 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		return nil, fmt.Errorf("agent runtime: %w", err)
 	}
 
-	// Build the command the same way the one-shot Run does: the sandbox
-	// branch routes through the shared newSandboxCommand (and hands back the
-	// teardown the LiveRun will own); the direct branch spawns node on the
-	// host. The no-op cleanup for the direct path keeps local runs
-	// byte-identical. cmd.StdinPipe / cmd.StdoutPipe below are wired
-	// identically for both — the reader loop is transport-agnostic.
-	var (
-		proc    runProc
-		cleanup = func() {}
-	)
-	if shouldSandbox() {
-		sandboxProc, sandboxCleanup, serr := newSandboxCommand(runCtx, opts, wrapperPath)
-		if serr != nil {
-			cancel()
-			return nil, serr
-		}
-		proc = sandboxProc
-		cleanup = sandboxCleanup
-	} else {
-		nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
-		directCmd, derr := newDirectCommand(runCtx, opts, nodeArgs)
-		if derr != nil {
-			cancel()
-			return nil, derr
-		}
-		directProc, perr := newExecProc(directCmd)
-		if perr != nil {
-			cancel()
-			return nil, perr
-		}
-		proc = directProc
+	nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
+	directCmd, derr := newDirectCommand(runCtx, opts, nodeArgs)
+	if derr != nil {
+		cancel()
+		return nil, derr
+	}
+	proc, perr := newExecProc(directCmd)
+	if perr != nil {
+		cancel()
+		return nil, perr
 	}
 
-	// From here a pre-launch failure must tear down the sandbox bring-up
-	// (cleanup) as well as release the derived ctx (cancel); cleanup is a
-	// no-op on the direct path. Once readLoop is running it owns cleanup, so
-	// there are no cleanup() calls past the go-statement below. The stdio
-	// pipes/socket + stderr capture are set up inside the runProc (execProc
-	// for the direct path, the sandbox LaunchedRun otherwise); Stdin/Stdout
-	// are valid only after Start.
+	// The stdio pipes + stderr capture are set up inside execProc; Stdin/
+	// Stdout are valid only after Start.
 	if err := proc.Start(); err != nil {
-		cleanup()
 		cancel()
 		return nil, fmt.Errorf("start agent runtime: %w", err)
 	}
@@ -229,7 +199,7 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 	l := &LiveRun{
 		stdin:   proc.Stdin(),
 		cancel:  cancel,
-		cleanup: cleanup,
+		cleanup: func() {},
 		done:    make(chan struct{}),
 		ready:   make(chan struct{}),
 		stream:  NewStreamState(),

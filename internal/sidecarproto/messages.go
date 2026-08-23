@@ -35,15 +35,6 @@ type StartProxiesBody struct {
 	// jailed agent (which can't reach 127.0.0.1) can talk to them.
 	HostVethIP string `json:"host_veth_ip"`
 
-	// SandboxLLM asks for the LLM proxy's address and per-run placeholder to
-	// be included in the sandbox env. The proxy binds either way — it is where
-	// the run's real provider key lives — so this names only who dials it: an
-	// engagement whose engine runs inside the jail (the SDK subprocess) needs
-	// the jail pointed at it; one whose engine runs in the executor process
-	// does not, and its jail is given no LLM channel at all. That caller reads
-	// the coordinates off StartProxiesResult.LLMEnv instead.
-	SandboxLLM bool `json:"sandbox_llm,omitempty"`
-
 	// GitEnabled requests the git-over-HTTPS credential proxy. When false the
 	// run pre-clones nothing and pushes nowhere (a prompt-only or Jira-only
 	// run) and no git proxy is bound. Which host it forwards to is not asked
@@ -111,9 +102,9 @@ type StartProxiesResult struct {
 	// LLMEnv is the LLM proxy's address plus this run's placeholder, in the
 	// same provider vocabulary Env would have carried them in. It is here
 	// unconditionally, for the caller whose model calls originate in the
-	// executor process rather than in the jail; whether the jail ALSO got
-	// them is what SandboxLLM decided. Non-secret for the reason every
-	// placeholder here is: the real provider key never leaves the sidecar.
+	// executor process (the native engine) — no jail is ever pointed at the
+	// LLM proxy. Non-secret for the reason every placeholder here is: the
+	// real provider key never leaves the sidecar.
 	LLMEnv []string `json:"llm_env,omitempty"`
 
 	// GitProxyURL / GitProxyToken are the sidecar's git-over-HTTPS proxy

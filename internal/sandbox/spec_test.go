@@ -16,8 +16,7 @@ func canonicalConfig() Config {
 	return Config{
 		ConversationID: "abc123def",
 		Worktree:       "/data/worktrees/abc123def",
-		SDKDir:         "/home/tf/.triagefactory/sdk",
-		Argv:           []string{"/usr/bin/node", "/sdk/wrapper.mjs", "-p", "hi"},
+		Argv:           []string{TrustedToolHostBinaryDestination, toolHostServeVerb, "--connect", "/run/tf-tools/tools.sock"},
 		Env: []string{
 			"PATH=/usr/local/bin:/usr/bin:/bin",
 			"HOME=/work",
@@ -32,7 +31,6 @@ func TestBuildSpec_RequiredFields(t *testing.T) {
 	}{
 		{"empty_conversationid", func(c *Config) { c.ConversationID = "" }},
 		{"empty_worktree", func(c *Config) { c.Worktree = "" }},
-		{"empty_sdkdir", func(c *Config) { c.SDKDir = "" }},
 		{"empty_argv", func(c *Config) { c.Argv = nil }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -173,7 +171,7 @@ func TestBuildSpec_NamespacesIncludeNetnsPath(t *testing.T) {
 	}
 }
 
-func TestBuildSpec_MountsIncludeWorktreeAndSDK(t *testing.T) {
+func TestBuildSpec_MountsIncludeWorktree(t *testing.T) {
 	cfg := canonicalConfig()
 	spec, err := buildSpec(cfg, "/var/run/netns/tf-test")
 	if err != nil {
@@ -181,7 +179,6 @@ func TestBuildSpec_MountsIncludeWorktreeAndSDK(t *testing.T) {
 	}
 	wantMounts := map[string]string{
 		"/work": cfg.Worktree,
-		"/sdk":  cfg.SDKDir,
 	}
 	for dst, src := range wantMounts {
 		var found bool
@@ -259,7 +256,7 @@ func TestBuildSpec_ReadOnlyRepoMountIsRO(t *testing.T) {
 }
 
 // TestBuildSpec_NoHostMountOutsideDeclaredSet is the "no escape" test: the
-// only bind mounts that expose a host path are the worktree, the SDK, the CA
+// only bind mounts that expose a host path are the worktree, the CA
 // certs, and the caller's explicit ExtraMounts. Nothing else from the host is
 // reachable — so a path outside the project/repo set cannot be read from
 // inside the jail. A regression that mounted, say, the whole org root or a
@@ -277,7 +274,6 @@ func TestBuildSpec_NoHostMountOutsideDeclaredSet(t *testing.T) {
 	}
 	allowed := map[string]bool{
 		cfg.Worktree:                       true,
-		cfg.SDKDir:                         true,
 		hostSSLCertsDir():                  true,
 		"/usr/local/bin/triagefactory":     true,
 		"/run/tf/abc.sock":                 true,

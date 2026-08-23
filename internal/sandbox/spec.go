@@ -19,17 +19,6 @@ const (
 	WorktreeGID = 10000
 )
 
-// sandboxNodeBinary / sandboxWrapperEntry are the fixed entrypoint of
-// every sandbox: the apk-installed nodejs in the cached rootfs running
-// the SDK wrapper bind-mounted at /sdk. The broker pins these two argv
-// elements so a compromised orchestrator can vary only the wrapper's
-// arguments (model, prompt, tool flags), never the executed program —
-// "the broker owns the command." validateArgv enforces the pin.
-const (
-	sandboxNodeBinary   = "/usr/bin/node"
-	sandboxWrapperEntry = "/sdk/wrapper.mjs"
-)
-
 // defaultRlimits is the fixed resource shape applied when a launch names
 // none. Kept here (not inlined in buildSpec) so both the default path and
 // the validation of a caller-supplied set reference one source of truth.
@@ -60,9 +49,6 @@ func buildSpec(cfg Config, netnsPath string) (*specs.Spec, error) {
 	}
 	if cfg.Worktree == "" {
 		return nil, fmt.Errorf("spec: Config.Worktree is required")
-	}
-	if cfg.SDKDir == "" {
-		return nil, fmt.Errorf("spec: Config.SDKDir is required")
 	}
 	if len(cfg.Argv) == 0 {
 		return nil, fmt.Errorf("spec: Config.Argv is required")
@@ -134,14 +120,6 @@ func buildSpec(cfg Config, netnsPath string) (*specs.Spec, error) {
 			// before Wrap was called.
 			{Destination: "/work", Type: "bind", Source: cfg.Worktree,
 				Options: []string{"rbind", "rw"}},
-
-			// Agent SDK install — bind-mount RO. The agent loads
-			// wrapper.mjs + node_modules from /sdk. The `node` binary
-			// itself comes from the apk-installed nodejs package in
-			// the cached rootfs (musl-linked, matches alpine's libc),
-			// not from the host — so no node bind-mount is needed.
-			{Destination: "/sdk", Type: "bind", Source: cfg.SDKDir,
-				Options: []string{"rbind", "ro"}},
 
 			// CA certificates from the host so outbound TLS (to the
 			// proxy, to git/Anthropic upstream) verifies.

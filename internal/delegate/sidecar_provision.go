@@ -205,28 +205,6 @@ func (rs *runSidecar) GitCloneAuth(cloneURL string) worktree.CloneAuth {
 	return worktree.CloneAuthViaGitProxy(rs.res.GitProxyURL, cloneHostBase(cloneURL), rs.res.GitProxyToken)
 }
 
-// loopRunsInJail reports whether this runtime's agent loop executes inside the
-// sandbox — which is the same question as whether the jail needs a channel to
-// a model provider. The SDK spawns its loop in there and has to reach one; the
-// native engine runs in this process and only its tools are jailed, so its cell
-// is built with no LLM channel at all: nothing to dial, nothing to authenticate
-// with, one fewer thing for hostile text in that jail to aim at.
-//
-// Written as named engines with a closed default because the answer is a
-// CAPABILITY. Spelled "anything but native" instead, an engine nobody has
-// taught this yet would be handed a provider channel by default, and the
-// mistake would be silent — an over-provisioned jail looks exactly like a
-// correct one. This way the same mistake withholds a channel instead, and a
-// runtime that genuinely needs one fails at its first model call, loudly, in
-// the place that has to be taught.
-//
-// A function rather than an expression at the call site so the rule has one
-// statement and a test can reach it; the grant itself is otherwise only
-// exercised by a bring-up that needs a real broker and a real network.
-func loopRunsInJail(runtime string) bool {
-	return runtime == domain.ConversationRuntimeSDK
-}
-
 // bringUpRunSidecar stands up the run network, launches the credential
 // sidecar, provisions it (publishing the sidecar's public key so the brain
 // seals THIS run's bundle to it, without the orchestrator ever unsealing), and
@@ -324,7 +302,6 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	relaySrv := agenthost.NewRelayServer(stores, info, git)
 	params := agentproc.SidecarBringUpParams{
 		HostVethIP: net.HostIP,
-		SandboxLLM: loopRunsInJail(conv.Runtime),
 		Git:        git,
 		// The org-bound op server the sidecar's relay envelope dispatches to:
 		// the git proxy's push authz/audit (backed by the same git gate) plus

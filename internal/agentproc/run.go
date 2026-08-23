@@ -3,14 +3,12 @@ package agentproc
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc/localsandbox"
@@ -18,8 +16,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
-	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // RunOptions configures one `claude -p` invocation. Callers populate
@@ -443,7 +439,10 @@ type Outcome struct {
 }
 
 // Run spawns `claude` with the given options, pumps the stream-json
-// output through Sink, and waits for the subprocess to exit.
+// output through Sink, and waits for the subprocess to exit. Local mode
+// only: refuses with errSDKLoopInMultiMode before spawning anything if
+// runmode is multi, rather than running the SDK unsandboxed on the host —
+// see refuseMultiModeSDKLoop.
 //
 // Cancellation: when ctx is cancelled mid-run, the goroutine sends
 // SIGKILL to the entire process group (Setpgid is used so child
@@ -455,10 +454,16 @@ type Outcome struct {
 //     processes the Result (memory gate, completion JSON, etc.).
 //   - nil error + nil Outcome.Result: subprocess exited cleanly
 //     without emitting a `result` event. Treat as involuntary failure.
-//   - non-nil error: argv-build / Start failure, stream malformed
-//     mid-stream, subprocess crashed, or ctx cancelled. Outcome.Stderr
-//     is populated when the subprocess produced any.
+//   - non-nil error: the multi-mode refusal, argv-build / Start failure,
+//     stream malformed mid-stream, subprocess crashed, or ctx cancelled.
+//     Outcome is nil for the multi-mode refusal (nothing spawned); for every
+//     other non-nil error Outcome.Stderr is populated when the subprocess
+//     produced any.
 func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
+	if err := refuseMultiModeSDKLoop(); err != nil {
+		return nil, err
+	}
+
 	// Derived ctx so the stream-error path can SIGKILL the process
 	// group via cmd.Cancel without affecting the caller's ctx. Without
 	// this, a stream read failure (cap exceeded, malformed mid-stream)
@@ -484,44 +489,31 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	// and the SDK shares Claude Code's auth / config / session store so
 	// behavior is identical for the user.
 	//
-	// Branch: multi-mode + Linux routes through the gVisor sandbox for
-	// tenant isolation (newSandboxCommand — shared with the interactive
-	// RunInteractive); local-mode + non-Linux take the direct subprocess
-	// path (newDirectCommand, unchanged behavior; its Setpgid + Cancel hook
-	// own the SIGKILL-the-process-group teardown). For the sandbox branch,
-	// cleanup bundles every teardown (sandbox, agenthost daemon, scratch
-	// dir, proxies); deferring it here fires it on every exit, including the
-	// StdoutPipe / Start error returns in the shared tail below.
-	var proc runProc
-	if shouldSandbox() {
-		sandboxProc, cleanup, serr := newSandboxCommand(runCtx, opts, wrapperPath)
-		if serr != nil {
-			return nil, serr
-		}
-		defer cleanup()
-		proc = sandboxProc
-	} else {
-		nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
-		// Local-mode TF_CLAUDE_BINARY override (non-sandbox path only): point the
-		// SDK at a specific Claude binary. Validated here so a bad path fails the
-		// spawn with a clear message rather than an opaque SDK exec error. The
-		// sandbox branch deliberately ignores it — it runs the image-baked binary.
-		bin, berr := claudeBinaryOverride()
-		if berr != nil {
-			return nil, berr
-		}
-		if bin != "" {
-			nodeArgs = append(nodeArgs, "--claude-bin", bin)
-		}
-		directCmd, derr := newDirectCommand(runCtx, opts, nodeArgs)
-		if derr != nil {
-			return nil, derr
-		}
-		directProc, perr := newExecProc(directCmd)
-		if perr != nil {
-			return nil, perr
-		}
-		proc = directProc
+	// Local-only, and enforced above: refuseMultiModeSDKLoop already returned
+	// before this point if runmode is multi, so what follows only ever runs
+	// local. newDirectCommand spawns the direct subprocess unconditionally
+	// (its Setpgid + Cancel hook own the SIGKILL-the-process-group teardown)
+	// — on Linux this is wrapped in the bubblewrap courtesy sandbox
+	// (opts.LocalSandbox) when the caller wired one, which is not a
+	// tenant-isolation boundary and is why multi mode may never reach here.
+	nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
+	// TF_CLAUDE_BINARY override: point the SDK at a specific Claude binary.
+	// Validated here so a bad path fails the spawn with a clear message
+	// rather than an opaque SDK exec error.
+	bin, berr := claudeBinaryOverride()
+	if berr != nil {
+		return nil, berr
+	}
+	if bin != "" {
+		nodeArgs = append(nodeArgs, "--claude-bin", bin)
+	}
+	directCmd, derr := newDirectCommand(runCtx, opts, nodeArgs)
+	if derr != nil {
+		return nil, derr
+	}
+	proc, perr := newExecProc(directCmd)
+	if perr != nil {
+		return nil, perr
 	}
 
 	if err := proc.Start(); err != nil {
@@ -573,340 +565,6 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	}
 
 	return outcome, nil
-}
-
-// newSandboxCommand builds the gVisor-sandboxed `node /sdk/wrapper.mjs`
-// command for one multi-mode run and returns it alongside a cleanup func
-// that tears down everything the bring-up allocated. Shared by the one-shot
-// Run and the interactive RunInteractive so both spawn — and tear down —
-// sandbox runs identically.
-//
-// cleanup bundles the teardowns in defer-LIFO order — sb.Close() → agenthost
-// closer.Close() → scratch-dir remove → proxies.Shutdown() — matching the
-// inline-defer order the one-shot Run used before this extraction. It is
-// idempotent (a sync.Once guards the body), so a caller may defer it even on
-// a path that also invokes it directly. The proxy shutdown runs on a fresh
-// 5 s detached context so a cancelled run still drains cleanly rather than
-// tearing the TCP close and leaking the proxy goroutine.
-//
-// On error, cleanup has already run for whatever was half-allocated (mirroring
-// sandbox.Wrap's own self-cleanup contract); the returned cleanup is then a
-// spent no-op, safe to defer or ignore.
-//
-// PROPERTY B INVARIANT: this process holds no run credential at all. The
-// run's LLM/git/egress proxies run in the per-run credential sidecar the
-// caller brought up over the sealed bundle; the agent's env carries only the
-// proxy URLs + per-run placeholder credentials (opts.PrebuiltProxyEnv), and
-// the real key is injected onto the upstream hop inside the sidecar.
-func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath string) (_ runProc, _ func(), err error) {
-	// The jail bring-up under one span: the rootfs ensure, the run-tree
-	// handoff, and the LaunchRun IPC all happen below, and each of them is a
-	// round trip to the cap-broker that this side can time and the broker —
-	// which never exports a span of its own — cannot.
-	//
-	// runCtx is reassigned rather than shadowed so those broker calls nest
-	// under this span instead of hanging off the engagement root directly.
-	// Cancellation is untouched; a context gains only a value here.
-	var launchSpan trace.Span
-	runCtx, launchSpan = tracer.Start(runCtx, "agent.jail.launch", trace.WithAttributes(telemetry.Runtime("sdk")))
-	defer func() {
-		recordSpanError(launchSpan, err)
-		launchSpan.End()
-	}()
-
-	// Teardown state, accumulated as each setup step below succeeds. cleanup
-	// runs the undos in LIFO order and is single-shot via once, so the error
-	// paths can invoke it eagerly and the caller can still defer it safely.
-	var (
-		scratchCwd  string
-		ahCloser    io.Closer
-		sb          *sandbox.Sandbox
-		run         sandbox.LaunchedRun
-		releaseJail = func() {}
-		once        sync.Once
-	)
-	cleanup := func() {
-		once.Do(func() {
-			// Drop the jail from the live registry before anything is torn
-			// down, so the resource sampler stops reading a cgroup that is
-			// about to disappear rather than after it already has.
-			//
-			// Ordering is load-bearing beyond that: container ids are
-			// tf-<conversationIDFrag>-<idx> and the subnet idx is RECYCLED, so a later
-			// run can legitimately mint this same id (some callers pass a
-			// fixed ConversationID — see Wrap). Deregistering here, ahead of the idx
-			// release in sb.Close() (or, on the executor path, in the
-			// delegate's even-later RunNetwork.Close), is what keeps a reused
-			// container id from ever being sampled against this claim.
-			releaseJail()
-			// The run process + its memory cgroup first: kill the runtime (or
-			// reclaim the cgroup on an abandoned bring-up) before its netns is
-			// torn down below.
-			if run != nil {
-				_ = run.Close()
-			}
-			// sb.Close is a no-op on the network when the delegate owns it
-			// (Config.Network / the executor path — the delegate's
-			// RunNetwork.Close + sidecar Close run after Run returns); on the
-			// self-contained path it tears down the network wrap allocated.
-			if sb != nil {
-				_ = sb.Close()
-			}
-			if ahCloser != nil {
-				_ = ahCloser.Close()
-			}
-			if scratchCwd != "" {
-				// Via the privileged seam, not os.RemoveAll: the scratch
-				// cwd was handed to the sandbox identity at run start, and
-				// the run may have left files inside that the post-drop
-				// orchestrator cannot unlink itself. Background context —
-				// this is teardown; the run's own ctx may be canceled.
-				_ = sandbox.RemoveRunTree(context.Background(), scratchCwd)
-			}
-		})
-	}
-
-	sdkDir := filepath.Dir(wrapperPath)
-
-	// Every sandboxed run launches into a prebuilt per-run network whose
-	// credential sidecar already runs the proxies over the run's sealed
-	// bundle. This process resolves no credential here (the executor's
-	// secret store is disabled, and multi mode is per-run-isolated by
-	// construction); the former
-	// in-process proxy bring-up no longer exists, so a sandboxed caller
-	// without a prebuilt network is a wiring bug, surfaced before the
-	// subprocess spawns rather than degraded into a fused fallback.
-	if opts.PrebuiltNetwork == nil {
-		cleanup()
-		return nil, cleanup, errors.New("sandbox: no prebuilt run network — sandboxed runs require the per-run credential sidecar (multi mode is always per-run-isolated)")
-	}
-
-	// Some callers (scorer, classifier stage1, profiler) are prompt-only —
-	// they send a prompt, get JSON back, and never touch the host filesystem.
-	// They have no natural Cwd. The sandbox still needs *something* to
-	// bind-mount at /work, so when the caller didn't pass one, materialize a
-	// per-run scratch tmpdir. Removed by cleanup.
-	workCwd := opts.Cwd
-	if workCwd == "" {
-		scratch, mkErr := os.MkdirTemp("", "agentproc-scratch-")
-		if mkErr != nil {
-			cleanup()
-			return nil, cleanup, fmt.Errorf("sandbox: scratch cwd: %w", mkErr)
-		}
-		scratchCwd = scratch
-		workCwd = scratch
-	}
-	if err := chownWorktreeForSandbox(runCtx, workCwd); err != nil {
-		cleanup()
-		return nil, cleanup, fmt.Errorf("sandbox: chown worktree: %w", err)
-	}
-
-	// Translate any host-path env values (e.g. TRIAGE_FACTORY_CONVERSATION_ROOT) to
-	// /work-relative paths before the sandbox sees them.
-	sbExtraEnv := translateEnvForSandbox(opts.ExtraEnv, workCwd)
-	// The pre-push hook (A·3, TFAC-460) invokes the binary via this env
-	// entry; in the sandbox it's the fixed bind-mount path, which is also on
-	// PATH but set explicitly so the hook never depends on PATH contents. A
-	// literal sandbox path, so it goes in after translateEnvForSandbox.
-	sbExtraEnv = append(sbExtraEnv, githooks.BinEnvVar+"="+sandboxTFBinary)
-	sbEnv := buildSandboxEnv(sbExtraEnv)
-
-	// Translate AddDirs (host paths under workCwd) into their /work-relative
-	// equivalents inside the sandbox. Without this the agent's `--add-dir`
-	// flags reference paths that don't exist inside the sandbox rootfs and
-	// Claude Code's per-tool path checks reject every write attempt to those
-	// subtrees. Build a shallow copy of opts so BuildArgs picks up the
-	// translated paths without mutating the caller's struct.
-	sandboxOpts := opts
-	sandboxOpts.AddDirs = translateAddDirsForSandbox(opts.AddDirs, workCwd)
-	// Rewrite the --allowedTools selfBin pattern to point at the in-sandbox
-	// path. BuildAllowedTools embeds os.Executable() in its
-	// `Bash(<selfBin> exec *)` rule; inside the sandbox that host path
-	// doesn't exist, so the agent's per-tool path check would reject every
-	// `triagefactory exec` invocation. Re-point to the canonical
-	// /usr/local/bin/triagefactory path we bind-mount below.
-	hostSelfBin, _ := os.Executable()
-	sandboxOpts.AllowedTools = rewriteAllowedToolsForSandbox(opts.AllowedTools, hostSelfBin)
-
-	// Extra bind mounts the sandbox needs:
-	//
-	//   1. The host TF binary at /usr/local/bin/triagefactory (RO). The
-	//      agent's `triagefactory exec ...` invocations exec this path;
-	//      without the bind-mount they ENOENT because the host path isn't
-	//      visible inside the alpine rootfs.
-	//
-	//   2. The per-run agenthost unix socket at /run/tf.sock (RW). Started
-	//      below when StartAgentHost is supplied. The caller's StartAgentHost
-	//      handles chown/chmod so the sandbox UID can connect.
-	extraMounts := []sandbox.Mount{}
-	if hostSelfBin != "" {
-		extraMounts = append(extraMounts, sandbox.Mount{
-			Source:      hostSelfBin,
-			Destination: sandboxTFBinary,
-			Options:     []string{"ro"},
-		})
-		// The same binary a second time under the additive `tfac` applet name on
-		// a PATH-leading dir, so `tfac <verb>` (argv0 dispatch) resolves to this
-		// binary and runs `exec <verb>`. Additive to the canonical mount above.
-		extraMounts = append(extraMounts, sandbox.Mount{
-			Source:      hostSelfBin,
-			Destination: sandboxTFACBinary,
-			Options:     []string{"ro"},
-		})
-	}
-
-	// The TF-controlled git hooks dir (F2, TFAC-456), bind-mounted RO at a
-	// fixed in-sandbox path. core.hooksPath (set in the GIT_CONFIG_* env by
-	// startProxiesForSandbox) points here, so the hooks fire for every repo
-	// the agent touches. Mounted unconditionally (cheap, RO) so subdir
-	// clones in a repo-less Jira run are covered too. The dir is ensured on
-	// the host at startup; the os.Stat guard is purely for paths where that
-	// didn't run (e.g. a unit test driving Run directly) — a missing source
-	// is skipped rather than failing the run, and core.hooksPath at a
-	// non-existent dir is a git no-op anyway.
-	hooksDir := githooks.HostDir()
-	if _, statErr := os.Stat(hooksDir); statErr == nil {
-		extraMounts = append(extraMounts, sandbox.Mount{
-			Source:      hooksDir,
-			Destination: githooks.SandboxDir,
-			Options:     []string{"ro"},
-		})
-	}
-
-	// Start the per-run agenthost daemon (when wired). The socket must exist
-	// on disk before sandbox.Wrap reads the spec, since the spec references
-	// the source path of every bind mount. cleanup owns the daemon's Close so
-	// a Wrap failure (or run exit) tears it down cleanly.
-	if opts.StartAgentHost != nil {
-		mount, closer, ahErr := opts.StartAgentHost()
-		if ahErr != nil {
-			cleanup()
-			return nil, cleanup, fmt.Errorf("sandbox: start agenthost daemon: %w", ahErr)
-		}
-		extraMounts = append(extraMounts, mount)
-		ahCloser = closer
-	}
-
-	// Real-gh channel mounts: the per-run injector cert (RO, from the
-	// sidecar-written source) and the TF-pinned gh binary (RO, from the host
-	// image). The cert source must exist before Wrap reads the spec — the
-	// sidecar wrote it during bring-up, which ran before this. The gh binary is
-	// os.Stat-guarded so a dev/host without a baked gh simply mounts no gh (the
-	// channel is a no-op there), exactly like the git-hooks dir.
-	if opts.GHChannel != nil {
-		if opts.GHChannel.CertSourcePath != "" {
-			extraMounts = append(extraMounts, sandbox.Mount{
-				Source:      opts.GHChannel.CertSourcePath,
-				Destination: sandboxGHInjectorCert,
-				Options:     []string{"ro"},
-			})
-		}
-		if _, statErr := os.Stat(hostGHBinaryPath); statErr == nil {
-			extraMounts = append(extraMounts, sandbox.Mount{
-				Source:      hostGHBinaryPath,
-				Destination: sandboxGHBinary,
-				Options:     []string{"ro"},
-			})
-		}
-	}
-
-	// This launch's blueprint step skill, bind-mounted RO from the
-	// orchestrator-owned staging dir at the fixed rootfs destination. Optional:
-	// only a blueprint step carries one. The os.Stat guard keeps a staging dir
-	// that vanished (a swept orphan on a cold cross-executor resume) from failing
-	// the whole launch on the broker's source-resolution check — the agent then
-	// continues from its transcript without the skill file, which is a discovery
-	// degradation, not a broken run.
-	if opts.SkillsSourcePath != "" {
-		if _, statErr := os.Stat(opts.SkillsSourcePath); statErr == nil {
-			extraMounts = append(extraMounts, sandbox.Mount{
-				Source:      opts.SkillsSourcePath,
-				Destination: sandbox.TrustedSkillsDestination,
-				Options:     []string{"ro"},
-			})
-		} else {
-			agentprocLog.Warn("step-skill staging dir missing; launching without the skills mount", "path", opts.SkillsSourcePath, "error", statErr)
-		}
-	}
-
-	// This launch's materialized entity-memory tree, bind-mounted RO from the
-	// orchestrator-owned staging dir. Same optional shape as the skills mount: a
-	// staging dir that vanished (a swept orphan on a cold cross-executor resume)
-	// launches without the mount rather than failing on the broker's
-	// source-resolution check. The agent then finds nothing behind its
-	// `_tfac/entity-memory` symlink, which is a context loss, not a broken run.
-	if opts.MemorySourcePath != "" {
-		if _, statErr := os.Stat(opts.MemorySourcePath); statErr == nil {
-			extraMounts = append(extraMounts, sandbox.Mount{
-				Source:      opts.MemorySourcePath,
-				Destination: sandbox.TrustedMemoryDestination,
-				Options:     []string{"ro"},
-			})
-		} else {
-			agentprocLog.Warn("entity-memory staging dir missing; launching without the memory mount", "path", opts.MemorySourcePath, "error", statErr)
-		}
-	}
-
-	// The sandbox's argv targets /usr/bin/node (the apk-installed nodejs in
-	// the cached alpine rootfs) + /sdk/wrapper.mjs (the SDK bind-mount
-	// destination), not host paths. Build the sandbox-side argv from scratch.
-	argv := append(
-		[]string{"/usr/bin/node", "/sdk/wrapper.mjs"},
-		BuildArgs(sandboxOpts)...,
-	)
-
-	// The caller's sidecar bring-up already produced the agent's proxy env
-	// (LLM/git/egress URLs + placeholders + the single GIT_CONFIG_* block,
-	// with the org commit identity folded in at bring-up). Fold it into the
-	// sandbox env and give Wrap the prebuilt network so it skips its own
-	// allocation — this process holds no run credential and runs no proxy.
-	sbEnv = append(sbEnv, opts.PrebuiltProxyEnv...)
-	sbEnv = append(sbEnv, ghChannelEnv(opts.GHChannel)...)
-
-	sandboxRun, sboxObj, err := sandbox.Wrap(runCtx, sandbox.Config{
-		ConversationID:  opts.TraceID,
-		MemoryNamespace: opts.MemoryNamespace,
-		Worktree:        workCwd,
-		SDKDir:          sdkDir,
-		Argv:            argv,
-		Env:             sbEnv,
-		ExtraMounts:     extraMounts,
-		Network:         opts.PrebuiltNetwork,
-		MemoryLimitMB:   ClaimMemoryLimitMB(),
-	})
-	if err != nil {
-		// Wrap cleaned up its own partial state; cleanup covers the agenthost
-		// daemon + scratch dir. The caller's sidecar + network are untouched
-		// here — it owns their teardown once Run returns.
-		cleanup()
-		return nil, cleanup, fmt.Errorf("sandbox: %w", err)
-	}
-	sb = sboxObj
-	run = sandboxRun
-
-	// Publish the jail so the executor's resource sampler can observe its
-	// cgroup for as long as it lives, attributed to the engagement paying for
-	// it. A launch with no claim (the toolless system jobs) registers nothing.
-	//
-	// This deliberately precedes Start, which is what actually execs runsc and
-	// makes the broker create the group — so for a moment the jail is
-	// registered and its cgroup does not exist yet. That is the correct start
-	// of the series, not a gap in it: nothing is running, so nothing has been
-	// consumed, and a sampler tick landing in the window reads no group and
-	// writes no row (the same read a torn-down jail gives). A row of zeroes
-	// there would claim a live sandbox using nothing, which in a chart is
-	// indistinguishable from a collapsed one. Registering after Start instead
-	// would move this to both callers and take the release out of the single
-	// cleanup chain below that guarantees it — a leaked registration makes the
-	// sampler read a dead cgroup forever, which is far worse than a skipped
-	// tick.
-	releaseJail = registerLiveJail(opts.ClaimID, sboxObj.ContainerID)
-
-	// The LaunchedRun satisfies runProc (Start/Stdin/Stdout/Stderr/Wait/
-	// OOMKilled); cleanup closes it (kill + cgroup). On the executor path the
-	// credential sidecar + network were brought up by the delegate before this
-	// call and are torn down by it after Run returns — not here.
-	return sandboxRun, cleanup, nil
 }
 
 // newDirectCommand builds the direct (non-sandbox) `node wrapper.mjs`
@@ -1014,8 +672,7 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 }
 
 // envClaudeBinary is the local-mode override for the Claude binary the Agent
-// SDK launches. Honored only on the direct (non-sandbox) spawn path; the
-// sandboxed multi-tenant path runs the image-baked binary and ignores it.
+// SDK launches.
 const envClaudeBinary = "TF_CLAUDE_BINARY"
 
 // claudeBinaryOverride resolves TF_CLAUDE_BINARY to an absolute path to an
@@ -1024,12 +681,9 @@ const envClaudeBinary = "TF_CLAUDE_BINARY"
 // an explicit override that's wrong should fail the spawn loudly rather than
 // silently fall back to the bundled binary and mask the misconfiguration.
 func claudeBinaryOverride() (string, error) {
-	// Local mode only — independent of the sandbox routing. shouldSandbox() is
-	// (ModeMulti && Linux), so a multi-mode process on a non-Linux host would
-	// otherwise take the direct spawn path and honor this global override,
-	// undercutting the image-baked-binary assumption. Gating on the mode here
-	// keeps the behavior matching the docs and survives any change to where the
-	// sandbox/direct split is drawn.
+	// Local mode only: multi mode never mints an SDK-runtime conversation (its
+	// delegations are always runtime='native'), so this override has no
+	// legitimate multi-mode caller to honor it for.
 	if runmode.Current() != runmode.ModeLocal {
 		return "", nil
 	}

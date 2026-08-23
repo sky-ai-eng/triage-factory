@@ -202,7 +202,6 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 		Env:             stringsToEnvVars(specCfg.Env),
 		Args:            cfg.Argv,
 		Worktree:        cfg.Worktree,
-		SDKDir:          cfg.SDKDir,
 		Mounts:          cfg.ExtraMounts,
 		Rlimits:         cfg.Rlimits,
 		MemoryLimitMB:   cfg.MemoryLimitMB,

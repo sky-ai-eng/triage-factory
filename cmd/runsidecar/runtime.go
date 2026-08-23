@@ -200,15 +200,14 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		git.SharedOriginCAPath = agentproc.SandboxGHInjectorCertPath
 	}
 
-	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, req.SandboxLLM, git, r.recordEgressDenial, r.llmSource, req.IdentityConfigPairs...)
+	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, git, r.recordEgressDenial, r.llmSource, req.IdentityConfigPairs...)
 	if err != nil {
 		return nil, err
 	}
 
-	// The LLM coordinates travel back whoever dials them: the jail got them in
-	// env only if this run asked for it, and the orchestrator's own engine
-	// reads them here. Either way the proxy holds the key and the caller holds
-	// a per-run placeholder.
+	// The LLM coordinates travel back to the orchestrator's own engine only —
+	// no jail is ever pointed at the proxy. The proxy holds the key; the
+	// caller holds a per-run placeholder.
 	result := sidecarproto.StartProxiesResult{Env: env, LLMEnv: handle.LLMEnv()}
 	// Surface the git proxy's address + per-run placeholder so the orchestrator
 	// routes its OWN pre-sandbox clone through this same proxy — the real token

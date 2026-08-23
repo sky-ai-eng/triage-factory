@@ -106,14 +106,6 @@ func (s *Server) launchRun(ctx context.Context, a launchRunArgs) (any, error) {
 		return nil, err
 	}
 
-	// The broker owns the command: the pinned argv execs /sdk/wrapper.mjs, and
-	// /sdk is bind-mounted from the SDK dir — so the SDK source is part of the
-	// executed program, not run data. Resolve it broker-side and DISCARD the
-	// orchestrator's value, exactly as the rootfs is resolved by catalog name,
-	// so a compromised orchestrator can't point /sdk at an attacker-authored
-	// wrapper.
-	p.SDKDir = sandbox.TrustedSDKDir()
-
 	// Abuse resistance (DoS, NOT a capability boundary — a validated caller
 	// still cannot escalate). One orchestrator maps to one broker, so this
 	// bounds a runaway caller's in-flight launches to the subnet pool size:
