@@ -1126,8 +1126,10 @@ export interface FactorySnapshot {
 
 export type WSEvent =
   // One transcript row for a conversation. data is the shared snake_case
-  // Message DTO.
-  | { type: 'message'; conversation_id: string; data: Message }
+  // Message DTO. conversation_id is optional on the wire (pkg/websocket.Event
+  // omits it when empty) — every real emitter sets it, but a consumer must
+  // not assume it, since a frame arrives from the network, not from the type.
+  | { type: 'message'; conversation_id?: string; data: Message }
   // Conversation lifecycle/status change. Carries conversation_id and a
   // coalesced display status (fetching/cloning/agent_starting/
   // awaiting_credentials/running/terminal) plus failure_kind on a failure.

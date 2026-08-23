@@ -718,6 +718,7 @@ export default function Board() {
           // reference for a display-no-op message (tool results, mostly) —
           // return prev in that case so React skips the board re-render.
           const conversationID = event.conversation_id
+          if (!conversationID) return
           setConversationFeeds((prev) => {
             const cur = prev[conversationID]
             const next = appendToFeed(cur, event.data)
