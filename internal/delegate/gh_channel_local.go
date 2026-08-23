@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -176,4 +177,25 @@ func recordLocalObservation(ctx context.Context, stores db.Stores, info agenthos
 		return
 	}
 	agenthost.RecordExternalWrite(ctx, stores, info, &art, nil)
+}
+
+// githubAPIUpstreamFor resolves the REST API base the local gh channel's
+// injector forwards to — api.github.com, a GHES {base}/api/v3, or a .ghe.com
+// api host — derived from the org's non-secret configured GitHub base via the
+// same APIBase mapping the client uses. Empty (resolver unwired / read error)
+// defaults to api.github.com inside ghchannel. Local mode only: a sandboxed
+// run's injector reads the host off its sealed bundle instead.
+func (s *Spawner) githubAPIUpstreamFor(ctx context.Context, orgID string) string {
+	s.mu.Lock()
+	resolver := s.ghResolver
+	s.mu.Unlock()
+	if resolver == nil {
+		return ""
+	}
+	base, err := resolver.BaseURLFor(ctx, orgID)
+	if err != nil {
+		delegateLog.Warn("resolve github base for the local gh channel failed; defaulting to api.github.com", "org", orgID, "error", err)
+		return ""
+	}
+	return ghbase.APIBase(base)
 }

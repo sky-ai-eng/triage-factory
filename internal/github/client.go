@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
@@ -101,7 +102,7 @@ type Client struct {
 // (e.g. "https://github.com" or "https://github.example.com").
 func NewClient(baseURL, pat string) *Client {
 	return &Client{
-		baseURL: APIBase(baseURL),
+		baseURL: ghbase.APIBase(baseURL),
 		pat:     pat,
 		// At the transport, so REST, GraphQL, artifact downloads (which
 		// clone this client, keeping its Transport), and the direct-Do

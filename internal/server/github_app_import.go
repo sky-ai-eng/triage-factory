@@ -11,7 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -317,7 +317,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "github-app", err)
 		return
 	}
-	apiBase := ghclient.APIBase(base)
+	apiBase := ghbase.APIBase(base)
 
 	// Parse the PEM (garbage → 422).
 	key, err := githubapp.ParsePrivateKey([]byte(req.PEM))

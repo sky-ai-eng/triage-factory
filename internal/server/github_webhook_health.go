@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -305,7 +305,7 @@ func (s *Server) appMinterAt(ctx context.Context, orgID, base string, app *domai
 	minter, err := githubapp.NewMinter(githubapp.Config{
 		PrivateKey: key,
 		AppID:      appID,
-		APIBase:    ghclient.APIBase(base),
+		APIBase:    ghbase.APIBase(base),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init app token minter: %w", err)

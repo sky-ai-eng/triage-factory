@@ -102,9 +102,18 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 		auditHost.SetGitHubCredential(domain.CredentialGitHubPAT)
 	}
 
-	cfg := s.managedGitGate(ctx, info, stores, auditHost)
+	cfg := s.managedGitGate(info, stores, auditHost)
 	if cfg == nil {
 		return nil, errors.New("local Git credential proxy is not configured")
+	}
+	// The insteadOf upstream the proxy rewrites onto. Resolved here rather than
+	// in the shared gate because only this half needs it: the sandboxed sibling
+	// reads the same host off its sealed bundle. A read failure leaves it empty,
+	// which the proxy fills with github.com.
+	if base, err := resolver.BaseURLFor(ctx, orgID); err != nil {
+		delegateLog.Warn("resolve git host base for the local git proxy failed; leaving upstream empty (defaults to github.com)", "org", orgID, "error", err)
+	} else {
+		cfg.Upstream = base
 	}
 	cfg.TokenSource = func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 		tok, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)

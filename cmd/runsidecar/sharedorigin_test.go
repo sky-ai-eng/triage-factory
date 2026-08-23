@@ -70,6 +70,7 @@ func TestRuntime_StartProxiesRoutesGitAtTheSharedOrigin(t *testing.T) {
 		LLM: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
 		GitHub: &credbundle.GitHubCreds{
 			Mode:       "app",
+			BaseURL:    "https://github.com",
 			CLIToken:   &credbundle.RepoToken{Token: "ghs_REALCLITOKEN"},
 			RepoTokens: map[string]credbundle.RepoToken{"acme/widgets": {Token: "ghs_REALINSTALLTOKEN"}},
 		},
@@ -83,12 +84,10 @@ func TestRuntime_StartProxiesRoutesGitAtTheSharedOrigin(t *testing.T) {
 
 	var res sidecarproto.StartProxiesResult
 	if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{
-		HostVethIP:        "127.0.0.1",
-		GitEnabled:        true,
-		GitUpstream:       "https://github.com",
-		GHChannelEnabled:  true,
-		GHChannelUpstream: "https://api.github.com",
-		AgentHost:         &sidecarproto.AgentHostInfo{OrgID: "org", ConversationID: "run-shared-origin"},
+		HostVethIP:       "127.0.0.1",
+		GitEnabled:       true,
+		GHChannelEnabled: true,
+		AgentHost:        &sidecarproto.AgentHostInfo{OrgID: "org", ConversationID: "run-shared-origin"},
 	}, &res); err != nil {
 		t.Fatalf("start proxies: %v", err)
 	}
@@ -141,6 +140,7 @@ func TestRuntime_StartProxiesWithoutSharedOriginKeepsProxyRouting(t *testing.T) 
 		LLM: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
 		GitHub: &credbundle.GitHubCreds{
 			Mode:       "app",
+			BaseURL:    "https://github.com",
 			RepoTokens: map[string]credbundle.RepoToken{"acme/widgets": {Token: "ghs_REALINSTALLTOKEN"}},
 		},
 	}
@@ -153,7 +153,6 @@ func TestRuntime_StartProxiesWithoutSharedOriginKeepsProxyRouting(t *testing.T) 
 	if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{
 		HostVethIP:       "127.0.0.1",
 		GitEnabled:       true,
-		GitUpstream:      "https://github.com",
 		GHChannelEnabled: true,
 	}, &res); err != nil {
 		t.Fatalf("start proxies: %v", err)

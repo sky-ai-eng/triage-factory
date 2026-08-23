@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -536,7 +537,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		internalError(w, "github-app", err)
 		return
 	}
-	apiBase := ghclient.APIBase(ghBase)
+	apiBase := ghbase.APIBase(ghBase)
 
 	conversionURL := apiBase + "/app-manifests/" + url.PathEscape(code) + "/conversions"
 	convResp, err := exchangeManifestCode(r.Context(), conversionURL)

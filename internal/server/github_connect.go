@@ -18,7 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -80,7 +80,7 @@ func (s *Server) connectCallbackURL(orgID string) string {
 // returned value matches what the other writers/readers store. ok=false on a
 // malformed base URL.
 func resolveGitHubHost(orgBase string) (string, bool) {
-	host := ghclient.ResolveBaseURL(orgBase)
+	host := ghbase.ResolveBaseURL(orgBase)
 	if _, ok := gitHubWebOrigin(host); !ok {
 		return "", false
 	}
@@ -381,7 +381,7 @@ func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Reque
 		} else {
 			// Malformed host config — surface the raw value for display but
 			// report not-connected (we can't key a lookup off a bad host).
-			host = ghclient.ResolveBaseURL(orgSet.GitHubBaseURL)
+			host = ghbase.ResolveBaseURL(orgSet.GitHubBaseURL)
 		}
 		app, lerr := tx.GitHubApps.GetForOrg(r.Context(), orgID)
 		if lerr != nil {

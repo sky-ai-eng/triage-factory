@@ -990,3 +990,61 @@ func orgPATLogin(t *testing.T, s *Server) string {
 func patRoute() string {
 	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/pat"
 }
+
+// --- one base-URL rule on both doors that write github_base_url -----------
+
+// TestGitHubPATPut_RejectsUnusableBaseURL pins that the credential bind holds
+// the same rule about github_base_url that the settings PATCH does. Both write
+// that one column, so a form the PATCH refuses must not be persistable through
+// the token route instead — and the refusal has to read the same, since a
+// client can't tell which door it went through from a different error shape.
+//
+// Accepted forms are asserted alongside on purpose: plain http and an IP
+// literal with a port are supported deployments (a private GHES host, a local
+// test host), so this is a check that the shared validator was applied, not an
+// invitation to tighten it here.
+func TestGitHubPATPut_RejectsUnusableBaseURL(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	for _, base := range []string{
+		"https://user:pass@ghes.acme.com", // userinfo
+		"https://ghes.acme.com?x=1",       // query
+		"https://ghes.acme.com#frag",      // fragment
+		"ghes.acme.com",                   // no scheme
+	} {
+		t.Run(base, func(t *testing.T) {
+			rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{"base_url": base, "pat": "ghp_x"})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("pat bind with base_url %q = %d, want 400; body=%s", base, rec.Code, rec.Body.String())
+			}
+			got := decodeErrorItems(t, rec)[0]
+
+			// The settings PATCH's answer for the same value is the standard
+			// this route is held to, so it is read rather than restated. Only
+			// `field` legitimately differs — each route names the payload field
+			// the bad value arrived in.
+			patch := patchOrgSettings(t, s, map[string]any{"github_base_url": base})
+			want := decodeErrorItems(t, patch)[0]
+			if rec.Code != patch.Code || got.Reason != want.Reason {
+				t.Errorf("(status, reason) = (%d, %q), want the settings PATCH's (%d, %q)", rec.Code, got.Reason, patch.Code, want.Reason)
+			}
+			if got.Field != "base_url" {
+				t.Errorf("field = %q, want the offending payload field base_url", got.Field)
+			}
+
+			stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT)
+			if stored != "" {
+				t.Errorf("a rejected base_url still bound a token (%q)", stored)
+			}
+		})
+	}
+
+	// An http IP-literal-with-port base is what every local GHES stand-in
+	// looks like; it must still bind.
+	gh := githubUserStub(t, "acme-bot")
+	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{"base_url": gh.URL, "pat": "ghp_ok"}); rec.Code != http.StatusOK {
+		t.Fatalf("pat bind with %q = %d, want 200; body=%s", gh.URL, rec.Code, rec.Body.String())
+	}
+}

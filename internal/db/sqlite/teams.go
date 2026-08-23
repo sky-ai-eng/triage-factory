@@ -714,7 +714,7 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 	// Identity enrichment, scoped to the team by the same membership join the
 	// Postgres impl uses. Host resolution is the interface's, not the raw
 	// setting's: an unset github_base_url resolves to github.com, which is
-	// where the capture paths bind (they key on github.ResolveBaseURL), and an
+	// where the capture paths bind (they key on ghbase.ResolveBaseURL), and an
 	// unset jira_base_url normalizes to "" and matches nothing.
 	ghMap, err := queryIdentityMap(ctx, s.q, `
 		SELECT gh.user_id, gh.login

@@ -95,7 +95,15 @@ type GitHubCreds struct {
 
 	IdentityName  string `json:"identity_name,omitempty"`
 	IdentityEmail string `json:"identity_email,omitempty"`
-	BaseURL       string `json:"base_url,omitempty"`
+
+	// BaseURL is the org's configured GitHub web base — github.com, a GHES
+	// host, or a *.ghe.com data-residency tenant. It travels sealed beside the
+	// tokens because it is half of the same credential: a token is only
+	// meaningful against the host it was resolved for. Every GitHub lane an
+	// executor binds takes its upstream from here (the git proxy verbatim, the
+	// REST proxy and the gh injector through ghbase.APIBase), so nothing can
+	// point a token at a host it does not belong to. Empty means github.com.
+	BaseURL string `json:"base_url,omitempty"`
 
 	RepoTokens map[string]RepoToken `json:"repo_tokens,omitempty"`
 

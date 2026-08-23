@@ -107,13 +107,14 @@ type SidecarBringUpParams struct {
 	// coordinates come back on the result for whoever does dial it.
 	SandboxLLM bool
 
-	// Git, when non-nil, requests the git-over-HTTPS proxy: BringUpRunSidecar
-	// reads only GitEnabled (Git != nil) and Upstream from it. Its
+	// Git, when non-nil, requests the git-over-HTTPS proxy — its presence is
+	// the whole of what BringUpRunSidecar reads out of it. Its
 	// Authorize/RecordDenial/RecordPush are NOT consumed here — those are the
 	// git proxy's push authz/audit, served through the Relay dispatcher as
 	// core ops (the delegate builds the same GitProxyConfig into that
-	// dispatcher). TokenSource is likewise ignored — the sidecar resolves the
-	// real token from its own unsealed bundle. nil = no git proxy.
+	// dispatcher). TokenSource and Upstream are likewise ignored — the sidecar
+	// resolves both the real token and the host it belongs to from its own
+	// unsealed bundle. nil = no git proxy.
 	Git *GitProxyConfig
 
 	// Relay is the org-bound op server the supervisor routes the sidecar's
@@ -128,12 +129,10 @@ type SidecarBringUpParams struct {
 	IdentityPairs [][2]string
 
 	// GitHubAPIEnabled requests the GitHub-REST credential proxy (GetPR +
-	// agenthost gh verbs). GitHubAPIUpstream is the resolved REST base —
-	// api.github.com, a GHES {base}/api/v3, or a .ghe.com api host — which
-	// the proxy prepends; the orchestrator points its client at the bare
+	// agenthost gh verbs). The REST base it prepends is derived sidecar-side
+	// from the sealed bundle; the orchestrator points its client at the bare
 	// proxy URL the result returns.
-	GitHubAPIEnabled  bool
-	GitHubAPIUpstream string
+	GitHubAPIEnabled bool
 
 	// JiraAPIEnabled requests the Jira-REST credential proxy (agenthost jira
 	// verbs). JiraAPIUpstream is the org's Jira base (Cloud gateway or DC
@@ -142,12 +141,11 @@ type SidecarBringUpParams struct {
 	JiraAPIUpstream string
 
 	// GHChannelEnabled requests the real-gh credential-injector proxy (the TLS
-	// listener the sandboxed gh reaches via GH_HOST). GHChannelUpstream is the
-	// org's REST base (same value as GitHubAPIUpstream); the injector derives the
-	// GraphQL endpoint from it. The injector's host:port + placeholder come back
-	// in the result (GHChannelHost/GHChannelToken).
-	GHChannelEnabled  bool
-	GHChannelUpstream string
+	// listener the sandboxed gh reaches via GH_HOST). It shares the REST base
+	// the GitHub proxy derives from the bundle, and derives the GraphQL
+	// endpoint from it. The injector's host:port + placeholder come back in
+	// the result (GHChannelHost/GHChannelToken).
+	GHChannelEnabled bool
 
 	// AgentHost, when non-nil, asks the sidecar to also host the exec-verb
 	// socket server for this run (the relocation) — carrying the run's
@@ -226,15 +224,10 @@ func BringUpRunSidecar(ctx context.Context, sc sandbox.LaunchedSidecar, provisio
 		GitEnabled:          params.Git != nil,
 		IdentityConfigPairs: params.IdentityPairs,
 		GitHubAPIEnabled:    params.GitHubAPIEnabled,
-		GitHubAPIUpstream:   params.GitHubAPIUpstream,
 		JiraAPIEnabled:      params.JiraAPIEnabled,
 		JiraAPIUpstream:     params.JiraAPIUpstream,
 		GHChannelEnabled:    params.GHChannelEnabled,
-		GHChannelUpstream:   params.GHChannelUpstream,
 		AgentHost:           params.AgentHost,
-	}
-	if params.Git != nil {
-		req.GitUpstream = params.Git.Upstream
 	}
 	var res sidecarproto.StartProxiesResult
 	proxyCtx, proxySpan := tracer.Start(ctx, "sidecar.start_proxies")

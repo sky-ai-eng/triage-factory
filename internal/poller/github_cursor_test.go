@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -87,7 +88,7 @@ func (r *freshClientPerCallResolver) TokenFor(ctx context.Context, orgID, target
 }
 
 func (r *freshClientPerCallResolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
-	return ghclient.DefaultBaseURL, nil
+	return ghbase.DefaultBaseURL, nil
 }
 
 func (r *freshClientPerCallResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool) {
@@ -353,7 +354,7 @@ func (r *perAccountFailResolver) TokenFor(ctx context.Context, orgID, target str
 }
 
 func (r *perAccountFailResolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
-	return ghclient.DefaultBaseURL, nil
+	return ghbase.DefaultBaseURL, nil
 }
 
 func (r *perAccountFailResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool) {

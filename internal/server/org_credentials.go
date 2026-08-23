@@ -68,12 +68,20 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
-	pat := strings.TrimSpace(req.PAT)
-	if baseURL == "" {
+	if strings.TrimSpace(req.BaseURL) == "" {
 		badRequestField(w, "A GitHub base URL is required.", "base_url")
 		return
 	}
+	// The same validator + canonicalizer the settings PATCH runs before writing
+	// this very column, so both doors hold one rule about what github_base_url
+	// can contain: userinfo, a query and a fragment are refused, while plain
+	// http and an IP literal with a port stay accepted (private GHES hosts).
+	baseURL, valid := normalizeBaseURL(req.BaseURL)
+	if !valid {
+		invalidBaseURLField(w, "base_url")
+		return
+	}
+	pat := strings.TrimSpace(req.PAT)
 	if pat == "" {
 		badRequestField(w, "A GitHub personal access token is required.", "pat")
 		return

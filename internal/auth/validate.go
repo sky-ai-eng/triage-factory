@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
@@ -113,17 +114,13 @@ func (u JiraUser) StableID() string {
 	return jira.StableUserID(u.AccountID, u.Key, "")
 }
 
-// ValidateGitHub checks the PAT against the GitHub API and returns the user info.
+// ValidateGitHub checks the PAT against the GitHub API and returns the user
+// info. The API mount comes from ghbase.APIBase — the same derivation the
+// client and the poller use — so a host class the token works against is a
+// host class this probe reaches: notably a *.ghe.com data-residency tenant,
+// whose API lives on an api.* subdomain rather than the GHES /api/v3 path.
 func ValidateGitHub(ctx context.Context, baseURL, pat string) (*GitHubUser, error) {
-	baseURL = strings.TrimRight(baseURL, "/")
-
-	// github.com API lives at api.github.com; GHE uses {host}/api/v3
-	var apiURL string
-	if baseURL == "https://github.com" {
-		apiURL = "https://api.github.com/user"
-	} else {
-		apiURL = baseURL + "/api/v3/user"
-	}
+	apiURL := ghbase.APIBase(baseURL) + "/user"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
@@ -172,13 +169,7 @@ func CaptureGitHubIdentity(ctx context.Context, baseURL, token string) (*GitHubU
 		return nil, err
 	}
 
-	baseURL = strings.TrimRight(baseURL, "/")
-	var apiURL string
-	if baseURL == "https://github.com" {
-		apiURL = "https://api.github.com/user/emails"
-	} else {
-		apiURL = baseURL + "/api/v3/user/emails"
-	}
+	apiURL := ghbase.APIBase(baseURL) + "/user/emails"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
