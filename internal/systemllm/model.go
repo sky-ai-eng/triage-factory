@@ -43,11 +43,18 @@ var ErrNoModel = errors.New("systemllm: no usable background jobs model")
 //
 // Four gates, all of which make the setting unusable rather than substitutable:
 // the value must be present, this deployment's universe must offer it, the org
-// must be able to authenticate at all, and it must have connected the provider
-// that serves this model. The third is what stops a cycle billing an org's work
-// to whatever credential the operator's shell happens to hold. The R5 delegation
-// gates (tool support, a 64k window) deliberately do NOT apply — these jobs are
-// toolless and short-context, so every offered model is a legitimate choice here.
+// must be able to authenticate at all, and — where the id names the provider
+// that serves it — the org must have connected that provider. The third is what
+// stops a cycle billing an org's work to whatever credential the operator's
+// shell happens to hold. The R5 delegation gates (tool support, a 64k window)
+// deliberately do NOT apply — these jobs are toolless and short-context, so
+// every offered model is a legitimate choice here.
+//
+// The fourth reaches only native ids, and that is the vocabulary difference
+// rather than a hole: an SDK alias names no access path — the harness resolves
+// one from whichever credential its environment supplies — so there is no
+// per-model provider for a credential rule to be about, and the third gate's
+// org-wide question is the whole of what can be asked.
 //
 // The universe is asked rather than the native registry, because the stored
 // value is in the vocabulary the jobs dispatch it in: a local install stores and

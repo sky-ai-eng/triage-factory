@@ -36,9 +36,11 @@ func init() {
 	sdkModels, sdkLoadErr = loadSDKModels(sdkModelsJSON)
 }
 
-// SDKModels returns the models sdk names, in display order, or nil for an SDK
-// this build carries no list for. The slice is freshly copied per call, for the
-// same reason Entries is: it is read on an API request path.
+// SDKModels returns the models sdk names, in display order, and an empty slice
+// for an SDK this build carries no list for — never nil, so a caller ranging
+// over the result and one checking its length read the same thing. The slice is
+// freshly copied per call, for the same reason Entries is: it is read on an API
+// request path.
 func SDKModels(sdk string) []Model {
 	src := sdkModels[sdk]
 	out := make([]Model, len(src))

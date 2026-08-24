@@ -100,7 +100,11 @@ func (a availabilityIndex) hasCredentialFor(m modelcatalog.Model) bool {
 // familyFor is the credential family half of m's stored row key. An alias names
 // none, so the org's bound family stands in.
 //
-// That is unambiguous exactly while an org binds one family. An org holding two
+// It answers "" for a model that names no provider in an org that has bound
+// none, which is not a key anything should be stored under — every caller is
+// therefore downstream of hasCredentialFor, which refuses exactly that case.
+//
+// A bound family is unambiguous only while an org binds one. An org holding two
 // resolves by this order, which is a guess rather than an answer: a verdict
 // swept under the second family would be keyed where the read below never looks.
 //
@@ -246,10 +250,13 @@ func (h *modelsHandler) handleModelTest(w http.ResponseWriter, r *http.Request) 
 	if !requireOwnCredentials(w, avail) {
 		return
 	}
-	family := avail.familyFor(model)
-	if !requireProviderConnected(w, avail, family) {
+	if !requireCredentialFor(w, avail, model) {
 		return
 	}
+	// Resolved after the gate above, which is what makes a family exist to
+	// resolve: an alias names none of its own, so with nothing bound there
+	// would be nothing here to key the row under.
+	family := avail.familyFor(model)
 
 	result, ok := h.runProbe(w, r, prober, orgID, userID, family, model)
 	if !ok {
@@ -483,21 +490,52 @@ func requireOwnCredentials(w http.ResponseWriter, avail availabilityIndex) bool 
 	return false
 }
 
-// requireProviderConnected refuses a probe against a provider the org holds no
+// requireCredentialFor refuses a probe of one model the org holds no credential
+// for, before anything is attempted.
+//
+// The DECISION is availabilityIndex.hasCredentialFor — the same predicate the
+// badge is derived from, so a caller told "unconfigured" by the read and refused
+// by this is being told one thing about one credential. Only the MESSAGE
+// branches, and it branches on what there is to say: a model that names its
+// access path names the credential to connect, while an alias names none — with
+// nothing bound there is no provider to point at, and a message built from one
+// nobody chose would open with a blank name.
+func requireCredentialFor(w http.ResponseWriter, avail availabilityIndex, m modelcatalog.Model) bool {
+	if avail.hasCredentialFor(m) {
+		return true
+	}
+	if m.Provider != "" {
+		writeNotConfigured(w, notConnectedMessage(m.Provider))
+		return false
+	}
+	writeNotConfigured(w, "this organization has connected no Claude credentials — connect one in Settings → Claude credentials before testing models")
+	return false
+}
+
+// requireProviderConnected refuses a sweep of a provider the org holds no
 // credential for, before anything is attempted.
 //
-// It reads the already-resolved index rather than the store, so the refusal
-// and the badge the catalog read publishes for the same model are one
-// decision: a caller told "unconfigured" by the read and "not connected" by
-// this cannot be told two different things about one credential. Deciding it
-// up front is also what makes a sweep of an unconnected provider write no rows
-// at all, rather than a few before giving up.
+// It reads the already-resolved index rather than the store, for the same
+// reason requireCredentialFor does. Deciding it up front is also what makes a
+// sweep of an unconnected provider write no rows at all, rather than a few
+// before giving up.
+//
+// It takes the provider rather than a model because a sweep IS addressed at one:
+// the request names the credential family, which is validated as one this build
+// drives before it reaches here, so there is always a provider to name.
 func requireProviderConnected(w http.ResponseWriter, avail availabilityIndex, provider string) bool {
 	if avail.creds.Has(provider) {
 		return true
 	}
-	writeNotConfigured(w, fmt.Sprintf(
-		"%s is not connected for this organization — connect it in Settings → Claude credentials before testing its models",
-		modelcatalog.ProviderDisplayName(provider)))
+	writeNotConfigured(w, notConnectedMessage(provider))
 	return false
+}
+
+// notConnectedMessage is the refusal both routes give for a named provider the
+// org has not bound. One spelling, so a caller cannot tell the two routes apart
+// by their prose.
+func notConnectedMessage(provider string) string {
+	return fmt.Sprintf(
+		"%s is not connected for this organization — connect it in Settings → Claude credentials before testing its models",
+		modelcatalog.ProviderDisplayName(provider))
 }

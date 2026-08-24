@@ -690,6 +690,71 @@ func TestModelTests_LocalMode_SystemCredentialsRefuseWithoutSpending(t *testing.
 	}
 }
 
+// An org that has SAID it brings its own credentials and bound none is refused,
+// and the refusal has to name THAT gap. There is no provider to name: an alias
+// resolves its access path from the credential, so with nothing bound the model
+// under test names nothing that could be connected — and a message built from a
+// provider nobody chose reads as " is not connected for this organization".
+//
+// It is the same predicate the badge uses, so a caller told "unconfigured" by
+// the read and refused by this is being told one thing about one credential.
+func TestModelTest_LocalMode_NothingBoundRefusesWithoutNamingAProvider(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	// Brings its own, binds nothing: the state the setup flow leaves behind
+	// between choosing BYOK and pasting a key.
+	set, err := s.allStores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("read org settings: %v", err)
+	}
+	set.LLMAuthMethod = domain.LLMAuthBYOK
+	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
+		t.Fatalf("select byok: %v", err)
+	}
+
+	spent := &countingProber{}
+	mdh := &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return spent }}
+	rec := httptest.NewRecorder()
+	mdh.handleModelTest(rec, localModelTestRequest(domain.ModelAliasSonnet))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("test = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if spent.calls != 0 {
+		t.Errorf("the prober was called %d times; a refused route must spend nothing", spent.calls)
+	}
+	var body struct {
+		Errors []httpx.ErrorItem `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode errors: %v (body: %s)", err, rec.Body.String())
+	}
+	if len(body.Errors) != 1 {
+		t.Fatalf("reported %d errors, want 1: %s", len(body.Errors), rec.Body.String())
+	}
+	message := body.Errors[0].Message
+	if strings.HasPrefix(message, " ") {
+		t.Errorf("refusal opens with a blank provider name: %q", message)
+	}
+	// The remedy is where an admin goes, and it is the whole point of the
+	// message: nothing is bound, so the fix is binding something.
+	if !strings.Contains(message, "Settings") {
+		t.Errorf("refusal does not say where to fix it: %q", message)
+	}
+	// The badge the read publishes for the same model agrees.
+	read := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
+	if read.Code != http.StatusOK {
+		t.Fatalf("catalog read = %d, want 200 (body: %s)", read.Code, read.Body.String())
+	}
+	for _, row := range decodeModels(t, read.Body.Bytes()).Items {
+		if row.Availability != modelAvailabilityUnconfigured {
+			t.Errorf("%s: availability = %q, want %q", row.Key, row.Availability, modelAvailabilityUnconfigured)
+		}
+	}
+}
+
 // countingProber records that it was asked. It answers green so that a route
 // which wrongly reached it would look like it succeeded, which is what makes
 // the call count the assertion rather than the status.

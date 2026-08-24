@@ -1122,8 +1122,11 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	// it — these jobs are toolless and short-context, so every offered model is
 	// a legitimate choice.
 	//
-	// Whether the org has connected the provider that serves it is checked in
-	// the transaction below, against the row this write is landing on.
+	// Where the id names the provider that serves it, whether the org has
+	// connected that provider is checked in the transaction below, against the
+	// row this write is landing on. An SDK alias names none — the harness
+	// resolves the path from the credential — so that check has nothing to bite
+	// on there and the universe above is the whole gate.
 	//
 	// Null clears it, and clearing is a real intent: it turns the background
 	// jobs off, which is the only way to stop them short of unbinding the
