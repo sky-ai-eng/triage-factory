@@ -179,6 +179,13 @@ const (
 	// rather than fails: nothing ran, so there is nothing to have failed, and
 	// a message wakes it to try again.
 	ParkReasonLaunchFailed ParkReason = "launch_failed"
+	// ParkReasonModelNotEnabled — the model this conversation would run on is
+	// one its team may no longer pick: its default, or the model the step it
+	// follows ran on, dropped out of the team's enabled set. Its own reason
+	// rather than launch_failed because nothing tried to launch and retrying
+	// changes nothing — the fix is a person picking a model, and a park that
+	// says "the runtime could not start" sends them looking at the runtime.
+	ParkReasonModelNotEnabled ParkReason = "model_not_enabled"
 	// ParkReasonDrained — the executor holding this conversation is draining
 	// (scale-down). A forward seam: no writer yet, and the one that lands is
 	// the drain trigger internal/delegate/workspace_snapshot.go documents.
@@ -201,6 +208,7 @@ func AllParkReasons() []ParkReason {
 		ParkReasonBlueprintCancelled,
 		ParkReasonBlueprintTerminal,
 		ParkReasonLaunchFailed,
+		ParkReasonModelNotEnabled,
 		ParkReasonDrained,
 	}
 }

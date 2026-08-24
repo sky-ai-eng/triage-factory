@@ -45,5 +45,17 @@ ALTER TABLE org_settings DROP COLUMN max_llm_model_tier;
 -- own set afterwards and nothing rewrites a team row when it does.
 ALTER TABLE team_settings ADD COLUMN enabled_models TEXT;
 
+-- A team default of '' used to mean "fall back to the shipped default", which
+-- is what the resolution this ticket deletes did with an empty value. Nothing
+-- falls back now — an unset default refuses the claim by name — so a row left
+-- empty would be a team whose every unpinned step stops working on upgrade.
+--
+-- The save refuses to clear the column going forward, which makes '' a state
+-- reachable in data but not through the API. Backfilling is what closes that:
+-- the value written is the one those teams were already running on, since it is
+-- the same constant the old fallback resolved to and the same one this column
+-- defaults to for a team that never picked.
+UPDATE team_settings SET default_model = 'sonnet' WHERE default_model = '';
+
 -- +goose Down
 SELECT 'down not supported';

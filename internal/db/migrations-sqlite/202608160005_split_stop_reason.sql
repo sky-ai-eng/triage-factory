@@ -23,7 +23,7 @@ UPDATE conversations
  WHERE park_reason IS NOT NULL
    AND park_reason NOT IN ('idle', 'user_cancelled', 'system_cancelled',
                            'blueprint_cancelled', 'blueprint_terminal',
-                           'launch_failed', 'drained');
+                           'launch_failed', 'model_not_enabled', 'drained');
 
 -- 2. The model half moves to the row it describes. `end_turn` / `max_tokens` /
 -- `tool_use` are facts about ONE assistant turn, so at conversation scope the

@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
@@ -175,9 +176,13 @@ func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	}
 }
 
-// TestTeamSettingsPatch_NullClearsEveryClearableField is the team mirror, and
-// it includes ai_model — which previously could not be cleared AT ALL, because
-// its wire encoding read a blank as "keep".
+// TestTeamSettingsPatch_NullClearsEveryClearableField is the team mirror.
+//
+// ai_model is deliberately NOT in the cleared set: it is the one field on
+// either scope where null is refused rather than meaning "reset", because
+// nothing resolves an empty default at dispatch. It rides along here anyway,
+// set before the mass clear and asserted after it, so a save that clears every
+// field around it is shown to leave it standing.
 func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -199,7 +204,7 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	defaults := domain.DefaultTeamSettingsFor(runmode.Current() == runmode.ModeMulti)
 	body := map[string]any{}
 	for _, f := range []string{
-		"ai_model", "ai_auto_delegate_enabled", "auto_mode_enabled", "ai_reprioritize_threshold",
+		"ai_auto_delegate_enabled", "auto_mode_enabled", "ai_reprioritize_threshold",
 		"ai_preference_update_interval", "branch_template", "review_posture",
 		"base_branch_push_policy", "permission_absent_autodeny_enabled",
 		"permission_absent_grace_seconds",
@@ -209,10 +214,8 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	patchTeamSettingsOK(t, s, "default", body)
 
 	got := teamSettingsSnapshot(t, s)
-	// ai_model clears to "inherit", which is the empty value — not a default
-	// model, because the point of clearing it is to stop having a preference.
-	if got.DefaultModel != "" {
-		t.Errorf("ai_model after null = %q, want \"\" (inherit)", got.DefaultModel)
+	if got.DefaultModel != domain.ModelAliasOpus {
+		t.Errorf("ai_model after clearing everything around it = %q, want %q untouched", got.DefaultModel, domain.ModelAliasOpus)
 	}
 	if got.AutoDelegateEnabled != defaults.AutoDelegateEnabled ||
 		got.AutoModeEnabled != defaults.AutoModeEnabled ||
@@ -224,6 +227,40 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		got.PermissionAbsentAutodenyEnabled != defaults.PermissionAbsentAutodenyEnabled ||
 		got.PermissionAbsentGraceMS != defaults.PermissionAbsentGraceMS {
 		t.Errorf("null did not reset every field to its default:\n got: %+v\nwant: %+v", got, defaults)
+	}
+}
+
+// A team's default model cannot be cleared, and that is the whole reason the
+// field sits outside the null-resets-everything contract above: nothing
+// resolves an empty default at dispatch, so a cleared team is one whose every
+// unpinned step refuses. The provisioning default is not a fallback to reach
+// for — picking it on the team's behalf would spend on a choice nobody made —
+// so the save refuses and says which models it will take instead.
+func TestTeamSettingsPatch_AIModelCannotBeCleared(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelAliasOpus})
+
+	for name, body := range map[string]map[string]any{
+		"explicit null": {"ai_model": nil},
+		"empty string":  {"ai_model": ""},
+		"blank":         {"ai_model": "   "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := patchTeamSettings(t, s, "default", body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+			}
+			assertFieldError(t, rec, "ai_model")
+			// The refusal names what it will take, which is the whole fix.
+			if !strings.Contains(rec.Body.String(), domain.ModelAliasSonnet) {
+				t.Errorf("the refusal does not name a model it would accept: %s", rec.Body.String())
+			}
+		})
+	}
+	if got := teamSettingsSnapshot(t, s); got.DefaultModel != domain.ModelAliasOpus {
+		t.Errorf("a refused clear changed the stored default to %q", got.DefaultModel)
 	}
 }
 

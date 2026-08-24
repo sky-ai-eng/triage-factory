@@ -796,6 +796,14 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 // it, so nothing delivers the message. An expired workspace (ErrWorkspaceExpired) is 410 Gone: the
 // conversation's saved state was reaped after the retention window, so retrying won't
 // help — the client surfaces the clear error rather than a transient conflict.
+// A model the conversation's team may no longer pick (domain.ErrModelNotEnabled)
+// is 409 for the same reason as its neighbours and NOT the 422 a refused
+// delegation answers with: this is a rung of the resume ladder, so the composer
+// the run read disabled and the send refused here have to agree, and the client
+// re-reads the conversation to find out what changed. It is also the one rung a
+// person clears without touching the conversation at all — the message names
+// the model and the set, and re-enabling makes the very next send succeed.
+//
 // A concluded conversation (ErrConversationConcluded) is 409 as well, but it
 // carries its own message: this conversation's blueprint will never drive it
 // again (it has moved past this step). A cancelled one (ErrBlueprintCancelled)
@@ -826,7 +834,8 @@ func steerErrorStatus(err error) (int, string) {
 	case errors.Is(err, delegate.ErrNoLiveProcess),
 		errors.Is(err, delegate.ErrConversationNotSteerable),
 		errors.Is(err, delegate.ErrConversationNotResumable),
-		errors.Is(err, delegate.ErrStepHandedOff):
+		errors.Is(err, delegate.ErrStepHandedOff),
+		errors.Is(err, domain.ErrModelNotEnabled):
 		return http.StatusConflict, httpx.ReasonConflict
 	default:
 		return http.StatusInternalServerError, httpx.ReasonInternal

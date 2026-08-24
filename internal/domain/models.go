@@ -198,6 +198,24 @@ func NewTeamModels(defaultModel string, enabled ModelSet) TeamModels {
 // none.
 func (m TeamModels) Enabled() ModelSet { return m.enabled }
 
+// RequireModel holds one model that is NOT the team's default to the same set,
+// so a model reaching dispatch by inheritance is judged exactly as one reaching
+// it by selection. Its caller is the follow-up: a claim on concluded work runs
+// on the model the step it follows used, and "inherited" is not a licence to
+// run something nobody may pick.
+//
+// Empty passes. That is not a model outside the set, it is no model at all, and
+// whatever answers for a conversation with no model on it is not this.
+func (m TeamModels) RequireModel(model string) error {
+	model = strings.TrimSpace(model)
+	if model == "" || m.enabled.Has(model) {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: %s is the model this work last ran on, and this team's enabled models no longer include it (%s) — pick a model from that set in Settings",
+		ErrModelNotEnabled, model, m.enabled)
+}
+
 // RequireDefault resolves the model an unset step inherits, refusing when the
 // team's enable-set no longer includes it — the org may have disabled it since
 // it was picked, and nothing rewrites a team's row when that happens.

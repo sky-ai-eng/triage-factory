@@ -445,17 +445,24 @@ func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (app
 	// options from the same universe, so the closed set is the one the UI shows
 	// — and a stored value that is dispatched verbatim has no room for a
 	// spelling nothing can invoke, nor for one in the other deployment
-	// vocabulary's spelling. Null clears the team's preference.
+	// vocabulary's spelling.
+	//
+	// It cannot be cleared, and this is the one PATCH field on either scope
+	// where null is refused rather than meaning "reset". There is nothing to
+	// reset TO: no org-level team default exists, and nothing resolves an empty
+	// one at dispatch, so a cleared team is a team whose every unpinned step
+	// fails. The provisioning default seeds the column and is not a fallback —
+	// picking it here would spend on a choice nobody made. A team changing its
+	// mind names the new model; a team that wants fewer choices narrows
+	// enabled_models beside this.
 	if v, st := httpx.PatchString(&shape, req.AIModel, "ai_model"); st != httpx.PatchAbsent {
 		universe := deploymentUniverse()
 		switch {
-		case st == httpx.PatchClear:
-			set(func(t *domain.TeamSettings) { t.DefaultModel = "" })
-		case st == httpx.PatchSet && strings.TrimSpace(v) == "":
-			shape.Invalid("ai_model", "ai_model must name a model, or be null to inherit the org default")
-		case st == httpx.PatchSet && !universe.Offers(strings.TrimSpace(v)):
+		case st == httpx.PatchClear || strings.TrimSpace(v) == "":
+			shape.Invalid("ai_model", "ai_model must name a model this deployment offers and cannot be cleared — a team with no default has no model to run its unpinned steps on: "+strings.Join(universe.Keys(), ", "))
+		case !universe.Offers(strings.TrimSpace(v)):
 			shape.Invalid("ai_model", "ai_model must name a model this deployment offers: "+strings.Join(universe.Keys(), ", "))
-		case st == httpx.PatchSet:
+		default:
 			set(func(t *domain.TeamSettings) { t.DefaultModel = strings.TrimSpace(v) })
 		}
 	}

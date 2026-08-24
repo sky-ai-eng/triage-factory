@@ -366,6 +366,16 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	model, err := s.modelForClaim(ctx, orgID, br, *conv)
 	if err != nil {
 		s.failEngagement(conv.ID, err)
+		// An enable-set refusal is settled, not transient: every retry re-reads
+		// the same rows and refuses again, so the retry ladder would spend the
+		// claim budget to arrive here anyway — and then say the runtime failed
+		// to start, which is not what happened and points at the wrong fix. It
+		// takes the exhausted disposition directly instead, which parks a
+		// conversation with a transcript and fails a step that never ran.
+		if errors.Is(err, domain.ErrModelNotEnabled) {
+			s.disposeOfModelRefusal(orgID, br, *conv, err)
+			return
+		}
 		s.handlePreAgentFailure(orgID, br, *conv, err)
 		return
 	}
@@ -1167,9 +1177,15 @@ func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.Bl
 		return "", err
 	}
 	if err != nil {
-		// The team names no default at all — a fixture with no resolver wired,
-		// or a row nobody has configured. The step's own model is a worse
-		// answer than a fresh decision, but it is a better one than no model.
+		// The team names no default at all. The settings save refuses to clear
+		// one, so this is a row written before it did, or a fixture with no
+		// resolver wired. The step's own model is a worse answer than a fresh
+		// decision, but it is a better one than no model — held to the same set
+		// either way, because arriving by inheritance is not a licence to run a
+		// model nobody may pick.
+		if err := models.RequireModel(conv.Model); err != nil {
+			return "", err
+		}
 		return conv.Model, nil
 	}
 	return model, nil
@@ -1586,8 +1602,46 @@ func (s *Spawner) conversationHasTranscript(orgID, conversationID string) bool {
 // undelivered message would re-claim the conversation immediately and the
 // budget would buy nothing at all.
 func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversation, cause error) {
+	s.parkWithStopNote(orgID, conv, domain.ParkReasonLaunchFailed,
+		fmt.Sprintf("The runtime failed to start after %d attempts: %s. Send a message to retry.", conv.Attempts, cause),
+		fmt.Sprintf("Run %s could not start: %s", shortConversationID(conv.ID), truncateToastMsg(cause.Error(), 160)))
+}
+
+// disposeOfModelRefusal answers for a claim whose model its team may no longer
+// pick. It is disposeOfExhaustedConversation's split — park what has a
+// transcript, fail a step that never ran — reached without the retries, since
+// re-reading the same two settings rows cannot produce a different answer.
+//
+// The note is the refusal itself, which already names the model and the set
+// that excludes it, so the person reading the transcript is told the one thing
+// that fixes it. "Send a message to retry" is deliberately absent: a message
+// would wake the conversation into this same refusal until somebody picks.
+func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) {
+	if br == nil || s.conversationHasTranscript(orgID, conv.ID) {
+		dispatchLog.Warn("claim refused: the model this conversation would run on is not enabled for its team; parking",
+			"conversation", conv.ID, "team", conv.TeamID, "error", cause)
+		s.parkWithStopNote(orgID, conv, domain.ParkReasonModelNotEnabled,
+			fmt.Sprintf("This conversation cannot continue: %s", cause),
+			fmt.Sprintf("Run %s is paused: %s", shortConversationID(conv.ID), truncateToastMsg(cause.Error(), 160)))
+		return
+	}
+	dispatchLog.Error("blueprint step refused: the model it would run on is not enabled for its team",
+		"conversation", conv.ID, "blueprint_run", br.ID, "team", conv.TeamID, "error", cause)
+	s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
+		runConfig{orgID: orgID, teamID: conv.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
+		domain.BlueprintRunStatusFailed, cause.Error(), conv.BlueprintStepIndex, false)
+}
+
+// parkWithStopNote is the park every pre-agent stop lands on: a stop note on the
+// transcript saying what happened, the waiting input settled so `open` does not
+// immediately re-claim, the park itself fenced on this claim, and the two
+// surfaces a person watching either the conversation or the board reads from.
+//
+// The note and the reason are the caller's because they are the only parts that
+// differ, and they are what a person is actually told — a park that describes
+// the wrong cause sends them to fix the wrong thing.
+func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reason domain.ParkReason, note, toastMsg string) {
 	bgCtx := context.Background()
-	note := fmt.Sprintf("The runtime failed to start after %d attempts: %s. Send a message to retry.", conv.Attempts, cause)
 	if _, err := s.conversations.InsertMessageForClaimSystem(bgCtx, orgID, conv.ClaimID, &domain.Message{
 		ConversationID: conv.ID,
 		UserID:         conv.CreatorUserID,
@@ -1596,20 +1650,20 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversati
 		Content:        note,
 	}); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
-			dispatchLog.Error("claim fence refused the launch-failure note — a successor owns this conversation; recording nothing",
+			dispatchLog.Error("claim fence refused the stop note — a successor owns this conversation; recording nothing",
 				"conversation", conv.ID, "claim_id", conv.ClaimID, "org_id", orgID)
 			return
 		}
-		dispatchLog.Warn("record launch-failure note failed; the park still lands", "conversation", conv.ID, "error", err)
+		dispatchLog.Warn("record stop note failed; the park still lands", "conversation", conv.ID, "error", err)
 	}
 	if s.pendingInput != nil {
 		if _, _, _, err := s.pendingInput.Consume(bgCtx, orgID, conv.ID); err != nil {
 			dispatchLog.Warn("settle pending input before parking a conversation that could not start failed", "conversation", conv.ID, "error", err)
 		}
 	}
-	if _, err := s.conversations.ParkOpenForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, db.ParkStopped(domain.ParkReasonLaunchFailed, "")); err != nil {
+	if _, err := s.conversations.ParkOpenForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, db.ParkStopped(reason, "")); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
-			dispatchLog.Error("claim fence refused the park after a launch failure — a successor owns this conversation",
+			dispatchLog.Error("claim fence refused the park — a successor owns this conversation",
 				"conversation", conv.ID, "claim_id", conv.ClaimID, "org_id", orgID)
 			return
 		}
@@ -1618,7 +1672,7 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversati
 	}
 	s.broadcastConversationUpdate(orgID, conv.ID, "open")
 	s.recomputeTaskBoardColumn(orgID, conv.TaskID)
-	toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s could not start: %s", shortConversationID(conv.ID), truncateToastMsg(cause.Error(), 160)))
+	toast.Error(s.wsHub, orgID, toastMsg)
 }
 
 // failClaimedConversation marks an orphaned claimed conversation failed (its

@@ -98,6 +98,23 @@ differently, enforced at different times, and fail differently. One decides
     never a silent ignore (R6): a default outside the set fails the next
     claim, a pin outside it fails the step. In-flight work is untouched —
     disabling a model is forward-acting, exactly as untracking a repo is.
+  - **A follow-up is refused before the message is written**, and the
+    composer says so before anyone types. The refusal is a rung on the
+    resume ladder, so the run read that disables the composer and the send
+    that returns 409 are one decision made once — a message accepted here
+    would be queued against a claim that refuses it, and the person would
+    learn from a stop note minutes later. The dispatch keeps the same check
+    as a backstop, for a set that narrows between the send and the claim,
+    and parks on the FIRST attempt: an enable-set refusal is settled, so a
+    retry ladder only spends the claim budget to arrive at the same answer
+    under a message that blames the runtime.
+  - **A team default cannot be cleared.** There is nothing to clear it to —
+    no org-level team default exists and nothing resolves an empty one — so
+    a cleared team is one whose every unpinned step refuses. The
+    provisioning default seeds the column and is never a fallback: picking
+    it at dispatch would spend on a choice nobody made. A team changing its
+    mind names the new model; a team wanting fewer choices narrows its
+    enable-set instead.
   - **An org save that disables a model some team still selects succeeds,
     with a warning naming that team.** Refusing until every team re-picked
     would couple the org admin to team settings they are barred from

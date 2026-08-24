@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -268,6 +270,32 @@ func TestModelForClaim_FollowUpDoesNotInheritTheStepModel(t *testing.T) {
 	if got, err := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: domain.BlueprintRunStatusCompleted}, conv); !errors.Is(err, domain.ErrModelNotEnabled) || got != "" {
 		t.Errorf("a disabled team default = (%q, %v), want a refusal naming the model", got, err)
 	}
+
+	// And the fallback itself is held to the set. A team with no default at all
+	// whose step ran on a model the set has since dropped refuses too: reaching
+	// the claim by inheritance is not a licence to run something nobody may
+	// pick, and answering with it would be the same substitution wearing the
+	// one costume the branch above does not check for.
+	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+		return domain.NewTeamModels("",
+			domain.TeamModelSet([]string{domain.ModelHaiku}, orgUnrestricted())), nil
+	})
+	disabledStep := domain.Conversation{Model: domain.ModelOpus, TeamID: runmode.LocalDefaultTeamID}
+	got, err := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: domain.BlueprintRunStatusCompleted}, disabledStep)
+	if !errors.Is(err, domain.ErrModelNotEnabled) || got != "" {
+		t.Fatalf("no default plus a disabled step model = (%q, %v), want a refusal", got, err)
+	}
+	for _, want := range []string{domain.ModelOpus, domain.ModelHaiku} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not name %s", err, want)
+		}
+	}
+	// The same shape with the step's model still enabled is the case the
+	// fallback exists for, and it still runs.
+	enabledStep := domain.Conversation{Model: domain.ModelHaiku, TeamID: runmode.LocalDefaultTeamID}
+	if got, err := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: domain.BlueprintRunStatusCompleted}, enabledStep); err != nil || got != domain.ModelHaiku {
+		t.Errorf("no default plus an enabled step model = (%q, %v), want %q", got, err, domain.ModelHaiku)
+	}
 }
 
 // TestFollowUpRecordsTaskEvent: the resume moves nothing a person can see, so
@@ -343,5 +371,136 @@ func TestDispatchClaimedRun_FinishedBlueprintWithoutAMessageParks(t *testing.T) 
 	}
 	if gotStatus, gotStep := blueprintState(t, database, bpr); gotStatus != "completed" || gotStep != 0 {
 		t.Errorf("blueprint = (%q, %d), want it untouched at (completed, 0)", gotStatus, gotStep)
+	}
+}
+
+// A team that may no longer run the model its concluded work would continue on
+// is refused BEFORE the message is written, and the composer is told the same
+// thing by the same walk.
+//
+// That is the whole point of putting the check on the refusal ladder rather
+// than only at dispatch: the person is right there, having just typed, and the
+// answer they need — pick a model — is one they can act on in the moment. A
+// message accepted here would be queued against a claim that refuses it, and
+// they would learn minutes later from a stop note.
+func TestFollowUp_ModelNotEnabledIsRefusedBeforeTheWrite(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-disabled", "sess-disabled", t.TempDir())
+	if _, err := database.Exec(
+		`UPDATE conversations SET status='completed', outcome='finish', model=? WHERE id='r-disabled'`,
+		domain.ModelOpus,
+	); err != nil {
+		t.Fatalf("conclude conversation: %v", err)
+	}
+	bpr := blueprintRunIDForConversation(t, database, "r-disabled")
+	finishBlueprint(t, database, bpr, "completed", 0)
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	// The team's default is gone and its set no longer names what the step ran
+	// on — the two halves of the refusal, together.
+	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+		return domain.NewTeamModels("",
+			domain.TeamModelSet([]string{domain.ModelHaiku}, orgUnrestricted())), nil
+	})
+
+	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-disabled")
+	if err != nil || conv == nil {
+		t.Fatalf("load conversation: %v", err)
+	}
+	ok, reason := s.ResumabilityFor(context.Background(), runmode.LocalDefaultOrgID, conv)
+	if ok || reason != ResumeBlockedModelNotEnabled {
+		t.Errorf("ResumabilityFor = (%v, %q), want the model rung — the composer has to say so before anyone types", ok, reason)
+	}
+
+	err = s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-disabled", runmode.LocalDefaultUserID, "one more thing")
+	if !errors.Is(err, domain.ErrModelNotEnabled) {
+		t.Fatalf("SendMessage err = %v, want a model refusal", err)
+	}
+	// Nothing was written: no queued row for a claim that would refuse it, and
+	// the conversation is where it was.
+	var queued int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE conversation_id='r-disabled' AND delivered=false`,
+	).Scan(&queued); err != nil {
+		t.Fatalf("count undelivered: %v", err)
+	}
+	if queued != 0 {
+		t.Errorf("a refused send queued %d message(s)", queued)
+	}
+	if st := storedStatus(t, database, "r-disabled"); st != "completed" {
+		t.Errorf("stored status = %q, want completed — a refused send writes nothing", st)
+	}
+
+	// Re-enabling is the whole fix, and it takes effect on the next read: the
+	// ladder resolves the set fresh rather than caching a verdict onto the row.
+	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+		return domain.NewTeamModels("",
+			domain.TeamModelSet([]string{domain.ModelHaiku, domain.ModelOpus}, orgUnrestricted())), nil
+	})
+	if ok, reason := s.ResumabilityFor(context.Background(), runmode.LocalDefaultOrgID, conv); !ok {
+		t.Errorf("after re-enabling the model the composer is still blocked: %q", reason)
+	}
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-disabled", runmode.LocalDefaultUserID, "one more thing"); err != nil {
+		t.Errorf("SendMessage after re-enabling: %v", err)
+	}
+}
+
+// The dispatch-side backstop, and the reason it does not go through the retry
+// ladder: an enable-set refusal is settled, so five attempts buy nothing and
+// then report that the runtime failed to start — which is not what happened and
+// points at the wrong fix.
+//
+// It is a backstop rather than the gate, because the set can narrow between the
+// send the ladder allowed and the claim that picks it up. What lands is a park
+// with the refusal itself on the transcript, on the first attempt.
+func TestDisposeOfModelRefusal_ParksOnceWithTheRefusal(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-refused", "sess-refused", t.TempDir())
+	if _, err := database.Exec(
+		`INSERT INTO messages (org_id, conversation_id, role, content)
+		 VALUES (?, 'r-refused', 'assistant', 'work happened here')`, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed transcript: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+
+	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-refused")
+	if err != nil || conv == nil {
+		t.Fatalf("load conversation: %v", err)
+	}
+	cause := fmt.Errorf("%w: %s is not one of %s", domain.ErrModelNotEnabled, domain.ModelOpus, domain.ModelHaiku)
+	s.disposeOfModelRefusal(runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: domain.BlueprintRunStatusCompleted}, *conv, cause)
+
+	var status, reason string
+	if err := database.QueryRow(
+		`SELECT status, COALESCE(park_reason, '') FROM conversations WHERE id='r-refused'`,
+	).Scan(&status, &reason); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != "open" || reason != string(domain.ParkReasonModelNotEnabled) {
+		t.Errorf("parked as (%q, %q), want (open, %s)", status, reason, domain.ParkReasonModelNotEnabled)
+	}
+
+	var note string
+	if err := database.QueryRow(
+		`SELECT content FROM messages WHERE conversation_id='r-refused' AND subtype=?
+		  ORDER BY id DESC LIMIT 1`, domain.MessageSubtypeStopNote,
+	).Scan(&note); err != nil {
+		t.Fatalf("read stop note: %v", err)
+	}
+	for _, want := range []string{domain.ModelOpus, domain.ModelHaiku} {
+		if !strings.Contains(note, want) {
+			t.Errorf("stop note %q does not name %s", note, want)
+		}
+	}
+	// "Send a message to retry" is the launch-failure note's advice and would be
+	// wrong here: a message wakes this straight back into the same refusal.
+	if strings.Contains(note, "retry") {
+		t.Errorf("stop note tells the reader to retry, which cannot work: %q", note)
+	}
+	if strings.Contains(note, "runtime failed to start") {
+		t.Errorf("stop note blames the runtime for a settings refusal: %q", note)
 	}
 }
