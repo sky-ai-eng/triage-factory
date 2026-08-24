@@ -915,7 +915,7 @@ Five layers, most-shared first:
 | vocabulary & storage | concrete model ids | ~~**identical** — the SDK's `--model` accepts concrete ids, so no translation exists anywhere~~ superseded 2026-08-24 — the SDK's own alias vocabulary, stored as-is; see the amendment below |
 | catalog & names | allowlist ⋈ datasheet, embedded | ~~**identical** — it ships in the binary~~ superseded 2026-08-24 — the per-SDK list ships in the binary beside the native registry; see the amendment below |
 | model universe | filtered by the org's configured providers | ~~filtered by what the SDK can drive: the Claude family via Anthropic direct / Bedrock / Vertex.~~ superseded 2026-08-24 — the SDK's supported-model list, decoupled from the catalog; see the amendment below. **Not a mock — a truth.** A GPT entry in a local picker would be a lie, because nothing local can execute it |
-| availability | `verified` via probe, save-gated (Q4) | **identical vocabulary** — local probes through the agent runtime, which reports the provider's HTTP status on its terminal event (`api_error_status`), so a subscription with no key this process could assemble a request from still yields a real verdict. Same four states, same test-connection button, same stored rows |
+| availability | `verified` via probe, save-gated (Q4) | ~~**identical vocabulary** — local probes through the agent runtime, which reports the provider's HTTP status on its terminal event (`api_error_status`), so a subscription with no key this process could assemble a request from still yields a real verdict. Same four states, same test-connection button, same stored rows~~ superseded 2026-08-24 — a stored verdict needs a TF-owned credential: under system credentials nothing is stored and no probe surface exists; under BYOK the same four states, keyed `(credential family, alias)`; see the amendment below |
 | caps & usage | full | shared ledger shape (`messages.cost_usd`); rate caps work identically (a picker filter against catalog prices); budget caps per §7.1 |
 
 One deliberate asymmetry, written down so it is a decision rather than
@@ -931,7 +931,9 @@ are the two conversation runtimes' own: an in-process call over
 engine) and the **SDK** subprocess. Either way it spends the request through
 the same client a delegated run does, so it tests that run's credential path
 rather than a parallel one — and what it asks, and what the answer means, are
-identical, so the field carries no mode difference for a client to read.
+identical~~, so the field carries no mode difference for a client to read~~
+(superseded 2026-08-24: whether the field exists at all now follows the
+credential source — see the amendment below).
 
 It picks by mode because the mode settles the runtime: the dialect *is* the
 mode and the enqueue stamps the ratchet per dialect — Postgres mints
