@@ -1035,15 +1035,21 @@ What follows:
 
 Two hazards, recorded so the implementing tickets carry them:
 
-- `addBedrockConfig` pins `ANTHROPIC_MODEL` to the org's stored
-  `bedrock_model_id` for any model the native catalog cannot place, so an
-  alias sent down a BYOK-Bedrock local path would be silently overridden.
-  Lands with the local credential wiring (TFAC-888), which is also what
-  makes a local BYOK path real at all. A second consequence for that
-  ticket: with aliases the model no longer names the provider, so a local
-  org holding both credentials needs an explicit active-path choice for
-  the SDK environment — the existing provider picker becomes that choice,
-  rather than merely selecting which credential to bind.
+- TF's Bedrock env composition (`addBedrockConfig`) pins
+  `ANTHROPIC_MODEL` — the run's model when it is a Bedrock catalog key,
+  else the org's stored `bedrock_model_id`. That arm is an artifact of the
+  concrete-id vocabulary: Claude Code needs no pin at all. Per its Bedrock
+  docs, aliases resolve to built-in per-region inference-profile defaults
+  with startup availability checks and fallback, and `ANTHROPIC_MODEL` /
+  `ANTHROPIC_DEFAULT_*_MODEL` exist only as deliberate version-pinning
+  overrides. Under aliases the arm is deleted with the local credential
+  wiring (TFAC-888), not inherited, and the stored `bedrock_model_id`
+  stops driving the SDK path; region and endpoint env survive. A second
+  consequence for that ticket: with aliases the model no longer names the
+  provider, so a local org holding both credentials needs an explicit
+  active-path choice for the SDK environment — the existing provider
+  picker becomes that choice, rather than merely selecting which
+  credential to bind.
 - The alias list (`fable` included) is asserted, not yet probed. The
   first implementation step is a sweep of the aliases through the SDK
   transport — engineering verification the probe machinery makes a button
