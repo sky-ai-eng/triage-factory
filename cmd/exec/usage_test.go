@@ -21,7 +21,7 @@ func TestHelpTextUsageLine(t *testing.T) {
 		{"./triagefactory exec", "Usage: ./triagefactory exec <command> [args]\n"},
 	}
 	for _, tt := range tests {
-		if got := helpText(tt.prefix); !strings.HasPrefix(got, tt.want) {
+		if got := helpText(tt.prefix, nil); !strings.HasPrefix(got, tt.want) {
 			t.Errorf("helpText(%q) first line = %q, want %q", tt.prefix, firstLine(got), tt.want)
 		}
 	}
@@ -29,8 +29,8 @@ func TestHelpTextUsageLine(t *testing.T) {
 	// Everything past the usage line is the shared verb documentation, which
 	// names its verbs bare — so the prefix appears in the usage line alone and
 	// the rest of the output is invariant.
-	canonical := strings.TrimPrefix(helpText("triagefactory exec"), tests[0].want)
-	applet := strings.TrimPrefix(helpText("tfac"), tests[1].want)
+	canonical := strings.TrimPrefix(helpText("triagefactory exec", nil), tests[0].want)
+	applet := strings.TrimPrefix(helpText("tfac", nil), tests[1].want)
 	if canonical != applet {
 		t.Error("help bodies diverge between invoked forms; only the usage line may differ")
 	}
@@ -61,7 +61,7 @@ func TestUnknownCommandText(t *testing.T) {
 // prefix rather than any baked-in name: under `go test` argv0 is the test
 // binary, so its own path is what must appear.
 func TestHelpIsWiredToArgv0(t *testing.T) {
-	out := helpText(prog.Prefix())
+	out := helpText(prog.Prefix(), nil)
 	if !strings.HasPrefix(out, "Usage: "+prog.Prefix()+" <command> [args]") {
 		t.Errorf("usage line does not name the invoked prefix %q:\n%s", prog.Prefix(), firstLine(out))
 	}

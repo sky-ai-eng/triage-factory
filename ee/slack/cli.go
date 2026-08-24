@@ -19,20 +19,99 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
 func init() {
-	exec.RegisterSubcommand("slack", runSlackCLI)
+	exec.RegisterSubcommand("slack", exec.Subcommand{
+		Run:        runSlackCLI,
+		HelpText:   cliHelpText,
+		ValueFlags: cliValueFlags,
+		SourceKind: "slack",
+	})
+}
+
+// cliHelpText is the `exec slack` section of the CLI help — the top-level
+// index and every `slack ... --help` depth print from it. It is the
+// CLI-format counterpart of prompts/slack.txt, which is prompt text (with
+// placeholders and run-context rules that mean nothing in a terminal), never
+// reused here. The built-ins' HelpText conventions apply: verbs named bare,
+// the invocation prefix appears in the usage line alone.
+const cliHelpText = `Slack Commands:
+  slack send --channel <C> [--thread-ts <TS>] [--body <md> | --body-file <path|->] [--attach-file <path|->]
+                                                          Post a message (Markdown). Needs a body
+                                                          and/or an attach-file — a file-only send
+                                                          is fine. Returns {"channel":..., "ts":...}.
+  slack edit --channel <C> --ts <TS> (--body <md> | --body-file <path|->)
+                                                          Edit a message the bot itself posted.
+  slack react --channel <C> --ts <TS> --emoji <name>      Add an emoji reaction (name only, no
+                                                          colons: thumbsup, not :thumbsup:).
+  slack read thread --channel <C> --ts <TS> [--limit <N>] Read a thread's replies, oldest first.
+  slack read channel --channel <C> (--limit <N> | --ts <TS> [--num-prior <N>] [--num-following <N>])
+                                                          Read channel history: the latest N
+                                                          messages, or a window around an anchor ts.
+                                                          The two forms are mutually exclusive.
+  slack download --id <file_id> [--out <path>]            Download a file from a read result's
+                                                          files array; prints {"path":...}.
+
+  --body-file and --attach-file accept "-" for stdin. Both reads return a JSON array of
+  {ts, thread_ts, sender_id, sender_name, text, files:[{id,name}]} per message.`
+
+// cliValueFlags is every exec-slack flag that takes a value, for the shared
+// help scan (execflags.HasHelpFlag) — what keeps --body "--help" a message
+// body rather than a help request. slack has no boolean flags.
+var cliValueFlags = map[string]bool{
+	"--channel":       true,
+	"--ts":            true,
+	"--thread-ts":     true,
+	"--emoji":         true,
+	"--body":          true,
+	"--body-file":     true,
+	"--attach-file":   true,
+	"--limit":         true,
+	"--num-prior":     true,
+	"--num-following": true,
+	"--id":            true,
+	"--out":           true,
+}
+
+// slackVerbHelp maps each slack verb to its usage line(s), powering
+// `slack <verb> --help` (cmd/exec/jira's ticketHelp is the pattern) — one
+// line per form, so `read` carries both of its shapes. Mirrored in
+// cliHelpText, the family overview — a rename has to touch both.
+var slackVerbHelp = map[string][]string{
+	"send":     {"slack send --channel <C> [--thread-ts <TS>] [--body <md> | --body-file <path|->] [--attach-file <path|->]"},
+	"edit":     {"slack edit --channel <C> --ts <TS> (--body <md> | --body-file <path|->)"},
+	"react":    {"slack react --channel <C> --ts <TS> --emoji <name>"},
+	"read":     {"slack read thread --channel <C> --ts <TS> [--limit <N>]", "slack read channel --channel <C> (--limit <N> | --ts <TS> [--num-prior <N>] [--num-following <N>])"},
+	"download": {"slack download --id <file_id> [--out <path>]"},
 }
 
 // runSlackCLI dispatches `exec slack <verb> ...`. Returns a process exit
-// code, mirroring every other SubcommandRunner.
+// code, mirroring every other SubcommandRunner. host is nil on help routes —
+// the exec dispatcher short-circuits them before building the agenthost — so
+// every help path below returns before touching it.
 func runSlackCLI(ctx context.Context, args []string, host agenthost.Client) int {
-	if len(args) == 0 {
-		slackReportErr("usage: exec slack <send|edit|react|read|download> ...")
-		return 1
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		printSlackHelp()
+		return 0
 	}
 	verb, rest := args[0], args[1:]
+
+	// Per-verb --help: print just that verb's usage and exit cleanly, without
+	// running the verb body (which would otherwise report its required flags
+	// as missing). An unknown verb with --help falls through to the
+	// unknown-verb error, so the caller learns the verb itself is wrong.
+	if execflags.HasHelpFlag(rest, cliValueFlags) {
+		if lines, ok := slackVerbHelp[verb]; ok {
+			for _, h := range lines {
+				fmt.Printf("usage: %s %s\n", prog.Prefix(), h)
+			}
+			return 0
+		}
+	}
+
 	switch verb {
 	case "send":
 		return slackCLISend(ctx, rest, host)
@@ -45,9 +124,13 @@ func runSlackCLI(ctx context.Context, args []string, host agenthost.Client) int 
 	case "download":
 		return slackCLIDownload(ctx, rest, host)
 	default:
-		slackReportErr(fmt.Sprintf("unknown exec slack verb: %s", verb))
+		slackReportErr(fmt.Sprintf("unknown slack verb: %s\nvalid verbs: download, edit, react, read, send\nRun '%s slack --help' for usage.", verb, prog.Prefix()))
 		return 1
 	}
+}
+
+func printSlackHelp() {
+	fmt.Printf("Usage: %s slack <verb> [flags]\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n", prog.Prefix(), cliHelpText)
 }
 
 // --- shared arg-parsing / output helpers (mirrors cmd/exec/gh's idioms) ---
@@ -265,7 +348,7 @@ func slackCLIReact(ctx context.Context, args []string, host agenthost.Client) in
 
 func slackCLIRead(ctx context.Context, args []string, host agenthost.Client) int {
 	if len(args) == 0 {
-		slackReportErr("usage: exec slack read <thread|channel> ...")
+		slackReportErr(fmt.Sprintf("usage: %s slack read <thread|channel> ...", prog.Prefix()))
 		return 1
 	}
 	mode, rest := args[0], args[1:]
@@ -275,7 +358,7 @@ func slackCLIRead(ctx context.Context, args []string, host agenthost.Client) int
 	case "channel":
 		return slackCLIReadChannel(ctx, rest, host)
 	default:
-		slackReportErr(fmt.Sprintf("unknown exec slack read mode: %s", mode))
+		slackReportErr(fmt.Sprintf("unknown slack read mode: %s\nvalid modes: thread, channel\nRun '%s slack read --help' for usage.", mode, prog.Prefix()))
 		return 1
 	}
 }

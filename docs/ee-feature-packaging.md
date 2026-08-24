@@ -220,9 +220,17 @@ and audit writes all happen host-side.
 An EE feature adds verbs with two registrations from its `init()`:
 
 ```go
-// The verb: arg parsing lives in the ee package. Core's dispatch is a map
-// lookup after the built-in switch — core never knows the feature's flags.
-exec.RegisterSubcommand("chat", cli.Run)
+// The verb family: arg parsing lives in the ee package. Core's dispatch is a
+// map lookup after the built-in switch — the only things core learns from the
+// registration are the docs it needs to serve --help: the family's help
+// section, its value-taking flags (so `--body "--help"` stays a payload, not
+// a help request), and the source kind the help index filters on.
+exec.RegisterSubcommand("chat", exec.Subcommand{
+	Run:        cli.Run,
+	HelpText:   cli.HelpText,
+	ValueFlags: cli.ValueFlags,
+	SourceKind: "chat",
+})
 
 // The logic: runs host-side, keyed by namespace, gated by feature.
 agenthost.RegisterExtension("chat", entitlements.FeatureChat, hostHandler)
@@ -242,9 +250,18 @@ Two consequences worth knowing:
   process never has an entitlement provider — every gated verb refuses
   there. Entitled execution happens only where identity and entitlements are
   real: the daemon inside the server process.
-- **`exec --help` lists built-ins only.** Registered verbs are documented by
-  the feature that ships them (and surfaced to agents via their briefing) —
-  help has no org context to filter on.
+- **`exec --help` documents registered verbs, filtered by availability where
+  an answer is in scope.** The registration's `HelpText`/`ValueFlags` are what
+  the dispatcher serves `--help` from, at every depth and with a nil host —
+  exactly the built-ins' contract, so help never needs run identity. The
+  top-level index additionally resolves the org's available source kinds
+  through the run's agenthost (the claim's stamped tools manifest in multi, a
+  live resolve in local — the same answer the run's `<tools>` prompt section
+  derives from) and omits a registered family whose `SourceKind` is not in
+  it; a failed resolve, and an operator's bare terminal, fall back to the
+  full listing (over-inclusion is the safe direction). The filter is
+  index-only: `<name> --help` always answers, and execution stays gated by
+  the extension dispatch's entitlement + source-disabled checks.
 
 Payloads are one JSON frame in, one out (no streaming), within the IPC frame
 cap — size verb responses accordingly.

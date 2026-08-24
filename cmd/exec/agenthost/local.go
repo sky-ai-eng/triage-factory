@@ -760,6 +760,10 @@ func (c *LocalClient) TeamTracksRepo(ctx context.Context, owner, repo string) (b
 	return c.rt.TeamTracksRepo(ctx, owner, repo)
 }
 
+func (c *LocalClient) AvailableSources(ctx context.Context) ([]string, error) {
+	return c.rt.AvailableSources(ctx)
+}
+
 func (c *LocalClient) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
 	return c.rt.GetConversationWorktreeByRepoRef(ctx, repoID, ref)
 }

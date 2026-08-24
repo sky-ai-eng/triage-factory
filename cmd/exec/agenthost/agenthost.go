@@ -189,6 +189,17 @@ type Client interface {
 	// returns its cached value, the IPCClient does one round-trip.
 	LookupConversation(ctx context.Context) (ConversationInfo, error)
 
+	// AvailableSources answers which event-source kinds the run's org can
+	// currently reach ("github", "jira", registered kinds like "slack") — the
+	// availability set the top-level exec help filters its command index on,
+	// resolved host-side from the same answer the run's <tools> prompt section
+	// was composed from (the claim's stamped tools manifest where one exists,
+	// a live resolve otherwise). Documentation only: the gate that actually
+	// stops a verb is the credential funnel / extension dispatch it resolves
+	// through. Callers treat any error as "unknown" and fall back to the
+	// unfiltered surface — over-inclusion is the safe direction.
+	AvailableSources(ctx context.Context) ([]string, error)
+
 	// --- review draft finalization (gh pr finalize-review) ---
 	//
 	// FinalizeReviewDraft finalizes the conversation's fully TF-side `review` draft: it

@@ -3,6 +3,7 @@ package agenthost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -136,6 +137,15 @@ type Runtime interface {
 	// window in which a source an admin turned off still answers, and the read
 	// is one indexed row against the API round trip it guards.
 	SourceDisabled(ctx context.Context, kind string) (bool, error)
+
+	// AvailableSources answers which event-source kinds the run's org can
+	// reach — the set the top-level exec help filters its command index on.
+	// It relays on the sidecar (every availability input lives behind stores
+	// that process does not hold); the direct runtime answers from the claim's
+	// stamped tools manifest where one exists, else a live system resolve —
+	// the same two-door rule the spawner's toolsReferenceFor reads, so a run's
+	// help index and its <tools> section derive from one answer.
+	AvailableSources(ctx context.Context) ([]string, error)
 }
 
 // ExtensionRuntime is the narrower runtime a provider's sidecar-half handler
@@ -181,6 +191,7 @@ const (
 	opMemoryLoad            = "memory_load"
 	opCheckEntitlement      = "check_entitlement"
 	opSourceDisabled        = "source_disabled"
+	opAvailableSources      = "available_sources"
 	opReviewPosture         = "review_posture"
 	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
 	// the other core ops it is FS-bearing: the sidecar relays it because it owns
@@ -234,6 +245,13 @@ type sourceDisabledArgs struct {
 
 type sourceDisabledResult struct {
 	Disabled bool `json:"disabled"`
+}
+
+// availableSourcesResult is the available_sources op's (and the matching IPC
+// method's) result — the org's reachable event-source kinds. There are no
+// args: identity is bound host-side from the run's ConversationInfo.
+type availableSourcesResult struct {
+	Kinds []string `json:"kinds"`
 }
 
 // ReviewPostureResolution is what the review-posting decision reads from
@@ -590,6 +608,30 @@ func (r *directRuntime) SourceDisabled(ctx context.Context, kind string) (bool, 
 	return eventsource.Disabled(ctx, r.stores.OrgEventSources, r.info.OrgID, kind)
 }
 
+// AvailableSources resolves the org's reachable source kinds through the same
+// two doors the spawner's toolsReferenceFor reads, in the same order: the
+// claim's stamped tools manifest (claim_credentials.include_tools — the
+// brain's own availability answer, and the only complete one an executor can
+// produce, its secret store being disabled), else a live system resolve. A
+// manifest read that fails hard is logged and falls through rather than
+// failing the caller: on a placement where the live resolve can answer it
+// will, and where it can't the caller's own degrade (an unfiltered help
+// index) is the designed fallback. A nil manifest means the brain stamped no
+// answer and also falls through; an empty non-nil one is a real answer.
+func (r *directRuntime) AvailableSources(ctx context.Context) ([]string, error) {
+	if r.stores.ClaimCredentials != nil {
+		b, found, err := r.stores.ClaimCredentials.Get(ctx, r.info.OrgID, r.info.ConversationID)
+		switch {
+		case err != nil && !errors.Is(err, db.ErrNotApplicableInLocal):
+			agenthostLog.Warn("read the claim's stamped tools manifest failed; falling back to the live availability resolve",
+				"conversation", r.info.ConversationID, "error", err)
+		case err == nil && found && b.IncludeTools != nil:
+			return b.IncludeTools, nil
+		}
+	}
+	return eventsource.AvailableKindsSystem(ctx, r.stores, r.info.OrgID)
+}
+
 // Relay dispatches a provider op locally against db.Stores (all/local), the
 // mirror of the sidecar relaying it to the orchestrator. Core built-ins never
 // call this (they use the typed methods); a provider handler reaching its own
@@ -847,6 +889,14 @@ func (r *relayRuntime) SourceDisabled(ctx context.Context, kind string) (bool, e
 		return false, err
 	}
 	return res.Disabled, nil
+}
+
+func (r *relayRuntime) AvailableSources(ctx context.Context) ([]string, error) {
+	var res availableSourcesResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opAvailableSources, emptyArgs{}, &res); err != nil {
+		return nil, err
+	}
+	return res.Kinds, nil
 }
 
 // sidecarRelayConn adapts a live supervision channel to relayConn — the

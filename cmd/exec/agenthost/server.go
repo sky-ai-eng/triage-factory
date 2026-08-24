@@ -412,6 +412,13 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 	case methodLookupConversation:
 		return lookupConversationResult{Info: s.info}, nil
 
+	case methodAvailableSources:
+		kinds, err := client.AvailableSources(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return availableSourcesResult{Kinds: kinds}, nil
+
 	case methodFinalizeReviewDraft:
 		var a finalizeReviewDraftArgs
 		if err := dec(&a); err != nil {

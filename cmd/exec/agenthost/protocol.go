@@ -644,6 +644,7 @@ const (
 	methodUpdateStagedReviewComment           = "UpdateStagedReviewComment"
 	methodDeleteStagedReviewComment           = "DeleteStagedReviewComment"
 	methodGetConversation                     = "GetConversation"
+	methodAvailableSources                    = "AvailableSources"
 	methodGetTask                             = "GetTask"
 	methodListRepos                           = "ListRepos"
 	methodGetRepo                             = "GetRepo"
