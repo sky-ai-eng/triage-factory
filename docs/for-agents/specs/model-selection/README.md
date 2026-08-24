@@ -979,6 +979,20 @@ What follows:
   mechanism this section already mandates. `prices_per_mtok` becomes
   optional on the wire; its absence is how a client knows cost is
   harness-settled.
+- **A row names its executor once there is more than one.** With a second
+  SDK configured, a model choice on this path also chooses the harness
+  that runs the conversation, so rows carry an `sdk` field — absent on
+  native rows, the same absence convention as the price — and the picker
+  groups by it. Keys stay each SDK's vocabulary verbatim, with no
+  cross-SDK uniqueness asserted (TF does not control those
+  vocabularies), so the unambiguous identity for a stored choice is the
+  `(sdk, model)` pair once a second SDK exists; today the bare alias
+  stores, and the second-SDK ticket carries the widening. The likely
+  home for the run-time half already exists: `conversations.runtime` is
+  which engine drives the transcript, and its generic `sdk` value
+  naturally becomes the harness's own id at that point — recorded here
+  as the direction, decided in that ticket, since it changes stored
+  ratchet strings.
 - **Stored local vocabulary is the alias.** Team defaults, step pins, and
   the background-jobs knob store `sonnet` in a local install, never
   `claude-sonnet-5`. No translation layer exists in either direction (§3
