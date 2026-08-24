@@ -187,3 +187,17 @@ func TestTeamModels_RequireDefault(t *testing.T) {
 		t.Errorf("err = %v, want a missing-default refusal rather than a disabled-model one", err)
 	}
 }
+
+// The provisioning default is spelled in the vocabulary its deployment
+// dispatches: the native wire id under the native runtime, the harness alias
+// under the SDK one. Getting either wrong seeds an install with a model its own
+// save validator refuses — and, since an absent enable-set resolves to that
+// deployment's whole universe, one that no enable-set could ever admit either.
+func TestDefaultModelPerVocabulary(t *testing.T) {
+	if DefaultModelFor(true) != ModelSonnet {
+		t.Errorf("DefaultModelFor(multi) = %q, want %q", DefaultModelFor(true), ModelSonnet)
+	}
+	if DefaultModelFor(false) != ModelAliasSonnet {
+		t.Errorf("DefaultModelFor(local) = %q, want %q", DefaultModelFor(false), ModelAliasSonnet)
+	}
+}

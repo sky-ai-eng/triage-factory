@@ -10,6 +10,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
@@ -111,6 +112,7 @@ func resolveAIModelForTeam(ctx context.Context, stores db.Stores, orgID, teamID 
 		return domain.TeamModels{}, fmt.Errorf("read org settings: %w", err)
 	}
 
+	universe := modelcatalog.UniverseFor(runmode.Current() == runmode.ModeMulti)
 	return domain.NewTeamModels(teamSet.DefaultModel, domain.TeamModelSet(teamSet.EnabledModels,
-		domain.OrgModelSet(orgSet.EnabledModels, modelcatalog.DefaultEnabled()))), nil
+		domain.OrgModelSet(orgSet.EnabledModels, universe.DefaultEnabled()))), nil
 }

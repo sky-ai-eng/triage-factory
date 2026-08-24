@@ -7,19 +7,42 @@ import (
 	"strings"
 )
 
-// The concrete model ids stored configuration carries. A team default, a
-// per-prompt override, and the local background-jobs pre-fill all hold one of
-// these verbatim, and they are what reaches the provider, so nothing downstream
-// translates a stored value.
+// The concrete model ids the three Anthropic tiers name — the NATIVE
+// vocabulary, which a multi-mode install stores and sends. They are what
+// reaches the provider on that path, so nothing downstream translates a stored
+// value.
 //
 // Haiku is the dated spelling, which is what the vendor publishes it under and
-// what the pricing datasheet carries; the rest are the undated current ids. A
-// test in internal/modelcatalog pins them to catalog keys, which is what keeps a
-// value the settings UI offers from being one the ledger cannot price.
+// what the pricing datasheet carries; Sonnet and Opus are the undated current
+// ids. A test in internal/modelcatalog pins all three to native registry keys,
+// which is what keeps a value the settings UI offers from being one the ledger
+// cannot price.
 const (
 	ModelHaiku  = "claude-haiku-4-5-20251001"
 	ModelSonnet = "claude-sonnet-5"
 	ModelOpus   = "claude-opus-5"
+)
+
+// The Claude Code SDK's family aliases — the vocabulary a LOCAL install stores
+// and sends, because the SDK subprocess is what executes a local conversation
+// and these are its own words. The harness resolves each to whichever model
+// currently heads that family, against whichever access path its environment
+// selects, so an alias names no provider and joins no price table.
+//
+// They are named here, beside the native ids, because the schema's dialect
+// defaults are written in one vocabulary or the other and a stored default has
+// to be spelled somewhere Go can see. A test in internal/modelcatalog pins each
+// to the SDK registry, the same way the native ids are pinned.
+//
+// Which of the two vocabularies an enable-set is written in follows from the
+// same place: a set is stored catalog keys, and the keys a deployment may store
+// are its universe's (modelcatalog.UniverseFor). The two never mix in one set,
+// because no deployment can dispatch both.
+const (
+	ModelAliasHaiku  = "haiku"
+	ModelAliasSonnet = "sonnet"
+	ModelAliasOpus   = "opus"
+	ModelAliasFable  = "fable"
 )
 
 // ModelSet is a resolved enable-set: the models one org, or one team, may pick
@@ -31,8 +54,8 @@ const (
 // The zero value admits everything. That is for a caller who has no enablement
 // to apply at all — a test fixture with no stores behind it — and never for
 // stored configuration: OrgModelSet resolves an absent stored set to the
-// catalog default rather than to this, so a set built from a settings row
-// always names its members.
+// deployment's whole universe rather than to this, so a set built from a
+// settings row always names its members.
 //
 // A RESOLVED set naming nothing admits nothing, and that is a different answer
 // from the zero value's. It is what a team disjoint from its org resolves to,
@@ -47,8 +70,16 @@ type ModelSet struct {
 }
 
 // OrgModelSet resolves an org's stored enable-set. stored is org_settings
-// .enabled_models as it was written; catalogDefault is the set an org that has
-// never expressed a preference gets — every model this build offers.
+// .enabled_models as it was written; universeDefault is the set an org that has
+// never expressed a preference gets — every model this DEPLOYMENT offers, which
+// callers read from modelcatalog.UniverseFor(mode).DefaultEnabled().
+//
+// It is a parameter because the two answers differ and this package cannot ask:
+// a multi deployment offers native wire ids and a local one the harness aliases
+// its subprocess resolves, and domain sits below the registry that knows. A set
+// is therefore always in one vocabulary — whichever this caller's deployment
+// dispatches — and a stored key from the other one is simply a key nothing
+// enables.
 //
 // An absent stored set tracks the default, so a model added by a later release
 // is enabled for that org the day it ships. A stored one is frozen at what it
@@ -62,9 +93,9 @@ type ModelSet struct {
 // (the PATCH rejects an empty array, and clearing writes NULL), so this is the
 // reading of a row nobody should have written, in the direction that refuses
 // rather than the one that grants.
-func OrgModelSet(stored, catalogDefault []string) ModelSet {
+func OrgModelSet(stored, universeDefault []string) ModelSet {
 	if stored == nil {
-		stored = catalogDefault
+		stored = universeDefault
 	}
 	return newModelSet(stored)
 }
@@ -105,7 +136,7 @@ func newModelSet(keys []string) ModelSet {
 }
 
 // Has reports whether key is enabled. The unrestricted zero value answers true
-// for everything, including a key the catalog does not offer — a set that never
+// for everything, including a key no deployment offers — a set that never
 // narrowed anything is not the surface that decides what exists.
 func (s ModelSet) Has(key string) bool {
 	if s.keys == nil {

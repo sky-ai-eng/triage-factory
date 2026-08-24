@@ -75,6 +75,18 @@ func TestDelegate_StepRunsOnTheStoredModelID(t *testing.T) {
 	}
 }
 
+// orgUnrestricted is "the org expressed no preference", in the vocabulary these
+// fixtures speak.
+//
+// The native universe, because the models named here are native wire ids: the
+// delegate holds whatever set it is handed and reads no universe of its own, so
+// which one an absent org set widens to is the fixture's choice rather than the
+// code's — and the credential gate beside these checks reads the provider off
+// the id, which only a native id names.
+func orgUnrestricted() domain.ModelSet {
+	return domain.OrgModelSet(nil, modelcatalog.UniverseFor(true).DefaultEnabled())
+}
+
 // A pinned step outside the team's enable-set fails the delegation by name, and
 // leaves nothing behind to reap. The pin was legal when it was saved — the
 // catalog is the save-time gate — and became illegal when the set narrowed
@@ -87,7 +99,7 @@ func TestDelegate_StepRunsOnTheStoredModelID(t *testing.T) {
 func TestDelegate_StepPinOutsideTheEnabledSet(t *testing.T) {
 	enabled := func(keys ...string) domain.TeamModels {
 		return domain.NewTeamModels(domain.ModelHaiku,
-			domain.TeamModelSet(keys, domain.OrgModelSet(nil, modelcatalog.DefaultEnabled())))
+			domain.TeamModelSet(keys, orgUnrestricted()))
 	}
 
 	t.Run("outside the set fails", func(t *testing.T) {

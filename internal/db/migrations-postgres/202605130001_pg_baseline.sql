@@ -933,19 +933,24 @@ CREATE TABLE public.org_settings (
     -- baseline (not a forward migration) because multi-mode / Postgres is
     -- net-new and unshipped, so there are no existing rows to backfill.
     llm_auth_method text DEFAULT 'byok'::text NOT NULL,
-    -- The org's enable-set: the catalog keys its teams may pick from, as a JSON
+    -- The org's enable-set: the model keys its teams may pick from, as a JSON
     -- array. This is the selection-time control — its whole effect is a smaller
     -- picker — and it says which models may be picked without claiming any is
     -- better than another, which is the claim a ranked ceiling has to make and
     -- the catalog declines to.
     --
+    -- The keys are native wire ids, this dialect's own execution vocabulary, as
+    -- default_model and background_jobs_model on these tables already are: a set
+    -- names models the deployment will be asked to run, and a harness alias
+    -- stored here would go on the bifrost wire unresolved.
+    --
     -- NULL is the absent value and means the org has expressed no preference,
-    -- which resolves to the whole catalog: a model a later release adds is
-    -- enabled for that org the day it ships, while a stored set stays frozen at
-    -- what it names. The RESOLVED set is never stored — "chose nothing" and
-    -- "chose everything" are different facts about what happens next, and
-    -- collapsing them at the column is what would make the first impossible to
-    -- spell.
+    -- which resolves to every model this deployment offers: a model a later
+    -- release adds is enabled for that org the day it ships, while a stored set
+    -- stays frozen at what it names. The RESOLVED set is never stored — "chose
+    -- nothing" and "chose everything" are different facts about what happens
+    -- next, and collapsing them at the column is what would make the first
+    -- impossible to spell.
     --
     -- JSON text rather than a child table: nothing semi-joins through
     -- enablement, the catalog is code so there is no FK target, and the set is
@@ -961,7 +966,7 @@ CREATE TABLE public.org_settings (
     --
     -- A modelcatalog key, validated app-side against the catalog and against the
     -- providers the org has connected — not CHECK-constrained, the
-    -- enabled_models precedent above: the accepted set is the build's catalog,
+    -- enabled_models precedent above: the accepted set is the build's own,
     -- which changes with the binary rather than with the schema.
     --
     -- NOT NULL with an EMPTY default, and the empty string is the load-bearing

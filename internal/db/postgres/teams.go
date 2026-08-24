@@ -139,7 +139,7 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 	if errors.Is(err, sql.ErrNoRows) {
 		// See OrgsStore for the rationale. Matches team_settings'
 		// schema DEFAULT clauses.
-		return domain.DefaultTeamSettings(), nil
+		return domain.DefaultTeamSettingsFor(true), nil
 	}
 	if err != nil {
 		return domain.TeamSettings{}, fmt.Errorf("read team_settings: %w", err)

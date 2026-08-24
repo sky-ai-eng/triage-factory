@@ -13,7 +13,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -647,8 +646,7 @@ func TestStepModelOrInherit(t *testing.T) {
 // The inherited model is deliberately enabled here, so the only thing that can
 // produce the refusal is the pin itself.
 func TestStepModelOrInherit_PinOutsideTheSetFails(t *testing.T) {
-	enabled := domain.TeamModelSet([]string{domain.ModelSonnet},
-		domain.OrgModelSet(nil, modelcatalog.DefaultEnabled()))
+	enabled := domain.TeamModelSet([]string{domain.ModelSonnet}, orgUnrestricted())
 
 	got, err := stepModelOrInherit(domain.ModelOpus, domain.ModelSonnet, enabled)
 	if !errors.Is(err, domain.ErrModelNotEnabled) {
@@ -673,8 +671,7 @@ func TestStepModelOrInherit_PinOutsideTheSetFails(t *testing.T) {
 
 	// A pin the set DOES name runs, whatever it costs relative to what was
 	// inherited — the enable-set is membership, never a ceiling.
-	both := domain.TeamModelSet([]string{domain.ModelHaiku, domain.ModelOpus},
-		domain.OrgModelSet(nil, modelcatalog.DefaultEnabled()))
+	both := domain.TeamModelSet([]string{domain.ModelHaiku, domain.ModelOpus}, orgUnrestricted())
 	pinned, err := stepModelOrInherit(domain.ModelOpus, domain.ModelHaiku, both)
 	if err != nil || pinned != domain.ModelOpus {
 		t.Errorf("an enabled costlier pin = (%q, %v); want %q", pinned, err, domain.ModelOpus)

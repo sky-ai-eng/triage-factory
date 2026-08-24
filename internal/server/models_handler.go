@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -37,8 +38,9 @@ type modelsHandler struct {
 	tx db.TxRunner
 	// prober runs one paid request against the org's credentials to establish
 	// whether a model is invocable. A getter (not a captured value) because
-	// routes register before the app injects it, and nil in local mode, where
-	// the test routes report that this deployment cannot answer the question.
+	// routes register before the app injects it, so the closure over the
+	// server's field is what lets a route registered first read a value set
+	// later.
 	prober func() modelProber
 }
 
@@ -54,18 +56,34 @@ type modelPricesPerMTok struct {
 
 // modelCatalogRow is one offered model.
 //
-// display_order is presentation only — the catalog file's order — and asserts
+// display_order is presentation only — the registry file's order — and asserts
 // nothing about capability. There is no rank or tier field, and adding one
 // would require a defensible ordering over models that does not exist.
+//
+// One contract, two universes, and the difference travels as ABSENT FIELDS
+// rather than as a mode a client reads. A native row names the provider that
+// serves it and joins the pricing datasheet, so it carries provider, prices and
+// the two window/caching facts. An SDK row carries none of them: the harness
+// resolves the alias against whichever access path its environment selects, so
+// the provider is a property of the credential rather than of the id, and the
+// cost is settled by the harness rather than interpolated from a price table —
+// publishing a zero, or the provider TF guessed, would be a claim nothing backs.
+// A client renders what is present and says nothing about what is not.
 type modelCatalogRow struct {
-	Key                   string             `json:"key"`
-	DisplayName           string             `json:"display_name"`
-	Provider              string             `json:"provider"`
-	Enabled               bool               `json:"enabled"`
-	PricesPerMTok         modelPricesPerMTok `json:"prices_per_mtok"`
-	ContextWindow         int                `json:"context_window"`
-	SupportsPromptCaching bool               `json:"supports_prompt_caching"`
-	Availability          string             `json:"availability"`
+	Key         string `json:"key"`
+	DisplayName string `json:"display_name"`
+	// Provider is absent where the id does not name one. See the type doc.
+	Provider string `json:"provider,omitempty"`
+	Enabled  bool   `json:"enabled"`
+	// PricesPerMTok is absent where cost is harness-settled. See the type doc.
+	PricesPerMTok         *modelPricesPerMTok `json:"prices_per_mtok,omitempty"`
+	ContextWindow         int                 `json:"context_window,omitempty"`
+	SupportsPromptCaching bool                `json:"supports_prompt_caching,omitempty"`
+	// Availability is the whole triple's presence gate: it is absent — with the
+	// two fields below — when this org's credentials are not TF-owned, because
+	// a verdict about the machine an agent happens to run on has no stable
+	// subject. See modelaccess.Credentials.BringsOwn.
+	Availability string `json:"availability,omitempty"`
 	// AvailabilityDetail is the provider's own refusal, present only on "red".
 	// It is what turns an unavailable badge into something an admin can act
 	// on: "not entitled in this account" and "this id does not exist" are the
@@ -82,10 +100,11 @@ type modelCatalogResponse struct {
 	Items []modelCatalogRow `json:"items"`
 }
 
-// The availability vocabulary this read publishes. Four values, the same four
-// in either deployment mode: an org running on the host's credentials probes
-// through the agent runtime, which reports the provider's HTTP status on its
-// terminal event, so there is no deployment TF can only guess about.
+// The availability vocabulary this read publishes. Four values, published
+// whenever the org's credentials are TF-owned — always in multi mode, and in
+// local once the org binds its own — and no value at all when they are not: a
+// stored verdict is a fact about a credential, and the host environment an
+// agent authenticates from is not one TF can name, watch, or invalidate.
 const (
 	// modelAvailabilityUnconfigured — this org brings its own credentials and
 	// holds none for this model's provider, so nothing can invoke it and no
@@ -112,30 +131,28 @@ const (
 	// modelAvailabilityRed — a probe was refused. Carries the provider's own
 	// message in availability_detail.
 	modelAvailabilityRed = "red"
-	// modelAvailabilityUnverified — TF can put a credential behind this model
-	// (the provider is connected, or the org runs on the host's) and no probe
-	// has concluded anything yet. It is deliberately not
-	// distinguished from "every attempt timed out": both mean nobody has
-	// established anything, and both are fixed by pressing test again — which
-	// is exactly why an unconnected provider must not land here, since testing
-	// one is refused rather than inconclusive.
+	// modelAvailabilityUnverified — the org has connected a credential that
+	// could invoke this model and no probe has concluded anything yet. It is
+	// deliberately not distinguished from "every attempt timed out": both mean
+	// nobody has established anything, and both are fixed by pressing test
+	// again — which is exactly why an unconnected provider must not land here,
+	// since testing one is refused rather than inconclusive.
 	modelAvailabilityUnverified = "unverified"
 )
 
-// handleModelsList returns the org's model catalog.
+// handleModelsList returns the models the org may pick from.
 //
-// Unpaginated by design: the catalog is the build's own vocabulary, fixed at
-// compile time and a handful of entries long, and a page token would address a
-// set that changes only when the binary does. Same call as GET /api/event-types.
+// Unpaginated by design: the universe is the build's own vocabulary, fixed at
+// compile time and a handful of rows long, and a page token would address a set
+// that changes only when the binary does. Same call as GET /api/event-types.
 //
-// Local mode answers the identical contract from the identical catalog. Its
-// universe is what the SDK subprocess can actually drive — the Claude family
-// via Anthropic, Bedrock, or Vertex — which every entry in the catalog
-// currently is, so the two sets coincide and no filter is applied. Should the
-// catalog ever name a model the SDK cannot invoke, local's universe is the
-// narrower one: offering a row that nothing local can execute would be a lie
-// the picker tells, and the mode difference belongs in this data, never in a
-// mode branch in the client.
+// Local mode answers the identical contract from its own universe: the Claude
+// Code SDK's alias list rather than the native registry, because that harness is
+// what executes a local conversation and its vocabulary is what a local row
+// stores and sends. Offering a concrete wire id there would be a lie the picker
+// tells, and offering it under the provider spellings that id implies would ask
+// the user a question their environment has already answered. The difference
+// belongs in this data — absent fields — never in a mode branch in the client.
 //
 // GET /api/orgs/{org_id}/models
 func (h *modelsHandler) handleModelsList(w http.ResponseWriter, r *http.Request) {
@@ -158,14 +175,27 @@ func (h *modelsHandler) handleModelsList(w http.ResponseWriter, r *http.Request)
 		internalError(w, "models", err)
 		return
 	}
-	enabled := domain.OrgModelSet(orgSet.EnabledModels, modelcatalog.DefaultEnabled())
+	universe := deploymentUniverse()
+	enabled := domain.OrgModelSet(orgSet.EnabledModels, universe.DefaultEnabled())
 
-	catalog := modelcatalog.Entries()
-	items := make([]modelCatalogRow, 0, len(catalog))
-	for _, e := range catalog {
-		items = append(items, catalogRow(e, enabled.Has(e.Key), avail))
+	models := universe.Models()
+	items := make([]modelCatalogRow, 0, len(models))
+	for _, m := range models {
+		items = append(items, catalogRow(m, enabled.Has(m.Key), avail))
 	}
 	writeJSON(w, http.StatusOK, modelCatalogResponse{Items: items})
+}
+
+// deploymentUniverse is the handler surface's one door onto what this
+// deployment may offer or store.
+//
+// One helper rather than a modelcatalog call per site, so the models read, every
+// model validator beside it and the probe routes cannot end up asking about
+// different universes. modelcatalog takes the mode as a parameter and reads no
+// ambient mode of its own; this is the single place in this package that
+// supplies it.
+func deploymentUniverse() modelcatalog.Universe {
+	return modelcatalog.UniverseFor(runmode.Current() == runmode.ModeMulti)
 }
 
 // catalogRow projects one catalog entry onto the wire shape both scopes serve,
@@ -173,26 +203,29 @@ func (h *modelsHandler) handleModelsList(w http.ResponseWriter, r *http.Request)
 // differently — availability included, which is org truth and therefore
 // identical at both scopes. A team's enable-set removes an entry from the team
 // read; it never changes what the remaining entries say.
-func catalogRow(e modelcatalog.Entry, enabled bool, avail availabilityIndex) modelCatalogRow {
-	state, detail, checkedAt := avail.forEntry(e)
-	return modelCatalogRow{
-		Key:         e.Key,
-		DisplayName: e.DisplayName,
-		Provider:    e.Provider,
-		Enabled:     enabled,
-		PricesPerMTok: modelPricesPerMTok{
-			Input:      e.Prices.Input,
-			Output:     e.Prices.Output,
-			CacheRead:  e.Prices.CacheRead,
-			CacheWrite: e.Prices.CacheWrite,
-		},
-		ContextWindow:         e.ContextWindow,
-		SupportsPromptCaching: e.SupportsPromptCaching,
+func catalogRow(m modelcatalog.Model, enabled bool, avail availabilityIndex) modelCatalogRow {
+	state, detail, checkedAt := avail.forModel(m)
+	row := modelCatalogRow{
+		Key:                   m.Key,
+		DisplayName:           m.DisplayName,
+		Provider:              m.Provider,
+		Enabled:               enabled,
 		Availability:          state,
 		AvailabilityDetail:    detail,
 		AvailabilityCheckedAt: checkedAt,
-		DisplayOrder:          e.DisplayOrder,
+		DisplayOrder:          m.DisplayOrder,
 	}
+	if f := m.Facts; f != nil {
+		row.PricesPerMTok = &modelPricesPerMTok{
+			Input:      f.Prices.Input,
+			Output:     f.Prices.Output,
+			CacheRead:  f.Prices.CacheRead,
+			CacheWrite: f.Prices.CacheWrite,
+		}
+		row.ContextWindow = f.ContextWindow
+		row.SupportsPromptCaching = f.SupportsPromptCaching
+	}
+	return row
 }
 
 // handleTeamModelsList returns the models one TEAM may run on: the org's
@@ -236,7 +269,7 @@ func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Requ
 			return fmt.Errorf("read team settings: %w", err)
 		}
 		enabled = domain.TeamModelSet(teamSet.EnabledModels,
-			domain.OrgModelSet(orgSet.EnabledModels, modelcatalog.DefaultEnabled()))
+			domain.OrgModelSet(orgSet.EnabledModels, deploymentUniverse().DefaultEnabled()))
 		return nil
 	}); err != nil {
 		internalError(w, "models", err)
@@ -248,13 +281,13 @@ func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	catalog := modelcatalog.Entries()
-	items := make([]modelCatalogRow, 0, len(catalog))
-	for _, e := range catalog {
-		if !enabled.Has(e.Key) {
+	models := deploymentUniverse().Models()
+	items := make([]modelCatalogRow, 0, len(models))
+	for _, m := range models {
+		if !enabled.Has(m.Key) {
 			continue
 		}
-		items = append(items, catalogRow(e, true, avail))
+		items = append(items, catalogRow(m, true, avail))
 	}
 	writeJSON(w, http.StatusOK, modelCatalogResponse{Items: items})
 }

@@ -8,7 +8,7 @@ import (
 
 // The enable-set columns — org_settings.enabled_models and
 // team_settings.enabled_models — are nullable TEXT holding a JSON array of
-// catalog keys, in BOTH dialects. That is unusual here (a Postgres text[] is
+// model keys, in BOTH dialects. That is unusual here (a Postgres text[] is
 // the house shape for a list) and deliberate: NULL is a value with its own
 // meaning, distinct from a set naming nothing, and one encoding across the two
 // backends means the absent-value semantics cannot come out different on one of
@@ -21,8 +21,8 @@ import (
 // The empty string is therefore a DECODE FAILURE, not a second spelling of
 // absent. Nothing writes it (ModelSetColumnValue writes NULL or JSON, and both
 // columns are nullable with no default), so a row holding it is corrupt — and
-// reading corrupt as absent would resolve it to the whole catalog, quietly
-// enabling models nobody chose. column names the column, because that is what a
+// reading corrupt as absent would resolve it to the deployment's whole
+// universe, quietly enabling models nobody chose. column names the column, because that is what a
 // reader needs to go fix the row.
 func UnmarshalModelSetColumn(v sql.NullString, column string) ([]string, error) {
 	if !v.Valid {

@@ -917,11 +917,11 @@ func TestOrgSettingsPatch_DisablingATeamsDefault_WarnsAndSaves(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
-	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelOpus})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelAliasOpus})
 
-	resp := patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelSonnet}})
+	resp := patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelAliasSonnet}})
 	w := settingsWarning(resp)
-	if !strings.Contains(w, domain.ModelOpus) {
+	if !strings.Contains(w, domain.ModelAliasOpus) {
 		t.Errorf("warning %q does not name the disabled model", w)
 	}
 	if !strings.Contains(w, "re-pick") {
@@ -940,10 +940,10 @@ func TestOrgSettingsPatch_WideningTheSet_NoWarning(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
-	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelSonnet})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelAliasSonnet})
 
 	if w := settingsWarning(patchOrgSettingsOK(t, s, map[string]any{
-		"enabled_models": []string{domain.ModelSonnet, domain.ModelOpus},
+		"enabled_models": []string{domain.ModelAliasSonnet, domain.ModelAliasOpus},
 	})); w != "" {
 		t.Errorf("narrowing to a set that keeps the team's default warned: %q", w)
 	}
@@ -962,7 +962,7 @@ func TestOrgSettingsPatch_EnabledModels_Validation(t *testing.T) {
 	s := newTestServer(t)
 
 	rec := patchOrgSettings(t, s, map[string]any{
-		"enabled_models": []string{domain.ModelSonnet, "gpt-9", "llama-99"},
+		"enabled_models": []string{domain.ModelAliasSonnet, "gpt-9", "llama-99"},
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown keys = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
@@ -978,7 +978,7 @@ func TestOrgSettingsPatch_EnabledModels_Validation(t *testing.T) {
 		t.Errorf("empty set = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
 	}
 	if rec := patchOrgSettings(t, s, map[string]any{
-		"enabled_models": []string{domain.ModelSonnet, domain.ModelSonnet},
+		"enabled_models": []string{domain.ModelAliasSonnet, domain.ModelAliasSonnet},
 	}); rec.Code != http.StatusBadRequest {
 		t.Errorf("duplicate key = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
 	}
@@ -1009,12 +1009,12 @@ func TestTeamSettingsPatch_EnabledModels_HeldToBothSets(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
 	patchOrgSettingsOK(t, s, map[string]any{
-		"enabled_models": []string{domain.ModelSonnet, domain.ModelHaiku},
+		"enabled_models": []string{domain.ModelAliasSonnet, domain.ModelAliasHaiku},
 	})
 
 	// A superset of the org's set is refused, naming enabled_models.
 	rec := patchTeamSettings(t, s, "default", map[string]any{
-		"enabled_models": []string{domain.ModelSonnet, domain.ModelOpus},
+		"enabled_models": []string{domain.ModelAliasSonnet, domain.ModelAliasOpus},
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("superset = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
@@ -1023,8 +1023,8 @@ func TestTeamSettingsPatch_EnabledModels_HeldToBothSets(t *testing.T) {
 
 	// A default outside the team's own set is refused, naming ai_model.
 	rec = patchTeamSettings(t, s, "default", map[string]any{
-		"enabled_models": []string{domain.ModelHaiku},
-		"ai_model":       domain.ModelSonnet,
+		"enabled_models": []string{domain.ModelAliasHaiku},
+		"ai_model":       domain.ModelAliasSonnet,
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("default outside the set = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
@@ -1033,8 +1033,8 @@ func TestTeamSettingsPatch_EnabledModels_HeldToBothSets(t *testing.T) {
 
 	// Both wrong at once reports both.
 	rec = patchTeamSettings(t, s, "default", map[string]any{
-		"enabled_models": []string{domain.ModelOpus},
-		"ai_model":       domain.ModelSonnet,
+		"enabled_models": []string{domain.ModelAliasOpus},
+		"ai_model":       domain.ModelAliasSonnet,
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("both wrong = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
@@ -1044,13 +1044,13 @@ func TestTeamSettingsPatch_EnabledModels_HeldToBothSets(t *testing.T) {
 
 	// A legal pair saves, and the team's set round-trips as what it named.
 	ok := patchTeamSettingsOK(t, s, "default", map[string]any{
-		"enabled_models": []string{domain.ModelHaiku},
-		"ai_model":       domain.ModelHaiku,
+		"enabled_models": []string{domain.ModelAliasHaiku},
+		"ai_model":       domain.ModelAliasHaiku,
 	})
 	set, _ := ok["team_settings"].(map[string]any)
 	got, _ := set["EnabledModels"].([]any)
-	if len(got) != 1 || got[0] != domain.ModelHaiku {
-		t.Errorf("stored team set = %v, want [%s]", set["EnabledModels"], domain.ModelHaiku)
+	if len(got) != 1 || got[0] != domain.ModelAliasHaiku {
+		t.Errorf("stored team set = %v, want [%s]", set["EnabledModels"], domain.ModelAliasHaiku)
 	}
 }
 
@@ -1119,7 +1119,7 @@ func TestOrgSettingsPatch_DailyCostCap_OmittedFieldUntouched(t *testing.T) {
 	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": 40})
 
 	// A save touching only the enable-set omits the cap → it must survive.
-	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelSonnet}})
+	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelAliasSonnet}})
 	if got := orgDailyCap(t, s); got != 40 {
 		t.Errorf("omitting max_daily_cost_usd cleared the cap: got %v, want 40 preserved", got)
 	}
@@ -1191,7 +1191,7 @@ func TestOrgSettingsPatch_ConcurrentRuns_OmittedFieldUntouched(t *testing.T) {
 	patchOrgSettingsOK(t, s, map[string]any{"max_concurrent_runs": 5})
 
 	// A save touching only the enable-set omits the limit → it must survive.
-	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelSonnet}})
+	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelAliasSonnet}})
 	if got := orgConcurrentRuns(t, s); got != 5 {
 		t.Errorf("omitting max_concurrent_runs cleared the limit: got %v, want 5 preserved", got)
 	}
@@ -1348,7 +1348,7 @@ func TestTeamSettingsPatch_ReviewPosture(t *testing.T) {
 
 	// An unrelated save leaves the stored posture alone.
 	patchTeamSettingsOK(t, s, "default", map[string]any{"review_posture": domain.ReviewPostureAuto})
-	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelHaiku})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelAliasHaiku})
 	if got := teamReviewPosture(t, s); got != domain.ReviewPostureAuto {
 		t.Errorf("an unrelated save clobbered the posture: got %q, want %q", got, domain.ReviewPostureAuto)
 	}
@@ -1415,7 +1415,7 @@ func TestTeamSettingsPatch_BaseBranchPushPolicy(t *testing.T) {
 	}
 
 	patchTeamSettingsOK(t, s, "default", map[string]any{"base_branch_push_policy": domain.BaseBranchPushAlways})
-	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelHaiku})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelAliasHaiku})
 	if got := teamBasePushPolicy(t, s); got != domain.BaseBranchPushAlways {
 		t.Errorf("an unrelated save clobbered the policy: got %q, want %q", got, domain.BaseBranchPushAlways)
 	}

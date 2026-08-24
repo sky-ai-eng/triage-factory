@@ -16,7 +16,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -372,7 +371,7 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 // success for a configuration whose only observable effect is a failed run
 // later.
 func checkTeamModelSelection(teamSet domain.TeamSettings, orgSet domain.OrgSettings) error {
-	orgEnabled := domain.OrgModelSet(orgSet.EnabledModels, modelcatalog.DefaultEnabled())
+	orgEnabled := domain.OrgModelSet(orgSet.EnabledModels, deploymentUniverse().DefaultEnabled())
 	var faults fieldFaults
 	var outside []string
 	for _, m := range teamSet.EnabledModels {
@@ -438,22 +437,24 @@ func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (app
 		shape    httpx.Validation
 		ranges   httpx.Validation
 		mutators []func(*domain.TeamSettings)
-		defaults = domain.DefaultTeamSettings()
+		defaults = domain.DefaultTeamSettingsFor(runmode.Current() == runmode.ModeMulti)
 	)
 	set := func(f func(*domain.TeamSettings)) { mutators = append(mutators, f) }
 
 	// ai_model must name a model this deployment offers. The picker draws its
-	// options from the same catalog, so the closed set is the one the UI shows
+	// options from the same universe, so the closed set is the one the UI shows
 	// — and a stored value that is dispatched verbatim has no room for a
-	// spelling nothing can invoke. Null clears the team's preference.
+	// spelling nothing can invoke, nor for one in the other deployment
+	// vocabulary's spelling. Null clears the team's preference.
 	if v, st := httpx.PatchString(&shape, req.AIModel, "ai_model"); st != httpx.PatchAbsent {
+		universe := deploymentUniverse()
 		switch {
 		case st == httpx.PatchClear:
 			set(func(t *domain.TeamSettings) { t.DefaultModel = "" })
 		case st == httpx.PatchSet && strings.TrimSpace(v) == "":
 			shape.Invalid("ai_model", "ai_model must name a model, or be null to inherit the org default")
-		case st == httpx.PatchSet && !modelcatalog.Offers(strings.TrimSpace(v)):
-			shape.Invalid("ai_model", "ai_model must name a model this deployment offers: "+strings.Join(modelcatalog.Keys(), ", "))
+		case st == httpx.PatchSet && !universe.Offers(strings.TrimSpace(v)):
+			shape.Invalid("ai_model", "ai_model must name a model this deployment offers: "+strings.Join(universe.Keys(), ", "))
 		case st == httpx.PatchSet:
 			set(func(t *domain.TeamSettings) { t.DefaultModel = strings.TrimSpace(v) })
 		}
@@ -470,7 +471,7 @@ func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (app
 		case httpx.PatchClear:
 			set(func(t *domain.TeamSettings) { t.EnabledModels = nil })
 		case httpx.PatchSet:
-			if models, ok := normalizeModelSet(&shape, v, "enabled_models"); ok {
+			if models, ok := normalizeModelSet(&shape, deploymentUniverse(), v, "enabled_models"); ok {
 				set(func(t *domain.TeamSettings) { t.EnabledModels = models })
 			}
 		}
@@ -1170,11 +1171,11 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 		}
 		set(func(o *domain.OrgSettings) { o.GitHubCloneProtocol = next })
 	}
-	// enabled_models is the org's enable-set: which catalog models its teams may
-	// pick from. The list IS the value — a set replaces wholesale rather than
-	// merging — and null resets it to the catalog default, which is the state an
-	// org that has never expressed a preference is in, and the state that keeps
-	// tracking new models as releases add them.
+	// enabled_models is the org's enable-set: which of the models this
+	// deployment offers its teams may pick from. The list IS the value — a set
+	// replaces wholesale rather than merging — and null resets it to the whole
+	// universe, the state an org that has never expressed a preference is in,
+	// and the state that keeps tracking new models as releases add them.
 	//
 	// A save may disable a model some team currently selects, and it SUCCEEDS
 	// anyway, with a warning naming that team. Refusing until every team
@@ -1186,31 +1187,35 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 		case httpx.PatchClear:
 			set(func(o *domain.OrgSettings) { o.EnabledModels = nil })
 		case httpx.PatchSet:
-			if models, ok := normalizeModelSet(&shape, v, "enabled_models"); ok {
+			if models, ok := normalizeModelSet(&shape, deploymentUniverse(), v, "enabled_models"); ok {
 				set(func(o *domain.OrgSettings) { o.EnabledModels = models })
 			}
 		}
 	}
 	// background_jobs_model must name a model this deployment offers. The picker
-	// draws from the same catalog and the jobs dispatch the stored value
+	// draws from the same universe and the jobs dispatch the stored value
 	// verbatim, so there is no room for a spelling nothing can invoke. The R5
 	// delegation gates (tool support, a 64k window) deliberately do NOT narrow
-	// it — these jobs are toolless and short-context, so every catalog entry is
+	// it — these jobs are toolless and short-context, so every offered model is
 	// a legitimate choice.
 	//
-	// Whether the org has connected the provider that serves it is checked in
-	// the transaction below, against the row this write is landing on.
+	// Where the id names the provider that serves it, whether the org has
+	// connected that provider is checked in the transaction below, against the
+	// row this write is landing on. An SDK alias names none — the harness
+	// resolves the path from the credential — so that check has nothing to bite
+	// on there and the universe above is the whole gate.
 	//
 	// Null clears it, and clearing is a real intent: it turns the background
 	// jobs off, which is the only way to stop them short of unbinding the
 	// credential every other feature shares. The jobs then skip with a warning
 	// naming this setting — never a model of TF's choosing.
 	if v, st := httpx.PatchString(&shape, req.BackgroundJobsModel, "background_jobs_model"); st != httpx.PatchAbsent {
+		universe := deploymentUniverse()
 		switch {
 		case st == httpx.PatchClear:
 			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = "" })
-		case !modelcatalog.Offers(strings.TrimSpace(v)):
-			shape.Invalid("background_jobs_model", "background_jobs_model must name a model this deployment offers, or be null to stop running background jobs: "+strings.Join(modelcatalog.Keys(), ", "))
+		case !universe.Offers(strings.TrimSpace(v)):
+			shape.Invalid("background_jobs_model", "background_jobs_model must name a model this deployment offers, or be null to stop running background jobs: "+strings.Join(universe.Keys(), ", "))
 		default:
 			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = strings.TrimSpace(v) })
 		}
@@ -1382,11 +1387,12 @@ const orgPollIntervalMinMinutes = 10
 
 // modelsRemovedBySave lists the models this save took OUT of the org's
 // effective set — resolved on both sides, so clearing a stored set (which
-// widens to the catalog default) removes nothing and setting one for the first
+// widens to the deployment's whole universe) removes nothing and setting one for the first
 // time removes everything it leaves out.
 func modelsRemovedBySave(before, after domain.OrgSettings) []string {
-	prev := domain.OrgModelSet(before.EnabledModels, modelcatalog.DefaultEnabled())
-	next := domain.OrgModelSet(after.EnabledModels, modelcatalog.DefaultEnabled())
+	universe := deploymentUniverse()
+	prev := domain.OrgModelSet(before.EnabledModels, universe.DefaultEnabled())
+	next := domain.OrgModelSet(after.EnabledModels, universe.DefaultEnabled())
 	var removed []string
 	for _, key := range prev.Keys() {
 		if !next.Has(key) {

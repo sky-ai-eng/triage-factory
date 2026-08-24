@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 )
 
 // SettingsStoresFactory hands the conformance suite a wired bundle of
@@ -19,8 +20,16 @@ import (
 // schema-blind.
 type SettingsStoresFactory func(t *testing.T) (stores SettingsStores, ids SettingsIDs)
 
-// SettingsStores is the slice of stores the conformance suite exercises.
+// SettingsStores is the slice of stores the conformance suite exercises, plus
+// which dialect they are.
 type SettingsStores struct {
+	// MultiMode names the dialect in the vocabulary its divergent column
+	// DEFAULTs are written in: Postgres serves multi, SQLite serves local. Two
+	// settings columns default per dialect — the team default model and the
+	// background-jobs model — because each stores what its runtime dispatches,
+	// so an assertion about a materialized row has to know which it is reading.
+	MultiMode bool
+
 	Orgs             db.OrgsStore
 	Teams            db.TeamsStore
 	Users            db.UsersStore
@@ -469,6 +478,62 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		want := domain.DefaultOrgSettings()
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("GetSettingsSystem on empty row = %+v; want %+v", got, want)
+		}
+	})
+
+	// Two settings columns default to a MODEL, and each dialect spells its
+	// default in the vocabulary its own runtime dispatches: Postgres carries the
+	// native wire id the in-process loop sends, SQLite the Claude Code alias its
+	// subprocess resolves. Neither is a stylistic choice — the value is what a
+	// deployment materializes when nobody has picked, and every save validator
+	// and every dispatch measures a stored model against that deployment's
+	// universe, so a default in the other vocabulary seeds an install into a
+	// state its own settings page refuses to re-save.
+	//
+	// Both are read off a MATERIALIZED row rather than a Go constant: each is
+	// asserted through a surgical write that names one column and takes the rest
+	// from the schema's DEFAULT clauses, which is what a fresh tenant actually
+	// takes.
+	t.Run("Settings_DialectDefaults_SpeakThisDeploymentsVocabulary", func(t *testing.T) {
+		stores, ids := factory(t)
+
+		orgSet, err := stores.Orgs.SetGitHubCredentialClass(ctx, ids.OrgID, domain.GitHubCredentialClassPAT)
+		if err != nil {
+			t.Fatalf("SetGitHubCredentialClass (materializes org_settings from defaults): %v", err)
+		}
+		wantJobsModel := domain.LocalBackgroundJobsModel
+		if stores.MultiMode {
+			// Multi ships no pre-fill: an org there is forced through the setup
+			// pick, and until it picks the system jobs skip rather than spend on
+			// a model nobody chose.
+			wantJobsModel = ""
+		}
+		if orgSet.BackgroundJobsModel != wantJobsModel {
+			t.Errorf("materialized background_jobs_model = %q, want %q", orgSet.BackgroundJobsModel, wantJobsModel)
+		}
+
+		teamSet, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 1)
+		if err != nil {
+			t.Fatalf("SetDailyCostCapSystem (materializes team_settings from defaults): %v", err)
+		}
+		wantTeamModel := domain.DefaultModelFor(stores.MultiMode)
+		if teamSet.DefaultModel != wantTeamModel {
+			t.Errorf("materialized default_model = %q, want %q", teamSet.DefaultModel, wantTeamModel)
+		}
+
+		// And what each default names has to be something this deployment can
+		// actually offer — the property the two spellings exist to satisfy.
+		universe := modelcatalog.UniverseFor(stores.MultiMode)
+		for field, model := range map[string]string{
+			"background_jobs_model": orgSet.BackgroundJobsModel,
+			"default_model":         teamSet.DefaultModel,
+		} {
+			if model == "" {
+				continue
+			}
+			if !universe.Offers(model) {
+				t.Errorf("%s defaults to %q, which this deployment does not offer: %v", field, model, universe.Keys())
+			}
 		}
 	})
 
@@ -935,7 +1000,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if err != nil {
 			t.Fatalf("GetSettingsSystem: %v", err)
 		}
-		want := domain.DefaultTeamSettings()
+		want := domain.DefaultTeamSettingsFor(stores.MultiMode)
 		want.MaxDailyCostUSD = 42.50
 		// A materialized row reads jira_projects back as an empty (non-nil)
 		// slice, whereas DefaultTeamSettings leaves it nil — normalize so
@@ -983,11 +1048,22 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	// read-modify-write save. What this pins is the nullable round-trip the
 	// resolution depends on: nil is the absent set (inherit the org's), and a
 	// stored set is exactly what it names.
+	//
+	// The keys are drawn from the dialect's own universe: the column stores
+	// opaque text, and the vocabulary gate is the save handler's, but this is
+	// the case that is ABOUT enable-sets, so its fixture names models the
+	// deployment under test could actually be asked to dispatch.
 	t.Run("TeamSettings_EnabledModels_SetChangeAndClear", func(t *testing.T) {
 		stores, ids := factory(t)
 
-		base := domain.DefaultTeamSettings()
-		base.EnabledModels = []string{domain.ModelSonnet, domain.ModelHaiku}
+		keys := modelcatalog.UniverseFor(stores.MultiMode).Keys()
+		if len(keys) < 2 {
+			t.Fatalf("this deployment offers %d models, need 2 to narrow a set: %v", len(keys), keys)
+		}
+		first, second := keys[0], keys[1]
+
+		base := domain.DefaultTeamSettingsFor(stores.MultiMode)
+		base.EnabledModels = []string{first, second}
 		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, base); err != nil {
 			t.Fatalf("UpdateSettings (set): %v", err)
 		}
@@ -995,12 +1071,12 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if err != nil {
 			t.Fatalf("GetSettingsSystem: %v", err)
 		}
-		if !reflect.DeepEqual(got.EnabledModels, []string{domain.ModelSonnet, domain.ModelHaiku}) {
+		if !reflect.DeepEqual(got.EnabledModels, []string{first, second}) {
 			t.Errorf("EnabledModels = %v, want the stored set in order", got.EnabledModels)
 		}
 
 		// Narrowing writes the new set whole rather than merging into the old.
-		got.EnabledModels = []string{domain.ModelHaiku}
+		got.EnabledModels = []string{second}
 		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, got); err != nil {
 			t.Fatalf("UpdateSettings (narrow): %v", err)
 		}
@@ -1008,8 +1084,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if err != nil {
 			t.Fatalf("GetSettingsSystem after narrow: %v", err)
 		}
-		if !reflect.DeepEqual(narrowed.EnabledModels, []string{domain.ModelHaiku}) {
-			t.Errorf("narrowed EnabledModels = %v, want [%s]", narrowed.EnabledModels, domain.ModelHaiku)
+		if !reflect.DeepEqual(narrowed.EnabledModels, []string{second}) {
+			t.Errorf("narrowed EnabledModels = %v, want [%s]", narrowed.EnabledModels, second)
 		}
 
 		// nil clears it back to the absent set. It has to read back nil rather
@@ -1039,7 +1115,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if err != nil {
 			t.Fatalf("GetSettingsSystem on empty row: %v", err)
 		}
-		want := domain.DefaultTeamSettings()
+		want := domain.DefaultTeamSettingsFor(stores.MultiMode)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("GetSettingsSystem on empty row = %+v; want %+v", got, want)
 		}

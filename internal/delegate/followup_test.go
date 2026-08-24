@@ -10,7 +10,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -264,7 +263,7 @@ func TestModelForClaim_FollowUpDoesNotInheritTheStepModel(t *testing.T) {
 	// substitution the whole selection design forbids, dressed as inheritance.
 	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
 		return domain.NewTeamModels(domain.ModelOpus,
-			domain.TeamModelSet([]string{domain.ModelHaiku}, domain.OrgModelSet(nil, modelcatalog.DefaultEnabled()))), nil
+			domain.TeamModelSet([]string{domain.ModelHaiku}, orgUnrestricted())), nil
 	})
 	if got, err := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: domain.BlueprintRunStatusCompleted}, conv); !errors.Is(err, domain.ErrModelNotEnabled) || got != "" {
 		t.Errorf("a disabled team default = (%q, %v), want a refusal naming the model", got, err)

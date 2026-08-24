@@ -35,16 +35,18 @@ func keysOf(items []modelCatalogRow) []string {
 	return out
 }
 
-// modelKeyOn returns an offered model served by provider, read from the catalog
+// modelKeyOn returns a NATIVE model served by provider, read from the registry
 // so these tests exercise the real join rather than a spelling of their own.
+// Native, because the provider is a property of the id only in that vocabulary
+// — an SDK alias resolves its access path from the credential.
 func modelKeyOn(t *testing.T, provider string) string {
 	t.Helper()
-	for _, e := range modelcatalog.Entries() {
+	for _, e := range modelcatalog.UniverseFor(true).Models() {
 		if e.Provider == provider {
 			return e.Key
 		}
 	}
-	t.Fatalf("catalog offers no model on %s", provider)
+	t.Fatalf("the native universe offers no model on %s", provider)
 	return ""
 }
 
@@ -84,10 +86,25 @@ func providersOf(items []modelCatalogRow) map[string]bool {
 // the team removes the rest from the picker's options entirely, and clearing it
 // puts them back. The org's own narrowing shows through the team read too, which
 // is the intersection doing its job.
+//
+// Local mode, so the sets are written in the vocabulary a local deployment
+// dispatches — the harness's aliases, not native wire ids. That is not a detail
+// of the fixture: a set names models the deployment will be asked to run, so the
+// save refuses the other vocabulary outright (pinned both ways below).
 func TestTeamModelsList_NarrowsToTheEnabledSets(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
+
+	universe := modelcatalog.UniverseFor(false)
+	keys := universe.Keys()
+	if len(keys) < 3 {
+		t.Fatalf("the local universe offers %d models, need 3: %v", len(keys), keys)
+	}
+	// Named by position rather than by constant: what this exercises is set
+	// algebra over whatever this deployment offers, and pinning the alias list
+	// itself is internal/modelcatalog's job.
+	wide, narrow, other := keys[0], keys[1], keys[2]
 
 	read := func() []string {
 		t.Helper()
@@ -98,13 +115,13 @@ func TestTeamModelsList_NarrowsToTheEnabledSets(t *testing.T) {
 		return keysOf(decodeModels(t, rec.Body.Bytes()).Items)
 	}
 
-	if got, want := len(read()), len(modelcatalog.Entries()); got != want {
-		t.Fatalf("a team that has narrowed nothing sees %d models, want the whole catalog (%d)", got, want)
+	if got, want := len(read()), len(keys); got != want {
+		t.Fatalf("a team that has narrowed nothing sees %d models, want the whole universe (%d)", got, want)
 	}
 
 	// The org narrows to three; the team read follows without the team saying
 	// anything, because an absent team set inherits the org's whole answer.
-	orgSet := []string{domain.ModelHaiku, domain.ModelSonnet, domain.ModelOpus}
+	orgSet := []string{wide, narrow, other}
 	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": orgSet})
 	if got := read(); len(got) != len(orgSet) {
 		t.Errorf("after the org narrowed to %v the team sees %v", orgSet, got)
@@ -114,20 +131,20 @@ func TestTeamModelsList_NarrowsToTheEnabledSets(t *testing.T) {
 	// whose default fell outside its own new set is refused, so the two travel
 	// together. What it sees afterwards is its own set, not the org's.
 	if rec := doJSON(t, s, http.MethodPatch, "/api/teams/default/settings", map[string]any{
-		"enabled_models": []string{domain.ModelHaiku},
-		"ai_model":       domain.ModelHaiku,
+		"enabled_models": []string{narrow},
+		"ai_model":       narrow,
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("team narrow: %d %s", rec.Code, rec.Body.String())
 	}
-	if got := read(); len(got) != 1 || got[0] != domain.ModelHaiku {
-		t.Errorf("after the team narrowed to Haiku it sees %v", got)
+	if got := read(); len(got) != 1 || got[0] != narrow {
+		t.Errorf("after the team narrowed to %s it sees %v", narrow, got)
 	}
 
 	// The org narrowing BELOW what the team stored wins at the read: the team's
 	// set is frozen at what it named, and the intersection is what keeps a
 	// stale team row from outliving its org's decision. Nothing rewrites the
 	// team row to say so.
-	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelSonnet}})
+	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{wide}})
 	if got := read(); len(got) != 0 {
 		t.Errorf("a team set disjoint from its org's still shows %v", got)
 	}
@@ -138,64 +155,56 @@ func TestTeamModelsList_NarrowsToTheEnabledSets(t *testing.T) {
 	// the re-pick the org save's warning asks for.
 	if rec := doJSON(t, s, http.MethodPatch, "/api/teams/default/settings", map[string]any{
 		"enabled_models": nil,
-		"ai_model":       domain.ModelSonnet,
+		"ai_model":       wide,
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("team clear: %d %s", rec.Code, rec.Body.String())
 	}
-	if got := read(); len(got) != 1 || got[0] != domain.ModelSonnet {
+	if got := read(); len(got) != 1 || got[0] != wide {
 		t.Errorf("after clearing the team's set it sees %v, want the org's set", got)
 	}
 
-	// Clearing the org's set restores the catalog default for both.
+	// Clearing the org's set restores the deployment's whole universe for both.
 	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": nil})
-	if got, want := len(read()), len(modelcatalog.Entries()); got != want {
+	if got, want := len(read()), len(keys); got != want {
 		t.Errorf("after clearing both sets the team sees %d models, want %d", got, want)
 	}
 }
 
-// Save-time enforcement: a default whose provider the org never connected is
-// refused with the field named. The stored default is untouched by the refusal.
-func TestTeamSettingsPatch_ModelProviderMustBeAvailable(t *testing.T) {
+// An enable-set names models the deployment will be asked to dispatch, so it is
+// written in that deployment's own vocabulary and the other one is refused —
+// on both settings scopes, and whichever way round the mismatch runs.
+//
+// This is the gate that keeps the two registries from mixing in stored config.
+// A local org that stored a native wire id would hand the Claude Code harness a
+// word it cannot resolve; a multi org that stored an alias would put it on the
+// bifrost wire unresolved, and every message it produced would persist unpriced.
+// Neither is a spelling the set resolution could recover from later, because
+// nothing translates a stored value.
+func TestSettingsPatch_EnabledModels_RefusesTheOtherVocabulary(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
+	s := newTestServer(t)
 
-	bedrockModel := modelKeyOn(t, modelcatalog.ProviderBedrock)
+	native := modelcatalog.UniverseFor(true).Keys()[0]
+	alias := modelcatalog.UniverseFor(false).Keys()[0]
 
-	t.Run("provider not connected", func(t *testing.T) {
-		s := newTestServer(t)
-		connectOrgProviders(t, s, true, false)
-
-		rec := doJSON(t, s, http.MethodPatch, "/api/teams/default/settings", map[string]any{"ai_model": bedrockModel})
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
-		}
-		assertFieldError(t, rec, "ai_model")
-
-		set, err := s.allStores.Teams.GetSettingsSystem(context.Background(), runmode.LocalDefaultTeamID)
-		if err != nil {
-			t.Fatalf("read team settings: %v", err)
-		}
-		if set.DefaultModel == bedrockModel {
-			t.Error("the refused model was stored anyway")
-		}
-	})
-
-	t.Run("both connected saves", func(t *testing.T) {
-		s := newTestServer(t)
-		connectOrgProviders(t, s, true, true)
-
-		rec := doJSON(t, s, http.MethodPatch, "/api/teams/default/settings", map[string]any{"ai_model": bedrockModel})
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-		}
-		set, err := s.allStores.Teams.GetSettingsSystem(context.Background(), runmode.LocalDefaultTeamID)
-		if err != nil {
-			t.Fatalf("read team settings: %v", err)
-		}
-		if set.DefaultModel != bedrockModel {
-			t.Errorf("stored default = %q, want %q", set.DefaultModel, bedrockModel)
-		}
-	})
+	body := map[string]any{"enabled_models": []string{native}}
+	for name, patch := range map[string]func() *httptest.ResponseRecorder{
+		"org":  func() *httptest.ResponseRecorder { return patchOrgSettings(t, s, body) },
+		"team": func() *httptest.ResponseRecorder { return patchTeamSettings(t, s, "default", body) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := patch()
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("a native wire id on a local %s save = %d, want 400 (body: %s)", name, rec.Code, rec.Body.String())
+			}
+			assertFieldError(t, rec, "enabled_models")
+			// The refusal names the offered vocabulary, which is the whole fix.
+			if !strings.Contains(rec.Body.String(), alias) {
+				t.Errorf("the refusal does not name what this deployment does offer: %s", rec.Body.String())
+			}
+		})
+	}
 }
 
 // assertFieldError checks the response carries one error naming field.
@@ -281,7 +290,7 @@ func TestTeamModelsRead_ScopeAndSets_Postgres(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("teamB read = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 		}
-		if got, want := len(decodeModels(t, rec.Body.Bytes()).Items), len(modelcatalog.Entries()); got != want {
+		if got, want := len(decodeModels(t, rec.Body.Bytes()).Items), len(modelcatalog.UniverseFor(true).Models()); got != want {
 			t.Errorf("narrowing teamA also narrowed teamB: %d models, want %d", got, want)
 		}
 	})

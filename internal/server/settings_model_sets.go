@@ -57,7 +57,14 @@ func writeFieldFaults(w http.ResponseWriter, err error) bool {
 }
 
 // normalizeModelSet validates one enable-set as it arrives on the wire: a
-// non-empty list of distinct, non-blank catalog keys, trimmed.
+// non-empty list of distinct, non-blank keys this deployment offers, trimmed.
+//
+// The universe is the accepted set rather than the native registry, and it is a
+// parameter rather than resolved here. A set names models a deployment will be
+// asked to dispatch, so the two vocabularies cannot mix in one — an alias
+// stored where a wire id belongs is a model the runtime is handed and cannot
+// send. Both have to be exercisable from one test binary, which is why the
+// caller supplies the answer.
 //
 // Empty is refused rather than read as "no preference". Clearing a set has its
 // own spelling — an explicit null — and an org that means "nobody may pick
@@ -66,7 +73,7 @@ func writeFieldFaults(w http.ResponseWriter, err error) bool {
 //
 // Every unknown key is named, not the first: an admin fixing a hand-written
 // list should see the whole list of what is wrong with it.
-func normalizeModelSet(v *httpx.Validation, raw []string, field string) ([]string, bool) {
+func normalizeModelSet(v *httpx.Validation, universe modelcatalog.Universe, raw []string, field string) ([]string, bool) {
 	if len(raw) == 0 {
 		v.Invalid(field, field+" must name at least one model, or be null to clear it")
 		return nil, false
@@ -80,7 +87,7 @@ func normalizeModelSet(v *httpx.Validation, raw []string, field string) ([]strin
 		switch {
 		case key == "":
 			blank = true
-		case !modelcatalog.Offers(key):
+		case !universe.Offers(key):
 			unknown = append(unknown, key)
 		case seen[key]:
 			duplicate = append(duplicate, key)
@@ -96,7 +103,7 @@ func normalizeModelSet(v *httpx.Validation, raw []string, field string) ([]strin
 		v.Invalid(field, fmt.Sprintf(
 			"%s names %s this deployment does not offer: %s — offered: %s",
 			field, plural(len(unknown), "a model", "models"),
-			strings.Join(unknown, ", "), strings.Join(modelcatalog.Keys(), ", ")))
+			strings.Join(unknown, ", "), strings.Join(universe.Keys(), ", ")))
 	}
 	if len(duplicate) > 0 {
 		// A duplicate changes nothing, but accepting it would store a list that

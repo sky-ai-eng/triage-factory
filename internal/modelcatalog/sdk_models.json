@@ -1,0 +1,8 @@
+{
+  "claude-code": [
+    { "key": "haiku", "display_name": "Claude Haiku" },
+    { "key": "sonnet", "display_name": "Claude Sonnet" },
+    { "key": "opus", "display_name": "Claude Opus" },
+    { "key": "fable", "display_name": "Claude Fable" }
+  ]
+}

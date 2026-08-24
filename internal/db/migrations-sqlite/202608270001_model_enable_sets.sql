@@ -5,20 +5,32 @@
 -- cannot. A set also says which models may be picked without claiming any is
 -- better than another, which is the claim a ceiling had to make and the
 -- catalog declines to.
+--
+-- Only the ceiling is dropped here. The team restriction's column never
+-- reached an install, so its own migration is gone rather than folded
+-- forward: this epic's compatibility baseline is the last cut release, and a
+-- column added and removed between two unreleased commits is not an upgrade
+-- path anyone takes.
 
--- The catalog keys this org's teams may pick from, as a JSON array. NULL is
+-- The model keys this org's teams may pick from, as a JSON array. NULL is
 -- the absent value and means the org has expressed no preference, which
--- resolves to the whole catalog — so a model a later release adds is enabled
--- for that org the day it ships, while a stored set stays frozen at what it
--- names. The resolved set is never stored: "chose nothing" and "chose
--- everything" are different facts about what happens next, and collapsing
--- them at the column is what would make the first one impossible to spell.
+-- resolves to every model this deployment offers — so a model a later
+-- release adds is enabled for that org the day it ships, while a stored set
+-- stays frozen at what it names. The resolved set is never stored: "chose
+-- nothing" and "chose everything" are different facts about what happens
+-- next, and collapsing them at the column is what would make the first one
+-- impossible to spell.
+--
+-- The keys are this dialect's own execution vocabulary — the harness aliases
+-- a SQLite install dispatches, as its default_model and background_jobs_model
+-- columns already are — because a set names models the deployment will be
+-- asked to run.
 --
 -- JSON text rather than a child table: nothing semi-joins through
--- enablement, the catalog is code so there is no FK target, and the set is
--- read whole at one choke point. App-validated against the build's catalog,
--- not CHECK-constrained (the github_credential_class precedent) — the
--- accepted set changes with the binary, not with the schema.
+-- enablement, the model list is code so there is no FK target, and the set is
+-- read whole at one choke point. App-validated against what this deployment
+-- offers, not CHECK-constrained (the github_credential_class precedent) —
+-- the accepted set changes with the binary, not with the schema.
 ALTER TABLE org_settings ADD COLUMN enabled_models TEXT;
 
 -- The org's ceiling over three Anthropic tier words. A rank over models is a
@@ -32,13 +44,6 @@ ALTER TABLE org_settings DROP COLUMN max_llm_model_tier;
 -- save, and narrowed to it again at every read, since the org may shrink its
 -- own set afterwards and nothing rewrites a team row when it does.
 ALTER TABLE team_settings ADD COLUMN enabled_models TEXT;
-
--- The team's provider restriction, subsumed by the model-granular set above:
--- restricting a provider is unchecking that path's models. The one semantic a
--- provider restriction had and a model set does not — auto-covering that
--- provider's future models — is answered by the set's own NULL-tracks-default
--- versus stored-set-frozen distinction.
-ALTER TABLE team_settings DROP COLUMN allowed_providers;
 
 -- +goose Down
 SELECT 'down not supported';

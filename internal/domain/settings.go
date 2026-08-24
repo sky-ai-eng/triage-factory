@@ -8,11 +8,34 @@ import (
 	"time"
 )
 
-// DefaultModel is the model TF provisions a team with when nobody has chosen
-// one yet. Read by DefaultTeamSettings and pinned to the same value as the
-// team_settings.default_model column default, which is what a partial write
-// materializes a row from, so the two can't drift.
-const DefaultModel = ModelSonnet
+// The model TF provisions a team with when nobody has chosen one yet, one
+// constant per vocabulary. Read by DefaultTeamSettingsFor, and each pinned to
+// its dialect's team_settings.default_model column DEFAULT, which is what a
+// partial write materializes a row from, so the two can't drift.
+//
+// Two constants rather than one because the two dialects store different
+// vocabularies: Postgres carries the native wire id its runtime sends, SQLite
+// the harness alias its subprocess resolves. A single value would be refused by
+// one deployment's own save validator.
+const (
+	DefaultModel      = ModelSonnet
+	LocalDefaultModel = ModelAliasSonnet
+)
+
+// DefaultModelFor returns the provisioning default in the vocabulary the given
+// deployment stores. The mode is a parameter for the same reason it is one on
+// EffectiveLLMAuthMethod: the answer is a property of the deployment being
+// asked about, not of the process asking.
+//
+// It is what PROVISIONS a team, never what a resolution falls back to: a team
+// whose default is unset has chosen nothing, and dispatching a model on its
+// behalf would spend on a choice nobody made.
+func DefaultModelFor(multiMode bool) string {
+	if multiMode {
+		return DefaultModel
+	}
+	return LocalDefaultModel
+}
 
 // LocalBackgroundJobsModel is the background-jobs model a local install starts
 // with. Local mode is a single-user, zero-configuration first run, so its knob
@@ -23,7 +46,7 @@ const DefaultModel = ModelSonnet
 //
 // It is a pre-fill, not a fallback. Nothing resolves to it at job time; the only
 // thing that reads it is the schema.
-const LocalBackgroundJobsModel = ModelHaiku
+const LocalBackgroundJobsModel = ModelAliasHaiku
 
 // Where an org's Claude credentials come from — the value of
 // org_settings.llm_auth_method, and the answer to what it means that an org has
@@ -199,8 +222,8 @@ const MaxConcurrentClaimsCeiling = 1_000_000
 //     URLs) / "use deployment default" (vault refs). Callers never need a
 //     second sentinel for absence.
 //   - EnabledModels is nil for a NULL column — the org has expressed no
-//     preference, which OrgModelSet resolves to the catalog default. A stored
-//     set is never empty; the write refuses one.
+//     preference, which OrgModelSet resolves to every model this deployment
+//     offers. A stored set is never empty; the write refuses one.
 //   - MaxDailyCostUSD is a nullable numeric column (TFAC-477). 0
 //     round-trips 0 ↔ NULL — "no cap". Callers never need to
 //     distinguish 0 from NULL.
@@ -222,11 +245,15 @@ type OrgSettings struct {
 
 	AnthropicAPIKeyRef    string
 	BedrockCredentialsRef string
-	// EnabledModels is the org's enable-set: the catalog keys its teams may
-	// pick from, stored as a JSON array. nil is the absent value and means the
-	// org has expressed no preference, which resolves to the whole catalog —
-	// so a model a later release adds is enabled for that org the day it ships,
-	// while a stored set stays frozen at what it names.
+	// EnabledModels is the org's enable-set: the model keys its teams may pick
+	// from, stored as a JSON array. nil is the absent value and means the org
+	// has expressed no preference, which resolves to every model this
+	// deployment offers — so a model a later release adds is enabled for that
+	// org the day it ships, while a stored set stays frozen at what it names.
+	//
+	// The keys are this deployment's own execution vocabulary, the same one
+	// BackgroundJobsModel and TeamSettings.DefaultModel are written in. Nothing
+	// translates a stored value, so a set never mixes the two.
 	//
 	// Never store the resolved set. "The org chose nothing" and "the org chose
 	// everything" are different facts about what happens next, and collapsing
@@ -237,9 +264,9 @@ type OrgSettings struct {
 	EnabledModels []string
 
 	// BackgroundJobsModel is the model the two headless system jobs — the
-	// scorer and the repo profiler — run on. A catalog
-	// key (internal/modelcatalog), validated on write against the catalog and
-	// against the providers the org has connected.
+	// scorer and the repo profiler — run on. A key from this deployment's model
+	// universe (internal/modelcatalog), validated on write against that
+	// universe and against the providers the org has connected.
 	//
 	// One knob for all three, org-level: they are the same kind of work (short,
 	// toolless, no transcript) bought from the same budget, and a per-job knob
@@ -496,8 +523,9 @@ type TeamSettings struct {
 	ReviewPosture string
 
 	// EnabledModels is the team's enable-set: which of the models its org
-	// enables this team may pick from, stored as a JSON array of catalog keys.
-	// nil is the absent value and inherits the org's effective set whole.
+	// enables this team may pick from, stored as a JSON array of model keys in
+	// the same vocabulary as DefaultModel above. nil is the absent value and
+	// inherits the org's effective set whole.
 	//
 	// A subset of the org's set at every save — the write refuses a superset —
 	// and narrowed to it again at every read, because the org may shrink its own
@@ -523,10 +551,15 @@ type TeamSettings struct {
 	BaseBranchPushPolicy string
 }
 
-// DefaultTeamSettings returns the NOT NULL DEFAULT values from the
+// DefaultTeamSettingsFor returns the NOT NULL DEFAULT values from the
 // team_settings schema as a Go struct. Same pattern as
 // DefaultOrgSettings — read-side fallback for missing rows, plus an
 // explicit Go-side baseline for provisioning paths.
+//
+// It takes the mode because one of those DEFAULTs diverges by dialect:
+// default_model is stored in the vocabulary that dialect's runtime dispatches,
+// so a mode-blind answer would hand a caller a model its own deployment refuses.
+// The dialect is the mode, so a store passes the one it is.
 //
 // AutoDelegateEnabled defaults true (matching the schema DEFAULT): a
 // team that has a trigger enabled means the run to fire, and every
@@ -535,11 +568,11 @@ type TeamSettings struct {
 // (a Slack channel claim, for instance, seeds an enabled mention
 // trigger that never fired). The per-team toggle stays, for teams that
 // want review-before-run.
-func DefaultTeamSettings() TeamSettings {
+func DefaultTeamSettingsFor(multiMode bool) TeamSettings {
 	return TeamSettings{
 		AIReprioritizeThreshold:         5,
 		AIPreferenceUpdateInterval:      20,
-		DefaultModel:                    DefaultModel,
+		DefaultModel:                    DefaultModelFor(multiMode),
 		AutoDelegateEnabled:             true,
 		AutoModeEnabled:                 true,
 		PermissionAbsentGraceMS:         15000,

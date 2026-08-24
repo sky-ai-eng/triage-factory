@@ -210,8 +210,8 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "first_prompt.body is required", Field: "first_prompt.body"})
 			return
 		}
-		if !prompts.ValidModel(req.FirstPrompt.Model) {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(), Field: "first_prompt.model"})
+		if universe := deploymentUniverse(); !prompts.ValidModel(universe, req.FirstPrompt.Model) {
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(universe), Field: "first_prompt.model"})
 			return
 		}
 		if req.Name == "" {

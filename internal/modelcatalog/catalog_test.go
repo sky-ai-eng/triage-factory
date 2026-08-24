@@ -195,21 +195,27 @@ func TestLoad_DisplayOrderIsContiguousAfterADrop(t *testing.T) {
 	}
 }
 
-// DefaultEnabled is what an org that has expressed no preference resolves to:
-// one key per catalog entry, so a new model in a release is enabled for such an
-// org the day it ships.
-func TestDefaultEnabled_IsEveryCatalogKey(t *testing.T) {
-	got := DefaultEnabled()
-	if len(got) != len(Entries()) {
-		t.Fatalf("DefaultEnabled has %d keys, want %d (one per catalog entry)", len(got), len(Entries()))
-	}
-	named := make(map[string]bool, len(got))
-	for _, k := range got {
-		named[k] = true
-	}
-	for _, e := range Entries() {
-		if !named[e.Key] {
-			t.Errorf("%s: catalog entry missing from DefaultEnabled", e.Key)
+// An org that has expressed no preference resolves to the whole universe — one
+// key per offered model, so a model a later release adds is enabled for such an
+// org the day it ships. Asserted in both universes, because an org on one whose
+// default set was drawn from the other would see every picker empty.
+//
+// What the absent value RESOLVES to is domain.OrgModelSet's decision; this is
+// only the input it resolves to, which is the thing a universe knows.
+func TestDefaultEnabled_IsEveryOfferedModel(t *testing.T) {
+	for _, multi := range []bool{true, false} {
+		u := UniverseFor(multi)
+		named := make(map[string]bool, len(u.Models()))
+		for _, k := range u.DefaultEnabled() {
+			named[k] = true
+		}
+		if got, want := len(named), len(u.Models()); got != want {
+			t.Errorf("multi=%v: DefaultEnabled has %d keys, want %d (one per offered model)", multi, got, want)
+		}
+		for _, m := range u.Models() {
+			if !named[m.Key] {
+				t.Errorf("multi=%v: %s: offered model missing from DefaultEnabled", multi, m.Key)
+			}
 		}
 	}
 }
@@ -263,20 +269,18 @@ func TestLoad_ReportsEveryUnusableEntry(t *testing.T) {
 	}
 }
 
-// The three ids domain names for the Anthropic tiers must be catalog keys.
-// They are what a migrated install stores, what the shipped default provisions,
-// and what the org cap clamps to — so a key the catalog stopped offering would
-// leave existing configuration pointing at a model the picker cannot show and
-// the ledger cannot price. The catalog is free to grow; it may not drop one of
-// these without the settings that reference them moving in the same change.
+// The three ids domain names for the Anthropic tiers must be native registry
+// keys. They are what a multi install stores, what the shipped default
+// provisions there, and what the org cap clamps to — so a key the registry
+// stopped offering would leave existing configuration pointing at a model the
+// picker cannot show and the ledger cannot price. The registry is free to grow;
+// it may not drop one of these without the settings that reference them moving
+// in the same change.
 func TestCatalog_OffersEveryTierID(t *testing.T) {
-	offered := make(map[string]bool, len(Entries()))
-	for _, e := range Entries() {
-		offered[e.Key] = true
-	}
+	u := UniverseFor(true)
 	for _, id := range []string{domain.ModelHaiku, domain.ModelSonnet, domain.ModelOpus, domain.DefaultModel} {
-		if !offered[id] {
-			t.Errorf("catalog does not offer %q", id)
+		if !u.Offers(id) {
+			t.Errorf("the native universe does not offer %q", id)
 		}
 	}
 }

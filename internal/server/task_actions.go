@@ -775,7 +775,7 @@ func writeDelegateSpawnError(w http.ResponseWriter, err error) {
 	// names the model and either where an admin connects the provider or which
 	// set excludes it — so it goes out verbatim rather than through the 500
 	// arm's redaction, which exists for errors that can carry driver and
-	// upstream strings. These carry a provider display name and catalog keys,
+	// upstream strings. These carry a provider display name and model keys,
 	// all TF's own.
 	//
 	// No `field`: nothing in the body is wrong. The caller asked to run a task

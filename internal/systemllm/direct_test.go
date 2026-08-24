@@ -375,12 +375,15 @@ func TestComplete_Direct_RecordsErrorRow(t *testing.T) {
 
 // TestRecordDirectCall_PricesOnTheRequestedModel pins that the ledger charges
 // what actually ran: the model the request carried is both the row's model and
-// the pricing key, for every provider. The knob is a catalog key and the catalog
-// only offers keys the datasheet prices, so the two can't come apart.
+// the pricing key, for every provider. The knob is a native registry key and the
+// registry only offers keys the datasheet prices, so the two can't come apart.
+//
+// The native universe specifically: the direct arm is the only one that prices
+// from the datasheet at all, and it is the multi-mode path.
 func TestRecordDirectCall_PricesOnTheRequestedModel(t *testing.T) {
 	usage := inference.Usage{PromptTokens: 1000, OutputTokens: 500, CacheReadTokens: 100, CacheCreationTokens: 50}
 
-	for _, model := range modelcatalog.Keys() {
+	for _, model := range modelcatalog.UniverseFor(true).Keys() {
 		t.Run(model, func(t *testing.T) {
 			wantCost, ok := inference.CostForUsage(model, usage)
 			if !ok {
@@ -488,12 +491,12 @@ func TestMapDirectCreds(t *testing.T) {
 // modelOn returns an offered model served by provider.
 func modelOn(t *testing.T, provider string) string {
 	t.Helper()
-	for _, e := range modelcatalog.Entries() {
+	for _, e := range modelcatalog.UniverseFor(true).Models() {
 		if e.Provider == provider {
 			return e.Key
 		}
 	}
-	t.Fatalf("catalog offers no model on %s", provider)
+	t.Fatalf("the native universe offers no model on %s", provider)
 	return ""
 }
 

@@ -19,8 +19,14 @@ import (
 // enableSetStores is a fresh local install with the org and team enable-sets a
 // case wants. A nil set is the absent value on that scope, which is the state a
 // deployment nobody has configured is in.
+//
+// Local, so the models these cases name are the harness aliases a local install
+// stores and dispatches. An absent set resolves to the deployment's universe,
+// and the two universes are disjoint — a fixture in the native vocabulary would
+// resolve to a set that excludes every value it names.
 func enableSetStores(t *testing.T, orgSet, teamSet []string, teamDefault string) (db.Stores, *sql.DB) {
 	t.Helper()
+	runmode.SetForTest(t, runmode.ModeLocal)
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -58,7 +64,7 @@ func enableSetStores(t *testing.T, orgSet, teamSet []string, teamDefault string)
 // A default both sets admit resolves, and hands back the set every model the
 // run touches is held to.
 func TestResolveAIModelForTeam_DefaultInTheSet(t *testing.T) {
-	stores, _ := enableSetStores(t, nil, nil, domain.ModelSonnet)
+	stores, _ := enableSetStores(t, nil, nil, domain.ModelAliasSonnet)
 
 	got, err := resolveAIModelForTeam(context.Background(), stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID)
 	if err != nil {
@@ -68,11 +74,11 @@ func TestResolveAIModelForTeam_DefaultInTheSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequireDefault: %v", err)
 	}
-	if model != domain.ModelSonnet {
-		t.Errorf("default = %q, want %q", model, domain.ModelSonnet)
+	if model != domain.ModelAliasSonnet {
+		t.Errorf("default = %q, want %q", model, domain.ModelAliasSonnet)
 	}
-	// Both sets absent → the catalog default, so the whole catalog is pinnable.
-	for _, key := range modelcatalog.DefaultEnabled() {
+	// Both sets absent → this deployment's whole universe is pinnable.
+	for _, key := range modelcatalog.UniverseFor(false).DefaultEnabled() {
 		if !got.Enabled().Has(key) {
 			t.Errorf("%s: not enabled with both sets absent", key)
 		}
@@ -90,7 +96,7 @@ func TestResolveAIModelForTeam_DefaultInTheSet(t *testing.T) {
 func TestResolveAIModelForTeam_DefaultOutsideTheSetRefuses(t *testing.T) {
 	// The org narrowed to Haiku after this team picked Opus. Nothing rewrote
 	// the team's row, which is exactly the case this gate exists for.
-	stores, _ := enableSetStores(t, []string{domain.ModelHaiku}, nil, domain.ModelOpus)
+	stores, _ := enableSetStores(t, []string{domain.ModelAliasHaiku}, nil, domain.ModelAliasOpus)
 
 	got, err := resolveAIModelForTeam(context.Background(), stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID)
 	if err != nil {
@@ -103,10 +109,10 @@ func TestResolveAIModelForTeam_DefaultOutsideTheSetRefuses(t *testing.T) {
 	if model != "" {
 		t.Errorf("a refusal handed back %q; want no model at all", model)
 	}
-	if !strings.Contains(err.Error(), domain.ModelOpus) {
+	if !strings.Contains(err.Error(), domain.ModelAliasOpus) {
 		t.Errorf("error %q does not name the model", err)
 	}
-	if !strings.Contains(err.Error(), domain.ModelHaiku) {
+	if !strings.Contains(err.Error(), domain.ModelAliasHaiku) {
 		t.Errorf("error %q does not name the set that excludes it", err)
 	}
 	if !strings.Contains(err.Error(), "Settings") {
@@ -115,7 +121,7 @@ func TestResolveAIModelForTeam_DefaultOutsideTheSetRefuses(t *testing.T) {
 	// The set still resolved, and the pin the org DOES enable still dispatches:
 	// a disabled default breaks the steps that inherit it, not the ones that
 	// name a model of their own.
-	if !got.Enabled().Has(domain.ModelHaiku) {
+	if !got.Enabled().Has(domain.ModelAliasHaiku) {
 		t.Error("the refusal took the enable-set with it")
 	}
 }
@@ -123,7 +129,7 @@ func TestResolveAIModelForTeam_DefaultOutsideTheSetRefuses(t *testing.T) {
 // The team's own narrowing binds it too, not just the org's: a team that
 // narrowed past its own default is broken the same way, and by the same rule.
 func TestResolveAIModelForTeam_TeamNarrowedPastItsOwnDefault(t *testing.T) {
-	stores, _ := enableSetStores(t, nil, []string{domain.ModelHaiku}, domain.ModelOpus)
+	stores, _ := enableSetStores(t, nil, []string{domain.ModelAliasHaiku}, domain.ModelAliasOpus)
 
 	got, err := resolveAIModelForTeam(context.Background(), stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID)
 	if err != nil {
@@ -139,7 +145,7 @@ func TestResolveAIModelForTeam_TeamNarrowedPastItsOwnDefault(t *testing.T) {
 // enabled, so it refuses rather than reaching for a shipped default — there
 // isn't one.
 func TestResolveAIModelForTeam_UnreadableStateRefuses(t *testing.T) {
-	stores, conn := enableSetStores(t, nil, nil, domain.ModelSonnet)
+	stores, conn := enableSetStores(t, nil, nil, domain.ModelAliasSonnet)
 	if err := conn.Close(); err != nil {
 		t.Fatalf("close db: %v", err)
 	}

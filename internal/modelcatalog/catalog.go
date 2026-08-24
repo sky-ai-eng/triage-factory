@@ -1,12 +1,25 @@
-// Package modelcatalog is the list of models Triage Factory offers, and the
-// names it offers them under.
+// Package modelcatalog is the list of models Triage Factory offers, under each
+// execution vocabulary it offers them in, and the names it offers them under.
 //
-// It owns exactly the editorial half of that: which datasheet keys are
-// supported, and what each is called in a picker. Everything factual about a
-// model — its prices, its context window, whether it caches prompts, which
-// vendor serves it — comes from internal/inference's embedded datasheet, joined
-// in here at process start. Two files, one join, so the price a user is shown is
-// the price the ledger charges.
+// There are two registries here, not one, because there are two vocabularies. A
+// NATIVE id is a bifrost wire id: it names the provider that serves it and
+// resolves in the pricing datasheet, so supported_models.json is joined against
+// that datasheet at process start and the price a user is shown is the price the
+// ledger charges. An SDK ALIAS is a harness's own word for a model family:
+// sdk_models.json names those per SDK, with no provider and no join, because the
+// harness resolves the alias itself against whichever access path its
+// environment selects — the provider is a property of the credential, and the
+// cost is settled by the harness rather than interpolated from a price table.
+//
+// Universe (universe.go) is the one door onto "what may this deployment offer or
+// store". Every validator asks it, so none of them has to know which registry
+// answered.
+//
+// It owns exactly the editorial half of the native registry: which datasheet
+// keys are supported, and what each is called in a picker. Everything factual
+// about such a model — its prices, its context window, whether it caches
+// prompts, which vendor serves it — comes from internal/inference's embedded
+// datasheet.
 //
 // The split is not stylistic. scripts/refresh-pricing.sh rewrites the datasheet
 // wholesale from upstream every day, so a TF-authored field placed inside it
@@ -18,8 +31,8 @@
 // means different things in different places, and no substring of a key tells
 // you whether two spellings are the same model, an alias and a pin, or unrelated.
 //
-// The file is the allowlist: present means supported and named, absent means not
-// offered. There is no second list, no disabled flag, and no ranking — file
+// Each file is its vocabulary's allowlist: present means supported and named,
+// absent means not offered. There is no disabled flag and no ranking — file
 // order is display order and nothing more. A capability ordering would need a
 // defensible basis for saying one model is better than another, and there is
 // none TF is willing to assert.
@@ -128,42 +141,6 @@ func Entries() []Entry {
 // therefore a decision for whoever holds the build — this package only reports
 // it.
 func JoinError() error { return joinErr }
-
-// Keys returns the offered keys in display order — the accepted set for any
-// stored model value. A validator wants this rather than Entries: what makes a
-// value acceptable is that the catalog names it, and nothing about its price or
-// window enters that.
-func Keys() []string {
-	keys := make([]string, 0, len(entries))
-	for _, e := range entries {
-		keys = append(keys, e.Key)
-	}
-	return keys
-}
-
-// Offers reports whether key is one this build names. The membership test every
-// surface that validates a stored model value runs, so "offered" has one
-// definition rather than one per handler.
-//
-// It answers for the BUILD, not for a tenant. Whether a tenant may pick the
-// model is the enable-set's question (domain.ModelSet), and the two are asked
-// at different moments on purpose: a pin is validated against the catalog when
-// it is SAVED, because that is a spelling nothing can invoke, and against the
-// enable-set at DISPATCH, because sets drift after a save.
-func Offers(key string) bool {
-	for _, e := range entries {
-		if e.Key == key {
-			return true
-		}
-	}
-	return false
-}
-
-// DefaultEnabled is the enable-set an org that has never expressed a preference
-// gets: every entry in the catalog. It is the second argument to
-// domain.OrgModelSet, which owns the absent-value decision — this package owns
-// only what the default IS, since the catalog is the thing that knows.
-func DefaultEnabled() []string { return Keys() }
 
 // load parses the supported-models file and joins each entry against the
 // datasheet. lookup is a parameter rather than a direct inference call so the

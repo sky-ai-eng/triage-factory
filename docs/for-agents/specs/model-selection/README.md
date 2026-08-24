@@ -87,9 +87,10 @@ Conflating these produces a design that does neither well. They are stored
 differently, enforced at different times, and fail differently. One decides
 **which models may be chosen**; the other decides **when work stops**.
 
-- **R7. Enable-set** — the selection-time control. An org picks which
-  catalog models its teams may use; a team picks a subset of those plus its
-  default. Enforced at **selection** time; its effect is a smaller picker.
+- **R7. Enable-set** — the selection-time control. An org picks which of
+  the models its deployment offers its teams may use; a team picks a subset
+  of those plus its default. Enforced at **selection** time; its effect is a
+  smaller picker.
   The effective team set is the team's stored set intersected with the org's,
   so a later org-side narrowing takes effect without rewriting a team row.
   - **A default or a pin outside the effective set fails, loudly, naming
@@ -102,10 +103,18 @@ differently, enforced at different times, and fail differently. One decides
     would couple the org admin to team settings they are barred from
     editing (the settled org-admin ≠ team-admin rule), and nothing is
     grandfathered, because those teams' new claims reject at dispatch.
-  - **An absent set tracks the catalog default; a stored set is frozen at
-    what it names.** That is the one semantic a coarser provider-granular
-    control had and this one has to state explicitly: an untouched set
-    picks up a model a later release adds, a stored one does not.
+  - **An absent set tracks the deployment's whole universe; a stored set is
+    frozen at what it names.** That is the one semantic a coarser
+    provider-granular control had and this one has to state explicitly: an
+    untouched set picks up a model a later release adds, a stored one does
+    not.
+  - **A set is written in the vocabulary its deployment dispatches**, and
+    the two never mix in one set — the keys are whatever the universe
+    offers (§7's 2026-08-24 amendment), native wire ids in multi and harness
+    aliases in local, exactly as the team default and the background-jobs
+    knob beside them already are. Nothing translates a stored value, so the
+    save refuses the other vocabulary rather than storing a word the runtime
+    would be handed and could not send.
   - ~~*Rate cap* — "no model costing more than $X per million tokens"
     (basis: output price), with a blast-radius resolution for tightening
     it over existing selections.~~ **Superseded 2026-08-20: not built.**
@@ -793,13 +802,15 @@ probes and no caps. Fable is the load-bearing entry: it is a fourth
 product name arriving *below* the floor of a three-word ladder, so the
 slice that includes it is the one that proves the vocabulary was never a
 hierarchy. The file's Bedrock spellings of those same four ride along as
-supported entries, so the shipped catalog is eight rows and the enable-set
-default is eight keys — but nothing in this slice asks a user to choose
-between the two spellings, which is the question §7's amendment removes.
+supported entries, so the native registry is eight rows and a multi org's
+default set is eight keys; a local one's is the four aliases its own
+universe offers, and nothing in this slice asks a user to choose between the
+two spellings, which is the question §7's 2026-08-24 amendment removes.
 
 **The selection-time control is the enable-set** (R7 as amended): an org
-picks which catalog models its teams may use, a team picks a subset plus
-its default, and the effective team set is the intersection. Price-based
+picks which of the models its deployment offers its teams may use, a team
+picks a subset plus its default, and the effective team set is the
+intersection. Price-based
 rate caps are **not built**, and if a price guardrail ever returns it is an
 overlay on top of enable-sets rather than a second gate beside them.
 R8/R9's budget caps are untouched: the two-systems invariant survives with
@@ -807,18 +818,25 @@ enable-sets in the selection-time seat.
 
 **Storage is two nullable JSON columns**, `org_settings.enabled_models` and
 `team_settings.enabled_models`, and the resolved set is never stored — NULL
-means the org expressed no preference (track the catalog default) or the
-team inherits its org's, which is a different fact from a set naming
-nothing. Not a child table: nothing semi-joins through enablement, the
-catalog is code so there is no FK target, and the sets are read whole at
-one choke point. The probe-history table Q4 eventually wants is a *sibling*
-fact — verification, not enablement — and does not change this.
+means the org expressed no preference (track the deployment's whole
+universe) or the team inherits its org's, which is a different fact from a
+set naming nothing. Not a child table: nothing semi-joins through
+enablement, the model lists are code so there is no FK target, and the sets
+are read whole at one choke point. The probe-history table Q4 eventually
+wants is a *sibling* fact — verification, not enablement — and does not
+change this.
 
-**There is no enable-set UI in either mode, yet.** Local's sets stay NULL:
-enable-sets govern the native universe, and the SDK list is not narrowed by
-them. The API accepts the fields **mode-uniformly** — no `runmode` branch,
-per §7's mode-as-data discipline — so a local install can express a set and
-simply has no reason to. Multi's org control is API-only for now; the
+**A set is bounded by the deployment's universe, not by the build.** Every
+place enablement is answered takes the universe as its input: the absent
+value widens to `Universe.DefaultEnabled()`, and the save refuses a key the
+universe does not offer. So a local org's set is over the SDK aliases and a
+multi org's over the native ids, through the same code and with no branch —
+which is what keeps the two vocabularies from mixing in one stored set.
+
+**There is no enable-set UI in either mode, yet.** Local's sets stay NULL,
+and the API accepts the fields **mode-uniformly** — no `runmode` branch, per
+§7's mode-as-data discipline; the universe is a parameter, which is how the
+same handler serves both. Multi's org control is API-only for now; the
 team-page surface is its own ticket.
 
 ---
@@ -834,8 +852,10 @@ team-page surface is its own ticket.
   tenant-local allowed, since an Azure deployment alias is unavoidably so).
   There is no third, auto-resolving mode — see D4 for the full reasoning.
   Two consequences survive as requirement details:
-  - A pin's **save**-validation is catalog membership only. The enable-set
-    is checked at **dispatch**, because sets drift after a save: an org
+  - A pin's **save**-validation is universe membership only — a name the
+    deployment cannot dispatch is a spelling mistake nothing will ever fix.
+    The enable-set is checked at **dispatch**, because sets drift after a
+    save: an org
     narrowing its set rewrites no pin, so a pin legal when it was written
     can be illegal when it runs, and the moment that can be established is
     the dispatch. A pin outside the effective set fails the step by name
