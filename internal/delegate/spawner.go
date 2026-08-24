@@ -257,9 +257,9 @@ type Spawner struct {
 	// SetRunCredentialResolvers. When set (both modes in production) these
 	// supersede the process-global ghClient/model above; tests leave them
 	// nil and the resolver helpers fall back to ghClient/model.
-	ghResolver ghclient.Resolver                            // per-(org, owner) GitHub client source (App token in multi, keychain PAT in local)
-	runSecrets agentproc.SecretsReader                      // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi)
-	modelFor   func(context.Context, string, string) string // per-(org, team) default-model resolver (prompt.Model still overrides per delegation)
+	ghResolver ghclient.Resolver                                                // per-(org, owner) GitHub client source (App token in multi, keychain PAT in local)
+	runSecrets agentproc.SecretsReader                                          // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi)
+	modelFor   func(context.Context, string, string) (domain.TeamModels, error) // per-(org, team) model resolver: the default a step inherits plus the set every model is held to
 	// llmResolver is the shared LLM-credential resolver (internal/llmcred,
 	// TFAC-616) — role-mode Bedrock orgs mint short-lived STS session creds
 	// through it. Used only where a run resolves its own credentials in
@@ -740,14 +740,14 @@ func (s *Spawner) notifyDrainer(orgID, triggerType, taskID string) {
 //   - secrets: per-org LLM-credential reader. nil in local → the agent
 //     inherits the host's ambient Claude subscription; the system-door
 //     reader in multi.
-//   - modelFor: per-(org, team) default model (the run's team default,
-//     capped by the org max tier). The prompt's own Model still overrides
-//     this per delegation.
+//   - modelFor: per-(org, team) model configuration — the team's default plus
+//     the enable-set it may pick from. The prompt's own Model still overrides
+//     the default per delegation; nothing overrides the set.
 //
 // Set once at startup, post-NewSpawner. Any of the three may be nil; the
 // resolver helpers fall back to the constructor-supplied ghClient/model
 // (the test / no-seam path).
-func (s *Spawner) SetRunCredentialResolvers(resolver ghclient.Resolver, secrets agentproc.SecretsReader, modelFor func(context.Context, string, string) string) {
+func (s *Spawner) SetRunCredentialResolvers(resolver ghclient.Resolver, secrets agentproc.SecretsReader, modelFor func(context.Context, string, string) (domain.TeamModels, error)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ghResolver = resolver
@@ -832,8 +832,8 @@ func (s *Spawner) Storage() storage.Storage {
 	return s.blobs
 }
 
-// resolveRunCredentials resolves the per-(org, owner) GitHub client and
-// the run's team default model. Both modes call this identically;
+// resolveRunCredentials resolves the per-(org, owner) GitHub client and the
+// run's team model configuration. Both modes call this identically;
 // mode-awareness lives inside the resolver (App token vs PAT) and the
 // secrets reader (system door vs nil), not at the call site. owner is the
 // GitHub account the run targets — empty for Jira runs, which don't
@@ -842,8 +842,15 @@ func (s *Spawner) Storage() storage.Storage {
 // the caller has none in view. teamID is the task's owning team, so a
 // multi-team org honors each team's model choice; empty falls back to the
 // org default team.
-func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo, teamID string) (*ghclient.Client, string) {
-	return s.resolveGHClient(ctx, orgID, owner, repo), s.resolveModel(ctx, orgID, teamID)
+//
+// A model that cannot be resolved is an error rather than a substitution, so
+// the caller refuses the delegation instead of buying a model nobody chose.
+func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo, teamID string) (*ghclient.Client, domain.TeamModels, error) {
+	models, err := s.resolveModel(ctx, orgID, teamID)
+	if err != nil {
+		return nil, domain.TeamModels{}, err
+	}
+	return s.resolveGHClient(ctx, orgID, owner, repo), models, nil
 }
 
 // resolveGHClient resolves the per-(org, owner) GitHub client via the
@@ -1075,22 +1082,23 @@ func gitPushRecorder(host *agenthost.LocalClient, info agenthost.ConversationInf
 	}
 }
 
-// resolveModel resolves the run's team default model via the
-// resolver, falling back to the constructor-supplied model when no resolver
-// is wired (test fixtures) or the resolver returns empty. teamID is the
-// run's owning team; empty falls back to the org default team inside the
-// resolver.
-func (s *Spawner) resolveModel(ctx context.Context, orgID, teamID string) string {
+// resolveModel resolves the run's team model configuration via the resolver.
+// teamID is the run's owning team; empty falls back to the org default team
+// inside the resolver.
+//
+// With no resolver wired (test fixtures) it answers the constructor-supplied
+// model under an unrestricted set — there are no stores to read an enable-set
+// out of, and inventing an empty one would refuse every model instead of
+// admitting that nothing was configured to narrow.
+func (s *Spawner) resolveModel(ctx context.Context, orgID, teamID string) (domain.TeamModels, error) {
 	s.mu.Lock()
 	fn := s.modelFor
 	fallback := s.model
 	s.mu.Unlock()
-	if fn != nil {
-		if m := fn(ctx, orgID, teamID); m != "" {
-			return m
-		}
+	if fn == nil {
+		return domain.NewTeamModels(fallback, domain.ModelSet{}), nil
 	}
-	return fallback
+	return fn(ctx, orgID, teamID)
 }
 
 // getRunSecrets returns the per-org LLM-credential reader threaded into

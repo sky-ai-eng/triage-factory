@@ -3,9 +3,12 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -46,7 +49,9 @@ func TestDelegate_StepRunsOnTheStoredModelID(t *testing.T) {
 
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
 			s.SetRunCredentialResolvers(nil, nil,
-				func(context.Context, string, string) string { return tc.teamDefault })
+				func(context.Context, string, string) (domain.TeamModels, error) {
+					return domain.NewTeamModels(tc.teamDefault, domain.ModelSet{}), nil
+				})
 
 			brID, err := s.Delegate(task, DelegateOpts{
 				OrgID:               runmode.LocalDefaultOrgID,
@@ -68,4 +73,93 @@ func TestDelegate_StepRunsOnTheStoredModelID(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A pinned step outside the team's enable-set fails the delegation by name, and
+// leaves nothing behind to reap. The pin was legal when it was saved — the
+// catalog is the save-time gate — and became illegal when the set narrowed
+// afterwards, which is the case a save-time check structurally cannot catch.
+//
+// The team default here IS enabled, so the only thing that can produce the
+// refusal is the pin. And the same pin under a set that names it runs, which is
+// the other half: the enable-set is membership, never a ceiling, so an enabled
+// model costlier than the default dispatches on it.
+func TestDelegate_StepPinOutsideTheEnabledSet(t *testing.T) {
+	enabled := func(keys ...string) domain.TeamModels {
+		return domain.NewTeamModels(domain.ModelHaiku,
+			domain.TeamModelSet(keys, domain.OrgModelSet(nil, modelcatalog.DefaultEnabled())))
+	}
+
+	t.Run("outside the set fails", func(t *testing.T) {
+		database := newDelegateTestDB(t)
+		task, bpID := delegatableFixture(t, database, "pin-refused")
+		if _, err := database.Exec(
+			`UPDATE prompts SET model = ? WHERE id = 'capp-pin-refused'`, domain.ModelOpus,
+		); err != nil {
+			t.Fatalf("pin step model: %v", err)
+		}
+
+		s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
+		s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+			return enabled(domain.ModelHaiku), nil
+		})
+
+		_, err := s.Delegate(task, DelegateOpts{
+			OrgID:               runmode.LocalDefaultOrgID,
+			ExplicitBlueprintID: bpID,
+			TriggerType:         "manual",
+		})
+		if !errors.Is(err, domain.ErrModelNotEnabled) {
+			t.Fatalf("Delegate = %v, want ErrModelNotEnabled", err)
+		}
+		if !strings.Contains(err.Error(), domain.ModelOpus) {
+			t.Errorf("error %q does not name the pinned model", err)
+		}
+		// Nothing durable was written: the refusal lands before the firing's
+		// commit point, so there is no blueprint_run to reap and no queued
+		// conversation for a claim to pick up.
+		if n := countBlueprintRuns(t, database, task.ID); n != 0 {
+			t.Errorf("a refused delegation minted %d blueprint_run(s)", n)
+		}
+		var queued int
+		if err := database.QueryRow(`SELECT COUNT(*) FROM conversations`).Scan(&queued); err != nil {
+			t.Fatalf("count conversations: %v", err)
+		}
+		if queued != 0 {
+			t.Errorf("a refused delegation enqueued %d conversation(s)", queued)
+		}
+	})
+
+	t.Run("an enabled costlier pin runs", func(t *testing.T) {
+		database := newDelegateTestDB(t)
+		task, bpID := delegatableFixture(t, database, "pin-allowed")
+		if _, err := database.Exec(
+			`UPDATE prompts SET model = ? WHERE id = 'capp-pin-allowed'`, domain.ModelOpus,
+		); err != nil {
+			t.Fatalf("pin step model: %v", err)
+		}
+
+		s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
+		s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+			return enabled(domain.ModelHaiku, domain.ModelOpus), nil
+		})
+
+		brID, err := s.Delegate(task, DelegateOpts{
+			OrgID:               runmode.LocalDefaultOrgID,
+			ExplicitBlueprintID: bpID,
+			TriggerType:         "manual",
+		})
+		if err != nil {
+			t.Fatalf("Delegate: %v", err)
+		}
+		var got sql.NullString
+		if err := database.QueryRow(
+			`SELECT model FROM conversations WHERE blueprint_run_id = ?`, brID,
+		).Scan(&got); err != nil {
+			t.Fatalf("read step-0 conversation: %v", err)
+		}
+		if got.String != domain.ModelOpus {
+			t.Errorf("conversation model = %q, want the enabled pin %q", got.String, domain.ModelOpus)
+		}
+	})
 }

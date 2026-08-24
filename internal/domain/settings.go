@@ -9,10 +9,9 @@ import (
 )
 
 // DefaultModel is the model TF provisions a team with when nobody has chosen
-// one yet. Shared by DefaultTeamSettings (the stored default) and
-// EffectiveModel (the resolution fallback) so the two can't drift, and pinned
-// to the same value as the team_settings.default_model column default, which
-// is what a partial write materializes a row from.
+// one yet. Read by DefaultTeamSettings and pinned to the same value as the
+// team_settings.default_model column default, which is what a partial write
+// materializes a row from, so the two can't drift.
 const DefaultModel = ModelSonnet
 
 // LocalBackgroundJobsModel is the background-jobs model a local install starts
@@ -109,7 +108,7 @@ const (
 const DefaultReviewPosture = ReviewPostureIdentity
 
 // ValidReviewPostures is the accepted value set for TeamSettings.ReviewPosture.
-// Validated app-side rather than with a DB CHECK (the MaxLLMModelTier
+// Validated app-side rather than with a DB CHECK (the GitHubCredentialClass
 // precedent): a CHECK buys little over a closed handler and would force
 // SQLite's whole table-rebuild dance to ever change.
 var ValidReviewPostures = []string{
@@ -196,9 +195,12 @@ const MaxConcurrentClaimsCeiling = 1_000_000
 //     NULL-to-default resolution above, GitHubCloneProtocol as a genuine
 //     NOT NULL org_settings column.
 //   - GitHubBaseURL / JiraBaseURL / AnthropicAPIKeyRef /
-//     BedrockCredentialsRef / MaxLLMModelTier round-trip "" for "not
-//     configured yet" (base URLs) / "use deployment default" (vault refs) /
-//     "no cap" (max tier). Callers never need a second sentinel for absence.
+//     BedrockCredentialsRef round-trip "" for "not configured yet" (base
+//     URLs) / "use deployment default" (vault refs). Callers never need a
+//     second sentinel for absence.
+//   - EnabledModels is nil for a NULL column — the org has expressed no
+//     preference, which OrgModelSet resolves to the catalog default. A stored
+//     set is never empty; the write refuses one.
 //   - MaxDailyCostUSD is a nullable numeric column (TFAC-477). 0
 //     round-trips 0 ↔ NULL — "no cap". Callers never need to
 //     distinguish 0 from NULL.
@@ -220,18 +222,19 @@ type OrgSettings struct {
 
 	AnthropicAPIKeyRef    string
 	BedrockCredentialsRef string
-	// MaxLLMModelTier is the org's ceiling over the three Anthropic tiers,
-	// stored as the bare tier word ("haiku" | "sonnet" | "opus"; "" = no cap).
-	// App-validated, NOT DB-constrained. It is the one model setting that still
-	// speaks tier words rather than concrete ids, because a rank is all it is:
-	// it can only place models the ladder orders, which is three of them.
+	// EnabledModels is the org's enable-set: the catalog keys its teams may
+	// pick from, stored as a JSON array. nil is the absent value and means the
+	// org has expressed no preference, which resolves to the whole catalog —
+	// so a model a later release adds is enabled for that org the day it ships,
+	// while a stored set stays frozen at what it names.
 	//
-	// TODO(TFAC-703): replace this column with the org's enable-set — a list of
-	// models with an on/off each — and delete the tier ladder (domain.ModelTier,
-	// ParseTier, EffectiveModel) along with it. A set says which models may be
-	// picked without claiming any is better than another, which is the claim a
-	// ceiling has to make and the catalog declines to.
-	MaxLLMModelTier string
+	// Never store the resolved set. "The org chose nothing" and "the org chose
+	// everything" are different facts about what happens next, and collapsing
+	// them at the column is what would make the first one impossible to spell.
+	//
+	// Read through OrgModelSet, which is also where the absent-value decision
+	// lives, so every surface answers the same.
+	EnabledModels []string
 
 	// BackgroundJobsModel is the model the two headless system jobs — the
 	// scorer and the repo profiler — run on. A catalog
@@ -342,7 +345,7 @@ type OrgSettings struct {
 // collapse them.
 //
 // Values are app-validated, not CHECK-constrained — the same convention the
-// other open-set text columns follow (org_settings.max_llm_model_tier,
+// other open-set text columns follow (org_settings.background_jobs_model,
 // prompts.source), so a new class costs no DDL on either backend.
 //
 // "managed_app" — an org riding the deployment's own shared App — is a reserved
@@ -492,21 +495,20 @@ type TeamSettings struct {
 	// prompt author must not be able to opt their conversations out of the team's gate.
 	ReviewPosture string
 
-	// AllowedProviders restricts which inference providers this team may spend
-	// against — an org admin's decision, stored as modelcatalog provider ids.
-	// Empty (the default) is no restriction: every provider the org configured.
+	// EnabledModels is the team's enable-set: which of the models its org
+	// enables this team may pick from, stored as a JSON array of catalog keys.
+	// nil is the absent value and inherits the org's effective set whole.
 	//
-	// Org-admin-configured, like MaxDailyCostUSD and for the same reason: a team
-	// admin who could widen their own team's restriction would not be restricted.
-	// The team-settings write path never populates this field from its request
-	// body, so a team-admin save round-trips the stored value untouched; only the
-	// org-admin write changes it.
+	// A subset of the org's set at every save — the write refuses a superset —
+	// and narrowed to it again at every read, because the org may shrink its own
+	// set afterwards and nothing rewrites a team row when it does. TeamModelSet
+	// is where both halves meet.
 	//
-	// It is forward-acting. Restricting a team does not rewrite the model already
+	// It is forward-acting. Narrowing a team does not rewrite the model already
 	// pinned on its prompts or stored as its default — those are caught at the
 	// next dispatch, which refuses by name rather than substituting a model
 	// nobody chose.
-	AllowedProviders []string
+	EnabledModels []string
 
 	// BaseBranchPushPolicy is whether this team's delegated agents may push to
 	// a repo's base / default branch — one of ValidBaseBranchPushPolicies, read

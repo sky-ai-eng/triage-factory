@@ -4,10 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
@@ -19,14 +19,13 @@ import (
 //
 //   - GET /api/orgs/{org_id}/models — as one org sees them.
 //   - GET /api/teams/{team_id}/models — as one team may run them.
-//   - PUT /api/teams/{team_id}/models/providers — the org admin's restriction.
 //   - POST /api/orgs/{org_id}/models/{model_key}/test — verify one model.
 //   - POST /api/orgs/{org_id}/models/tests — verify one provider's candidates.
 //
 // The subject is the org or the team, never the caller, because the answer
-// depends on it: `enabled` is org state and the provider restriction is team
-// state, and an admin belonging to several of either must be able to read each
-// without first moving a session cursor.
+// depends on it: `enabled` is the org's enable-set and the team read narrows to
+// the team's, and an admin belonging to several of either must be able to read
+// each without first moving a session cursor.
 //
 // Read is any member, not admin. The widest audience for this read is a team
 // admin who cannot read org settings at all but has to know what the org
@@ -150,12 +149,16 @@ func (h *modelsHandler) handleModelsList(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// The org's stored enable-set has no column yet, so every org resolves to
-	// the default set — every catalog entry. The seam is this call, not a
-	// branch here: filling in the stored value changes the argument and
-	// nothing else.
-	// TODO(TFAC-703): pass the org's org_settings.enabled_models here.
-	enabled := modelcatalog.Enabled(nil)
+	var orgSet domain.OrgSettings
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var err error
+		orgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
+		return err
+	}); err != nil {
+		internalError(w, "models", err)
+		return
+	}
+	enabled := domain.OrgModelSet(orgSet.EnabledModels, modelcatalog.DefaultEnabled())
 
 	catalog := modelcatalog.Entries()
 	items := make([]modelCatalogRow, 0, len(catalog))
@@ -168,7 +171,7 @@ func (h *modelsHandler) handleModelsList(w http.ResponseWriter, r *http.Request)
 // catalogRow projects one catalog entry onto the wire shape both scopes serve,
 // so the org read and the team read cannot describe the same model
 // differently — availability included, which is org truth and therefore
-// identical at both scopes. A team restriction removes an entry from the team
+// identical at both scopes. A team's enable-set removes an entry from the team
 // read; it never changes what the remaining entries say.
 func catalogRow(e modelcatalog.Entry, enabled bool, avail availabilityIndex) modelCatalogRow {
 	state, detail, checkedAt := avail.forEntry(e)
@@ -193,8 +196,7 @@ func catalogRow(e modelcatalog.Entry, enabled bool, avail availabilityIndex) mod
 }
 
 // handleTeamModelsList returns the models one TEAM may run on: the org's
-// catalog minus the providers an org admin restricted this team from spending
-// against.
+// enable-set narrowed to the team's own.
 //
 // The same node name at a second scope, the way /usage is mounted at
 // /api/me, /api/teams/{id} and /api/orgs/{id}: a caller who found the org's
@@ -203,10 +205,10 @@ func catalogRow(e modelcatalog.Entry, enabled bool, avail availabilityIndex) mod
 // answer depends on the {team_id}, so a session cursor could not address it and
 // a token caller could not reach it at all.
 //
-// Restricted entries are omitted rather than flagged. The list's job is to be
-// the picker's options, and a model this team cannot spend against is not an
-// option; the restriction itself is readable on the team's settings, which is
-// where an admin goes to change it.
+// Models outside the team's set are omitted rather than flagged. The list's job
+// is to be the picker's options, and a model this team may not pick is not an
+// option; the set itself is readable on the team's settings, which is where an
+// admin goes to change it.
 //
 // GET /api/teams/{team_id}/models
 func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Request) {
@@ -215,22 +217,26 @@ func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// The restriction is read on the admin pool, after the gate above has
-	// established the team is in the caller's org. It is org policy ABOUT a
-	// team rather than the team's own configuration, and its first reader is
-	// the org admin who set it — who need not be a member of the team, and
-	// whom the membership-gated team_settings RLS would silently answer with
-	// the defaults, showing them an unrestricted catalog seconds after they
-	// restricted it. A wrong answer here is worse than a wider one: what it
-	// discloses to another org member is which providers a sibling team may
-	// spend against.
-	var allowed modelcatalog.ProviderSet
+	// The team's set is read on the admin pool, after the gate above has
+	// established the team is in the caller's org. Its first reader is an org
+	// admin comparing what a team may run against what the org enabled — who
+	// need not be a member of the team, and whom the membership-gated
+	// team_settings RLS would silently answer with the defaults, showing them an
+	// unnarrowed catalog. A wrong answer here is worse than a wider one: what it
+	// discloses to another org member is which models a sibling team may spend
+	// on.
+	var enabled domain.ModelSet
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		set, err := tx.Teams.GetSettingsSystem(r.Context(), teamID)
+		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
+		if err != nil {
+			return fmt.Errorf("read org settings: %w", err)
+		}
+		teamSet, err := tx.Teams.GetSettingsSystem(r.Context(), teamID)
 		if err != nil {
 			return fmt.Errorf("read team settings: %w", err)
 		}
-		allowed = modelcatalog.AllowedProviders(set.AllowedProviders)
+		enabled = domain.TeamModelSet(teamSet.EnabledModels,
+			domain.OrgModelSet(orgSet.EnabledModels, modelcatalog.DefaultEnabled()))
 		return nil
 	}); err != nil {
 		internalError(w, "models", err)
@@ -242,111 +248,15 @@ func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// TODO(TFAC-703): pass the org's org_settings.enabled_models here, as the
-	// org-scoped read will.
-	enabled := modelcatalog.Enabled(nil)
-
 	catalog := modelcatalog.Entries()
 	items := make([]modelCatalogRow, 0, len(catalog))
 	for _, e := range catalog {
-		if !allowed.Has(e.Provider) {
+		if !enabled.Has(e.Key) {
 			continue
 		}
-		items = append(items, catalogRow(e, enabled.Has(e.Key), avail))
+		items = append(items, catalogRow(e, true, avail))
 	}
 	writeJSON(w, http.StatusOK, modelCatalogResponse{Items: items})
-}
-
-// teamProvidersUpdate is the PUT …/models/providers body. The list IS the
-// resource: an empty list (or null) is the unrestricted state, because a
-// restriction naming nothing and no restriction are the same fact.
-type teamProvidersUpdate struct {
-	AllowedProviders []string `json:"allowed_providers"`
-}
-
-// handleTeamProvidersPut restricts which providers a team may spend against.
-//
-// Org admin, and only org admin: a team that could widen its own restriction
-// would not be restricted. That is the same reason the per-team spend cap is
-// org-admin-only, and it is why the write goes through the admin-pool
-// SetAllowedProvidersSystem — the org admin need not be a member of the team
-// they are restricting. The org comes from the session (as the other
-// /api/teams/{team_id} writes do), the team from the path.
-//
-// The restriction is forward-acting. It does not rewrite a model already stored
-// as this team's default or pinned on its prompts; those are caught at the next
-// dispatch, which refuses by name rather than substituting a model nobody chose.
-//
-// PUT /api/teams/{team_id}/models/providers
-func (h *modelsHandler) handleTeamProvidersPut(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, teamID, ok := h.resolveTeam(w, r)
-	if !ok {
-		return
-	}
-	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
-		return
-	}
-	// An archived team runs nothing, so a restriction on one could never take
-	// effect — the rest of the team-settings write family refuses these too.
-	if !h.az.VerifyTeamNotArchived(w, r, orgID, userID, teamID) {
-		return
-	}
-
-	var req teamProvidersUpdate
-	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return
-	}
-	providers, ok := validateProviderRestriction(w, req.AllowedProviders)
-	if !ok {
-		return
-	}
-
-	// The write returns the settings row it persisted, so the echo reflects what
-	// actually landed rather than this caller's request body — what keeps two
-	// admins racing on the same team convergent.
-	var stored []string
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		set, e := tx.Teams.SetAllowedProvidersSystem(r.Context(), teamID, providers)
-		if e != nil {
-			return e
-		}
-		stored = set.AllowedProviders
-		return nil
-	}); err != nil {
-		internalError(w, "models", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, teamProvidersUpdate{AllowedProviders: nonNil(stored)})
-}
-
-// validateProviderRestriction normalizes and checks the requested restriction.
-// A provider this build cannot drive is rejected by name rather than stored: a
-// restriction nothing matches is a team that can run nothing, and a typo would
-// produce exactly that silently.
-func validateProviderRestriction(w http.ResponseWriter, requested []string) ([]string, bool) {
-	var v httpx.Validation
-	out := make([]string, 0, len(requested))
-	seen := map[string]bool{}
-	for _, raw := range requested {
-		p := strings.TrimSpace(raw)
-		switch {
-		case p == "":
-			v.Invalid("allowed_providers", "allowed_providers must not contain an empty provider; send [] to remove the restriction")
-		case !modelcatalog.KnownProvider(p):
-			v.Invalid("allowed_providers", fmt.Sprintf("%q is not a provider this deployment drives: %s", p, strings.Join(modelcatalog.SupportedProviders(), ", ")))
-		case seen[p]:
-			// A duplicate changes nothing, but accepting it would store a list
-			// that does not read back as it was sent.
-			v.Invalid("allowed_providers", fmt.Sprintf("%q appears twice", p))
-		default:
-			seen[p] = true
-			out = append(out, p)
-		}
-	}
-	if v.Flush(w, http.StatusBadRequest) {
-		return nil, false
-	}
-	return out, true
 }
 
 // resolveTeam is the shared prefix of the two team-scoped model routes: the
@@ -377,12 +287,11 @@ func (h *modelsHandler) resolveTeam(w http.ResponseWriter, r *http.Request) (org
 // returning false for anything else so the caller falls through to its own
 // error handling.
 //
-// Both are 400 INVALID_FIELD on the named field: the value is well-formed and
-// the write is well-addressed, but it names a model this team cannot run. They
-// stay distinguishable in the message, which carries the remedy — connect the
-// provider, or ask an org admin to widen the team's restriction.
+// 400 INVALID_FIELD on the named field: the value is well-formed and the write
+// is well-addressed, but it names a model this organization cannot
+// authenticate. The message carries the remedy — connect the provider.
 func writeModelAccessError(w http.ResponseWriter, err error, field string) bool {
-	if !errors.Is(err, modelaccess.ErrProviderUnconfigured) && !errors.Is(err, modelaccess.ErrProviderRestricted) {
+	if !errors.Is(err, modelaccess.ErrProviderUnconfigured) {
 		return false
 	}
 	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{

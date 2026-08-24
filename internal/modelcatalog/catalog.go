@@ -75,7 +75,7 @@ type Entry struct {
 	DisplayName string
 	// Provider is the access path this key is reached through, mapped from the
 	// datasheet's vendor label through datasheetProviders. It is the provider
-	// vocabulary a credential lookup and a team restriction share, not
+	// vocabulary a credential lookup and an availability probe share, not
 	// upstream's label, which spells one path several ways.
 	Provider              string
 	Prices                PricesPerMTok
@@ -143,16 +143,13 @@ func Keys() []string {
 
 // Offers reports whether key is one this build names. The membership test every
 // surface that validates a stored model value runs, so "offered" has one
-// definition rather than one per handler. Named for what it asks rather than
-// Has, which on this package already belongs to EnableSet and answers the
-// narrower per-org question.
+// definition rather than one per handler.
 //
-// It answers for the BUILD, not for a tenant — no enable-set is consulted here.
-//
-// TODO(TFAC-703): make the accepted set the org's (and the team's) enable-set
-// rather than the whole catalog, so a stored model can only ever name one the
-// org turned on. Until then a pin is bounded by the catalog alone, and the
-// org max-tier cap — which this replaces — reaches only the team default.
+// It answers for the BUILD, not for a tenant. Whether a tenant may pick the
+// model is the enable-set's question (domain.ModelSet), and the two are asked
+// at different moments on purpose: a pin is validated against the catalog when
+// it is SAVED, because that is a spelling nothing can invoke, and against the
+// enable-set at DISPATCH, because sets drift after a save.
 func Offers(key string) bool {
 	for _, e := range entries {
 		if e.Key == key {
@@ -163,38 +160,10 @@ func Offers(key string) bool {
 }
 
 // DefaultEnabled is the enable-set an org that has never expressed a preference
-// gets: every entry in the catalog. Stored enable-sets read this as their
-// absent-value semantics, so "the org chose nothing" and "the org chose
-// everything" stay distinguishable in storage while resolving the same here.
+// gets: every entry in the catalog. It is the second argument to
+// domain.OrgModelSet, which owns the absent-value decision — this package owns
+// only what the default IS, since the catalog is the thing that knows.
 func DefaultEnabled() []string { return Keys() }
-
-// EnableSet answers whether one org has a given model enabled.
-type EnableSet struct {
-	keys map[string]bool
-}
-
-// Enabled resolves an org's stored enable-set into something to ask questions
-// of. A nil or empty stored set means no preference was expressed and resolves
-// to DefaultEnabled — not to "nothing enabled", which would leave an org with
-// no models the moment the column exists.
-//
-// Callers pass what the org stored and never branch on whether it was empty;
-// that decision belongs here, in one place, so every surface answers the same.
-func Enabled(stored []string) EnableSet {
-	if len(stored) == 0 {
-		stored = DefaultEnabled()
-	}
-	set := EnableSet{keys: make(map[string]bool, len(stored))}
-	for _, k := range stored {
-		set.keys[k] = true
-	}
-	return set
-}
-
-// Has reports whether key is enabled. A key the org enabled but the catalog no
-// longer offers simply never gets asked about, since callers iterate the
-// catalog.
-func (s EnableSet) Has(key string) bool { return s.keys[key] }
 
 // load parses the supported-models file and joins each entry against the
 // datasheet. lookup is a parameter rather than a direct inference call so the

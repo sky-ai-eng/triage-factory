@@ -770,17 +770,18 @@ func writeDelegateSpawnError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
-	// The model's provider is unconnected, or restricted for this team. The
-	// message is the entire value of the refusal — it names the provider and
-	// where an admin connects it — so it goes out verbatim rather than through
-	// the 500 arm's redaction, which exists for errors that can carry driver
-	// and upstream strings. These carry a provider display name and a model
-	// key, both TF's own.
+	// The model's provider is unconnected, or the model is one this team's
+	// enable-set excludes. The message is the entire value of the refusal — it
+	// names the model and either where an admin connects the provider or which
+	// set excludes it — so it goes out verbatim rather than through the 500
+	// arm's redaction, which exists for errors that can carry driver and
+	// upstream strings. These carry a provider display name and catalog keys,
+	// all TF's own.
 	//
 	// No `field`: nothing in the body is wrong. The caller asked to run a task
-	// and the answer depends on the org's credentials and the team's
-	// restriction, neither of which they sent.
-	if errors.Is(err, modelaccess.ErrProviderUnconfigured) || errors.Is(err, modelaccess.ErrProviderRestricted) {
+	// and the answer depends on the org's credentials and the team's enabled
+	// models, neither of which they sent.
+	if errors.Is(err, modelaccess.ErrProviderUnconfigured) || errors.Is(err, domain.ErrModelNotEnabled) {
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
 			Reason:  httpx.ReasonSpawnFailed,
 			Message: err.Error(),

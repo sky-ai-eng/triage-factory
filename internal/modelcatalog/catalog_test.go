@@ -195,30 +195,22 @@ func TestLoad_DisplayOrderIsContiguousAfterADrop(t *testing.T) {
 	}
 }
 
-// An org that has expressed no preference has everything enabled — the absent
-// value resolves to the whole catalog, never to nothing.
-func TestEnabled_AbsentSetMeansEveryModel(t *testing.T) {
-	set := Enabled(nil)
+// DefaultEnabled is what an org that has expressed no preference resolves to:
+// one key per catalog entry, so a new model in a release is enabled for such an
+// org the day it ships.
+func TestDefaultEnabled_IsEveryCatalogKey(t *testing.T) {
+	got := DefaultEnabled()
+	if len(got) != len(Entries()) {
+		t.Fatalf("DefaultEnabled has %d keys, want %d (one per catalog entry)", len(got), len(Entries()))
+	}
+	named := make(map[string]bool, len(got))
+	for _, k := range got {
+		named[k] = true
+	}
 	for _, e := range Entries() {
-		if !set.Has(e.Key) {
-			t.Errorf("%s: not enabled under the default set", e.Key)
+		if !named[e.Key] {
+			t.Errorf("%s: catalog entry missing from DefaultEnabled", e.Key)
 		}
-	}
-	if got, want := len(DefaultEnabled()), len(Entries()); got != want {
-		t.Errorf("DefaultEnabled has %d keys, want %d (one per catalog entry)", got, want)
-	}
-	if set.Has("some-model-nobody-enabled") {
-		t.Error("default set claims a key that is not in the catalog")
-	}
-}
-
-func TestEnabled_StoredSetIsHonoured(t *testing.T) {
-	set := Enabled([]string{"claude-opus-5"})
-	if !set.Has("claude-opus-5") {
-		t.Error("stored key is not enabled")
-	}
-	if set.Has("claude-sonnet-5") {
-		t.Error("a key outside the stored set is enabled")
 	}
 }
 

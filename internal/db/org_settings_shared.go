@@ -43,7 +43,7 @@ func ApplyOrgSourceOverrides(set *domain.OrgSettings, github, jira SourceOverrid
 
 // ScanOrgSettingsCore decodes the org_settings columns each dialect store's
 // orgSettingsColumns projects, in that order: github_clone_protocol,
-// anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
+// anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
 // background_jobs_model, llm_auth_method, max_daily_cost_usd,
 // max_concurrent_runs, marketplace_enabled, github_credential_class, version.
 // GitHubBaseURL / GitHubPollInterval / JiraBaseURL / JiraPollInterval are left
@@ -55,22 +55,29 @@ func ApplyOrgSourceOverrides(set *domain.OrgSettings, github, jira SourceOverrid
 // org_event_sources), so it lives here rather than duplicated per dialect.
 func ScanOrgSettingsCore(scan func(...any) error) (domain.OrgSettings, error) {
 	var (
-		anthRef, bedRef, maxTier sql.NullString
-		cloneProto               string
-		backgroundJobsModel      string
-		llmAuthMethod            string
-		maxDailyCost             sql.NullFloat64
-		maxConcurrentRuns        sql.NullInt64
-		marketplaceEnabled       bool
-		credentialClass          string
-		version                  int
+		anthRef, bedRef, enabledModels sql.NullString
+		cloneProto                     string
+		backgroundJobsModel            string
+		llmAuthMethod                  string
+		maxDailyCost                   sql.NullFloat64
+		maxConcurrentRuns              sql.NullInt64
+		marketplaceEnabled             bool
+		credentialClass                string
+		version                        int
 	)
 	if err := scan(
 		&cloneProto,
-		&anthRef, &bedRef, &maxTier, &backgroundJobsModel, &llmAuthMethod,
+		&anthRef, &bedRef, &enabledModels, &backgroundJobsModel, &llmAuthMethod,
 		&maxDailyCost, &maxConcurrentRuns, &marketplaceEnabled,
 		&credentialClass, &version,
 	); err != nil {
+		return domain.OrgSettings{}, err
+	}
+	// NULL stays nil rather than becoming an empty slice: the absent set and a
+	// set naming nothing resolve differently, and this is the one place the
+	// column's NULL reaches Go.
+	enabled, err := UnmarshalModelSetColumn(enabledModels, "org_settings.enabled_models")
+	if err != nil {
 		return domain.OrgSettings{}, err
 	}
 	// Clamp a stray negative up to 0. No DB CHECK guards this column, and
@@ -85,7 +92,7 @@ func ScanOrgSettingsCore(scan func(...any) error) (domain.OrgSettings, error) {
 		GitHubCloneProtocol:   cloneProto,
 		AnthropicAPIKeyRef:    anthRef.String,
 		BedrockCredentialsRef: bedRef.String,
-		MaxLLMModelTier:       maxTier.String,
+		EnabledModels:         enabled,
 		// NOT NULL on both backends, so no null coalescing: "" is the org's own
 		// "not picked", which is the value the multi-mode column defaults to.
 		BackgroundJobsModel: backgroundJobsModel,

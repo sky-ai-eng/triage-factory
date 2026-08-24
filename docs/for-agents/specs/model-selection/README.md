@@ -81,33 +81,44 @@ position, and a fifth arriving between two existing ones breaks it again.
   (`internal/agentloop/stream.go` already states this for retry; it becomes
   a system-wide invariant).
 
-### 1.2 Caps are two different systems
+### 1.2 Selection and spend are two different systems
 
 Conflating these produces a design that does neither well. They are stored
-differently, enforced at different times, and fail differently.
+differently, enforced at different times, and fail differently. One decides
+**which models may be chosen**; the other decides **when work stops**.
 
-- **R7. Rate cap** — "no model costing more than $X per million tokens"
-  (basis: **output price**, the headline axis — no blend). Enforced at
-  **selection** time; its effect is a smaller picker. Org sets one; a team
-  may set a stricter one. The effective cap is the tighter of the two.
-  - When a team's default model exceeds the effective cap, **refuse and
-    require an explicit choice**. Do not auto-clamp: with a single vendor
-    clamping meant "drop a tier," but across vendors "the best model under
-    $X" can silently change vendor, which R6 forbids.
-  - **Tightening a cap over existing selections resolves by blast
-    radius** — a cap that grandfathers everything is a lying control (the
-    admin believes spend is capped while existing pins burn indefinitely):
-    - *Defaults and the background-jobs knob*: the cap save is **refused**
-      until they are re-picked under the new cap. An over-cap team default
-      would break every unset step, and the admin tightening the cap is
-      the right person to re-pick, at that moment.
-    - *Step pins*: the cap save lists every affected pin and requires an
-      explicit confirm ("N pinned steps exceed this cap and will stop
-      dispatching until re-pinned"); after confirm, over-cap pins **fail
-      at dispatch**, loudly naming the cap — the same failure family as
-      R14, and a fail rather than a park, because no rollover fixes it
-      and only a human re-pin can. Over-cap pins are badged in the
-      blueprint editor. Nothing ever substitutes (R6).
+- **R7. Enable-set** — the selection-time control. An org picks which
+  catalog models its teams may use; a team picks a subset of those plus its
+  default. Enforced at **selection** time; its effect is a smaller picker.
+  The effective team set is the team's stored set intersected with the org's,
+  so a later org-side narrowing takes effect without rewriting a team row.
+  - **A default or a pin outside the effective set fails, loudly, naming
+    the model and the set that excludes it.** Never a substitution and
+    never a silent ignore (R6): a default outside the set fails the next
+    claim, a pin outside it fails the step. In-flight work is untouched —
+    disabling a model is forward-acting, exactly as untracking a repo is.
+  - **An org save that disables a model some team still selects succeeds,
+    with a warning naming that team.** Refusing until every team re-picked
+    would couple the org admin to team settings they are barred from
+    editing (the settled org-admin ≠ team-admin rule), and nothing is
+    grandfathered, because those teams' new claims reject at dispatch.
+  - **An absent set tracks the catalog default; a stored set is frozen at
+    what it names.** That is the one semantic a coarser provider-granular
+    control had and this one has to state explicitly: an untouched set
+    picks up a model a later release adds, a stored one does not.
+  - ~~*Rate cap* — "no model costing more than $X per million tokens"
+    (basis: output price), with a blast-radius resolution for tightening
+    it over existing selections.~~ **Superseded 2026-08-20: not built.**
+    Multi-select enablement is the selection-time control, and two
+    selection-time controls can disagree. A price threshold is also the
+    wrong shape for the thing an admin is actually choosing — they are
+    picking *which models*, and price is one of several reasons; a
+    threshold turns that into a claim that models are ordered by price,
+    which is the ordering D4 declines to assert. If a price guardrail ever
+    returns it is an **overlay on top of enable-sets** — a helper that
+    proposes a set, or a badge on an expensive one — never a second gate
+    beside them. R12's provider restriction retires into this control for
+    the same reason (§7's 2026-08-24 amendment).
 - **R8. Budget cap** — "no more than $Y per period," per provider and
   optionally per model. Enforced at **runtime**; its effect is that work
   stops. Breach behavior is settled (Q3): **park** — the workspace and the
@@ -213,8 +224,9 @@ differently, enforced at different times, and fail differently.
 
   Until a defensible ordering exists — plausibly never, plausibly when the
   industry standardizes one — auto-selection would be false confidence
-  with an audit trail. The org/team **rate cap** (R7) already provides the
-  spend guardrail without pretending to know which model is best.
+  with an audit trail. The org/team **enable-set** (R7) already bounds what
+  may be chosen without pretending to know which model is best, and the
+  **budget cap** (R8) bounds what may be spent.
 
   *Amended 2026-08-21.* Storing and displaying a TF-harness benchmark
   score is no longer rejected — see the §3 amendment's evaluation
@@ -603,8 +615,9 @@ Not accepted.
    ListModels term being deployments-mapped-to-models.
 5. **Per-org alias tables** (§2.5) hold the per-vendor id shapes; TF
    requests alias names.
-6. **Rate caps shrink the picker; budget caps stop work.** Separate
-   storage, separate enforcement points.
+6. **Enable-sets shrink the picker; budget caps stop work.** Separate
+   storage, separate enforcement points. ~~Rate caps~~ superseded
+   2026-08-20 — see R7 as amended, and the ship-order amendment below.
 
 ### Amendment (2026-08-21): the file is a registry, not the allowlist
 
@@ -772,6 +785,42 @@ point where file-as-allowlist would otherwise start gating customers. The
 bench snapshot lands when the external bench system exists; nothing
 sequences on it.
 
+### Amendment (2026-08-20): the active slice, and enable-sets over rate caps
+
+**The slice being built is Anthropic-only, four models** — Claude Haiku
+4.5, Sonnet 5, Opus 5, Fable 5 — with no second provider, no availability
+probes and no caps. Fable is the load-bearing entry: it is a fourth
+product name arriving *below* the floor of a three-word ladder, so the
+slice that includes it is the one that proves the vocabulary was never a
+hierarchy. The file's Bedrock spellings of those same four ride along as
+supported entries, so the shipped catalog is eight rows and the enable-set
+default is eight keys — but nothing in this slice asks a user to choose
+between the two spellings, which is the question §7's amendment removes.
+
+**The selection-time control is the enable-set** (R7 as amended): an org
+picks which catalog models its teams may use, a team picks a subset plus
+its default, and the effective team set is the intersection. Price-based
+rate caps are **not built**, and if a price guardrail ever returns it is an
+overlay on top of enable-sets rather than a second gate beside them.
+R8/R9's budget caps are untouched: the two-systems invariant survives with
+enable-sets in the selection-time seat.
+
+**Storage is two nullable JSON columns**, `org_settings.enabled_models` and
+`team_settings.enabled_models`, and the resolved set is never stored — NULL
+means the org expressed no preference (track the catalog default) or the
+team inherits its org's, which is a different fact from a set naming
+nothing. Not a child table: nothing semi-joins through enablement, the
+catalog is code so there is no FK target, and the sets are read whole at
+one choke point. The probe-history table Q4 eventually wants is a *sibling*
+fact — verification, not enablement — and does not change this.
+
+**There is no enable-set UI in either mode, yet.** Local's sets stay NULL:
+enable-sets govern the native universe, and the SDK list is not narrowed by
+them. The API accepts the fields **mode-uniformly** — no `runmode` branch,
+per §7's mode-as-data discipline — so a local install can express a set and
+simply has no reason to. Multi's org control is API-only for now; the
+team-page surface is its own ticket.
+
 ---
 
 ## 4. Open questions
@@ -785,10 +834,13 @@ sequences on it.
   tenant-local allowed, since an Azure deployment alias is unavoidably so).
   There is no third, auto-resolving mode — see D4 for the full reasoning.
   Two consequences survive as requirement details:
-  - A **new** pin that violates the effective rate cap fails at **save**
-    time; a pre-existing pin that a *tightened* cap strands follows R7's
-    blast-radius rule — confirmed by the admin at cap-save, then failing
-    at dispatch naming the cap.
+  - A pin's **save**-validation is catalog membership only. The enable-set
+    is checked at **dispatch**, because sets drift after a save: an org
+    narrowing its set rewrites no pin, so a pin legal when it was written
+    can be illegal when it runs, and the moment that can be established is
+    the dispatch. A pin outside the effective set fails the step by name
+    (R7 as amended); a pin the set admits is honored **whatever its
+    price**, since the set is membership and never a ceiling.
   - A pinned step whose model becomes unavailable fails per R14 — loudly,
     naming the cause. It never silently re-resolves.
 - ~~**Q3 — Budget-cap breach behavior.**~~ **Answered: park, everything,
@@ -916,7 +968,7 @@ Five layers, most-shared first:
 | catalog & names | allowlist ⋈ datasheet, embedded | ~~**identical** — it ships in the binary~~ superseded 2026-08-24 — the per-SDK list ships in the binary beside the native registry; see the amendment below |
 | model universe | filtered by the org's configured providers | ~~filtered by what the SDK can drive: the Claude family via Anthropic direct / Bedrock / Vertex.~~ superseded 2026-08-24 — the SDK's supported-model list, decoupled from the catalog; see the amendment below. **Not a mock — a truth.** A GPT entry in a local picker would be a lie, because nothing local can execute it |
 | availability | `verified` via probe, save-gated (Q4) | ~~**identical vocabulary** — local probes through the agent runtime, which reports the provider's HTTP status on its terminal event (`api_error_status`), so a subscription with no key this process could assemble a request from still yields a real verdict. Same four states, same test-connection button, same stored rows~~ superseded 2026-08-24 — a stored verdict needs a TF-owned credential: under system credentials nothing is stored and no probe surface exists; under BYOK the same four states, keyed `(credential family, alias)`; see the amendment below |
-| caps & usage | full | shared ledger shape (`messages.cost_usd`); rate caps work identically (a picker filter against catalog prices); budget caps per §7.1 |
+| caps & usage | full | shared ledger shape (`messages.cost_usd`); enable-sets are accepted mode-uniformly and simply left unset (§3's active-slice amendment); budget caps per §7.1 |
 
 One deliberate asymmetry, written down so it is a decision rather than
 drift:

@@ -1,18 +1,24 @@
-// Package modelaccess answers one question, for one org and one team: may this
-// model be dispatched?
+// Package modelaccess answers one question, for one org: can this model be
+// authenticated?
 //
-// Two facts decide it, and they fail differently. A provider the org never
-// connected is a setup gap an admin fixes by connecting it; a provider a team is
-// restricted from is a decision an admin already made about that team. Both
-// refuse, and neither substitutes: TF ships no fallback model, so a model whose
-// provider is unavailable is a refusal, never a quiet switch to one the caller
-// did not choose.
+// It is about CREDENTIALS and nothing else. A provider the org never connected
+// is a setup gap an admin fixes by connecting it, and an org that brings its own
+// and has bound nothing can authenticate nothing at all. Both refuse, and
+// neither substitutes: TF ships no fallback model, so a model whose provider is
+// unavailable is a refusal, never a quiet switch to one the caller did not
+// choose.
+//
+// Which models a tenant may PICK is a separate control with a separate storage
+// and a separate failure — the org and team enable-sets (domain.ModelSet) — and
+// the two are deliberately not fused: one is about what the deployment can
+// reach, the other about what an admin decided, and a caller told the wrong one
+// goes to the wrong settings page.
 //
 // It is its own package because both enforcement points need it and neither can
 // import the other. The settings handler asks at save time, so a team's default
 // cannot be set to something its next run would refuse; the delegate asks at
-// dispatch, which is what catches a configuration saved before the restriction —
-// restricting a team rewrites nothing it already stored.
+// dispatch, which is what catches a configuration saved before a credential was
+// unbound.
 package modelaccess
 
 import (
@@ -43,13 +49,6 @@ var ErrProviderUnconfigured = errors.New("model's provider is not connected")
 // substituting a model the caller did not choose, and worse, because the payer
 // changes rather than the price.
 var ErrNoCredentials = errors.New("organization has no Claude credentials of its own")
-
-// ErrProviderRestricted is a model served by a provider an org admin has
-// restricted this team from spending against. Distinct from unconfigured
-// because the remedies differ — one is a credential nobody bound, the other a
-// decision somebody made — and a caller told the wrong one goes to the wrong
-// settings page.
-var ErrProviderRestricted = errors.New("model's provider is restricted for this team")
 
 // Credentials says which providers this org can actually reach. Build it once
 // per request or dispatch and ask it every credential question, so the badge a
@@ -117,34 +116,28 @@ func (c Credentials) Ready() error {
 	return fmt.Errorf("%w: connect a provider in Settings → Claude credentials, or switch to the credentials already on this machine", ErrNoCredentials)
 }
 
-// Check reports whether a team in this org may use model. allowedProviders is
-// the team's stored restriction; empty means unrestricted.
+// Check reports whether this org can authenticate model.
 //
-// Three rules, in order:
+// Two rules:
 //
 //   - A model the catalog does not offer passes. That fault belongs to the
 //     catalog validator wherever the model is stored; reporting it here would
 //     name the wrong problem.
-//   - The team restriction is checked first, so a team is never told to connect
-//     a provider it is not allowed to use anyway.
 //   - The credential is checked only if the org holds some. An org holding none
 //     passes every model: Ready refuses it at dispatch, and the settings save —
 //     which calls Check and not Ready — has to accept a model chosen before any
 //     credential is bound.
 //
-// That last rule is why this is not simply !Has, and why the catalog read can
+// That second rule is why this is not simply !Has, and why the catalog read can
 // badge a model unconfigured while a save of it succeeds.
-func (c Credentials) Check(model string, allowedProviders []string) error {
+func (c Credentials) Check(model string) error {
 	provider, ok := modelcatalog.ProviderFor(model)
 	if !ok {
 		return nil
 	}
-	name := modelcatalog.ProviderDisplayName(provider)
-	if !modelcatalog.AllowedProviders(allowedProviders).Has(provider) {
-		return fmt.Errorf("%w: %s is served by %s, which this team is not allowed to spend against", ErrProviderRestricted, model, name)
-	}
 	if c.anyBound() && !c.Has(provider) {
-		return fmt.Errorf("%w: %s is served by %s, which this organization has not connected — connect it in Settings → Claude credentials", ErrProviderUnconfigured, model, name)
+		return fmt.Errorf("%w: %s is served by %s, which this organization has not connected — connect it in Settings → Claude credentials",
+			ErrProviderUnconfigured, model, modelcatalog.ProviderDisplayName(provider))
 	}
 	return nil
 }

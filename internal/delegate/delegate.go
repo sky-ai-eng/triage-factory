@@ -259,11 +259,23 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		}
 	}
 
-	// model is captured here and stamped onto every enqueued step so the whole
-	// blueprint runs on one model; the GitHub client is resolved per-claim by the
-	// dispatcher (the queue path defers all workspace setup off this call).
+	// The team's model configuration is captured here — its default is stamped
+	// onto every enqueued step so the whole blueprint runs on one model, and its
+	// enable-set is what each step's pin is held to. The GitHub client is
+	// resolved per-claim by the dispatcher (the queue path defers all workspace
+	// setup off this call).
 	owner, repo := ownerRepoForTask(task)
-	_, defaultModel := s.resolveRunCredentials(context.Background(), orgID, owner, repo, teamID)
+	_, teamModels, err := s.resolveRunCredentials(context.Background(), orgID, owner, repo, teamID)
+	if err != nil {
+		return "", err
+	}
+	// A team whose default its own set no longer includes refuses right here,
+	// before any write, naming the model. Asked at the delegation because this
+	// is where the default is chosen for the whole firing.
+	defaultModel, err := teamModels.RequireDefault()
+	if err != nil {
+		return "", err
+	}
 
 	// Compute trigger type + creator user up front so resolvePrompt
 	// can route by them (manual delegations must honor prompts_select
@@ -364,12 +376,20 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 			Brief:        st.Brief,
 		}
 	}
-	// Refuse a firing whose models this org/team cannot run — a provider the org
-	// never connected, or one an org admin restricted this team from. Here,
-	// because this is the last point before the commit: the plan's pins are
-	// resolved and nothing durable has been written, so the refusal leaves no
-	// blueprint_run to reap and nothing to retry.
-	if err := s.checkModelProviders(bgCtx, orgID, teamID, blueprintModels(model, stepPlan)); err != nil {
+	// Refuse a firing whose models this org cannot authenticate — a provider it
+	// never connected. Here, because this is the last point before the commit:
+	// the plan's pins are resolved and nothing durable has been written, so the
+	// refusal leaves no blueprint_run to reap and nothing to retry.
+	if err := s.checkModelProviders(bgCtx, orgID, blueprintModels(model, stepPlan)); err != nil {
+		return "", err
+	}
+	// Step 0's model, decided before the commit for the same reason: a pin the
+	// team's enable-set excludes fails the firing outright, and a firing that
+	// never happened should leave no blueprint_run behind. Later steps' pins are
+	// held to the set at their own advance instead, where the set is read fresh
+	// — narrowing one mid-flight is the case no check here can see.
+	stepModel, err := stepModelOrInherit(stepPlan[0].Model, model, teamModels.Enabled())
+	if err != nil {
 		return "", err
 	}
 
@@ -433,7 +453,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// no child for any conversation-joining recovery arm to find it by — so the
 	// childless-parent shape is owned outside this path, by the boot reconcile
 	// and the leader reaper (domain.BlueprintAbortOrphanedAtMint).
-	if err := s.enqueueBlueprintStep(bgCtx, orgID, blueprintRunID, task, steps[0], stepModelOrInherit(stepPlan[0].Model, model), triggerType, triggerID, creatorUserID, brRow.ActorAgentID); err != nil {
+	if err := s.enqueueBlueprintStep(bgCtx, orgID, blueprintRunID, task, steps[0], stepModel, triggerType, triggerID, creatorUserID, brRow.ActorAgentID); err != nil {
 		if _, mErr := s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, domain.BlueprintRunStatusFailed, "enqueue first step: "+err.Error(), nil); mErr != nil {
 			delegateLog.Warn("mark blueprint_run failed after enqueue error", "blueprint_run", blueprintRunID, "error", mErr)
 		}

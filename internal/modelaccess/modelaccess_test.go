@@ -25,9 +25,9 @@ func bothConnected() domain.OrgSettings {
 	return domain.OrgSettings{AnthropicAPIKeyRef: "anthropic_api_key", BedrockCredentialsRef: "aws_role_arn"}
 }
 
-func TestCheck_BothConnectedAndUnrestricted(t *testing.T) {
+func TestCheck_BothConnected(t *testing.T) {
 	for _, provider := range modelcatalog.SupportedProviders() {
-		if err := For(bothConnected(), false).Check(modelOn(t, provider), nil); err != nil {
+		if err := For(bothConnected(), false).Check(modelOn(t, provider)); err != nil {
 			t.Errorf("%s: %v", provider, err)
 		}
 	}
@@ -37,7 +37,7 @@ func TestCheck_UnconnectedProviderIsNamed(t *testing.T) {
 	org := domain.OrgSettings{AnthropicAPIKeyRef: "anthropic_api_key"}
 	bedrock := modelOn(t, modelcatalog.ProviderBedrock)
 
-	err := For(org, false).Check(bedrock, nil)
+	err := For(org, false).Check(bedrock)
 	if !errors.Is(err, ErrProviderUnconfigured) {
 		t.Fatalf("err = %v, want ErrProviderUnconfigured", err)
 	}
@@ -47,21 +47,8 @@ func TestCheck_UnconnectedProviderIsNamed(t *testing.T) {
 	if !strings.Contains(err.Error(), "Settings") {
 		t.Errorf("error %q does not say where to connect it", err)
 	}
-	if err := For(org, false).Check(modelOn(t, modelcatalog.ProviderAnthropic), nil); err != nil {
+	if err := For(org, false).Check(modelOn(t, modelcatalog.ProviderAnthropic)); err != nil {
 		t.Errorf("the connected provider's model was refused: %v", err)
-	}
-}
-
-// The restriction outranks the credential: telling a team to connect a provider
-// it is not allowed to spend against sends it to do useless work.
-func TestCheck_RestrictionOutranksTheCredential(t *testing.T) {
-	org := domain.OrgSettings{AnthropicAPIKeyRef: "anthropic_api_key"}
-	err := For(org, false).Check(modelOn(t, modelcatalog.ProviderBedrock), []string{modelcatalog.ProviderAnthropic})
-	if !errors.Is(err, ErrProviderRestricted) {
-		t.Fatalf("err = %v, want ErrProviderRestricted", err)
-	}
-	if errors.Is(err, ErrProviderUnconfigured) {
-		t.Errorf("err = %v, reported as both faults at once", err)
 	}
 }
 
@@ -117,21 +104,18 @@ func TestCheck_OrgWithNothingConnected(t *testing.T) {
 	var nothing domain.OrgSettings
 	bedrock := modelOn(t, modelcatalog.ProviderBedrock)
 
-	if err := For(nothing, false).Check(bedrock, nil); err != nil {
+	if err := For(nothing, false).Check(bedrock); err != nil {
 		t.Errorf("an org with nothing connected refused a model: %v", err)
-	}
-	if err := For(nothing, false).Check(bedrock, []string{modelcatalog.ProviderAnthropic}); !errors.Is(err, ErrProviderRestricted) {
-		t.Errorf("err = %v, want the admin's restriction to bind whatever is connected", err)
 	}
 }
 
 // A model nothing offers is not this predicate's fault to report — the catalog
 // validator owns that, and answering here would name the wrong problem.
 func TestCheck_UnofferedModelPasses(t *testing.T) {
-	if err := For(domain.OrgSettings{AnthropicAPIKeyRef: "k"}, false).Check("vendor-model-nobody-offers", []string{modelcatalog.ProviderAnthropic}); err != nil {
+	if err := For(domain.OrgSettings{AnthropicAPIKeyRef: "k"}, false).Check("vendor-model-nobody-offers"); err != nil {
 		t.Errorf("unoffered model reported as a provider fault: %v", err)
 	}
-	if err := For(bothConnected(), false).Check("", nil); err != nil {
+	if err := For(bothConnected(), false).Check(""); err != nil {
 		t.Errorf("an unset model reported as a provider fault: %v", err)
 	}
 }
@@ -186,7 +170,7 @@ func TestCheck_ExemptsTheOrgHoldingNothingSoSetupCanSave(t *testing.T) {
 	fresh := domain.OrgSettings{LLMAuthMethod: domain.LLMAuthBYOK}
 	for _, provider := range modelcatalog.SupportedProviders() {
 		model := modelOn(t, provider)
-		if err := For(fresh, true).Check(model, nil); err != nil {
+		if err := For(fresh, true).Check(model); err != nil {
 			t.Errorf("%s: a fresh multi org could not save a model: %v", provider, err)
 		}
 		if For(fresh, true).Has(provider) {

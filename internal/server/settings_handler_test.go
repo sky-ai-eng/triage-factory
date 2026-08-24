@@ -446,19 +446,26 @@ func TestSettingsGet_MemberCountAndRole(t *testing.T) {
 	}
 }
 
-// --- model cap warnings -----------------------------------------------------
+// --- model enable-sets ------------------------------------------------------
 //
-// EffectiveModel's unit behavior is covered in internal/domain. These cover
-// the handler wiring: the cap never blocks a save, it just surfaces a
-// warning so the admin/team know the effective model differs from the input.
+// The set algebra's unit behavior is covered in internal/domain. These cover
+// the handler wiring: which selections a save refuses, and what a save that
+// succeeds says about the teams it just broke.
 
-// patchTeamSettingsOK PATCHes the team settings row and hands back the decoded
-// settings resource — which is what the PATCH answers with, including any
-// advisory `warning`.
+// patchTeamSettings PATCHes the team settings row and returns the raw response,
+// for tests about a refusal.
+func patchTeamSettings(t *testing.T, s *Server, teamID string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	return doJSON(t, s, http.MethodPatch, teamSettingsPath(teamID), body)
+}
+
+// patchTeamSettingsOK is patchTeamSettings for the happy path: it fails on any
+// non-200 and hands back the decoded settings resource — which is what the
+// PATCH answers with, including any advisory `warning`.
 func patchTeamSettingsOK(t *testing.T, s *Server, teamID string, body any) map[string]any {
 	t.Helper()
 	path := teamSettingsPath(teamID)
-	rec := doJSON(t, s, http.MethodPatch, path, body)
+	rec := patchTeamSettings(t, s, teamID, body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PATCH %s: %d: %s", path, rec.Code, rec.Body.String())
 	}
@@ -902,33 +909,148 @@ func settingsWarning(resp map[string]any) string {
 	return w
 }
 
-func TestTeamSettingsPatch_ModelExceedsOrgCap_Warns(t *testing.T) {
-	s := newTestServer(t)
-	patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "sonnet"})
-
-	resp := patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelOpus})
-	if w := settingsWarning(resp); !strings.Contains(w, "exceeds the org cap") {
-		t.Errorf("expected org-cap warning, got warning=%q", w)
-	}
-}
-
-func TestTeamSettingsPatch_ModelWithinOrgCap_NoWarning(t *testing.T) {
-	s := newTestServer(t)
-	patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "opus"})
-
-	resp := patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelSonnet})
-	if w := settingsWarning(resp); w != "" {
-		t.Errorf("expected no warning when team default is within cap, got %q", w)
-	}
-}
-
-func TestOrgSettingsPatch_CapBelowTeamDefault_Warns(t *testing.T) {
+// An org save that disables a model a team still selects SUCCEEDS, and names
+// that team. Refusing until every team re-picked would couple an org admin to
+// team settings they are barred from editing; saying nothing would leave the
+// team to discover it as a failed run.
+func TestOrgSettingsPatch_DisablingATeamsDefault_WarnsAndSaves(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
 	s := newTestServer(t)
 	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelOpus})
 
-	resp := patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "sonnet"})
-	if w := settingsWarning(resp); !strings.Contains(w, "exceeds the new cap") {
-		t.Errorf("expected cap-downgrade warning, got warning=%q", w)
+	resp := patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelSonnet}})
+	w := settingsWarning(resp)
+	if !strings.Contains(w, domain.ModelOpus) {
+		t.Errorf("warning %q does not name the disabled model", w)
+	}
+	if !strings.Contains(w, "re-pick") {
+		t.Errorf("warning %q does not say what fixes it", w)
+	}
+	// The save landed: the warning is about a save that happened.
+	if got, _ := resp["enabled_models"].([]any); len(got) != 1 {
+		t.Errorf("enabled_models = %v, want the one model the save named", resp["enabled_models"])
+	}
+}
+
+// A save that leaves every team's selection intact says nothing. The warning is
+// computed from what the save REMOVED, so widening — or clearing the set back to
+// the catalog default — is silent.
+func TestOrgSettingsPatch_WideningTheSet_NoWarning(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelSonnet})
+
+	if w := settingsWarning(patchOrgSettingsOK(t, s, map[string]any{
+		"enabled_models": []string{domain.ModelSonnet, domain.ModelOpus},
+	})); w != "" {
+		t.Errorf("narrowing to a set that keeps the team's default warned: %q", w)
+	}
+	if w := settingsWarning(patchOrgSettingsOK(t, s, map[string]any{"enabled_models": nil})); w != "" {
+		t.Errorf("clearing the set back to the catalog default warned: %q", w)
+	}
+}
+
+// Every unknown key is named, not the first — an admin fixing a hand-written
+// list should see the whole list of what is wrong with it. An empty array is
+// refused too: clearing has its own spelling, and a set naming nothing is a
+// deployment where nothing runs.
+func TestOrgSettingsPatch_EnabledModels_Validation(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	rec := patchOrgSettings(t, s, map[string]any{
+		"enabled_models": []string{domain.ModelSonnet, "gpt-9", "llama-99"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown keys = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonInvalidField, "enabled_models")
+	for _, want := range []string{"gpt-9", "llama-99"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("refusal does not name %q: %s", want, rec.Body.String())
+		}
+	}
+
+	if rec := patchOrgSettings(t, s, map[string]any{"enabled_models": []string{}}); rec.Code != http.StatusBadRequest {
+		t.Errorf("empty set = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if rec := patchOrgSettings(t, s, map[string]any{
+		"enabled_models": []string{domain.ModelSonnet, domain.ModelSonnet},
+	}); rec.Code != http.StatusBadRequest {
+		t.Errorf("duplicate key = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	// A null resets to the catalog default: the settings read shows null, and
+	// the models read shows every entry enabled.
+	resp := patchOrgSettingsOK(t, s, map[string]any{"enabled_models": nil})
+	if resp["enabled_models"] != nil {
+		t.Errorf("after a null reset the settings read shows %v, want null", resp["enabled_models"])
+	}
+	models := doJSON(t, s, http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/models", nil)
+	if models.Code != http.StatusOK {
+		t.Fatalf("models read = %d: %s", models.Code, models.Body.String())
+	}
+	for _, item := range decodeModels(t, models.Body.Bytes()).Items {
+		if !item.Enabled {
+			t.Errorf("%s: not enabled after a reset to the catalog default", item.Key)
+		}
+	}
+}
+
+// The team save is held to the org's set and to its own in one pass, and both
+// fields are named when both fail: a save that stored a default the team cannot
+// dispatch would report success for a configuration whose only observable
+// effect is a failed run later.
+func TestTeamSettingsPatch_EnabledModels_HeldToBothSets(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	patchOrgSettingsOK(t, s, map[string]any{
+		"enabled_models": []string{domain.ModelSonnet, domain.ModelHaiku},
+	})
+
+	// A superset of the org's set is refused, naming enabled_models.
+	rec := patchTeamSettings(t, s, "default", map[string]any{
+		"enabled_models": []string{domain.ModelSonnet, domain.ModelOpus},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("superset = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	assertFieldError(t, rec, "enabled_models")
+
+	// A default outside the team's own set is refused, naming ai_model.
+	rec = patchTeamSettings(t, s, "default", map[string]any{
+		"enabled_models": []string{domain.ModelHaiku},
+		"ai_model":       domain.ModelSonnet,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("default outside the set = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	assertFieldError(t, rec, "ai_model")
+
+	// Both wrong at once reports both.
+	rec = patchTeamSettings(t, s, "default", map[string]any{
+		"enabled_models": []string{domain.ModelOpus},
+		"ai_model":       domain.ModelSonnet,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("both wrong = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	assertFieldError(t, rec, "enabled_models")
+	assertFieldError(t, rec, "ai_model")
+
+	// A legal pair saves, and the team's set round-trips as what it named.
+	ok := patchTeamSettingsOK(t, s, "default", map[string]any{
+		"enabled_models": []string{domain.ModelHaiku},
+		"ai_model":       domain.ModelHaiku,
+	})
+	set, _ := ok["team_settings"].(map[string]any)
+	got, _ := set["EnabledModels"].([]any)
+	if len(got) != 1 || got[0] != domain.ModelHaiku {
+		t.Errorf("stored team set = %v, want [%s]", set["EnabledModels"], domain.ModelHaiku)
 	}
 }
 
@@ -996,8 +1118,8 @@ func TestOrgSettingsPatch_DailyCostCap_OmittedFieldUntouched(t *testing.T) {
 	s := newTestServer(t)
 	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": 40})
 
-	// A save touching only the model tier omits the cap → it must survive.
-	patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "sonnet"})
+	// A save touching only the enable-set omits the cap → it must survive.
+	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelSonnet}})
 	if got := orgDailyCap(t, s); got != 40 {
 		t.Errorf("omitting max_daily_cost_usd cleared the cap: got %v, want 40 preserved", got)
 	}
@@ -1068,8 +1190,8 @@ func TestOrgSettingsPatch_ConcurrentRuns_OmittedFieldUntouched(t *testing.T) {
 	s := newTestServer(t)
 	patchOrgSettingsOK(t, s, map[string]any{"max_concurrent_runs": 5})
 
-	// A save touching only the model tier omits the limit → it must survive.
-	patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "sonnet"})
+	// A save touching only the enable-set omits the limit → it must survive.
+	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelSonnet}})
 	if got := orgConcurrentRuns(t, s); got != 5 {
 		t.Errorf("omitting max_concurrent_runs cleared the limit: got %v, want 5 preserved", got)
 	}

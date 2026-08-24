@@ -48,9 +48,11 @@ var ErrNoModel = errors.New("systemllm: no usable background jobs model")
 // a 64k window) deliberately do NOT apply — these jobs are toolless and
 // short-context, so every catalog entry is a legitimate choice here.
 //
-// Team provider restrictions are not consulted, and there is no team argument to
-// consult one with: a restriction narrows what a team may spend against, and
-// these jobs are the org's own work rather than any team's.
+// Enable-sets are not consulted, and there is no team argument to consult a
+// team's with: a set narrows what a TEAM may pick for its runs, and these jobs
+// are the org's own work rather than any team's. The org admin who would edit
+// the set is the same person who picks this knob, so a second gate over one
+// person's two choices would only ever refuse them their own decision.
 func ModelForSettings(set domain.OrgSettings) (string, error) {
 	model := strings.TrimSpace(set.BackgroundJobsModel)
 	if model == "" {
@@ -63,7 +65,7 @@ func ModelForSettings(set domain.OrgSettings) (string, error) {
 	if err := creds.Ready(); err != nil {
 		return "", fmt.Errorf("%w: %w", ErrNoModel, err)
 	}
-	if err := creds.Check(model, nil); err != nil {
+	if err := creds.Check(model); err != nil {
 		return "", fmt.Errorf("%w: the background jobs model setting names %q: %w", ErrNoModel, model, err)
 	}
 	return model, nil

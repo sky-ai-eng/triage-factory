@@ -46,7 +46,6 @@ export interface OrgConfigForm {
   jira_email: string
   jira_api_token: string
   jira_poll_interval: string
-  max_llm_model_tier: string
   // The model the three background jobs — scoring, project classification, repo
   // profiling — run on. A catalog key. Empty means nobody has picked one, and
   // those jobs do not run until somebody does: there is no fallback model.
@@ -123,7 +122,11 @@ export interface OrgSettingsData {
   // Jira host and/or service token, either of which makes an in-place rebind
   // partly or wholly unobservable.
   jira_credential_env_provided?: boolean
-  max_llm_model_tier?: string
+  // The org's stored model enable-set — the catalog keys its teams may pick
+  // from — or null when it has expressed no preference, in which case every
+  // model the deployment offers is enabled. There is no UI for it yet; the
+  // field is carried so a form round-trips the org's settings unchanged.
+  enabled_models: string[] | null
   // The background-jobs model as a catalog key; "" = not picked. Always
   // present — "" is a state the form renders, not an absent field.
   background_jobs_model: string
@@ -175,7 +178,6 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
   jira_email: '',
   jira_api_token: '',
   jira_poll_interval: '5m0s',
-  max_llm_model_tier: '',
   background_jobs_model: '',
   // The blank-form value only; every real form is seeded from the GET, which
   // always carries the org's own. 'byok' rather than 'system' because it is the
@@ -214,7 +216,6 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
     jira_email: '',
     jira_api_token: '',
     jira_poll_interval: org.jira_poll_interval,
-    max_llm_model_tier: org.max_llm_model_tier || '',
     background_jobs_model: org.background_jobs_model || '',
     llm_auth_method: org.llm_auth_method === 'system' ? 'system' : 'byok',
     // 0 (no cap) renders as an empty input ("No cap"); any positive cap seeds
@@ -340,7 +341,6 @@ export type OrgSettingsPatch = Partial<
     | 'github_clone_protocol'
     | 'jira_url'
     | 'jira_poll_interval'
-    | 'max_llm_model_tier'
     | 'background_jobs_model'
     | 'llm_auth_method'
     | 'max_daily_cost_usd'
@@ -376,8 +376,6 @@ export async function patchOrgSettings(
     body.github_clone_protocol = fields.github_clone_protocol
   if (fields.jira_url !== undefined) body.jira_base_url = blankAsNull(fields.jira_url)
   if (fields.jira_poll_interval !== undefined) body.jira_poll_interval = fields.jira_poll_interval
-  if (fields.max_llm_model_tier !== undefined)
-    body.max_llm_model_tier = blankAsNull(fields.max_llm_model_tier)
   // Blank sends null, which is not "leave it alone" here — it stops the
   // background jobs. That is the only way to turn them off short of unbinding
   // the Claude credential every other feature shares.

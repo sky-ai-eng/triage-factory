@@ -394,47 +394,56 @@ func TestBaseline_JiraStatusRulesCompleteOrEmpty_CHECKsFire(t *testing.T) {
 	}
 }
 
-// TestBaseline_OrgSettingsMaxLLMTier_AppValidated pins the baseline
-// decision that org_settings.max_llm_model_tier is an opaque, app-validated,
-// provider-agnostic identifier with NO DB CHECK. NULL ("no cap"), the three
-// app-known tiers, AND a value the app doesn't know today (a future
-// OpenAI/Bedrock family) must all insert at the DB layer — the settings
-// handler is the validation gate, not the column. Dropping the CHECK is what
-// lets new model families land with zero DDL in a later migration.
-func TestBaseline_OrgSettingsMaxLLMTier_AppValidated(t *testing.T) {
+// TestBaseline_EnableSets_AppValidated pins the baseline decision that the two
+// enable-set columns are opaque, app-validated JSON with NO DB CHECK. NULL (the
+// absent set), a set of app-known catalog keys, AND a set naming a key this
+// build does not offer must all insert at the DB layer — the settings handlers
+// are the validation gate, not the column. That is what lets the catalog change
+// with the binary instead of with the schema.
+//
+// NULL is the load-bearing case on both columns, and it is why they are
+// nullable rather than NOT NULL DEFAULT '[]': "expressed no preference" and
+// "named nothing" resolve differently, and a column that cannot be NULL cannot
+// tell them apart.
+func TestBaseline_EnableSets_AppValidated(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
-	owner := SeedUser(t, h, "tier-owner")
-	orgID := SeedOrg(t, h, "tier-org", owner)
+	owner := SeedUser(t, h, "enableset-owner")
+	orgID := SeedOrg(t, h, "enableset-org", owner)
+	teamID := SeedTeam(t, h, orgID, "enableset-team")
 
-	for _, tier := range []sql.NullString{
-		{Valid: false},
-		{String: "haiku", Valid: true},
-		{String: "sonnet", Valid: true},
-		{String: "opus", Valid: true},
-		// Not an app-known tier today — must still pass the DB (no CHECK).
-		{String: "gpt-5-future", Valid: true},
+	for _, tc := range []struct {
+		name string
+		set  sql.NullString
+	}{
+		{"null", sql.NullString{Valid: false}},
+		{"known keys", sql.NullString{String: `["claude-sonnet-5","claude-haiku-4-5-20251001"]`, Valid: true}},
+		// Not a key this build offers — must still pass the DB (no CHECK).
+		{"a key the build does not offer", sql.NullString{String: `["gpt-5-future"]`, Valid: true}},
 	} {
-		name := "null"
-		if tier.Valid {
-			name = tier.String
-		}
-		t.Run("accepted/"+name, func(t *testing.T) {
-			if _, err := h.AdminDB.Exec(
-				`DELETE FROM org_settings WHERE org_id = $1`, orgID,
-			); err != nil {
-				t.Fatalf("reset org_settings: %v", err)
-			}
+		t.Run("org/"+tc.name, func(t *testing.T) {
+			MustExec(t, h.AdminDB, `DELETE FROM org_settings WHERE org_id = $1`, orgID)
 			var arg any
-			if tier.Valid {
-				arg = tier.String
+			if tc.set.Valid {
+				arg = tc.set.String
 			}
 			if _, err := h.AdminDB.Exec(
-				`INSERT INTO org_settings (org_id, max_llm_model_tier) VALUES ($1, $2)`,
-				orgID, arg,
+				`INSERT INTO org_settings (org_id, enabled_models) VALUES ($1, $2)`, orgID, arg,
 			); err != nil {
-				t.Errorf("INSERT max_llm_model_tier=%v: %v (column must be app-validated, no DB CHECK)", arg, err)
+				t.Errorf("INSERT org enabled_models=%v: %v (column must be app-validated, no DB CHECK)", arg, err)
+			}
+		})
+		t.Run("team/"+tc.name, func(t *testing.T) {
+			MustExec(t, h.AdminDB, `DELETE FROM team_settings WHERE team_id = $1`, teamID)
+			var arg any
+			if tc.set.Valid {
+				arg = tc.set.String
+			}
+			if _, err := h.AdminDB.Exec(
+				`INSERT INTO team_settings (team_id, enabled_models) VALUES ($1, $2)`, teamID, arg,
+			); err != nil {
+				t.Errorf("INSERT team enabled_models=%v: %v (column must be app-validated, no DB CHECK)", arg, err)
 			}
 		})
 	}

@@ -359,8 +359,17 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	}
 
 	// Past the authorization gate, so this claim will really run — decide the
-	// model it runs on before either arm below picks it up.
-	conv.Model = s.modelForClaim(ctx, orgID, br, *conv)
+	// model it runs on before either arm below picks it up. A refusal here is a
+	// team whose default its own enable-set no longer includes: nothing has run
+	// under this claim, so it takes the ordinary pre-agent failure path and the
+	// message names the model.
+	model, err := s.modelForClaim(ctx, orgID, br, *conv)
+	if err != nil {
+		s.failEngagement(conv.ID, err)
+		s.handlePreAgentFailure(orgID, br, *conv, err)
+		return
+	}
+	conv.Model = model
 
 	// Resume-by-enqueue: queued input means this claim is NOT a
 	// fresh/crash-reclaimed blueprint step — it's a parked/terminal-resumable
@@ -1081,7 +1090,23 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		if _, err := s.blueprints.SetRunCurrentStepSystem(ctx, orgID, br.ID, next); err != nil {
 			dispatchLog.Warn("set current_step_index for blueprint_run failed", "blueprint_run", br.ID, "error", err)
 		}
-		if err := s.enqueueBlueprintStep(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepModelOrInherit(plan[next].Model, stepConversation.Model), triggerType, br.TriggerID, creatorUserID, br.ActorAgentID); err != nil {
+		// The next step's pin is held to the team's set as it stands NOW, not as
+		// it stood when this blueprint fired: a set narrowed mid-flight is the
+		// case a check at the firing point cannot see. The step this advance
+		// would mint has not run, so refusing it costs no work.
+		teamModels, err := s.resolveModel(ctx, orgID, stepConversation.TeamID)
+		if err != nil {
+			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+				domain.BlueprintRunStatusFailed, fmt.Sprintf("step %d: %v", next, err), &stepIdx, false)
+			return
+		}
+		nextModel, err := stepModelOrInherit(plan[next].Model, stepConversation.Model, teamModels.Enabled())
+		if err != nil {
+			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+				domain.BlueprintRunStatusFailed, fmt.Sprintf("step %d: %v", next, err), &stepIdx, false)
+			return
+		}
+		if err := s.enqueueBlueprintStep(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), nextModel, triggerType, br.TriggerID, creatorUserID, br.ActorAgentID); err != nil {
 			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("enqueue step %d: %v", next, err), &stepIdx, false)
 			return
@@ -1121,14 +1146,33 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 //
 // Nothing is written: the conversation row keeps the model its step ran on, and
 // no blueprint step's model moves. Only this turn is re-modelled.
-func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.BlueprintRun, conv domain.Conversation) string {
+//
+// A fresh decision is a decision that can be refused. When the team's default is
+// one its enable-set no longer includes, this claim fails by name rather than
+// answering with the step's old model — the org disabled that model, and running
+// the follow-up on something the team can no longer pick would be the
+// substitution R6 forbids wearing an inheritance costume. A step of a RUNNING
+// blueprint never asks: its model was frozen at the firing and mid-blueprint
+// work is not re-decided.
+func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.BlueprintRun, conv domain.Conversation) (string, error) {
 	if br == nil || br.Status == domain.BlueprintRunStatusRunning {
-		return conv.Model
+		return conv.Model, nil
 	}
-	if m := s.resolveModel(ctx, orgID, conv.TeamID); m != "" {
-		return m
+	models, err := s.resolveModel(ctx, orgID, conv.TeamID)
+	if err != nil {
+		return "", err
 	}
-	return conv.Model
+	model, err := models.RequireDefault()
+	if errors.Is(err, domain.ErrModelNotEnabled) {
+		return "", err
+	}
+	if err != nil {
+		// The team names no default at all — a fixture with no resolver wired,
+		// or a row nobody has configured. The step's own model is a worse
+		// answer than a fresh decision, but it is a better one than no model.
+		return conv.Model, nil
+	}
+	return model, nil
 }
 
 // stepModelOrInherit resolves the model a blueprint step runs on: its own pin
@@ -1137,22 +1181,30 @@ func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.Bl
 // prior step's model on an advance.
 //
 // Two states, and there is no third. A step is unset and inherits, or it is
-// pinned and runs on what it names; a pin is never ranked, compared, or
-// overruled here. Which models a prompt may name is settled where it is saved —
-// the catalog is the accepted set — and a dispatch that quietly substituted
-// something else would leave the transcript and the ledger describing a model
-// nobody chose.
+// pinned and runs on what it names. A pin is honored whatever it costs: nothing
+// here ranks models or overrules a pin for being the expensive one, because
+// ranking them would need a defensible basis for calling one better than
+// another and TF asserts none.
 //
-// `inherited` has already been through the org max-tier cap
-// (domain.EffectiveModel in resolveAIModelForTeam). A pin has not, and is
-// deliberately not held to it: that cap ranks three Anthropic tiers and can
-// place almost nothing else the catalog offers, so applying it to a pin would
-// mean discarding every model it cannot compare.
-func stepModelOrInherit(stepModel, inherited string) string {
+// What a pin IS held to is the team's enable-set, and a pin outside it fails the
+// step by name. That check belongs here rather than where the prompt was saved,
+// because sets drift after a save — an org narrowing its set does not rewrite
+// the pins already stored under the old one. Failing is the only honest answer:
+// ignoring the pin would run the step on the inherited model, which is the
+// substitution R6 forbids.
+//
+// enabled is the team's effective set, resolved with the default the step
+// inherits so both come from one read of one moment.
+func stepModelOrInherit(stepModel, inherited string, enabled domain.ModelSet) (string, error) {
 	if stepModel == "" {
-		return inherited
+		return inherited, nil
 	}
-	return stepModel
+	if !enabled.Has(stepModel) {
+		return "", fmt.Errorf(
+			"%w: the blueprint step pins %s, which this team's enabled models do not include (%s) — re-pin the step or enable the model in Settings",
+			domain.ErrModelNotEnabled, stepModel, enabled)
+	}
+	return stepModel, nil
 }
 
 // enqueueBlueprintStep mints a queued conversations row for step stepIndex

@@ -54,7 +54,15 @@ func PatchFloat(v *Validation, raw json.RawMessage, field string) (float64, Patc
 	return patchValue[float64](v, raw, field, "a number")
 }
 
-// patchValue is the shared body of the four readers: absent stays absent, the
+// PatchStrings reads a `[]string | null` PATCH field. The list IS the value —
+// a set replaces wholesale rather than merging — so PatchSet hands back exactly
+// what the body named, empty array included; whether an empty one is legal is
+// the field's own question, not this reader's.
+func PatchStrings(v *Validation, raw json.RawMessage, field string) ([]string, PatchState) {
+	return patchValue[[]string](v, raw, field, "an array of strings")
+}
+
+// patchValue is the shared body of the readers above: absent stays absent, the
 // literal null clears, and anything else must decode as T or it's a 400 naming
 // the field.
 func patchValue[T any](v *Validation, raw json.RawMessage, field, want string) (T, PatchState) {

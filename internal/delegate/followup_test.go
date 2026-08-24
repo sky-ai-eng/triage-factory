@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -231,8 +232,8 @@ func TestModelForClaim_FollowUpDoesNotInheritTheStepModel(t *testing.T) {
 	ctx := context.Background()
 
 	running := &domain.BlueprintRun{Status: domain.BlueprintRunStatusRunning}
-	if got := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, running, conv); got != "cheap-aggregator" {
-		t.Errorf("step of a running blueprint = %q, want the step's own model (no mid-blueprint drift)", got)
+	if got, err := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, running, conv); err != nil || got != "cheap-aggregator" {
+		t.Errorf("step of a running blueprint = (%q, %v), want the step's own model (no mid-blueprint drift)", got, err)
 	}
 
 	for _, term := range []domain.BlueprintRunStatus{
@@ -240,17 +241,33 @@ func TestModelForClaim_FollowUpDoesNotInheritTheStepModel(t *testing.T) {
 		domain.BlueprintRunStatusAborted,
 		domain.BlueprintRunStatusFailed,
 	} {
-		if got := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: term}, conv); got != "team-default-model" {
-			t.Errorf("follow-up under a %s blueprint = %q, want the configured default", term, got)
+		got, err := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: term}, conv)
+		if err != nil || got != "team-default-model" {
+			t.Errorf("follow-up under a %s blueprint = (%q, %v), want the configured default", term, got, err)
 		}
 	}
 
-	// A resolver that answers nothing must not blank the model out from under
+	// A resolver that answers no model at all must not blank it out from under
 	// the turn — the step's is a worse answer than the default, never no answer.
-	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) string { return "" })
+	// A resolver that REFUSES is the other case, and it is not this one: that
+	// refusal fails the claim by name rather than reaching for anything.
+	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+		return domain.NewTeamModels("", domain.ModelSet{}), nil
+	})
 	s.model = ""
-	if got := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: domain.BlueprintRunStatusCompleted}, conv); got != "cheap-aggregator" {
-		t.Errorf("unresolvable default = %q, want a fall back to the step's model", got)
+	if got, err := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: domain.BlueprintRunStatusCompleted}, conv); err != nil || got != "cheap-aggregator" {
+		t.Errorf("unresolvable default = (%q, %v), want a fall back to the step's model", got, err)
+	}
+
+	// A team whose default its own enable-set no longer includes refuses the
+	// follow-up by name. Answering with the step's model would be the silent
+	// substitution the whole selection design forbids, dressed as inheritance.
+	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+		return domain.NewTeamModels(domain.ModelOpus,
+			domain.TeamModelSet([]string{domain.ModelHaiku}, domain.OrgModelSet(nil, modelcatalog.DefaultEnabled()))), nil
+	})
+	if got, err := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: domain.BlueprintRunStatusCompleted}, conv); !errors.Is(err, domain.ErrModelNotEnabled) || got != "" {
+		t.Errorf("a disabled team default = (%q, %v), want a refusal naming the model", got, err)
 	}
 }
 

@@ -133,7 +133,7 @@ func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		// environment can satisfy. The clear still round-trips; it just starts
 		// from the value it ends at.
 		"github_clone_protocol": defaultsCloneProtocol(),
-		"max_llm_model_tier":    "sonnet",
+		"enabled_models":        []string{domain.ModelSonnet},
 		"background_jobs_model": domain.ModelOpus,
 		"max_daily_cost_usd":    42.5,
 		"max_concurrent_runs":   9,
@@ -149,9 +149,10 @@ func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		{"github_poll_interval", defaults.GitHubPollInterval.String()},
 		{"jira_poll_interval", defaults.JiraPollInterval.String()},
 		{"github_clone_protocol", defaults.GitHubCloneProtocol},
-		// max_llm_model_tier is omitempty on the wire, so its cleared value is
-		// an absent key, which decodes to nil.
-		{"max_llm_model_tier", nil},
+		// enabled_models is NOT omitempty on the wire: null is the org's "no
+		// preference expressed", which is a state the settings form has to
+		// render, and an absent key would read to a client as "unchanged".
+		{"enabled_models", nil},
 		// background_jobs_model is NOT omitempty on the wire: "" is the state
 		// in which the background jobs do not run, and a form that has to
 		// render it needs the key present rather than absent.

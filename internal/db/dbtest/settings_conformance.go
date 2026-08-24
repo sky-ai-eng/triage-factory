@@ -10,7 +10,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 )
 
 // SettingsStoresFactory hands the conformance suite a wired bundle of
@@ -302,7 +301,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			JiraPollInterval:      3 * time.Minute,
 			AnthropicAPIKeyRef:    "vault://orgs/A/anthropic",
 			BedrockCredentialsRef: "vault://orgs/A/bedrock",
-			MaxLLMModelTier:       "sonnet",
+			EnabledModels:         []string{domain.ModelSonnet, domain.ModelHaiku},
 			BackgroundJobsModel:   domain.ModelSonnet,
 			LLMAuthMethod:         domain.LLMAuthBYOK,
 			MaxDailyCostUSD:       12.50,
@@ -496,11 +495,13 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	})
 
 	t.Run("OrgSettings_NullableFields_RoundTripEmpty", func(t *testing.T) {
-		// AnthropicAPIKeyRef / BedrockCredentialsRef / MaxLLMModelTier /
-		// GitHubBaseURL / JiraBaseURL: empty input writes NULL, scans
-		// back as "". MaxDailyCostUSD: 0 input writes NULL, scans back as 0
-		// (TFAC-477's "no cap" round-trip). MaxConcurrentRuns: 0 input writes
-		// NULL, scans back as 0 ("unlimited"). Pins the ""/0 ↔ NULL contract.
+		// AnthropicAPIKeyRef / BedrockCredentialsRef / GitHubBaseURL /
+		// JiraBaseURL: empty input writes NULL, scans back as "".
+		// MaxDailyCostUSD: 0 input writes NULL, scans back as 0 (TFAC-477's
+		// "no cap" round-trip). MaxConcurrentRuns: 0 input writes NULL, scans
+		// back as 0 ("unlimited"). EnabledModels: a nil set writes NULL and
+		// scans back nil — the absent value, which is NOT the same as a stored
+		// set naming nothing. Pins the ""/0/nil ↔ NULL contract.
 		stores, ids := factory(t)
 		in := domain.OrgSettings{
 			GitHubPollInterval:  5 * time.Minute,
@@ -516,7 +517,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if got.GitHubBaseURL != "" || got.JiraBaseURL != "" ||
 			got.AnthropicAPIKeyRef != "" || got.BedrockCredentialsRef != "" ||
-			got.MaxLLMModelTier != "" || got.MaxDailyCostUSD != 0 ||
+			got.EnabledModels != nil || got.MaxDailyCostUSD != 0 ||
 			got.MaxConcurrentRuns != 0 {
 			t.Errorf("nullable empties did not round-trip: %+v", got)
 		}
@@ -699,7 +700,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			GitHubPollInterval:  5 * time.Minute,
 			GitHubCloneProtocol: "ssh",
 			JiraPollInterval:    5 * time.Minute,
-			MaxLLMModelTier:     "haiku",
+			EnabledModels:       []string{domain.ModelHaiku},
 			LLMAuthMethod:       domain.LLMAuthBYOK,
 			MaxDailyCostUSD:     5,
 			MaxConcurrentRuns:   3,
@@ -711,7 +712,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		second := first
 		second.GitHubBaseURL = "https://second.example.com"
-		second.MaxLLMModelTier = "opus"
+		second.EnabledModels = []string{domain.ModelOpus}
 		second.MaxDailyCostUSD = 10
 		second.MaxConcurrentRuns = 20
 		// Two saves, so the row's concurrency token has been bumped twice. The
@@ -904,7 +905,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			BranchTemplate:                  "team/<ticket-id>-wip",
 			ReviewPosture:                   domain.ReviewPostureAutoUnlessBlocking,
 			BaseBranchPushPolicy:            domain.BaseBranchPushManualOnly,
-			AllowedProviders:                []string{modelcatalog.ProviderAnthropic},
+			EnabledModels:                   []string{domain.ModelOpus, domain.ModelSonnet},
 		}
 		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
@@ -936,12 +937,13 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		want := domain.DefaultTeamSettings()
 		want.MaxDailyCostUSD = 42.50
-		// A materialized row reads its array columns back as empty (non-nil)
-		// slices, whereas DefaultTeamSettings leaves them nil — normalize so
+		// A materialized row reads jira_projects back as an empty (non-nil)
+		// slice, whereas DefaultTeamSettings leaves it nil — normalize so
 		// DeepEqual checks the fields that matter, not the nil-vs-empty
-		// distinction.
+		// distinction. EnabledModels is NOT normalized: its column is nullable
+		// and nil is the answer, which is exactly what a fresh row must hand
+		// back.
 		want.JiraProjects = []string{}
-		want.AllowedProviders = []string{}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("after SetDailyCostCapSystem on a fresh team\n got: %+v\nwant: %+v (defaults + cap)", got, want)
 		}
@@ -976,72 +978,54 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
-	// SetAllowedProvidersSystem is the org-admin write path for the per-team
-	// provider restriction: surgical (touches only that column), creates the row
-	// from schema defaults when none exists, and the team-settings
-	// read-modify-write path preserves it — a team admin cannot widen their own
-	// restriction. An empty list is the unrestricted state.
-	t.Run("TeamSettings_AllowedProviders_SetClearAndPreserve", func(t *testing.T) {
+	// The team's enable-set is the team's OWN column — unlike the daily cap
+	// beside it, a team admin picks it — so it rides the ordinary
+	// read-modify-write save. What this pins is the nullable round-trip the
+	// resolution depends on: nil is the absent set (inherit the org's), and a
+	// stored set is exactly what it names.
+	t.Run("TeamSettings_EnabledModels_SetChangeAndClear", func(t *testing.T) {
 		stores, ids := factory(t)
 
-		// Fresh team, no settings row yet → the partial INSERT must materialize the
-		// row from defaults + the restriction, touching only allowed_providers.
-		if _, err := stores.Teams.SetAllowedProvidersSystem(ctx, ids.TeamID, []string{modelcatalog.ProviderAnthropic}); err != nil {
-			t.Fatalf("SetAllowedProvidersSystem (insert): %v", err)
+		base := domain.DefaultTeamSettings()
+		base.EnabledModels = []string{domain.ModelSonnet, domain.ModelHaiku}
+		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, base); err != nil {
+			t.Fatalf("UpdateSettings (set): %v", err)
 		}
 		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
 		if err != nil {
 			t.Fatalf("GetSettingsSystem: %v", err)
 		}
-		want := domain.DefaultTeamSettings()
-		want.AllowedProviders = []string{modelcatalog.ProviderAnthropic}
-		// A materialized row reads its array columns back as empty (non-nil)
-		// slices, whereas DefaultTeamSettings leaves them nil — normalize so
-		// DeepEqual checks the fields that matter.
-		want.JiraProjects = []string{}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("after SetAllowedProvidersSystem on a fresh team\n got: %+v\nwant: %+v (defaults + restriction)", got, want)
+		if !reflect.DeepEqual(got.EnabledModels, []string{domain.ModelSonnet, domain.ModelHaiku}) {
+			t.Errorf("EnabledModels = %v, want the stored set in order", got.EnabledModels)
 		}
 
-		// A read-modify-write team-settings save that changes another field must
-		// preserve the restriction — the team-admin path can never alter it.
-		got.DefaultModel = domain.ModelHaiku
+		// Narrowing writes the new set whole rather than merging into the old.
+		got.EnabledModels = []string{domain.ModelHaiku}
 		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, got); err != nil {
-			t.Fatalf("UpdateSettings (rmw): %v", err)
+			t.Fatalf("UpdateSettings (narrow): %v", err)
 		}
-		after, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
+		narrowed, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
 		if err != nil {
-			t.Fatalf("GetSettingsSystem after rmw: %v", err)
+			t.Fatalf("GetSettingsSystem after narrow: %v", err)
 		}
-		if !reflect.DeepEqual(after.AllowedProviders, []string{modelcatalog.ProviderAnthropic}) {
-			t.Errorf("UpdateSettings clobbered the restriction: got %v, want [%s] preserved", after.AllowedProviders, modelcatalog.ProviderAnthropic)
-		}
-		if after.DefaultModel != domain.ModelHaiku {
-			t.Errorf("UpdateSettings didn't apply the unrelated change: got %q, want %q", after.DefaultModel, domain.ModelHaiku)
+		if !reflect.DeepEqual(narrowed.EnabledModels, []string{domain.ModelHaiku}) {
+			t.Errorf("narrowed EnabledModels = %v, want [%s]", narrowed.EnabledModels, domain.ModelHaiku)
 		}
 
-		// Several providers round-trip in order, and an empty list clears the
-		// restriction back to unrestricted.
-		both := []string{modelcatalog.ProviderAnthropic, modelcatalog.ProviderBedrock}
-		if _, err := stores.Teams.SetAllowedProvidersSystem(ctx, ids.TeamID, both); err != nil {
-			t.Fatalf("SetAllowedProvidersSystem (both): %v", err)
-		}
-		multi, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
-		if err != nil {
-			t.Fatalf("GetSettingsSystem after both: %v", err)
-		}
-		if !reflect.DeepEqual(multi.AllowedProviders, both) {
-			t.Errorf("AllowedProviders = %v, want %v", multi.AllowedProviders, both)
-		}
-		if _, err := stores.Teams.SetAllowedProvidersSystem(ctx, ids.TeamID, nil); err != nil {
-			t.Fatalf("SetAllowedProvidersSystem (clear): %v", err)
+		// nil clears it back to the absent set. It has to read back nil rather
+		// than an empty slice: "inherit the org's set" and "this team enabled
+		// nothing" are different answers, and only the column's NULL keeps them
+		// apart.
+		narrowed.EnabledModels = nil
+		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, narrowed); err != nil {
+			t.Fatalf("UpdateSettings (clear): %v", err)
 		}
 		cleared, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
 		if err != nil {
 			t.Fatalf("GetSettingsSystem after clear: %v", err)
 		}
-		if len(cleared.AllowedProviders) != 0 {
-			t.Errorf("cleared restriction = %v, want empty (unrestricted)", cleared.AllowedProviders)
+		if cleared.EnabledModels != nil {
+			t.Errorf("cleared EnabledModels = %v, want nil (inherit the org)", cleared.EnabledModels)
 		}
 	})
 
