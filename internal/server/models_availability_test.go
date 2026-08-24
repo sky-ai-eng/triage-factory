@@ -287,7 +287,7 @@ func TestModelTest_Postgres_RecordsWhatTheProviderAnswered(t *testing.T) {
 		// A model with no row yet, so "nothing recorded" is visible as an
 		// absence rather than as an unchanged value.
 		fresh := ""
-		for _, e := range modelcatalog.Entries() {
+		for _, e := range modelcatalog.UniverseFor(true).Models() {
 			if e.Provider == modelcatalog.ProviderAnthropic && e.Key != key {
 				fresh = e.Key
 				break
@@ -363,7 +363,7 @@ func TestModelTestSweep_Postgres_SkipsVerifiedAndCoversTheRest(t *testing.T) {
 	}
 
 	var anthropic int
-	for _, e := range modelcatalog.Entries() {
+	for _, e := range modelcatalog.UniverseFor(true).Models() {
 		if e.Provider == modelcatalog.ProviderAnthropic {
 			anthropic++
 		}
@@ -524,15 +524,53 @@ type cannedProber struct {
 	err error
 }
 
-func (c cannedProber) Probe(context.Context, string, modelcatalog.Entry) (modelprobe.Result, error) {
+func (c cannedProber) Probe(context.Context, string, modelcatalog.Model) (modelprobe.Result, error) {
 	return c.res, c.err
 }
 
-// Local mode probes, and the verdict it reaches is stored and published exactly
-// as multi's is. Its runs go through the agent runtime, which reports the
-// provider's HTTP status on its terminal event, so there is no question the
-// deployment has to decline — and declining was the whole reason a fourth
-// availability state existed.
+// bindLocalAnthropic puts the local org on its OWN Anthropic credential, which
+// is what makes an availability verdict have a subject at all: a stored row
+// describes a credential TF holds a ref to, and the ref is what a later unbind
+// invalidates it through. Both fields, because that is what the bind route
+// writes — the ref says which provider, the method says the org has stopped
+// running on the host's.
+func bindLocalAnthropic(t *testing.T, s *Server) {
+	t.Helper()
+	set, err := s.allStores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("read org settings: %v", err)
+	}
+	set.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
+	set.BedrockCredentialsRef = ""
+	set.LLMAuthMethod = domain.LLMAuthBYOK
+	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
+		t.Fatalf("bind anthropic: %v", err)
+	}
+}
+
+// localModelHandler wires the models handler over a local server with a canned
+// verdict, and returns a request addressed at the local org as its own user.
+func localModelHandler(s *Server, canned cannedProber) *modelsHandler {
+	return &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return canned }}
+}
+
+func localModelTestRequest(modelKey string) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, "/api/models", nil)
+	r.SetPathValue("org_id", runmode.LocalDefaultOrgID)
+	r.SetPathValue("model_key", modelKey)
+	ctx := httpx.WithOrgID(r.Context(), runmode.LocalDefaultOrgID)
+	ctx = httpx.WithClaims(ctx, &verify.Claims{Subject: runmode.LocalDefaultUserID})
+	return r.WithContext(ctx)
+}
+
+// A local org that brought its OWN credential probes, and the verdict it
+// reaches is stored and published exactly as multi's is. Its runs go through
+// the agent runtime, which reports the provider's HTTP status on its terminal
+// event, so the transport can answer for an alias as readily as for a wire id.
+//
+// The stored row is keyed (credential family, alias): the alias names no
+// provider, so what the verdict is ABOUT is the credential it was spent
+// against, and the family half records which one.
 //
 // Both conclusive verdicts, because they take different arms of the write and a
 // refusal is the one that has to carry the provider's own message out to the
@@ -551,24 +589,19 @@ func TestModelTest_LocalMode_ProbesAndPublishesTheVerdict(t *testing.T) {
 			runmode.SetForTest(t, runmode.ModeLocal)
 			keyring.MockInit()
 			s := newTestServer(t)
-			canned := cannedProber{res: modelprobe.Result{Verdict: tc.verdict, Detail: tc.detail}}
-			mdh := &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return canned }}
+			bindLocalAnthropic(t, s)
+			mdh := localModelHandler(s, cannedProber{res: modelprobe.Result{Verdict: tc.verdict, Detail: tc.detail}})
 
-			key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
-			r := httptest.NewRequest(http.MethodPost, "/api/models", nil)
-			r.SetPathValue("org_id", runmode.LocalDefaultOrgID)
-			r.SetPathValue("model_key", key)
-			ctx := httpx.WithOrgID(r.Context(), runmode.LocalDefaultOrgID)
-			ctx = httpx.WithClaims(ctx, &verify.Claims{Subject: runmode.LocalDefaultUserID})
+			key := domain.ModelAliasSonnet
 			rec := httptest.NewRecorder()
-			mdh.handleModelTest(rec, r.WithContext(ctx))
+			mdh.handleModelTest(rec, localModelTestRequest(key))
 
 			if rec.Code != http.StatusOK {
 				t.Fatalf("local test = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 			}
-			var got modelTestResult
-			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-				t.Fatalf("decode test result: %v (body: %s)", err, rec.Body.String())
+			got := decodeTestResult(t, rec.Body.Bytes())
+			if got.ModelKey != key {
+				t.Errorf("model_key = %q, want %q", got.ModelKey, key)
 			}
 			if got.Outcome != tc.wantOutcome {
 				t.Errorf("outcome = %q, want %q", got.Outcome, tc.wantOutcome)
@@ -578,6 +611,17 @@ func TestModelTest_LocalMode_ProbesAndPublishesTheVerdict(t *testing.T) {
 			}
 			if got.CheckedAt == nil {
 				t.Error("no checked_at on a conclusive verdict — the row was not stored")
+			}
+
+			// The row is keyed by the credential family it was spent against.
+			var provider string
+			if err := s.db.QueryRow(
+				`SELECT provider FROM model_availability WHERE org_id = ? AND model_key = ?`,
+				runmode.LocalDefaultOrgID, key).Scan(&provider); err != nil {
+				t.Fatalf("read the stored row: %v", err)
+			}
+			if provider != modelcatalog.ProviderAnthropic {
+				t.Errorf("stored provider = %q, want the credential family %q", provider, modelcatalog.ProviderAnthropic)
 			}
 
 			// The verdict reaches the catalog read, which is where anyone
@@ -599,6 +643,61 @@ func TestModelTest_LocalMode_ProbesAndPublishesTheVerdict(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Under the host's credentials both test routes refuse, and they refuse as a
+// SETUP GAP rather than answering — a verdict recorded there would be about the
+// machine the process happens to be running on, keyed to nothing TF can name,
+// watch, or invalidate. Nothing is stored, and the prober is never called: the
+// refusal is decided before anything is spent.
+func TestModelTests_LocalMode_SystemCredentialsRefuseWithoutSpending(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	spent := &countingProber{}
+	mdh := &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return spent }}
+
+	single := httptest.NewRecorder()
+	mdh.handleModelTest(single, localModelTestRequest(domain.ModelAliasSonnet))
+	if single.Code != http.StatusConflict {
+		t.Errorf("single test = %d, want 409 (body: %s)", single.Code, single.Body.String())
+	}
+
+	body, err := json.Marshal(map[string]any{"provider": modelcatalog.ProviderAnthropic})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r.SetPathValue("org_id", runmode.LocalDefaultOrgID)
+	ctx := httpx.WithOrgID(r.Context(), runmode.LocalDefaultOrgID)
+	ctx = httpx.WithClaims(ctx, &verify.Claims{Subject: runmode.LocalDefaultUserID})
+	sweep := httptest.NewRecorder()
+	mdh.handleModelTestSweep(sweep, r.WithContext(ctx))
+	if sweep.Code != http.StatusConflict {
+		t.Errorf("sweep = %d, want 409 (body: %s)", sweep.Code, sweep.Body.String())
+	}
+
+	if spent.calls != 0 {
+		t.Errorf("the prober was called %d times; a refused route must spend nothing", spent.calls)
+	}
+	var rows int
+	if err := s.db.QueryRow(`SELECT count(*) FROM model_availability`).Scan(&rows); err != nil {
+		t.Fatalf("count model_availability: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("%d availability rows stored under system credentials, want none", rows)
+	}
+}
+
+// countingProber records that it was asked. It answers green so that a route
+// which wrongly reached it would look like it succeeded, which is what makes
+// the call count the assertion rather than the status.
+type countingProber struct{ calls int }
+
+func (c *countingProber) Probe(context.Context, string, modelcatalog.Model) (modelprobe.Result, error) {
+	c.calls++
+	return modelprobe.Result{Verdict: modelprobe.VerdictGreen}, nil
 }
 
 // A multi-mode pod that never had the prober wired says so as a configuration
@@ -770,12 +869,11 @@ func TestTeamModelsList_Postgres_ReportsTheSameAvailability(t *testing.T) {
 	}
 }
 
-// The zero-configuration local install: it has CHOSEN the host's credentials,
-// which is not a per-provider binding, so there is no provider it could be
-// missing and nothing is unconfigured. What it is instead is unprobed — an
-// answer it can act on, because the test route will spend one through the agent
-// runtime and come back with a real verdict.
-func TestModelsList_LocalMode_HostCredentialsAreUnverified(t *testing.T) {
+// The zero-configuration local install: it runs on the host's credentials, so
+// there is no TF-owned credential for a verdict to be about and the whole
+// availability triple is absent from every row. Not "unverified" — that word
+// promises a test button, and the routes beside this one refuse.
+func TestModelsList_LocalMode_SystemCredentialsPublishNoAvailability(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -789,9 +887,32 @@ func TestModelsList_LocalMode_HostCredentialsAreUnverified(t *testing.T) {
 		t.Fatal("catalog read returned no models")
 	}
 	for _, row := range items {
-		if row.Availability != modelAvailabilityUnverified {
-			t.Errorf("%s: availability = %q, want %q on the host's credentials",
-				row.Key, row.Availability, modelAvailabilityUnverified)
+		if row.Availability != "" || row.AvailabilityDetail != "" || row.AvailabilityCheckedAt != nil {
+			t.Errorf("%s: availability = %q on the host's credentials, want the triple absent", row.Key, row.Availability)
+		}
+	}
+}
+
+// A stored verdict does not survive the org going back to the host's
+// credentials. The row stays in the table — nothing destroys it, and rebinding
+// the same credential makes it meaningful again — but it is not published,
+// because what it describes is a credential this org is no longer using.
+func TestModelsList_LocalMode_SystemCredentialsSuppressAStoredVerdict(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	if _, err := s.allStores.ModelAvailability.Record(t.Context(), runmode.LocalDefaultOrgID,
+		modelcatalog.ProviderAnthropic, domain.ModelAliasSonnet, domain.ModelAvailabilityGreen, ""); err != nil {
+		t.Fatalf("record a green verdict: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	for _, row := range decodeModels(t, rec.Body.Bytes()).Items {
+		if row.Availability != "" {
+			t.Errorf("%s: availability = %q, want the triple absent under system credentials", row.Key, row.Availability)
 		}
 	}
 }
@@ -832,34 +953,21 @@ func TestModelsList_LocalMode_OwnCredentialsWithNoneBoundIsUnconfigured(t *testi
 	}
 }
 
-// Local mode's half of the same state, and the stored verdict beside it.
+// Local BYOK's half of the same state, and the stored verdict beside it.
 //
-// Local answers "unconfigured" for a provider the org has not bound, exactly as
-// multi does. And it reads model_availability: a probe spent here writes a row
-// like any other, so a stored green renders verified rather than being
-// discarded by a mode check. Both halves in one read, against the real store
-// bundle the handler builds for itself, because the two are one precedence
-// order and testing them apart would not catch them disagreeing.
-func TestModelsList_LocalMode_ReadsStoredVerdictsAndUnconfiguredProviders(t *testing.T) {
+// The org brought its own Anthropic credential, so the surface exists: a stored
+// green renders verified, and everything it has not probed renders unverified —
+// an answer it can act on, because the test route beside it will spend one.
+// Nothing is unconfigured here, and nothing can be: an alias names no provider,
+// so "connected the provider that serves this model" has no per-model answer and
+// the org-wide one is what stands in.
+func TestModelsList_LocalMode_BYOKReadsStoredVerdicts(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
+	bindLocalAnthropic(t, s)
 
-	// Bind Anthropic only, so the org is on its own credentials and Bedrock is
-	// genuinely unconfigured. Both fields, because that is what the bind route
-	// writes: the ref says which provider, the method says the org has stopped
-	// running on the host's.
-	set, err := s.allStores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("read org settings: %v", err)
-	}
-	set.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
-	set.BedrockCredentialsRef = ""
-	set.LLMAuthMethod = domain.LLMAuthBYOK
-	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
-		t.Fatalf("bind anthropic: %v", err)
-	}
-	probed := modelKeyOn(t, modelcatalog.ProviderAnthropic)
+	probed := domain.ModelAliasSonnet
 	if _, err := s.allStores.ModelAvailability.Record(t.Context(), runmode.LocalDefaultOrgID,
 		modelcatalog.ProviderAnthropic, probed, domain.ModelAvailabilityGreen, ""); err != nil {
 		t.Fatalf("record a green verdict: %v", err)
@@ -869,26 +977,17 @@ func TestModelsList_LocalMode_ReadsStoredVerdictsAndUnconfiguredProviders(t *tes
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
-	var anthropic, bedrock int
-	for _, row := range decodeModels(t, rec.Body.Bytes()).Items {
-		switch row.Provider {
-		case modelcatalog.ProviderAnthropic:
-			anthropic++
-			want := modelAvailabilityUnverified
-			if row.Key == probed {
-				want = modelAvailabilityVerified
-			}
-			if row.Availability != want {
-				t.Errorf("%s: availability = %q, want %q", row.Key, row.Availability, want)
-			}
-		default:
-			bedrock++
-			if row.Availability != modelAvailabilityUnconfigured {
-				t.Errorf("%s: availability = %q, want %q", row.Key, row.Availability, modelAvailabilityUnconfigured)
-			}
-		}
+	items := decodeModels(t, rec.Body.Bytes()).Items
+	if len(items) == 0 {
+		t.Fatal("catalog read returned no models")
 	}
-	if anthropic == 0 || bedrock == 0 {
-		t.Fatalf("catalog gave %d anthropic / %d bedrock rows; the test needs both", anthropic, bedrock)
+	for _, row := range items {
+		want := modelAvailabilityUnverified
+		if row.Key == probed {
+			want = modelAvailabilityVerified
+		}
+		if row.Availability != want {
+			t.Errorf("%s: availability = %q, want %q", row.Key, row.Availability, want)
+		}
 	}
 }

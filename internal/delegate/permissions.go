@@ -139,7 +139,7 @@ func (s *Spawner) resolveSDKPermissionMode(ctx context.Context, teamID string) s
 		return "auto"
 	}
 
-	ts := domain.DefaultTeamSettings()
+	ts := domain.DefaultTeamSettingsFor(runmode.Current() == runmode.ModeMulti)
 	if s.teams != nil && teamID != "" {
 		if loaded, err := s.teams.GetSettingsSystem(ctx, teamID); err == nil {
 			ts = loaded
@@ -204,7 +204,7 @@ type AbsentAutoDeny struct {
 // handler is always built with a usable policy. Called at spawn time, not per
 // prompt.
 func (s *Spawner) resolveAbsentAutoDeny(ctx context.Context, teamID string) AbsentAutoDeny {
-	ts := domain.DefaultTeamSettings()
+	ts := domain.DefaultTeamSettingsFor(runmode.Current() == runmode.ModeMulti)
 	if s.teams != nil && teamID != "" {
 		if loaded, err := s.teams.GetSettingsSystem(ctx, teamID); err == nil {
 			ts = loaded

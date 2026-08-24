@@ -32,6 +32,7 @@ func TestSettingsStores_SQLite(t *testing.T) {
 		}
 		stores := sqlitestore.New(conn)
 		return dbtest.SettingsStores{
+				MultiMode:        false,
 				Orgs:             stores.Orgs,
 				Teams:            stores.Teams,
 				Users:            stores.Users,

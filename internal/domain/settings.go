@@ -8,12 +8,31 @@ import (
 	"time"
 )
 
-// DefaultModel is the model TF provisions a team with when nobody has chosen
-// one yet. Shared by DefaultTeamSettings (the stored default) and
-// EffectiveModel (the resolution fallback) so the two can't drift, and pinned
-// to the same value as the team_settings.default_model column default, which
-// is what a partial write materializes a row from.
-const DefaultModel = ModelSonnet
+// The model TF provisions a team with when nobody has chosen one yet, one
+// constant per vocabulary. Shared by DefaultTeamSettingsFor (the stored default)
+// and EffectiveModel (the resolution fallback) so the two can't drift, and each
+// pinned to its dialect's team_settings.default_model column DEFAULT, which is
+// what a partial write materializes a row from.
+//
+// Two constants rather than one because the two dialects store different
+// vocabularies: Postgres carries the native wire id its runtime sends, SQLite
+// the harness alias its subprocess resolves. A single value would be refused by
+// one deployment's own save validator.
+const (
+	DefaultModel      = ModelSonnet
+	LocalDefaultModel = ModelAliasSonnet
+)
+
+// DefaultModelFor returns the provisioning default in the vocabulary the given
+// deployment stores. The mode is a parameter for the same reason it is one on
+// EffectiveLLMAuthMethod: the answer is a property of the deployment being
+// asked about, not of the process asking.
+func DefaultModelFor(multiMode bool) string {
+	if multiMode {
+		return DefaultModel
+	}
+	return LocalDefaultModel
+}
 
 // LocalBackgroundJobsModel is the background-jobs model a local install starts
 // with. Local mode is a single-user, zero-configuration first run, so its knob
@@ -24,7 +43,7 @@ const DefaultModel = ModelSonnet
 //
 // It is a pre-fill, not a fallback. Nothing resolves to it at job time; the only
 // thing that reads it is the schema.
-const LocalBackgroundJobsModel = ModelHaiku
+const LocalBackgroundJobsModel = ModelAliasHaiku
 
 // Where an org's Claude credentials come from — the value of
 // org_settings.llm_auth_method, and the answer to what it means that an org has
@@ -521,10 +540,15 @@ type TeamSettings struct {
 	BaseBranchPushPolicy string
 }
 
-// DefaultTeamSettings returns the NOT NULL DEFAULT values from the
+// DefaultTeamSettingsFor returns the NOT NULL DEFAULT values from the
 // team_settings schema as a Go struct. Same pattern as
 // DefaultOrgSettings — read-side fallback for missing rows, plus an
 // explicit Go-side baseline for provisioning paths.
+//
+// It takes the mode because one of those DEFAULTs diverges by dialect:
+// default_model is stored in the vocabulary that dialect's runtime dispatches,
+// so a mode-blind answer would hand a caller a model its own deployment refuses.
+// The dialect is the mode, so a store passes the one it is.
 //
 // AutoDelegateEnabled defaults true (matching the schema DEFAULT): a
 // team that has a trigger enabled means the run to fire, and every
@@ -533,11 +557,11 @@ type TeamSettings struct {
 // (a Slack channel claim, for instance, seeds an enabled mention
 // trigger that never fired). The per-team toggle stays, for teams that
 // want review-before-run.
-func DefaultTeamSettings() TeamSettings {
+func DefaultTeamSettingsFor(multiMode bool) TeamSettings {
 	return TeamSettings{
 		AIReprioritizeThreshold:         5,
 		AIPreferenceUpdateInterval:      20,
-		DefaultModel:                    DefaultModel,
+		DefaultModel:                    DefaultModelFor(multiMode),
 		AutoDelegateEnabled:             true,
 		AutoModeEnabled:                 true,
 		PermissionAbsentGraceMS:         15000,

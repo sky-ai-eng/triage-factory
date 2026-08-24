@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // OrgSettingsReader is the claims-free org-settings read the model resolution
@@ -41,12 +42,17 @@ var ErrNoModel = errors.New("systemllm: no usable background jobs model")
 // holds.
 //
 // Four gates, all of which make the setting unusable rather than substitutable:
-// the value must be present, the catalog must offer it, the org must be able to
-// authenticate at all, and it must have connected the provider that serves this
-// model. The third is what stops a cycle billing an org's work to whatever
-// credential the operator's shell happens to hold. The R5 delegation gates (tool support,
-// a 64k window) deliberately do NOT apply — these jobs are toolless and
-// short-context, so every catalog entry is a legitimate choice here.
+// the value must be present, this deployment's universe must offer it, the org
+// must be able to authenticate at all, and it must have connected the provider
+// that serves this model. The third is what stops a cycle billing an org's work
+// to whatever credential the operator's shell happens to hold. The R5 delegation
+// gates (tool support, a 64k window) deliberately do NOT apply — these jobs are
+// toolless and short-context, so every offered model is a legitimate choice here.
+//
+// The universe is asked rather than the native registry, because the stored
+// value is in the vocabulary the jobs dispatch it in: a local install stores and
+// sends the harness alias, a multi one the concrete wire id, and each is
+// nonsense to the other's transport.
 //
 // Team provider restrictions are not consulted, and there is no team argument to
 // consult one with: a restriction narrows what a team may spend against, and
@@ -56,7 +62,7 @@ func ModelForSettings(set domain.OrgSettings) (string, error) {
 	if model == "" {
 		return "", fmt.Errorf("%w: the background jobs model setting is empty — pick one in Settings", ErrNoModel)
 	}
-	if !modelcatalog.Offers(model) {
+	if !modelcatalog.UniverseFor(runmode.Current() == runmode.ModeMulti).Offers(model) {
 		return "", fmt.Errorf("%w: the background jobs model setting names %q, which this deployment does not offer — pick another in Settings", ErrNoModel, model)
 	}
 	creds := modelaccess.ForOrg(set)

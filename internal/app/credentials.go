@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
@@ -79,7 +80,8 @@ func (a *App) buildRunCredentials() error {
 // Falls back to the shipped default model on any error so a transient DB
 // hiccup doesn't silently clear the spawner's credentials.
 func resolveAIModelForTeam(ctx context.Context, stores db.Stores, orgID, teamID string) string {
-	fallback := domain.DefaultTeamSettings().DefaultModel
+	multi := runmode.Current() == runmode.ModeMulti
+	fallback := domain.DefaultModelFor(multi)
 	if teamID == "" {
 		var err error
 		teamID, err = stores.Teams.GetDefaultForOrgSystem(ctx, orgID)
@@ -103,6 +105,6 @@ func resolveAIModelForTeam(ctx context.Context, stores db.Stores, orgID, teamID 
 		maxTier = orgSet.MaxLLMModelTier
 	}
 
-	model, _ := domain.EffectiveModel(teamSet.DefaultModel, maxTier)
+	model, _ := domain.EffectiveModel(teamSet.DefaultModel, maxTier, multi)
 	return model
 }

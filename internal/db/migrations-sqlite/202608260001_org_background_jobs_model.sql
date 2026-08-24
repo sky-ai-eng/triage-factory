@@ -4,10 +4,10 @@
 -- (short, toolless, no transcript) bought from the same budget, so a per-job
 -- column would be three ways to answer one question.
 --
--- A modelcatalog key, validated app-side against the catalog and against the
--- providers the org has connected — not CHECK-constrained, the
--- max_llm_model_tier precedent: the accepted set is the build's catalog, which
--- changes with the binary rather than with the schema.
+-- A key from this deployment's model universe, validated app-side against that
+-- universe and against the providers the org has connected — not
+-- CHECK-constrained, the max_llm_model_tier precedent: the accepted set is the
+-- build's, and it changes with the binary rather than with the schema.
 --
 -- Empty means unset, and unset means those jobs do not run. TF ships no
 -- fallback model, so a job with no model skips its cycle and says so rather
@@ -20,7 +20,13 @@
 -- with it too. Local mode is single-user and zero-configuration; there is no
 -- setup step to make someone choose here. Postgres/multi deliberately defaults
 -- to empty instead — an org there picks its model during setup.
-ALTER TABLE org_settings ADD COLUMN background_jobs_model TEXT NOT NULL DEFAULT 'claude-haiku-4-5-20251001';
+--
+-- It is the Claude Code SDK's family alias, not a concrete wire id, because a
+-- local conversation is executed by that subprocess and the alias is the word it
+-- resolves. The harness picks the access path from whichever credential its
+-- environment supplies, so the alias names no provider and joins no price table;
+-- the concrete-id vocabulary belongs to the native runtime, which is Postgres's.
+ALTER TABLE org_settings ADD COLUMN background_jobs_model TEXT NOT NULL DEFAULT 'haiku';
 
 -- +goose Down
 SELECT 'down not supported';

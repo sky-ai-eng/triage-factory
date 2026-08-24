@@ -115,7 +115,11 @@ func New(secrets agentproc.SecretsReader, resolver func(ctx context.Context, org
 }
 
 // Probe spends one minimal request establishing whether orgID's credentials
-// can invoke entry.
+// can invoke m.
+//
+// m comes from the deployment's own universe, so its key is already in the
+// vocabulary the transport below speaks — a bifrost wire id on the direct path,
+// a harness alias on the SDK one — and nothing here translates it.
 //
 // The returned error is for the cases where the question was never asked at
 // all: the org has not connected this model's provider, or its stored material
@@ -140,11 +144,11 @@ func New(secrets agentproc.SecretsReader, resolver func(ctx context.Context, org
 //
 // Both transports produce the same three verdicts from the same status sets:
 // what differs is where the status is read from, not what it means.
-func (p *Prober) Probe(ctx context.Context, orgID string, entry modelcatalog.Entry) (Result, error) {
+func (p *Prober) Probe(ctx context.Context, orgID string, m modelcatalog.Model) (Result, error) {
 	if runmode.Current() == runmode.ModeMulti {
-		return p.probeDirect(ctx, orgID, entry)
+		return p.probeDirect(ctx, orgID, m)
 	}
-	return p.probeSDK(ctx, orgID, entry)
+	return p.probeSDK(ctx, orgID, m)
 }
 
 // probeSDK spends the probe through the SDK subprocess, which is how a local
@@ -165,14 +169,14 @@ func (p *Prober) Probe(ctx context.Context, orgID string, entry modelcatalog.Ent
 // answer is worth it, because it is the only way to ask the question of a
 // subscription at all, but it is why nothing may spend one of these without a
 // person asking first.
-func (p *Prober) probeSDK(ctx context.Context, orgID string, entry modelcatalog.Entry) (Result, error) {
+func (p *Prober) probeSDK(ctx context.Context, orgID string, m modelcatalog.Model) (Result, error) {
 	callCtx, cancel := context.WithTimeout(ctx, probeSDKTimeout)
 	defer cancel()
 
 	startedAt := time.Now().UTC()
 	usage := &agentproc.UsageSink{}
 	outcome, err := runSDK(callCtx, agentproc.RunOptions{
-		Model:    entry.Key,
+		Model:    m.Key,
 		Message:  probeMessage,
 		MaxTurns: probeMaxTurns,
 		OrgID:    orgID,
@@ -182,7 +186,7 @@ func (p *Prober) probeSDK(ctx context.Context, orgID string, entry modelcatalog.
 		Secrets:     p.secrets,
 		LLMResolver: p.resolver,
 	}, usage)
-	p.recordSDK(ctx, orgID, entry.Key, startedAt, outcome, usage)
+	p.recordSDK(ctx, orgID, m.Key, startedAt, outcome, usage)
 
 	if err != nil && IsSetupGap(err) {
 		// Same contract as the direct path: a credential the runtime could not
@@ -201,26 +205,26 @@ func (p *Prober) probeSDK(ctx context.Context, orgID string, entry modelcatalog.
 // job both spend one. The native engine's loop runs here rather than in the
 // jail, so its cell is built with no model channel at all and this client is
 // the whole of how a multi run reaches a provider.
-func (p *Prober) probeDirect(ctx context.Context, orgID string, entry modelcatalog.Entry) (Result, error) {
-	creds, err := p.resolveCredentials(ctx, orgID, entry.Key)
+func (p *Prober) probeDirect(ctx context.Context, orgID string, m modelcatalog.Model) (Result, error) {
+	creds, err := p.resolveCredentials(ctx, orgID, m.Key)
 	if err != nil {
 		return Result{}, err
 	}
 	// The whitelist names exactly the model under test. bifrost reads an empty
 	// whitelist as "no models", and a key allowed to serve something else
 	// would let a probe pass on a model nobody asked about.
-	pc, err := inference.ProviderCredentialsFromEnv(creds, []string{entry.Key})
+	pc, err := inference.ProviderCredentialsFromEnv(creds, []string{m.Key})
 	if err != nil {
 		return Result{}, fmt.Errorf("modelprobe: %w", err)
 	}
-	if got := string(pc.Provider); got != entry.Provider {
+	if got := string(pc.Provider); got != m.Provider {
 		// Resolution is keyed by the model, so this cannot happen from
 		// configuration alone — it would mean the resolver and the catalog
 		// disagree about which provider serves this key, and probing the wrong
 		// one would record a verdict about a credential path nobody asked
 		// about.
 		return Result{}, fmt.Errorf("modelprobe: %s resolved %s credentials but the catalog serves it through %s",
-			entry.Key, got, entry.Provider)
+			m.Key, got, m.Provider)
 	}
 
 	account, err := inference.NewAccount(pc)
@@ -245,7 +249,7 @@ func (p *Prober) probeDirect(ctx context.Context, orgID string, entry modelcatal
 		// The exact catalog key, never a configured override: the whole
 		// advantage of a probe over a control-plane lookup is that it tests
 		// the string a run will actually send.
-		Model: entry.Key,
+		Model: m.Key,
 		// One user row and no system prompt. A system prefix would earn a
 		// cache write on tokens no later request can match, and the probe has
 		// nothing to instruct.
@@ -253,7 +257,7 @@ func (p *Prober) probeDirect(ctx context.Context, orgID string, entry modelcatal
 		MaxTokens:                     probeMaxTokens,
 		NoConversationCacheBreakpoint: true,
 	})
-	p.record(ctx, orgID, entry.Key, startedAt, completion, callErr)
+	p.record(ctx, orgID, m.Key, startedAt, completion, callErr)
 
 	// The classifier is handed the REQUEST's ctx, which is derived from the
 	// caller's — so a probe abandoned mid-sweep and one that ran out its own

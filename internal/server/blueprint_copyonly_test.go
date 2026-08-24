@@ -17,7 +17,7 @@ import (
 func TestBlueprintCreate_AutoWrapFirstPrompt(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprints", map[string]any{
-		"first_prompt": map[string]any{"name": "Reviewer", "body": "review the PR", "model": domain.ModelSonnet},
+		"first_prompt": map[string]any{"name": "Reviewer", "body": "review the PR", "model": domain.ModelAliasSonnet},
 	})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())

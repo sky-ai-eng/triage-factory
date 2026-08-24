@@ -28,22 +28,60 @@ func bothConnected() domain.OrgSettings {
 	return domain.OrgSettings{AnthropicAPIKeyRef: "anthropic_api_key", BedrockCredentialsRef: "aws_role_arn"}
 }
 
-// TestModelForSettings_Accepts pins that the picker's whole catalog is
+// TestModelForSettings_Accepts pins that the picker's whole universe is
 // available to the background jobs: they are toolless and short-context, so the
 // gates that narrow a delegation's picker (tool support, a 64k window)
 // deliberately do not narrow this one.
+//
+// Both universes, because the accepted set is the deployment's own vocabulary —
+// a local install stores and dispatches the harness alias, a multi one the
+// concrete wire id, and each must accept its own.
 func TestModelForSettings_Accepts(t *testing.T) {
-	for _, key := range modelcatalog.Keys() {
-		set := bothConnected()
-		set.BackgroundJobsModel = key
-		got, err := ModelForSettings(set)
-		if err != nil {
-			t.Errorf("%s: %v", key, err)
-			continue
-		}
-		if got != key {
-			t.Errorf("%s: resolved to %q", key, got)
-		}
+	for _, mode := range []runmode.Mode{runmode.ModeMulti, runmode.ModeLocal} {
+		t.Run(string(mode), func(t *testing.T) {
+			runmode.SetForTest(t, mode)
+			for _, key := range modelcatalog.UniverseFor(mode == runmode.ModeMulti).Keys() {
+				set := bothConnected()
+				set.BackgroundJobsModel = key
+				got, err := ModelForSettings(set)
+				if err != nil {
+					t.Errorf("%s: %v", key, err)
+					continue
+				}
+				if got != key {
+					t.Errorf("%s: resolved to %q", key, got)
+				}
+			}
+		})
+	}
+}
+
+// The other deployment's vocabulary is refused, in both directions: a stored
+// value is dispatched verbatim, so an alias on the native wire persists unpriced
+// and a concrete id handed to the harness is a version pin nobody asked for.
+func TestModelForSettings_RefusesTheOtherVocabulary(t *testing.T) {
+	for _, tc := range []struct {
+		mode  runmode.Mode
+		model string
+	}{
+		{runmode.ModeMulti, domain.ModelAliasSonnet},
+		{runmode.ModeLocal, domain.ModelSonnet},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			runmode.SetForTest(t, tc.mode)
+			set := bothConnected()
+			set.BackgroundJobsModel = tc.model
+			got, err := ModelForSettings(set)
+			if !errors.Is(err, ErrNoModel) {
+				t.Fatalf("err = %v, want ErrNoModel", err)
+			}
+			if got != "" {
+				t.Errorf("resolved to %q; a refusal must name no model at all", got)
+			}
+			if !strings.Contains(err.Error(), tc.model) {
+				t.Errorf("error %q does not name the refused value", err)
+			}
+		})
 	}
 }
 
@@ -52,6 +90,9 @@ func TestModelForSettings_Accepts(t *testing.T) {
 // different model is the whole remedy — and none of them substitutes a model of
 // TF's choosing, which is what a caller would do with any other error.
 func TestModelForSettings_Refusals(t *testing.T) {
+	// The provider-specific cases only exist on the native path, where the id
+	// names the provider that serves it; multi mode is where that path runs.
+	runmode.SetForTest(t, runmode.ModeMulti)
 	anthropicModel := modelOn(t, modelcatalog.ProviderAnthropic)
 	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
 
@@ -111,9 +152,11 @@ func TestModelForSettings_Refusals(t *testing.T) {
 	t.Run("an org on the host's credentials is not refused", func(t *testing.T) {
 		// Local mode's zero-config subscription: it has chosen the host's
 		// environment as its credential, so there is nothing for a model to
-		// select between and nothing missing.
+		// select between and nothing missing. Only local can hold that source,
+		// which is also the mode whose universe the alias below belongs to.
+		runmode.SetForTest(t, runmode.ModeLocal)
 		set := domain.OrgSettings{
-			BackgroundJobsModel: anthropicModel,
+			BackgroundJobsModel: domain.LocalBackgroundJobsModel,
 			LLMAuthMethod:       domain.LLMAuthSystem,
 		}
 		if _, err := ModelForSettings(set); err != nil {
@@ -167,6 +210,7 @@ func TestModelForSettings_Refusals(t *testing.T) {
 // failure, and an unreadable settings row reported that way would be a wedged
 // database showing up as a configuration state nobody can act on.
 func TestNewModelFunc(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
 	ctx := context.Background()
 	set := bothConnected()
 	set.BackgroundJobsModel = domain.ModelHaiku

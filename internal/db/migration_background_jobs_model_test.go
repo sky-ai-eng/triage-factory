@@ -98,12 +98,15 @@ func TestSeedLocalTenantRows_CarriesBackgroundJobsModel(t *testing.T) {
 	}
 }
 
-// The pre-fill is dispatched verbatim and validated against the catalog on
-// every save, so a value the catalog does not offer would be one the settings
-// UI refuses to re-save and every background job refuses to run — a local
-// install seeded into a state it cannot get out of without editing the DB.
+// The pre-fill is dispatched verbatim and validated against the deployment's
+// universe on every save, so a value that universe does not offer would be one
+// the settings UI refuses to re-save and every background job refuses to run — a
+// local install seeded into a state it cannot get out of without editing the DB.
+//
+// Asked of the LOCAL universe specifically: this column default is SQLite's, and
+// SQLite is local, whose runtime is the SDK subprocess.
 func TestLocalBackgroundJobsModel_IsOffered(t *testing.T) {
-	if !modelcatalog.Offers(domain.LocalBackgroundJobsModel) {
-		t.Errorf("LocalBackgroundJobsModel %q is not a model this build offers", domain.LocalBackgroundJobsModel)
+	if !modelcatalog.UniverseFor(false).Offers(domain.LocalBackgroundJobsModel) {
+		t.Errorf("LocalBackgroundJobsModel %q is not a model a local deployment offers", domain.LocalBackgroundJobsModel)
 	}
 }

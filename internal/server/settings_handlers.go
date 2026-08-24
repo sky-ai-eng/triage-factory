@@ -16,7 +16,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -356,7 +355,7 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 	// the effective model is the org's cap. Gated on an actual change so a save
 	// that re-sends the current model doesn't re-warn every time.
 	if savedModel != "" && savedModel != prevModel {
-		if eff, source := domain.EffectiveModel(savedModel, orgMaxTier); source == "org-cap" {
+		if eff, source := domain.EffectiveModel(savedModel, orgMaxTier, runmode.Current() == runmode.ModeMulti); source == "org-cap" {
 			resp.Warning = fmt.Sprintf(
 				"Team default of %s exceeds the org cap of %s. Effective model is %s.",
 				savedModel, orgMaxTier, eff,
@@ -398,22 +397,24 @@ func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (app
 		shape    httpx.Validation
 		ranges   httpx.Validation
 		mutators []func(*domain.TeamSettings)
-		defaults = domain.DefaultTeamSettings()
+		defaults = domain.DefaultTeamSettingsFor(runmode.Current() == runmode.ModeMulti)
 	)
 	set := func(f func(*domain.TeamSettings)) { mutators = append(mutators, f) }
 
 	// ai_model must name a model this deployment offers. The picker draws its
-	// options from the same catalog, so the closed set is the one the UI shows
+	// options from the same universe, so the closed set is the one the UI shows
 	// — and a stored value that is dispatched verbatim has no room for a
-	// spelling nothing can invoke. Null clears the team's preference.
+	// spelling nothing can invoke, nor for one in the other deployment
+	// vocabulary's spelling. Null clears the team's preference.
 	if v, st := httpx.PatchString(&shape, req.AIModel, "ai_model"); st != httpx.PatchAbsent {
+		universe := deploymentUniverse()
 		switch {
 		case st == httpx.PatchClear:
 			set(func(t *domain.TeamSettings) { t.DefaultModel = "" })
 		case st == httpx.PatchSet && strings.TrimSpace(v) == "":
 			shape.Invalid("ai_model", "ai_model must name a model, or be null to inherit the org default")
-		case st == httpx.PatchSet && !modelcatalog.Offers(strings.TrimSpace(v)):
-			shape.Invalid("ai_model", "ai_model must name a model this deployment offers: "+strings.Join(modelcatalog.Keys(), ", "))
+		case st == httpx.PatchSet && !universe.Offers(strings.TrimSpace(v)):
+			shape.Invalid("ai_model", "ai_model must name a model this deployment offers: "+strings.Join(universe.Keys(), ", "))
 		case st == httpx.PatchSet:
 			set(func(t *domain.TeamSettings) { t.DefaultModel = strings.TrimSpace(v) })
 		}
@@ -1115,10 +1116,10 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	// background_jobs_model must name a model this deployment offers. The picker
-	// draws from the same catalog and the jobs dispatch the stored value
+	// draws from the same universe and the jobs dispatch the stored value
 	// verbatim, so there is no room for a spelling nothing can invoke. The R5
 	// delegation gates (tool support, a 64k window) deliberately do NOT narrow
-	// it — these jobs are toolless and short-context, so every catalog entry is
+	// it — these jobs are toolless and short-context, so every offered model is
 	// a legitimate choice.
 	//
 	// Whether the org has connected the provider that serves it is checked in
@@ -1129,11 +1130,12 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	// credential every other feature shares. The jobs then skip with a warning
 	// naming this setting — never a model of TF's choosing.
 	if v, st := httpx.PatchString(&shape, req.BackgroundJobsModel, "background_jobs_model"); st != httpx.PatchAbsent {
+		universe := deploymentUniverse()
 		switch {
 		case st == httpx.PatchClear:
 			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = "" })
-		case !modelcatalog.Offers(strings.TrimSpace(v)):
-			shape.Invalid("background_jobs_model", "background_jobs_model must name a model this deployment offers, or be null to stop running background jobs: "+strings.Join(modelcatalog.Keys(), ", "))
+		case !universe.Offers(strings.TrimSpace(v)):
+			shape.Invalid("background_jobs_model", "background_jobs_model must name a model this deployment offers, or be null to stop running background jobs: "+strings.Join(universe.Keys(), ", "))
 		default:
 			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = strings.TrimSpace(v) })
 		}
@@ -1324,7 +1326,7 @@ func (s *Server) capDowngradeWarning(ctx context.Context, orgID, userID, maxTier
 	if err != nil || teamDefault == "" {
 		return ""
 	}
-	if eff, source := domain.EffectiveModel(teamDefault, maxTier); source == "org-cap" {
+	if eff, source := domain.EffectiveModel(teamDefault, maxTier, runmode.Current() == runmode.ModeMulti); source == "org-cap" {
 		return fmt.Sprintf(
 			"The default team prefers %s, which exceeds the new cap of %s. Its effective model is now %s.",
 			teamDefault, maxTier, eff,

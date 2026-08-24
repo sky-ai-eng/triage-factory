@@ -5,11 +5,20 @@ import { useApiOrgId } from './useApiOrgId'
 /** One offered model, as GET /api/orgs/{org}/models returns it. The read
  *  carries more (prices, context window, availability); this is the slice the
  *  pickers need — the key is what gets stored, the display name is what a
- *  person reads, and `enabled` is the org's own say over what may be picked. */
+ *  person reads, and `enabled` is the org's own say over what may be picked.
+ *
+ *  `provider` is OPTIONAL, and its absence is data rather than a gap: the read
+ *  serves whichever execution vocabulary the deployment speaks, and a model id
+ *  names an access path only in one of them. Where the harness resolves the
+ *  path from the credential instead, no provider is published — and a client
+ *  must not invent one, group by one, or ask the user to pick one. The same
+ *  convention governs the fields this slice does not take (prices, context
+ *  window, availability): present means TF can assert it, absent means nothing
+ *  is claimed. */
 export interface ModelCatalogEntry {
   key: string
   display_name: string
-  provider: string
+  provider?: string
   enabled: boolean
 }
 

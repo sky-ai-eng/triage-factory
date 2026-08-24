@@ -74,7 +74,7 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		// belt-and-suspenders fallback for test fixtures or any
 		// caller that beats the provisioning path. Matches the
 		// schema DEFAULT clauses on team_settings.
-		return domain.DefaultTeamSettings(), nil
+		return domain.DefaultTeamSettingsFor(false), nil
 	}
 	if err != nil {
 		return domain.TeamSettings{}, fmt.Errorf("read team_settings: %w", err)

@@ -36,24 +36,30 @@ type UpdateRequest struct {
 	Model string `json:"model"`
 }
 
-// ValidModel reports whether m is an acceptable prompts.model value — "" (the
-// step is unset and inherits the team default at dispatch) or a model catalog
-// key.
+// ValidModel reports whether model is an acceptable prompts.model value — ""
+// (the step is unset and inherits the team default at dispatch) or a key this
+// deployment's universe offers.
 //
-// The catalog is the accepted set rather than a list kept beside it: the value
-// stored here is dispatched verbatim, so anything the catalog does not name is
-// a model the ledger has no price for and, quite possibly, one no credential
-// can invoke. The picker draws from the same read, which is what makes a
-// rejection here something only a headless caller can provoke.
-func ValidModel(m string) bool {
-	return m == "" || modelcatalog.Offers(m)
+// The universe is the accepted set rather than a list kept beside it: the value
+// stored here is dispatched verbatim, so anything the deployment does not name
+// is a model in the wrong vocabulary for the runtime that will send it and,
+// quite possibly, one no credential can invoke. The picker draws from the same
+// read, which is what makes a rejection here something only a headless caller
+// can provoke.
+//
+// The universe is a parameter rather than resolved here, so the caller that
+// already knows which deployment it is answering for states it once and the two
+// halves of a validation — the predicate and the message below — cannot end up
+// describing different universes.
+func ValidModel(u modelcatalog.Universe, model string) bool {
+	return model == "" || u.Offers(model)
 }
 
 // InvalidModelError is the 400 message for a value ValidModel rejects. It names
 // the offered keys rather than the requirement in the abstract, because the
 // caller's next move is picking one of them.
-func InvalidModelError() string {
-	return `model must be "" (inherit the team default) or one of: ` + strings.Join(modelcatalog.Keys(), ", ")
+func InvalidModelError(u modelcatalog.Universe) string {
+	return `model must be "" (inherit the team default) or one of: ` + strings.Join(u.Keys(), ", ")
 }
 
 // SoftDeleteBySource soft-deletes a prompt according to its source and

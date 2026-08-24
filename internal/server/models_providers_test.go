@@ -28,16 +28,18 @@ import (
 func teamModelsPath(teamID string) string    { return "/api/teams/" + teamID + "/models" }
 func teamProvidersPath(teamID string) string { return teamModelsPath(teamID) + "/providers" }
 
-// modelKeyOn returns an offered model served by provider, read from the catalog
+// modelKeyOn returns a NATIVE model served by provider, read from the registry
 // so these tests exercise the real join rather than a spelling of their own.
+// Native, because the provider is a property of the id only in that vocabulary
+// — an SDK alias resolves its access path from the credential.
 func modelKeyOn(t *testing.T, provider string) string {
 	t.Helper()
-	for _, e := range modelcatalog.Entries() {
+	for _, e := range modelcatalog.UniverseFor(true).Models() {
 		if e.Provider == provider {
 			return e.Key
 		}
 	}
-	t.Fatalf("catalog offers no model on %s", provider)
+	t.Fatalf("the native universe offers no model on %s", provider)
 	return ""
 }
 
@@ -73,9 +75,16 @@ func providersOf(items []modelCatalogRow) map[string]bool {
 	return out
 }
 
-// An unrestricted team sees the whole catalog; restricting it to one provider
-// removes the other's entries from the picker's options entirely.
-func TestTeamModelsList_OmitsRestrictedProviders(t *testing.T) {
+// A provider restriction cannot narrow a LOCAL team's picker, and that is the
+// decoupling working rather than the restriction failing: the models a local
+// install offers are the harness's aliases, and an alias names no access path —
+// the SDK resolves one from whichever credential its environment supplies. So
+// there is nothing for a restriction over access paths to match on, and
+// filtering by one would remove rows nobody asserted were served that way.
+//
+// The narrowing itself is a native-path behaviour and is pinned against
+// Postgres in TestTeamProviders_GatesAndScope_Postgres.
+func TestTeamModelsList_LocalAliasesAreNotNarrowedByAProviderRestriction(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -85,11 +94,14 @@ func TestTeamModelsList_OmitsRestrictedProviders(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
 	all := decodeModels(t, rec.Body.Bytes()).Items
-	if got, want := len(all), len(modelcatalog.Entries()); got != want {
-		t.Fatalf("unrestricted team read returned %d models, want the whole catalog (%d)", got, want)
+	want := len(modelcatalog.UniverseFor(false).Models())
+	if len(all) != want {
+		t.Fatalf("unrestricted team read returned %d models, want the whole local universe (%d)", len(all), want)
 	}
-	if !providersOf(all)[modelcatalog.ProviderBedrock] {
-		t.Fatal("catalog read carries no Bedrock entry; the restriction case would prove nothing")
+	for _, row := range all {
+		if row.Provider != "" {
+			t.Errorf("%s: provider = %q, want absent on an alias", row.Key, row.Provider)
+		}
 	}
 
 	put := doJSON(t, s, http.MethodPut, teamProvidersPath("default"),
@@ -102,27 +114,8 @@ func TestTeamModelsList_OmitsRestrictedProviders(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status after restriction = %d, want 200", rec.Code)
 	}
-	restricted := decodeModels(t, rec.Body.Bytes()).Items
-	if len(restricted) == 0 {
-		t.Fatal("restricted read returned nothing; the team can run no model at all")
-	}
-	seen := providersOf(restricted)
-	if seen[modelcatalog.ProviderBedrock] {
-		t.Errorf("Bedrock entries survived a restriction to Anthropic: %+v", restricted)
-	}
-	if !seen[modelcatalog.ProviderAnthropic] {
-		t.Error("the allowed provider's entries are missing")
-	}
-
-	// Clearing the restriction restores the whole catalog — empty is the
-	// unrestricted state, not "nothing allowed".
-	clear := doJSON(t, s, http.MethodPut, teamProvidersPath("default"), map[string]any{"allowed_providers": []string{}})
-	if clear.Code != http.StatusOK {
-		t.Fatalf("clear: %d %s", clear.Code, clear.Body.String())
-	}
-	rec = doJSON(t, s, http.MethodGet, teamModelsPath("default"), nil)
-	if got, want := len(decodeModels(t, rec.Body.Bytes()).Items), len(modelcatalog.Entries()); got != want {
-		t.Errorf("after clearing the restriction the team sees %d models, want %d", got, want)
+	if got := len(decodeModels(t, rec.Body.Bytes()).Items); got != want {
+		t.Errorf("restricted read returned %d models, want all %d — an alias names no provider to restrict", got, want)
 	}
 }
 
@@ -165,67 +158,6 @@ func TestTeamProvidersPut_ValidatesAndEchoes(t *testing.T) {
 	if seen := providersOf(decodeModels(t, rec.Body.Bytes()).Items); seen[modelcatalog.ProviderAnthropic] {
 		t.Error("a rejected write widened the stored restriction")
 	}
-}
-
-// Save-time enforcement: a default whose provider this team is restricted from,
-// or whose provider the org never connected, is refused with the field named.
-// The stored default is untouched by the refusal.
-func TestTeamSettingsPatch_ModelProviderMustBeAvailable(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-
-	bedrockModel := modelKeyOn(t, modelcatalog.ProviderBedrock)
-
-	t.Run("provider not connected", func(t *testing.T) {
-		s := newTestServer(t)
-		connectOrgProviders(t, s, true, false)
-
-		rec := doJSON(t, s, http.MethodPatch, "/api/teams/default/settings", map[string]any{"ai_model": bedrockModel})
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
-		}
-		assertFieldError(t, rec, "ai_model")
-
-		set, err := s.allStores.Teams.GetSettingsSystem(context.Background(), runmode.LocalDefaultTeamID)
-		if err != nil {
-			t.Fatalf("read team settings: %v", err)
-		}
-		if set.DefaultModel == bedrockModel {
-			t.Error("the refused model was stored anyway")
-		}
-	})
-
-	t.Run("provider restricted", func(t *testing.T) {
-		s := newTestServer(t)
-		connectOrgProviders(t, s, true, true)
-		if rec := doJSON(t, s, http.MethodPut, teamProvidersPath("default"),
-			map[string]any{"allowed_providers": []string{modelcatalog.ProviderAnthropic}}); rec.Code != http.StatusOK {
-			t.Fatalf("restrict: %d %s", rec.Code, rec.Body.String())
-		}
-
-		rec := doJSON(t, s, http.MethodPatch, "/api/teams/default/settings", map[string]any{"ai_model": bedrockModel})
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
-		}
-		assertFieldError(t, rec, "ai_model")
-	})
-
-	t.Run("both connected and unrestricted saves", func(t *testing.T) {
-		s := newTestServer(t)
-		connectOrgProviders(t, s, true, true)
-
-		rec := doJSON(t, s, http.MethodPatch, "/api/teams/default/settings", map[string]any{"ai_model": bedrockModel})
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-		}
-		set, err := s.allStores.Teams.GetSettingsSystem(context.Background(), runmode.LocalDefaultTeamID)
-		if err != nil {
-			t.Fatalf("read team settings: %v", err)
-		}
-		if set.DefaultModel != bedrockModel {
-			t.Errorf("stored default = %q, want %q", set.DefaultModel, bedrockModel)
-		}
-	})
 }
 
 // assertFieldError checks the response carries one error naming field.
