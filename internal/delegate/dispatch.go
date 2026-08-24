@@ -359,8 +359,27 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	}
 
 	// Past the authorization gate, so this claim will really run — decide the
-	// model it runs on before either arm below picks it up.
-	conv.Model = s.modelForClaim(ctx, orgID, br, *conv)
+	// model it runs on before either arm below picks it up. A refusal here is a
+	// team whose default its own enable-set no longer includes: nothing has run
+	// under this claim, so it takes the ordinary pre-agent failure path and the
+	// message names the model.
+	model, err := s.modelForClaim(ctx, orgID, br, *conv)
+	if err != nil {
+		s.failEngagement(conv.ID, err)
+		// An enable-set refusal is settled, not transient: every retry re-reads
+		// the same rows and refuses again, so the retry ladder would spend the
+		// claim budget to arrive here anyway — and then say the runtime failed
+		// to start, which is not what happened and points at the wrong fix. It
+		// takes the exhausted disposition directly instead, which parks a
+		// conversation with a transcript and fails a step that never ran.
+		if errors.Is(err, domain.ErrModelNotEnabled) {
+			s.disposeOfModelRefusal(orgID, br, *conv, err)
+			return
+		}
+		s.handlePreAgentFailure(orgID, br, *conv, err)
+		return
+	}
+	conv.Model = model
 
 	// Resume-by-enqueue: queued input means this claim is NOT a
 	// fresh/crash-reclaimed blueprint step — it's a parked/terminal-resumable
@@ -1081,7 +1100,23 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		if _, err := s.blueprints.SetRunCurrentStepSystem(ctx, orgID, br.ID, next); err != nil {
 			dispatchLog.Warn("set current_step_index for blueprint_run failed", "blueprint_run", br.ID, "error", err)
 		}
-		if err := s.enqueueBlueprintStep(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepModelOrInherit(plan[next].Model, stepConversation.Model), triggerType, br.TriggerID, creatorUserID, br.ActorAgentID); err != nil {
+		// The next step's pin is held to the team's set as it stands NOW, not as
+		// it stood when this blueprint fired: a set narrowed mid-flight is the
+		// case a check at the firing point cannot see. The step this advance
+		// would mint has not run, so refusing it costs no work.
+		teamModels, err := s.resolveModel(ctx, orgID, stepConversation.TeamID)
+		if err != nil {
+			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+				domain.BlueprintRunStatusFailed, fmt.Sprintf("step %d: %v", next, err), &stepIdx, false)
+			return
+		}
+		nextModel, err := stepModelOrInherit(plan[next].Model, stepConversation.Model, teamModels.Enabled())
+		if err != nil {
+			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
+				domain.BlueprintRunStatusFailed, fmt.Sprintf("step %d: %v", next, err), &stepIdx, false)
+			return
+		}
+		if err := s.enqueueBlueprintStep(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), nextModel, triggerType, br.TriggerID, creatorUserID, br.ActorAgentID); err != nil {
 			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("enqueue step %d: %v", next, err), &stepIdx, false)
 			return
@@ -1121,14 +1156,39 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 //
 // Nothing is written: the conversation row keeps the model its step ran on, and
 // no blueprint step's model moves. Only this turn is re-modelled.
-func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.BlueprintRun, conv domain.Conversation) string {
+//
+// A fresh decision is a decision that can be refused. When the team's default is
+// one its enable-set no longer includes, this claim fails by name rather than
+// answering with the step's old model — the org disabled that model, and running
+// the follow-up on something the team can no longer pick would be the
+// substitution R6 forbids wearing an inheritance costume. A step of a RUNNING
+// blueprint never asks: its model was frozen at the firing and mid-blueprint
+// work is not re-decided.
+func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.BlueprintRun, conv domain.Conversation) (string, error) {
 	if br == nil || br.Status == domain.BlueprintRunStatusRunning {
-		return conv.Model
+		return conv.Model, nil
 	}
-	if m := s.resolveModel(ctx, orgID, conv.TeamID); m != "" {
-		return m
+	models, err := s.resolveModel(ctx, orgID, conv.TeamID)
+	if err != nil {
+		return "", err
 	}
-	return conv.Model
+	model, err := models.RequireDefault()
+	if errors.Is(err, domain.ErrModelNotEnabled) {
+		return "", err
+	}
+	if err != nil {
+		// The team names no default at all. The settings save refuses to clear
+		// one, so this is a row written before it did, or a fixture with no
+		// resolver wired. The step's own model is a worse answer than a fresh
+		// decision, but it is a better one than no model — held to the same set
+		// either way, because arriving by inheritance is not a licence to run a
+		// model nobody may pick.
+		if err := models.RequireModel(conv.Model); err != nil {
+			return "", err
+		}
+		return conv.Model, nil
+	}
+	return model, nil
 }
 
 // stepModelOrInherit resolves the model a blueprint step runs on: its own pin
@@ -1137,22 +1197,30 @@ func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.Bl
 // prior step's model on an advance.
 //
 // Two states, and there is no third. A step is unset and inherits, or it is
-// pinned and runs on what it names; a pin is never ranked, compared, or
-// overruled here. Which models a prompt may name is settled where it is saved —
-// the catalog is the accepted set — and a dispatch that quietly substituted
-// something else would leave the transcript and the ledger describing a model
-// nobody chose.
+// pinned and runs on what it names. A pin is honored whatever it costs: nothing
+// here ranks models or overrules a pin for being the expensive one, because
+// ranking them would need a defensible basis for calling one better than
+// another and TF asserts none.
 //
-// `inherited` has already been through the org max-tier cap
-// (domain.EffectiveModel in resolveAIModelForTeam). A pin has not, and is
-// deliberately not held to it: that cap ranks three Anthropic tiers and can
-// place almost nothing else the catalog offers, so applying it to a pin would
-// mean discarding every model it cannot compare.
-func stepModelOrInherit(stepModel, inherited string) string {
+// What a pin IS held to is the team's enable-set, and a pin outside it fails the
+// step by name. That check belongs here rather than where the prompt was saved,
+// because sets drift after a save — an org narrowing its set does not rewrite
+// the pins already stored under the old one. Failing is the only honest answer:
+// ignoring the pin would run the step on the inherited model, which is the
+// substitution R6 forbids.
+//
+// enabled is the team's effective set, resolved with the default the step
+// inherits so both come from one read of one moment.
+func stepModelOrInherit(stepModel, inherited string, enabled domain.ModelSet) (string, error) {
 	if stepModel == "" {
-		return inherited
+		return inherited, nil
 	}
-	return stepModel
+	if !enabled.Has(stepModel) {
+		return "", fmt.Errorf(
+			"%w: the blueprint step pins %s, which this team's enabled models do not include (%s) — re-pin the step or enable the model in Settings",
+			domain.ErrModelNotEnabled, stepModel, enabled)
+	}
+	return stepModel, nil
 }
 
 // enqueueBlueprintStep mints a queued conversations row for step stepIndex
@@ -1534,8 +1602,46 @@ func (s *Spawner) conversationHasTranscript(orgID, conversationID string) bool {
 // undelivered message would re-claim the conversation immediately and the
 // budget would buy nothing at all.
 func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversation, cause error) {
+	s.parkWithStopNote(orgID, conv, domain.ParkReasonLaunchFailed,
+		fmt.Sprintf("The runtime failed to start after %d attempts: %s. Send a message to retry.", conv.Attempts, cause),
+		fmt.Sprintf("Run %s could not start: %s", shortConversationID(conv.ID), truncateToastMsg(cause.Error(), 160)))
+}
+
+// disposeOfModelRefusal answers for a claim whose model its team may no longer
+// pick. It is disposeOfExhaustedConversation's split — park what has a
+// transcript, fail a step that never ran — reached without the retries, since
+// re-reading the same two settings rows cannot produce a different answer.
+//
+// The note is the refusal itself, which already names the model and the set
+// that excludes it, so the person reading the transcript is told the one thing
+// that fixes it. "Send a message to retry" is deliberately absent: a message
+// would wake the conversation into this same refusal until somebody picks.
+func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) {
+	if br == nil || s.conversationHasTranscript(orgID, conv.ID) {
+		dispatchLog.Warn("claim refused: the model this conversation would run on is not enabled for its team; parking",
+			"conversation", conv.ID, "team", conv.TeamID, "error", cause)
+		s.parkWithStopNote(orgID, conv, domain.ParkReasonModelNotEnabled,
+			fmt.Sprintf("This conversation cannot continue: %s", cause),
+			fmt.Sprintf("Run %s is paused: %s", shortConversationID(conv.ID), truncateToastMsg(cause.Error(), 160)))
+		return
+	}
+	dispatchLog.Error("blueprint step refused: the model it would run on is not enabled for its team",
+		"conversation", conv.ID, "blueprint_run", br.ID, "team", conv.TeamID, "error", cause)
+	s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
+		runConfig{orgID: orgID, teamID: conv.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
+		domain.BlueprintRunStatusFailed, cause.Error(), conv.BlueprintStepIndex, false)
+}
+
+// parkWithStopNote is the park every pre-agent stop lands on: a stop note on the
+// transcript saying what happened, the waiting input settled so `open` does not
+// immediately re-claim, the park itself fenced on this claim, and the two
+// surfaces a person watching either the conversation or the board reads from.
+//
+// The note and the reason are the caller's because they are the only parts that
+// differ, and they are what a person is actually told — a park that describes
+// the wrong cause sends them to fix the wrong thing.
+func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reason domain.ParkReason, note, toastMsg string) {
 	bgCtx := context.Background()
-	note := fmt.Sprintf("The runtime failed to start after %d attempts: %s. Send a message to retry.", conv.Attempts, cause)
 	if _, err := s.conversations.InsertMessageForClaimSystem(bgCtx, orgID, conv.ClaimID, &domain.Message{
 		ConversationID: conv.ID,
 		UserID:         conv.CreatorUserID,
@@ -1544,20 +1650,20 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversati
 		Content:        note,
 	}); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
-			dispatchLog.Error("claim fence refused the launch-failure note — a successor owns this conversation; recording nothing",
+			dispatchLog.Error("claim fence refused the stop note — a successor owns this conversation; recording nothing",
 				"conversation", conv.ID, "claim_id", conv.ClaimID, "org_id", orgID)
 			return
 		}
-		dispatchLog.Warn("record launch-failure note failed; the park still lands", "conversation", conv.ID, "error", err)
+		dispatchLog.Warn("record stop note failed; the park still lands", "conversation", conv.ID, "error", err)
 	}
 	if s.pendingInput != nil {
 		if _, _, _, err := s.pendingInput.Consume(bgCtx, orgID, conv.ID); err != nil {
 			dispatchLog.Warn("settle pending input before parking a conversation that could not start failed", "conversation", conv.ID, "error", err)
 		}
 	}
-	if _, err := s.conversations.ParkOpenForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, db.ParkStopped(domain.ParkReasonLaunchFailed, "")); err != nil {
+	if _, err := s.conversations.ParkOpenForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, db.ParkStopped(reason, "")); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
-			dispatchLog.Error("claim fence refused the park after a launch failure — a successor owns this conversation",
+			dispatchLog.Error("claim fence refused the park — a successor owns this conversation",
 				"conversation", conv.ID, "claim_id", conv.ClaimID, "org_id", orgID)
 			return
 		}
@@ -1566,7 +1672,7 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversati
 	}
 	s.broadcastConversationUpdate(orgID, conv.ID, "open")
 	s.recomputeTaskBoardColumn(orgID, conv.TaskID)
-	toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s could not start: %s", shortConversationID(conv.ID), truncateToastMsg(cause.Error(), 160)))
+	toast.Error(s.wsHub, orgID, toastMsg)
 }
 
 // failClaimedConversation marks an orphaned claimed conversation failed (its

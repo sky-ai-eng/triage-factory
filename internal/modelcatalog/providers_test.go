@@ -100,36 +100,3 @@ func TestProviderDisplayNames_CoverEveryMappedProvider(t *testing.T) {
 		}
 	}
 }
-
-// An admin who has restricted nothing has restricted nothing — the absent
-// value is every provider, never none.
-func TestAllowedProviders_AbsentMeansEveryProvider(t *testing.T) {
-	set := AllowedProviders(nil)
-	if set.Restricted() {
-		t.Error("an absent restriction reads as restricted")
-	}
-	for _, p := range SupportedProviders() {
-		if !set.Has(p) {
-			t.Errorf("%s: not allowed under an absent restriction", p)
-		}
-	}
-	if !set.Has("a-provider-this-build-never-heard-of") {
-		t.Error("an absent restriction narrowed something")
-	}
-	if got := AllowedProviders([]string{}); got.Restricted() {
-		t.Error("an empty stored restriction reads as restricted")
-	}
-}
-
-func TestAllowedProviders_StoredSetIsHonoured(t *testing.T) {
-	set := AllowedProviders([]string{ProviderAnthropic})
-	if !set.Restricted() {
-		t.Error("a stored restriction does not read as restricted")
-	}
-	if !set.Has(ProviderAnthropic) {
-		t.Error("the stored provider is not allowed")
-	}
-	if set.Has(ProviderBedrock) {
-		t.Error("a provider outside the stored set is allowed")
-	}
-}

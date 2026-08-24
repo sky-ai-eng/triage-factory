@@ -29,7 +29,7 @@ func TestGatedProxy_AuthorizeErrorIsLogged(t *testing.T) {
 	defer upstream.Close()
 	ts := &constantTokenSource{value: "ghs", expiresAt: time.Now().Add(time.Hour)}
 	errAuthorize := func(_ context.Context, _, _ string) (gitproxy.Decision, error) {
-		return gitproxy.Decision{}, errors.New("push policy read: column \"allowed_providers\" does not exist")
+		return gitproxy.Decision{}, errors.New("push policy read: column \"base_branch_push_policy\" does not exist")
 	}
 	sink := newDenialSink()
 	_, proxyURL := startGatedProxy(t, ts.source, upstream.URL, errAuthorize, sink.record)
@@ -47,7 +47,7 @@ func TestGatedProxy_AuthorizeErrorIsLogged(t *testing.T) {
 	got := buf.String()
 	// The cause verbatim, and the repo it was refused for — an operator reading
 	// this needs to know which repo stalled as much as why.
-	for _, want := range []string{"allowed_providers", "push policy read", "octo", "repo"} {
+	for _, want := range []string{"base_branch_push_policy", "push policy read", "octo", "repo"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("log missing %q; got:\n%s", want, got)
 		}

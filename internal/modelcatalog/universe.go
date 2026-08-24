@@ -114,13 +114,13 @@ func (u Universe) Keys() []string {
 // membership test every surface that validates a stored model value runs, so
 // "offered" has one definition rather than one per handler.
 //
-// It answers for the DEPLOYMENT, not for a tenant — no enable-set is consulted
-// here.
-//
-// TODO(TFAC-703): make the accepted set the org's (and the team's) enable-set
-// rather than the whole universe, so a stored model can only ever name one the
-// org turned on. Until then a pin is bounded by the universe alone, and the
-// org max-tier cap — which this replaces — reaches only the team default.
+// It answers for the DEPLOYMENT, not for a tenant. Whether a tenant may pick
+// the model is the enable-set's question (domain.ModelSet), and the two are
+// asked at different moments on purpose: a stored model is validated against
+// the universe when it is SAVED, because a name this deployment cannot dispatch
+// is a spelling mistake nothing will ever fix, and against the enable-set at
+// DISPATCH, because a set drifts after a save and a pin refused at save time
+// could never be re-enabled.
 func (u Universe) Offers(key string) bool {
 	_, ok := u.Lookup(key)
 	return ok
@@ -158,35 +158,10 @@ func (u Universe) CandidatesFor(provider string) []Model {
 }
 
 // DefaultEnabled is the enable-set an org that has never expressed a preference
-// gets: every model in this deployment's universe. Stored enable-sets read this
-// as their absent-value semantics, so "the org chose nothing" and "the org chose
-// everything" stay distinguishable in storage while resolving the same here.
-func (u Universe) DefaultEnabled() []string { return u.Keys() }
-
-// EnableSet answers whether one org has a given model enabled.
-type EnableSet struct {
-	keys map[string]bool
-}
-
-// Enabled resolves an org's stored enable-set into something to ask questions
-// of. A nil or empty stored set means no preference was expressed and resolves
-// to DefaultEnabled — not to "nothing enabled", which would leave an org with
-// no models the moment the column exists.
+// resolves to: every model in this deployment's universe, so a model a later
+// release adds is enabled for such an org the day it ships.
 //
-// Callers pass what the org stored and never branch on whether it was empty;
-// that decision belongs here, in one place, so every surface answers the same.
-func (u Universe) Enabled(stored []string) EnableSet {
-	if len(stored) == 0 {
-		stored = u.DefaultEnabled()
-	}
-	set := EnableSet{keys: make(map[string]bool, len(stored))}
-	for _, k := range stored {
-		set.keys[k] = true
-	}
-	return set
-}
-
-// Has reports whether key is enabled. A key the org enabled but the universe no
-// longer names simply never gets asked about, since callers iterate the
-// universe.
-func (s EnableSet) Has(key string) bool { return s.keys[key] }
+// It is the second argument to domain.OrgModelSet, which owns the absent-value
+// decision — a universe owns only what the default IS, since it is the thing
+// that knows what this deployment can dispatch.
+func (u Universe) DefaultEnabled() []string { return u.Keys() }

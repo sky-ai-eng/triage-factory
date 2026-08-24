@@ -185,6 +185,7 @@ export const PARK_REASON_LABELS: Record<string, string> = {
   blueprint_cancelled: 'workflow cancelled',
   blueprint_terminal: 'workflow ended first',
   launch_failed: 'the runtime could not start',
+  model_not_enabled: 'its model is no longer one this team can pick',
   drained: 'the executor was drained',
 }
 
@@ -245,6 +246,8 @@ export function resumeBlockedCopy(conversation: Conversation): string {
     case 'worktree_missing':
     case 'model_missing':
       return 'This run didn’t record the state a resume needs, so it can’t be continued.'
+    case 'model_not_enabled':
+      return 'This run’s model is no longer one this team can pick — choose one from the team’s enabled models in Settings, then continue.'
     default:
       return 'This conversation can’t take a follow-up.'
   }

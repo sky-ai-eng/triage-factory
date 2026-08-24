@@ -916,11 +916,10 @@ CREATE TABLE public.org_settings (
     -- providers are bound; this column answers what it means when none are —
     -- deliberately on the host's credentials, or not set up.
     --
-    -- App-validated, not CHECK-constrained, the max_llm_model_tier /
-    -- background_jobs_model precedent: the SQLite tree adds this column with
-    -- ALTER TABLE, where widening a CHECK later means a full table rebuild, and
-    -- a constraint that exists on one dialect only is worse than one on
-    -- neither.
+    -- App-validated, not CHECK-constrained, the background_jobs_model
+    -- precedent: the SQLite tree adds this column with ALTER TABLE, where
+    -- widening a CHECK later means a full table rebuild, and a constraint that
+    -- exists on one dialect only is worse than one on neither.
     --
     -- DEFAULT 'byok', and here that is not a default so much as the only value:
     -- a hosted deployment has no host credentials to lend — the operator's
@@ -934,14 +933,32 @@ CREATE TABLE public.org_settings (
     -- baseline (not a forward migration) because multi-mode / Postgres is
     -- net-new and unshipped, so there are no existing rows to backfill.
     llm_auth_method text DEFAULT 'byok'::text NOT NULL,
-    -- Max model tier the org permits teams/users to pick. NULL means no cap.
-    -- App-validated, not CHECK-constrained (the max_llm_model_tier_check was
-    -- dropped in this baseline, both dialects): an opaque, provider-agnostic
-    -- model/capability identifier. The app knows 'haiku'|'sonnet'|'opus' today
-    -- (validated in the settings handler), but dropping the CHECK lets OpenAI /
-    -- future families be added with zero DDL; a richer provider/model split stays
-    -- additive (new columns). Column not renamed; app layer unchanged.
-    max_llm_model_tier text,
+    -- The org's enable-set: the model keys its teams may pick from, as a JSON
+    -- array. This is the selection-time control — its whole effect is a smaller
+    -- picker — and it says which models may be picked without claiming any is
+    -- better than another, which is the claim a ranked ceiling has to make and
+    -- the catalog declines to.
+    --
+    -- The keys are native wire ids, this dialect's own execution vocabulary, as
+    -- default_model and background_jobs_model on these tables already are: a set
+    -- names models the deployment will be asked to run, and a harness alias
+    -- stored here would go on the bifrost wire unresolved.
+    --
+    -- NULL is the absent value and means the org has expressed no preference,
+    -- which resolves to every model this deployment offers: a model a later
+    -- release adds is enabled for that org the day it ships, while a stored set
+    -- stays frozen at what it names. The RESOLVED set is never stored — "chose
+    -- nothing" and "chose everything" are different facts about what happens
+    -- next, and collapsing them at the column is what would make the first
+    -- impossible to spell.
+    --
+    -- JSON text rather than a child table: nothing semi-joins through
+    -- enablement, the catalog is code so there is no FK target, and the set is
+    -- read whole at one choke point. App-validated against the build's catalog,
+    -- not CHECK-constrained: the accepted set changes with the binary, not with
+    -- the schema, and a CHECK would have to be migrated on both dialects for
+    -- every model TF names.
+    enabled_models text,
     -- The model the two headless system jobs — scorer, repo profiler —
     -- run on. One knob for both: they are the same kind of
     -- work (short, toolless, no transcript) bought from the same budget, so a
@@ -949,8 +966,8 @@ CREATE TABLE public.org_settings (
     --
     -- A modelcatalog key, validated app-side against the catalog and against the
     -- providers the org has connected — not CHECK-constrained, the
-    -- max_llm_model_tier precedent above: the accepted set is the build's
-    -- catalog, which changes with the binary rather than with the schema.
+    -- enabled_models precedent above: the accepted set is the build's own,
+    -- which changes with the binary rather than with the schema.
     --
     -- NOT NULL with an EMPTY default, and the empty string is the load-bearing
     -- part: it means the org has not picked yet, and until it does those jobs
@@ -968,7 +985,7 @@ CREATE TABLE public.org_settings (
     -- (summed across every category — autonomous + manual + system
     -- overhead) is at or above this value, the delegation choke point
     -- (Spawner.Delegate) refuses all new agent runs, a runaway-spend fuse. Mirrors
-    -- the nullable max_llm_model_tier shape above; in-flight runs are unaffected
+    -- the nullable enabled_models shape above; in-flight runs are unaffected
     -- and the read fails open on error so a transient failure can't wedge delegation.
     max_daily_cost_usd double precision,
     -- Per-org cap on how many runs the org may have executing concurrently
@@ -999,7 +1016,7 @@ CREATE TABLE public.org_settings (
     -- visibly so during the staged window of a PAT→App switch, where the class
     -- is already byo_app while the PAT is still the live credential.
     --
-    -- App-validated, not CHECK-constrained, matching max_llm_model_tier above:
+    -- App-validated, not CHECK-constrained, matching enabled_models above:
     -- admitting a new class must cost no DDL on either backend.
     --
     -- Not owned by the settings writer. OrgsStore.UpdateSettings deliberately
@@ -1717,8 +1734,8 @@ CREATE TABLE public.team_settings (
     ai_reprioritize_threshold integer DEFAULT 5 NOT NULL,
     ai_preference_update_interval integer DEFAULT 20 NOT NULL,
     -- Team-scope AI behavior policy. Moved off user_settings: in v1 the
-    -- team owns the model used for scoring + agent runs (clamped by
-    -- org_settings.max_llm_model_tier when set) and the master toggle for
+    -- team owns the model used for scoring + agent runs (drawn from the
+    -- enable-sets on this row and on org_settings) and the master toggle for
     -- auto-delegation. auto_delegate_enabled defaults TRUE: a team whose
     -- trigger is enabled means the run to fire, and shipped triggers are off
     -- until opted in, so a second gate defaulting off would swallow it. Teams
@@ -1766,7 +1783,7 @@ CREATE TABLE public.team_settings (
     -- literal DEFAULT so partial upserts (e.g. SetDailyCostCapSystem) materialize
     -- it without the writer naming the column; the app coalesces an empty write
     -- to the default and validates the value set app-side (no CHECK — the
-    -- max_llm_model_tier precedent). Rolled into the baseline (not a forward
+    -- enabled_models precedent). Rolled into the baseline (not a forward
     -- migration) because multi-mode / Postgres is net-new and unshipped; the
     -- SQLite tree carries 202607260001_team_review_posture.sql.
     review_posture text DEFAULT 'identity'::text NOT NULL,
@@ -1780,25 +1797,26 @@ CREATE TABLE public.team_settings (
     -- literal DEFAULT so partial upserts (e.g. SetDailyCostCapSystem)
     -- materialize it without the writer naming the column; the app coalesces an
     -- empty write to the default and validates the value set app-side (no CHECK
-    -- — the max_llm_model_tier precedent). Rolled into the baseline (not a
+    -- — the enabled_models precedent). Rolled into the baseline (not a
     -- forward migration) because multi-mode / Postgres is net-new and unshipped;
     -- the SQLite tree carries 202607270001_team_base_branch_push_policy.sql.
     base_branch_push_policy text DEFAULT 'never'::text NOT NULL,
-    -- Which inference providers this team may spend against, as modelcatalog
-    -- provider ids. Empty (the default) is no restriction — every provider the
-    -- org configured; absent and "all of them" therefore store the same value,
-    -- which is correct, since an admin who has narrowed nothing has narrowed
-    -- nothing and a team whose restriction happened to name every provider
-    -- would silently become restricted the day the org connects a third. An org
-    -- admin's decision, not the team's: the team-settings write path
-    -- round-trips this column untouched and only the admin-pool
-    -- SetAllowedProvidersSystem changes it (an org admin restricting a team
-    -- need not be a member of it). NOT NULL with a literal DEFAULT so partial
-    -- upserts materialize it without the writer naming the column. Rolled into
-    -- the baseline (not a forward migration) because multi-mode / Postgres is
-    -- net-new and unshipped; the SQLite tree, which HAS shipped, carries
-    -- 202608250001_team_allowed_providers.sql.
-    allowed_providers text[] DEFAULT '{}'::text[] NOT NULL,
+    -- Which of the models its org enables this team may pick from, as a JSON
+    -- array of catalog keys — same encoding and same absent-value discipline as
+    -- org_settings.enabled_models. NULL inherits the org's effective set whole.
+    --
+    -- A subset of that set at every save (the write refuses a superset) and
+    -- narrowed to it again at every read, because the org may shrink its own set
+    -- afterwards and nothing rewrites a team row when it does.
+    --
+    -- Model-granular, and that grain is what makes it the only selection-time
+    -- control a team needs: restricting a team from a provider is unchecking
+    -- that path's models, so no coarser provider column stands beside this one
+    -- to disagree with it.
+    -- Rolled into the baseline (not a forward migration) because multi-mode /
+    -- Postgres is net-new and unshipped; the SQLite tree, which HAS shipped,
+    -- carries 202608270001_model_enable_sets.sql.
+    enabled_models text,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 

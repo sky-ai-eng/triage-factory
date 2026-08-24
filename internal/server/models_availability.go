@@ -270,13 +270,14 @@ func (h *modelsHandler) handleModelTest(w http.ResponseWriter, r *http.Request) 
 //
 // Candidates follow the universe, minus the ones already verified: on the native
 // one they are the ids the named provider serves, and on an SDK one they are
-// every alias, because one credential family reaches all of them there. Team
-// provider restrictions do NOT narrow the set:
-// availability is org truth about what the org's credentials can do, and a
-// restriction is a decision about which team may spend against it — filtering
-// here would make one team's restriction silently leave another team's picker
-// unverified. The org's enable-set does not narrow it either, for the same
-// reason: what is offered is a separate question from what works.
+// every alias, because one credential family reaches all of them there.
+//
+// Enable-sets do NOT narrow the set, at either scope. Availability is org truth
+// about what the org's credentials can do, and a set is a decision about which
+// models a tenant may pick — filtering here would make one team's narrowing
+// silently leave another team's picker unverified, and would leave a model
+// unverified the moment before an admin re-enables it. What is offered is a
+// separate question from what works.
 //
 // The probes run one after another and each commits on its own, with no
 // sweep-level transaction. A process that dies halfway leaves the rows it

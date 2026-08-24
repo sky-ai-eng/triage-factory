@@ -62,13 +62,16 @@ var fixReviewFeedback string
 // identifier) rather than a literal id — the seeder mints a random UUID per
 // team copy and dedupes on (org_id, team_id, system_slug).
 //
-// No seed names a model. A seed goes to every org whatever its providers, so a
-// concrete id here would be a claim about a deployment TF cannot see, and the
-// tier words that used to stand in for one no longer exist. Every seeded prompt
-// therefore ships Model "" — inherit the team default — which the team owns and
-// can override per prompt in the editor. The accepted cost is that a
-// deliberately cheap step (the PR-review aggregator) runs at the team default
-// until someone pins it.
+// No seed names a model. A seed goes to every org whatever its providers and
+// whatever each team has enabled, so a concrete id here would be a claim about
+// a deployment TF cannot see — and there is no vendor-neutral vocabulary to name
+// one in instead. Every seeded prompt therefore ships Model "" — inherit the
+// team default — which the team owns and can override per prompt in the editor.
+//
+// A pin the editor writes is honored at dispatch whatever it costs; what it is
+// held to is the team's enable-set, and a pin outside it fails the step by name.
+// The accepted cost of seeding none is that a deliberately cheap step (the
+// PR-review aggregator) runs at the team default until someone pins it.
 func Prompts() []domain.Prompt {
 	return []domain.Prompt{
 		// PR review is a three-step blueprint (system-pr-review, see

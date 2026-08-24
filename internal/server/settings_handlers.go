@@ -240,6 +240,7 @@ func (s *Server) readTeamSettings(w http.ResponseWriter, r *http.Request, orgID,
 // them here into a 400 naming the field rather than a silent half-save.
 type teamSettingsPatch struct {
 	AIModel                         json.RawMessage `json:"ai_model"`
+	EnabledModels                   json.RawMessage `json:"enabled_models"`
 	AIAutoDelegate                  json.RawMessage `json:"ai_auto_delegate_enabled"`
 	AutoModeEnabled                 json.RawMessage `json:"auto_mode_enabled"`
 	AIReprioritizeThreshold         json.RawMessage `json:"ai_reprioritize_threshold"`
@@ -292,7 +293,6 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 	var (
 		prevModel  string
 		savedModel string
-		orgMaxTier string
 		saved      domain.TeamSettings
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -301,36 +301,38 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 			return fmt.Errorf("load team settings: %w", err)
 		}
 		prevModel = teamSet.DefaultModel
-		// The org row feeds two different things, and they tolerate a read
-		// failure differently. The max-tier cap only renders an advisory line
-		// after the save, so a failed read there costs a sentence. The provider
-		// check below decides whether the write happens at all, so the same
-		// failure has to stop it — see the abort inside.
-		orgSet, orgErr := tx.Orgs.GetSettings(r.Context(), orgID)
-		if orgErr == nil {
-			orgMaxTier = orgSet.MaxLLMModelTier
+		// The org row decides whether this write happens at all — both halves of
+		// the enable-set check are against it — so a failed read stops the save.
+		// A failed read is the check's input missing, not the check passing, and
+		// saving through it would persist a set the next dispatch refuses while
+		// telling the caller it succeeded. A missing org_settings row is not
+		// this case: the store answers that with the schema defaults, which
+		// resolve to an org enabling the whole catalog and holding no
+		// credential, so they refuse nothing.
+		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
+		if err != nil {
+			return fmt.Errorf("load org settings: %w", err)
 		}
 		apply(&teamSet)
 		savedModel = teamSet.DefaultModel
-		// A default this team's next run would refuse is not a default worth
-		// storing, so the provider check happens here — inside the transaction,
-		// where both the org's connected providers and the team's restriction
-		// are already loaded. Only on a change: a save that re-sends a model
-		// stored before a credential was disconnected must not be blocked by
-		// something this caller did not do (that one is the dispatch's to
-		// refuse).
-		if savedModel != "" && savedModel != prevModel {
-			// A failed read is the check's input missing, not the check
-			// passing. Saving through it would persist a default the next
-			// dispatch refuses, and the caller would be told the save
-			// succeeded — so the write is abandoned and the caller retries.
-			// A missing org_settings row is not this case: the store answers
-			// that with the schema defaults, which resolve to an org holding
-			// no credential and therefore refuse nothing.
-			if orgErr != nil {
-				return fmt.Errorf("load org settings: %w", orgErr)
+		// Only when this save is the one choosing. A team whose default its org
+		// disabled is broken, but it was not broken by the admin editing a
+		// branch template — refusing them would blame this caller for state
+		// they did not create, and the dispatch gate already refuses that
+		// team's next run by name. Naming either field is asking for the
+		// selection to be judged, and then BOTH are, because narrowing a set
+		// and moving a default are one decision.
+		if httpx.PatchNamed(req.AIModel, req.EnabledModels) {
+			if e := checkTeamModelSelection(teamSet, orgSet); e != nil {
+				return e
 			}
-			if e := modelaccess.ForOrg(orgSet).Check(savedModel, teamSet.AllowedProviders); e != nil {
+		}
+		// A default this team's next run could not authenticate is not a default
+		// worth storing. Only on a change: a save that re-sends a model stored
+		// before a credential was disconnected must not be blocked by something
+		// this caller did not do (that one is the dispatch's to refuse).
+		if savedModel != "" && savedModel != prevModel {
+			if e := modelaccess.ForOrg(orgSet).Check(savedModel); e != nil {
 				return e
 			}
 		}
@@ -339,6 +341,9 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 		}
 		return nil
 	}); err != nil {
+		if writeFieldFaults(w, err) {
+			return
+		}
 		if writeModelAccessError(w, err, "ai_model") {
 			return
 		}
@@ -350,19 +355,53 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	// The team default doesn't override the org cap. If a newly-picked default
-	// exceeds it, accept the save (the team owns its preference) but say that
-	// the effective model is the org's cap. Gated on an actual change so a save
-	// that re-sends the current model doesn't re-warn every time.
-	if savedModel != "" && savedModel != prevModel {
-		if eff, source := domain.EffectiveModel(savedModel, orgMaxTier, runmode.Current() == runmode.ModeMulti); source == "org-cap" {
-			resp.Warning = fmt.Sprintf(
-				"Team default of %s exceeds the org cap of %s. Effective model is %s.",
-				savedModel, orgMaxTier, eff,
-			)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// checkTeamModelSelection holds a team's post-apply model selection to the
+// org's enable-set: the team's own set must be a subset of it, and the team's
+// default must be a member of the set that results. Both are checked against
+// the state this save LANDS on rather than the body alone, which is why it runs
+// inside the transaction — a team may be narrowing its set and moving its
+// default in one call, and either can invalidate the other, so the pair is
+// judged whenever either is named.
+//
+// Violations are refusals, not warnings, and both fields are named when both
+// fail: a save that stored a default the team cannot dispatch would report
+// success for a configuration whose only observable effect is a failed run
+// later.
+func checkTeamModelSelection(teamSet domain.TeamSettings, orgSet domain.OrgSettings) error {
+	orgEnabled := domain.OrgModelSet(orgSet.EnabledModels, deploymentUniverse().DefaultEnabled())
+	var faults fieldFaults
+	var outside []string
+	for _, m := range teamSet.EnabledModels {
+		if !orgEnabled.Has(m) {
+			outside = append(outside, m)
 		}
 	}
-	writeJSON(w, http.StatusOK, resp)
+	if len(outside) > 0 {
+		faults.invalid("enabled_models", fmt.Sprintf(
+			"enabled_models must be a subset of the models this organization enables; %s %s not: the organization enables %s",
+			strings.Join(outside, ", "), plural(len(outside), "is", "are"), orgEnabled))
+	}
+	// Resolved from the team's own stored set so the two fields are judged
+	// together: a default legal under the OLD set but not the new one is exactly
+	// what a save narrowing both at once has to catch.
+	teamEnabled := domain.TeamModelSet(teamSet.EnabledModels, orgEnabled)
+	if model := strings.TrimSpace(teamSet.DefaultModel); model != "" && !teamEnabled.Has(model) {
+		faults.invalid("ai_model", fmt.Sprintf(
+			"ai_model must name a model this team has enabled; %s is not one of %s", model, teamEnabled))
+	}
+	return faults.orNil()
+}
+
+// plural picks between two words by count, so a refusal naming one model reads
+// as a sentence rather than as a template.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // resolveTeamSettingsPatch validates the body ONCE and returns the mutation it
@@ -379,7 +418,8 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 // On any failure the response is already written and ok is false.
 func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (apply func(*domain.TeamSettings), ok bool) {
 	if !httpx.PatchNamed(
-		req.AIModel, req.AIAutoDelegate, req.AutoModeEnabled, req.AIReprioritizeThreshold,
+		req.AIModel, req.EnabledModels, req.AIAutoDelegate, req.AutoModeEnabled,
+		req.AIReprioritizeThreshold,
 		req.AIPreferenceUpdateInterval, req.BranchTemplate, req.ReviewPosture,
 		req.BaseBranchPushPolicy, req.PermissionAbsentAutodenyEnabled,
 		req.PermissionAbsentGraceSeconds,
@@ -405,18 +445,42 @@ func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (app
 	// options from the same universe, so the closed set is the one the UI shows
 	// — and a stored value that is dispatched verbatim has no room for a
 	// spelling nothing can invoke, nor for one in the other deployment
-	// vocabulary's spelling. Null clears the team's preference.
+	// vocabulary's spelling.
+	//
+	// It cannot be cleared, and this is the one PATCH field on either scope
+	// where null is refused rather than meaning "reset". There is nothing to
+	// reset TO: no org-level team default exists, and nothing resolves an empty
+	// one at dispatch, so a cleared team is a team whose every unpinned step
+	// fails. The provisioning default seeds the column and is not a fallback —
+	// picking it here would spend on a choice nobody made. A team changing its
+	// mind names the new model; a team that wants fewer choices narrows
+	// enabled_models beside this.
 	if v, st := httpx.PatchString(&shape, req.AIModel, "ai_model"); st != httpx.PatchAbsent {
 		universe := deploymentUniverse()
 		switch {
-		case st == httpx.PatchClear:
-			set(func(t *domain.TeamSettings) { t.DefaultModel = "" })
-		case st == httpx.PatchSet && strings.TrimSpace(v) == "":
-			shape.Invalid("ai_model", "ai_model must name a model, or be null to inherit the org default")
-		case st == httpx.PatchSet && !universe.Offers(strings.TrimSpace(v)):
+		case st == httpx.PatchClear || strings.TrimSpace(v) == "":
+			shape.Invalid("ai_model", "ai_model must name a model this deployment offers and cannot be cleared — a team with no default has no model to run its unpinned steps on: "+strings.Join(universe.Keys(), ", "))
+		case !universe.Offers(strings.TrimSpace(v)):
 			shape.Invalid("ai_model", "ai_model must name a model this deployment offers: "+strings.Join(universe.Keys(), ", "))
-		case st == httpx.PatchSet:
+		default:
 			set(func(t *domain.TeamSettings) { t.DefaultModel = strings.TrimSpace(v) })
+		}
+	}
+	// enabled_models is the team's own enable-set — which of the models its org
+	// enables this team may pick from. The list IS the value: a set replaces
+	// wholesale, and null clears it back to inheriting the org's whole set.
+	//
+	// Only the SHAPE is decided here. Whether the set is one the org actually
+	// enables needs the org's row, so it is checked inside the write's
+	// transaction against the state this save lands on.
+	if v, st := httpx.PatchStrings(&shape, req.EnabledModels, "enabled_models"); st != httpx.PatchAbsent {
+		switch st {
+		case httpx.PatchClear:
+			set(func(t *domain.TeamSettings) { t.EnabledModels = nil })
+		case httpx.PatchSet:
+			if models, ok := normalizeModelSet(&shape, deploymentUniverse(), v, "enabled_models"); ok {
+				set(func(t *domain.TeamSettings) { t.EnabledModels = models })
+			}
 		}
 	}
 	if v, st := httpx.PatchBool(&shape, req.AIAutoDelegate, "ai_auto_delegate_enabled"); st != httpx.PatchAbsent {
@@ -576,8 +640,17 @@ type orgSettingsResponse struct {
 	// even for a Cloud org whose email + API token aren't shadowed at all.
 	// Either half being env-supplied is enough to make "replace this credential"
 	// a promise Settings can't keep. Local mode only.
-	JiraCredentialEnvProvided bool   `json:"jira_credential_env_provided,omitempty"`
-	MaxLLMModelTier           string `json:"max_llm_model_tier,omitempty"`
+	JiraCredentialEnvProvided bool `json:"jira_credential_env_provided,omitempty"`
+	// EnabledModels is the org's STORED enable-set, or null when it has
+	// expressed no preference. Deliberately not the resolved set: the models
+	// read (GET /api/orgs/{org_id}/models) is what answers "which models are
+	// enabled right now", and publishing the resolution here too would give a
+	// client two places to ask one question and a way to see them disagree.
+	//
+	// Always emitted (not omitempty): null is the org's "no preference", which
+	// is a state the settings form has to render, and an omitted field would
+	// read to a client as "unchanged".
+	EnabledModels []string `json:"enabled_models"`
 	// BackgroundJobsModel is the model the scorer and repo
 	// profiler run on — a catalog key. Always emitted (not omitempty): "" is
 	// the org's "not picked yet", which is the state the settings form has to
@@ -645,7 +718,7 @@ type orgSettingsResponse struct {
 	// route's disabled switch already has.
 	Version int `json:"version"`
 	// Warning is advisory prose about a save that SUCCEEDED — today, that a
-	// newly-lowered model cap now clamps the default team's preference. Only the
+	// narrowed enable-set has disabled a model some team still selects. Only the
 	// PATCH response carries it; the GET leaves it empty and omitempty drops it,
 	// so the read and the write answer one shape.
 	Warning string `json:"warning,omitempty"`
@@ -773,7 +846,7 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 		JiraPollInterval:          orgSet.JiraPollInterval.String(),
 		HasJiraCredential:         hasJiraCred,
 		JiraCredentialEnvProvided: jiraCredEnv,
-		MaxLLMModelTier:           orgSet.MaxLLMModelTier,
+		EnabledModels:             orgSet.EnabledModels,
 		BackgroundJobsModel:       orgSet.BackgroundJobsModel,
 		MaxDailyCostUSD:           orgSet.MaxDailyCostUSD,
 		MaxConcurrentRuns:         orgSet.MaxConcurrentRuns,
@@ -810,7 +883,7 @@ type orgSettingsPatch struct {
 	GitHubCloneProtocol json.RawMessage `json:"github_clone_protocol"`
 	JiraBaseURL         json.RawMessage `json:"jira_base_url"`
 	JiraPollInterval    json.RawMessage `json:"jira_poll_interval"`
-	MaxLLMModelTier     json.RawMessage `json:"max_llm_model_tier"`
+	EnabledModels       json.RawMessage `json:"enabled_models"`
 	BackgroundJobsModel json.RawMessage `json:"background_jobs_model"`
 	LLMAuthMethod       json.RawMessage `json:"llm_auth_method"`
 	MaxDailyCostUSD     json.RawMessage `json:"max_daily_cost_usd"`
@@ -876,7 +949,7 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		// No team restriction is consulted, and there is no team to consult one
 		// for — these jobs are the org's own work.
 		if cur.BackgroundJobsModel != "" && cur.BackgroundJobsModel != prevOrgSet.BackgroundJobsModel {
-			if e := modelaccess.ForOrg(cur).Check(cur.BackgroundJobsModel, nil); e != nil {
+			if e := modelaccess.ForOrg(cur).Check(cur.BackgroundJobsModel); e != nil {
 				return e
 			}
 		}
@@ -949,14 +1022,14 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	// Lowering the cap doesn't block the save — the admin has authority — but if
-	// the default team already prefers a higher tier, surface that its effective
-	// model just dropped. Gated on an actual cap change so an unrelated save
-	// doesn't re-warn each time the default team sits above an unchanged cap.
-	// Single-team-per-org today, so we check the default team; broadens to a
-	// team list when multi-team lands.
-	if orgSet.MaxLLMModelTier != "" && orgSet.MaxLLMModelTier != prevOrgSet.MaxLLMModelTier {
-		resp.Warning = s.capDowngradeWarning(r.Context(), orgID, userID, orgSet.MaxLLMModelTier)
+	// Narrowing the set doesn't block the save — the admin has authority, and
+	// the teams whose configuration it invalidates are ones they cannot edit —
+	// but the teams it breaks are named, because the only other way they learn
+	// is a failed run. Computed from what this save actually REMOVED, so a save
+	// that widens the set, or that touches something else entirely, says
+	// nothing.
+	if removed := modelsRemovedBySave(prevOrgSet, orgSet); len(removed) > 0 {
+		resp.Warning = s.disabledModelsWarning(r.Context(), orgID, userID, removed)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -972,7 +1045,7 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request, orgID string, req orgSettingsPatch) (apply func(*domain.OrgSettings), ok bool) {
 	if !httpx.PatchNamed(
 		req.GitHubBaseURL, req.GitHubPollInterval, req.GitHubCloneProtocol,
-		req.JiraBaseURL, req.JiraPollInterval, req.MaxLLMModelTier,
+		req.JiraBaseURL, req.JiraPollInterval, req.EnabledModels,
 		req.BackgroundJobsModel, req.LLMAuthMethod, req.MaxDailyCostUSD, req.MaxConcurrentRuns,
 	) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
@@ -1105,14 +1178,25 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 		}
 		set(func(o *domain.OrgSettings) { o.GitHubCloneProtocol = next })
 	}
-	if v, st := httpx.PatchString(&shape, req.MaxLLMModelTier, "max_llm_model_tier"); st != httpx.PatchAbsent {
-		switch {
-		case st == httpx.PatchClear:
-			set(func(o *domain.OrgSettings) { o.MaxLLMModelTier = "" })
-		case st == httpx.PatchSet && domain.ParseTier(v) == domain.TierUnknown:
-			shape.Invalid("max_llm_model_tier", "max_llm_model_tier must be haiku, sonnet, or opus, or null for no cap")
-		case st == httpx.PatchSet:
-			set(func(o *domain.OrgSettings) { o.MaxLLMModelTier = v })
+	// enabled_models is the org's enable-set: which of the models this
+	// deployment offers its teams may pick from. The list IS the value — a set
+	// replaces wholesale rather than merging — and null resets it to the whole
+	// universe, the state an org that has never expressed a preference is in,
+	// and the state that keeps tracking new models as releases add them.
+	//
+	// A save may disable a model some team currently selects, and it SUCCEEDS
+	// anyway, with a warning naming that team. Refusing until every team
+	// re-picked would couple an org admin to team settings they are barred from
+	// editing. Nothing is grandfathered either: those teams' new claims fail at
+	// dispatch, by name.
+	if v, st := httpx.PatchStrings(&shape, req.EnabledModels, "enabled_models"); st != httpx.PatchAbsent {
+		switch st {
+		case httpx.PatchClear:
+			set(func(o *domain.OrgSettings) { o.EnabledModels = nil })
+		case httpx.PatchSet:
+			if models, ok := normalizeModelSet(&shape, deploymentUniverse(), v, "enabled_models"); ok {
+				set(func(o *domain.OrgSettings) { o.EnabledModels = models })
+			}
 		}
 	}
 	// background_jobs_model must name a model this deployment offers. The picker
@@ -1308,34 +1392,77 @@ func (s *Server) orgSettingsSSHPreflight(w http.ResponseWriter, r *http.Request,
 // tighter risks GitHub/Jira rate limits across a fleet of orgs.
 const orgPollIntervalMinMinutes = 10
 
-// capDowngradeWarning returns a non-empty message when the org's default
-// team prefers a model above the given cap — i.e. the cap clamps it. Empty
-// when no clamp applies or the lookup fails (best-effort UX, never blocks
-// the save).
-func (s *Server) capDowngradeWarning(ctx context.Context, orgID, userID, maxTier string) string {
-	var teamDefault string
-	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		teamID, e := tx.Teams.GetDefaultForOrg(ctx, orgID)
-		if e != nil || teamID == "" {
-			return e
+// modelsRemovedBySave lists the models this save took OUT of the org's
+// effective set — resolved on both sides, so clearing a stored set (which
+// widens to the deployment's whole universe) removes nothing and setting one for the first
+// time removes everything it leaves out.
+func modelsRemovedBySave(before, after domain.OrgSettings) []string {
+	universe := deploymentUniverse()
+	prev := domain.OrgModelSet(before.EnabledModels, universe.DefaultEnabled())
+	next := domain.OrgModelSet(after.EnabledModels, universe.DefaultEnabled())
+	var removed []string
+	for _, key := range prev.Keys() {
+		if !next.Has(key) {
+			removed = append(removed, key)
 		}
-		teamSet, e := tx.Teams.GetSettings(ctx, teamID)
+	}
+	return removed
+}
+
+// disabledModelsWarning names the teams whose stored configuration still points
+// at a model this save disabled — their default, or their own enable-set. Those
+// teams keep running whatever is already in flight and fail at the next claim,
+// by name, so the warning is what turns a delayed failure into something the
+// admin can see at the moment they cause it.
+//
+// Best-effort: empty when nothing is affected or a read fails. It is prose
+// about a save that already succeeded, and a lookup failure must not turn that
+// into an error the caller reads as "not saved".
+func (s *Server) disabledModelsWarning(ctx context.Context, orgID, userID string, removed []string) string {
+	gone := make(map[string]bool, len(removed))
+	for _, m := range removed {
+		gone[m] = true
+	}
+
+	var affected []string
+	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		teams, e := tx.Teams.ListActiveForOrgSystem(ctx, orgID)
 		if e != nil {
 			return e
 		}
-		teamDefault = teamSet.DefaultModel
+		for _, team := range teams {
+			set, e := tx.Teams.GetSettingsSystem(ctx, team.ID)
+			if e != nil {
+				return e
+			}
+			// The default is reported ahead of the set because it is the
+			// sharper break: a team whose default is gone fails every unset
+			// step, while one whose set merely names a disabled model keeps
+			// running on whatever it defaults to.
+			if gone[set.DefaultModel] {
+				affected = append(affected, fmt.Sprintf("%s (default %s)", team.Name, set.DefaultModel))
+				continue
+			}
+			for _, m := range set.EnabledModels {
+				if gone[m] {
+					affected = append(affected, fmt.Sprintf("%s (enabled models name %s)", team.Name, m))
+					break
+				}
+			}
+		}
 		return nil
 	})
-	if err != nil || teamDefault == "" {
+	if err != nil || len(affected) == 0 {
 		return ""
 	}
-	if eff, source := domain.EffectiveModel(teamDefault, maxTier, runmode.Current() == runmode.ModeMulti); source == "org-cap" {
+	if len(affected) == 1 {
 		return fmt.Sprintf(
-			"The default team prefers %s, which exceeds the new cap of %s. Its effective model is now %s.",
-			teamDefault, maxTier, eff,
-		)
+			"%s still selects a model this change disables. Its new runs will fail until it re-picks.",
+			affected[0])
 	}
-	return ""
+	return fmt.Sprintf(
+		"%d teams still select models this change disables: %s. Their new runs will fail until they re-pick.",
+		len(affected), strings.Join(affected, ", "))
 }
 
 // --------------------------------------------------------------------

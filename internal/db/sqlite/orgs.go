@@ -99,7 +99,7 @@ func (s *orgsStore) GetSettingsSystem(ctx context.Context, orgID string) (domain
 // what it returns, so the struct this file hands back is unchanged even
 // though the row it comes from is now two tables.
 const orgSettingsColumns = `github_clone_protocol,
-	       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
+	       anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
 	       background_jobs_model, llm_auth_method,
 	       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
 	       github_credential_class, version`
@@ -262,7 +262,7 @@ const orgSettingsConflictUpdate = `
 			github_clone_protocol = excluded.github_clone_protocol,
 			anthropic_api_key_ref = excluded.anthropic_api_key_ref,
 			bedrock_credentials_ref = excluded.bedrock_credentials_ref,
-			max_llm_model_tier = excluded.max_llm_model_tier,
+			enabled_models = excluded.enabled_models,
 			background_jobs_model = excluded.background_jobs_model,
 			llm_auth_method = excluded.llm_auth_method,
 			max_daily_cost_usd = excluded.max_daily_cost_usd,
@@ -287,7 +287,7 @@ func orgSettingsValues(u domain.OrgSettings) []any {
 		cloneProto,
 		nullStringValue(u.AnthropicAPIKeyRef),
 		nullStringValue(u.BedrockCredentialsRef),
-		nullStringValue(u.MaxLLMModelTier),
+		db.ModelSetColumnValue(u.EnabledModels),
 		// Plain string, not nullStringValue: the column is NOT NULL and "" is
 		// the org's own "not picked yet" rather than an absent value.
 		u.BackgroundJobsModel,
@@ -323,7 +323,7 @@ func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.O
 	stored, err := db.ScanOrgSettingsCore(s.q.QueryRowContext(ctx, `
 		INSERT INTO org_settings (
 			org_id, github_clone_protocol,
-			anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
+			anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
 			background_jobs_model, llm_auth_method,
 			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
 			version, updated_at
@@ -349,7 +349,7 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 			github_clone_protocol = ?,
 			anthropic_api_key_ref = ?,
 			bedrock_credentials_ref = ?,
-			max_llm_model_tier = ?,
+			enabled_models = ?,
 			background_jobs_model = ?,
 			llm_auth_method = ?,
 			max_daily_cost_usd = ?,

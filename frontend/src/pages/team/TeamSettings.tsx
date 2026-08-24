@@ -88,10 +88,10 @@ const ROLE_LABELS: Record<string, string> = {
   viewer: 'Viewer — read only',
 }
 
-/** What this deployment can run. Org-level today; the per-team override is not built. */
-// TODO(TFAC-879): the CONFIGURED MODELS panel is a static sketch — replace
-// this array with the org model catalog read once per-team enable-sets exist,
-// and delete the hardcoded prices with it. Blocked on TFAC-703.
+/** What this deployment can run — a static sketch, not a read. */
+// TODO(TFAC-879): replace this array with the team models read
+// (GET /api/teams/{team_id}/models), which now serves the team's effective
+// enable-set, and delete the hardcoded prices with it.
 const MODELS = [
   { name: 'Claude Opus 5', tag: '(default)', price: '$25 / M' },
   { name: 'Claude Sonnet 5', tag: '', price: '$15 / M' },

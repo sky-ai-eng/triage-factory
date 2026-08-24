@@ -179,9 +179,9 @@ func TestOrgSettingsPatch_BackgroundJobsModel_Postgres_RefusesUnconnectedProvide
 	}
 }
 
-// Save-time enforcement on the team default: a model whose provider this team is
-// restricted from, or whose provider the org never connected, is refused with
-// the field named. The stored default is untouched by the refusal.
+// Save-time enforcement on the team default: a model whose provider the org
+// never connected is refused with the field named. The stored default is
+// untouched by the refusal.
 //
 // Native-path only, for the same reason as the org knob above.
 func TestTeamSettingsPatch_Postgres_ModelProviderMustBeAvailable(t *testing.T) {
@@ -206,22 +206,7 @@ func TestTeamSettingsPatch_Postgres_ModelProviderMustBeAvailable(t *testing.T) {
 		}
 	})
 
-	t.Run("provider restricted", func(t *testing.T) {
-		rig := newVocabularyRig(t)
-		rig.connect(t, true, true)
-		if _, err := rig.s.allStores.Teams.SetAllowedProvidersSystem(t.Context(), rig.teamID,
-			[]string{modelcatalog.ProviderAnthropic}); err != nil {
-			t.Fatalf("restrict: %v", err)
-		}
-
-		rec := rig.patchTeam(t, map[string]any{"ai_model": bedrockModel})
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
-		}
-		assertFieldError(t, rec, "ai_model")
-	})
-
-	t.Run("both connected and unrestricted saves", func(t *testing.T) {
+	t.Run("connected saves", func(t *testing.T) {
 		rig := newVocabularyRig(t)
 		rig.connect(t, true, true)
 

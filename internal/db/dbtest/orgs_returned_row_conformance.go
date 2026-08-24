@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -80,7 +81,7 @@ func RunOrgsReturnedRowConformance(t *testing.T, mk OrgsStoreFactory) {
 		if !errors.Is(err, db.ErrOrgSettingsVersion) {
 			t.Fatalf("stale UpdateSettingsVersioned err = %v, want ErrOrgSettingsVersion", err)
 		}
-		if zero != (domain.OrgSettings{}) {
+		if !reflect.DeepEqual(zero, domain.OrgSettings{}) {
 			t.Errorf("refused UpdateSettingsVersioned returned %+v, want the zero value", zero)
 		}
 		after, rerr := read()

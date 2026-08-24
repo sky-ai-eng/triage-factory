@@ -901,8 +901,8 @@ func TestModelsList_Postgres_StoredHostCredentialsAreInert(t *testing.T) {
 }
 
 // Availability is org truth, so the team-scoped read reports the same state for
-// every entry that survives the team's provider restriction. The restriction
-// removes entries; it never changes what a remaining one says.
+// every entry that survives the team's enable-set. The set removes entries; it
+// never changes what a remaining one says.
 func TestTeamModelsList_Postgres_ReportsTheSameAvailability(t *testing.T) {
 	rig := newAvailabilityRig(t)
 	rig.provider.answerWith(http.StatusOK, "")

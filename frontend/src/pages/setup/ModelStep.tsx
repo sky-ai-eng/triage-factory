@@ -1,36 +1,13 @@
 // The model steps' bodies — flush, leading with a conversational line over the
-// shared ModelTierSelector ladder. Selection just records the value; the step's
-// Continue advances (a model cap/default is a value worth pausing on, not a
-// branch). The org step caps the workspace (No cap + the three tiers, with the
-// ceiling/ghost treatment); the team step picks the team's default; the
-// background-jobs step picks what the headless jobs run on.
+// shared ModelTierSelector. Selection just records the value; the step's
+// Continue advances (a model choice is a value worth pausing on, not a branch).
+// The team step picks the team's default; the background-jobs step picks what
+// the headless jobs run on.
 
 import ModelTierSelector from '../settings/ModelTierSelector'
-import { MODEL_CAP_OPTIONS, modelOptionsFrom } from '../settings/modelTiers'
+import { modelOptionsFrom } from '../settings/modelTiers'
 import { useModelCatalog } from '../../hooks/useModelCatalog'
 import type { StepContext } from './types'
-
-// OrgModelStep body — the workspace max-tier cap.
-export function OrgModelStep({ state, patch }: StepContext) {
-  const choose = (tier: string) => patch({ org: { ...state.org, max_llm_model_tier: tier } })
-  return (
-    <div className="space-y-5">
-      <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Cap the model tier</h2>
-        <p className="text-body leading-relaxed text-ink-3">
-          A hard ceiling for the whole workspace. A team default above the cap is clamped down to it
-          — the team is told, but the cap wins.
-        </p>
-      </div>
-      <ModelTierSelector
-        value={state.org.max_llm_model_tier}
-        onChange={choose}
-        options={MODEL_CAP_OPTIONS}
-        ariaLabel="Maximum model tier (workspace cap)"
-      />
-    </div>
-  )
-}
 
 // TeamModelStep body — the team's default delegation model, drawn from the
 // org's model catalog. The stored value is the catalog key; the picker shows

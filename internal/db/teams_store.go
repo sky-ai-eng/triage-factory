@@ -121,11 +121,10 @@ type TeamsStore interface {
 	// JiraStatusRulesStore.ReplaceForTeam alongside (the existing
 	// config.Save() flow does both). Postgres routes through the app
 	// pool (team_settings_update RLS gates by team admin). It writes
-	// MaxDailyCostUSD and AllowedProviders too, but the team-settings handler
-	// reaches this via read-modify-write and never sets either from its request
-	// body, so a team-admin save round-trips the org-admin-configured cap and
-	// provider restriction untouched — they are *changed* only by
-	// SetDailyCostCapSystem / SetAllowedProvidersSystem.
+	// MaxDailyCostUSD too, but the team-settings handler reaches this via
+	// read-modify-write and never sets that field from its request body, so a
+	// team-admin save round-trips the org-admin-configured cap untouched — it is
+	// *changed* only by SetDailyCostCapSystem.
 	//
 	// Returns the persisted settings, read off RETURNING on the write
 	// statement itself rather than from a follow-up SELECT and projecting
@@ -148,24 +147,6 @@ type TeamsStore interface {
 	// admins racing on the same cap each get the value that actually landed
 	// rather than an echo of their own request.
 	SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) (domain.TeamSettings, error)
-
-	// SetAllowedProvidersSystem upserts ONLY team_settings.allowed_providers for
-	// teamID — the org-admin restriction on which inference providers this team
-	// may spend against, stored as modelcatalog provider ids. An empty or nil
-	// list is the unrestricted state; there is no separate clear operation,
-	// because a restriction naming nothing and no restriction are the same fact.
-	//
-	// Admin pool in Postgres (BYPASSRLS), for the same reason the cap is: an org
-	// admin restricting a team may not be a member of it, so the team-admin-gated
-	// team_settings_update RLS would reject an app-pool write — the HTTP
-	// RequireOrgAdminRole gate authorizes this System path. Teams must not be
-	// able to widen their own restriction, which is why this is the only writer.
-	// It touches one column and creates the row from schema defaults when none
-	// exists. SQLite is N=1 / no RLS and writes directly.
-	//
-	// Returns the whole persisted settings row, for the same reason
-	// SetDailyCostCapSystem does.
-	SetAllowedProvidersSystem(ctx context.Context, teamID string, providers []string) (domain.TeamSettings, error)
 
 	// ListForUser returns one page of the requesting user's active teams in
 	// the org plus the unpaged total, ordered oldest-first (the same

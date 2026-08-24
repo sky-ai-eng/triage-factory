@@ -53,15 +53,6 @@ func setAuthMethod(t *testing.T, database *sql.DB, method string) {
 	}
 }
 
-func restrictTeamProviders(t *testing.T, database *sql.DB, providers ...string) {
-	t.Helper()
-	if _, err := sqlitestore.New(database).Teams.SetAllowedProvidersSystem(
-		context.Background(), runmode.LocalDefaultTeamID, providers,
-	); err != nil {
-		t.Fatalf("restrict team providers: %v", err)
-	}
-}
-
 // modelOn returns an offered model served by provider.
 func modelOn(t *testing.T, provider string) string {
 	t.Helper()
@@ -82,7 +73,7 @@ func TestCheckModelProviders_BothConnected_AllowsEither(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, domain.ModelSonnet)
 
 	models := []string{modelOn(t, modelcatalog.ProviderAnthropic), modelOn(t, modelcatalog.ProviderBedrock)}
-	if err := s.checkModelProviders(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, models); err != nil {
+	if err := s.checkModelProviders(context.Background(), runmode.LocalDefaultOrgID, models); err != nil {
 		t.Fatalf("both providers connected must allow either model, got: %v", err)
 	}
 }
@@ -97,7 +88,7 @@ func TestCheckModelProviders_ProviderNotConnected_RefusesByName(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, domain.ModelSonnet)
 
 	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
-	err := s.checkModelProviders(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+	err := s.checkModelProviders(context.Background(), runmode.LocalDefaultOrgID,
 		[]string{domain.ModelSonnet, bedrockModel})
 	if !errors.Is(err, modelaccess.ErrProviderUnconfigured) {
 		t.Fatalf("err = %v, want ErrProviderUnconfigured", err)
@@ -107,31 +98,6 @@ func TestCheckModelProviders_ProviderNotConnected_RefusesByName(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), bedrockModel) {
 		t.Errorf("error %q does not name the offending model", err)
-	}
-}
-
-// The restriction is enforced at dispatch, which is what covers a default or a
-// step pin stored before an admin imposed it — imposing one rewrites nothing.
-func TestCheckModelProviders_RestrictedProvider_Refuses(t *testing.T) {
-	database := newCostCapTestDB(t)
-	connectProviders(t, database, true, true)
-	restrictTeamProviders(t, database, modelcatalog.ProviderAnthropic)
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, domain.ModelSonnet)
-
-	err := s.checkModelProviders(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
-		[]string{modelOn(t, modelcatalog.ProviderBedrock)})
-	if !errors.Is(err, modelaccess.ErrProviderRestricted) {
-		t.Fatalf("err = %v, want ErrProviderRestricted", err)
-	}
-	// The provider IS connected for the org, so this must not be reported as a
-	// setup gap — the admin's fix is the restriction, not a credential.
-	if errors.Is(err, modelaccess.ErrProviderUnconfigured) {
-		t.Errorf("err = %v, mis-reported as an unconnected provider", err)
-	}
-	// A model on the allowed provider still dispatches.
-	if err := s.checkModelProviders(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
-		[]string{modelOn(t, modelcatalog.ProviderAnthropic)}); err != nil {
-		t.Errorf("allowed provider refused: %v", err)
 	}
 }
 
@@ -145,7 +111,7 @@ func TestCheckModelProviders_FreshLocalInstall_Allows(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, domain.ModelSonnet)
 
 	models := []string{modelOn(t, modelcatalog.ProviderAnthropic), modelOn(t, modelcatalog.ProviderBedrock)}
-	if err := s.checkModelProviders(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, models); err != nil {
+	if err := s.checkModelProviders(context.Background(), runmode.LocalDefaultOrgID, models); err != nil {
 		t.Fatalf("a fresh local install must keep running, got: %v", err)
 	}
 }
@@ -180,7 +146,7 @@ func TestCheckModelProviders_OwnCredentialsWithNoneBound_Refuses(t *testing.T) {
 	setAuthMethod(t, database, domain.LLMAuthBYOK)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, domain.ModelSonnet)
 
-	err := s.checkModelProviders(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+	err := s.checkModelProviders(context.Background(), runmode.LocalDefaultOrgID,
 		[]string{modelOn(t, modelcatalog.ProviderAnthropic)})
 	if !errors.Is(err, modelaccess.ErrNoCredentials) {
 		t.Fatalf("err = %v, want ErrNoCredentials", err)
@@ -199,7 +165,7 @@ func TestCheckModelProviders_HostCredentials_Allows(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, domain.ModelSonnet)
 
 	for _, provider := range modelcatalog.SupportedProviders() {
-		if err := s.checkModelProviders(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		if err := s.checkModelProviders(context.Background(), runmode.LocalDefaultOrgID,
 			[]string{modelOn(t, provider)}); err != nil {
 			t.Errorf("%s: an org on the machine's credentials was refused: %v", provider, err)
 		}

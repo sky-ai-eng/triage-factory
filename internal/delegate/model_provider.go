@@ -8,17 +8,22 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 )
 
-// checkModelProviders is the admission gate for the models a delegation would
-// actually run on: the team's default and every step pin in the blueprint about
-// to fire. Delegate calls it once the plan is resolved and before the firing's
-// commit point.
+// checkModelProviders is the credential admission gate for the models a
+// delegation would actually run on: the team's default and every step pin in
+// the blueprint about to fire. Delegate calls it once the plan is resolved and
+// before the firing's commit point.
 //
-// It refuses when a model's provider is one the org never connected, or one an
-// org admin restricted this team from spending against. Both are dispatch-time
-// checks because both describe state that can change after a model was stored: a
-// credential can be disconnected and a restriction imposed, and neither rewrites
-// the defaults and pins already saved. The save-time check in the settings
-// handler catches new selections; this one catches everything else.
+// It refuses when a model's provider is one the org never connected. That is a
+// dispatch-time check because it describes state that can change after a model
+// was stored — a credential can be disconnected, and disconnecting one rewrites
+// none of the defaults and pins already saved. The save-time check in the
+// settings handler catches new selections; this one catches everything else.
+//
+// Whether a model is one this TEAM may pick is a separate question with its own
+// gate (the enable-set, resolved alongside the default). Kept apart because the
+// remedies differ: one is a credential nobody bound, the other a decision
+// somebody made, and a caller told the wrong one goes to the wrong settings
+// page.
 //
 // It refuses BEFORE any write — no blueprint_run is minted, no conversation is
 // enqueued — so there is nothing to retry and nothing to reap. That is the
@@ -28,7 +33,7 @@ import (
 // Fails OPEN on a read error, matching the cost caps: a transient settings read
 // must not wedge all delegation, and the credential resolver is the backstop —
 // it refuses the same run by name a moment later.
-func (s *Spawner) checkModelProviders(ctx context.Context, orgID, teamID string, models []string) error {
+func (s *Spawner) checkModelProviders(ctx context.Context, orgID string, models []string) error {
 	if s.orgs == nil {
 		return nil // no stores wired (test fixtures) → nothing to check against
 	}
@@ -36,18 +41,6 @@ func (s *Spawner) checkModelProviders(ctx context.Context, orgID, teamID string,
 	if err != nil {
 		delegateLog.Warn("model provider check: read org settings failed; allowing delegation", "org", orgID, "error", err)
 		return nil
-	}
-
-	// An unowned task has no team, so it carries no restriction — the org's
-	// connected providers are the whole answer for it.
-	var allowed []string
-	if teamID != "" && s.teams != nil {
-		teamSet, err := s.teams.GetSettingsSystem(ctx, teamID)
-		if err != nil {
-			delegateLog.Warn("model provider check: read team settings failed; allowing delegation", "org", orgID, "team", teamID, "error", err)
-			return nil
-		}
-		allowed = teamSet.AllowedProviders
 	}
 
 	// Whether the org can authenticate anything at all, asked once before the
@@ -65,7 +58,7 @@ func (s *Spawner) checkModelProviders(ctx context.Context, orgID, teamID string,
 			continue
 		}
 		seen[m] = true
-		if err := creds.Check(m, allowed); err != nil {
+		if err := creds.Check(m); err != nil {
 			return fmt.Errorf("cannot dispatch: %w", err)
 		}
 	}

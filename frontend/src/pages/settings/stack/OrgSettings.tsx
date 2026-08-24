@@ -1,6 +1,6 @@
 // The Organization group of the Settings stack — rendered only for org admins.
 // Most sections' BODY is the actual /setup step component (GitHubUrlStep,
-// GitHubCloneStep, OrgModelStep, …) fed a WizardState draft, so Settings and
+// GitHubCloneStep, OrgBackgroundJobsModelStep, …) fed a WizardState draft, so Settings and
 // /setup are literally the same components — same visuals, same copy.
 //
 // GitHub *access* is the exception (TFAC-328/329): it's either/or per org, so
@@ -38,7 +38,7 @@ import {
   reachabilityMessage,
 } from '../../../lib/reachability'
 import { GitHubUrlStep, GitHubCloneStep } from '../../setup/GitHubStep'
-import { OrgBackgroundJobsModelStep, OrgModelStep } from '../../setup/ModelStep'
+import { OrgBackgroundJobsModelStep } from '../../setup/ModelStep'
 import {
   initialWizardState,
   loadOrg,
@@ -75,7 +75,6 @@ import FailedEventsPanel from '../FailedEventsPanel'
 import { useFailedEvents, type UseFailedEvents } from '../../../hooks/useFailedEvents'
 import { useEntitlements, FeatureSSO, FeatureSlack } from '../../../hooks/useEntitlements'
 
-const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
 const intervalLabel = (d: string): string => d.replace(/m0s$/, 'm')
 const noop = () => {}
 
@@ -271,9 +270,6 @@ export default function OrgSettings({
     : draft.hasGitHubPat
       ? 'Personal access token — connected'
       : 'Not configured'
-  const capSummary = baseline.org.max_llm_model_tier
-    ? `Capped at ${TIER_LABELS[baseline.org.max_llm_model_tier] ?? baseline.org.max_llm_model_tier}`
-    : 'No cap'
   // "Not set" is not a gap to paper over — it is the state in which the three
   // background jobs do not run, so the collapsed section says so.
   const backgroundJobsSummary = baseline.org.background_jobs_model
@@ -677,20 +673,6 @@ export default function OrgSettings({
           </div>
         </SettingsSection>
       )}
-
-      {/* ── Model cap ── */}
-      <SettingsSection
-        title="Model cap"
-        summary={capSummary}
-        dirty={draft.org.max_llm_model_tier !== baseline.org.max_llm_model_tier}
-        saving={isSaving('model')}
-        onSave={() =>
-          commitOrgSlice('model', { max_llm_model_tier: draft.org.max_llm_model_tier }, 'Model cap')
-        }
-        onCancel={() => revertOrg(['max_llm_model_tier'])}
-      >
-        <OrgModelStep {...ctx} />
-      </SettingsSection>
 
       {/* ── Background jobs model ── The one model the scorer, the project
           classifier and the repo profiler all run on. Empty is a real state:

@@ -3,7 +3,9 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -598,6 +600,10 @@ func mustGetRun(t *testing.T, s *Spawner, org, brID string) *domain.BlueprintRun
 // (Fable), an older spelling. A pin is a person's explicit choice, and the id
 // that survives here is the STORED one, since it is what reaches the provider
 // and what the ledger prices.
+//
+// The set these cases run under is the unrestricted one — what a team that has
+// narrowed nothing resolves to. TestStepModelOrInherit_PinOutsideTheSetFails
+// below is the other half: the one thing a pin IS held to.
 func TestStepModelOrInherit(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -620,9 +626,54 @@ func TestStepModelOrInherit(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := stepModelOrInherit(c.step, c.inherited); got != c.want {
+			got, err := stepModelOrInherit(c.step, c.inherited, domain.ModelSet{})
+			if err != nil {
+				t.Fatalf("stepModelOrInherit(%q, %q): %v", c.step, c.inherited, err)
+			}
+			if got != c.want {
 				t.Errorf("stepModelOrInherit(%q, %q) = %q; want %q", c.step, c.inherited, got, c.want)
 			}
 		})
+	}
+}
+
+// A pin outside the team's enable-set fails the step by name rather than
+// falling back to what the step would have inherited. Silently ignoring it
+// would run the step on a model nobody chose — the substitution the whole
+// selection design forbids — and would hide from the author that their pin
+// stopped taking effect.
+//
+// The inherited model is deliberately enabled here, so the only thing that can
+// produce the refusal is the pin itself.
+func TestStepModelOrInherit_PinOutsideTheSetFails(t *testing.T) {
+	enabled := domain.TeamModelSet([]string{domain.ModelSonnet}, orgUnrestricted())
+
+	got, err := stepModelOrInherit(domain.ModelOpus, domain.ModelSonnet, enabled)
+	if !errors.Is(err, domain.ErrModelNotEnabled) {
+		t.Fatalf("stepModelOrInherit = (%q, %v); want ErrModelNotEnabled", got, err)
+	}
+	if got != "" {
+		t.Errorf("a refused step resolved to %q; want no model at all", got)
+	}
+	if !strings.Contains(err.Error(), domain.ModelOpus) {
+		t.Errorf("error %q does not name the pinned model", err)
+	}
+	if !strings.Contains(err.Error(), domain.ModelSonnet) {
+		t.Errorf("error %q does not name the set that excludes it", err)
+	}
+
+	// An unset step under the same set still inherits: the set narrows what may
+	// be PINNED, and the inherited model was already held to it upstream.
+	inherited, err := stepModelOrInherit("", domain.ModelSonnet, enabled)
+	if err != nil || inherited != domain.ModelSonnet {
+		t.Errorf("unset step = (%q, %v); want the inherited model", inherited, err)
+	}
+
+	// A pin the set DOES name runs, whatever it costs relative to what was
+	// inherited — the enable-set is membership, never a ceiling.
+	both := domain.TeamModelSet([]string{domain.ModelHaiku, domain.ModelOpus}, orgUnrestricted())
+	pinned, err := stepModelOrInherit(domain.ModelOpus, domain.ModelHaiku, both)
+	if err != nil || pinned != domain.ModelOpus {
+		t.Errorf("an enabled costlier pin = (%q, %v); want %q", pinned, err, domain.ModelOpus)
 	}
 }

@@ -83,10 +83,11 @@ type OrgsStore interface {
 	// rather than the Go zero value with "0s" poll intervals — the
 	// row-missing case happens for test fixtures that bypass
 	// provisioning; production paths always seed a row at org-create
-	// time. Empty GitHubBaseURL / JiraBaseURL / vault refs /
-	// MaxLLMModelTier reflect NULL columns ("not configured yet" /
-	// "use deployment default" / "no cap"). Postgres routes through
-	// the app pool (org_settings_select RLS gates by org membership).
+	// time. Empty GitHubBaseURL / JiraBaseURL / vault refs and a nil
+	// EnabledModels reflect NULL columns ("not configured yet" /
+	// "use deployment default" / "no preference expressed"). Postgres
+	// routes through the app pool (org_settings_select RLS gates by org
+	// membership).
 	GetSettings(ctx context.Context, orgID string) (domain.OrgSettings, error)
 
 	// GetSettingsSystem mirrors GetSettings but routes through the
@@ -97,8 +98,8 @@ type OrgsStore interface {
 
 	// UpdateSettings upserts the org's settings row. An empty
 	// GitHubBaseURL / JiraBaseURL / AnthropicAPIKeyRef /
-	// BedrockCredentialsRef / MaxLLMModelTier writes NULL into the
-	// column. An empty GitHubCloneProtocol substitutes "ssh" — the
+	// BedrockCredentialsRef, and a nil EnabledModels, write NULL into
+	// the column. An empty GitHubCloneProtocol substitutes "ssh" — the
 	// column CHECK rejects empty strings. Postgres routes through
 	// the app pool (org_settings_update RLS gates by org admin).
 	//

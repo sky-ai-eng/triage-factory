@@ -2,12 +2,14 @@ package app
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
@@ -30,8 +32,10 @@ import (
 //     reader here is the fix, and it changes who pays for a local user
 //     holding both a key and a subscription.
 //
-//   - modelFor resolves the run's team default model (per-(org, team),
-//     capped by the org max tier). A prompt's own Model still overrides it.
+//   - modelFor resolves the run's team model configuration (per-(org, team)):
+//     the default an unset step inherits, and the enable-set every model the
+//     run touches has to belong to. A prompt's own Model still overrides the
+//     default, but not the set.
 //
 //   - ghResolver picks the right GitHub credential (App-installation token
 //     → org PAT) per (org, target). Shared by the poller, spawner, and repo
@@ -62,49 +66,53 @@ func (a *App) buildRunCredentials() error {
 	// of those would be two independent opinions about whether the upstream is
 	// down.
 	a.llmRecorder = systemllm.NewRecorder(a.stores.SystemLLMRuns)
-	a.modelFor = func(ctx context.Context, orgID, teamID string) string {
+	a.modelFor = func(ctx context.Context, orgID, teamID string) (domain.TeamModels, error) {
 		return resolveAIModelForTeam(ctx, a.stores, orgID, teamID)
 	}
 	a.ghResolver = ghclient.NewResolver(a.stores.Secrets, a.stores.GitHubApps, a.stores.Orgs, a.stores.Agents, nil)
 	return nil
 }
 
-// resolveAIModelForTeam looks up the model a specific team uses for
-// delegation, clamped by the org's max-tier cap (domain.EffectiveModel).
+// resolveAIModelForTeam resolves the model configuration a specific team runs
+// under: the default an unset step inherits, paired with the enable-set every
+// model that team dispatches is held to.
 //
 // teamID is the run's owning team. A multi-team org can have teams with
-// different DefaultModel settings, so resolving from the run's own team
-// (not the org default) honors each team's choice. An empty teamID falls
-// back to the org's default team.
+// different DefaultModel settings, so resolving from the run's own team (not the
+// org default) honors each team's choice. An empty teamID falls back to the
+// org's default team.
 //
-// Falls back to the shipped default model on any error so a transient DB
-// hiccup doesn't silently clear the spawner's credentials.
-func resolveAIModelForTeam(ctx context.Context, stores db.Stores, orgID, teamID string) string {
-	multi := runmode.Current() == runmode.ModeMulti
-	fallback := domain.DefaultModelFor(multi)
+// It resolves; it does not judge the default. Whether the set still includes it
+// is TeamModels.RequireDefault's answer, asked wherever the default is actually
+// USED — which keeps a pinned step, and a mid-flight blueprint of pinned steps,
+// out of a refusal about a value it never reads.
+//
+// A read that does not answer IS a refusal here: the check's input is missing,
+// which is not the check passing, and dispatching through it would spend on a
+// model nobody can show is enabled. Nothing substitutes on the way — TF ships no
+// fallback model. In-flight work is untouched either way; this decides new
+// claims only.
+func resolveAIModelForTeam(ctx context.Context, stores db.Stores, orgID, teamID string) (domain.TeamModels, error) {
 	if teamID == "" {
 		var err error
 		teamID, err = stores.Teams.GetDefaultForOrgSystem(ctx, orgID)
-		if err != nil || teamID == "" {
-			if err != nil {
-				appLog.Warn("resolve default team failed; using default model", "org", orgID, "error", err, "model", fallback)
-			}
-			return fallback
+		if err != nil {
+			return domain.TeamModels{}, fmt.Errorf("resolve the org's default team: %w", err)
+		}
+		if teamID == "" {
+			return domain.TeamModels{}, fmt.Errorf("organization %s has no default team to resolve a model from", orgID)
 		}
 	}
 	teamSet, err := stores.Teams.GetSettingsSystem(ctx, teamID)
 	if err != nil {
-		appLog.Warn("read team settings failed; using default model", "team", teamID, "error", err, "model", fallback)
-		return fallback
+		return domain.TeamModels{}, fmt.Errorf("read team settings: %w", err)
+	}
+	orgSet, err := stores.Orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return domain.TeamModels{}, fmt.Errorf("read org settings: %w", err)
 	}
 
-	var maxTier string
-	if orgSet, err := stores.Orgs.GetSettingsSystem(ctx, orgID); err != nil {
-		appLog.Warn("read org settings failed; applying no model cap", "org", orgID, "error", err)
-	} else {
-		maxTier = orgSet.MaxLLMModelTier
-	}
-
-	model, _ := domain.EffectiveModel(teamSet.DefaultModel, maxTier, multi)
-	return model
+	universe := modelcatalog.UniverseFor(runmode.Current() == runmode.ModeMulti)
+	return domain.NewTeamModels(teamSet.DefaultModel, domain.TeamModelSet(teamSet.EnabledModels,
+		domain.OrgModelSet(orgSet.EnabledModels, universe.DefaultEnabled()))), nil
 }

@@ -6,8 +6,8 @@
 --
 -- A key from this deployment's model universe, validated app-side against that
 -- universe and against the providers the org has connected — not
--- CHECK-constrained, the max_llm_model_tier precedent: the accepted set is the
--- build's, and it changes with the binary rather than with the schema.
+-- CHECK-constrained, the github_credential_class precedent: the accepted set is
+-- the build's, and it changes with the binary rather than with the schema.
 --
 -- Empty means unset, and unset means those jobs do not run. TF ships no
 -- fallback model, so a job with no model skips its cycle and says so rather

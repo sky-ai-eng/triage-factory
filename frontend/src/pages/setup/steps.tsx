@@ -53,7 +53,7 @@ import {
 } from '../../lib/reachability'
 import { toast } from '../../components/Toast/toastStore'
 import RepoPickerModal from '../../components/RepoPickerModal'
-import { OrgBackgroundJobsModelStep, OrgModelStep, TeamModelStep } from './ModelStep'
+import { OrgBackgroundJobsModelStep, TeamModelStep } from './ModelStep'
 import { OrgClaudeSourceStep, OrgClaudeKeyStep } from './ClaudeStep'
 import { UserIdentityStep } from './UserIdentityStep'
 import { JiraUserAccessStep } from './JiraUserAccessStep'
@@ -145,15 +145,6 @@ export const initialWizardState = (): WizardState => ({
   duplicateGitHubToUser: false,
   duplicateJiraToUser: false,
 })
-
-// The workspace cap's own vocabulary — a rank over the three Anthropic tiers,
-// which is what that column stores. A model CHOICE is a catalog key and reads
-// its name from modelDisplayName instead.
-const TIER_LABELS: Record<string, string> = {
-  haiku: 'Haiku',
-  sonnet: 'Sonnet',
-  opus: 'Opus',
-}
 
 // intervalLabel renders a Go duration like "5m0s" / "30s" compactly: trim the
 // dangling "0s" only when it follows a minutes part ("5m0s" → "5m"), so a
@@ -1074,24 +1065,6 @@ const jiraPollerStep: WizardStep = {
   ),
 }
 
-// Step 4 · Org max model tier — the ceiling ladder. Keeps an explicit Continue
-// (not selfAdvancing): picking a cap records it, but the user confirms with
-// Continue — "no cap" is a legitimate end state, so the step is always complete
-// and never blocks. No load of its own — reads the GitHub step's seeded org
-// form; saveOrgSlice guards against saving when that load failed.
-const orgModelStep: WizardStep = {
-  id: 'org-model',
-  section: 'org',
-  title: 'Max model tier',
-  isComplete: () => true,
-  persist: persistOrgFields('max_llm_model_tier'),
-  collapsedSummary: (s) =>
-    s.org.max_llm_model_tier
-      ? `Capped at ${TIER_LABELS[s.org.max_llm_model_tier] ?? s.org.max_llm_model_tier}`
-      : 'No model cap',
-  render: (ctx) => <OrgModelStep {...ctx} />,
-}
-
 // Step · Background jobs model — the one model scoring, project classification
 // and repo profiling all run on. Blocking, and that is the whole point in multi:
 // nothing falls back, so an org that skips this has three background jobs that
@@ -1604,7 +1577,6 @@ export const WIZARD_STEPS: WizardStep[] = [
   jiraModeStep,
   jiraAccessStep,
   jiraPollerStep,
-  orgModelStep,
   orgBackgroundJobsModelStep,
   orgClaudeSourceStep,
   orgClaudeKeyStep,

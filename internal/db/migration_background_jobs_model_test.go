@@ -14,7 +14,7 @@ import (
 // between them, so the fixture row below is staged exactly the way a shipped
 // build wrote it.
 const (
-	beforeBackgroundJobsModel = 202608250001
+	beforeBackgroundJobsModel = 202608240002
 	backgroundJobsModel       = 202608260001
 )
 

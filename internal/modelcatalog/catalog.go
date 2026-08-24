@@ -88,7 +88,7 @@ type Entry struct {
 	DisplayName string
 	// Provider is the access path this key is reached through, mapped from the
 	// datasheet's vendor label through datasheetProviders. It is the provider
-	// vocabulary a credential lookup and a team restriction share, not
+	// vocabulary a credential lookup and an availability probe share, not
 	// upstream's label, which spells one path several ways.
 	Provider              string
 	Prices                PricesPerMTok

@@ -230,8 +230,9 @@ func TestUniverse_ModelsIsACopy(t *testing.T) {
 }
 
 // The alias constants domain names are what the SQLite dialect defaults are
-// spelled in and what ParseTier reads. A local install would seed itself with a
-// model its own save refuses if one of them stopped being an offered alias.
+// spelled in. A local install would seed itself with a model its own save
+// refuses — and one no enable-set could admit, since an absent set resolves to
+// exactly this universe — if one of them stopped being an offered alias.
 func TestLocalUniverse_OffersEveryDomainAlias(t *testing.T) {
 	u := UniverseFor(false)
 	for _, alias := range []string{

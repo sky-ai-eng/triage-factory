@@ -195,35 +195,28 @@ func TestLoad_DisplayOrderIsContiguousAfterADrop(t *testing.T) {
 	}
 }
 
-// An org that has expressed no preference has everything enabled — the absent
-// value resolves to the whole universe, never to nothing. Asserted in both
-// universes, because an org on one whose default set was drawn from the other
-// would see every picker empty.
-func TestEnabled_AbsentSetMeansEveryModel(t *testing.T) {
+// An org that has expressed no preference resolves to the whole universe — one
+// key per offered model, so a model a later release adds is enabled for such an
+// org the day it ships. Asserted in both universes, because an org on one whose
+// default set was drawn from the other would see every picker empty.
+//
+// What the absent value RESOLVES to is domain.OrgModelSet's decision; this is
+// only the input it resolves to, which is the thing a universe knows.
+func TestDefaultEnabled_IsEveryOfferedModel(t *testing.T) {
 	for _, multi := range []bool{true, false} {
 		u := UniverseFor(multi)
-		set := u.Enabled(nil)
-		for _, m := range u.Models() {
-			if !set.Has(m.Key) {
-				t.Errorf("multi=%v: %s: not enabled under the default set", multi, m.Key)
-			}
+		named := make(map[string]bool, len(u.Models()))
+		for _, k := range u.DefaultEnabled() {
+			named[k] = true
 		}
-		if got, want := len(u.DefaultEnabled()), len(u.Models()); got != want {
+		if got, want := len(named), len(u.Models()); got != want {
 			t.Errorf("multi=%v: DefaultEnabled has %d keys, want %d (one per offered model)", multi, got, want)
 		}
-		if set.Has("some-model-nobody-enabled") {
-			t.Errorf("multi=%v: default set claims a key outside the universe", multi)
+		for _, m := range u.Models() {
+			if !named[m.Key] {
+				t.Errorf("multi=%v: %s: offered model missing from DefaultEnabled", multi, m.Key)
+			}
 		}
-	}
-}
-
-func TestEnabled_StoredSetIsHonoured(t *testing.T) {
-	set := UniverseFor(true).Enabled([]string{"claude-opus-5"})
-	if !set.Has("claude-opus-5") {
-		t.Error("stored key is not enabled")
-	}
-	if set.Has("claude-sonnet-5") {
-		t.Error("a key outside the stored set is enabled")
 	}
 }
 

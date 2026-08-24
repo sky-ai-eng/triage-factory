@@ -7,9 +7,9 @@ import (
 )
 
 // The providers TF can reach a model through. The values are bifrost's own
-// vocabulary — derived from it rather than restated, so a stored restriction, a
-// wire field and the account TF hands bifrost cannot spell the same provider two
-// ways.
+// vocabulary — derived from it rather than restated, so a wire field, a probe's
+// stored verdict and the account TF hands bifrost cannot spell the same
+// provider two ways.
 //
 // Two, and adding a third is an execution-path decision, not a naming one: a
 // provider is offered when the LLM proxy, the sandbox egress allowlist and the
@@ -26,8 +26,7 @@ const (
 // Bedrock is spelled two ways there (`bedrock` for the older invoke rows,
 // `bedrock_converse` for the Converse-API ones), and the same split will appear
 // for any provider whose API surface upstream versions. Collapsing them here is
-// what lets a team restriction, a picker and a credential lookup all name one
-// "bedrock".
+// what lets a picker, a probe and a credential lookup all name one "bedrock".
 //
 // The map is also the gate: a supported entry whose label is absent is dropped
 // from the catalog and named in JoinError, because TF has no credential path for
@@ -58,7 +57,8 @@ func SupportedProviders() []string {
 }
 
 // KnownProvider reports whether p names a provider this build drives — the
-// accepted set for any stored provider value, the way Offers is for a model.
+// accepted set for any provider value a caller supplies, the way Offers is for
+// a model.
 func KnownProvider(p string) bool {
 	_, ok := providerDisplayNames[p]
 	return ok
@@ -89,41 +89,3 @@ func ProviderFor(key string) (string, bool) {
 	}
 	return "", false
 }
-
-// ProviderSet answers whether one team may spend against a given provider.
-type ProviderSet struct {
-	keys map[string]bool
-}
-
-// AllowedProviders resolves a team's stored provider restriction into something
-// to ask questions of. A nil or empty stored value means the org admin has
-// expressed no restriction and resolves to every provider — never to "none",
-// which would leave a team unable to run the moment the column exists.
-//
-// Callers pass what the team stored and never branch on whether it was empty;
-// that decision belongs here, in one place, so every surface answers the same.
-func AllowedProviders(stored []string) ProviderSet {
-	if len(stored) == 0 {
-		return ProviderSet{}
-	}
-	set := ProviderSet{keys: make(map[string]bool, len(stored))}
-	for _, p := range stored {
-		set.keys[p] = true
-	}
-	return set
-}
-
-// Has reports whether the team may spend against p. An unrestricted set answers
-// true for everything, including a provider this build does not know — the
-// restriction is a narrowing, and something it never narrowed is not its call.
-func (s ProviderSet) Has(p string) bool {
-	if s.keys == nil {
-		return true
-	}
-	return s.keys[p]
-}
-
-// Restricted reports whether an org admin narrowed this team at all. The read
-// surfaces use it to distinguish "allowed because the admin said so" from
-// "allowed because nobody has said anything".
-func (s ProviderSet) Restricted() bool { return s.keys != nil }

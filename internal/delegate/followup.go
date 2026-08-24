@@ -52,9 +52,12 @@ var ErrConversationNotFound = errors.New("conversation not found")
 // model to re-invoke it on — so they read as internal faults (500) rather than
 // as a state the client should re-read.
 var (
-	errResumeNoSessionID    = errors.New("conversation has no session id; cannot resume")
-	errResumeNoWorktreePath = errors.New("conversation has no worktree path; cannot resume")
-	errResumeNoModel        = errors.New("conversation has no model; cannot resume")
+	errResumeNoSessionID     = errors.New("conversation has no session id; cannot resume")
+	errResumeNoWorktreePath  = errors.New("conversation has no worktree path; cannot resume")
+	errResumeNoModel         = errors.New("conversation has no model; cannot resume")
+	errResumeModelNotEnabled = fmt.Errorf(
+		"%w: this conversation would continue on a model its team can no longer pick — choose one from the team's enabled models in Settings",
+		domain.ErrModelNotEnabled)
 )
 
 // The refusal ladder's rungs, named. A rung travels two ways from the single
@@ -91,6 +94,11 @@ const (
 	// anything — the work itself was ended, and the stop note on the transcript
 	// names the lifecycle event that ended it.
 	ResumeBlockedBlueprintCancelled = "blueprint_cancelled"
+	// ResumeBlockedModelNotEnabled — the model a resume would run on is one the
+	// team's enable-set no longer includes: its default, or the model the step
+	// this follows ran on. The least permanent rung on the ladder — an admin
+	// re-enables it in a click — which is why it is asked last.
+	ResumeBlockedModelNotEnabled = "model_not_enabled"
 	// ResumeBlockedStepHandedOff — the step concluded and its blueprint has
 	// not reacted yet. The one rung about TIMING rather than about the
 	// conversation: a beat later the answer changes.
@@ -191,26 +199,54 @@ func injectionWillFlush(status, outcome string) bool {
 // merely cannot see. A run with no blueprint, or a lookup that fails, is
 // treated as drivable — an inability to check must not strand a resumable run,
 // and both the CAS and the claim gate re-check for real.
-func (s *Spawner) blueprintFollowUpBlock(ctx context.Context, orgID string, conv *domain.Conversation) string {
+func (s *Spawner) blueprintFollowUpBlock(ctx context.Context, orgID string, conv *domain.Conversation) (string, *domain.BlueprintRun) {
 	if s.blueprints == nil || conv.BlueprintRunID == "" {
-		return ""
+		return "", nil
 	}
 	br, err := s.blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID)
 	if err != nil {
 		delegateLog.Warn("resume: blueprint state lookup inconclusive; treating as drivable", "conversation", conv.ID, "blueprint_run", conv.BlueprintRunID, "error", err)
-		return ""
+		return "", nil
 	}
 	if !blueprintDrivableForClaim(br, conv.BlueprintStepIndex) {
 		// The refused set is exactly !blueprintDrivableForClaim — the split
 		// below only names which of its two arms refused, so the safety
 		// identity with the claim gate is untouched.
 		if blueprintCalledOff(br) {
-			return ResumeBlockedBlueprintCancelled
+			return ResumeBlockedBlueprintCancelled, br
 		}
-		return ResumeBlockedBlueprintConcluded
+		return ResumeBlockedBlueprintConcluded, br
 	}
 	if br != nil && br.Status == domain.BlueprintRunStatusRunning && conv.Status == domain.StatusCompleted {
-		return ResumeBlockedStepHandedOff
+		return ResumeBlockedStepHandedOff, br
+	}
+	// The run travels back so the model rung can ask modelForClaim without a
+	// second read of the row this one already has.
+	return "", br
+}
+
+// modelFollowUpBlock is the ladder's last rung: would the claim this wake
+// creates have a model to run on?
+//
+// It asks modelForClaim — the same call the dispatch makes — rather than
+// re-deriving the answer, because the ladder's whole contract is that a
+// composer the server leaves live and a send the server accepts are one
+// decision. A second copy here would be the copy that drifts, and it would
+// drift into the worst direction: a composer that accepts a message no claim
+// will ever deliver.
+//
+// An inconclusive resolve leaves the composer live, matching the blueprint
+// rung above. A settings read that failed is not evidence a model is
+// disabled, and greying out every composer in the org on a transient database
+// hiccup would be a worse answer than letting the dispatch gate refuse — which
+// it does, fail-closed, on the same reads a moment later.
+func (s *Spawner) modelFollowUpBlock(ctx context.Context, orgID string, conv *domain.Conversation, br *domain.BlueprintRun) string {
+	if _, err := s.modelForClaim(ctx, orgID, br, *conv); err != nil {
+		if errors.Is(err, domain.ErrModelNotEnabled) {
+			return ResumeBlockedModelNotEnabled
+		}
+		delegateLog.Warn("resume: model lookup inconclusive; treating as resumable",
+			"conversation", conv.ID, "team", conv.TeamID, "error", err)
 	}
 	return ""
 }
@@ -540,6 +576,8 @@ func blockedFollowUpError(block string) error {
 		return errResumeNoWorktreePath
 	case ResumeBlockedModelMissing:
 		return errResumeNoModel
+	case ResumeBlockedModelNotEnabled:
+		return errResumeModelNotEnabled
 	case ResumeBlockedWorkspaceExpired:
 		return ErrWorkspaceExpired
 	case ResumeBlockedBlueprintConcluded:
@@ -616,10 +654,18 @@ func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, con
 		return ResumeBlockedWorkspaceExpired
 	}
 	// The workspace survives but the blueprint says otherwise: nothing would ever
-	// drive this conversation, or nothing would drive it yet. Asked last because
+	// drive this conversation, or nothing would drive it yet. Asked here because
 	// both are about the sequence rather than the workspace, and a person whose
 	// workspace is gone is better served by hearing that.
-	return s.blueprintFollowUpBlock(ctx, orgID, conv)
+	block, br := s.blueprintFollowUpBlock(ctx, orgID, conv)
+	if block != "" {
+		return block
+	}
+	// And last, the least permanent refusal of all: everything about this
+	// conversation is fine and its team simply may not run the model it would
+	// continue on. Bottom of the ladder because it is the one rung that a person
+	// clears by changing a setting rather than by giving up on this run.
+	return s.modelFollowUpBlock(ctx, orgID, conv, br)
 }
 
 // wakeParked flips a parked conversation back to `queued` so the dispatcher
