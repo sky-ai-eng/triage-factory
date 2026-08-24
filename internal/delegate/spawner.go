@@ -27,6 +27,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/pushpolicy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
@@ -297,6 +298,12 @@ type Spawner struct {
 	// Storage() by the snapshot/rehydrate consumer (a follow-up). Guarded
 	// by mu like the credential seam it sits beside.
 	blobs storage.Storage
+
+	// teamKB is the team knowledge-base seam a claim stages a run's knowledge
+	// from — the task team's whole KB plus every other team's published root.
+	// Wired once at startup via SetTeamKB, beside SetStorage. nil is tolerated
+	// (a fixture that never stages knowledge), and a run then stages none.
+	teamKB kbstore.KB
 
 	cancels map[string]context.CancelFunc // conversationID → cancel the entire run
 	// engagements holds the live claim attempt's trace root for each run
@@ -796,6 +803,24 @@ func (s *Spawner) SetStorage(blobs storage.Storage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.blobs = blobs
+}
+
+// SetTeamKB wires the team knowledge-base seam. Post-construction like
+// SetStorage, and for the same reason — every fixture's NewSpawner call stays
+// put. nil is tolerated: a run whose spawner has no KB stages no knowledge,
+// which is the same tree a team with an empty KB produces.
+func (s *Spawner) SetTeamKB(kb kbstore.KB) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.teamKB = kb
+}
+
+// TeamKB returns the wired knowledge-base seam, or nil if none was set. The
+// lock keeps it race-free against a startup-time SetTeamKB.
+func (s *Spawner) TeamKB() kbstore.KB {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.teamKB
 }
 
 // Storage returns the wired blob store, or nil if none was set. It is the

@@ -148,7 +148,7 @@ func TestNonTerminalCompletion_RuntimeArms(t *testing.T) {
 // relying on one would be an example of nothing they could reproduce.
 //
 // A fact that genuinely varies per run belongs in the tail's <run_context> /
-// <project_context> / <tools> sections, which a block refers to by name.
+// <task_context> / <tools> sections, which a block refers to by name.
 func TestBlocks_AreLiteral(t *testing.T) {
 	for _, p := range walkBlocks(t) {
 		body, err := blocksFS.ReadFile(path.Join("blocks", p))
@@ -281,6 +281,47 @@ func TestNativeBlocks_NameTheRealPaths(t *testing.T) {
 	// run's memory silently.
 	if want := root + "/memory.md"; !strings.Contains(block(blockVerbMemoryNv), want) {
 		t.Errorf("the native memory block does not name the write path %q", want)
+	}
+}
+
+// TestKnowledgeBlock_IsInBothRuntimes pins the pair, because a section that
+// exists for only one engine is a section half the fleet never reads — and the
+// two runtimes reach the same tree by different paths, so one file cannot serve
+// both.
+//
+// It asserts what the blocks may say and what they may NOT: they describe the
+// staged layout, which is fixed, and they never name a document or a folder,
+// which is per-run data. A block that listed what an org happens to hold today
+// would fork the cached prefix per team.
+func TestKnowledgeBlock_IsInBothRuntimes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		spec  Spec
+		block string
+		root  string
+	}{
+		{"sdk", Spec{Surface: SurfaceMachinist, Runtime: RuntimeSDK, Family: FamilyClaude, Mode: ModeMulti},
+			blockVerbTeamKnowledge, "_tfac/knowledge/"},
+		{"native", Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti},
+			blockVerbTeamKnowledgeNv, agentproc.SandboxWorkRoot + "/" + worktree.ScratchDir + "/knowledge/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			composed := Build(tc.spec)
+			body := block(tc.block)
+			if !strings.Contains(composed, strings.TrimSpace(body)) {
+				t.Fatalf("the %s machinist prompt does not carry its knowledge block", tc.name)
+			}
+			// The staged layout, named the way the staging step writes it.
+			for _, want := range []string{tc.root, tc.root + "team/", tc.root + "org/", "private/", "shared/"} {
+				if !strings.Contains(body, want) {
+					t.Errorf("the %s knowledge block does not name %q", tc.name, want)
+				}
+			}
+			// The block says the tree exists; <run_context> says what is in it.
+			if !strings.Contains(body, "run_context") && !strings.Contains(body, "run context") {
+				t.Errorf("the %s knowledge block does not point at the run context that lists what was staged", tc.name)
+			}
+		})
 	}
 }
 

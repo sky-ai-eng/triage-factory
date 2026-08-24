@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
@@ -346,6 +347,13 @@ func (a *App) buildExecution() error {
 	a.blobStore = blobStore
 	a.spawner.SetStorage(blobStore)
 
+	// The team knowledge base: one process-wide seam over the same blob store
+	// in multi, plain files under the state root in local. Both halves of the
+	// product read it — the HTTP surface below, and the spawner, which stages
+	// a run's knowledge from it at claim — so it is built once here and shared.
+	a.teamKB = kbstore.New(blobStore)
+	a.spawner.SetTeamKB(a.teamKB)
+
 	// Cross-pod run control (TFAC-585): the conversation_signals outbox is Postgres-
 	// only, so this is the ONE gate that keeps local mode structurally free
 	// of conversation_signals writes — s.controller stays the plain
@@ -378,6 +386,11 @@ func (a *App) buildExecution() error {
 		return nil
 	}
 	a.srv.SetSpawner(a.spawner)
+	// The team knowledge base rides the same blob seam in multi and plain files
+	// under the state root in local (internal/kbstore picks by mode). Wired
+	// here rather than in buildServer because the blob store it is built over
+	// is resolved with the rest of this subsystem.
+	a.srv.SetTeamKB(a.teamKB)
 	return nil
 }
 

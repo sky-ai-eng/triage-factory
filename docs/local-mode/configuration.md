@@ -33,6 +33,35 @@ to keep current" when a token is already stored.
 Where exactly they land, and how the headless encrypted-file backend works, is
 covered in [Secret storage](secret-storage.md).
 
+## Knowledge base
+
+The Knowledge page is your team's knowledge base — the notes, conventions and
+runbooks every delegated run reads before it starts. It is stored as plain files
+under the state root, in two folders:
+
+```
+~/.triagefactory/teams/<teamID>/kb/private/…    # your team's own
+~/.triagefactory/teams/<teamID>/kb/shared/…     # published to the organization
+```
+
+**The folder is the visibility.** There is no per-file setting anywhere;
+publishing a document moves it from `private/` to `shared/`, and the page's
+publish verb is exactly that move. At N=1 the distinction costs nothing and
+still matters: it is the same layout a hosted deployment uses, so a knowledge
+base written here means the same thing if the org ever grows.
+
+Under each root the layout is an ordinary folder tree. Because these are plain
+files on your own machine — no object store, no database — you can edit them
+with your usual editor and the page picks the change up on its next read. Names
+are validated the same way the upload route validates them: no traversal, no
+path separators inside a name, no dot files.
+
+Before every delegated run, the whole knowledge base is copied into that run's
+tree under `_tfac/knowledge/`, and a manifest of what landed — the folder tree
+with a one-line summary per file — rides the run's opening context. The copy is
+read-only from the agent's point of view: it is rebuilt on the next run, so
+anything an agent leaves there is discarded.
+
 ## Agent sandbox (Linux)
 
 On Linux, delegated agent runs execute inside a

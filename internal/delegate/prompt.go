@@ -173,13 +173,15 @@ func machinistSpec() agentprompt.Spec {
 //
 // metadataJSON is the primary event's metadata blob ("" is fine — the context
 // block just carries no event fields). skeleton is the rendered PR history
-// block, empty for a task with no pull request behind it.
-func buildPrompt(task domain.Task, metadataJSON, skeleton, mission, scope, toolsRef, binaryPath, runRoot, branchTemplate, runURL string) string {
+// block, empty for a task with no pull request behind it. knowledge is the
+// manifest of what this launch staged under _tfac/knowledge/, empty when it
+// staged nothing.
+func buildPrompt(task domain.Task, metadataJSON, skeleton, mission, scope, toolsRef, binaryPath, runRoot, branchTemplate, runURL, knowledge string) string {
 	cli := func(s string) string { return resolveCLIPath(s, binaryPath) }
 	return joinSections(
 		BuildTaskContext(task, metadataJSON, skeleton),
 		cli(mission),
-		runContext(scope, runRoot, branchTemplate, runURL),
+		runContext(scope, runRoot, branchTemplate, runURL, knowledge),
 		cli("<tools>\n"+strings.TrimSpace(toolsRef)+"\n</tools>"),
 		cli(agentprompt.Build(machinistSpec())),
 	)
@@ -205,7 +207,15 @@ func resolveCLIPath(text, binaryPath string) string {
 // System-authored, so unlike the task context it carries no untrusted markers.
 // An absent fact renders no line: a deployment with no public URL says nothing
 // about a URL rather than offering a blank one.
-func runContext(scope, runRoot, branchTemplate, runURL string) string {
+//
+// The knowledge manifest arrives here for exactly that reason: WHICH documents
+// this org happens to hold today is a fact about one run, and the framework
+// blocks that tell the agent knowledge exists have to stay byte-identical
+// across runs to remain a cacheable prefix. It renders last and as its own
+// block, because it is a listing rather than a line — and only when something
+// was actually staged, so a run with no knowledge behind it says nothing about
+// knowledge at all.
+func runContext(scope, runRoot, branchTemplate, runURL, knowledge string) string {
 	var lines []string
 	if s := strings.TrimSpace(scope); s != "" {
 		lines = append(lines, s)
@@ -220,6 +230,9 @@ func runContext(scope, runRoot, branchTemplate, runURL string) string {
 	}
 	if runURL != "" {
 		lines = append(lines, "Run URL: "+runURL)
+	}
+	if k := strings.TrimSpace(knowledge); k != "" {
+		lines = append(lines, k)
 	}
 	if len(lines) == 0 {
 		return ""

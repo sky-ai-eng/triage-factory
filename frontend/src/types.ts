@@ -1101,6 +1101,13 @@ export type WSEvent =
     }
   | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }
+  // A team's knowledge base changed. An invalidation ping, not a diff: the
+  // client refetches through the REST list, which carries the visibility
+  // scoping the hub cannot apply. `root` is what changed, so a page showing
+  // one root does not refetch when the other is written — and the delivery
+  // scope follows it, since the root IS the visibility (a `shared` change is
+  // org-scoped, a `private` one is fanned per team member).
+  | { type: 'team_knowledge_updated'; data: { team_id: string; root: 'private' | 'shared' } }
   // Which event sources can reach the org changed. Payload-free and
   // org-scoped: the client refetches GET /api/orgs/{org}/sources, which is
   // where the scoping lives.

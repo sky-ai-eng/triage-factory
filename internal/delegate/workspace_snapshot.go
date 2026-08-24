@@ -70,21 +70,24 @@ const (
 // their own and so never ride in the snapshot: entity-memory rebuilds from
 // conversation_memory (and under a jail is not even a directory — it is the
 // symlink standing in for the read-only mount, which the walk skips as
-// non-regular regardless), and ci-logs is the extracted output of `exec gh
+// non-regular regardless), knowledge is re-copied from the team knowledge
+// store on every launch (carrying it would preserve a stale copy at the cost
+// of the blob's size), and ci-logs is the extracted output of `exec gh
 // actions download-logs`, which the agent re-runs to get byte-identical
 // content back from GitHub. Everything else under _tfac (skill scratch,
 // ad-hoc agent files, and the agent's own memory.md — which is not in the DB
 // until termination ingests it) is non-recoverable and IS captured.
 //
-// ci-logs is the only one of the two the agent can notice missing:
-// entity-memory is re-materialized before it looks, while a full Actions log
-// archive — routinely hundreds of MB to GBs of text, and the largest thing a
+// ci-logs is the only one of the three the agent can notice missing:
+// entity-memory and knowledge are both re-staged before it looks, while a full
+// Actions log archive — routinely hundreds of MB to GBs of text, and the largest thing a
 // park would ever compress — is re-fetched on demand rather than restored.
 // So a cold rehydrate whose snapshot dropped a populated ci-logs plants
 // ciLogsNotice where the logs were, rather than handing back a tree that
 // quietly lost them.
 var scratchExcludes = map[string]bool{
 	"entity-memory":    true,
+	knowledgeDirName:   true,
 	worktree.CILogsDir: true,
 }
 

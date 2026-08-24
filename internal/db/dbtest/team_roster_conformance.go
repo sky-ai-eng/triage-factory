@@ -310,4 +310,55 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 			t.Errorf("jira_account_id = %v, want acct-solo", m.JiraAccountID)
 		}
 	})
+	t.Run("MemberIDsSystem_EveryRole_OrgScoped", func(t *testing.T) {
+		// The websocket audience for a private-root knowledge change: every
+		// member of the team, whatever their role, and nobody outside it.
+		stores, seed := mk(t)
+		owner := seed.User(t, "owner")
+		org := seed.Org(t, owner)
+		teamID := seed.Team(t, org)
+
+		admin := seed.User(t, "Admin")
+		member := seed.User(t, "Member")
+		// A viewer reads the KB page too, so a stale listing is exactly what
+		// excluding them would produce.
+		viewer := seed.User(t, "Viewer")
+		seed.Membership(t, admin, teamID, "admin")
+		seed.Membership(t, member, teamID, "member")
+		seed.Membership(t, viewer, teamID, "viewer")
+
+		sibling := seed.Team(t, org)
+		outsider := seed.User(t, "Outsider")
+		seed.Membership(t, outsider, sibling, "admin")
+
+		got, err := stores.Teams.MemberIDsSystem(ctx, org, teamID)
+		if err != nil {
+			t.Fatalf("MemberIDsSystem: %v", err)
+		}
+		assertSameSet(t, "MemberIDsSystem", got, []string{admin, member, viewer})
+
+		// The org id is checked in the WHERE clause, so a real team id read
+		// under the wrong tenant resolves to nobody rather than to its own
+		// members.
+		otherOrg := seed.Org(t, seed.User(t, "elsewhere"))
+		crossed, err := stores.Teams.MemberIDsSystem(ctx, otherOrg, teamID)
+		if err != nil {
+			t.Fatalf("MemberIDsSystem(cross-org): %v", err)
+		}
+		if len(crossed) != 0 {
+			t.Errorf("MemberIDsSystem(cross-org) = %v; want empty", crossed)
+		}
+	})
+
+	t.Run("MemberIDsSystem_EmptyTeam", func(t *testing.T) {
+		stores, seed := mk(t)
+		org := seed.Org(t, seed.User(t, "owner"))
+		got, err := stores.Teams.MemberIDsSystem(ctx, org, seed.Team(t, org))
+		if err != nil {
+			t.Fatalf("MemberIDsSystem: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("MemberIDsSystem(empty team) = %v; want empty slice", got)
+		}
+	})
 }

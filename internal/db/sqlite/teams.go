@@ -232,6 +232,33 @@ func (s *teamsStore) Get(ctx context.Context, orgID, teamID string) (*domain.Tea
 	return &t, nil
 }
 
+// MemberIDsSystem — identical query to the Postgres impl so both backends pin
+// to one result. Local mode never emits the per-user fan-out this feeds (N=1
+// broadcasts org-wide), but the read is real rather than a stub so the shared
+// conformance suite pins one answer.
+func (s *teamsStore) MemberIDsSystem(ctx context.Context, orgID, teamID string) ([]string, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT DISTINCT m.user_id
+		FROM memberships m
+		JOIN teams t ON t.id = m.team_id
+		WHERE t.org_id = ? AND m.team_id = ?
+		ORDER BY 1 ASC
+	`, orgID, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("list team member ids: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan member user_id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *teamsStore) TeamIDsForUserInOrgSystem(ctx context.Context, orgID, userID string) ([]string, error) {
 	// memberships ⋈ teams, scoped to the org — identical query to the
 	// Postgres impl so both backends pin to one result. Unlike

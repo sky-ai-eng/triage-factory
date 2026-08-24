@@ -104,13 +104,24 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	memoryDir, memoryOwned := entityMemoryTarget(&cfg, conversationID, claudeCwd, owned)
 	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, cfg.blueprintRunID, memoryOwned)
 
+	// The SDK path's twin again: the task team's knowledge base plus every
+	// other team's published root, copied in before the jail starts so it is
+	// present at first read. Skipped on a warm step for the same reason the
+	// memory clear is — the tree belongs to the sandbox identity by then.
+	knowledge := ""
+	if handedOff {
+		delegateLog.Debug("run tree already handed to the sandbox identity; team knowledge not refreshed for this step", "conversation", conversationID, "cwd", claudeCwd)
+	} else {
+		knowledge = s.stageTeamKnowledge(stagingCtx, orgID, cfg.teamID, claudeCwd, owned)
+	}
+
 	priorMemory := s.prepareInheritedMemory(stagingCtx, orgID, conversationID, claudeCwd, owned, handedOff)
 	stagingSpan.End()
 
 	// Composed before the jail is launched, so the fallible half fails the claim
 	// without having cost a sandbox. The system prompt is the same for every
 	// native run; everything about this one rides the opening turn.
-	opening, err := s.buildNativeOpeningTurn(ctx, task, mission, cfg)
+	opening, err := s.buildNativeOpeningTurn(ctx, task, mission, cfg, knowledge)
 	if err != nil {
 		return launchFailed(fmt.Errorf("compose opening turn: %w", err))
 	}
@@ -279,7 +290,7 @@ func nativeSystemPrompt(nonTerminalStep bool) string {
 // buildNativeOpeningTurn resolves this run's inputs and composes the
 // conversation's first user message. The fallible resolutions live here; the
 // composition itself is composeNativeOpeningTurn.
-func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, mission string, cfg runConfig) (string, error) {
+func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, mission string, cfg runConfig, knowledge string) (string, error) {
 	selfBin, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("resolve own binary path: %w", err)
@@ -291,7 +302,7 @@ func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, 
 		metadataJSON = ""
 	}
 	return composeNativeOpeningTurn(task, metadataJSON, cfg.prSkeleton, mission,
-		agentproc.AgentVisibleBinary(selfBin), s.resolveBranchTemplate(ctx, task)), nil
+		agentproc.AgentVisibleBinary(selfBin), s.resolveBranchTemplate(ctx, task), knowledge), nil
 }
 
 // composeNativeOpeningTurn assembles what the loop says first: run context,
@@ -303,11 +314,12 @@ func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, 
 // choice; buildPrompt does the same on the SDK path.
 //
 // The native blocks name the in-jail paths and the `tfac` applet outright, so
-// the run context carries only the branch convention — a fact that differs per
-// team, and the one thing those blocks cannot state for themselves.
-func composeNativeOpeningTurn(task domain.Task, metadataJSON, skeleton, mission, binaryPath, branchTemplate string) string {
+// the run context carries only the branch convention and this run's staged
+// knowledge — the two facts that differ per team and per run, and the ones
+// those blocks cannot state for themselves.
+func composeNativeOpeningTurn(task domain.Task, metadataJSON, skeleton, mission, binaryPath, branchTemplate, knowledge string) string {
 	return joinSections(
-		runContext("", "", branchTemplate, ""),
+		runContext("", "", branchTemplate, "", knowledge),
 		BuildTaskContext(task, metadataJSON, skeleton),
 		resolveCLIPath(mission, binaryPath),
 	)

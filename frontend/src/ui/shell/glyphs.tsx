@@ -20,6 +20,12 @@ const G = {
     'M6 4a2 2 0 11-4 0 2 2 0 014 0M14 12a2 2 0 11-4 0 2 2 0 014 0' +
     'M8.7 4h2A1.3 1.3 0 0112 5.3V10M4 6v8',
   prompts: 'M3.5 4.5L6.5 8l-3 3.5M8.5 12h4',
+  // An open book with a bookmark: what a team writes down and keeps. Kin to
+  // `library` (which is also two facing pages) but marked rather than shelved —
+  // the library is a catalogue you browse, knowledge is a record you consult.
+  knowledge:
+    'M2.6 3.4h3.6a2 2 0 011.8 1 2 2 0 011.8-1h3.6v8.2H9.8a2 2 0 00-1.8 1 2 2 0 00-1.8-1H2.6z' +
+    'M8 4.4v8.2',
   usage: 'M3 12a5 5 0 1110 0M8 12V8.5',
   // Lucide server: stacked units with a status lamp each. The old 2x2 grid
   // read as a dashboard or an app launcher, not as machines.

@@ -70,6 +70,11 @@ export function routes({
         { id: 'overview', name: 'Overview', icon: 'overview' },
         { id: 'board', name: 'Board', icon: 'board', counts: true },
         { id: 'factory', name: 'Factory', icon: 'factory' },
+        // Knowledge is work, not configuration: it is what the agents read on
+        // every run, and it takes the row the projects page used to hold.
+        // Present in both modes — local has knowledge bases too, one team's
+        // worth of them.
+        { id: 'knowledge', name: 'Knowledge', icon: 'knowledge' },
       ],
     },
     {

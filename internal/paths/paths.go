@@ -161,6 +161,20 @@ func BareCacheDir(orgID, owner, repo string) string {
 	return filepath.Join(BareCacheRoot(orgID), owner, repo+".git")
 }
 
+// TeamKBDir is one team's knowledge base on disk:
+// <OrgRoot>/teams/<teamID>/kb. Its two visibility roots (private/,
+// shared/) are subdirectories of it, named by internal/kbstore — this
+// resolver stops at the KB root so the two-root vocabulary lives in one
+// package rather than two.
+//
+// Local mode only. A multi deployment keys a team's knowledge into the
+// shared object store instead, so that every pod reads the same bytes and
+// no executor owns a tenant's knowledge; the on-disk form exists because
+// a single-machine install has no object store to route it through.
+func TeamKBDir(orgID, teamID string) string {
+	return filepath.Join(OrgRoot(orgID), "teams", teamID, "kb")
+}
+
 // --- Class 2: host-global persistent (NEVER org-scoped) ------------------
 
 // ToolchainRoot is the base for image-baked, host-global toolchain

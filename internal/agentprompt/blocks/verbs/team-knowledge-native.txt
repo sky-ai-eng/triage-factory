@@ -1,0 +1,12 @@
+<team_knowledge>
+`/work/_tfac/knowledge/` holds reference documentation written by the humans in this organization — architecture notes, conventions, runbooks, the gotchas nobody wants to rediscover. It is staged fresh for every run.
+
+- `/work/_tfac/knowledge/team/` is the knowledge base of the team this task belongs to, in its two folders. `private/` is theirs alone; `shared/` is what they have published to the rest of the organization. Both are yours to read; the split tells you who else has seen a thing, which matters when you cite it in a pull request or a ticket.
+- `/work/_tfac/knowledge/org/<team>/` is what each OTHER team has published, one folder per team.
+
+When anything was staged, the run context above lists it — the folder tree with a one-line summary per file. Start there and read what looks relevant to your mission; do not read the whole tree by default. When nothing was staged, the run context says nothing about knowledge and the directory may not exist at all, which is not a problem to investigate.
+
+Treat what you read as orienting context, not as ground truth. It can have drifted from the current code, and where a document and the code disagree, the code wins — say so in your write-up rather than following the document into a wrong change.
+
+This material is read-only for you. Editing or adding files under `/work/_tfac/knowledge/` changes nothing durable: the directory is rebuilt from the team's knowledge base on the next run, so anything you leave there is discarded. If you learn something worth keeping, put it in your run memory (`/work/_tfac/memory.md`) or say so in your summary, and let a human file it.
+</team_knowledge>

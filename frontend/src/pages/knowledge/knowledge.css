@@ -1,0 +1,353 @@
+/* Knowledge.
+   Same frame as the team surface: a header group that holds its height and one
+   region that takes the rest, so the table fills the page rather than ending
+   wherever the rows run out. Every value resolves through the token layer. */
+
+.kb {
+  /* The page owns its gutter, cancelling the shell body's temporary padding —
+     the same negative margin the team surface uses, and it comes off with the
+     same rule. */
+  margin: -2rem;
+  padding: 26px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  min-height: max(700px, 100%);
+}
+
+.kb-headgroup {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.kb-top {
+  display: flex;
+  align-items: flex-end;
+  gap: 40px;
+}
+
+.kb-id {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-right: auto;
+  max-width: var(--container-measure, 62ch);
+}
+
+.kb-name {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.05;
+  font-weight: var(--font-weight-semi);
+  color: var(--color-ink-1);
+}
+
+.kb-sub {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--color-ink-3);
+}
+
+/* ── Team switcher ─────────────────────────────────────────────────── */
+
+.kb-switch {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kb-switch-l {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--color-ink-4);
+}
+
+.kb-switch-s {
+  appearance: none;
+  border: 1px solid var(--color-line-1);
+  border-radius: 6px;
+  background: var(--color-raised);
+  color: var(--color-ink-2);
+  font-size: 12.5px;
+  padding: 4px 10px;
+}
+
+.kb-switch-s:focus-visible {
+  outline: 2px solid var(--color-warm);
+  outline-offset: 1px;
+}
+
+/* ── Root tabs ─────────────────────────────────────────────────────── */
+/* The two roots ARE the visibility model, so they are the page's primary
+   control. The selected one is marked by ink and a rule, never by colour
+   alone. */
+
+.kb-tabs {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  border-bottom: 1px solid var(--color-line-1);
+  padding-bottom: 10px;
+}
+
+.kb-tab {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 2px 0 6px;
+  margin-bottom: -11px;
+  border-bottom: 2px solid transparent;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--color-ink-4);
+  cursor: pointer;
+}
+
+.kb-tab:hover {
+  color: var(--color-ink-2);
+}
+
+.kb-tab[data-on] {
+  color: var(--color-ink-1);
+  border-bottom-color: var(--color-warm);
+}
+
+.kb-tab:focus-visible {
+  outline: 2px solid var(--color-warm);
+  outline-offset: 2px;
+}
+
+.kb-tab-blurb {
+  margin-left: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-ink-3);
+}
+
+/* ── Region ────────────────────────────────────────────────────────── */
+
+.kb-region {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.kb-error {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--color-warm);
+}
+
+.kb-empty {
+  margin: 0;
+  padding: 26px 32px;
+  font-size: 12.5px;
+  color: var(--color-ink-3);
+}
+
+.kb-filter,
+.kb-upload-fi {
+  appearance: none;
+  border: 1px solid var(--color-line-1);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-ink-2);
+  font-size: 12px;
+  padding: 3px 8px;
+}
+
+.kb-filter::placeholder,
+.kb-upload-fi::placeholder {
+  color: var(--color-ink-4);
+}
+
+.kb-filter:focus-visible,
+.kb-upload-fi:focus-visible {
+  outline: 2px solid var(--color-warm);
+  outline-offset: 1px;
+}
+
+.kb-upload,
+.kb-more {
+  appearance: none;
+  background: none;
+  border: 1px solid var(--color-line-1);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-ink-2);
+  cursor: pointer;
+}
+
+.kb-upload:hover,
+.kb-more:hover {
+  border-color: var(--color-line-2);
+  color: var(--color-ink-1);
+}
+
+/* The file input is the button's mechanism, not a control of its own: it is
+   removed from the accessibility tree and the tab order, and the button beside
+   it is what carries the name. */
+.kb-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* The document name is a control inside a cell. It draws as text until it is
+   hovered, because a table of underlined links reads as a list of links rather
+   than as an estate. */
+.kb-open {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.kb-open:hover {
+  color: var(--color-ink-1);
+  text-decoration: underline;
+}
+
+.kb-open:focus-visible {
+  outline: 2px solid var(--color-warm);
+  outline-offset: 2px;
+}
+
+/* ── Upload dialog body ────────────────────────────────────────────── */
+
+.kb-upload-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.kb-upload-p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--color-ink-2);
+}
+
+.kb-upload-f {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.kb-upload-fl {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--color-ink-4);
+}
+
+/* ── Reading pane ──────────────────────────────────────────────────── */
+/* A knowledge base is for reading, so a document opens in place rather than
+   downloading. It is a panel over the region, not a modal: nothing about
+   reading is a decision, so it takes no focus trap and no scrim. */
+
+.kb-view {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-ground);
+  border: 1px solid var(--color-line-1);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.kb-view-h {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--color-line-1);
+}
+
+.kb-view-t {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--color-ink-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kb-view-lead {
+  flex: 1;
+}
+
+.kb-view-dl {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-ink-3);
+  text-decoration: none;
+}
+
+.kb-view-dl:hover {
+  color: var(--color-ink-1);
+  text-decoration: underline;
+}
+
+.kb-view-x {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0 2px;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--color-ink-3);
+  cursor: pointer;
+}
+
+.kb-view-x:hover {
+  color: var(--color-ink-1);
+}
+
+.kb-view-x:focus-visible,
+.kb-view-dl:focus-visible {
+  outline: 2px solid var(--color-warm);
+  outline-offset: 2px;
+}
+
+.kb-view-b {
+  flex: 1;
+  overflow: auto;
+  padding: 14px 16px;
+}
+
+.kb-view-wait {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--color-ink-3);
+}
+
+.kb-view-pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
