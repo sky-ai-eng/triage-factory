@@ -39,10 +39,10 @@ func init() {
 // reused here. The built-ins' HelpText conventions apply: verbs named bare,
 // the invocation prefix appears in the usage line alone.
 const cliHelpText = `Slack Commands:
-  slack send --channel <C> [--thread-ts <TS>] (--body <md> | --body-file <path|->) [--attach-file <path|->]
+  slack send --channel <C> [--thread-ts <TS>] [--body <md> | --body-file <path|->] [--attach-file <path|->]
                                                           Post a message (Markdown). Needs a body
-                                                          and/or an attach-file. Returns
-                                                          {"channel":..., "ts":...}.
+                                                          and/or an attach-file — a file-only send
+                                                          is fine. Returns {"channel":..., "ts":...}.
   slack edit --channel <C> --ts <TS> (--body <md> | --body-file <path|->)
                                                           Edit a message the bot itself posted.
   slack react --channel <C> --ts <TS> --emoji <name>      Add an emoji reaction (name only, no
@@ -81,7 +81,7 @@ var cliValueFlags = map[string]bool{
 // line per form, so `read` carries both of its shapes. Mirrored in
 // cliHelpText, the family overview — a rename has to touch both.
 var slackVerbHelp = map[string][]string{
-	"send":     {"slack send --channel <C> [--thread-ts <TS>] (--body <md> | --body-file <path|->) [--attach-file <path|->]"},
+	"send":     {"slack send --channel <C> [--thread-ts <TS>] [--body <md> | --body-file <path|->] [--attach-file <path|->]"},
 	"edit":     {"slack edit --channel <C> --ts <TS> (--body <md> | --body-file <path|->)"},
 	"react":    {"slack react --channel <C> --ts <TS> --emoji <name>"},
 	"read":     {"slack read thread --channel <C> --ts <TS> [--limit <N>]", "slack read channel --channel <C> (--limit <N> | --ts <TS> [--num-prior <N>] [--num-following <N>])"},
