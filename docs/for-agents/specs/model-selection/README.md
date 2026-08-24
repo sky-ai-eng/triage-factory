@@ -992,11 +992,24 @@ What follows:
   once and written whole. R18 already made the SDK's reported figure
   authoritative at settle; this removes the last implication that a local
   row ever joins the datasheet.
-- **Availability keys by access path.** `model_availability.provider`
-  generalizes from "bifrost provider" to "the access path the verdict was
-  earned through"; SDK rows key `(claude-code, alias)`. Probe candidates
+- **Availability is a fact about a TF-owned credential — on every
+  path.** A stored verdict needs a stable subject. Multi's rows are about
+  the org's bound credential, and unbinding it is an event the
+  `unconfigured` derivation sees; under local's system credentials the
+  subject would be the host environment — mutable, unobservable, and
+  invalidated by nothing TF can detect — so on that path nothing is
+  stored, no badge renders, no save gate engages, and the probe surface
+  does not appear in settings. The surface exists exactly when the org
+  brings its own credential, which needs no mode branch: always in multi,
+  and in local once the credential wiring (TFAC-888) makes BYOK real
+  there — the same bit `modelaccess` already resolves. A local BYOK
+  verdict keys as native ones do, `(credential family, id in the asking
+  path's vocabulary)`: `(anthropic, sonnet)` records that this org's
+  Anthropic key can invoke `sonnet` through the SDK. Probe candidates
   follow the universe — a local sweep is the aliases through the SDK
-  transport (see Q4's amended cost note).
+  transport (see Q4's amended cost note). The probe already resolves
+  credentials exactly as a run does, so it follows the TFAC-888 wiring
+  with no change of its own.
 - **R12 retires.** The team-level control is the model enable-set; a
   provider restriction is unchecking that path's models, so the shipped
   `allowed_providers` control retires with the enable-set work rather than
@@ -1012,10 +1025,15 @@ Two hazards, recorded so the implementing tickets carry them:
   `bedrock_model_id` for any model the native catalog cannot place, so an
   alias sent down a BYOK-Bedrock local path would be silently overridden.
   Lands with the local credential wiring (TFAC-888), which is also what
-  makes a local BYOK path real at all.
-- The alias list (`fable` included) is asserted, not yet probed. The first
-  implementation step is a sweep of the aliases through the SDK transport
-  — which the probe machinery makes a button press.
+  makes a local BYOK path real at all. A second consequence for that
+  ticket: with aliases the model no longer names the provider, so a local
+  org holding both credentials needs an explicit active-path choice for
+  the SDK environment — the existing provider picker becomes that choice,
+  rather than merely selecting which credential to bind.
+- The alias list (`fable` included) is asserted, not yet probed. The
+  first implementation step is a sweep of the aliases through the SDK
+  transport — engineering verification the probe machinery makes a button
+  press, not a shipped surface.
 
 Adding an SDK (Codex CLI, Gemini CLI, …) is an ordinary ticket, not an
 epic: a new list, a credential shape, a probe transport, and the
