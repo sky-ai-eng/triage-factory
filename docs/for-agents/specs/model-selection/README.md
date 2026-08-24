@@ -13,7 +13,9 @@ provisional until the design pass. **Amended 2026-08-21**: §3's
 file-is-the-allowlist shape is superseded by the registry design in §3's
 dated amendment block; D4 carries a matching dated note on benchmark
 scores. The reasoning that was superseded is struck, not deleted, per this
-document's convention.
+document's convention. **Amended 2026-08-24**: the SDK path decouples from
+the catalog — §7's shared-vocabulary rows and R12 are superseded; see §7's
+dated amendment block.
 
 Scope note: multi-mode is where the new machinery lands. **Local mode stays
 SDK-bound** — see §2.6, which is a requirement, not an implementation
@@ -134,8 +136,12 @@ differently, enforced at different times, and fail differently.
   reported in usage as its own `system_overhead` category — what is
   missing is the rest: they are outside every cap, not org-configurable,
   and absent from the per-model/provider breakdown R15 requires.
-- **R12.** An org admin can restrict which of the org's providers a given
-  team may spend against.
+- **R12.** ~~An org admin can restrict which of the org's providers a given
+  team may spend against.~~ **Superseded 2026-08-24**: the team-level
+  control is the model enable-set — a provider restriction is unchecking
+  that path's models — so no coarser provider control stands beside it to
+  disagree with. The shipped `allowed_providers` restriction retires with
+  the enable-set work. See §7's amendment.
 - **R13.** The model picker shows only what the org's credential can
   actually invoke. **No admin writes a configuration file describing their
   own infrastructure.** Discovery is TF's job. See §2.4 — this is harder
@@ -526,6 +532,11 @@ legible error naming the model, not a hang.
 `internal/systemllm` already has the split R11 needs: direct API calls in
 multi mode, SDK subprocess in local. Only the multi-mode half changes.
 
+*Amended 2026-08-24.* The CLI verification above (concrete ids are valid
+on subscription auth) stands as a fact but is no longer load-bearing: the
+SDK path offers and stores its own alias vocabulary rather than the
+catalog's concrete ids. See §7's amendment.
+
 ### 2.7 Things that do not port across vendors
 
 - **Reasoning effort.** `Spec.Effort` maps to Anthropic budget-tokens or
@@ -746,9 +757,10 @@ mis-billing (R17 already insulates history).
 **What does not change.** R6 (resolve once, no fallback), the probe and
 its semantics (§2.4, Q4), enable-sets as the org's control surface, the
 mechanical gates failing closed, D4's prohibition on ordering and
-auto-selection, and §7's mode contract — local serves the identical read
-from the identical registry, and its universe stays what the SDK can
-drive.
+auto-selection, and §7's one-contract mode discipline — ~~local serves the
+identical read from the identical registry, and its universe stays what
+the SDK can drive~~ (superseded 2026-08-24: local serves the same contract
+from the SDK's own registry; §7's amendment).
 
 **Ship order.** The four-entry Anthropic file ships now with
 file-as-offered-set semantics — correct at one provider and one family,
@@ -807,6 +819,9 @@ sequences on it.
     that later loses access is **not** caught eagerly — the alternative is
     re-testing every model on every save, which is rejected. Late
     drop-outs surface at dispatch per R14, loudly, naming the cause.
+  - *Amended 2026-08-24*: "~2 tokens" prices the **direct** transport. The
+    SDK transport spends a full harness invocation per probe, so consent
+    copy states the cost of the transport the deployment uses.
 - ~~**Q5 — Does bifrost report `ModelName` or `ModelID` on responses?**~~
   **Answered** (§2.5): neither. `ModelID` goes on the wire and lands in
   `ExtraFields.ResolvedModelUsed`; the alias name lands in
@@ -841,6 +856,14 @@ what `"sonnet"` meant when they were written. They are reached only by the
 approximate (`~`-prefixed) footer path today, so they are not actively
 mis-billing — but they are exactly the drift this design exists to remove,
 and they collapse into the single catalog lookup.
+
+*Amended 2026-08-24.* The compatibility baseline for every migration in
+this epic is **v1.12.2** — the last cut release. Nothing merged since has
+reached an install, so tickets write **target-state DDL only**: no
+incremental folds between post-v1.12.2 shapes, no compat for columns that
+never shipped. A single consolidated migration lands before v1.13.0 and
+owns the one real upgrade path from what v1.12.2 holds (this table,
+including the baseline's `max_llm_model_tier`).
 
 ---
 
@@ -889,10 +912,10 @@ Five layers, most-shared first:
 
 | layer | multi | local |
 |---|---|---|
-| vocabulary & storage | concrete model ids | **identical** — the SDK's `--model` accepts concrete ids, so no translation exists anywhere |
-| catalog & names | allowlist ⋈ datasheet, embedded | **identical** — it ships in the binary |
-| model universe | filtered by the org's configured providers | filtered by what the SDK can drive: the Claude family via Anthropic direct / Bedrock / Vertex. **Not a mock — a truth.** A GPT entry in a local picker would be a lie, because nothing local can execute it |
-| availability | `verified` via probe, save-gated (Q4) | **identical vocabulary** — local probes through the agent runtime, which reports the provider's HTTP status on its terminal event (`api_error_status`), so a subscription with no key this process could assemble a request from still yields a real verdict. Same four states, same test-connection button, same stored rows |
+| vocabulary & storage | concrete model ids | ~~**identical** — the SDK's `--model` accepts concrete ids, so no translation exists anywhere~~ superseded 2026-08-24 — the SDK's own alias vocabulary, stored as-is; see the amendment below |
+| catalog & names | allowlist ⋈ datasheet, embedded | ~~**identical** — it ships in the binary~~ superseded 2026-08-24 — the per-SDK list ships in the binary beside the native registry; see the amendment below |
+| model universe | filtered by the org's configured providers | ~~filtered by what the SDK can drive: the Claude family via Anthropic direct / Bedrock / Vertex.~~ superseded 2026-08-24 — the SDK's supported-model list, decoupled from the catalog; see the amendment below. **Not a mock — a truth.** A GPT entry in a local picker would be a lie, because nothing local can execute it |
+| availability | `verified` via probe, save-gated (Q4) | ~~**identical vocabulary** — local probes through the agent runtime, which reports the provider's HTTP status on its terminal event (`api_error_status`), so a subscription with no key this process could assemble a request from still yields a real verdict. Same four states, same test-connection button, same stored rows~~ superseded 2026-08-24 — a stored verdict needs a TF-owned credential: under system credentials nothing is stored and no probe surface exists; under BYOK the same four states, keyed `(credential family, alias)`; see the amendment below |
 | caps & usage | full | shared ledger shape (`messages.cost_usd`); rate caps work identically (a picker filter against catalog prices); budget caps per §7.1 |
 
 One deliberate asymmetry, written down so it is a decision rather than
@@ -908,7 +931,9 @@ are the two conversation runtimes' own: an in-process call over
 engine) and the **SDK** subprocess. Either way it spends the request through
 the same client a delegated run does, so it tests that run's credential path
 rather than a parallel one — and what it asks, and what the answer means, are
-identical, so the field carries no mode difference for a client to read.
+identical~~, so the field carries no mode difference for a client to read~~
+(superseded 2026-08-24: whether the field exists at all now follows the
+credential source — see the amendment below).
 
 It picks by mode because the mode settles the runtime: the dialect *is* the
 mode and the enqueue stamps the ratchet per dialect — Postgres mints
@@ -919,6 +944,133 @@ conversation.
 The one thing that genuinely differs between the modes is what an org's
 credential source can be: only local can run on the host's, and that source
 is what makes every provider reachable rather than only the bound ones.
+
+### Amendment (2026-08-24): the SDK path is its own registry
+
+The five-layer table recorded vocabulary and universe as shared, on the
+verified fact that the SDK's `--model` accepts concrete ids. Superseded:
+**the SDK path decouples from the catalog entirely.** The registry of the
+2026-08-21 amendment is the *native* registry — bifrost wire ids joined to
+the datasheet — and each supported SDK carries a **parallel
+supported-model list** in its own vocabulary. For Claude Code that list is
+`haiku` / `sonnet` / `opus` / `fable`: family aliases the SDK resolves
+itself, against whichever access path its environment selects — the same
+alias reaches Anthropic on a subscription and Bedrock under
+`CLAUDE_CODE_USE_BEDROCK=1`. On this path the provider is a property of
+the credential, never the id, which is the fact the shared vocabulary
+could not express: it forced a local picker to offer the Anthropic and
+Bedrock spellings side by side and ask the user a question the
+deployment's environment had already answered.
+
+What follows:
+
+- **Two registries, one package.** `internal/modelcatalog` keeps its name
+  and widens its job to "the models TF offers, under each execution
+  vocabulary it offers them in": the native registry (the datasheet join,
+  unchanged) beside per-SDK lists (`sdk_models.json`, keyed by SDK id —
+  `claude-code` — TF-authored display names, **no prices**, no datasheet
+  join). Not subpackages, and never `multi`/`local` in a path: the axis is
+  the execution vocabulary, and mode is only what selects between them
+  today. The one new seam — *what may this deployment offer or store* — is
+  a single resolver taking the mode (eventually the access path) as a
+  parameter, the `modelaccess.For` discipline, so validators stop meaning
+  "∈ the catalog" and start meaning "∈ this deployment's universe" through
+  one door.
+- **One contract, universe per deployment.** `GET …/models` serves the
+  native registry in multi and the SDK list in local — the mode-as-data
+  mechanism this section already mandates. `prices_per_mtok` becomes
+  optional on the wire; its absence is how a client knows cost is
+  harness-settled.
+- **A row names its executor once there is more than one.** With a second
+  SDK configured, a model choice on this path also chooses the harness
+  that runs the conversation, so rows carry an `sdk` field — absent on
+  native rows, the same absence convention as the price — and the picker
+  groups by it. Keys stay each SDK's vocabulary verbatim, with no
+  cross-SDK uniqueness asserted (TF does not control those
+  vocabularies), so the unambiguous identity for a stored choice is the
+  `(sdk, model)` pair once a second SDK exists; today the bare alias
+  stores, and the second-SDK ticket carries the widening. The likely
+  home for the run-time half already exists: `conversations.runtime` is
+  which engine drives the transcript, and its generic `sdk` value
+  naturally becomes the harness's own id at that point — recorded here
+  as the direction, decided in that ticket, since it changes stored
+  ratchet strings.
+- **Stored local vocabulary is the alias.** Team defaults, step pins, and
+  the background-jobs knob store `sonnet` in a local install, never
+  `claude-sonnet-5`. No translation layer exists in either direction (§3
+  item 3 stands): local stores aliases and sends aliases, multi stores
+  concrete ids and sends them, and §0's bug cannot return because nothing
+  native ever reads a local row — the alias never reaches bifrost.
+- **Cost on the SDK path is harness-settled — verified, not assumed.**
+  `inference.CostForUsage` (the datasheet interpolation) is called only by
+  the native engine, the direct probe, and `systemllm`'s direct arm; the
+  SDK path carries cost as the runtime's terminal `total_cost_usd`, parsed
+  once and written whole. R18 already made the SDK's reported figure
+  authoritative at settle; this removes the last implication that a local
+  row ever joins the datasheet.
+- **Availability is a fact about a TF-owned credential — on every
+  path.** A stored verdict needs a stable subject. Multi's rows are about
+  the org's bound credential, and unbinding it is an event the
+  `unconfigured` derivation sees; under local's system credentials the
+  subject would be the host environment — mutable, unobservable, and
+  invalidated by nothing TF can detect — so on that path nothing is
+  stored, no badge renders, no save gate engages, and the probe surface
+  does not appear in settings. The surface exists exactly when the org
+  brings its own credential, which needs no mode branch: always in multi,
+  and in local once the credential wiring (TFAC-888) makes BYOK real
+  there — the same bit `modelaccess` already resolves. A local BYOK
+  verdict keys as native ones do, `(credential family, id in the asking
+  path's vocabulary)`: `(anthropic, sonnet)` records that this org's
+  Anthropic key can invoke `sonnet` through the SDK. Probe candidates
+  follow the universe — a local sweep is the aliases through the SDK
+  transport (see Q4's amended cost note). The probe already resolves
+  credentials exactly as a run does, so it follows the TFAC-888 wiring
+  with no change of its own.
+- **R12 retires.** The team-level control is the model enable-set; a
+  provider restriction is unchecking that path's models, so the shipped
+  `allowed_providers` control retires with the enable-set work rather than
+  standing beside it as a coarser answer that can disagree. The one
+  semantic that does not carry — a provider restriction auto-covered that
+  provider's *future* models — is answered by the enable-set's own
+  semantics: an untouched set tracks the default, a stored set is frozen
+  at what it names.
+
+Two hazards, recorded so the implementing tickets carry them:
+
+- TF's Bedrock env composition (`addBedrockConfig`) pins
+  `ANTHROPIC_MODEL` — the run's model when it is a Bedrock catalog key,
+  else the org's stored `bedrock_model_id`. That arm is an artifact of the
+  concrete-id vocabulary: Claude Code needs no pin at all. Per its Bedrock
+  docs, aliases resolve to built-in per-region inference-profile defaults
+  with startup availability checks and fallback, and `ANTHROPIC_MODEL` /
+  `ANTHROPIC_DEFAULT_*_MODEL` exist only as deliberate version-pinning
+  overrides. Under aliases the arm is deleted with the local credential
+  wiring (TFAC-888), not inherited, and the stored `bedrock_model_id`
+  stops driving the SDK path; region and endpoint env survive. A second
+  consequence for that ticket: with aliases the model no longer names the
+  provider, so a local org holding both credentials needs an explicit
+  active-path choice for the SDK environment — the existing provider
+  picker becomes that choice, rather than merely selecting which
+  credential to bind. A third: of the three stored Bedrock auth shapes,
+  only the bearer token (`AWS_BEARER_TOKEN_BEDROCK`) and the access-key
+  pair have an env contract the SDK reads. Role mode is a native-path
+  shape — it needs the STS minter, and a minted triple injected into a
+  subprocess env frozen at spawn cannot refresh, so a run outliving the
+  TTL dies mid-run. The SDK path offers two shapes; the role-shaped local
+  user is already served by system credentials, where the SDK's own AWS
+  chain does the AssumeRole and refresh natively. Which shapes a
+  deployment accepts travels as data on the read, never as a mode branch
+  in the form — local currently offers all three, which is the confusion
+  this resolves.
+- The alias list (`fable` included) is asserted, not yet probed. The
+  first implementation step is a sweep of the aliases through the SDK
+  transport — engineering verification the probe machinery makes a button
+  press, not a shipped surface.
+
+Adding an SDK (Codex CLI, Gemini CLI, …) is an ordinary ticket, not an
+epic: a new list, a credential shape, a probe transport, and the
+harness-family work the 2026-08-21 amendment already buckets (prompt
+text, tool surface, loop mechanics).
 
 ### 7.1 Budget caps: enforcement follows settlement
 
