@@ -267,12 +267,18 @@ var credentialEnvKeys = []string{
 // refusing.
 var ErrProviderNotConfigured = errors.New("agentproc: no credential for this model's provider")
 
-// unnamedModelPrecedence orders the providers consulted for a caller that named
-// no catalog model and an org that configured more than one. Anthropic first:
-// it is the direct path, and the one this deployment's own tooling was built
-// against. Nothing TF dispatches reaches it — a run and a system job both carry
-// a catalog key — so it covers a stored id from an older catalog and nothing
-// else.
+// unnamedModelPrecedence orders the providers consulted for a model that names
+// no provider and an org that configured more than one. Anthropic first: it is
+// the direct path, and the one this deployment's own tooling was built against.
+//
+// Two kinds of value land here. A stored id from an older catalog, which is a
+// leftover. And every SDK alias, which is not: on that path the id deliberately
+// names no provider — the harness resolves one from whichever credential its
+// environment supplies — so a local org holding both credentials is picking by
+// precedence rather than by an answer anybody gave.
+//
+// TODO(TFAC-888): make that an explicit active-path choice for the SDK
+// environment, rather than a precedence order standing in for one.
 var unnamedModelPrecedence = []string{modelcatalog.ProviderAnthropic, modelcatalog.ProviderBedrock}
 
 // ResolveCredentialsForBundle is resolveCredentials, exported for the brain-side
@@ -539,6 +545,11 @@ func bedrockEnv(ctx context.Context, secrets SecretsReader, orgID, model string)
 // stored bedrock_model_id is the fallback for a run that named no Bedrock model:
 // it is the org's single pinned inference profile, which is what an org had
 // before it could pick per run.
+//
+// TODO(TFAC-888): delete the pin entirely. Claude Code resolves a family alias
+// to a per-region inference profile itself, with its own availability check, so
+// pinning a version here overrides a choice the harness is better placed to
+// make; region and endpoint env stay.
 func addBedrockConfig(ctx context.Context, secrets SecretsReader, orgID, model string, env map[string]string) error {
 	region, err := secrets.Get(ctx, orgID, secretAWSRegion)
 	if err != nil {

@@ -96,6 +96,24 @@ func (c Credentials) Has(provider string) bool {
 	return c.host
 }
 
+// BringsOwn reports whether this org's credentials are TF-owned — bound
+// material this deployment holds a ref to — rather than whatever the machine
+// running the agent supplies.
+//
+// It is the bit that decides whether an availability VERDICT has a subject. A
+// stored verdict is a fact about a credential, and it stays true until that
+// credential changes, which is an event TF sees. Under the host's credentials
+// there is no such subject: the environment an agent authenticates from is
+// mutable, unobservable from here, and invalidated by nothing TF can detect, so
+// a green row would record something that was true of a machine at a moment
+// nobody can reconstruct. Where this is false, nothing is probed, nothing is
+// stored, and no badge renders.
+//
+// It is deliberately not "holds a bound provider": an org that says it brings
+// its own and has bound none is unconfigured, which is a real, renderable state
+// and the one the save gate exists to catch.
+func (c Credentials) BringsOwn() bool { return !c.host }
+
 // Ready reports whether the org can reach any provider at all.
 //
 // Call it before dispatching work, and only then. A settings save must still
@@ -122,9 +140,12 @@ func (c Credentials) Ready() error {
 //
 // Three rules, in order:
 //
-//   - A model the catalog does not offer passes. That fault belongs to the
-//     catalog validator wherever the model is stored; reporting it here would
-//     name the wrong problem.
+//   - A model whose id names no provider passes. Either it is outside this
+//     deployment's universe — a fault belonging to the universe validator
+//     wherever the model is stored, and reporting it here would name the wrong
+//     problem — or it is an SDK alias, where the provider is a property of the
+//     credential rather than of the id and there is nothing for a per-model
+//     credential rule to be about.
 //   - The team restriction is checked first, so a team is never told to connect
 //     a provider it is not allowed to use anyway.
 //   - The credential is checked only if the org holds some. An org holding none

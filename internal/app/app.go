@@ -17,6 +17,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/fs"
 	"sync"
@@ -242,7 +243,7 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 
 	// Cheapest check in the file — pure embedded data, no I/O — so it runs
 	// before anything acquires a lock or opens a pool.
-	if err = checkModelCatalog(cfg.Version, modelcatalog.JoinError()); err != nil {
+	if err = checkModelCatalog(cfg.Version, errors.Join(modelcatalog.JoinError(), modelcatalog.SDKLoadError())); err != nil {
 		return nil, err
 	}
 
@@ -518,15 +519,17 @@ func (a *App) local() bool { return runmode.Current() == runmode.ModeLocal }
 // the same reason.
 const unreleasedVersion = "dev"
 
-// checkModelCatalog decides what a broken catalog join costs.
+// checkModelCatalog decides what a broken model registry costs. It covers both:
+// the native registry's join against the pricing datasheet, and the per-SDK
+// lists, which have no join and can only be malformed.
 //
-// The supported-models file and the pricing datasheet are both compiled in, so
-// a failed join is settled when the binary is linked: whoever builds it can see
-// it, and an operator running it cannot fix it. So an unreleased build refuses
-// to boot — the author is right there, and a model TF names but cannot price is
-// a defect to fix, not to ship — while a released build logs the dropped
-// entries and serves the rest. A key retired upstream costs a stale binary one
-// picker row; it must never cost it the server.
+// Every file involved is compiled in, so a failure is settled when the binary is
+// linked: whoever builds it can see it, and an operator running it cannot fix
+// it. So an unreleased build refuses to boot — the author is right there, and a
+// model TF names but cannot serve is a defect to fix, not to ship — while a
+// released build logs the dropped rows and serves the rest. A key retired
+// upstream costs a stale binary one picker row; it must never cost it the
+// server.
 func checkModelCatalog(version string, err error) error {
 	if err == nil {
 		return nil

@@ -29,6 +29,7 @@ func TestSettingsStores_Postgres(t *testing.T) {
 		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "settings-conf")
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		return dbtest.SettingsStores{
+				MultiMode:        true,
 				Orgs:             stores.Orgs,
 				Teams:            stores.Teams,
 				Users:            stores.Users,

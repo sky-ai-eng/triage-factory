@@ -162,9 +162,9 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		})
 		return
 	}
-	if !prompts.ValidModel(req.Model) {
+	if universe := deploymentUniverse(); !prompts.ValidModel(universe, req.Model) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(), Field: "model",
+			Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(universe), Field: "model",
 		})
 		return
 	}
@@ -245,9 +245,9 @@ func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request
 		})
 		return
 	}
-	if !prompts.ValidModel(req.Model) {
+	if universe := deploymentUniverse(); !prompts.ValidModel(universe, req.Model) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(), Field: "model",
+			Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(universe), Field: "model",
 		})
 		return
 	}

@@ -134,7 +134,7 @@ func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		// from the value it ends at.
 		"github_clone_protocol": defaultsCloneProtocol(),
 		"max_llm_model_tier":    "sonnet",
-		"background_jobs_model": domain.ModelOpus,
+		"background_jobs_model": domain.ModelAliasOpus,
 		"max_daily_cost_usd":    42.5,
 		"max_concurrent_runs":   9,
 	})
@@ -183,7 +183,7 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	s := newTestServer(t)
 
 	patchTeamSettingsOK(t, s, "default", map[string]any{
-		"ai_model":                           domain.ModelOpus,
+		"ai_model":                           domain.ModelAliasOpus,
 		"ai_auto_delegate_enabled":           false,
 		"auto_mode_enabled":                  false,
 		"ai_reprioritize_threshold":          11,
@@ -195,7 +195,7 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		"permission_absent_grace_seconds":    22,
 	})
 
-	defaults := domain.DefaultTeamSettings()
+	defaults := domain.DefaultTeamSettingsFor(runmode.Current() == runmode.ModeMulti)
 	body := map[string]any{}
 	for _, f := range []string{
 		"ai_model", "ai_auto_delegate_enabled", "auto_mode_enabled", "ai_reprioritize_threshold",

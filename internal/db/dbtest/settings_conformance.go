@@ -20,8 +20,16 @@ import (
 // schema-blind.
 type SettingsStoresFactory func(t *testing.T) (stores SettingsStores, ids SettingsIDs)
 
-// SettingsStores is the slice of stores the conformance suite exercises.
+// SettingsStores is the slice of stores the conformance suite exercises, plus
+// which dialect they are.
 type SettingsStores struct {
+	// MultiMode names the dialect in the vocabulary its divergent column
+	// DEFAULTs are written in: Postgres serves multi, SQLite serves local. Two
+	// settings columns default per dialect — the team default model and the
+	// background-jobs model — because each stores what its runtime dispatches,
+	// so an assertion about a materialized row has to know which it is reading.
+	MultiMode bool
+
 	Orgs             db.OrgsStore
 	Teams            db.TeamsStore
 	Users            db.UsersStore
@@ -470,6 +478,62 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		want := domain.DefaultOrgSettings()
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("GetSettingsSystem on empty row = %+v; want %+v", got, want)
+		}
+	})
+
+	// Two settings columns default to a MODEL, and each dialect spells its
+	// default in the vocabulary its own runtime dispatches: Postgres carries the
+	// native wire id the in-process loop sends, SQLite the Claude Code alias its
+	// subprocess resolves. Neither is a stylistic choice — the value is what a
+	// deployment materializes when nobody has picked, and every save validator
+	// and every dispatch measures a stored model against that deployment's
+	// universe, so a default in the other vocabulary seeds an install into a
+	// state its own settings page refuses to re-save.
+	//
+	// Both are read off a MATERIALIZED row rather than a Go constant: each is
+	// asserted through a surgical write that names one column and takes the rest
+	// from the schema's DEFAULT clauses, which is what a fresh tenant actually
+	// takes.
+	t.Run("Settings_DialectDefaults_SpeakThisDeploymentsVocabulary", func(t *testing.T) {
+		stores, ids := factory(t)
+
+		orgSet, err := stores.Orgs.SetGitHubCredentialClass(ctx, ids.OrgID, domain.GitHubCredentialClassPAT)
+		if err != nil {
+			t.Fatalf("SetGitHubCredentialClass (materializes org_settings from defaults): %v", err)
+		}
+		wantJobsModel := domain.LocalBackgroundJobsModel
+		if stores.MultiMode {
+			// Multi ships no pre-fill: an org there is forced through the setup
+			// pick, and until it picks the system jobs skip rather than spend on
+			// a model nobody chose.
+			wantJobsModel = ""
+		}
+		if orgSet.BackgroundJobsModel != wantJobsModel {
+			t.Errorf("materialized background_jobs_model = %q, want %q", orgSet.BackgroundJobsModel, wantJobsModel)
+		}
+
+		teamSet, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 1)
+		if err != nil {
+			t.Fatalf("SetDailyCostCapSystem (materializes team_settings from defaults): %v", err)
+		}
+		wantTeamModel := domain.DefaultModelFor(stores.MultiMode)
+		if teamSet.DefaultModel != wantTeamModel {
+			t.Errorf("materialized default_model = %q, want %q", teamSet.DefaultModel, wantTeamModel)
+		}
+
+		// And what each default names has to be something this deployment can
+		// actually offer — the property the two spellings exist to satisfy.
+		universe := modelcatalog.UniverseFor(stores.MultiMode)
+		for field, model := range map[string]string{
+			"background_jobs_model": orgSet.BackgroundJobsModel,
+			"default_model":         teamSet.DefaultModel,
+		} {
+			if model == "" {
+				continue
+			}
+			if !universe.Offers(model) {
+				t.Errorf("%s defaults to %q, which this deployment does not offer: %v", field, model, universe.Keys())
+			}
 		}
 	})
 
@@ -934,7 +998,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if err != nil {
 			t.Fatalf("GetSettingsSystem: %v", err)
 		}
-		want := domain.DefaultTeamSettings()
+		want := domain.DefaultTeamSettingsFor(stores.MultiMode)
 		want.MaxDailyCostUSD = 42.50
 		// A materialized row reads its array columns back as empty (non-nil)
 		// slices, whereas DefaultTeamSettings leaves them nil — normalize so
@@ -993,7 +1057,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if err != nil {
 			t.Fatalf("GetSettingsSystem: %v", err)
 		}
-		want := domain.DefaultTeamSettings()
+		want := domain.DefaultTeamSettingsFor(stores.MultiMode)
 		want.AllowedProviders = []string{modelcatalog.ProviderAnthropic}
 		// A materialized row reads its array columns back as empty (non-nil)
 		// slices, whereas DefaultTeamSettings leaves them nil — normalize so
@@ -1055,7 +1119,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if err != nil {
 			t.Fatalf("GetSettingsSystem on empty row: %v", err)
 		}
-		want := domain.DefaultTeamSettings()
+		want := domain.DefaultTeamSettingsFor(stores.MultiMode)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("GetSettingsSystem on empty row = %+v; want %+v", got, want)
 		}

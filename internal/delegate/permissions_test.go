@@ -109,7 +109,7 @@ func TestResolveSDKPermissionMode(t *testing.T) {
 			runmode.SetForTest(t, tc.mode)
 			database := newDelegateTestDB(t)
 			stores := sqlitestore.New(database)
-			settings := domain.DefaultTeamSettings()
+			settings := domain.DefaultTeamSettingsFor(tc.mode == runmode.ModeMulti)
 			settings.AutoModeEnabled = tc.teamEnabled
 			if _, err := stores.Teams.UpdateSettings(t.Context(), runmode.LocalDefaultTeamID, settings); err != nil {
 				t.Fatalf("UpdateSettings: %v", err)

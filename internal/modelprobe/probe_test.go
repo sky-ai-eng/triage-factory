@@ -91,21 +91,21 @@ func probeStreamFrames() []string {
 	}
 }
 
-// anthropicEntry is a catalog entry served by Anthropic — read from the real
+// anthropicEntry is a native universe model served by Anthropic — read from the real
 // catalog so these tests exercise the ids TF actually offers.
-func anthropicEntry(t *testing.T) modelcatalog.Entry {
+func anthropicEntry(t *testing.T) modelcatalog.Model {
 	t.Helper()
-	for _, e := range modelcatalog.Entries() {
+	for _, e := range modelcatalog.UniverseFor(true).Models() {
 		if e.Provider == modelcatalog.ProviderAnthropic {
 			return e
 		}
 	}
 	t.Fatal("catalog offers no Anthropic model")
-	return modelcatalog.Entry{}
+	return modelcatalog.Model{}
 }
 
 // probeAgainst runs one probe against a fake provider answering with status.
-func probeAgainst(t *testing.T, status int, errBody string) (*fakeProvider, modelcatalog.Entry, Result, error) {
+func probeAgainst(t *testing.T, status int, errBody string) (*fakeProvider, modelcatalog.Model, Result, error) {
 	t.Helper()
 	runmode.SetForTest(t, runmode.ModeMulti)
 	provider := &fakeProvider{status: status, errBody: errBody}
@@ -228,8 +228,8 @@ func TestProbe_UnconnectedProviderIsASetupGap(t *testing.T) {
 // dispatch holds.
 func TestProbe_WrongProviderIsNotSubstituted(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	var bedrock modelcatalog.Entry
-	for _, e := range modelcatalog.Entries() {
+	var bedrock modelcatalog.Model
+	for _, e := range modelcatalog.UniverseFor(true).Models() {
 		if e.Provider == modelcatalog.ProviderBedrock {
 			bedrock = e
 			break

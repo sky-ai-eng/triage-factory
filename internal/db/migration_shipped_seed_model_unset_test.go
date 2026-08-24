@@ -8,25 +8,27 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// The versions either side of the model-vocabulary rewrite. Seeding happens
+// The versions either side of the shipped-seed model reset. Seeding happens
 // between them, so the fixture rows below are staged exactly the way a shipped
 // build wrote them.
 const (
-	beforeConcreteModelIDs = 202608240001
-	concreteModelIDs       = 202608240002
+	beforeShippedSeedModelUnset = 202608240001
+	shippedSeedModelUnset       = 202608240002
 )
 
-// The migration that rewrites stored configuration from the three Claude Code
-// tier words to concrete model ids.
+// The migration that stops shipped prompt seeds from naming a model.
 //
-// It runs on real deployed data, where a team default and a per-prompt
-// override each hold whichever of "haiku" / "sonnet" / "opus" a person picked
-// — values the raw provider API rejects and the pricing datasheet cannot cost.
-// The assertions pin all four rules at once: user pins map, system-source
-// prompts land unset (a shipped seed names no model any more), already-concrete
-// and empty values are left exactly as they are, and what a past run actually
-// executed on is never rewritten.
-func TestMigrate_RewritesStoredModelVocabularyToConcreteIDs(t *testing.T) {
+// It runs on real deployed data, where a seeded system prompt holds whichever
+// model the seed pinned and a person's own prompt holds whichever they picked.
+// The assertions pin all four rules at once: a system-source row lands unset, a
+// user's and an importer's pin is carried through verbatim, already-empty values
+// stay empty, and what a past run actually executed on is never rewritten.
+//
+// The values carried through are the Claude Code SDK's family aliases, because
+// this dialect is local mode and that harness executes its conversations. A
+// migration that rewrote them into concrete wire ids would be translating a
+// local install into the native runtime's vocabulary, which nothing local sends.
+func TestMigrate_ShippedSeedPromptsStopNamingAModel(t *testing.T) {
 	database := openMigrationsTestDB(t)
 
 	gooseMu.Lock()
@@ -40,7 +42,7 @@ func TestMigrate_RewritesStoredModelVocabularyToConcreteIDs(t *testing.T) {
 		gooseMu.Unlock()
 		t.Fatalf("SetDialect: %v", err)
 	}
-	upToErr := goose.UpTo(database, dir, beforeConcreteModelIDs)
+	upToErr := goose.UpTo(database, dir, beforeShippedSeedModelUnset)
 	gooseMu.Unlock()
 	if upToErr != nil {
 		t.Fatalf("goose.UpTo previous version: %v", upToErr)
@@ -81,13 +83,12 @@ func TestMigrate_RewritesStoredModelVocabularyToConcreteIDs(t *testing.T) {
 		}
 	}
 	// Every value a deployed build could hold, across both provenances.
-	seedPrompt("user-haiku", "user", "haiku")
-	seedPrompt("user-sonnet", "user", "sonnet")
-	seedPrompt("user-opus", "user", "opus")
+	seedPrompt("user-haiku", "user", domain.ModelAliasHaiku)
+	seedPrompt("user-sonnet", "user", domain.ModelAliasSonnet)
+	seedPrompt("user-opus", "user", domain.ModelAliasOpus)
 	seedPrompt("user-unset", "user", "")
-	seedPrompt("user-already-concrete", "user", "claude-opus-4-8")
-	seedPrompt("imported-haiku", "imported", "haiku")
-	seedPrompt("system-haiku", "system", "haiku")
+	seedPrompt("imported-haiku", "imported", domain.ModelAliasHaiku)
+	seedPrompt("system-haiku", "system", domain.ModelAliasHaiku)
 	seedPrompt("system-unset", "system", "")
 
 	// What a past run executed on. Never rewritten: the transcript and the
@@ -104,11 +105,11 @@ func TestMigrate_RewritesStoredModelVocabularyToConcreteIDs(t *testing.T) {
 	goose.SetBaseFS(treeFS)
 	upErr := goose.SetDialect("sqlite3")
 	if upErr == nil {
-		upErr = goose.UpTo(database, dir, concreteModelIDs)
+		upErr = goose.UpTo(database, dir, shippedSeedModelUnset)
 	}
 	gooseMu.Unlock()
 	if upErr != nil {
-		t.Fatalf("goose.UpTo concrete model ids: %v", upErr)
+		t.Fatalf("goose.UpTo shipped seed model unset: %v", upErr)
 	}
 
 	promptModel := func(id string) string {
@@ -120,12 +121,11 @@ func TestMigrate_RewritesStoredModelVocabularyToConcreteIDs(t *testing.T) {
 		return got
 	}
 	for id, want := range map[string]string{
-		"user-haiku":            domain.ModelHaiku,
-		"user-sonnet":           domain.ModelSonnet,
-		"user-opus":             domain.ModelOpus,
-		"user-unset":            "",
-		"user-already-concrete": "claude-opus-4-8",
-		"imported-haiku":        domain.ModelHaiku,
+		"user-haiku":     domain.ModelAliasHaiku,
+		"user-sonnet":    domain.ModelAliasSonnet,
+		"user-opus":      domain.ModelAliasOpus,
+		"user-unset":     "",
+		"imported-haiku": domain.ModelAliasHaiku,
 		// A shipped seed names no model; the row it seeded stops naming one too.
 		"system-haiku": "",
 		"system-unset": "",
@@ -143,16 +143,16 @@ func TestMigrate_RewritesStoredModelVocabularyToConcreteIDs(t *testing.T) {
 		}
 		return got
 	}
-	if got := teamModel(teamID); got != domain.ModelSonnet {
-		t.Errorf("team default = %q, want %q", got, domain.ModelSonnet)
+	if got := teamModel(teamID); got != domain.ModelAliasSonnet {
+		t.Errorf("team default = %q, want %q", got, domain.ModelAliasSonnet)
 	}
-	if got := teamModel(altTeam); got != domain.ModelOpus {
-		t.Errorf("second team default = %q, want %q", got, domain.ModelOpus)
+	if got := teamModel(altTeam); got != domain.ModelAliasOpus {
+		t.Errorf("second team default = %q, want %q", got, domain.ModelAliasOpus)
 	}
 
-	// The rebuild's real payload: the daily-cost-cap surgery materializes a
-	// row without naming default_model, so what the column defaults to is what
-	// that team runs on.
+	// The daily-cost-cap surgery materializes a team_settings row without naming
+	// default_model, so what the column defaults to is what that team runs on —
+	// and it has to be in the vocabulary this dialect's runtime dispatches.
 	const thirdTeam = "00000000-0000-0000-0000-000000000012"
 	if _, err := database.Exec(
 		`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'third', 'Third')`, thirdTeam, orgID,
@@ -164,24 +164,8 @@ func TestMigrate_RewritesStoredModelVocabularyToConcreteIDs(t *testing.T) {
 	); err != nil {
 		t.Fatalf("partial insert: %v", err)
 	}
-	if got := teamModel(thirdTeam); got != domain.DefaultModel {
-		t.Errorf("column default materialized %q, want %q", got, domain.DefaultModel)
-	}
-
-	// Everything else the rebuild copied is still there, with its defaults.
-	var (
-		branch   string
-		posture  string
-		autoMode int
-	)
-	if err := database.QueryRow(
-		`SELECT branch_template, review_posture, auto_mode_enabled FROM team_settings WHERE team_id = ?`,
-		teamID,
-	).Scan(&branch, &posture, &autoMode); err != nil {
-		t.Fatalf("read rebuilt columns: %v", err)
-	}
-	if branch != domain.DefaultBranchTemplate || posture != domain.DefaultReviewPosture || autoMode != 1 {
-		t.Errorf("rebuilt row lost a column: branch=%q posture=%q auto_mode=%d", branch, posture, autoMode)
+	if got := teamModel(thirdTeam); got != domain.LocalDefaultModel {
+		t.Errorf("column default materialized %q, want %q", got, domain.LocalDefaultModel)
 	}
 
 	var historical string

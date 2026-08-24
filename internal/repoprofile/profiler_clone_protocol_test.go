@@ -89,10 +89,19 @@ func (cloneProtocolOrgStore) ListActiveSystem(context.Context) ([]string, error)
 // or a credential to run it on — the clone URL this test is about is written
 // past both gates. The ref matters in multi specifically, where an org that has
 // bound nothing can authenticate nothing.
+//
+// The model is spelled per mode, because the accepted set is the deployment's
+// own universe: a multi org stores the native wire id its runtime sends, a local
+// one the harness alias its subprocess resolves. This store answers for both
+// arms of the table, so it carries whichever the mode under test would.
 func (s cloneProtocolOrgStore) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
+	model := domain.LocalBackgroundJobsModel
+	if runmode.Current() == runmode.ModeMulti {
+		model = domain.ModelHaiku
+	}
 	return domain.OrgSettings{
 		GitHubCloneProtocol: s.stored,
-		BackgroundJobsModel: domain.LocalBackgroundJobsModel,
+		BackgroundJobsModel: model,
 		AnthropicAPIKeyRef:  "anthropic_api_key",
 	}, nil
 }

@@ -38,33 +38,44 @@ func decodeModels(t *testing.T, body []byte) modelCatalogResponse {
 	return resp
 }
 
-// The read an org member gets: every catalog entry, enabled, with prices and
-// capabilities joined in from the datasheet.
+// The read a member of a MULTI org gets: every native registry entry, enabled,
+// with prices and capabilities joined in from the datasheet.
 func TestModelsList_ServesTheJoinedCatalog(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	alice := r.seedUser()
+	org, _ := r.seedOrg(alice, "alice-catalog-org")
+	bindAnthropicRef(t, r, org.String())
+	resp, _ := r.driveCallback(alice)
 
-	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	got := r.requestWithSid(http.MethodGet, modelsPath(org.String()), r.sidFromResp(resp))
+	defer got.Body.Close()
+	if got.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", got.StatusCode)
 	}
-	items := decodeModels(t, rec.Body.Bytes()).Items
+	body, err := io.ReadAll(got.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	items := decodeModels(t, body).Items
 
 	catalog := modelcatalog.Entries()
 	if len(items) != len(catalog) {
-		t.Fatalf("returned %d models, want %d (one per catalog entry)", len(items), len(catalog))
+		t.Fatalf("returned %d models, want %d (one per registry entry)", len(items), len(catalog))
 	}
 	for i, want := range catalog {
 		got := items[i]
 		if got.Key != want.Key {
-			t.Errorf("item %d: key = %q, want %q (catalog order is display order)", i, got.Key, want.Key)
+			t.Errorf("item %d: key = %q, want %q (file order is display order)", i, got.Key, want.Key)
 		}
 		if got.DisplayName != want.DisplayName {
 			t.Errorf("%s: display_name = %q, want %q", got.Key, got.DisplayName, want.DisplayName)
 		}
 		if got.Provider != want.Provider {
 			t.Errorf("%s: provider = %q, want %q", got.Key, got.Provider, want.Provider)
+		}
+		if got.PricesPerMTok == nil {
+			t.Fatalf("%s: no prices on a native row", got.Key)
 		}
 		if got.PricesPerMTok.Output != want.Prices.Output {
 			t.Errorf("%s: output price = %v, want %v", got.Key, got.PricesPerMTok.Output, want.Prices.Output)
@@ -78,13 +89,99 @@ func TestModelsList_ServesTheJoinedCatalog(t *testing.T) {
 		if got.DisplayOrder != i {
 			t.Errorf("%s: display_order = %d, want %d", got.Key, got.DisplayOrder, i)
 		}
-		// No org has expressed an enable-set yet, so every entry is enabled;
-		// and nothing has been probed yet, so nothing is more than unverified.
+		// No org has expressed an enable-set yet, so every entry is enabled.
 		if !got.Enabled {
 			t.Errorf("%s: enabled = false, want true with no stored enable-set", got.Key)
 		}
-		if got.Availability != modelAvailabilityUnverified {
-			t.Errorf("%s: availability = %q, want %q", got.Key, got.Availability, modelAvailabilityUnverified)
+	}
+}
+
+// The read a LOCAL install gets: the Claude Code SDK's alias list, and only it.
+//
+// Every field the native rows carry from the datasheet is ABSENT here, which is
+// the whole mode-as-data mechanism: an alias names no provider (the harness
+// picks the path from the credential) and joins no price table (the harness
+// settles the cost), and the availability triple is absent because a
+// zero-configuration install has no TF-owned credential for a verdict to be
+// about. A picker renders what is present.
+func TestModelsList_LocalServesTheSDKAliasList(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	items := decodeModels(t, rec.Body.Bytes()).Items
+
+	want := modelcatalog.SDKModels(modelcatalog.SDKClaudeCode)
+	if len(items) != len(want) {
+		t.Fatalf("returned %d models, want %d (one per SDK alias): %+v", len(items), len(want), items)
+	}
+	for i, w := range want {
+		got := items[i]
+		if got.Key != w.Key {
+			t.Errorf("item %d: key = %q, want %q", i, got.Key, w.Key)
+		}
+		if got.DisplayName != w.DisplayName {
+			t.Errorf("%s: display_name = %q, want %q", got.Key, got.DisplayName, w.DisplayName)
+		}
+		if got.DisplayOrder != i {
+			t.Errorf("%s: display_order = %d, want %d", got.Key, got.DisplayOrder, i)
+		}
+		if !got.Enabled {
+			t.Errorf("%s: enabled = false, want true with no stored enable-set", got.Key)
+		}
+		if got.Provider != "" {
+			t.Errorf("%s: provider = %q, want absent — an alias names no access path", got.Key, got.Provider)
+		}
+		if got.PricesPerMTok != nil {
+			t.Errorf("%s: prices_per_mtok = %+v, want absent — cost is harness-settled", got.Key, *got.PricesPerMTok)
+		}
+		if got.ContextWindow != 0 || got.SupportsPromptCaching {
+			t.Errorf("%s: carries datasheet facts (%d, %v), want absent", got.Key, got.ContextWindow, got.SupportsPromptCaching)
+		}
+		if got.Availability != "" || got.AvailabilityDetail != "" || got.AvailabilityCheckedAt != nil {
+			t.Errorf("%s: carries an availability triple under system credentials, want absent", got.Key)
+		}
+	}
+}
+
+// The raw JSON, not the decoded struct: a client reading these fields has to see
+// them MISSING rather than zero-valued, because a rendered $0.00 per million
+// tokens is a price claim and `"provider": ""` is an access-path claim.
+func TestModelsList_LocalOmitsTheNativeOnlyFieldsOnTheWire(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var raw struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if len(raw.Items) == 0 {
+		t.Fatal("read returned no models")
+	}
+	for _, item := range raw.Items {
+		for _, absent := range []string{
+			"provider", "prices_per_mtok", "context_window", "supports_prompt_caching",
+			"availability", "availability_detail", "availability_checked_at",
+		} {
+			if _, present := item[absent]; present {
+				t.Errorf("%s: field %q is on the wire, want it omitted", item["key"], absent)
+			}
+		}
+		for _, required := range []string{"key", "display_name", "enabled", "display_order"} {
+			if _, present := item[required]; !present {
+				t.Errorf("%v: field %q is missing", item["key"], required)
+			}
 		}
 	}
 }
@@ -136,20 +233,16 @@ func TestModelsList_OrgScoping(t *testing.T) {
 	}
 }
 
-// One contract, two implementations. The catalog ships in the binary, so both
-// modes answer with the same rows in the same order carrying the same facts —
-// and the single field they differ on is `availability`, which exists to carry
-// exactly this difference as DATA. A client reads the field; it never asks
-// which mode it is talking to.
+// One contract, two implementations — and after the SDK decoupling the two
+// implementations answer from two universes, which is the mode difference
+// travelling as DATA rather than as a branch a client reads.
 //
-// The multi org here holds an Anthropic credential and no Bedrock one, so it
-// exercises the real divergence rather than the degenerate case: it
-// distinguishes "connected, nothing established" from "no credential for this
-// provider at all". The local org runs on the host's credentials, which is not
-// a per-provider binding, so it has no provider it could be missing and every
-// entry is merely unprobed. The difference is the credential SOURCE, not the
-// mode — the vocabulary is the same four values on both sides.
-func TestModelsList_AcrossModes_DiffersOnlyOnAvailability(t *testing.T) {
+// What stays identical is the SHAPE: the same route, the same envelope, the same
+// four always-present fields, in display order, enabled. What differs is which
+// models are named and which optional fields they carry. The multi org here
+// holds an Anthropic credential and no Bedrock one, so it also exercises the
+// real availability divergence rather than the degenerate case.
+func TestModelsList_AcrossModes_OneContractTwoUniverses(t *testing.T) {
 	multi := func() []modelCatalogRow {
 		runmode.SetForTest(t, runmode.ModeMulti)
 		r := newAuthRig(t)
@@ -177,34 +270,47 @@ func TestModelsList_AcrossModes_DiffersOnlyOnAvailability(t *testing.T) {
 	}
 	local := decodeModels(t, rec.Body.Bytes()).Items
 
-	if len(local) != len(multi) {
-		t.Fatalf("local returned %d models, multi %d — the catalog is the same file in both", len(local), len(multi))
+	for _, side := range []struct {
+		name  string
+		items []modelCatalogRow
+	}{{"multi", multi}, {"local", local}} {
+		if len(side.items) == 0 {
+			t.Fatalf("%s returned no models", side.name)
+		}
+		for i, row := range side.items {
+			if row.Key == "" || row.DisplayName == "" {
+				t.Errorf("%s item %d: %+v is missing an always-present field", side.name, i, row)
+			}
+			if row.DisplayOrder != i {
+				t.Errorf("%s item %d: display_order = %d", side.name, i, row.DisplayOrder)
+			}
+			if !row.Enabled {
+				t.Errorf("%s: %s is not enabled with no stored enable-set", side.name, row.Key)
+			}
+		}
 	}
-	for i := range local {
-		// Local's org runs on the host's credentials, so nothing is
-		// unconfigured for it — including the Bedrock entries the multi org
-		// calls exactly that. That is the asymmetry the field exists to carry.
-		if local[i].Availability != modelAvailabilityUnverified {
-			t.Errorf("%s: local availability = %q, want %q", local[i].Key, local[i].Availability, modelAvailabilityUnverified)
+
+	// The universes are disjoint: neither mode may name a model the other's
+	// runtime would be handed.
+	localKeys := map[string]bool{}
+	for _, row := range local {
+		localKeys[row.Key] = true
+	}
+	for _, row := range multi {
+		if localKeys[row.Key] {
+			t.Errorf("%q appears in both universes", row.Key)
 		}
-		wantMulti := modelAvailabilityUnverified
-		if multi[i].Provider != modelcatalog.ProviderAnthropic {
-			wantMulti = modelAvailabilityUnconfigured
+		// The multi org bound Anthropic and not Bedrock, so its rows split on
+		// exactly that, and every one of them carries the triple.
+		want := modelAvailabilityUnverified
+		if row.Provider != modelcatalog.ProviderAnthropic {
+			want = modelAvailabilityUnconfigured
 		}
-		if multi[i].Availability != wantMulti {
-			t.Errorf("%s (%s): multi availability = %q, want %q", multi[i].Key, multi[i].Provider, multi[i].Availability, wantMulti)
+		if row.Availability != want {
+			t.Errorf("%s (%s): multi availability = %q, want %q", row.Key, row.Provider, row.Availability, want)
 		}
-		// Neither mode reports a detail or a check time for a state no probe
-		// produced — and neither of these states is one.
-		if local[i].AvailabilityDetail != "" || local[i].AvailabilityCheckedAt != nil ||
-			multi[i].AvailabilityDetail != "" || multi[i].AvailabilityCheckedAt != nil {
-			t.Errorf("%s: an unprobed row carries a detail or a timestamp", local[i].Key)
-		}
-		// Everything else is the same fact about the same build.
-		a, b := local[i], multi[i]
-		a.Availability, b.Availability = "", ""
-		if a != b {
-			t.Errorf("modes disagree on more than availability:\n local: %+v\n multi: %+v", a, b)
+		if row.AvailabilityDetail != "" || row.AvailabilityCheckedAt != nil {
+			t.Errorf("%s: an unprobed row carries a detail or a timestamp", row.Key)
 		}
 	}
 }

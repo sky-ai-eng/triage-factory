@@ -21,13 +21,13 @@ import (
 // model. A narrow interface so a handler test can answer with a canned verdict
 // instead of standing up a provider.
 type modelProber interface {
-	Probe(ctx context.Context, orgID string, entry modelcatalog.Entry) (modelprobe.Result, error)
+	Probe(ctx context.Context, orgID string, m modelcatalog.Model) (modelprobe.Result, error)
 }
 
-// availabilityIndex answers what the catalog read should publish for one
-// entry's availability, and is the single resolution every route on this
-// handler reads — the catalog reads to render a badge, the test routes to
-// refuse a provider before spending anything on it.
+// availabilityIndex answers what the models read should publish for one model's
+// availability, and is the single resolution every route on this handler reads
+// — the catalog reads to render a badge, the test routes to refuse before
+// spending anything.
 //
 // Two inputs. creds is a LOCAL, CERTAIN fact resolved off the settings row, so
 // it needs no probe; it is modelaccess's own value rather than a second copy of
@@ -40,23 +40,36 @@ type availabilityIndex struct {
 	rows  map[string]domain.ModelAvailability
 }
 
-// availabilityRowKey addresses a stored row from a catalog entry. Both halves,
-// because the stored identity is (provider, model) — the same key reached
-// through two credential paths is two independent facts.
+// availabilityRowKey addresses a stored row from a model. Both halves, because
+// the stored identity is (credential family, model) — the same key reached
+// through two credential paths is two independent facts. On an SDK universe the
+// id names no family, so the family is the one the probe resolved against and
+// the row records what THAT credential can invoke through the harness.
 func availabilityRowKey(provider, modelKey string) string { return provider + "\x00" + modelKey }
 
-// forEntry renders one entry's availability triple for the wire.
+// forModel renders one model's availability triple for the wire.
 //
-// The order is the precedence, least-fixable first, and it is the same
+// An empty state is the fourth answer and it is not a gap: an org whose
+// credentials are not TF-owned has no subject for a verdict to be about, so
+// nothing is stored, nothing is derived, and the three fields are absent from
+// the row entirely.
+//
+// Otherwise the order is the precedence, least-fixable first, and it is the same
 // predicate the test routes gate on — so a green that a later disconnect
 // invalidated cannot outlive the credential that earned it, and nobody is
 // badged "unverified" and pointed at a test button that the routes beside this
 // one refuse.
-func (a availabilityIndex) forEntry(e modelcatalog.Entry) (state, detail string, checkedAt *time.Time) {
-	if !a.creds.Has(e.Provider) {
+func (a availabilityIndex) forModel(m modelcatalog.Model) (state, detail string, checkedAt *time.Time) {
+	if !a.creds.BringsOwn() {
+		return "", "", nil
+	}
+	// A model whose id names no provider is reached through whichever family
+	// the org bound, so "has the org connected this model's provider" has no
+	// per-model answer; the org-wide one is what stands in.
+	if !a.hasCredentialFor(m) {
 		return modelAvailabilityUnconfigured, "", nil
 	}
-	row, ok := a.rows[availabilityRowKey(e.Provider, e.Key)]
+	row, ok := a.rows[availabilityRowKey(a.familyFor(m), m.Key)]
 	if !ok {
 		return modelAvailabilityUnverified, "", nil
 	}
@@ -72,6 +85,41 @@ func (a availabilityIndex) forEntry(e modelcatalog.Entry) (state, detail string,
 	// than passing it through keeps a hand-written row from becoming a badge
 	// no client knows how to draw.
 	return modelAvailabilityUnverified, "", nil
+}
+
+// hasCredentialFor reports whether the org holds a credential that could invoke
+// m. A model that names its provider asks about that one; an alias asks whether
+// the org can authenticate at all, since the harness picks the path.
+func (a availabilityIndex) hasCredentialFor(m modelcatalog.Model) bool {
+	if m.Provider != "" {
+		return a.creds.Has(m.Provider)
+	}
+	return a.creds.Ready() == nil
+}
+
+// familyFor is the credential family half of m's stored row key. An alias names
+// none, so the org's bound family stands in.
+//
+// It answers "" for a model that names no provider in an org that has bound
+// none, which is not a key anything should be stored under — every caller is
+// therefore downstream of hasCredentialFor, which refuses exactly that case.
+//
+// A bound family is unambiguous only while an org binds one. An org holding two
+// resolves by this order, which is a guess rather than an answer: a verdict
+// swept under the second family would be keyed where the read below never looks.
+//
+// TODO(TFAC-888): key on the org's chosen active path once the SDK credential
+// wiring makes that a real selection rather than a precedence order.
+func (a availabilityIndex) familyFor(m modelcatalog.Model) string {
+	if m.Provider != "" {
+		return m.Provider
+	}
+	for _, family := range modelcatalog.SupportedProviders() {
+		if a.creds.Has(family) {
+			return family
+		}
+	}
+	return ""
 }
 
 // availability resolves everything this handler knows about what the org can
@@ -191,7 +239,7 @@ func (h *modelsHandler) handleModelTest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	entry, ok := offeredModel(w, r.PathValue("model_key"))
+	model, ok := offeredModel(w, r.PathValue("model_key"))
 	if !ok {
 		return
 	}
@@ -199,11 +247,18 @@ func (h *modelsHandler) handleModelTest(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	if !requireProviderConnected(w, avail, entry.Provider) {
+	if !requireOwnCredentials(w, avail) {
 		return
 	}
+	if !requireCredentialFor(w, avail, model) {
+		return
+	}
+	// Resolved after the gate above, which is what makes a family exist to
+	// resolve: an alias names none of its own, so with nothing bound there
+	// would be nothing here to key the row under.
+	family := avail.familyFor(model)
 
-	result, ok := h.runProbe(w, r, prober, orgID, userID, entry)
+	result, ok := h.runProbe(w, r, prober, orgID, userID, family, model)
 	if !ok {
 		return
 	}
@@ -213,8 +268,10 @@ func (h *modelsHandler) handleModelTest(w http.ResponseWriter, r *http.Request) 
 // handleModelTestSweep tests every candidate of one provider — the eager pass
 // that runs when an admin connects or rotates that provider's credential.
 //
-// Candidates are the catalog entries served by the named provider, minus the
-// ones already verified. Team provider restrictions do NOT narrow the set:
+// Candidates follow the universe, minus the ones already verified: on the native
+// one they are the ids the named provider serves, and on an SDK one they are
+// every alias, because one credential family reaches all of them there. Team
+// provider restrictions do NOT narrow the set:
 // availability is org truth about what the org's credentials can do, and a
 // restriction is a decision about which team may spend against it — filtering
 // here would make one team's restriction silently leave another team's picker
@@ -273,22 +330,22 @@ func (h *modelsHandler) handleModelTestSweep(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
+	if !requireOwnCredentials(w, avail) {
+		return
+	}
 	if !requireProviderConnected(w, avail, provider) {
 		return
 	}
 
 	items := []modelTestResult{}
-	for _, entry := range modelcatalog.Entries() {
-		if entry.Provider != provider {
-			continue
-		}
-		if state, _, checkedAt := avail.forEntry(entry); state == modelAvailabilityVerified {
+	for _, model := range deploymentUniverse().CandidatesFor(provider) {
+		if state, _, checkedAt := avail.forModel(model); state == modelAvailabilityVerified {
 			items = append(items, modelTestResult{
-				ModelKey: entry.Key, Outcome: modelTestSkipped, CheckedAt: checkedAt,
+				ModelKey: model.Key, Outcome: modelTestSkipped, CheckedAt: checkedAt,
 			})
 			continue
 		}
-		result, ok := h.runProbe(w, r, prober, orgID, userID, entry)
+		result, ok := h.runProbe(w, r, prober, orgID, userID, provider, model)
 		if !ok {
 			// runProbe has written the fault. Rows from earlier candidates
 			// stand; they are each their own committed fact.
@@ -303,13 +360,18 @@ func (h *modelsHandler) handleModelTestSweep(w http.ResponseWriter, r *http.Requ
 // the per-model result both routes report. ok=false means it has already
 // written an error response.
 //
+// family is the credential family the row is keyed under. It is a parameter
+// rather than read off the model because an SDK alias names none — the harness
+// resolves the path from the credential — so the caller, which knows which
+// credential this probe was about, is the only thing that can answer.
+//
 // The write happens only for a conclusive verdict. An inconclusive probe
 // writes nothing at all — not a row, not a timestamp — because the alternative
 // is a state that means "we tried and could not tell", which every consumer
 // would then have to decide how to render and which one bad provider minute
 // could put on a model that works.
-func (h *modelsHandler) runProbe(w http.ResponseWriter, r *http.Request, prober modelProber, orgID, userID string, entry modelcatalog.Entry) (modelTestResult, bool) {
-	res, err := prober.Probe(r.Context(), orgID, entry)
+func (h *modelsHandler) runProbe(w http.ResponseWriter, r *http.Request, prober modelProber, orgID, userID, family string, model modelcatalog.Model) (modelTestResult, bool) {
+	res, err := prober.Probe(r.Context(), orgID, model)
 	if err != nil {
 		if modelprobe.IsSetupGap(err) {
 			// The org cannot reach this provider at all. Not a verdict about
@@ -318,7 +380,7 @@ func (h *modelsHandler) runProbe(w http.ResponseWriter, r *http.Request, prober 
 			writeNotConfigured(w, err.Error())
 			return modelTestResult{}, false
 		}
-		internalError(w, "models", fmt.Errorf("probe %s: %w", entry.Key, err))
+		internalError(w, "models", fmt.Errorf("probe %s: %w", model.Key, err))
 		return modelTestResult{}, false
 	}
 
@@ -329,12 +391,12 @@ func (h *modelsHandler) runProbe(w http.ResponseWriter, r *http.Request, prober 
 	case modelprobe.VerdictRed:
 		state = domain.ModelAvailabilityRed
 	default:
-		return modelTestResult{ModelKey: entry.Key, Outcome: modelTestInconclusive, Detail: res.Detail}, true
+		return modelTestResult{ModelKey: model.Key, Outcome: modelTestInconclusive, Detail: res.Detail}, true
 	}
 
 	var stored domain.ModelAvailability
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		row, e := tx.ModelAvailability.Record(r.Context(), orgID, entry.Provider, entry.Key, state, res.Detail)
+		row, e := tx.ModelAvailability.Record(r.Context(), orgID, family, model.Key, state, res.Detail)
 		if e != nil {
 			return e
 		}
@@ -343,7 +405,7 @@ func (h *modelsHandler) runProbe(w http.ResponseWriter, r *http.Request, prober 
 	}); err != nil {
 		// The request was made and billed; only the record of it failed. Say
 		// so rather than reporting an outcome the next read will contradict.
-		internalError(w, "models", fmt.Errorf("record availability for %s: %w", entry.Key, err))
+		internalError(w, "models", fmt.Errorf("record availability for %s: %w", model.Key, err))
 		return modelTestResult{}, false
 	}
 
@@ -356,7 +418,7 @@ func (h *modelsHandler) runProbe(w http.ResponseWriter, r *http.Request, prober 
 		outcome = modelTestRed
 	}
 	return modelTestResult{
-		ModelKey:  entry.Key,
+		ModelKey:  model.Key,
 		Outcome:   outcome,
 		Detail:    stored.Detail,
 		CheckedAt: &checkedAt,
@@ -394,36 +456,86 @@ func (h *modelsHandler) requireProbing(w http.ResponseWriter) (modelProber, bool
 // would only invite a client to tell them apart.
 const noProberConfigured = "this deployment has no model prober configured"
 
-// offeredModel resolves a {model_key} path segment against the catalog. A key
-// this build does not offer is a 404: the addressed resource does not exist,
-// and probing an arbitrary caller-supplied string would let anyone spend the
-// org's money on requests to models TF never named.
-func offeredModel(w http.ResponseWriter, rawKey string) (modelcatalog.Entry, bool) {
-	key := strings.TrimSpace(rawKey)
-	for _, e := range modelcatalog.Entries() {
-		if e.Key == key {
-			return e, true
-		}
+// offeredModel resolves a {model_key} path segment against this deployment's
+// universe. A key it does not offer is a 404: the addressed resource does not
+// exist, and probing an arbitrary caller-supplied string would let anyone spend
+// the org's money on requests to models TF never named.
+func offeredModel(w http.ResponseWriter, rawKey string) (modelcatalog.Model, bool) {
+	model, ok := deploymentUniverse().Lookup(strings.TrimSpace(rawKey))
+	if !ok {
+		notFound(w, "model")
+		return modelcatalog.Model{}, false
 	}
-	notFound(w, "model")
-	return modelcatalog.Entry{}, false
+	return model, true
 }
 
-// requireProviderConnected refuses a probe against a provider the org holds no
+// requireOwnCredentials refuses both test routes while the org's credentials are
+// not TF-owned — a local install running on the host's environment.
+//
+// It is a setup gap, not a verdict, and it is refused rather than answered
+// because there is nothing to record the answer ABOUT: a probe there would
+// establish something true of one machine at one moment, keyed to no credential
+// TF can name, watch, or invalidate. The read beside this publishes no
+// availability at all under the same condition, so the badge a reader sees and
+// the refusal a tester hits come from one decision.
+//
+// The surface appears the moment the org brings its own credential — always in
+// multi mode, and in local once its credential wiring makes BYOK real there — so
+// this is not a mode branch.
+func requireOwnCredentials(w http.ResponseWriter, avail availabilityIndex) bool {
+	if avail.creds.BringsOwn() {
+		return true
+	}
+	writeNotConfigured(w, "this organization runs on the credentials of the machine hosting it, which no stored availability result can describe — connect a provider in Settings → Claude credentials to test models against it")
+	return false
+}
+
+// requireCredentialFor refuses a probe of one model the org holds no credential
+// for, before anything is attempted.
+//
+// The DECISION is availabilityIndex.hasCredentialFor — the same predicate the
+// badge is derived from, so a caller told "unconfigured" by the read and refused
+// by this is being told one thing about one credential. Only the MESSAGE
+// branches, and it branches on what there is to say: a model that names its
+// access path names the credential to connect, while an alias names none — with
+// nothing bound there is no provider to point at, and a message built from one
+// nobody chose would open with a blank name.
+func requireCredentialFor(w http.ResponseWriter, avail availabilityIndex, m modelcatalog.Model) bool {
+	if avail.hasCredentialFor(m) {
+		return true
+	}
+	if m.Provider != "" {
+		writeNotConfigured(w, notConnectedMessage(m.Provider))
+		return false
+	}
+	writeNotConfigured(w, "this organization has connected no Claude credentials — connect one in Settings → Claude credentials before testing models")
+	return false
+}
+
+// requireProviderConnected refuses a sweep of a provider the org holds no
 // credential for, before anything is attempted.
 //
-// It reads the already-resolved index rather than the store, so the refusal
-// and the badge the catalog read publishes for the same model are one
-// decision: a caller told "unconfigured" by the read and "not connected" by
-// this cannot be told two different things about one credential. Deciding it
-// up front is also what makes a sweep of an unconnected provider write no rows
-// at all, rather than a few before giving up.
+// It reads the already-resolved index rather than the store, for the same
+// reason requireCredentialFor does. Deciding it up front is also what makes a
+// sweep of an unconnected provider write no rows at all, rather than a few
+// before giving up.
+//
+// It takes the provider rather than a model because a sweep IS addressed at one:
+// the request names the credential family, which is validated as one this build
+// drives before it reaches here, so there is always a provider to name.
 func requireProviderConnected(w http.ResponseWriter, avail availabilityIndex, provider string) bool {
 	if avail.creds.Has(provider) {
 		return true
 	}
-	writeNotConfigured(w, fmt.Sprintf(
-		"%s is not connected for this organization — connect it in Settings → Claude credentials before testing its models",
-		modelcatalog.ProviderDisplayName(provider)))
+	writeNotConfigured(w, notConnectedMessage(provider))
 	return false
+}
+
+// notConnectedMessage is the refusal both routes give for a named provider the
+// org has not bound. One spelling, so a caller cannot tell the two routes apart
+// by their prose.
+func notConnectedMessage(provider string) string {
+	return fmt.Sprintf(
+		"%s is not connected for this organization — connect it in Settings → Claude credentials before testing its models",
+		modelcatalog.ProviderDisplayName(provider))
 }
