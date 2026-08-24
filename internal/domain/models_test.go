@@ -38,6 +38,39 @@ func TestOrgModelSet_AbsentTracksTheDefault(t *testing.T) {
 	}
 }
 
+// A stored set naming nothing enables nothing. Absent is nil and only nil, so
+// an empty stored set cannot widen back to the catalog default (or, for a team,
+// to its org's set) — a read that silently ignored what the row says would grant
+// models nobody chose, and a wrong grant is the unrecoverable direction.
+//
+// Nothing writes one: the PATCH refuses an empty array and clearing writes NULL.
+// These pin the reading of a row nobody should have written.
+func TestModelSet_StoredEmptySetEnablesNothing(t *testing.T) {
+	org := OrgModelSet([]string{}, catalogDefault())
+	if got := org.Keys(); len(got) != 0 {
+		t.Errorf("an empty stored org set = %v, want nothing enabled", got)
+	}
+	for _, key := range catalogDefault() {
+		if org.Has(key) {
+			t.Errorf("%s: an empty stored org set widened back to the catalog default", key)
+		}
+	}
+
+	full := OrgModelSet(nil, catalogDefault())
+	team := TeamModelSet([]string{}, full)
+	if got := team.Keys(); len(got) != 0 {
+		t.Errorf("an empty stored team set = %v, want nothing enabled", got)
+	}
+	if team.Has(ModelSonnet) {
+		t.Error("an empty stored team set inherited its org's set")
+	}
+	// And the org it narrowed is untouched: the empty set is the team's answer,
+	// not a mutation of the one it was resolved against.
+	if !full.Has(ModelSonnet) {
+		t.Error("resolving a team set changed the org's")
+	}
+}
+
 // A team's effective set is its own narrowed to its org's, resolved at every
 // read. The intersection is not redundant with the ⊆ check the team write
 // enforces: the org may narrow afterwards, and nothing rewrites the team row.
@@ -100,9 +133,10 @@ func TestModelSet_KeysAndString(t *testing.T) {
 	if got := set.String(); !strings.Contains(got, ModelOpus) || !strings.Contains(got, ModelHaiku) {
 		t.Errorf("String() = %q, want it to name both members", got)
 	}
-	var empty ModelSet
-	if got := empty.String(); got != "(none)" {
-		t.Errorf("an empty set renders as %q, want a word rather than a blank", got)
+	// Bare, with no punctuation of its own: every caller wraps it in its own
+	// sentence, and two of them parenthesize.
+	if got := OrgModelSet([]string{}, catalogDefault()).String(); got != "none" {
+		t.Errorf("a set naming nothing renders as %q, want a bare word", got)
 	}
 
 	// Keys hands out a copy: a caller that sorts or truncates it must not

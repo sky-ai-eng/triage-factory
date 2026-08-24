@@ -14,13 +14,18 @@ import (
 // backends means the absent-value semantics cannot come out different on one of
 // them.
 
-// UnmarshalModelSetColumn decodes one enable-set column. NULL decodes to nil —
-// the absent set, which the domain resolvers read as "no preference expressed"
-// — and any stored text decodes to exactly what it names, empty array included.
-// column names the column in a decode failure, which is a corrupt row rather
-// than a caller fault and has to say which one.
+// UnmarshalModelSetColumn decodes one enable-set column. NULL — and only NULL —
+// decodes to nil, the absent set the domain resolvers read as "no preference
+// expressed". Any stored text decodes to exactly what it names, `[]` included.
+//
+// The empty string is therefore a DECODE FAILURE, not a second spelling of
+// absent. Nothing writes it (ModelSetColumnValue writes NULL or JSON, and both
+// columns are nullable with no default), so a row holding it is corrupt — and
+// reading corrupt as absent would resolve it to the whole catalog, quietly
+// enabling models nobody chose. column names the column, because that is what a
+// reader needs to go fix the row.
 func UnmarshalModelSetColumn(v sql.NullString, column string) ([]string, error) {
-	if !v.Valid || v.String == "" {
+	if !v.Valid {
 		return nil, nil
 	}
 	var out []string
@@ -31,7 +36,9 @@ func UnmarshalModelSetColumn(v sql.NullString, column string) ([]string, error) 
 }
 
 // ModelSetColumnValue encodes an enable-set for storage. A nil set writes SQL
-// NULL; anything else writes its JSON, so a stored set round-trips as itself.
+// NULL; anything else writes its JSON, so a stored set round-trips as itself —
+// an empty non-nil one included, which is what keeps the nil/non-nil
+// distinction the domain resolvers read from being lost at the column.
 //
 // No error to return: a []string always marshals, so the discarded error is
 // structurally unreachable — which is what lets the dialect stores keep

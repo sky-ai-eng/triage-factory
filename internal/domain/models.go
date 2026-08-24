@@ -33,6 +33,11 @@ const (
 // stored configuration: OrgModelSet resolves an absent stored set to the
 // catalog default rather than to this, so a set built from a settings row
 // always names its members.
+//
+// A RESOLVED set naming nothing admits nothing, and that is a different answer
+// from the zero value's. It is what a team disjoint from its org resolves to,
+// and every model then refuses — which is the right direction for a set nobody
+// can read as a choice.
 type ModelSet struct {
 	// keys is nil for the unrestricted zero value and non-nil (possibly empty)
 	// for a resolved one, which is what keeps "admits everything" and "admits
@@ -50,23 +55,30 @@ type ModelSet struct {
 // names, which is the same distinction, read from the other side: an admin who
 // picked a set picked THAT set, and a new model is a decision they have not
 // made yet.
+//
+// Absent is nil and nothing else. A stored set naming nothing is a set naming
+// nothing — it enables no model rather than widening back to the default, which
+// would silently ignore what the row says. The write path refuses to create one
+// (the PATCH rejects an empty array, and clearing writes NULL), so this is the
+// reading of a row nobody should have written, in the direction that refuses
+// rather than the one that grants.
 func OrgModelSet(stored, catalogDefault []string) ModelSet {
-	if len(stored) == 0 {
+	if stored == nil {
 		stored = catalogDefault
 	}
 	return newModelSet(stored)
 }
 
 // TeamModelSet resolves a team's effective enable-set: what the team stored,
-// narrowed to what its org still enables. An absent stored set inherits the
-// org's answer whole.
+// narrowed to what its org still enables. An absent stored set — nil, and only
+// nil, on the same rule as OrgModelSet — inherits the org's answer whole.
 //
 // The intersection is not redundant with the ⊆ check the team write enforces.
 // That check holds at the moment of the save; the org may shrink its own set
 // afterwards, and nothing rewrites a team row when it does — so the narrowing
 // has to happen here, at the read, where both halves are in hand.
 func TeamModelSet(stored []string, org ModelSet) ModelSet {
-	if len(stored) == 0 {
+	if stored == nil {
 		return org
 	}
 	keep := make([]string, 0, len(stored))
@@ -108,10 +120,11 @@ func (s ModelSet) Keys() []string { return slices.Clone(s.order) }
 
 // String renders the set for a refusal message, which is the only reason a
 // caller needs to see it as prose: a run that will not start has to say which
-// models this team may pick instead.
+// models this team may pick instead. Bare, with no punctuation of its own —
+// every caller wraps it in its own sentence.
 func (s ModelSet) String() string {
 	if len(s.order) == 0 {
-		return "(none)"
+		return "none"
 	}
 	return strings.Join(s.order, ", ")
 }
