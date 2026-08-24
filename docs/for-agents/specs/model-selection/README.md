@@ -1049,7 +1049,17 @@ Two hazards, recorded so the implementing tickets carry them:
   provider, so a local org holding both credentials needs an explicit
   active-path choice for the SDK environment — the existing provider
   picker becomes that choice, rather than merely selecting which
-  credential to bind.
+  credential to bind. A third: of the three stored Bedrock auth shapes,
+  only the bearer token (`AWS_BEARER_TOKEN_BEDROCK`) and the access-key
+  pair have an env contract the SDK reads. Role mode is a native-path
+  shape — it needs the STS minter, and a minted triple injected into a
+  subprocess env frozen at spawn cannot refresh, so a run outliving the
+  TTL dies mid-run. The SDK path offers two shapes; the role-shaped local
+  user is already served by system credentials, where the SDK's own AWS
+  chain does the AssumeRole and refresh natively. Which shapes a
+  deployment accepts travels as data on the read, never as a mode branch
+  in the form — local currently offers all three, which is the confusion
+  this resolves.
 - The alias list (`fable` included) is asserted, not yet probed. The
   first implementation step is a sweep of the aliases through the SDK
   transport — engineering verification the probe machinery makes a button
