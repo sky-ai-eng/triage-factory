@@ -3,11 +3,14 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
 )
 
 // fakeExtensionHost is a minimal agenthost.Client fake for the CLI's
@@ -392,10 +395,110 @@ func TestRunSlackCLI_UnknownVerb_UsageError(t *testing.T) {
 	}
 }
 
-func TestRunSlackCLI_NoArgs_UsageError(t *testing.T) {
-	host := &fakeExtensionHost{}
-	code := runSlackCLI(context.Background(), nil, host)
+// --- help routing ---
+
+// runSlackCLICapture runs runSlackCLI with a NIL host — the dispatcher's
+// help-route contract — capturing stdout. Any path that reached a verb body
+// would nil-panic on the host, so a clean return IS the assertion that help
+// routed before the verb.
+func runSlackCLICapture(t *testing.T, args []string) (string, int) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	saved := os.Stdout
+	os.Stdout = w
+	code := runSlackCLI(context.Background(), args, nil)
+	os.Stdout = saved
+	_ = w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	return string(out), code
+}
+
+// TestRunSlackCLI_FamilyHelp pins that `slack --help` — and bare `slack`,
+// which used to be a usage error — prints the family usage under the invoked
+// prefix and exits 0 with no host in scope. The exact invocation that used to
+// fail with "unknown exec slack verb: --help".
+func TestRunSlackCLI_FamilyHelp(t *testing.T) {
+	for _, args := range [][]string{nil, {"--help"}, {"-h"}} {
+		out, code := runSlackCLICapture(t, args)
+		if code != 0 {
+			t.Errorf("args %v: exit = %d, want 0", args, code)
+		}
+		if !strings.Contains(out, "Slack Commands:") || !strings.Contains(out, "slack send --channel") {
+			t.Errorf("args %v: family help missing from output:\n%s", args, out)
+		}
+	}
+}
+
+// TestRunSlackCLI_VerbHelp pins per-verb help at every depth — `slack send
+// --help`, `slack read thread --help` — served without a host and without the
+// verb body's required-flag validation firing.
+func TestRunSlackCLI_VerbHelp(t *testing.T) {
+	for verb, wantLine := range map[string]string{
+		"send":     "slack send --channel",
+		"edit":     "slack edit --channel",
+		"react":    "slack react --channel",
+		"read":     "slack read thread --channel",
+		"download": "slack download --id",
+	} {
+		out, code := runSlackCLICapture(t, []string{verb, "--help"})
+		if code != 0 {
+			t.Errorf("%s --help: exit = %d, want 0", verb, code)
+		}
+		if !strings.Contains(out, wantLine) {
+			t.Errorf("%s --help output missing %q:\n%s", verb, wantLine, out)
+		}
+		if strings.Contains(out, "required") {
+			t.Errorf("%s --help ran the verb body (required-flag error):\n%s", verb, out)
+		}
+	}
+
+	// Depth below the verb routes identically — the scan covers the whole tail.
+	out, code := runSlackCLICapture(t, []string{"read", "thread", "--help"})
+	if code != 0 || !strings.Contains(out, "slack read thread --channel") {
+		t.Errorf("read thread --help: exit=%d output:\n%s", code, out)
+	}
+}
+
+// TestRunSlackCLI_ValueFlagPayloadIsNotHelp pins the guard the shared scan
+// exists for: a value-taking flag whose payload is literally "--help" must
+// not read as a help request — the verb body runs and reaches the host.
+func TestRunSlackCLI_ValueFlagPayloadIsNotHelp(t *testing.T) {
+	if execflags.HasHelpFlag([]string{"send", "--channel", "C1", "--body", "--help"}, cliValueFlags) {
+		t.Error(`--body "--help" was read as a help request`)
+	}
+	host := &fakeExtensionHost{result: json.RawMessage(`{}`)}
+	code := runSlackCLI(context.Background(), []string{"send", "--channel", "C1", "--body", "--help"}, host)
+	if code != 0 || host.calls != 1 {
+		t.Errorf(`send with --body "--help": exit=%d calls=%d, want a normal send`, code, host.calls)
+	}
+}
+
+// TestRunSlackCLI_VerbHelpMirrorsFamilyHelp holds the per-verb usage lines
+// and the family overview to one another: every slackVerbHelp line must
+// appear in cliHelpText, so a flag rename cannot land in one and strand the
+// other.
+func TestRunSlackCLI_VerbHelpMirrorsFamilyHelp(t *testing.T) {
+	for verb, lines := range slackVerbHelp {
+		for _, line := range lines {
+			if !strings.Contains(cliHelpText, line) {
+				t.Errorf("verb %q usage line is not mirrored in cliHelpText: %s", verb, line)
+			}
+		}
+	}
+}
+
+// TestRunSlackCLI_UnknownVerbWithHelpNamesTheValidSet pins the loser path: a
+// mistyped verb with --help reports the valid set (the verb itself is wrong)
+// instead of printing usage for a verb that does not exist.
+func TestRunSlackCLI_UnknownVerbWithHelpNamesTheValidSet(t *testing.T) {
+	_, code := runSlackCLICapture(t, []string{"bogus", "--help"})
 	if code != 1 {
-		t.Errorf("exit code = %d, want 1", code)
+		t.Errorf("unknown verb with --help: exit = %d, want 1", code)
 	}
 }

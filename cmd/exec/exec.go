@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/pressly/goose/v3"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/workspace"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 )
 
 // Handle dispatches exec subcommands for the HOST CLI boot identity: the
@@ -30,7 +34,7 @@ import (
 // order-of-operations question by not.
 func Handle(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		printHelp()
+		fmt.Print(helpText(prog.Prefix(), hostHelpKinds()))
 		return
 	}
 
@@ -76,7 +80,7 @@ func Handle(args []string) {
 // (idempotent) for the paths that don't reach a verb at all.
 func HandleSandboxed(client agenthost.Client, args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		printHelp()
+		fmt.Print(helpText(prog.Prefix(), availabilityKinds(client)))
 		return
 	}
 	dispatch(args, func() agenthost.Client { return client })
@@ -181,19 +185,28 @@ func dispatch(args []string, buildAgentHost func() agenthost.Client) {
 		// counterpart, e.g. "slack") land here — the switch's fallthrough
 		// path. A registered runner gets the same buildAgentHost() the
 		// built-in cases use; the runner's own entitlement check happens
-		// inside host.CallExtension, not here. host.Close() is called
-		// explicitly (not deferred) because os.Exit below terminates the
-		// process immediately without running any deferred call on the
-		// stack — a deferred Close() here would silently never run.
-		if run, ok := subcommandRegistry[cmd]; ok {
-			host := buildAgentHost()
-			code := run(context.Background(), cmdArgs, host)
-			_ = host.Close()
-			os.Exit(code)
+		// inside host.CallExtension, not here.
+		if sub, ok := subcommandRegistry[cmd]; ok {
+			os.Exit(runRegistered(sub, cmdArgs, buildAgentHost))
 		}
 		fmt.Fprint(os.Stderr, unknownCommandText(prog.Prefix(), cmd))
 		os.Exit(1)
 	}
+}
+
+// runRegistered executes a registered subcommand and returns its exit code.
+// Help routes are served with a nil host — buildAgentHost is never invoked —
+// which is the same short-circuit the built-in cases apply and what makes
+// `exec slack --help` answer with no run identity in scope. The deferred
+// Close runs before this returns (the caller os.Exits AFTER), so the host is
+// released on every non-help path.
+func runRegistered(sub Subcommand, cmdArgs []string, buildAgentHost func() agenthost.Client) int {
+	if isHelp(cmdArgs, sub.ValueFlags) {
+		return sub.Run(context.Background(), cmdArgs, nil)
+	}
+	host := buildAgentHost()
+	defer func() { _ = host.Close() }()
+	return sub.Run(context.Background(), cmdArgs, host)
 }
 
 // HandleStatus is the `triagefactory status` subcommand's entry point.
@@ -215,8 +228,52 @@ func isHelp(args []string, valueFlags map[string]bool) bool {
 	return len(args) == 0 || execflags.HasHelpFlag(args, valueFlags)
 }
 
-func printHelp() {
-	fmt.Print(helpText(prog.Prefix()))
+// availabilityTimeout bounds the help route's best-effort availability
+// resolve: help must never hang on a sick daemon, and a miss just yields the
+// unfiltered index.
+const availabilityTimeout = 3 * time.Second
+
+// availabilityKinds asks the run's agenthost which source kinds the org can
+// reach, best-effort: a nil client or any failure yields nil, which helpText
+// renders as the full unfiltered index. Over-inclusion is the safe degrade —
+// a listed verb the org lacks refuses with an error naming the reason, while
+// a hidden one leaves the agent improvising flags against live commands,
+// which is the exact failure filtered help must not reintroduce.
+func availabilityKinds(client agenthost.Client) []string {
+	if client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), availabilityTimeout)
+	defer cancel()
+	kinds, err := client.AvailableSources(ctx)
+	if err != nil {
+		return nil
+	}
+	return kinds
+}
+
+// hostHelpKinds resolves the help index's availability filter for the host
+// CLI. Only a delegated run gets a filtered index: with no run identity in
+// scope (an operator's bare terminal) it returns nil — the full listing —
+// WITHOUT opening the DB, preserving help's no-state property. With identity
+// present, the resolve goes through the same local client the verbs use, and
+// every failure degrades to nil rather than to an error: a help request must
+// never fail for want of a filter.
+func hostHelpKinds() []string {
+	if os.Getenv(convident.ConversationIDEnvVar) == "" {
+		return nil
+	}
+	stores, closeDB, err := openLocalStores()
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = closeDB() }()
+	client, err := agenthost.NewLocalFromEnv(context.Background(), stores)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = client.Close() }()
+	return availabilityKinds(client)
 }
 
 // helpText renders the top-level help. Only agent-facing verbs are listed. The
@@ -227,8 +284,55 @@ func printHelp() {
 //
 // The per-verb blocks name their verbs bare (`gh pr view`, not
 // `<prefix> gh pr view`), so the invoked prefix appears in the usage line alone.
-func helpText(prefix string) string {
-	return fmt.Sprintf("Usage: %s <command> [args]\n\n%s\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", prefix, gh.HelpText, jiraexec.HelpText, workspace.HelpText, memory.HelpText)
+//
+// kinds is the availability filter — the org's reachable source kinds, from
+// the same answer the run's <tools> prompt section derives from. nil means
+// unresolved and renders the full surface. Non-nil filters the index:
+// gh/workspace/memory are always listed (GitHub is a required source, the
+// other two are sourceless); Jira, a core source that is never unlicensed, is
+// listed with a not-currently-available note when absent (explained means not
+// yet); a registered family whose SourceKind is absent is omitted outright —
+// it may be unlicensed, and an unlicensed surface degrades to absence, the
+// same rule every other gate applies. Index-only either way: an omitted
+// family's own `--help` still answers, because the verbs are compiled in and
+// "unknown command" for a real name sends a caller hunting for a typo.
+func helpText(prefix string, kinds []string) string {
+	sections := []string{gh.HelpText, jiraHelpSection(kinds), workspace.HelpText, memory.HelpText}
+	sections = append(sections, registeredHelpSections(kinds)...)
+	return fmt.Sprintf("Usage: %s <command> [args]\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", prefix, strings.Join(sections, "\n\n"))
+}
+
+// jiraUnavailableNote rides under the Jira section when the availability
+// resolve answered and Jira was not in it. Its job is to stop an agent from
+// telling a user it can work a ticket and discovering the refusal mid-task:
+// the absence is always something an admin can fix, so the note says so.
+const jiraUnavailableNote = "  NOTE: Jira is not currently available for this org (not configured, or turned\n  off by an admin) — these commands will refuse until it is set up."
+
+func jiraHelpSection(kinds []string) string {
+	if kinds == nil || slices.Contains(kinds, eventsource.KindJira) {
+		return jiraexec.HelpText
+	}
+	return jiraexec.HelpText + "\n\n" + jiraUnavailableNote
+}
+
+// registeredHelpSections returns the registered families' help sections in
+// name order — deterministic output, the same canonical-order rule the tools
+// reference applies — filtered per Subcommand.SourceKind when kinds resolved.
+func registeredHelpSections(kinds []string) []string {
+	names := make([]string, 0, len(subcommandRegistry))
+	for name := range subcommandRegistry {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	var out []string
+	for _, name := range names {
+		sub := subcommandRegistry[name]
+		if kinds != nil && sub.SourceKind != "" && !slices.Contains(kinds, sub.SourceKind) {
+			continue
+		}
+		out = append(out, sub.HelpText)
+	}
+	return out
 }
 
 // unknownCommandText is the loser path: an unrecognized verb under any invoked

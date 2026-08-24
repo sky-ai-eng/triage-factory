@@ -133,6 +133,18 @@ func ToolsReferenceFor(source string) (string, bool) {
 	return text, ok
 }
 
+// RegisteredToolsReferenceSources returns the registered (non-core) sources
+// in sorted order — the composition-root parity guard reads it to hold each
+// source's tools reference and its exec CLI registration to one another.
+func RegisteredToolsReferenceSources() []string {
+	out := make([]string, 0, len(toolsReferenceRegistry))
+	for source := range toolsReferenceRegistry {
+		out = append(out, source)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // ResetToolsReferences clears the registry (tests only).
 func ResetToolsReferences() {
 	toolsReferenceRegistry = map[string]string{}

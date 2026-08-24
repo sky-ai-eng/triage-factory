@@ -417,6 +417,17 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(sourceDisabledResult{Disabled: off})
 
+	case opAvailableSources:
+		// Every availability input — the claim's stamped manifest, the stores a
+		// live resolve reads — lives on this side; the sidecar relays so the
+		// help index a jailed run prints derives from the same answer that
+		// composed its <tools> section.
+		kinds, err := s.rt.AvailableSources(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(availableSourcesResult{Kinds: kinds})
+
 	case opMemoryLoad:
 		var a memoryLoadArgs
 		if err := json.Unmarshal(args, &a); err != nil {

@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
@@ -59,6 +61,33 @@ func TestRegisteredFeaturesAreDeclared(t *testing.T) {
 	}
 	check("entitlements.GateEventSource", entitlements.RegisteredEventGateFeatures())
 	check("agenthost.RegisterExtension", agenthost.RegisteredExtensionFeatures())
+}
+
+// TestExecSubcommandsAndToolsReferencesArePaired holds the two per-source
+// registration seams an ee feature must both hit to one another: every
+// registered exec subcommand naming a SourceKind has agent-facing tools
+// reference text registered under that source (else the agent holds CLI verbs
+// its prompt never mentions), and every registered tools reference is claimed
+// by a subcommand's SourceKind (else the prompt documents verbs the CLI does
+// not serve, and the help index has nothing to filter them by). Package main
+// is the sole importer of ee/, so this process — and only this process — sees
+// the real init()-time registrations on both sides.
+func TestExecSubcommandsAndToolsReferencesArePaired(t *testing.T) {
+	claimed := map[string]bool{}
+	for name, sub := range exec.RegisteredSubcommands() {
+		if sub.SourceKind == "" {
+			continue
+		}
+		claimed[sub.SourceKind] = true
+		if _, ok := agentprompt.ToolsReferenceFor(sub.SourceKind); !ok {
+			t.Errorf("exec subcommand %q names source %q but no tools reference is registered for it", name, sub.SourceKind)
+		}
+	}
+	for _, source := range agentprompt.RegisteredToolsReferenceSources() {
+		if !claimed[source] {
+			t.Errorf("tools reference %q has no exec subcommand claiming it via Subcommand.SourceKind", source)
+		}
+	}
 }
 
 // TestFrontendMirrorsAllFeatures asserts that every feature in

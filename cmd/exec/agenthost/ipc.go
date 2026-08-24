@@ -198,6 +198,14 @@ func (c *IPCClient) DeleteStagedReviewComment(ctx context.Context, commentID str
 	return c.call(ctx, methodDeleteStagedReviewComment, deleteStagedReviewCommentArgs{CommentID: commentID}, nil)
 }
 
+func (c *IPCClient) AvailableSources(ctx context.Context) ([]string, error) {
+	var res availableSourcesResult
+	if err := c.call(ctx, methodAvailableSources, emptyArgs{}, &res); err != nil {
+		return nil, err
+	}
+	return res.Kinds, nil
+}
+
 func (c *IPCClient) GetConversation(ctx context.Context) (*domain.Conversation, error) {
 	var res getConversationResult
 	if err := c.call(ctx, methodGetConversation, emptyArgs{}, &res); err != nil {
