@@ -375,13 +375,13 @@ done
 pass "tempo ingests OTLP/HTTP on :4318 and serves the trace back"
 
 # 7c. The metrics-generator answers a TraceQL metrics query — the query class
-#     Grafana's Traces Drilldown is built on, and a different code path from
-#     7b's search. It runs after 7b deliberately: the generator only holds a
-#     tenant once spans have reached it, and until then a missing local-blocks
-#     processor answers an empty result instead of the error it owes you. With
-#     a tenant in place the two failures separate cleanly — no processor is an
-#     explicit `localblocks processor not found`, and an empty answer means the
-#     query ran and matched nothing.
+#     Grafana's Traces Drilldown is built on, and a different path through
+#     Tempo from 7b's lookup-by-ID. It runs after 7b deliberately: the
+#     generator only holds a tenant once spans have reached it, and until then
+#     a missing local-blocks processor answers an empty result instead of the
+#     error it owes you. With a tenant in place the two failures separate
+#     cleanly — no processor is an explicit `localblocks processor not found`,
+#     and an empty answer means the query ran and matched nothing.
 metrics=""
 for _ in $(seq 1 15); do
   body=$(dc exec -T grafana curl -sS -G http://tempo:3200/api/metrics/query_range \

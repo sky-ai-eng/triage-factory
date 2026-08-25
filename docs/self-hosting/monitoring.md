@@ -616,7 +616,7 @@ ceiling is shorter than what you are chasing.
 Tempo keeps blocks for 7 days and Prometheus keeps samples for 7 days, matched
 on purpose so an exemplar never outlives the trace it links to. `tempo-data`
 holds each span twice inside that window — the ingester's block and the
-metrics-generator's flushed copy, the one TraceQL metrics read — so size it for
+metrics-generator's flushed copy, the one TraceQL metrics reads — so size it for
 roughly double what the traces alone would take. All three volumes
 (`tempo-data`, `prometheus-data`, `grafana-data`) are caches: losing them loses
 observability history, never TF state.
