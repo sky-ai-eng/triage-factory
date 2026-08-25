@@ -473,24 +473,42 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	return blueprintRunID, nil
 }
 
+// splitGitHubEntitySourceID splits a GitHub entity's source id ("owner/repo#42"
+// for a PR/issue) into its parts, cutting the "#N" suffix before the owner/repo
+// split. That ordering is the reason this is one helper rather than a split
+// spelled out per call site: splitting the raw id leaves the repository named
+// "repo#42", which no repository row and no remote resolves, and the resulting
+// failure surfaces far downstream of the parse that caused it. owner and repo
+// are empty when what precedes the suffix carries no "/" (a Jira key, say);
+// prNumber is 0 when the suffix is absent or unparseable.
+func splitGitHubEntitySourceID(sourceID string) (owner, repo string, prNumber int) {
+	repoStr := sourceID
+	if idx := strings.LastIndex(sourceID, "#"); idx >= 0 {
+		repoStr = sourceID[:idx]
+		fmt.Sscanf(sourceID[idx+1:], "%d", &prNumber)
+	}
+	owner, repo = parseOwnerRepo(repoStr)
+	return owner, repo, prNumber
+}
+
 // ownerRepoForTask parses "owner/repo" out of a GitHub task's EntitySourceID
 // ("owner/repo#N" for a PR/issue task); ("", "") for Jira (and any
 // non-github source), which has no single owner/repo — the live resolver
 // then resolves the org's sole App installation, falling through to PAT
-// when ambiguous. Every call site needs both halves (the repo disambiguates
-// a bundle-backed credential lookup, TFAC-614, since unlike the live
-// resolver's account-wide App installation token, a bundle's RepoTokens are
-// scoped per-repo), so this returns the pair rather than splitting into
-// separate owner-only/repo-only helpers nobody calls independently.
+// when ambiguous. The source gate is load-bearing beyond Jira: a Slack
+// entity's source id ("<channel>/<ts>") splits on "/" perfectly well and
+// would otherwise mint a nonsense repo pair. Every call site needs both
+// halves (the repo disambiguates a bundle-backed credential lookup, since
+// unlike the live resolver's account-wide App installation token, a bundle's
+// RepoTokens are scoped per-repo), so this returns the pair rather than
+// splitting into separate owner-only/repo-only helpers nobody calls
+// independently.
 func ownerRepoForTask(task domain.Task) (owner, repo string) {
 	if task.EntitySource != "github" {
 		return "", ""
 	}
-	repoStr := task.EntitySourceID
-	if idx := strings.LastIndex(repoStr, "#"); idx >= 0 {
-		repoStr = repoStr[:idx]
-	}
-	return parseOwnerRepo(repoStr)
+	owner, repo, _ = splitGitHubEntitySourceID(task.EntitySourceID)
+	return owner, repo
 }
 
 // cloneHostBase returns the scheme://host of an HTTPS clone URL — the insteadOf
@@ -593,19 +611,9 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 		return runConfig{}, fmt.Errorf("GitHub credentials not configured")
 	}
 
-	// EntitySourceID for GitHub PRs is "owner/repo#42" — extract the repo part.
-	repoStr := task.EntitySourceID
-	if idx := strings.LastIndex(repoStr, "#"); idx >= 0 {
-		repoStr = repoStr[:idx]
-	}
-	owner, repo := parseOwnerRepo(repoStr)
+	owner, repo, prNumber := splitGitHubEntitySourceID(task.EntitySourceID)
 	if owner == "" || repo == "" {
 		return runConfig{}, fmt.Errorf("cannot parse owner/repo from entity source ID: %q", task.EntitySourceID)
-	}
-
-	prNumber := 0
-	if idx := strings.LastIndex(task.EntitySourceID, "#"); idx >= 0 {
-		fmt.Sscanf(task.EntitySourceID[idx+1:], "%d", &prNumber)
 	}
 	if prNumber == 0 {
 		return runConfig{}, fmt.Errorf("invalid PR number from task.EntitySourceID: %q", task.EntitySourceID)

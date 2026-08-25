@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -738,10 +737,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 
-	owner, repo := "", ""
-	if entity, eerr := s.entities.GetSystem(ctx, orgID, task.EntityID); eerr == nil && entity != nil {
-		owner, repo = parseOwnerRepo(entity.SourceID)
-	}
+	owner, repo := ownerRepoForTask(*task)
 	var extraTools string
 	if conv.PromptID != "" {
 		if p, perr := s.prompts.GetSystem(ctx, orgID, conv.PromptID); perr == nil && p != nil {
@@ -1424,13 +1420,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 // its parts. prNumber is 0 when absent/unparseable; callers surface that as a
 // setup failure.
 func parseGitHubTask(task domain.Task) (owner, repo string, prNumber int) {
-	repoStr := task.EntitySourceID
-	if idx := strings.LastIndex(task.EntitySourceID, "#"); idx >= 0 {
-		repoStr = task.EntitySourceID[:idx]
-		fmt.Sscanf(task.EntitySourceID[idx+1:], "%d", &prNumber)
-	}
-	owner, repo = parseOwnerRepo(repoStr)
-	return owner, repo, prNumber
+	return splitGitHubEntitySourceID(task.EntitySourceID)
 }
 
 // materializeStepSkill places one blueprint step's SKILL.md where this host's

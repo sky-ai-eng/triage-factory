@@ -53,12 +53,12 @@ func BuildTaskContext(task domain.Task, metadataJSON, skeleton string) string {
 
 	switch task.EntitySource {
 	case "github":
-		owner, repo, prNumber := parseGitHubEntitySourceID(task.EntitySourceID)
+		owner, repo, prNumber := splitGitHubEntitySourceID(task.EntitySourceID)
 		if owner != "" && repo != "" {
 			add("Repository", owner+"/"+repo)
 		}
-		if prNumber != "" {
-			add("Pull request", "#"+prNumber)
+		if prNumber > 0 {
+			add("Pull request", "#"+strconv.Itoa(prNumber))
 		}
 	case "jira":
 		add("Issue", task.EntitySourceID)
@@ -113,22 +113,6 @@ func BuildTaskContext(task domain.Task, metadataJSON, skeleton string) string {
 
 	body := framing + "\n\n" + begin + "\n" + region + "\n" + end
 	return "<task_context>\n" + body + "\n</task_context>"
-}
-
-// parseGitHubEntitySourceID splits "owner/repo#42" into its parts. Returns
-// empty strings on parse failure — callers omit the line.
-func parseGitHubEntitySourceID(s string) (owner, repo, prNumber string) {
-	hashIdx := strings.LastIndex(s, "#")
-	if hashIdx < 0 {
-		return "", "", ""
-	}
-	prNumber = s[hashIdx+1:]
-	repoStr := s[:hashIdx]
-	slashIdx := strings.LastIndex(repoStr, "/")
-	if slashIdx < 0 {
-		return "", "", prNumber
-	}
-	return repoStr[:slashIdx], repoStr[slashIdx+1:], prNumber
 }
 
 // projectFromJiraKey pulls "PROJ" out of "PROJ-123". Mirrors the tracker's
