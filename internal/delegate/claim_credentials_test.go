@@ -267,6 +267,9 @@ func TestOwnerRepoForTask(t *testing.T) {
 		{"github PR", domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}, "acme", "widgets"},
 		{"github no PR number", domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets"}, "acme", "widgets"},
 		{"jira", domain.Task{EntitySource: "jira", EntitySourceID: "SKY-123"}, "", ""},
+		// A Slack address splits on "/" as readily as a repo slug does, so
+		// the source gate is the only thing between it and a bogus pair.
+		{"slack", domain.Task{EntitySource: "slack", EntitySourceID: "C024BE91L/1712345678.000200"}, "", ""},
 		{"malformed", domain.Task{EntitySource: "github", EntitySourceID: "nostructure"}, "", ""},
 	}
 	for _, tc := range cases {
