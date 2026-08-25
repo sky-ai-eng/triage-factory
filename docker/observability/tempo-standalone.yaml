@@ -1,11 +1,14 @@
 # Tempo for the local-mode dev loop — a single `docker run`, no compose, no
 # other containers. See docs/local-mode/tuning.md#tracing for the invocation.
 #
-# The difference from tempo.yaml (the compose profile's config) is what is
-# absent: no metrics-generator, because there is no Prometheus here to
-# remote-write to and a generator pointed at a name that doesn't resolve
-# turns the container's log into a retry loop. Everything a span needs to
-# arrive, be stored, and be searched is here; nothing else is.
+# The difference from tempo.yaml (the compose profile's config) is which
+# metrics-generator processors run: local-blocks only. That one stores the
+# spans it receives and aggregates them when a TraceQL metrics query asks, so
+# it needs no remote-write target — while span-metrics and service-graphs
+# exist to push derived series at a Prometheus that does not exist on this
+# network, and a generator aimed at a name that doesn't resolve turns the
+# container's log into a retry loop. Everything a span needs to arrive, be
+# stored, be searched, and answer a `| rate()` is here; nothing else is.
 
 server:
   # Query + ingest API. Published on 127.0.0.1 by the documented `docker run`
@@ -34,6 +37,32 @@ compactor:
     # outlives its usefulness first.
     block_retention: 24h
 
+metrics_generator:
+  processor:
+    local_blocks:
+      # What TraceQL metrics queries read, and what Grafana's Traces Drilldown
+      # fails on when it is absent (`localblocks processor not found`). The two
+      # settings are the compose profile's, for the same reasons: keep interior
+      # spans rather than only server spans and trace roots, and put completed
+      # blocks in storage so a query further back than 30 minutes still has
+      # something to read. See docker/observability/tempo.yaml.
+      filter_server_spans: false
+      flush_to_storage: true
+  storage:
+    # The generator's Prometheus-registry WAL, and the switch that decides
+    # whether there is a generator at all: leave it unset and Tempo logs
+    # "metrics generator will be disabled", the ring stays empty, and every
+    # metrics query fails with "error finding generators: empty ring".
+    # No remote_write under it — local-blocks pushes nothing outward, it is
+    # read where it sits.
+    path: /var/tempo/generator/wal
+  traces_storage:
+    # Where local-blocks keeps the spans it aggregates. Required whenever that
+    # processor is on: without it the generator refuses to initialize ("local
+    # blocks processor requires traces wal"). Inside the container, so it dies
+    # with the container like everything else here.
+    path: /var/tempo/generator/traces
+
 storage:
   trace:
     backend: local
@@ -41,3 +70,10 @@ storage:
       path: /var/tempo/wal
     local:
       path: /var/tempo/blocks
+
+overrides:
+  defaults:
+    metrics_generator:
+      # local-blocks alone: the other two processors derive Prometheus series
+      # and there is no remote_write target on this stack to receive them.
+      processors: [local-blocks]

@@ -374,7 +374,37 @@ done
 [ -n "$stored" ] || fail "tempo accepted an OTLP span but never returned it from /api/traces/$trace_id"
 pass "tempo ingests OTLP/HTTP on :4318 and serves the trace back"
 
-# 7c. Grafana's provisioning actually applied. Provisioning failures are
+# 7c. The metrics-generator answers a TraceQL metrics query — the query class
+#     Grafana's Traces Drilldown is built on, and a different path through
+#     Tempo from 7b's lookup-by-ID. It runs after 7b deliberately: the
+#     generator only holds a tenant once spans have reached it, and until then
+#     a missing local-blocks processor answers an empty result instead of the
+#     error it owes you. With a tenant in place the two failures separate
+#     cleanly — no processor is an explicit `localblocks processor not found`,
+#     and an empty answer means the query ran and matched nothing.
+metrics=""
+for _ in $(seq 1 15); do
+  body=$(dc exec -T grafana curl -sS -G http://tempo:3200/api/metrics/query_range \
+    --data-urlencode 'q={ name = "smoke.test" } | count_over_time()' \
+    --data-urlencode "start=$((now - 60))" --data-urlencode "end=$(date +%s)" \
+    --data-urlencode 'step=60s' 2>/dev/null || true)
+  case "$body" in
+    *"localblocks processor not found"*)
+      fail "tempo's metrics-generator has no local-blocks processor — every TraceQL metrics query and all of Grafana's Traces Drilldown fail (check metrics_generator in docker/observability/tempo.yaml)" ;;
+  esac
+  #     Match a sample that carries a count. Every label object in the
+  #     response also has a `"value"` key, so the loose spelling would pass on
+  #     an answer of nothing but empty buckets; a timestamp-then-value pair is
+  #     a filled one. In-shell, like the case above and for the same reason —
+  #     piping the body to grep -q races the reader's exit. A span lands in a
+  #     bucket about ten seconds after the push, once it has gone idle.
+  if [[ "$body" =~ \"timestampMs\":\"[0-9]+\",\"value\": ]]; then metrics=yes; break; fi
+  sleep 2
+done
+[ -n "$metrics" ] || fail "tempo never counted the span 7b pushed in a TraceQL metrics query (metrics_generator.processors and traces_storage.path in docker/observability/tempo.yaml)"
+pass "tempo's local-blocks processor answers TraceQL metrics (what Traces Drilldown queries)"
+
+# 7d. Grafana's provisioning actually applied. Provisioning failures are
 #     logged and skipped, not fatal, so a malformed data source or correlation
 #     leaves a running Grafana that simply cannot navigate anything — and the
 #     correlations are the entire point of the file.
@@ -395,7 +425,7 @@ for attr in conversation.id event.id task.id; do
 done
 pass "grafana provisioned both data sources + the conversation/event/task correlations"
 
-# 7d. The dashboards half of the same provisioning, and the same failure mode:
+# 7e. The dashboards half of the same provisioning, and the same failure mode:
 #     a malformed dashboard JSON is logged and skipped, leaving a Grafana that
 #     starts fine and shows an empty home page. Three distinct regressions,
 #     each invisible without its own assertion:
