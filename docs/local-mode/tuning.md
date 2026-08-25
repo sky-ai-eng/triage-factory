@@ -113,7 +113,21 @@ curl -sS -G http://localhost:3200/api/search --data-urlencode 'q={ .conversation
 
 # the whole trace, spans and attributes included
 curl -sS http://localhost:3200/api/traces/<trace-id> | jq
+
+# an aggregate over spans rather than a search for them
+curl -sS -G http://localhost:3200/api/metrics/query_range \
+  --data-urlencode 'q={} | count_over_time() by (name)' \
+  --data-urlencode "start=$(($(date +%s) - 900))" --data-urlencode "end=$(date +%s)" \
+  --data-urlencode 'step=60s' | jq
 ```
+
+That last one is a **TraceQL metrics** query, and it runs on the checked-in
+config's `local-blocks` processor — the one that stores the spans it receives so
+a query can group them by an attribute nobody declared in advance. Without it in
+`metrics_generator`, those queries and every panel of Grafana's Traces Drilldown
+fail with `localblocks processor not found` rather than coming back empty. Two of
+Tempo's defaults bound them: a range wider than 3h is rejected outright, and
+anything past the last 30 minutes is read from storage rather than the generator.
 
 A trace is searchable a beat after it finishes (Tempo cuts it once it has been
 idle ~10s); `/api/traces/<id>` finds it immediately. If nothing shows up at all,
@@ -151,10 +165,14 @@ docker run -d --name tf-grafana --network tf-traces -p 127.0.0.1:3030:3000 \
   grafana/grafana:13.1.2
 ```
 
-Then open <http://localhost:3030> → **Explore** → **Tempo**. The file also
-provisions a Prometheus data source, which has nothing behind it in this
-two-container shape; the only thing that notices is the trace view's Service
-Graph tab. No login form, and both containers publish to `127.0.0.1` only.
+Then open <http://localhost:3030> → **Explore** → **Tempo**, or **Drilldown →
+Traces** for the aggregate view over the same spans — Grafana fetches that app
+from `grafana.com` when it first starts, so with no outbound access the section
+is absent rather than broken. The file also provisions a
+Prometheus data source, which has nothing behind it in this two-container shape;
+the only things that notice are the trace view's Service Graph tab and its
+trace-to-metrics links — Drilldown reads Tempo directly and works here. No login
+form, and both containers publish to `127.0.0.1` only.
 
 Tear the whole thing down with `docker rm -f tf-tempo tf-grafana && docker
 network rm tf-traces` — no state outside the containers, and TF's own SQLite

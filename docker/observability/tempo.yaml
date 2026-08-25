@@ -43,6 +43,35 @@ compactor:
     block_retention: 168h
 
 metrics_generator:
+  processor:
+    local_blocks:
+      # The processor TraceQL metrics run on — `{...} | rate()`,
+      # `| quantile_over_time()`, and every query Grafana's Traces Drilldown
+      # issues on your behalf. Unlike the two processors in the overrides
+      # block below it derives no series ahead of time: it keeps the spans
+      # themselves and aggregates them when a query asks, which is what lets
+      # Drilldown group by an attribute nobody enumerated in advance.
+      #
+      # It is not optional for those queries. The generator answers the metrics
+      # query path, so with the processor off they fail — `localblocks
+      # processor not found` — rather than returning an empty result.
+      #
+      # Record every span. What the default admits is server-kind spans and
+      # trace roots — the outside of a trace and none of its interior — and
+      # TF sets a span kind in a handful of places (the HTTP surface, the
+      # event producer/consumer pair) and leaves the rest INTERNAL. So the
+      # default would hand Drilldown the `engagement.setup` root while
+      # dropping the phase spans underneath it that answer why the run took
+      # four minutes to start.
+      filter_server_spans: false
+      # Flush completed blocks into the trace storage below. Metrics queries
+      # reach past `query_frontend.metrics.query_backend_after` (30m) into the
+      # backend, and this is what puts data there — without it a Drilldown
+      # window wider than the generator's own retention thins out into
+      # nothing. Costs a second copy of every span alongside the ingester's,
+      # which is the price of a 7-day window on a stack whose storage is a
+      # local disk.
+      flush_to_storage: true
   registry:
     external_labels:
       source: tempo
@@ -56,6 +85,13 @@ metrics_generator:
       # so a latency spike in Grafana is one click from the trace behind it.
       - url: http://prometheus:9090/api/v1/write
         send_exemplars: true
+  traces_storage:
+    # Where local-blocks keeps the spans it is aggregating. Required once that
+    # processor is enabled, and the failure is wider than it looks: without a
+    # path the generator refuses to initialize at all ("local blocks processor
+    # requires traces wal"), taking span-metrics and service-graphs down with
+    # it — so a missing line here costs the RED dashboard, not just Drilldown.
+    path: /var/tempo/generator/traces
 
 storage:
   trace:
@@ -73,6 +109,8 @@ overrides:
     metrics_generator:
       # Per-tenant switch for the generator above — the processors produce
       # `traces_spanmetrics_*` (what the Tempo data source's trace-to-metrics
-      # links query) and `traces_service_graph_*` (the Service Graph tab).
-      # Without this the generator runs and emits nothing.
-      processors: [service-graphs, span-metrics]
+      # links query), `traces_service_graph_*` (the Service Graph tab), and
+      # the span store TraceQL metrics aggregate at query time (Grafana's
+      # Traces Drilldown, and any `| rate()` typed into Explore). Without this
+      # the generator runs and emits nothing.
+      processors: [service-graphs, span-metrics, local-blocks]

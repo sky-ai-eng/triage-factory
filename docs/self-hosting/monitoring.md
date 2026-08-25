@@ -405,9 +405,12 @@ reading rather than aggregating, and one that should stay empty:
   row structurally cannot show: `queue.wait_ms` (the enqueue→claim interval,
   over before the consumer span starts) and the routing `disposition`. Both are
   span *attributes*, and the `traces_spanmetrics_*` series carry only service,
-  span name, kind and status — so this is a span list you sort and filter, not
-  a series you graph, and that is a deliberate choice rather than a gap waiting
-  for a Tempo processor. Alongside it, the `route.delegate` rate: how much
+  span name, kind and status — so this is a span list you sort and filter rather
+  than a series you graph, which is what reading "which event went which way"
+  actually wants. Graphing them is still available, one
+  [TraceQL metrics](#traceql-metrics-and-traces-drilldown) query away
+  (`{ name = "route.event" } | count_over_time() by (span.disposition)`), it is
+  just not what this row is for. Alongside it, the `route.delegate` rate: how much
   auto-delegation a trigger's configuration is actually causing, which has no
   other display anywhere. Note `error` there is a disposition, not a span error
   status — the store call that failed carries the status on its own span.
@@ -564,12 +567,59 @@ emitted under a span carries `trace_id` — it is just `docker compose logs | gr
 <trace_id>` rather than a click. Adding a Loki container and a `tracesToLogsV2`
 block to the Tempo data source is the upgrade path.
 
+#### TraceQL metrics and Traces Drilldown
+
+Span metrics are derived ahead of time and carry four labels — service, span
+name, kind, status — so they answer "how many, how slow" and nothing about what
+a span was *about*. **TraceQL metrics** are the other half of the question:
+`{ name = "route.event" } | count_over_time() by (span.disposition)` aggregates
+the stored spans when the query runs, so any attribute TF stamps is a grouping
+key without anyone having declared it in advance. Grafana's **Traces Drilldown**
+is a UI over exactly these queries, and `| rate()` typed into Explore is the
+same machinery.
+
+Drilldown itself is Grafana's, not something this stack provisions: Grafana
+installs that app at startup by fetching it from `grafana.com`, so on a host
+with no outbound access the Drilldown section is simply missing — a different
+symptom from the one below, where the section is there and every panel in it
+errors.
+
+What answers them is the `local-blocks` processor in
+`docker/observability/tempo.yaml`, which keeps the spans themselves rather than
+a summary of them. It is not optional, and its absence is loud rather than
+empty: with the processor off, every metrics query and every Drilldown panel
+fails with *localblocks processor not found*. Three settings there are
+load-bearing, all checked in:
+
+- `metrics_generator.traces_storage.path` — where the processor keeps those
+  spans. Required whenever it is enabled, and the blast radius is wider than
+  the feature: with no path the generator refuses to initialize at all, taking
+  span metrics and the service graph down with it.
+- `filter_server_spans: false` — the default admits server-kind spans and trace
+  roots, which on TF's traces means the HTTP surface and the outside of every
+  pipeline. The interior spans (`engagement.clone`, `sidecar.provision`,
+  `capbroker.call`) are the ones worth aggregating.
+- `flush_to_storage: true` — completed blocks land in the trace storage the
+  ingester also writes to, which is what lets a query reach past the
+  generator's own window, at the cost of a second copy of every span.
+
+Two of Tempo's defaults shape what you can ask, and neither is written into the
+checked-in config: a metrics query's range is capped at
+`query_frontend.metrics.max_duration` (3h — a wider time picker is rejected
+rather than truncated), and anything older than
+`query_frontend.metrics.query_backend_after` (30m) is answered from backend
+blocks rather than from the generator. Set them in `tempo.yaml` if a three-hour
+ceiling is shorter than what you are chasing.
+
 #### Retention
 
 Tempo keeps blocks for 7 days and Prometheus keeps samples for 7 days, matched
-on purpose so an exemplar never outlives the trace it links to. All three
-volumes (`tempo-data`, `prometheus-data`, `grafana-data`) are caches: losing
-them loses observability history, never TF state.
+on purpose so an exemplar never outlives the trace it links to. `tempo-data`
+holds each span twice inside that window — the ingester's block and the
+metrics-generator's flushed copy, the one TraceQL metrics read — so size it for
+roughly double what the traces alone would take. All three volumes
+(`tempo-data`, `prometheus-data`, `grafana-data`) are caches: losing them loses
+observability history, never TF state.
 
 For the local-mode dev loop — a single `docker run` of Tempo against a TF binary
 running on the host — see [Environment tuning →
