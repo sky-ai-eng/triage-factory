@@ -333,6 +333,22 @@ func (h *GitProxyHandle) GitConfigPairsWithSSH(sharedHost, sharedCAPath string) 
 	return gitProxyPairs(h.url, h.upstream, h.token, sharedHost, sharedCAPath, true)
 }
 
+// UpstreamHost returns the bare hostname of the git host this proxy relays to.
+// The local run's GIT_SSH_COMMAND dispatcher decides on it: an SSH-shaped
+// session for this host belongs on this proxy, one for any other host does
+// not. Empty when the upstream cannot be parsed, which leaves the dispatcher
+// with no host to match and every session passing through to real ssh.
+func (h *GitProxyHandle) UpstreamHost() string {
+	if h == nil {
+		return ""
+	}
+	u, err := url.Parse(h.upstream)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
 // Shutdown drains the proxy. Safe on a nil handle.
 func (h *GitProxyHandle) Shutdown(ctx context.Context) error {
 	if h == nil || h.srv == nil {

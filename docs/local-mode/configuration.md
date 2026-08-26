@@ -127,6 +127,14 @@ team's tracked/materialized repository set and base-branch policy, and records
 the actual upstream result. It refuses a push when it cannot authorize the
 repository or ref instead of falling back to your SSH key or credential helper.
 
+That covers SSH-shaped remotes too. The common spellings of your GitHub host are
+rewritten onto the proxy before Git picks a transport at all; anything they miss
+— an unusual `ssh://` form, an explicit port, a `pushInsteadOf` in your own
+`~/.gitconfig` — reaches a dispatcher that stands in for `ssh` and carries the
+session to the same proxy, so it is authorized, authenticated and recorded
+identically. A remote on any other host still goes out over real `ssh`,
+unchanged and (as before) unrecorded.
+
 This is still a **safety and identity guarantee for ordinary behavior, not a
 security boundary**: a local-mode agent runs as you with unrestricted shell
 access and can deliberately bypass process-scoped routing. Multi mode's sandbox

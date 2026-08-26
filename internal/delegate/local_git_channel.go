@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/gitssh"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -50,10 +51,54 @@ func (c *localGitChannel) configPairs(gh *agentproc.GHChannelParams) [][2]string
 	if c == nil || c.proxy == nil {
 		return nil
 	}
+	var pairs [][2]string
 	if gh == nil {
-		return c.proxy.GitConfigPairsWithSSH("", "")
+		pairs = c.proxy.GitConfigPairsWithSSH("", "")
+	} else {
+		pairs = c.proxy.GitConfigPairsWithSSH(gh.Host, gh.CertSourcePath)
 	}
-	return c.proxy.GitConfigPairsWithSSH(gh.Host, gh.CertSourcePath)
+	// The SSH bridge below carries a fetch by mapping each protocol-v2 command
+	// onto one stateless request; v0's negotiation is stateful and has no such
+	// mapping, so a v2 session is the bridge's precondition. v2 has been git's
+	// default since 2.26, so this states what a managed run already gets rather
+	// than changing it — and it states it where an operator's own config cannot
+	// take it away.
+	return append(pairs, [2]string{"protocol.version", "2"})
+}
+
+// gitSSHCommand is what a managed local run's git execs in place of ssh. git
+// runs the value through a shell, which is what lets it name the binary the
+// same way the hooks do — one resolution for both, tracking whatever the
+// spawner exported, with the PATH fallback for a host where it exported
+// nothing.
+const gitSSHCommand = `"${TRIAGE_FACTORY_BIN:-triagefactory}" git-ssh`
+
+// sshBridgeEnv routes the run's SSH-shaped git at the same proxy its HTTPS git
+// already uses. The insteadOf rewrites turn the canonical SSH spellings of the
+// org host into proxy HTTPS before a transport is ever chosen, and they stay
+// the fast path; this is the layer beneath them, where a spelling they missed
+// — or an operator pushInsteadOf that outranks them — still cannot reach the
+// network as the operator's own key.
+//
+// GIT_SSH_VARIANT pins the option dialect git uses so it never probes the
+// dispatcher to discover one. Nil when no upstream host resolves: with nothing
+// to match on, the dispatcher would pass every session through anyway.
+func (c *localGitChannel) sshBridgeEnv() []string {
+	if c == nil || c.proxy == nil {
+		return nil
+	}
+	host := c.proxy.UpstreamHost()
+	if host == "" {
+		return nil
+	}
+	proxyURL, token := c.proxy.Coordinates()
+	return []string{
+		"GIT_SSH_COMMAND=" + gitSSHCommand,
+		"GIT_SSH_VARIANT=ssh",
+		gitssh.UpstreamHostEnvVar + "=" + host,
+		gitssh.ProxyURLEnvVar + "=" + proxyURL,
+		gitssh.ProxyTokenEnvVar + "=" + token,
+	}
 }
 
 // startLocalGitChannel starts the managed Git path before workspace setup, so

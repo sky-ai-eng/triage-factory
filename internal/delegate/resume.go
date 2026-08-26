@@ -431,6 +431,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	}
 	if opts.localGit != nil {
 		extraEnv = append(extraEnv, githooks.PushCaptureEnvVar+"="+githooks.PushCaptureProxy)
+		// The stand-down above is only correct while every push really does
+		// transit the proxy, so the SSH transport joins it here rather than
+		// reaching the org host on its own.
+		extraEnv = append(extraEnv, opts.localGit.sshBridgeEnv()...)
 	}
 
 	// A resume gets the same isolation the initial invocation had — the
