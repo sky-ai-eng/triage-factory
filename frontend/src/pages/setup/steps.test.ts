@@ -67,7 +67,7 @@ describe('persistOrgFields — each org step saves only what it owns', () => {
     const sent = bodies()
     expect(sent[0]).not.toHaveProperty('github_pat')
     expect(sent[0]).not.toHaveProperty('github_base_url')
-    expect(sent[0]).toMatchObject({ github_clone_protocol: 'ssh' })
+    expect(sent[0]).toMatchObject({ github_clone_protocol: 'https' })
   })
 
   it('refuses to save (and makes no request) when the org load failed', async () => {

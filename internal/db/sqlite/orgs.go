@@ -281,7 +281,7 @@ const orgSettingsConflictUpdate = `
 func orgSettingsValues(u domain.OrgSettings) []any {
 	cloneProto := u.GitHubCloneProtocol
 	if cloneProto == "" {
-		cloneProto = "ssh"
+		cloneProto = "https"
 	}
 	return []any{
 		cloneProto,
