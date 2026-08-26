@@ -22,7 +22,13 @@ import { probeCostSentence } from '../lib/models'
 
 export default function ModelGateDialog() {
   const [request, setRequest] = useState<ModelGateRequest | null>(modelGate.current())
-  useEffect(() => modelGate.subscribe(() => setRequest(modelGate.current())), [])
+  useEffect(() => {
+    // subscribe returns its own unsubscribe, and that IS this effect's cleanup.
+    // Spelled out rather than returned from a concise arrow body, because a
+    // subscription whose teardown is invisible reads like one that has none.
+    const unsubscribe = modelGate.subscribe(() => setRequest(modelGate.current()))
+    return unsubscribe
+  }, [])
 
   return (
     <AnimatePresence>

@@ -169,6 +169,46 @@ describe('ModelPicker — one row per model, rendering what the read carries', (
     expect(container).toBeEmptyDOMElement()
   })
 
+  // The unset row survives every reason the list has nothing else to offer,
+  // because inheriting the team default is a real choice and it is available
+  // exactly when no model is. Swallowing it would leave a prompt author unable
+  // to un-pin a model on the day their org narrows its enable-set.
+  it('keeps the unset row pickable when no model is enabled, and still says why', async () => {
+    const onChange = vi.fn()
+    render(
+      <ModelPicker
+        value="verified-model"
+        onChange={onChange}
+        models={[]}
+        loaded
+        ariaLabel="Prompt model"
+        unsetOption={{ label: 'Default', detail: 'Whatever this team runs on.' }}
+      />,
+    )
+
+    expect(screen.getByText(/No models are enabled for this workspace/)).toBeVisible()
+    await userEvent.click(screen.getByRole('radio', { name: /Default/ }))
+    expect(onChange).toHaveBeenCalledWith('')
+  })
+
+  it('keeps the unset row pickable when nothing is reachable, and still says why', async () => {
+    const onChange = vi.fn()
+    render(
+      <ModelPicker
+        value="verified-model"
+        onChange={onChange}
+        models={CATALOG.map((m) => ({ ...m, availability: 'unconfigured' as const }))}
+        loaded
+        ariaLabel="Prompt model"
+        unsetOption={{ label: 'Default', detail: 'Whatever this team runs on.' }}
+      />,
+    )
+
+    expect(screen.getByText(/Connect a provider in Settings → Claude credentials/)).toBeVisible()
+    await userEvent.click(screen.getByRole('radio', { name: /Default/ }))
+    expect(onChange).toHaveBeenCalledWith('')
+  })
+
   // Unset is a real choice only where it means something — a prompt inherits
   // its team's default — and it is never badged, because it names no model.
   it('offers the unset row where a surface has one, unbadged', async () => {
