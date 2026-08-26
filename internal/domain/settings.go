@@ -233,7 +233,7 @@ const MaxConcurrentClaimsCeiling = 1_000_000
 //
 // GitHubCloneProtocol is "ssh" or "https" only — enforced by a CHECK
 // on both backends. An empty string from a caller is treated as
-// "leave the default in place" by UpdateSettings (substitutes "ssh"),
+// "leave the default in place" by UpdateSettings (substitutes "https"),
 // never written to the column.
 type OrgSettings struct {
 	GitHubBaseURL       string
@@ -424,8 +424,14 @@ func (c GitHubCredentialClass) Known() bool {
 // with the schema DEFAULT clauses in baseline migration.
 func DefaultOrgSettings() OrgSettings {
 	return OrgSettings{
-		GitHubPollInterval:  5 * time.Minute,
-		GitHubCloneProtocol: "ssh",
+		GitHubPollInterval: 5 * time.Minute,
+		// HTTPS is the only protocol that can carry the org's OWN credential —
+		// a PAT and an App installation token are both HTTPS bearer
+		// credentials — so it is what an org that has expressed no preference
+		// should get. SSH stays available and is honored end to end when
+		// chosen; it just authenticates as whoever owns the operator's key,
+		// which is not a thing to land on by default.
+		GitHubCloneProtocol: "https",
 		JiraPollInterval:    5 * time.Minute,
 		// Matches the column's NOT NULL DEFAULT 'pat'. An org with no
 		// settings row has bound no credential at all, and "the PAT system,
@@ -444,9 +450,9 @@ func DefaultOrgSettings() OrgSettings {
 // Multi-mode is ALWAYS "https", independent of the stored value: a GitHub App
 // installation token is an HTTPS bearer credential that cannot be used over
 // SSH at all, and the hosted runtime container has no ssh-agent / key /
-// known_hosts. The stored value may still read "ssh" — DefaultOrgSettings
-// returns "ssh" (correct for local), and a legacy row could carry it —
-// so it must not be honored in multi.
+// known_hosts. The write path refuses an "ssh" value in multi, but a stored one
+// can still reach here — a legacy row, or a row written outside the API — so the
+// read coerces rather than trusting the column.
 //
 // Local mode honors the stored value, treating only the literal "ssh" as SSH
 // and defaulting empty / "https" / any stale value to "https" — the same

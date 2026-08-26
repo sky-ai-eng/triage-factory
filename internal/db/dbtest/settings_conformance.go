@@ -53,7 +53,7 @@ type SettingsIDs struct {
 //     `...System` reader (admin pool — bypasses RLS, isolates the
 //     conformance from RLS test coverage which lives in the
 //     per-backend test files).
-//   - GitHubCloneProtocol defaulting: "" upserts as "ssh" (the column
+//   - GitHubCloneProtocol defaulting: "" upserts as "https" (the column
 //     CHECK rejects empty strings on both backends).
 //   - JiraStatusRulesStore.ReplaceForTeam bulk-replace semantics:
 //     upsert wins on conflict, missing project keys get pruned.
@@ -537,10 +537,10 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
-	t.Run("OrgSettings_EmptyCloneProtocol_DefaultsToSSH", func(t *testing.T) {
+	t.Run("OrgSettings_EmptyCloneProtocol_DefaultsToHTTPS", func(t *testing.T) {
 		// The github_clone_protocol column CHECK rejects empty string —
-		// UpdateSettings substitutes "ssh" so a fresh-mutate caller
-		// doesn't have to know the column constraint.
+		// UpdateSettings substitutes the package default so a fresh-mutate
+		// caller doesn't have to know the column constraint.
 		stores, ids := factory(t)
 		in := domain.OrgSettings{
 			GitHubPollInterval: 5 * time.Minute,
@@ -554,8 +554,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if err != nil {
 			t.Fatalf("GetSettingsSystem: %v", err)
 		}
-		if got.GitHubCloneProtocol != "ssh" {
-			t.Errorf("GitHubCloneProtocol=%q; want \"ssh\" (default substitution)", got.GitHubCloneProtocol)
+		if got.GitHubCloneProtocol != "https" {
+			t.Errorf("GitHubCloneProtocol=%q; want \"https\" (default substitution)", got.GitHubCloneProtocol)
 		}
 	})
 

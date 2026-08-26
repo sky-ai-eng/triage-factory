@@ -398,12 +398,12 @@ const CLONE_CARDS: { kind: 'ssh' | 'https'; title: string; detail: string }[] = 
   {
     kind: 'ssh',
     title: 'SSH',
-    detail: 'Clone over SSH using your key (an SSH agent must be configured).',
+    detail: 'Uses your own key and agent. Choose this if your host restricts Git over HTTPS.',
   },
   {
     kind: 'https',
     title: 'HTTPS',
-    detail: 'Clone over HTTPS using your token — no SSH setup needed.',
+    detail: 'Uses your token — no SSH setup, and pushes are checked and recorded.',
   },
 ]
 
@@ -421,7 +421,8 @@ export function GitHubCloneStep({ state, patch, advance }: StepContext) {
           How should repos be cloned?
         </h2>
         <p className="text-body leading-relaxed text-ink-3">
-          Only affects how Triage Factory clones repos to this machine — not the API connection.
+          Sets the transport for every Git operation Triage Factory and its agents make — cloning,
+          fetching and pushing. The GitHub API connection is HTTPS either way.
         </p>
       </div>
       <ChoiceCards
@@ -430,6 +431,13 @@ export function GitHubCloneStep({ state, patch, advance }: StepContext) {
         selected={state.org.github_clone_protocol}
         onChoose={choose}
       />
+      {/* Shown before the choice, not after it: this is what the choice costs,
+          and in the setup wizard picking an option advances the step. */}
+      <p className="text-body leading-relaxed text-ink-3">
+        Base-branch protection and push recording ride the HTTPS identity, so they do not apply on
+        SSH. There, a run&rsquo;s pushes are checked on this machine before they leave, and{' '}
+        <code>git push --no-verify</code> skips that check.
+      </p>
     </div>
   )
 }

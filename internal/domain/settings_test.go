@@ -21,9 +21,12 @@ func TestEffectiveCloneProtocol(t *testing.T) {
 		{"local honors https", "https", false, "https"},
 		{"local defaults empty to https", "", false, "https"},
 		{"local defaults stale to https", "garbage", false, "https"},
-		// DefaultOrgSettings ships "ssh" — correct for local, must coerce in multi.
-		{"local default-row ssh stays ssh", DefaultOrgSettings().GitHubCloneProtocol, false, "ssh"},
-		{"multi default-row ssh coerces", DefaultOrgSettings().GitHubCloneProtocol, true, "https"},
+		// The package default is what a read with no row resolves to and what
+		// an explicit clear lands on, so it has to be a value BOTH modes can
+		// honor — otherwise every door onto the column needs to fix it up
+		// rather than none of them.
+		{"package default survives local", DefaultOrgSettings().GitHubCloneProtocol, false, "https"},
+		{"package default survives multi", DefaultOrgSettings().GitHubCloneProtocol, true, "https"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

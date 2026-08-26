@@ -13,8 +13,9 @@ import (
 )
 
 // TestOrgSettings_CloneProtocolClear_LocalKeepsTheDefault pins the clear arm
-// where "ssh" is a real answer: local mode honors the stored value, so a null
-// means the package default and lands on it.
+// in the mode where "ssh" is a real answer: local honors the stored value, so a
+// null means the package default and has to land on it rather than on the value
+// that happens to be the other option.
 func TestOrgSettings_CloneProtocolClear_LocalKeepsTheDefault(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -26,8 +27,8 @@ func TestOrgSettings_CloneProtocolClear_LocalKeepsTheDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read back settings: %v", err)
 	}
-	if got.GitHubCloneProtocol != "ssh" {
-		t.Errorf("stored github_clone_protocol = %q; want %q", got.GitHubCloneProtocol, "ssh")
+	if got.GitHubCloneProtocol != "https" {
+		t.Errorf("stored github_clone_protocol = %q; want %q", got.GitHubCloneProtocol, "https")
 	}
 }
 
@@ -39,9 +40,9 @@ func TestOrgSettings_CloneProtocolClear_LocalKeepsTheDefault(t *testing.T) {
 // All three doors matter because they fail differently. Provisioning names only
 // org_id and takes the column from its DEFAULT, so the seed is the value a
 // fresh org is born with and nothing in the API is involved. An explicit null
-// means "back to the default", and the package default is "ssh" — the very
-// value the set arm rejects, so an unresolved clear writes through a validator.
-// The set arm is the only one that was ever guarded.
+// means "back to the default", which reaches the column through a resolver
+// rather than as the raw package value. The set arm is the only one that was
+// ever guarded.
 //
 // Asserted against the stored column rather than the GET: the read side
 // normalizes, so every one of these looks correct through the API whatever the

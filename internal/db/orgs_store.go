@@ -99,8 +99,9 @@ type OrgsStore interface {
 	// UpdateSettings upserts the org's settings row. An empty
 	// GitHubBaseURL / JiraBaseURL / AnthropicAPIKeyRef /
 	// BedrockCredentialsRef, and a nil EnabledModels, write NULL into
-	// the column. An empty GitHubCloneProtocol substitutes "ssh" — the
-	// column CHECK rejects empty strings. Postgres routes through
+	// the column. An empty GitHubCloneProtocol substitutes "https" — the
+	// column CHECK rejects empty strings, and this matches both the column
+	// DEFAULT and DefaultOrgSettings, so no door onto it disagrees. Postgres routes through
 	// the app pool (org_settings_update RLS gates by org admin).
 	//
 	// It does NOT write github_credential_class: that column is owned by the

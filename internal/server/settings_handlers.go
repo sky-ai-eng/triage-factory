@@ -1158,9 +1158,10 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	if v, st := httpx.PatchString(&shape, req.GitHubCloneProtocol, "github_clone_protocol"); st != httpx.PatchAbsent {
 		// The cleared-to-default value goes through the same resolver the read
 		// side does, so a null clears to what this deployment can actually
-		// honor. The package default is "ssh" (right for local), and writing it
-		// unresolved would plant, via an explicit clear, exactly the value the
-		// PatchSet arm below refuses to accept in multi.
+		// honor. The package default is "https" in both modes today, so the
+		// resolver is a no-op on it — it stays because the default is a local
+		// concern and the resolver is what keeps a future one that multi
+		// cannot honor from being planted here by an explicit clear.
 		next := domain.EffectiveCloneProtocol(defaults.GitHubCloneProtocol, runmode.Current() == runmode.ModeMulti)
 		if st == httpx.PatchSet {
 			switch {

@@ -529,6 +529,10 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	}
 	if cfg.localGit != nil {
 		extraEnv = append(extraEnv, githooks.PushCaptureEnvVar+"="+githooks.PushCaptureProxy)
+		// The stand-down above is only correct while every push really does
+		// transit the proxy, so the SSH transport joins it here rather than
+		// reaching the org host on its own.
+		extraEnv = append(extraEnv, cfg.localGit.sshBridgeEnv()...)
 	}
 
 	// Local-mode courtesy isolation: the mount-namespace plan plus the

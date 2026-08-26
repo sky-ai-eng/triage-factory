@@ -339,7 +339,12 @@ CREATE TABLE org_settings (
     org_id                  TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
     github_base_url         TEXT,
     github_poll_interval    TEXT NOT NULL DEFAULT '5m0s',
-    github_clone_protocol   TEXT NOT NULL DEFAULT 'ssh'
+    -- HTTPS is the default because it is the only protocol that can carry
+    -- the org's own GitHub credential: a PAT and an App installation token are
+    -- both HTTPS bearer credentials, so an SSH clone authenticates as whoever
+    -- owns the operator's key instead, and the per-run credential proxy — with
+    -- its ref policy and push recording — has nothing to attach.
+    github_clone_protocol   TEXT NOT NULL DEFAULT 'https'
                                 CHECK (github_clone_protocol IN ('https', 'ssh')),
     jira_base_url           TEXT,
     jira_poll_interval      TEXT NOT NULL DEFAULT '5m0s',

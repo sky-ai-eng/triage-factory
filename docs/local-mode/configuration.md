@@ -121,11 +121,34 @@ can change it. That is deliberate: a task's text comes from pull-request bodies,
 issue comments and labels, so anyone who can comment on an issue in a tracked
 repository could otherwise talk a run into pushing to `main`.
 
-In local mode TF routes the managed Git path through a per-run loopback proxy.
+In local mode the **clone protocol** decides which of two paths a delegated run's
+Git takes. The GitHub API connection is HTTPS either way.
+
+On **HTTPS**, TF routes the managed Git path through a per-run loopback proxy.
 That proxy authenticates with the GitHub identity configured in TF, checks the
 team's tracked/materialized repository set and base-branch policy, and records
 the actual upstream result. It refuses a push when it cannot authorize the
 repository or ref instead of falling back to your SSH key or credential helper.
+
+That covers SSH-shaped remotes too. The common spellings of your GitHub host are
+rewritten onto the proxy before Git picks a transport at all; anything they miss
+— an unusual `ssh://` form, an explicit port, a `pushInsteadOf` in your own
+`~/.gitconfig` — reaches a dispatcher that stands in for `ssh` and carries the
+session to the same proxy, so it is authorized, authenticated and recorded
+identically. A remote on any other host still goes out over real `ssh`,
+unchanged and (as before) unrecorded.
+
+On **SSH**, none of that runs. You selected your own key and agent as this
+deployment's Git identity, so TF uses them: the clone, every fetch and every
+push go out over SSH exactly as they would from your shell, with no rewrite and
+no proxy in the way — which is the point if your GitHub host restricts Git over
+HTTPS. Base-branch protection and push recording ride the HTTPS identity and do
+not apply. What remains is the local pre-push check, which refuses a
+base-branch push and records the branches a push carries. It runs before the
+transfer, so it records a branch whether or not the remote accepts it, and
+`git push --no-verify` skips it entirely. An SSH failure — an agent that lost
+its keys after a reboot, say — fails the operation and says so; TF never
+substitutes HTTPS for a transport you chose.
 
 This is still a **safety and identity guarantee for ordinary behavior, not a
 security boundary**: a local-mode agent runs as you with unrestricted shell

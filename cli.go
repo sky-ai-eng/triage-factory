@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
+	"github.com/sky-ai-eng/triage-factory/cmd/gitssh"
 	"github.com/sky-ai-eng/triage-factory/cmd/hook"
 	"github.com/sky-ai-eng/triage-factory/cmd/install"
 	"github.com/sky-ai-eng/triage-factory/cmd/instance"
@@ -51,6 +52,14 @@ func dispatchCLI(args []string) (handled bool, err error) {
 		hook.Handle(args[1:])
 	case "status":
 		exec.HandleStatus(args[1:])
+	case "git-ssh":
+		// Internal: the GIT_SSH_COMMAND dispatcher a managed local run's git
+		// execs in place of ssh, bridging org-host sessions onto the run's git
+		// proxy and passing every other host through to real ssh. git chooses
+		// when to run it, with git-generated argv — never a human or the
+		// agent. Off the `exec` namespace and undocumented in --help for the
+		// same reason as `hook`.
+		gitssh.Handle(args[1:])
 	case "snapshot-capture":
 		// Internal: run a parked run's git-delta capture, emitting the delta as
 		// JSON. Spawned by the delegate spawner as the sandbox uid so the

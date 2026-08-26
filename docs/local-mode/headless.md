@@ -80,7 +80,9 @@ Headless defaults to **HTTPS** cloning, authenticated with the bot PAT — a
 headless box usually has no SSH agent, so HTTPS is the credential-bearing path
 that works out of the box (private repos included). Set
 `TRIAGE_FACTORY_CLONE_PROTOCOL=ssh` only if the box has an SSH agent with a loaded
-key for your GitHub host; SSH clones authenticate through that agent, not the PAT.
+key for your GitHub host; SSH clones authenticate through that agent, not the PAT,
+and base-branch protection and push recording do not apply on that path (see
+[configuration](configuration.md)).
 
 Provisioning is a **one-time seed**: it runs only on the first start and never
 overwrites anything you later change in the UI, so editing repos or statuses in

@@ -171,9 +171,10 @@ export default function GitHubAccessGroup({
               )}
             </div>
             <p className="text-reported text-ink-3 mt-1.5 leading-relaxed">
-              Your token is still required for the GitHub API. The protocol only affects how Triage
-              Factory clones repos to your machine. Saving the toggle re-clones bare repos with the
-              new origin URL.
+              Your token is still required for the GitHub API. The protocol sets the transport for
+              every Git operation Triage Factory and its agents make; base-branch protection and
+              push recording ride the HTTPS identity and do not apply on SSH. Saving the toggle
+              re-clones bare repos with the new origin URL.
             </p>
             {sshTestState.kind === 'ok' && (
               <p className="text-reported text-warm mt-1.5">
