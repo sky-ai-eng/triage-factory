@@ -6,7 +6,10 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 import TeamPicker from './TeamPicker'
 import MarketplacePublishControl from './MarketplacePublishControl'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
-import { useModelCatalog, modelDisplayName } from '../hooks/useModelCatalog'
+import { useModelCatalog, modelCatalogEntry, modelDisplayName } from '../hooks/useModelCatalog'
+import ModelPicker from './ModelPicker'
+import { useApiOrgId } from '../hooks/useApiOrgId'
+import { gateModelSave } from '../lib/modelGate'
 import { promptsBase, blueprintsBase } from '../lib/scope'
 
 interface Props {
@@ -87,7 +90,10 @@ export default function PromptDrawer({
   // The models this org offers. A prompt's Model is a pin drawn from the same
   // catalog the team default is, so the two pickers can never disagree about
   // what exists.
-  const { models } = useModelCatalog()
+  const { models, loaded: modelsLoaded } = useModelCatalog()
+  // The org whose catalog those models came from — what the save gate addresses
+  // its test to.
+  const orgId = useApiOrgId()
   const [stats, setStats] = useState<PromptStatsData | null>(null)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -96,6 +102,15 @@ export default function PromptDrawer({
   const dragging = useRef(false)
   const startX = useRef(0)
   const startWidth = useRef(0)
+
+  // A pin the catalog no longer offers still has to render as the selection, or
+  // the drawer would silently show this prompt inheriting a model it does not
+  // inherit. It carries no availability field, which is the truth about it: the
+  // build makes no claim on a model it no longer describes.
+  const pinOptions =
+    model !== '' && !models.some((m) => m.key === model)
+      ? [...models, { key: model, display_name: modelDisplayName(model), enabled: true }]
+      : models
 
   const open = promptId !== null || isNew
 
@@ -224,6 +239,13 @@ export default function PromptDrawer({
       setError('Body is required')
       return
     }
+    // A pin is a model choice like any other, so it passes the same gate: one
+    // nothing has established these credentials can run is tested first, and
+    // the prompt is written only on green. An unpinned prompt (model === '')
+    // inherits the team default and has nothing of its own to test.
+    const picked = modelCatalogEntry(orgId, model)
+    if (picked && !(await gateModelSave(orgId!, picked))) return
+
     setSaving(true)
     setError('')
 
@@ -379,27 +401,20 @@ export default function PromptDrawer({
 
               <div>
                 <label className="block text-ui font-medium text-ink-2 mb-1.5">Model</label>
-                <select
+                <ModelPicker
                   value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  disabled={readOnly}
-                  className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-60"
-                >
-                  <option value="">
-                    Default{defaultModel ? ` (${modelDisplayName(defaultModel)})` : ''}
-                  </option>
-                  {models.map((m) => (
-                    <option key={m.key} value={m.key}>
-                      {m.display_name}
-                    </option>
-                  ))}
-                  {/* A pin the catalog no longer offers still has to render as
-                      the selection, or the drawer would silently show this
-                      prompt inheriting a model it does not inherit. */}
-                  {model !== '' && !models.some((m) => m.key === model) && (
-                    <option value={model}>{modelDisplayName(model)}</option>
-                  )}
-                </select>
+                  onChange={setModel}
+                  readOnly={readOnly}
+                  models={pinOptions}
+                  loaded={modelsLoaded}
+                  ariaLabel="Prompt model"
+                  unsetOption={{
+                    label: 'Default',
+                    detail: defaultModel
+                      ? `Whatever this team runs on — ${modelDisplayName(defaultModel)} today.`
+                      : 'Whatever this team runs on.',
+                  }}
+                />
                 <p className="text-label text-ink-3 mt-1.5">
                   Default tracks the model chosen in Settings — change it there and every prompt
                   using Default follows.

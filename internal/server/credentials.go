@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -38,6 +39,53 @@ func persistOrgGitHubIdentity(ctx context.Context, tx db.TxStores, orgID, login,
 	}
 	_, e := tx.Agents.SetGitHubOrgIdentity(ctx, orgID, agent.ID, login, email)
 	return e
+}
+
+// setupModelPicks answers whether this org has made the two model choices setup
+// requires of it: the background-jobs model, and the default model of the team
+// setup configures. They are reported separately because they are two different
+// screens — one org-scoped, one team-scoped — and the resume point has to name
+// the one that is actually missing.
+//
+// MULTI ONLY, and this is the one recorded mode asymmetry of the model surface
+// rather than drift. TF ships no fallback model, so a multi org that skipped
+// either pick has background jobs that silently never run and a team whose every
+// unpinned step refuses at dispatch — neither of which says anything at the
+// moment it is decided. Local pre-fills both from its dialect's column defaults
+// and never blocks on them, so asking there would gate a first run on a question
+// nobody was asked.
+//
+// The team is the org's default (oldest) team — the same one the wizard's team
+// section resolves and configures, so the answer is about the row the founder
+// was actually shown. Read under the caller's claims like everything else on
+// this route; a caller outside that team reads the schema defaults, which are
+// populated, so the gate errs toward letting them in rather than bouncing
+// somebody through a wizard step they cannot even see.
+func setupModelPicks(ctx context.Context, tx db.TxStores, orgID string) (orgPick, teamPick bool, err error) {
+	if runmode.Current() != runmode.ModeMulti {
+		return true, true, nil
+	}
+	orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
+	if err != nil {
+		return false, false, fmt.Errorf("load org settings for the setup gate: %w", err)
+	}
+	orgPick = strings.TrimSpace(orgSet.BackgroundJobsModel) != ""
+
+	teamID, err := tx.Teams.GetDefaultForOrg(ctx, orgID)
+	if err != nil {
+		return false, false, fmt.Errorf("resolve the default team for the setup gate: %w", err)
+	}
+	if teamID == "" {
+		// A teamless org is a bootstrap bug, not an unfinished pick. Nothing
+		// here can be chosen yet, and reporting the org incomplete would send
+		// the founder to a wizard whose team section has nothing to address.
+		return orgPick, true, nil
+	}
+	teamSet, err := tx.Teams.GetSettings(ctx, teamID)
+	if err != nil {
+		return false, false, fmt.Errorf("load team settings for the setup gate: %w", err)
+	}
+	return orgPick, strings.TrimSpace(teamSet.DefaultModel) != "", nil
 }
 
 func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request) {
@@ -97,12 +145,17 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		credsErr    error
 		repoCount   int
 		githubReady bool
+		orgModel    bool
+		teamModel   bool
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, credsErr = integrations.Load(r.Context(), tx.Secrets, orgID)
 		var e error
 		repoCount, e = tx.Repos.CountConfigured(r.Context(), orgID)
 		if e != nil {
+			return e
+		}
+		if orgModel, teamModel, e = setupModelPicks(r.Context(), tx, orgID); e != nil {
 			return e
 		}
 		// GitHub access can be satisfied by a registered GitHub App (the
@@ -146,8 +199,9 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	// Setup is complete once GitHub access is configured (PAT or registered
-	// App; the env overlay folds into creds.GitHubPAT) AND the org has brought
-	// at least one repo into the registry. ReplaceForTeam writes the registry
+	// App; the env overlay folds into creds.GitHubPAT), the org has brought at
+	// least one repo into the registry, and — in multi mode, where nothing is
+	// pre-filled — both model picks are made. ReplaceForTeam writes the registry
 	// row in the same tx it records the team's tracked repos, so repoCount is a
 	// durable signal here — it doesn't lag behind the (async) profiling pass.
 	// It counts the registry rather than the tracked set on purpose: a founder
@@ -155,12 +209,15 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	// setup, and bouncing them back through it would be a regression, not a
 	// reminder. Jira stays optional. setup_step tells the gate which configure
 	// screen an incomplete founder resumes on.
-	setupComplete := githubReady && repoCount >= 1
+	setupComplete := githubReady && orgModel && teamModel && repoCount >= 1
+	// The order is the wizard's own: the org's credential and jobs model, then
+	// the team's repos, then the team's default model. Each arm names the screen
+	// its missing input lives on, so a founder resumes where the work is.
 	setupStep := "done"
 	switch {
-	case !githubReady:
+	case !githubReady, !orgModel:
 		setupStep = "org"
-	case repoCount == 0:
+	case repoCount == 0, !teamModel:
 		setupStep = "team"
 	}
 

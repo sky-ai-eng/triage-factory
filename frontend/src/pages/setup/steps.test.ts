@@ -245,3 +245,52 @@ describe('team-model step — collapsed summary', () => {
     expect(teamModelStep().collapsedSummary(state)).toBe('Default model: claude-sonnet-5')
   })
 })
+
+// The two model picks and the credential steps that must come first.
+//
+// The order is the requirement, not a preference: a picker asked before the
+// credential can only offer models the org may turn out to have no way of
+// running, and its availability badges have nothing to be about. And both picks
+// are mandatory, because nothing falls back — a workspace through setup without
+// them has background jobs that never run and a team whose unpinned steps refuse
+// at dispatch.
+describe('setup — credentials before the model picks, and both picks mandatory', () => {
+  const indexOf = (id: string) => {
+    const i = WIZARD_STEPS.findIndex((s) => s.id === id)
+    if (i < 0) throw new Error(`${id} is missing from WIZARD_STEPS`)
+    return i
+  }
+  const stepFor = (id: string) => WIZARD_STEPS[indexOf(id)]
+
+  it('asks for the Claude credential before either model is chosen', () => {
+    const credential = indexOf('org-claude-key')
+    expect(credential).toBeLessThan(indexOf('org-background-jobs-model'))
+    expect(credential).toBeLessThan(indexOf('team-model'))
+    expect(indexOf('org-claude-source')).toBeLessThan(credential)
+  })
+
+  // Unset blocks in BOTH modes, and the mode difference is the seeded value
+  // rather than a branch here: a local install's reads arrive pre-filled from
+  // its own column defaults, so its steps are complete on arrival and it never
+  // feels the gate.
+  it('blocks on an unchosen background-jobs model', () => {
+    const base = initialWizardState()
+    expect(stepFor('org-background-jobs-model').isComplete(base)).toBe(false)
+    expect(
+      stepFor('org-background-jobs-model').isComplete({
+        ...base,
+        org: { ...base.org, background_jobs_model: 'claude-haiku-4-5-20251001' },
+      }),
+    ).toBe(true)
+  })
+
+  it('blocks on an unchosen team default model, and says what to do', () => {
+    const base = initialWizardState()
+    const step = stepFor('team-model')
+    expect(step.isComplete(base)).toBe(false)
+    expect(step.validate?.(base)).toMatch(/choose a default model/i)
+    const chosen = { ...base, team: { ...base.team, default_model: 'claude-sonnet-5' } }
+    expect(step.isComplete(chosen)).toBe(true)
+    expect(step.validate?.(chosen)).toBeNull()
+  })
+})

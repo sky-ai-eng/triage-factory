@@ -11,7 +11,7 @@
 //
 // Each team-scope group is its own flush collapsible composing the wizard's
 // `bare`/glass primitives (the inline RepoPickerModal, bare GitHubTeamGroup /
-// JiraProjectRulesGroup, ModelTierSelector) — no carded field groups.
+// JiraProjectRulesGroup, ModelPicker) — no carded field groups.
 //
 // Two couplings to honour:
 //   • Team-defaults ride PATCH /api/teams/{id}/settings and Jira-projects their
@@ -52,7 +52,9 @@ import {
   type TeamConfigForm,
 } from '../teamConfig'
 import { apiJSON } from '../../../lib/apiClient'
-import { modelDisplayName } from '../../../hooks/useModelCatalog'
+import { modelCatalogEntry, modelDisplayName } from '../../../hooks/useModelCatalog'
+import { useApiOrgId } from '../../../hooks/useApiOrgId'
+import { gateModelSave } from '../../../lib/modelGate'
 import SettingsSection from './SettingsSection'
 
 // Review-posting postures, in the order they're offered: the
@@ -176,6 +178,9 @@ export default function TeamSettings({
   // The endpoint alias: local addresses the sole team as "default"; multi uses
   // the selected team's real id.
   const endpointTeamId = isLocal ? 'default' : teamId
+  // The org whose catalog this team's models are drawn from — the model routes
+  // are org-scoped, and the save gate reads the same catalog the picker does.
+  const apiOrgId = useApiOrgId()
 
   const [baseline, setBaseline] = useState<TeamConfigForm>(emptyTeamConfig)
   const [reposLoaded, setReposLoaded] = useState(false)
@@ -356,6 +361,11 @@ export default function TeamSettings({
     reviewPosture !== baseline.review_posture ||
     basePushPolicy !== baseline.base_branch_push_policy
   const saveDefaults = async (): Promise<boolean> => {
+    // The save gate first: a team default nothing has established these
+    // credentials can run is tested before it is stored, because the alternative
+    // is a team whose every unpinned step fails at its next dispatch.
+    const picked = modelCatalogEntry(apiOrgId, defaultModel)
+    if (picked && !(await gateModelSave(apiOrgId!, picked))) return false
     setSavingDefaults(true)
     try {
       const res = await saveTeamSettings(

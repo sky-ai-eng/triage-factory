@@ -254,8 +254,9 @@ function SetupPendingNotice() {
  * RequireSetupComplete is the first-run completeness gate. It wraps the app
  * shell (NOT the configure routes — those must stay reachable for an
  * incomplete founder, so gating them here would loop) and blocks rendering
- * until the active org is setup_complete (GitHub access configured AND ≥1
- * tracked repo). An admin/owner of an incomplete org is routed to the single
+ * until the active org is setup_complete (GitHub access configured, ≥1 tracked
+ * repo, and the model picks setup requires). An admin/owner of an incomplete
+ * org is routed to the single
  * /setup wizard, which resumes on the first incomplete step (computed
  * client-side); a non-admin gets the holding screen since they can't action
  * the missing config. The gate no longer needs setup_step — one redirect
