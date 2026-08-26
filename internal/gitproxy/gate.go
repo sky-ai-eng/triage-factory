@@ -36,7 +36,7 @@ func parseGitPath(method, path string) (owner, repo, op string, ok bool) {
 	}
 	owner = segs[0]
 	repo = strings.TrimSuffix(segs[1], ".git")
-	if !validRepoSeg(owner) || !validRepoSeg(repo) {
+	if !ValidRepoSegment(owner) || !ValidRepoSegment(repo) {
 		return "", "", "", false
 	}
 	rest := segs[2:]
@@ -78,15 +78,22 @@ func IsGitSmartHTTPPath(method, path string) bool {
 	return false
 }
 
-// validRepoSeg accepts a single owner/repo path segment: non-empty, drawn from
-// the GitHub owner/repo alphabet [A-Za-z0-9._-], and free of "..". Restricting
-// the charset is defense-in-depth for the allowlist — it rejects a surviving
-// percent-escape (e.g. a smuggled "%2e%2e" or "%2f"), whitespace, and any other
-// byte that could yield an ambiguous or normalized path, so the owner/repo we
-// extract (and feed to the Authorize gate + the per-repo token-cache key) is
-// always a clean, expected shape. ".." is excluded explicitly: it passes the
-// charset (dots) but is no real repo name and enables traversal.
-func validRepoSeg(s string) bool {
+// ValidRepoSegment accepts a single owner/repo path segment: non-empty, drawn
+// from the GitHub owner/repo alphabet [A-Za-z0-9._-], and free of "..".
+// Restricting the charset is defense-in-depth for the allowlist — it rejects a
+// surviving percent-escape (e.g. a smuggled "%2e%2e" or "%2f"), whitespace, and
+// any other byte that could yield an ambiguous or normalized path, so the
+// owner/repo we extract (and feed to the Authorize gate + the per-repo
+// token-cache key) is always a clean, expected shape. ".." is excluded
+// explicitly: it passes the charset (dots) but is no real repo name and enables
+// traversal.
+//
+// Exported for the same reason IsGitSmartHTTPPath is: a caller that BUILDS a
+// path for this handler — the local run's SSH bridge, which turns a remote
+// path git handed it into a request here — has to agree with the rule rather
+// than restate it, so a segment this handler would refuse is refused where the
+// caller can still say something useful about it.
+func ValidRepoSegment(s string) bool {
 	if s == "" || strings.Contains(s, "..") {
 		return false
 	}

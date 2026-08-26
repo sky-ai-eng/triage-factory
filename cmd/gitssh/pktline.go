@@ -40,6 +40,13 @@ func (p *pktReader) readPacket() (raw, payload []byte, err error) {
 		return nil, nil, fmt.Errorf("malformed pkt-line length %q", hdr)
 	}
 	if n < pktHeaderLen {
+		// 0000, 0001 and 0002 are the only defined control packets. A length
+		// of 3 is unassigned, and passing it through as a control packet would
+		// leave the stream framed one packet behind what the peer meant —
+		// stopping on input that is already wrong beats desynchronizing on it.
+		if n > 2 {
+			return nil, nil, fmt.Errorf("undefined pkt-line control packet %q", hdr)
+		}
 		return hdr, nil, nil
 	}
 	line := make([]byte, n)

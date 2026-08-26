@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 )
 
 // The two remote commands git runs over ssh for a fetch and a push. Anything
@@ -31,6 +33,17 @@ type bridgeConfig struct {
 	upstreamHost string
 	proxyURL     string
 	proxyToken   string
+}
+
+// newClient dials the run's proxy directly. The default transport would consult
+// HTTP_PROXY/NO_PROXY, and the one address this ever talks to is a loopback
+// port on this machine: an inherited proxy setting has no route to it, and
+// sending the run's placeholder through a corporate proxy on the way is not a
+// thing that should depend on how the operator's shell happens to be
+// configured. No client timeout — a fetch's response IS the packfile, and it
+// takes as long as the repository is large.
+func newClient() *http.Client {
+	return &http.Client{Transport: &http.Transport{Proxy: nil}}
 }
 
 // bridgeConfigFromEnv reads the run env. ok=false when any part is missing,
@@ -68,8 +81,8 @@ func bridge(cfg bridgeConfig, remoteCommand string, stdin io.Reader, stdout io.W
 	if err != nil {
 		return err
 	}
-	client := &http.Client{}
 	s := session{bridgeConfig: cfg, repoPath: repoPath, service: service}
+	client := newClient()
 	switch service {
 	case receivePackService:
 		return bridgePush(client, s, stdin, stdout)
@@ -348,10 +361,16 @@ func parseRemoteCommand(remoteCommand string) (service, repoPath string, err err
 // splitOwnerRepo reduces the path git sends to the owner/repo pair the proxy
 // gates on. The ssh:// and scp-like spellings differ only in the leading
 // slash, and both may or may not carry the ".git" suffix.
+//
+// The segments are held to the proxy's own admission rule rather than a looser
+// one of our own: this is the side that BUILDS the request path, so a segment
+// the proxy would refuse should be refused before it is interpolated into a
+// URL — the agent then reads which remote path was wrong instead of a generic
+// refusal from the far end of a session it can no longer see.
 func splitOwnerRepo(path string) (owner, repo string, err error) {
 	trimmed := strings.TrimSuffix(strings.Trim(path, "/"), ".git")
 	owner, repo, found := strings.Cut(trimmed, "/")
-	if !found || owner == "" || repo == "" || strings.Contains(repo, "/") {
+	if !found || !gitproxy.ValidRepoSegment(owner) || !gitproxy.ValidRepoSegment(repo) {
 		return "", "", fmt.Errorf("remote path %q is not an owner/repo on the managed git host", path)
 	}
 	return owner, repo, nil

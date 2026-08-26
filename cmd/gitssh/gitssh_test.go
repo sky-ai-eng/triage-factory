@@ -81,10 +81,16 @@ func TestParseRemoteCommand(t *testing.T) {
 		{name: "scp-like fetch", in: "git-upload-pack 'acme/widgets.git'", service: uploadPackService, repo: "acme/widgets"},
 		{name: "no dot-git suffix", in: "git-upload-pack '/acme/widgets'", service: uploadPackService, repo: "acme/widgets"},
 		{name: "unquoted path", in: "git-upload-pack /acme/widgets.git", service: uploadPackService, repo: "acme/widgets"},
-		{name: "embedded quote", in: `git-upload-pack '/acme/wid'\''gets.git'`, service: uploadPackService, repo: "acme/wid'gets"},
 		{name: "no path", in: "git-upload-pack", wantErr: true},
 		{name: "not owner/repo", in: "git-upload-pack '/widgets.git'", wantErr: true},
 		{name: "nested path", in: "git-upload-pack '/acme/team/widgets.git'", wantErr: true},
+		// The proxy admits one alphabet for a repository segment, and this is
+		// the side that builds the path it will parse, so anything outside it
+		// is refused here rather than interpolated into a URL.
+		{name: "traversal", in: "git-upload-pack '/acme/../etc.git'", wantErr: true},
+		{name: "percent escape", in: "git-upload-pack '/acme/wid%2fgets.git'", wantErr: true},
+		{name: "quote in segment", in: `git-upload-pack '/acme/wid'\''gets.git'`, wantErr: true},
+		{name: "space in segment", in: "git-upload-pack '/acme/wid gets.git'", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,5 +122,31 @@ func TestBridge_RefusesNonTransportCommand(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "fetch and push only") {
 		t.Fatalf("error = %v, want it to name the supported services", err)
+	}
+}
+
+// git single-quotes the repository path and writes an embedded quote by
+// closing the quoting, escaping the character and reopening — a shape the
+// segment alphabet then refuses, but one the unquoting has to get right to
+// refuse the real path rather than a mangled one.
+func TestUnquotePath(t *testing.T) {
+	cases := map[string]string{
+		"'/acme/widgets.git'":     "/acme/widgets.git",
+		"'acme/widgets.git'":      "acme/widgets.git",
+		"/acme/widgets.git":       "/acme/widgets.git",
+		`'/acme/wid'\''gets.git'`: "/acme/wid'gets.git",
+	}
+	for in, want := range cases {
+		got, err := unquotePath(in)
+		if err != nil {
+			t.Errorf("unquotePath(%q): %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("unquotePath(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if _, err := unquotePath("'/acme/widgets.git"); err == nil {
+		t.Error("unquotePath accepted an unterminated quote, want an error")
 	}
 }
