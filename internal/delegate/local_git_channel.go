@@ -103,13 +103,14 @@ func (c *localGitChannel) sshBridgeEnv() []string {
 
 // startLocalGitChannel starts the managed Git path before workspace setup, so
 // the initial clone and every later agent Git command use the configured TF
-// identity. A non-GitHub task with no configured GitHub credential may still
-// run; there is no configured identity for Git to standardize on in that case.
+// identity. It is the HTTPS half of the clone-protocol choice: an org that
+// selected SSH gets no channel and keeps its own transport, for the reasons
+// below. A non-GitHub task with no configured GitHub credential may still run;
+// there is no configured identity for Git to standardize on in that case.
 func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task domain.Task, info agenthost.ConversationInfo) (*localGitChannel, error) {
 	if runmode.Current() != runmode.ModeLocal {
 		return nil, nil
 	}
-
 	s.mu.Lock()
 	resolver := s.ghResolver
 	s.mu.Unlock()
@@ -133,6 +134,29 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 		if task.EntitySource == "github" {
 			return nil, errors.New("GitHub credentials not configured; local Git refuses to fall back to the operator's credentials")
 		}
+		return nil, nil
+	}
+
+	// Ordered after the credential check, not before it: an org with no GitHub
+	// credential cannot do GitHub work at all — the REST surface needs one
+	// whatever the Git transport is — so that refusal stands for every
+	// protocol.
+	//
+	// Past it, an org that selected the SSH clone protocol selected the
+	// operator's own key as this deployment's Git identity. That is a
+	// CONFIGURED identity, not the ambient credential-helper fallback the
+	// refusal guards against, and the managed channel is an HTTPS credential
+	// path end to end — standing one up would substitute the one transport the
+	// operator explicitly chose against, on a host that may well restrict it.
+	//
+	// Returning nil settles the whole run rather than one decision: the clone
+	// URL, the insteadOf rewrites, the SSH bridge and the push-capture
+	// stand-down are all conditioned on this channel existing. Ref policy and
+	// push recording then fall to the pre-push hook, which is what it is for
+	// when no proxy owns them. The gaps that come with it — a --no-verify
+	// bypass, and recording at pre-push time rather than on the upstream's
+	// answer — are disclosed where the protocol is chosen.
+	if s.useSSHCloneProtocol(ctx, orgID, info.ConversationID) {
 		return nil, nil
 	}
 

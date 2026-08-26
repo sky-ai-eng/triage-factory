@@ -143,3 +143,56 @@ func TestStartLocalGitChannel_BridgesSSHOntoTheSameProxy(t *testing.T) {
 		t.Errorf("Git config = %v, want protocol.version pinned to 2", channel.configPairs(nil))
 	}
 }
+
+// An org that chose the SSH clone protocol chose the operator's key as its Git
+// identity. The managed channel is HTTPS end to end, so it must not start —
+// otherwise every downstream decision it drives substitutes the one transport
+// the operator explicitly chose against.
+func TestStartLocalGitChannel_SSHProtocolKeepsTheOperatorsTransport(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	stores := db.Stores{
+		Repos: &seedRepositoryStore{},
+		Orgs:  stubOrgsSettings{settings: domain.OrgSettings{GitHubCloneProtocol: "ssh"}},
+	}
+	s := NewSpawner(nil, stores, nil, nil, "")
+	s.SetStores(stores)
+	s.SetRunCredentialResolvers(&localGitResolver{fakeResolver: &fakeResolver{
+		token:   githubapp.Token{Value: "configured-bot-token"},
+		baseURL: "https://ghe.example.com",
+	}}, nil, nil)
+
+	channel, err := s.startLocalGitChannel(context.Background(), runmode.LocalDefaultOrgID,
+		domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#7"},
+		agenthost.ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-ssh"})
+	if err != nil {
+		t.Fatalf("startLocalGitChannel: %v", err)
+	}
+	if channel != nil {
+		_ = channel.Close()
+		t.Fatal("an SSH-protocol org got a managed HTTPS Git channel, want none")
+	}
+	// Every downstream decision hangs off the channel's absence, so a nil one
+	// is the whole answer: no rewrites, no bridge, and TF_GIT_PUSH_CAPTURE
+	// unset, which hands ref policy and recording to the pre-push hook.
+	if channel.configPairs(nil) != nil || channel.sshBridgeEnv() != nil {
+		t.Error("a nil channel still produced Git config or SSH bridge env")
+	}
+}
+
+// Choosing SSH says which transport carries Git, not that GitHub can be worked
+// without a credential — the REST surface needs one either way. So the ambient
+// refusal outranks the protocol rather than being excused by it.
+func TestStartLocalGitChannel_SSHProtocolDoesNotExcuseAnUnconfiguredOrg(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	stores := db.Stores{Orgs: stubOrgsSettings{settings: domain.OrgSettings{GitHubCloneProtocol: "ssh"}}}
+	s := NewSpawner(nil, stores, nil, nil, "")
+	s.SetStores(stores)
+	s.SetRunCredentialResolvers(&localGitResolver{fakeResolver: &fakeResolver{noCredential: true}}, nil, nil)
+
+	_, err := s.startLocalGitChannel(context.Background(), runmode.LocalDefaultOrgID,
+		domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#7"},
+		agenthost.ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-none"})
+	if err == nil || !strings.Contains(err.Error(), "refuses to fall back") {
+		t.Fatalf("startLocalGitChannel error = %v, want the ambient-credential refusal", err)
+	}
+}

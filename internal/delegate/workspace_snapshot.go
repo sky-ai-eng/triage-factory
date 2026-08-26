@@ -651,9 +651,10 @@ func (s *Spawner) gitSeedFor(ctx context.Context, orgID, owner, repo string, sid
 	}
 	seed.auth = sidecar.GitCloneAuth(upstream)
 	if seed.auth == (worktree.CloneAuth{}) && len(localChannels) > 0 && localChannels[0] != nil {
-		// The managed local channel speaks git-over-HTTPS even when the org's
-		// stored clone preference is SSH. Rebuild from the canonical HTTPS form;
-		// the agent's process-scoped rewrites cover any surviving SSH remotes.
+		// A repository row can still carry an SSH clone URL after an org moves to
+		// HTTPS: rows are rewritten only when profiling next runs, and that is
+		// TTL-gated. The managed channel is HTTPS end to end, so rebuild from the
+		// canonical form rather than hand it a URL it cannot route.
 		upstream = s.gitHostBaseFor(ctx, orgID)
 		if upstream != "" {
 			seed.cloneURL = strings.TrimRight(upstream, "/") + "/" + owner + "/" + repo + ".git"
