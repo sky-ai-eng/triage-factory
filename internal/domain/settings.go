@@ -450,9 +450,9 @@ func DefaultOrgSettings() OrgSettings {
 // Multi-mode is ALWAYS "https", independent of the stored value: a GitHub App
 // installation token is an HTTPS bearer credential that cannot be used over
 // SSH at all, and the hosted runtime container has no ssh-agent / key /
-// known_hosts. The stored value may still read "ssh" — DefaultOrgSettings
-// returns "ssh" (correct for local), and a legacy row could carry it —
-// so it must not be honored in multi.
+// known_hosts. The write path refuses an "ssh" value in multi, but a stored one
+// can still reach here — a legacy row, or a row written outside the API — so the
+// read coerces rather than trusting the column.
 //
 // Local mode honors the stored value, treating only the literal "ssh" as SSH
 // and defaulting empty / "https" / any stale value to "https" — the same

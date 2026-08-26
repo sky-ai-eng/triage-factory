@@ -309,9 +309,10 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 	)
 	if err := s.tx.WithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
 		// org-settings host URLs + clone protocol. The freshly-provisioned row
-		// carries empty base URLs and the "ssh" default; headless defaults to
-		// https (no SSH agent on a typical headless box), overridable via
-		// TRIAGE_FACTORY_CLONE_PROTOCOL for a box that does have SSH set up.
+		// carries empty base URLs; the clone protocol is pinned outright rather
+		// than left to the row's default, because a typical headless box has no
+		// SSH agent. TRIAGE_FACTORY_CLONE_PROTOCOL overrides it for a box that
+		// does have SSH set up.
 		orgSet, gerr := tx.Orgs.GetSettings(ctx, runmode.LocalDefaultOrgID)
 		if gerr != nil {
 			return gerr
