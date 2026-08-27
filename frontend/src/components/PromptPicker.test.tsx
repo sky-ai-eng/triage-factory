@@ -49,6 +49,16 @@ function prompt(id: string, name: string): Prompt {
   }
 }
 
+/** deferred parks a read open so a test can assert on the in-flight render
+ *  before letting it land. */
+function deferred<T>() {
+  let settle!: (v: T) => void
+  const promise = new Promise<T>((res) => {
+    settle = res
+  })
+  return { promise, settle }
+}
+
 function renderPicker() {
   return render(<PromptPicker open onSelect={() => {}} onClose={() => {}} />)
 }
@@ -107,6 +117,35 @@ describe('PromptPicker empty vs failed', () => {
     expect(screen.queryByText("Couldn't load prompts.")).not.toBeInTheDocument()
   })
 
+  it('Retry shows the skeleton, not a stale empty answer, while the read is in flight', async () => {
+    // A fresh account, where "you have none" is the honest first answer.
+    fetchMock.mockResolvedValueOnce(ok([]))
+    const view = render(<PromptPicker open onSelect={() => {}} onClose={() => {}} />)
+    expect(await screen.findByText('No prompts yet.')).toBeInTheDocument()
+
+    // Reopen onto a server that has since gone down.
+    fetchMock.mockResolvedValueOnce(fails('the prompt store is unreachable'))
+    view.rerender(<PromptPicker open={false} onSelect={() => {}} onClose={() => {}} />)
+    view.rerender(<PromptPicker open onSelect={() => {}} onClose={() => {}} />)
+    const retry = await screen.findByRole('button', { name: 'Retry' })
+
+    // Park the retry read. Until it answers, the picker knows nothing about
+    // the account — so it must not go on claiming the empty answer it had
+    // before the failure.
+    const pending = deferred<ReturnType<typeof ok>>()
+    fetchMock.mockReturnValueOnce(pending.promise)
+    fireEvent.click(retry)
+
+    expect(screen.getByRole('listbox')).toHaveAttribute('aria-busy', 'true')
+    expect(screen.queryByText('No prompts yet.')).not.toBeInTheDocument()
+
+    // And it lands back on a real answer.
+    await act(async () => {
+      pending.settle(ok([]))
+    })
+    expect(screen.getByText('No prompts yet.')).toBeInTheDocument()
+  })
+
   it('Retry re-fires the read and recovers without a reopen', async () => {
     fetchMock.mockResolvedValueOnce(fails('the prompt store is unreachable'))
     renderPicker()
@@ -118,5 +157,34 @@ describe('PromptPicker empty vs failed', () => {
     expect(await screen.findByRole('option', { name: /Fix the flake/ })).toBeInTheDocument()
     expect(screen.queryByText("Couldn't load prompts.")).not.toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+})
+
+// The same copy serves both sources through one noun, and the blueprint arm
+// reaches it down a different road: three list reads in a Promise.all rather
+// than one. So both the word and the path it arrives by are worth pinning —
+// a picker that says "prompts" while listing blueprints names the wrong thing
+// to go make.
+describe('PromptPicker blueprints source', () => {
+  function renderBlueprintPicker() {
+    return render(<PromptPicker open source="blueprints" onSelect={() => {}} onClose={() => {}} />)
+  }
+
+  it('names blueprints when the read succeeds with no rows', async () => {
+    fetchMock.mockResolvedValue(ok([]))
+    renderBlueprintPicker()
+
+    expect(await screen.findByText('No blueprints yet.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+  })
+
+  it('names blueprints when the read fails, and offers the same Retry', async () => {
+    fetchMock.mockResolvedValue(fails('the blueprint store is unreachable'))
+    renderBlueprintPicker()
+
+    expect(await screen.findByText("Couldn't load blueprints.")).toBeInTheDocument()
+    expect(screen.getByText('the blueprint store is unreachable')).toBeInTheDocument()
+    expect(screen.queryByText('No blueprints yet.')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
   })
 })

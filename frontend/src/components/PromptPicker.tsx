@@ -114,7 +114,7 @@ export default function PromptPicker({
   // is what ends the skeleton: a read that succeeds with zero rows is an
   // answer — "you have none" — and has to render as one.
   const [loaded, setLoaded] = useState(false)
-  // Bumped by the error pane's Retry button to re-fire the fetch effect.
+  // Bumped by retry() below to re-fire the fetch effect.
   const [retryKey, setRetryKey] = useState(0)
   const [query, setQuery] = useState('')
   // The highlighted row. The picker is browse-first: this is the previewed
@@ -134,9 +134,9 @@ export default function PromptPicker({
   useFocusTrap(dialogRef, { active: open, initialFocus: filterRef })
 
   // Derived: "loading" means open with a read still outstanding — neither
-  // answered nor failed. Both flags survive a close, so a reopen shows the
-  // cached rows instantly (intentional); only a team switch, which drops the
-  // rows, and Retry put us back in the skeleton.
+  // answered nor failed. Both flags survive a close, so a reopen shows what
+  // the last read found instantly (intentional); a team switch, which drops
+  // the rows, and Retry are what put us back in the skeleton.
   const loading = open && !loaded && loadError === null
 
   // The read failed AND left nothing to show — the only case that should claim
@@ -284,6 +284,15 @@ export default function PromptPicker({
   }, [selId])
 
   const selected = useMemo(() => visible.find((it) => it.id === selId) ?? null, [visible, selId])
+
+  // Retry drops the prior answer along with the failure. Clearing only the
+  // failure would leave a stale one standing — after a read that legitimately
+  // found nothing, then a failed refetch, the picker would go on saying "none"
+  // over a read it has not heard back from yet.
+  const retry = useCallback(() => {
+    setLoaded(false)
+    setRetryKey((k) => k + 1)
+  }, [])
 
   const commit = useCallback(
     (id?: string) => {
@@ -546,7 +555,7 @@ export default function PromptPicker({
                       <p className="text-ui text-ink-3">{loadError}</p>
                       <button
                         type="button"
-                        onClick={() => setRetryKey((k) => k + 1)}
+                        onClick={retry}
                         className="mt-1 inline-flex items-center gap-1.5 text-ui font-medium text-warm hover:text-warm/80 transition-colors"
                       >
                         <RotateCw size={13} />
