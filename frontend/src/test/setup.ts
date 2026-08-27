@@ -22,6 +22,15 @@ if (!('ResizeObserver' in globalThis)) {
   globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver
 }
 
+// jsdom implements no layout, so Element.scrollIntoView is absent; list
+// components call it to keep a keyboard-moved selection in view. A no-op stub
+// is enough for tests that assert on text/roles rather than scroll position.
+// Guarded on Element itself, not just the method: this setup file also runs
+// for the eslint-rules suites, which have no DOM at all.
+if (typeof Element !== 'undefined' && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {}
+}
+
 // Unmount, then restore the globals — and both in ONE hook body, because the
 // order is the whole point and hook registration cannot express it. Vitest's
 // default `sequence.hooks: 'stack'` runs afterEach hooks in reverse

@@ -1,9 +1,9 @@
 import { useState, useEffect, useMemo, useCallback, useId, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
-import { Layers } from 'lucide-react'
+import { Layers, RotateCw } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt } from '../types'
 import { useFocusTrap } from '../hooks/useFocusTrap'
-import { apiListAll } from '../lib/apiClient'
+import { apiListAll, httpErrorMessage } from '../lib/apiClient'
 import TeamPicker from './TeamPicker'
 
 interface Props {
@@ -105,7 +105,17 @@ export default function PromptPicker({
   selectionDisabled,
 }: Props) {
   const [items, setItems] = useState<PickerItem[]>([])
-  const [fetchFailed, setFetchFailed] = useState(false)
+  // Why the last load failed, or null when it hasn't. A failed fetch and an
+  // empty account both leave the picker with no rows, and only one of them
+  // means the user should go make something — so the failure carries its
+  // reason rather than collapsing into the same silence.
+  const [loadError, setLoadError] = useState<string | null>(null)
+  // Whether the current scope's read has answered. This, not the row count,
+  // is what ends the skeleton: a read that succeeds with zero rows is an
+  // answer — "you have none" — and has to render as one.
+  const [loaded, setLoaded] = useState(false)
+  // Bumped by retry() below to re-fire the fetch effect.
+  const [retryKey, setRetryKey] = useState(0)
   const [query, setQuery] = useState('')
   // The highlighted row. The picker is browse-first: this is the previewed
   // item, NOT a commit — onSelect fires only from the Run button / Enter /
@@ -123,11 +133,19 @@ export default function PromptPicker({
   const filterRef = useRef<HTMLInputElement>(null)
   useFocusTrap(dialogRef, { active: open, initialFocus: filterRef })
 
-  // Derived: "loading" means open, no items cached yet, AND the last fetch
-  // hasn't failed. The fetchFailed flag is what breaks us out of the skeleton
-  // on error. After a successful fetch, subsequent opens show cached items
-  // instantly (intentional).
-  const loading = open && items.length === 0 && !fetchFailed
+  // Derived: "loading" means open with a read still outstanding — neither
+  // answered nor failed. Both flags survive a close, so a reopen shows what
+  // the last read found instantly (intentional); a team switch, which drops
+  // the rows, and Retry are what put us back in the skeleton.
+  const loading = open && !loaded && loadError === null
+
+  // The read failed AND left nothing to show — the only case that should claim
+  // a failure. A failed refetch that still has cached rows keeps rendering
+  // them, so the no-match copy stays correct for a filter that hides them all.
+  const failedEmpty = loadError !== null && items.length === 0
+
+  // The word the empty and error copy uses for whatever this picker lists.
+  const noun = source === 'blueprints' ? 'blueprints' : 'prompts'
 
   // Reset the type-to-filter query each time the picker opens so a stale filter
   // from a prior open doesn't hide everything on reopen.
@@ -144,25 +162,25 @@ export default function PromptPicker({
     // callers that don't scope). Refetching on teamValue keeps rows matched
     // to the header's team so a user can't preview another team's item.
     const teamFilter = teamValue ? { team_id: teamValue } : {}
-    // Clear the prior failure so this attempt (first open, reopen, team switch)
-    // shows the loading skeleton again rather than getting stuck on the
-    // "Failed to load." message while the refetch is in flight; the .catch below
-    // re-raises it if this attempt also fails.
+    // Clear the prior failure so this attempt (first open, reopen, team switch,
+    // Retry) shows the loading skeleton again rather than getting stuck on the
+    // error message while the refetch is in flight; the .catch below re-raises
+    // it if this attempt also fails.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setFetchFailed(false)
+    setLoadError(null)
     // On a team switch, drop the prior team's rows so the skeleton shows during
     // the refetch and a stale cross-team item can't be committed. Only when
     // team-scoped — unscoped callers keep their across-opens cache.
     if (teamValue !== undefined) {
       setItems([])
+      setLoaded(false)
     }
 
-    const load = async () => {
+    const load = async (): Promise<PickerItem[]> => {
       // The 'prompts' source is already a flat list carrying bodies + models.
       if (source !== 'blueprints') {
         const data = await apiListAll<Prompt>('/api/prompts/list', teamFilter)
-        if (!cancelled) setItems(data.map((p) => ({ ...p })))
-        return
+        return data.map((p) => ({ ...p }))
       }
 
       // A blueprint has no body of its own. Pull the blueprint list, the prompt
@@ -213,17 +231,23 @@ export default function PromptPicker({
           steps,
         }
       })
-      if (!cancelled) setItems(normalized)
+      return normalized
     }
 
-    load().catch(() => {
-      if (!cancelled) setFetchFailed(true)
-    })
+    load()
+      .then((rows) => {
+        if (cancelled) return
+        setItems(rows)
+        setLoaded(true)
+      })
+      .catch((e) => {
+        if (!cancelled) setLoadError(httpErrorMessage(e, 'The request failed.'))
+      })
 
     return () => {
       cancelled = true
     }
-  }, [open, teamValue, source])
+  }, [open, teamValue, source, retryKey])
 
   // The visible rows: caller filter (e.g. hide the chain itself), then the
   // type-to-filter query against the name.
@@ -260,6 +284,15 @@ export default function PromptPicker({
   }, [selId])
 
   const selected = useMemo(() => visible.find((it) => it.id === selId) ?? null, [visible, selId])
+
+  // Retry drops the prior answer along with the failure. Clearing only the
+  // failure would leave a stale one standing — after a read that legitimately
+  // found nothing, then a failed refetch, the picker would go on saying "none"
+  // over a read it has not heard back from yet.
+  const retry = useCallback(() => {
+    setLoaded(false)
+    setRetryKey((k) => k + 1)
+  }, [])
 
   const commit = useCallback(
     (id?: string) => {
@@ -388,7 +421,7 @@ export default function PromptPicker({
                       ))
                     ) : visible.length === 0 ? (
                       <p className="px-2 py-6 text-center text-ui text-ink-3">
-                        {fetchFailed
+                        {failedEmpty
                           ? 'Failed to load.'
                           : query
                             ? 'No matches.'
@@ -509,10 +542,30 @@ export default function PromptPicker({
                         <p className="mt-3 text-ui italic text-ink-3">No description.</p>
                       )}
                     </div>
+                  ) : failedEmpty ? (
+                    /* The pane is the roomy half, so the failure states its
+                       case here and the rail keeps its one-line echo. Saying
+                       the rows didn't load — rather than that there are none —
+                       is the whole point: the user's prompts are still there. */
+                    <div
+                      role="alert"
+                      className="flex flex-1 flex-col items-center justify-center gap-2 px-5 text-center"
+                    >
+                      <p className="text-body text-ink-2">Couldn't load {noun}.</p>
+                      <p className="text-ui text-ink-3">{loadError}</p>
+                      <button
+                        type="button"
+                        onClick={retry}
+                        className="mt-1 inline-flex items-center gap-1.5 text-ui font-medium text-warm hover:text-warm/80 transition-colors"
+                      >
+                        <RotateCw size={13} />
+                        Retry
+                      </button>
+                    </div>
                   ) : (
                     <div className="flex flex-1 items-center justify-center px-5">
                       <p className="text-ui text-ink-3">
-                        {source === 'blueprints' ? 'No blueprints yet.' : 'No prompts yet.'}
+                        {query ? `No ${noun} match "${query}".` : `No ${noun} yet.`}
                       </p>
                     </div>
                   )}
