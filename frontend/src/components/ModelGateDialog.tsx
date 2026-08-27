@@ -3,6 +3,11 @@
 // a settings section's Save, a wizard step's persist and a credential bind's
 // aftermath — and only one of those is a component that could host a modal.
 //
+// TODO(TFAC-907): the scrim, panel, focus trap and Escape handling below are a
+// second implementation of ui/dialog/Dialog. Moving onto it has to settle two
+// things first — this dialog has phases rather than one decision, and its title
+// asks a question where Dialog states consequences.
+//
 // It never opens itself. Something awaits gateModelSave / offerModelSweep, this
 // renders what that put on the store, and pressing through is what spends the
 // request.

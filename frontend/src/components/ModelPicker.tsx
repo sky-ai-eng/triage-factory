@@ -19,6 +19,11 @@
 // with no availability field shows no badge — the read's absent fields are the
 // only signal, and this component reads no mode.
 
+// TODO(TFAC-907): raw Tailwind rather than a src/ui instrument. It mounts on
+// four surfaces with different cutover dates, so its treatment is tracked as
+// the component's rather than any one surface's. The SHAPE is settled: a
+// single-select radiogroup, deliberately not the table.
+
 import { useRef } from 'react'
 import { nextRadioIndex } from '../lib/rovingRadio'
 import {

@@ -7,6 +7,12 @@
 // deciding whether to enable a model wants to know it works first; the sweep
 // endpoint takes the same view and narrows by no enable-set either.
 //
+// TODO(TFAC-906): this is a table, and it is hand-rolled flex rows because the
+// org settings stack around it holds no design-system component. It becomes a
+// ui/table/Table — a render column for the test button — when that surface is
+// cut over; doing it before would make it the only instrument in a stack that
+// is being retired.
+//
 // THE PANEL EXISTS EXACTLY WHEN THE ORG BRINGS ITS OWN CREDENTIALS, and it
 // works that out from the rows rather than from a mode: a verdict is a fact
 // about a credential TF owns, so a row with no availability field is one no
