@@ -530,8 +530,11 @@ export default function TeamSettings() {
                       <span className="ts-row-tag">(default)</span>
                     ) : null}
                     <span className="ts-lead-flex" />
+                    {/* A row TF prices carries the rate; one it cannot price
+                        carries the same dash the rest of the surface uses for
+                        "unknown" — never an empty slot. */}
                     <span className="ts-row-v">
-                      {m.prices_per_mtok ? money(m.prices_per_mtok.output) + ' / M' : ''}
+                      {m.prices_per_mtok ? money(m.prices_per_mtok.output) + ' / M' : '—'}
                     </span>
                   </div>
                   {/* Share of the fortnight's model-attributed spend. The

@@ -38,6 +38,11 @@ function slice(resource: TeamSettingsResource): TeamModelConfig {
   }
 }
 
+/** An answer stored with the team it answers for — a team switch reads null
+ * until the new answer lands, with no synchronous reset: stale data simply
+ * stops matching, the same shape useTeamActivity and useTeamUsage use. */
+type Keyed = { team: string; config: TeamModelConfig }
+
 /**
  * useTeamModelConfig reads the team's model slice and saves changes to it.
  *
@@ -46,49 +51,55 @@ function slice(resource: TeamSettingsResource): TeamModelConfig {
  * waits a round trip reads as broken), then reconciles from the PATCH's own
  * response, which answers with the resource as a follow-up GET would; on
  * failure the optimistic state reverts to the last server truth and the error
- * is rethrown for the caller to phrase. Only the newest in-flight save may
- * reconcile or revert, so rapid toggles cannot resurrect an older answer.
+ * is rethrown for the caller to phrase.
+ *
+ * One generation counter guards every landing. Each save bumps it, so only the
+ * newest in-flight save may reconcile or revert and rapid toggles cannot
+ * resurrect an older answer — and a TEAM SWITCH bumps it too, so a response
+ * still in flight for the previous team is discarded rather than written over
+ * the next team's state.
  */
 export function useTeamModelConfig(teamId: string): {
   config: TeamModelConfig | null
   save: (patch: TeamModelPatch) => Promise<void>
 } {
-  const [config, setConfig] = useState<TeamModelConfig | null>(null)
+  const [got, setGot] = useState<Keyed | null>(null)
   // The last state the server confirmed — what a failed save falls back to.
-  const settled = useRef<TeamModelConfig | null>(null)
+  const settled = useRef<Keyed | null>(null)
   const seq = useRef(0)
 
   useEffect(() => {
     if (!teamId) return
-    let live = true
+    const mine = ++seq.current
     void apiJSON<TeamSettingsResource>(`/api/teams/${encodeURIComponent(teamId)}/settings`)
       .then((resource) => {
-        if (!live) return
-        settled.current = slice(resource)
-        setConfig(settled.current)
+        if (seq.current !== mine) return
+        settled.current = { team: teamId, config: slice(resource) }
+        setGot(settled.current)
       })
       .catch(() => {
         // The panel stays empty; the page around it still works.
       })
-    return () => {
-      live = false
-    }
   }, [teamId])
 
   const save = useCallback(
     async (patch: TeamModelPatch) => {
+      const team = teamId
       const mine = ++seq.current
-      setConfig((prev) =>
-        prev
+      setGot((prev) =>
+        prev && prev.team === team
           ? {
-              defaultModel: patch.ai_model ?? prev.defaultModel,
-              enabledModels: patch.enabled_models ?? prev.enabledModels,
+              team,
+              config: {
+                defaultModel: patch.ai_model ?? prev.config.defaultModel,
+                enabledModels: patch.enabled_models ?? prev.config.enabledModels,
+              },
             }
           : prev,
       )
       try {
         const resource = await apiJSON<TeamSettingsResource>(
-          `/api/teams/${encodeURIComponent(teamId)}/settings`,
+          `/api/teams/${encodeURIComponent(team)}/settings`,
           {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -96,15 +107,15 @@ export function useTeamModelConfig(teamId: string): {
           },
         )
         if (seq.current !== mine) return
-        settled.current = slice(resource)
-        setConfig(settled.current)
+        settled.current = { team, config: slice(resource) }
+        setGot(settled.current)
       } catch (e) {
-        if (seq.current === mine) setConfig(settled.current)
+        if (seq.current === mine && settled.current?.team === team) setGot(settled.current)
         throw e
       }
     },
     [teamId],
   )
 
-  return { config, save }
+  return { config: got && got.team === teamId ? got.config : null, save }
 }
