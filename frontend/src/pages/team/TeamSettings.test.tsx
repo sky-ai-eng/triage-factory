@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
+import { resetModelCatalogForTest } from '../../hooks/useModelCatalog'
 
 // The team overview's two wired verbs: the band as navigation, and the archive.
 //
@@ -118,6 +119,61 @@ const ACTIVITY = {
 const USAGE = {
   total_cost_usd: 12.4,
   by_user: [{ user_id: 'u1', display_name: 'robin', cost: 9.152 }],
+  // Opus carries the whole model-attributed window: sonnet is enabled with no
+  // spend (a 0% reading), haiku is team-unenabled (a dash, nothing to report).
+  by_model: [{ model: 'claude-opus-5', cost: 9.3 }],
+}
+
+// The org's enable-set as the catalog read answers it. GPT X is org-disabled:
+// the team surface must never list it — a model the org has not enabled is an
+// inventory of other people's decisions.
+const MODELS_READ = {
+  items: [
+    {
+      key: 'claude-opus-5',
+      display_name: 'Claude Opus 5',
+      provider: 'anthropic',
+      provider_display_name: 'Anthropic',
+      enabled: true,
+      prices_per_mtok: { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
+      display_order: 0,
+    },
+    {
+      key: 'claude-sonnet-5',
+      display_name: 'Claude Sonnet 5',
+      provider: 'anthropic',
+      provider_display_name: 'Anthropic',
+      enabled: true,
+      prices_per_mtok: { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
+      display_order: 1,
+    },
+    {
+      key: 'claude-haiku-4-5',
+      display_name: 'Claude Haiku 4.5',
+      provider: 'anthropic',
+      provider_display_name: 'Anthropic',
+      enabled: true,
+      prices_per_mtok: { input: 1, output: 4, cache_read: 0.1, cache_write: 1.25 },
+      display_order: 2,
+    },
+    {
+      key: 'gpt-x',
+      display_name: 'GPT X',
+      provider: 'openai',
+      provider_display_name: 'OpenAI',
+      enabled: false,
+      display_order: 3,
+    },
+  ],
+}
+
+// The team's stored choices: opus is the default, haiku is org-enabled but not
+// team-enabled — the row the panel exists to switch on.
+const TEAM_SETTINGS = {
+  team_settings: {
+    DefaultModel: 'claude-opus-5',
+    EnabledModels: ['claude-opus-5', 'claude-sonnet-5'],
+  },
 }
 
 beforeEach(() => {
@@ -125,13 +181,32 @@ beforeEach(() => {
   roles.team = 'admin'
   roles.org = true
   sources.state = {}
-  api.apiJSON.mockImplementation((path: string) => {
+  // The catalog hook caches per org at module level; without the reset, the
+  // first test's answer would be every later test's answer.
+  resetModelCatalogForTest()
+  api.apiJSON.mockImplementation((path: string, init?: RequestInit) => {
     if (path.endsWith('/members/list'))
       return Promise.resolve({ items: MEMBERS.members, total_count: MEMBERS.members.length })
     if (path.endsWith('/github-repos'))
       return Promise.resolve({ repos: ['sky/planner', 'sky/runner'] })
     if (path.includes('/activity?')) return Promise.resolve(ACTIVITY)
     if (path.includes('/usage?')) return Promise.resolve(USAGE)
+    if (path.endsWith('/models')) return Promise.resolve(MODELS_READ)
+    // The settings PATCH answers with the resource as a follow-up GET would,
+    // which is what the page reconciles its optimistic state from.
+    if (path.endsWith('/settings') && init?.method === 'PATCH') {
+      const body = JSON.parse(String(init.body)) as {
+        ai_model?: string
+        enabled_models?: string[]
+      }
+      return Promise.resolve({
+        team_settings: {
+          DefaultModel: body.ai_model ?? TEAM_SETTINGS.team_settings.DefaultModel,
+          EnabledModels: body.enabled_models ?? TEAM_SETTINGS.team_settings.EnabledModels,
+        },
+      })
+    }
+    if (path.endsWith('/settings')) return Promise.resolve(TEAM_SETTINGS)
     return Promise.reject(new Error('no route: ' + path))
   })
   // The org directory behind `+ add teammate`. Empty is the honest default
@@ -467,5 +542,112 @@ describe('the last admin', () => {
     // and nobody to add.
     expect(document.querySelector('.tb-row')?.getAttribute('data-selectable')).toBeNull()
     expect(screen.queryByText('add teammate')).not.toBeInTheDocument()
+  })
+})
+
+// The models surface: the band cell's preview and the panel it opens into.
+// The reads are the org catalog, the team's settings slice, and the admin-gated
+// spend cut; the writes are one PATCH each — and what a control refuses is as
+// load-bearing as what it sends.
+describe('the models panel', () => {
+  /** Scope to the opened panel's table — the band above repeats the names. */
+  const table = () => document.querySelector('.ts-tablewrap') as HTMLElement
+
+  const patches = () =>
+    api.apiJSON.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'PATCH',
+    )
+
+  async function openPanel() {
+    renderPage()
+    fireEvent.click(await screen.findByText('CONFIGURED MODELS'))
+    await screen.findByText('Claude Haiku 4.5')
+  }
+
+  it('moves the star onto an unenabled row and enables it in the same PATCH', async () => {
+    await openPanel()
+    const row = within(table()).getByText('Claude Haiku 4.5').closest('.tb-row') as HTMLElement
+    fireEvent.click(within(row).getByRole('button'))
+
+    await waitFor(() => expect(patches()).toHaveLength(1))
+    const [path, init] = patches()[0]
+    expect(path).toBe('/api/teams/t1/settings')
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+      ai_model: 'claude-haiku-4-5',
+      enabled_models: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+    })
+  })
+
+  it('refuses the toggle on the default row: the fallback cannot be switched off', async () => {
+    await openPanel()
+    const row = within(table()).getByText('Claude Opus 5').closest('.tb-row') as HTMLElement
+    fireEvent.click(within(row).getByRole('checkbox', { name: 'ENABLED' }))
+
+    expect(patches()).toHaveLength(0)
+  })
+
+  it('replaces the whole set when a row is switched off', async () => {
+    await openPanel()
+    const row = within(table()).getByText('Claude Sonnet 5').closest('.tb-row') as HTMLElement
+    fireEvent.click(within(row).getByRole('checkbox', { name: 'ENABLED' }))
+
+    await waitFor(() => expect(patches()).toHaveLength(1))
+    expect(JSON.parse(String((patches()[0][1] as RequestInit).body))).toEqual({
+      enabled_models: ['claude-opus-5'],
+    })
+  })
+
+  it('reads honestly per row: enabled-no-spend is 0%, unenabled is a dash', async () => {
+    await openPanel()
+    // Only the org's enable-set appears at all — a model the org has not
+    // enabled is not offerable here, whoever is looking.
+    expect(screen.queryByText('GPT X')).toBeNull()
+    await waitFor(() => {
+      const values = Array.from(table().querySelectorAll('.tb-share-value')).map(
+        (el) => el.textContent,
+      )
+      expect(values).toEqual(['100%', '0%', '—'])
+    })
+  })
+
+  it('gives a member no star, no toggle, and no spend claims', async () => {
+    roles.team = 'member'
+    roles.org = false
+    await openPanel()
+
+    // Absent, not disabled: a verb that 403s is not information.
+    expect(table().querySelector('.tb-mark')).toBeNull()
+    expect(table().querySelector('.tb-toggle')).toBeNull()
+    // The usage read never fired for them, and unknown is not zero.
+    const values = Array.from(table().querySelectorAll('.tb-share-value')).map(
+      (el) => el.textContent,
+    )
+    expect(values).toEqual(['—', '—', '—'])
+  })
+
+  it('fills the band cell from the reads: enabled models, default, out-price, providers', async () => {
+    renderPage()
+    await screen.findByText('(default)')
+    const cell = document.querySelector('.ts-band .ts-panel:not(.ts-panel-right)') as HTMLElement
+
+    // Team-enabled models only — haiku is org-enabled but off for this team,
+    // and GPT X is org-disabled.
+    const names = Array.from(cell.querySelectorAll('.ts-row-n')).map((el) => el.textContent)
+    expect(names).toEqual(['Claude Opus 5', 'Claude Sonnet 5'])
+    // The default is tagged on the row that carries it.
+    const opusRow = within(cell).getByText('Claude Opus 5').closest('.ts-row') as HTMLElement
+    expect(within(opusRow).getByText('(default)')).toBeInTheDocument()
+    // Out-price per M straight from the API's price fields.
+    expect(within(cell).getByText('$25 / M')).toBeInTheDocument()
+    expect(within(cell).getByText('$15 / M')).toBeInTheDocument()
+    // Distinct providers among the org's enable-set, not a model count.
+    expect(within(cell).getByText('1 provider')).toBeInTheDocument()
+    // The admin's spend bars: opus carries the whole cut, sonnet reads zero.
+    await waitFor(() => {
+      const fills = Array.from(cell.querySelectorAll<HTMLElement>('.ts-meter-fill')).map(
+        (el) => el.style.width,
+      )
+      expect(fills).toEqual(['100%', '0%'])
+    })
   })
 })

@@ -9,6 +9,9 @@ import { apiJSON } from '../lib/apiClient'
 export type TeamUsage = {
   total_cost_usd: number
   by_user: Array<{ user_id: string; display_name: string; cost: number }>
+  /** Model-attributed spend only — system overhead with no model lands in the
+   * total but never here, so shares are computed over this list's own sum. */
+  by_model: Array<{ model: string; cost: number }>
 }
 
 function sinceParam(days: number): string {

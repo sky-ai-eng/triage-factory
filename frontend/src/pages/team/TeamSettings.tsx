@@ -22,6 +22,10 @@ import { useTeamActivity, activitySource } from '../../hooks/useTeamActivity'
 import { useEventSources } from '../../hooks/useEventSources'
 import { sourceUnavailableReason } from '../../lib/eventSources'
 import { useTeamUsage, fmtSpendUSD } from '../../hooks/useTeamUsage'
+import { useTeamModelConfig } from '../../hooks/useTeamModelConfig'
+import { useModelCatalog } from '../../hooks/useModelCatalog'
+import ModelsPanel from './ModelsPanel'
+import { effectiveModelKeys, money, spendShares } from './models'
 import { archiveTeam, fetchArchivePreview } from '../../lib/teamLifecycle'
 import type { ArchivePreview } from '../../lib/teamLifecycle'
 import { toast } from '../../components/Toast/toastStore'
@@ -87,16 +91,6 @@ const ROLE_LABELS: Record<string, string> = {
   member: 'Member',
   viewer: 'Viewer — read only',
 }
-
-/** What this deployment can run — a static sketch, not a read. */
-// TODO(TFAC-879): replace this array with the team models read
-// (GET /api/teams/{team_id}/models), which now serves the team's effective
-// enable-set, and delete the hardcoded prices with it.
-const MODELS = [
-  { name: 'Claude Opus 5', tag: '(default)', price: '$25 / M' },
-  { name: 'Claude Sonnet 5', tag: '', price: '$15 / M' },
-  { name: 'Claude Haiku 4.5', tag: '', price: '$4 / M' },
-]
 
 /** The three live sources, in the order the band and the card grid list them. */
 const SOURCES: SourceKind[] = ['github', 'jira', 'slack']
@@ -201,6 +195,29 @@ export default function TeamSettings() {
     () => new Map((usage?.by_user ?? []).map((u) => [u.user_id, u.cost])),
     [usage],
   )
+
+  // The model surface's three reads: the org's enable-set (which is all a team
+  // may pick from), the team's own choices, and the spend cut the % column and
+  // the band's bars share with everything else on the page.
+  const catalog = useModelCatalog()
+  const { config: modelConfig, save: saveModels } = useTeamModelConfig(teamId)
+  const modelShares = useMemo(() => spendShares(usage), [usage])
+  const providerCount = useMemo(
+    () => new Set(catalog.models.map((m) => m.provider).filter(Boolean)).size,
+    [catalog.models],
+  )
+  // The band cell previews the team's enabled models; the panel is the full
+  // inventory. Four rows is what the cell's height holds, and the default is
+  // hoisted into view if the cap would hide it — the one row the cell exists
+  // to name.
+  const bandModels = useMemo(() => {
+    const on = new Set(effectiveModelKeys(catalog.models, modelConfig))
+    const enabled = catalog.models.filter((m) => on.has(m.key))
+    const four = enabled.slice(0, 4)
+    const def = enabled.find((m) => m.key === modelConfig?.defaultModel)
+    if (def && !four.includes(def)) four[four.length - 1] = def
+    return four
+  }, [catalog.models, modelConfig])
 
   // The three writes this page makes, defined once. `keepalive` keeps the
   // request alive past the document on the unload path; sendBeacon is not an
@@ -494,21 +511,33 @@ export default function TeamSettings() {
             >
               <span className="ts-panel-t">CONFIGURED MODELS</span>
               <span className="ts-lead" />
-              <span className="ts-panel-n">{MODELS.length} models</span>
+              {/* Distinct access paths among what the org enables — "1
+                  provider" is the true reading until a second one exists,
+                  not a placeholder. */}
+              <span className="ts-panel-n">
+                {catalog.loaded
+                  ? `${providerCount} ${providerCount === 1 ? 'provider' : 'providers'}`
+                  : '—'}
+              </span>
               <i className="ts-chev" aria-hidden="true" />
             </button>
             <div className="ts-rows">
-              {MODELS.map((m) => (
-                <div className="ts-row" key={m.name}>
+              {bandModels.map((m) => (
+                <div className="ts-row" key={m.key}>
                   <div className="ts-row-line">
-                    <span className="ts-row-n">{m.name}</span>
-                    {m.tag ? <span className="ts-row-tag">{m.tag}</span> : null}
+                    <span className="ts-row-n">{m.display_name}</span>
+                    {m.key === modelConfig?.defaultModel ? (
+                      <span className="ts-row-tag">(default)</span>
+                    ) : null}
                     <span className="ts-lead-flex" />
-                    <span className="ts-row-v">{m.price}</span>
+                    <span className="ts-row-v">
+                      {m.prices_per_mtok ? money(m.prices_per_mtok.output) + ' / M' : ''}
+                    </span>
                   </div>
-                  {/* No share-of-runs aggregation, so the track holds its
-                      height and draws no fill rather than inventing one. */}
-                  <Meter frac={null} />
+                  {/* Share of the fortnight's model-attributed spend. The
+                      usage read is admin-gated, so a member's tracks stay
+                      unfilled — unknown is not zero. */}
+                  <Meter frac={modelShares ? (modelShares.get(m.key) ?? 0) : null} />
                 </div>
               ))}
             </div>
@@ -827,22 +856,14 @@ export default function TeamSettings() {
         ) : null}
 
         {region === 'models' ? (
-          <div className="ts-panelview">
-            <div className="ts-panelview-head">
-              <button type="button" className="ts-back" onClick={() => setRegion('roster')}>
-                <i className="ts-back-chev" aria-hidden="true" />
-                <span>CONFIGURED MODELS</span>
-              </button>
-              <span className="ts-lead-flex" />
-              <span className="ts-panelview-n">{MODELS.length} models</span>
-            </div>
-            <div className="ts-panelview-body">
-              <p className="ts-note">
-                Model configuration is org-level today, so this reads rather than writes — the
-                per-team override is not built.
-              </p>
-            </div>
-          </div>
+          <ModelsPanel
+            models={catalog.models}
+            config={modelConfig}
+            usage={usage}
+            isAdmin={isAdmin}
+            onBack={() => setRegion('roster')}
+            onSave={saveModels}
+          />
         ) : null}
       </div>
 
