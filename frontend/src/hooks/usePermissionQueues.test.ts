@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { usePermissionQueues } from './usePermissionQueues'
 import { jsonBody } from '../test/apiResponse'
@@ -38,10 +38,6 @@ function stubPermissions(responses: Array<{ ok?: boolean; body?: unknown; throws
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
 }
-
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
 
 describe('usePermissionQueues', () => {
   it('sources a conversation’s prompts from the endpoint', async () => {

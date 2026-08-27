@@ -33,7 +33,6 @@ describe('Acquire', () => {
   })
   afterEach(() => {
     vi.useRealTimers()
-    vi.unstubAllGlobals()
   })
 
   it('runs every beat in order before showing a value it already has', () => {

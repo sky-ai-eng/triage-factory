@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import ModelAvailabilityPanel from './ModelAvailabilityPanel'
@@ -49,7 +49,6 @@ function stub(items: ModelCatalogEntry[], testResponse?: unknown) {
 }
 
 beforeEach(() => resetModelCatalogForTest())
-afterEach(() => vi.unstubAllGlobals())
 
 describe('ModelAvailabilityPanel', () => {
   it('lists every model with a verdict, enabled or not, each with its own test', async () => {

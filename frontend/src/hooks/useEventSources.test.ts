@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
 import {
   useEventSources,
@@ -40,10 +40,6 @@ const configured: EventSourceAvailability[] = [
 
 beforeEach(() => {
   resetEventSourcesForTest()
-})
-
-afterEach(() => {
-  vi.unstubAllGlobals()
 })
 
 describe('useEventSources', () => {

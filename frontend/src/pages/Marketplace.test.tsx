@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import type { EventType } from '../types'
@@ -118,7 +118,6 @@ function renderPage() {
 
 describe('Marketplace', () => {
   beforeEach(() => vi.restoreAllMocks())
-  afterEach(() => vi.unstubAllGlobals())
 
   it('renders each listing card with name, publisher, kind badge, event-type chips, and counts', async () => {
     mockFetchRouter({

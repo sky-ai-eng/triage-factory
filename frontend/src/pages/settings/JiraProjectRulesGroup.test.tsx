@@ -3,7 +3,7 @@
 // ARM it by mapping its workflow's statuses. What is pinned here is that the
 // first gesture costs one click and no mapping, that an unmapped project says
 // so instead of hiding, and that arming edits the rules the save will send.
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
@@ -79,9 +79,6 @@ function Harness({ seed = [] as JiraProjectConfig[] }) {
 // stub itself at cleanup.
 beforeEach(() => {
   stubFetch()
-})
-afterEach(() => {
-  vi.unstubAllGlobals()
 })
 
 describe('JiraProjectRulesGroup · watching', () => {

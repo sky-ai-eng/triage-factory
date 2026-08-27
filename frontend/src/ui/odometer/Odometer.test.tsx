@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { Odometer, Ticker } from './Odometer'
 
 // The contracts worth pinning are the ones a screenshot cannot show: where a
@@ -22,7 +22,6 @@ const ramps = () => Array.from(document.querySelectorAll('.odo-ramp')) as HTMLEl
 
 describe('Odometer', () => {
   beforeEach(() => setReducedMotion(false))
-  afterEach(() => vi.unstubAllGlobals())
 
   it('stops each digit on its own face, one ramp per digit', () => {
     render(<Odometer value={164} />)
@@ -75,7 +74,6 @@ describe('Odometer', () => {
 
 describe('Ticker', () => {
   beforeEach(() => setReducedMotion(false))
-  afterEach(() => vi.unstubAllGlobals())
 
   it('rolls up from nothing on arrival', () => {
     render(<Ticker value={22} />)

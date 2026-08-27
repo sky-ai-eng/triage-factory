@@ -96,10 +96,6 @@ describe('apiErrors', () => {
 })
 
 describe('apiJSON non-JSON guard', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
-
   // Minimal Response stand-in: apiFetch reads status/ok/text(), the hardened
   // apiJSON reads text(). Avoids depending on a Response global across envs.
   function stubFetch(status: number, body: string) {
@@ -147,7 +143,6 @@ describe('apiJSON non-JSON guard', () => {
 
 describe('apiFetch allow', () => {
   afterEach(() => {
-    vi.unstubAllGlobals()
     setUnauthHandler(null)
   })
 
@@ -215,10 +210,6 @@ describe('apiFetch allow', () => {
 })
 
 describe('apiList', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
-
   it('POSTs the filters and returns the envelope', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

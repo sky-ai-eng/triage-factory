@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import type {
   AccessChangeRow,
@@ -211,7 +211,6 @@ beforeEach(() => {
   authMock.local = false
   entMock.governance = false
 })
-afterEach(() => vi.unstubAllGlobals())
 
 describe('Usage page', () => {
   it('org admin sees personal + team + org sections', async () => {

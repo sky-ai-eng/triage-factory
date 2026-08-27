@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import PromptPicker from './PromptPicker'
 import type { Prompt } from '../types'
@@ -20,10 +20,6 @@ const fetchMock = vi.fn()
 beforeEach(() => {
   fetchMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
-})
-
-afterEach(() => {
-  vi.unstubAllGlobals()
 })
 
 /** ok answers a `POST /…/list` read with one complete page. */

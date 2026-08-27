@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import ActionList from './ActionList'
 import type { ActivityAction } from '../types'
@@ -27,7 +27,6 @@ const action = (over: Partial<ActivityAction>): ActivityAction => ({
 
 describe('ActionList', () => {
   beforeEach(() => vi.restoreAllMocks())
-  afterEach(() => vi.unstubAllGlobals())
 
   it('fetches the conversation-scoped endpoint and names each write', async () => {
     const fetchMock = mockActions([

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import EventSourcesGroup from './EventSourcesGroup'
@@ -34,7 +34,6 @@ function stub(sources: EventSourceAvailability[]) {
 }
 
 beforeEach(() => resetEventSourcesForTest())
-afterEach(() => vi.unstubAllGlobals())
 
 // Two sources an org can actually turn off. Every REGISTERED source is
 // disableable — required is a core-only property — so an ee build renders more

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import RunStation, { type StationActions } from './RunStation'
@@ -43,7 +43,6 @@ describe('RunStation composer gate', () => {
       vi.fn(() => Promise.reject(new Error('no network in this suite'))),
     )
   })
-  afterEach(() => vi.unstubAllGlobals())
 
   it('offers the input on a parked conversation the server says is resumable', () => {
     station({ Status: 'open', resumable: true })
@@ -91,7 +90,6 @@ describe('RunStation dock approval affordance', () => {
       vi.fn(() => Promise.reject(new Error('no network in this suite'))),
     )
   })
-  afterEach(() => vi.unstubAllGlobals())
 
   it('routes a lone unresolved item straight to its editor — no list detour', () => {
     const onOpenArtifact = vi.fn()

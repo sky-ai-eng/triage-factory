@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, act, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 
@@ -63,9 +63,6 @@ function renderRepos() {
 describe('Repos page addressing', () => {
   beforeEach(() => {
     dispatch = null
-  })
-  afterEach(() => {
-    vi.unstubAllGlobals()
   })
 
   it('renders the slug as the card title', async () => {

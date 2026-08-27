@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ActivityFeed from './ActivityFeed'
 import type { ActivityAction, ActivityArtifact } from '../types'
@@ -56,7 +56,6 @@ function calledBodies(fetchMock: ReturnType<typeof vi.fn>): Record<string, unkno
 
 describe('ActivityFeed', () => {
   beforeEach(() => vi.restoreAllMocks())
-  afterEach(() => vi.unstubAllGlobals())
 
   it('defaults to the Actions lens: renders verb + target + actor rows, reading the actions route', async () => {
     const fetchMock = stubByLens([
