@@ -1,11 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
-import {
-  useModelCatalog,
-  modelDisplayName,
-  resetModelCatalogForTest,
-  type ModelCatalogEntry,
-} from './useModelCatalog'
+import { useModelCatalog, modelDisplayName, resetModelCatalogForTest } from './useModelCatalog'
+import type { ModelCatalogEntry } from '../lib/models'
 import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
 import { jsonBody } from '../test/apiResponse'
 

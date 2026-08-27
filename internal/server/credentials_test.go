@@ -10,6 +10,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -252,5 +253,110 @@ func TestGitHubPATPut_PersistsOrgGitHubIdentity(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("user_github_identities has %d rows; the org bind must not write per-user identity", n)
+	}
+}
+
+// TestSetupModelPicks pins the two model picks multi-mode setup requires before
+// the completeness gate opens: the org's background-jobs model and the default
+// team's default model. TF ships no fallback for either, so an org
+// through the gate without them has background jobs that never run and a team
+// whose unpinned steps refuse at dispatch — and neither says so at the moment
+// it happens.
+//
+// The predicate is exercised directly rather than through the status route,
+// because the route's other inputs (a GitHub credential, a tracked repo, a
+// session) decide nothing here and standing them up would only obscure which
+// input moved the answer.
+func TestSetupModelPicks(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeMulti)
+	s := newTestServer(t)
+
+	picks := func() (orgPick, teamPick bool) {
+		t.Helper()
+		if err := s.tx.WithTx(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
+			func(tx db.TxStores) error {
+				var e error
+				orgPick, teamPick, e = setupModelPicks(t.Context(), tx, runmode.LocalDefaultOrgID)
+				return e
+			}); err != nil {
+			t.Fatalf("setupModelPicks: %v", err)
+		}
+		return orgPick, teamPick
+	}
+
+	setBackgroundJobsModel(t, s, "claude-haiku-4-5-20251001")
+	setTeamDefaultModel(t, s, "claude-sonnet-5")
+	if org, team := picks(); !org || !team {
+		t.Fatalf("picks = (org %v, team %v) with both stored; want both true", org, team)
+	}
+
+	// Each missing pick is reported on its own, because they are two different
+	// screens and the resume point has to name the one that is missing.
+	setBackgroundJobsModel(t, s, "")
+	if org, team := picks(); org || !team {
+		t.Errorf("picks = (org %v, team %v) with no background-jobs model; want (false, true)", org, team)
+	}
+
+	setBackgroundJobsModel(t, s, "claude-haiku-4-5-20251001")
+	setTeamDefaultModel(t, s, "")
+	if org, team := picks(); !org || team {
+		t.Errorf("picks = (org %v, team %v) with no team default model; want (true, false)", org, team)
+	}
+
+	// The other half of the asymmetry: local pre-fills both from its own column
+	// defaults and never blocks on them, so a zero-configuration first run is
+	// not held on a question nobody was asked. Both are still cleared here.
+	runmode.SetForTest(t, runmode.ModeLocal)
+	if org, team := picks(); !org || !team {
+		t.Errorf("local blocked on model picks (org %v, team %v); it gates on neither", org, team)
+	}
+}
+
+// TestIntegrationsStatus_SetupCompleteGate_ModelPicksLocal pins that the gate
+// the AuthGate actually keys on carries that local arm end to end: an install
+// with neither pick stored still finishes setup.
+func TestIntegrationsStatus_SetupCompleteGate_ModelPicksLocal(t *testing.T) {
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
+		GitHubURL: "https://github.com",
+		GitHubPAT: "ghp-test",
+	}); err != nil {
+		t.Fatalf("Save creds: %v", err)
+	}
+	seedConfiguredRepo(t, s, "acme", "widgets")
+	setBackgroundJobsModel(t, s, "")
+	setTeamDefaultModel(t, s, "")
+
+	if st := getIntegrationsStatus(t, s); st["setup_complete"] != true {
+		t.Errorf("setup_complete=%v in local with neither pick stored; want true", st["setup_complete"])
+	}
+}
+
+// setBackgroundJobsModel writes org_settings.background_jobs_model directly.
+// The PATCH route refuses a model this deployment does not offer, and these
+// fixtures need the EMPTY state a fresh multi org is provisioned into, which no
+// route can produce.
+func setBackgroundJobsModel(t *testing.T, s *Server, model string) {
+	t.Helper()
+	if _, err := s.db.ExecContext(t.Context(), `
+		INSERT INTO org_settings (org_id, background_jobs_model) VALUES (?, ?)
+		ON CONFLICT(org_id) DO UPDATE SET background_jobs_model = excluded.background_jobs_model
+	`, runmode.LocalDefaultOrgID, model); err != nil {
+		t.Fatalf("seed background_jobs_model: %v", err)
+	}
+}
+
+// setTeamDefaultModel writes team_settings.default_model for the default team
+// directly, for the same reason: the team PATCH refuses to clear it.
+func setTeamDefaultModel(t *testing.T, s *Server, model string) {
+	t.Helper()
+	if _, err := s.db.ExecContext(t.Context(), `
+		INSERT INTO team_settings (team_id, default_model) VALUES (?, ?)
+		ON CONFLICT(team_id) DO UPDATE SET default_model = excluded.default_model
+	`, runmode.LocalDefaultTeamID, model); err != nil {
+		t.Fatalf("seed team default_model: %v", err)
 	}
 }

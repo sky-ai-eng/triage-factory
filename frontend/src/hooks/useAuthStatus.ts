@@ -19,10 +19,12 @@ interface AuthStatus {
   jira_url?: string
   github_repos?: number
   env_provided?: string[]
-  // setup_complete = github_ready AND the org tracks ≥1 repo. The gate
-  // blocks the product until this is true; setup_step names which configure
-  // screen an incomplete founder resumes on ('org' → GitHub access, 'team' →
-  // tracked repos, 'done' → complete). Both absent only while loading.
+  // setup_complete = github_ready AND the org tracks ≥1 repo AND every model
+  // choice setup requires has been made. The gate blocks the product until this
+  // is true; setup_step names which configure screen an incomplete founder
+  // resumes on ('org' → GitHub access or the background-jobs model, 'team' →
+  // tracked repos or the team's default model, 'done' → complete). Both absent
+  // only while loading.
   setup_complete?: boolean
   setup_step?: 'org' | 'team' | 'done'
   loading: boolean

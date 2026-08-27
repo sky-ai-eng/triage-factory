@@ -83,8 +83,14 @@ func TestModelsList_ServesTheJoinedCatalog(t *testing.T) {
 		if got.ContextWindow != want.ContextWindow {
 			t.Errorf("%s: context_window = %d, want %d", got.Key, got.ContextWindow, want.ContextWindow)
 		}
-		if got.SupportsPromptCaching != want.SupportsPromptCaching {
-			t.Errorf("%s: supports_prompt_caching = %v, want %v", got.Key, got.SupportsPromptCaching, want.SupportsPromptCaching)
+		if got.SupportsPromptCaching == nil {
+			t.Errorf("%s: no supports_prompt_caching on a native row", got.Key)
+		} else if *got.SupportsPromptCaching != want.SupportsPromptCaching {
+			t.Errorf("%s: supports_prompt_caching = %v, want %v", got.Key, *got.SupportsPromptCaching, want.SupportsPromptCaching)
+		}
+		if got.ProviderDisplayName != modelcatalog.ProviderDisplayName(want.Provider) {
+			t.Errorf("%s: provider_display_name = %q, want %q",
+				got.Key, got.ProviderDisplayName, modelcatalog.ProviderDisplayName(want.Provider))
 		}
 		if got.DisplayOrder != i {
 			t.Errorf("%s: display_order = %d, want %d", got.Key, got.DisplayOrder, i)
@@ -139,8 +145,11 @@ func TestModelsList_LocalServesTheSDKAliasList(t *testing.T) {
 		if got.PricesPerMTok != nil {
 			t.Errorf("%s: prices_per_mtok = %+v, want absent — cost is harness-settled", got.Key, *got.PricesPerMTok)
 		}
-		if got.ContextWindow != 0 || got.SupportsPromptCaching {
+		if got.ContextWindow != 0 || got.SupportsPromptCaching != nil {
 			t.Errorf("%s: carries datasheet facts (%d, %v), want absent", got.Key, got.ContextWindow, got.SupportsPromptCaching)
+		}
+		if got.ProviderDisplayName != "" {
+			t.Errorf("%s: provider_display_name = %q, want absent — an alias names no access path", got.Key, got.ProviderDisplayName)
 		}
 		if got.Availability != "" || got.AvailabilityDetail != "" || got.AvailabilityCheckedAt != nil {
 			t.Errorf("%s: carries an availability triple under system credentials, want absent", got.Key)

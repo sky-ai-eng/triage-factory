@@ -74,11 +74,21 @@ type modelCatalogRow struct {
 	DisplayName string `json:"display_name"`
 	// Provider is absent where the id does not name one. See the type doc.
 	Provider string `json:"provider,omitempty"`
-	Enabled  bool   `json:"enabled"`
+	// ProviderDisplayName is how a person reads Provider, and travels beside it
+	// so a client renders the name TF uses rather than keeping its own map of
+	// the provider vocabulary — a second copy that can only ever fall behind
+	// this one. Absent exactly when Provider is.
+	ProviderDisplayName string `json:"provider_display_name,omitempty"`
+	Enabled             bool   `json:"enabled"`
 	// PricesPerMTok is absent where cost is harness-settled. See the type doc.
-	PricesPerMTok         *modelPricesPerMTok `json:"prices_per_mtok,omitempty"`
-	ContextWindow         int                 `json:"context_window,omitempty"`
-	SupportsPromptCaching bool                `json:"supports_prompt_caching,omitempty"`
+	PricesPerMTok *modelPricesPerMTok `json:"prices_per_mtok,omitempty"`
+	ContextWindow int                 `json:"context_window,omitempty"`
+	// SupportsPromptCaching is a POINTER because false is an answer here and
+	// absent is not one: a model that cannot cache its prompt costs several
+	// times more to run, which a client has to say out loud, and a bare bool
+	// with omitempty would publish that fact and "TF makes no claim" as the
+	// same missing field.
+	SupportsPromptCaching *bool `json:"supports_prompt_caching,omitempty"`
 	// Availability is the whole triple's presence gate: it is absent — with the
 	// two fields below — when this org's credentials are not TF-owned, because
 	// a verdict about the machine an agent happens to run on has no stable
@@ -215,6 +225,9 @@ func catalogRow(m modelcatalog.Model, enabled bool, avail availabilityIndex) mod
 		AvailabilityCheckedAt: checkedAt,
 		DisplayOrder:          m.DisplayOrder,
 	}
+	if m.Provider != "" {
+		row.ProviderDisplayName = modelcatalog.ProviderDisplayName(m.Provider)
+	}
 	if f := m.Facts; f != nil {
 		row.PricesPerMTok = &modelPricesPerMTok{
 			Input:      f.Prices.Input,
@@ -223,7 +236,8 @@ func catalogRow(m modelcatalog.Model, enabled bool, avail availabilityIndex) mod
 			CacheWrite: f.Prices.CacheWrite,
 		}
 		row.ContextWindow = f.ContextWindow
-		row.SupportsPromptCaching = f.SupportsPromptCaching
+		caching := f.SupportsPromptCaching
+		row.SupportsPromptCaching = &caching
 	}
 	return row
 }

@@ -28,7 +28,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import TeamPicker from '../../../components/TeamPicker'
 import { toast } from '../../../components/Toast/toastStore'
-import { modelDisplayName } from '../../../hooks/useModelCatalog'
+import {
+  modelCatalogEntry,
+  modelDisplayName,
+  refreshModelCatalog,
+} from '../../../hooks/useModelCatalog'
+import { gateModelSave, offerSweepAfterConnect } from '../../../lib/modelGate'
+import ModelAvailabilityPanel from '../ModelAvailabilityPanel'
 import { noteWrittenTeam, useWriteTeam } from '../../../hooks/useTeams'
 import { apiJSON, httpErrorMessage } from '../../../lib/apiClient'
 import {
@@ -682,16 +688,25 @@ export default function OrgSettings({
         summary={backgroundJobsSummary}
         dirty={draft.org.background_jobs_model !== baseline.org.background_jobs_model}
         saving={isSaving('background-jobs-model')}
-        onSave={() =>
-          commitOrgSlice(
+        onSave={async () => {
+          // The gate first, and the write only on its green: a save that stored
+          // a model nothing can invoke would report success for jobs that then
+          // silently never run.
+          const picked = modelCatalogEntry(orgId, draft.org.background_jobs_model)
+          if (picked && !(await gateModelSave(orgId!, picked))) return false
+          return commitOrgSlice(
             'background-jobs-model',
             { background_jobs_model: draft.org.background_jobs_model },
             'Background jobs model',
           )
-        }
+        }}
         onCancel={() => revertOrg(['background_jobs_model'])}
       >
-        <OrgBackgroundJobsModelStep {...ctx} allowOff />
+        {/* The off switch is local's alone, and that is the mandatory-pick
+            asymmetry rather than a feature gap: multi requires this choice
+            before setup completes (nothing falls back there), so offering a way
+            to un-choose it would be offering a way back into the wizard. */}
+        <OrgBackgroundJobsModelStep {...ctx} allowOff={isLocal} />
       </SettingsSection>
 
       {/* ── Daily spend cap (TFAC-477) ── A runaway-spend fuse: when the org's
@@ -853,6 +868,10 @@ export default function OrgSettings({
                 toast.error(r.error)
                 return false
               }
+              // The credential is bound, so its models can be tested now — the
+              // one moment the eager pass is offered. Declining is fine; the
+              // save gate catches each model individually later.
+              await offerSweepAfterConnect(orgId, 'bedrock', 'Amazon Bedrock')
               // The bind persisted its key ref onto the settings row.
               await refreshOrgVersion()
               const clearSecrets = {
@@ -914,6 +933,10 @@ export default function OrgSettings({
               })
               setBaseline(apply)
               setDraft(apply)
+              // Every availability derives from what is bound, and nothing is
+              // bound now — re-read so the model list stops showing verdicts
+              // about a credential this org no longer holds.
+              await refreshModelCatalog(orgId)
               toast.success('Using system Claude credentials')
               return true
             }
@@ -935,6 +958,7 @@ export default function OrgSettings({
               toast.error(r.error)
               return false
             }
+            await offerSweepAfterConnect(orgId, 'anthropic', 'Anthropic')
             // The bind rewrote the key ref on the settings row, and recorded
             // that the org is on its own credentials — an org holding a key is
             // not running on the machine's, so nothing asks it to say so twice.
@@ -1013,6 +1037,16 @@ export default function OrgSettings({
             </>
           )}
         </div>
+      </SettingsSection>
+
+      {/* ── Model availability ── What this organization's credentials have
+          actually been shown to run, with a per-row test. An action section: a
+          test commits inline (it spends a request and records a verdict), so
+          there is nothing to draft and nothing to save. The panel says so
+          itself when there is no TF-owned credential for a verdict to be
+          about — it reads that off the rows, not off the mode. */}
+      <SettingsSection title="Model availability" summary="Test models against your credentials">
+        <ModelAvailabilityPanel orgId={orgId} />
       </SettingsSection>
 
       {/* Add-team is hosted-only (POST /api/teams 404s in local). */}

@@ -41,6 +41,7 @@ import AuthGate, {
   RequireSetupComplete,
 } from './AuthGate'
 import ToastProvider from './components/Toast/ToastProvider'
+import ModelGateDialog from './components/ModelGateDialog'
 import { useDeploymentConfig } from './hooks/useDeploymentConfig'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { OrgProvider, useActiveOrgId } from './contexts/OrgContext'
@@ -341,6 +342,11 @@ createRoot(document.getElementById('root')!).render(
     <BrowserRouter>
       <AppRoutes />
       <ToastProvider />
+      {/* The consent dialog behind every paid model probe. Mounted here, beside
+          the toaster, because the things that await it — a settings Save, a
+          wizard step's persist, a credential bind's aftermath — are not all
+          components that could host a modal. */}
+      <ModelGateDialog />
     </BrowserRouter>
   </StrictMode>,
 )

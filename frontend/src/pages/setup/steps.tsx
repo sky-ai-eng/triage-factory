@@ -21,7 +21,7 @@
 // Reuse rule: every step composes a shared group (GitHubAccessGroup /
 // GitHubAppPanel via the GitHub bodies, JiraAccessGroup via the Jira bodies,
 // PollerTimingGroup, ModelGroup, the RepoPickerModal, GitHubTeamGroup,
-// JiraProjectRulesGroup, and the shared ModelTierSelector) — no parallel field
+// JiraProjectRulesGroup, and the shared ModelPicker) — no parallel field
 // UIs. Org persistence rides the single PATCH /api/orgs/{org}/settings; team
 // persistence rides the existing per-team repos / github-groups / jira-projects
 // PUTs and the team-settings PATCH — no wizard-only persistence path to drift. The URL
@@ -67,7 +67,8 @@ import {
   discardStagedApp,
 } from '../../lib/githubApp'
 import { apiJSON } from '../../lib/apiClient'
-import { modelDisplayName } from '../../hooks/useModelCatalog'
+import { modelCatalogEntry, modelDisplayName } from '../../hooks/useModelCatalog'
+import { gateModelSave, offerSweepAfterConnect } from '../../lib/modelGate'
 import type { GitHubIdentityStatus, JiraIdentityStatus } from '../../types'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
 import GitHubTeamGroup from '../settings/GitHubTeamGroup'
@@ -375,6 +376,27 @@ async function persistTeamSettings(
   const result = await saveTeamSettings(teamId, state.team, false)
   if (!result.ok) throw new Error(result.error)
   return result.warning
+}
+
+// gateModelPick holds a step's Continue to the same save gate every other model
+// choice passes through: a model nothing has established this org's credentials
+// can run is tested first, with the person's consent, and the step persists only
+// on green. Refusing throws, which is how a step reports "not saved" — the host
+// shows the message on the step it belongs to.
+//
+// Two things are not a gate. A blank key is the absence of a model, and the
+// step's own isComplete is what refuses that. And a model the catalog read
+// could not resolve proceeds: the client has learned nothing about it, and the
+// save it would be gating is refused server-side anyway if the org cannot run
+// it.
+async function gateModelPick(orgId: string | null, key: string): Promise<void> {
+  if (!orgId || key === '') return
+  const entry = modelCatalogEntry(orgId, key)
+  if (!entry) return
+  if (await gateModelSave(orgId, entry)) return
+  throw new Error(
+    `${entry.display_name} hasn’t been verified against your credentials — test it to continue.`,
+  )
 }
 
 // Step · GitHub URL (mandatory, first org step). The base-URL reachability
@@ -1076,7 +1098,10 @@ const orgBackgroundJobsModelStep: WizardStep = {
   section: 'org',
   title: 'Background jobs model',
   isComplete: (s) => s.org.background_jobs_model !== '',
-  persist: persistOrgFields('background_jobs_model'),
+  persist: async (ctx) => {
+    await gateModelPick(ctx.orgId, ctx.state.org.background_jobs_model)
+    await persistOrgFields('background_jobs_model')(ctx)
+  },
   collapsedSummary: (s) =>
     s.org.background_jobs_model
       ? modelDisplayName(s.org.background_jobs_model)
@@ -1216,6 +1241,10 @@ const orgClaudeKeyStep: WizardStep = {
     if (state.claudeProvider === 'bedrock') {
       const r = await connectBedrock(orgId, bedrockPayloadFromForm(state.org))
       if (!r.ok) throw new Error(r.error)
+      // The credential is bound, so its models can now be tested — this is the
+      // one moment the eager pass is offered. Declining is fine; the save gate
+      // catches each model individually later.
+      await offerSweepAfterConnect(orgId, 'bedrock', 'Amazon Bedrock')
       // Both binds persist their key ref onto the settings row, moving its
       // concurrency token — pick up the fresh one so a revisited org step's
       // save doesn't conflict with this write.
@@ -1242,6 +1271,7 @@ const orgClaudeKeyStep: WizardStep = {
     if (state.anthropicConnected && typed === '') return
     const r = await connectAnthropic(orgId, typed)
     if (!r.ok) throw new Error(r.error)
+    await offerSweepAfterConnect(orgId, 'anthropic', 'Anthropic')
     const version = await freshOrgVersion(orgId, state.org.version)
     patch({
       anthropicConnected: true,
@@ -1378,19 +1408,18 @@ const jiraProjectsStep: WizardStep = {
   ),
 }
 
-// Step 8 · Team default model. The same shared ModelTierSelector the org
-// max-tier step uses (step 4), team-scoped — the model this team delegates
-// with by default. No load of its own — reads the repos step's seeded team form;
-// persistTeamSettings guards against saving when that load failed. isComplete
-// requires a chosen model, which the team GET always carries (the settings row
-// defaults to one), so a returning team reads complete.
+// Step · Team default model. The shared ModelPicker, team-scoped — the model
+// this team delegates with by default. No load of its own — reads the repos
+// step's seeded team form; persistTeamSettings guards against saving when that
+// load failed. isComplete requires a chosen model.
 const teamModelStep: WizardStep = {
   id: 'team-model',
   section: 'team',
   title: 'Team default model',
   isComplete: (s) => s.team.default_model.trim() !== '',
   validate: (s) => (s.team.default_model.trim() === '' ? 'Choose a default model.' : null),
-  persist: async ({ state, teamId }) => {
+  persist: async ({ state, teamId, orgId }) => {
+    await gateModelPick(orgId, state.team.default_model)
     const warning = await persistTeamSettings(teamId, state)
     if (warning) toast.info(warning)
   },
@@ -1577,9 +1606,14 @@ export const WIZARD_STEPS: WizardStep[] = [
   jiraModeStep,
   jiraAccessStep,
   jiraPollerStep,
-  orgBackgroundJobsModelStep,
+  // The credential steps come BEFORE the model picks, and that order is the
+  // point: a picker asked first can only offer models the org may turn out to
+  // have no way of running, and its availability badges have no credential to
+  // be about. Connect first, then choose from what this organization can
+  // actually reach.
   orgClaudeSourceStep,
   orgClaudeKeyStep,
+  orgBackgroundJobsModelStep,
   reposStep,
   githubTeamsStep,
   jiraProjectsStep,
