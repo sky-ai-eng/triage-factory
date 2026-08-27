@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import ModelGateDialog from '../components/ModelGateDialog'
@@ -45,7 +45,6 @@ beforeEach(() => {
   resetModelGateForTest()
   resetModelCatalogForTest()
 })
-afterEach(() => vi.unstubAllGlobals())
 
 describe('the save gate — a selection nothing has verified', () => {
   it('asks first, states what the test costs, and completes the save on green', async () => {

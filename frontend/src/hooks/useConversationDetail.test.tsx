@@ -163,7 +163,6 @@ describe('useConversationDetail live cost accumulation', () => {
     firstPageOlderToken = ''
     mockFetch()
   })
-  afterEach(() => vi.unstubAllGlobals())
 
   it('folds a streamed row’s cost into the readout with no conversation_update', async () => {
     render(<Harness />)
@@ -303,7 +302,6 @@ describe('useConversationDetail live token accumulation', () => {
     firstPageOlderToken = ''
     mockFetch()
   })
-  afterEach(() => vi.unstubAllGlobals())
 
   it('shows the server’s sums rather than a walk of the transcript', async () => {
     // The transcript's own counts are deliberately not the conversation
@@ -465,7 +463,6 @@ describe('useConversationDetail transcript reconciliation', () => {
   })
   afterEach(() => {
     vi.useRealTimers()
-    vi.unstubAllGlobals()
   })
 
   it('pulls in a row whose websocket frame never arrived', async () => {
@@ -707,7 +704,6 @@ describe('useConversationDetail resumability', () => {
       resume_blocked_reason: 'workspace_expired',
     })
   })
-  afterEach(() => vi.unstubAllGlobals())
 
   it('turns the composer on when the workspace is announced as accounted for', async () => {
     mockResumableFetch()
@@ -771,7 +767,6 @@ describe('useConversationDetail transcript back-paging', () => {
     olderPages = {}
     firstPageOlderToken = ''
   })
-  afterEach(() => vi.unstubAllGlobals())
 
   it('reports no earlier history when the first read reached the beginning', async () => {
     serverMessages = [message({ id: 5 })]

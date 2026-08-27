@@ -7,6 +7,7 @@ import prettier from 'eslint-config-prettier'
 import { defineConfig, globalIgnores } from 'eslint/config'
 import noGhostConversationStatus from './eslint-rules/no-ghost-conversation-status.js'
 import noRawApiFetch from './eslint-rules/no-raw-api-fetch.js'
+import noTestGlobalUnstub from './eslint-rules/no-test-global-unstub.js'
 import uiNoAppImports from './eslint-rules/ui-no-app-imports.js'
 
 export default defineConfig([
@@ -36,11 +37,16 @@ export default defineConfig([
       // Triage Factory; the rule is a no-op for every file outside it, so it
       // is registered globally rather than in an override block.
       ui: { rules: { 'no-app-imports': uiNoAppImports } },
+      // src/test/setup.ts owns the order of unmount-then-unstub; the rule is a
+      // no-op for every file that is not a test, so it is registered globally
+      // rather than in an override block.
+      test: { rules: { 'no-global-unstub': noTestGlobalUnstub } },
     },
     rules: {
       'conversation-status/no-ghost-conversation-status': 'error',
       'api/no-raw-api-fetch': 'error',
       'ui/no-app-imports': 'error',
+      'test/no-global-unstub': 'error',
       '@typescript-eslint/no-unused-vars': [
         'error',
         {

@@ -1,7 +1,7 @@
 // The Jira write path's half of the id contract: the PUT takes status IDS and
 // resolves display names itself, so this is where the form's refs become ids —
 // and where a rule that has no ids to send is left out instead of cleared.
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 
 import {
   dropStatus,
@@ -65,10 +65,6 @@ function sentBody(fetchMock: ReturnType<typeof stubPut>): {
   const call = fetchMock.mock.calls[0] as unknown as [string, { body: string }]
   return JSON.parse(call[1].body)
 }
-
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
 
 describe('saveTeamJiraProjects', () => {
   it('sends status ids and never names', async () => {

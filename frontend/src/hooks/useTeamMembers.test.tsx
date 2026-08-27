@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
 import type { TeamSummary } from '../types'
 import { useTeamMembers } from './useDeploymentConfig'
@@ -66,10 +66,6 @@ beforeEach(() => {
   mockState.teams = []
   mockState.lastActingTeamId = ''
   mockState.loaded = true
-})
-
-afterEach(() => {
-  vi.unstubAllGlobals()
 })
 
 describe('useTeamMembers', () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 
 import { toast } from '../../components/Toast/toastStore'
@@ -76,10 +76,6 @@ beforeEach(() => {
   requeueBodies = []
   movedOverride = null
   installFetch()
-})
-
-afterEach(() => {
-  vi.unstubAllGlobals()
 })
 
 describe('FailedEventsPanel', () => {

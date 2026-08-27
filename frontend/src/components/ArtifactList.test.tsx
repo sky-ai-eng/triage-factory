@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ArtifactList from './ArtifactList'
 import type { Artifact } from '../types'
@@ -29,7 +29,6 @@ const art = (over: Partial<Artifact>): Artifact => ({
 
 describe('ArtifactList', () => {
   beforeEach(() => vi.restoreAllMocks())
-  afterEach(() => vi.unstubAllGlobals())
 
   it('fetches the conversation-scoped endpoint and renders each artifact (kind / state / link)', async () => {
     const fetchMock = mockArtifacts([

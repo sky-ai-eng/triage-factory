@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import AgentCard from './AgentCard'
@@ -42,7 +42,6 @@ function renderCard(over: Partial<Conversation>, onOpenArtifact = vi.fn()) {
 
 describe('AgentCard artifacts affordance', () => {
   beforeEach(() => vi.restoreAllMocks())
-  afterEach(() => vi.unstubAllGlobals())
 
   it('hides the affordance when the conversation produced no artifacts', () => {
     renderCard({ artifact_count: 0 })
@@ -129,7 +128,6 @@ describe('AgentCard artifacts affordance', () => {
 
 describe('AgentCard attention row', () => {
   beforeEach(() => vi.restoreAllMocks())
-  afterEach(() => vi.unstubAllGlobals())
 
   it('opens the lone unresolved artifact directly — no list detour', () => {
     vi.stubGlobal('fetch', vi.fn())

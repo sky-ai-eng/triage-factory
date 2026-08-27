@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { usePagedList } from './usePagedList'
 import { jsonBody } from '../test/apiResponse'
@@ -24,10 +24,6 @@ function stubPages(pages: Array<{ items: Row[]; next_page_token?: string; total_
   vi.stubGlobal('fetch', fetchMock)
   return { fetchMock, bodies }
 }
-
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
 
 describe('usePagedList', () => {
   it('loads the first page and reports the filtered total', async () => {

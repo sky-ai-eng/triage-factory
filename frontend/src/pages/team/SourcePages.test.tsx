@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import GitHubSource from './GitHubSource'
 import JiraSource from './JiraSource'
@@ -133,7 +133,6 @@ beforeEach(() => {
     })),
   )
 })
-afterEach(() => vi.unstubAllGlobals())
 
 describe('GitHub source page', () => {
   const REPOS = {
@@ -303,8 +302,16 @@ describe('Jira source page', () => {
     const fetchMock = stub(SETTINGS)
     render(<JiraSource {...BODY} />)
 
-    // A status nobody mapped sits in the tray rather than being hidden.
-    await waitFor(() => expect(screen.getByText('QA')).toBeInTheDocument())
+    // A status nobody mapped sits in the tray rather than being hidden — and
+    // 'Blocked' is the gate as well as the claim, because it is the one status
+    // reachable ONLY through the read this test is about: it is in PLAT's
+    // vocabulary and in none of its stored rules. A mapped chip would not do.
+    // 'QA' is an `in_review` member, so it renders straight off the settings
+    // payload, in the commit BEFORE the one whose passive effect issues the
+    // statuses read — waiting on it would leave the assertion below racing a
+    // fetch that has not been called yet.
+    await waitFor(() => expect(screen.getByText('Blocked')).toBeInTheDocument())
+    expect(screen.getByText('QA')).toBeInTheDocument()
     expect(screen.getByText('In Progress')).toBeInTheDocument()
 
     // The vocabulary is the shown project's own, never an intersection
@@ -341,6 +348,11 @@ describe('Jira source page', () => {
     // statuses were asked for, not reused from PLAT's read.
     await waitFor(() => expect(screen.getByText(/not armed yet/)).toBeInTheDocument())
     expect(keys[1].getAttribute('aria-selected')).toBe('true')
+    // That note is drawn from the stored config, so it says nothing about
+    // whether SKY's vocabulary landed. The tray refilling is what does: the
+    // board re-keys on the switch, so it is empty until SKY's own read
+    // resolves — which is the read the assertion below is about.
+    await waitFor(() => expect(screen.getByText('Blocked')).toBeInTheDocument())
     const statusReads = fetchMock.mock.calls
       .map((c) => String(c[0]))
       .filter((u) => u.includes('/api/jira/statuses'))

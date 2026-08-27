@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
 import { useModelCatalog, modelDisplayName, resetModelCatalogForTest } from './useModelCatalog'
 import type { ModelCatalogEntry } from '../lib/models'
@@ -36,10 +36,6 @@ const catalog: ModelCatalogEntry[] = [
 
 beforeEach(() => {
   resetModelCatalogForTest()
-})
-
-afterEach(() => {
-  vi.unstubAllGlobals()
 })
 
 describe('useModelCatalog', () => {

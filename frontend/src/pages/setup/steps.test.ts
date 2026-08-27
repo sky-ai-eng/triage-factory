@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { initialWizardState, persistOrgFields, bedrockFormError, WIZARD_STEPS } from './steps'
 import type { WizardState } from './types'
 
@@ -46,7 +46,6 @@ function orgCtx(state: WizardState, patch: (p: Partial<WizardState>) => void = (
 
 describe('persistOrgFields — each org step saves only what it owns', () => {
   beforeEach(() => vi.restoreAllMocks())
-  afterEach(() => vi.unstubAllGlobals())
 
   it('sends exactly the named fields plus the concurrency token', async () => {
     const bodies = captureSaveBodies()

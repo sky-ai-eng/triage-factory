@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import Login from './Login'
@@ -40,10 +40,6 @@ beforeEach(() => {
   api.apiJSON.mockReset()
   authState.value = { status: 'unauth', error: null }
   vi.stubGlobal('location', { href: '' })
-})
-
-afterEach(() => {
-  vi.unstubAllGlobals()
 })
 
 describe('Login (identifier-first, TFAC-427)', () => {

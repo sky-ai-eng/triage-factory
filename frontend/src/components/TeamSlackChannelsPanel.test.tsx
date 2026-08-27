@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import type { SlackChannelsResponse, SlackChannelView } from '../types'
 import { toast } from './Toast/toastStore'
@@ -95,10 +95,6 @@ function installFetch() {
 beforeEach(() => {
   seed({ role: 'admin', warnings: [], channels: [] })
   installFetch()
-})
-
-afterEach(() => {
-  vi.unstubAllGlobals()
 })
 
 describe('TeamSlackChannelsPanel', () => {

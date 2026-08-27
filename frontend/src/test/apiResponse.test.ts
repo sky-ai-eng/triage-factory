@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { apiFetch, apiJSON, httpErrorMessage, HttpError } from '../lib/apiClient'
 import { jsonBody } from './apiResponse'
 
@@ -7,10 +7,6 @@ import { jsonBody } from './apiResponse'
 // to be under test, which is the worst place to debug it from.
 
 describe('jsonBody', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
-
   const caught = (p: Promise<unknown>) =>
     p.then(
       () => null,

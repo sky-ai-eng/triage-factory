@@ -32,7 +32,6 @@ describe('Countdown', () => {
   })
   afterEach(() => {
     vi.useRealTimers()
-    vi.unstubAllGlobals()
   })
 
   it('holds its footprint at zero', () => {

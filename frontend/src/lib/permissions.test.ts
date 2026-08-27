@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { fetchPendingPermissions, ttlForPrompt, PERMISSION_TTL_GRACE_MS } from './permissions'
 import { jsonBody } from '../test/apiResponse'
 
@@ -12,10 +12,6 @@ function stubFetch(impl: () => Promise<unknown> | never) {
   vi.stubGlobal('fetch', mock)
   return mock
 }
-
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
 
 describe('fetchPendingPermissions', () => {
   it('returns the pending set on a 200', async () => {
