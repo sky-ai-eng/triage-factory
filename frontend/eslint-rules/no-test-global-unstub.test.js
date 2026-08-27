@@ -35,8 +35,13 @@ describe('no-test-global-unstub', () => {
         { code: 'afterEach(() => { cleanup(); vi.unstubAllGlobals() })', filename: SETUP },
         // Not a test file at all.
         { code: 'vi.unstubAllGlobals()', filename: APP },
-        // A same-named method on something that is not vitest's `vi`.
+        // A same-named method on something that is not vitest's `vi`, in
+        // either spelling.
         { code: 'sandbox.unstubAllGlobals()', filename: TEST },
+        { code: "sandbox['unstubAllGlobals']()", filename: TEST },
+        // A key the lint cannot read is not a finding it can make.
+        { code: 'vi[name]()', filename: TEST },
+        { code: 'vi[`unstub${rest}`]()', filename: TEST },
       ],
       invalid: [],
     })
@@ -70,6 +75,33 @@ describe('no-test-global-unstub', () => {
         },
         {
           code: "it('x', () => { vi.unstubAllGlobals() })",
+          filename: TEST,
+          errors: [{ messageId: 'ownHook' }],
+        },
+        // The same call, spelled the other three ways. A rule that reads only
+        // the dot form is a convention with a documented way around it.
+        {
+          code: "afterEach(() => vi['unstubAllGlobals']())",
+          filename: TEST,
+          errors: [{ messageId: 'ownHook' }],
+        },
+        {
+          code: 'afterEach(() => vi[`unstubAllGlobals`]())',
+          filename: TEST,
+          errors: [{ messageId: 'ownHook' }],
+        },
+        {
+          code: 'afterEach(() => vi?.unstubAllGlobals())',
+          filename: TEST,
+          errors: [{ messageId: 'ownHook' }],
+        },
+        {
+          code: "afterEach(() => vi?.['unstubAllGlobals']())",
+          filename: TEST,
+          errors: [{ messageId: 'ownHook' }],
+        },
+        {
+          code: 'afterEach(() => vi.unstubAllGlobals?.())',
           filename: TEST,
           errors: [{ messageId: 'ownHook' }],
         },

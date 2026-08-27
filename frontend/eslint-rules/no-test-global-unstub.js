@@ -17,8 +17,30 @@
 // redundant as well as wrong: the stub is already restored, one hook later.
 //
 // Scoped to test files because `vi` outside one is not vitest's runner API.
+//
+// The call is matched on the property it names rather than on how it is
+// spelled, so dot and bracket access are one finding — `vi.unstubAllGlobals()`
+// and `vi['unstubAllGlobals']()` are the same call, and optional chaining in
+// either is a third spelling that changes nothing. What it cannot see is a
+// binding pulled off `vi` first (`const { unstubAllGlobals } = vi`), which is
+// where a rule guarding a convention stops: nothing in the suite is written
+// that way, and a reader who takes that route has already read this file.
 
 const TEST_FILE = /\.test\.[cm]?[jt]sx?$/
+
+/**
+ * The property a member expression names, when it can be read statically — the
+ * identifier after a dot, or a plain string key in brackets.
+ */
+function staticPropertyName(node) {
+  const key = node.property
+  if (!node.computed) return key.type === 'Identifier' ? key.name : null
+  if (key.type === 'Literal') return typeof key.value === 'string' ? key.value : null
+  if (key.type === 'TemplateLiteral' && key.expressions.length === 0) {
+    return key.quasis[0].value.cooked
+  }
+  return null
+}
 
 const rule = {
   meta: {
@@ -41,16 +63,10 @@ const rule = {
     return {
       CallExpression(node) {
         const callee = node.callee
-        if (
-          callee.type === 'MemberExpression' &&
-          !callee.computed &&
-          callee.object.type === 'Identifier' &&
-          callee.object.name === 'vi' &&
-          callee.property.type === 'Identifier' &&
-          callee.property.name === 'unstubAllGlobals'
-        ) {
-          context.report({ node, messageId: 'ownHook' })
-        }
+        if (callee.type !== 'MemberExpression') return
+        if (callee.object.type !== 'Identifier' || callee.object.name !== 'vi') return
+        if (staticPropertyName(callee) !== 'unstubAllGlobals') return
+        context.report({ node, messageId: 'ownHook' })
       },
     }
   },
