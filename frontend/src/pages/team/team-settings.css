@@ -673,7 +673,6 @@
   background: color-mix(in srgb, var(--color-alarm) 16%, var(--color-ground));
 }
 
-.ts-note,
 .ts-error,
 .ts-empty {
   margin: 0;
@@ -681,6 +680,14 @@
   line-height: var(--leading-prose);
   color: var(--color-ink-3);
   max-width: var(--container-measure);
+}
+
+/* The models table's one footnote: the unit every price column shares. */
+.ts-models-foot {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--color-ink-4);
 }
 
 .ts-error {
