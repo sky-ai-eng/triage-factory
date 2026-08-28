@@ -866,10 +866,19 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// The sole local team, which local mode reports the single user as
 		// admin of — the same role the teams list gives the per-team gates, so
 		// the two reads of that one truth agree. s.teams is wired by New();
-		// guard it like s.users for the bare-rig test. A read error is fatal
-		// rather than an empty list: the field carries the viewer's team
-		// grants, and answering "no teams" for a failed read withdraws them
-		// silently.
+		// guard it like s.users for the bare-rig test.
+		//
+		// No team resolves to an empty list rather than an error, because an
+		// unprovisioned install is the shape a local DB genuinely has: nothing
+		// creates tenant rows at boot or in a migration, so orgs and teams both
+		// stay empty until the explicit "Start your factory" action, and this
+		// route answers throughout. An archived sole team lands here too, and
+		// [] is right for it as well — archived teams are excluded from this
+		// field by contract.
+		//
+		// Everything else is fatal rather than an empty list: the field carries
+		// the viewer's team grants, so answering "no teams" for a read that
+		// failed, or for a row that just vanished, withdraws them silently.
 		if s.teams != nil {
 			teamID, err := s.teams.GetDefaultForOrg(r.Context(), runmode.LocalDefaultOrgID)
 			if err != nil {
@@ -882,9 +891,15 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 					internalError(w, "auth", fmt.Errorf("local team %s: %w", teamID, err))
 					return
 				}
-				if t != nil {
-					resp.Teams = append(resp.Teams, teamRow{ID: t.ID, Name: t.Name, OrgID: t.OrgID, Role: t.Role})
+				if t == nil {
+					// The id came from the teams table one statement ago, and
+					// this read is the same table by (id, org_id) with no
+					// further filter — a miss means the row went away
+					// mid-request, which is corruption rather than an answer.
+					internalError(w, "auth", fmt.Errorf("local default team %s resolved to no row", teamID))
+					return
 				}
+				resp.Teams = append(resp.Teams, teamRow{ID: t.ID, Name: t.Name, OrgID: t.OrgID, Role: t.Role})
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
