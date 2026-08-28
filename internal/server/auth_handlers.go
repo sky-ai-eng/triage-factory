@@ -23,6 +23,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
@@ -865,42 +866,19 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		}
 		// The sole local team, which local mode reports the single user as
 		// admin of — the same role the teams list gives the per-team gates, so
-		// the two reads of that one truth agree. s.teams is wired by New();
-		// guard it like s.users for the bare-rig test.
-		//
-		// No team resolves to an empty list rather than an error, because an
-		// unprovisioned install is the shape a local DB genuinely has: nothing
-		// creates tenant rows at boot or in a migration, so orgs and teams both
-		// stay empty until the explicit "Start your factory" action, and this
-		// route answers throughout. An archived sole team lands here too, and
-		// [] is right for it as well — archived teams are excluded from this
-		// field by contract.
-		//
-		// Everything else is fatal rather than an empty list: the field carries
-		// the viewer's team grants, so answering "no teams" for a read that
-		// failed, or for a row that just vanished, withdraws them silently.
-		if s.teams != nil {
-			teamID, err := s.teams.GetDefaultForOrg(r.Context(), runmode.LocalDefaultOrgID)
-			if err != nil {
-				internalError(w, "auth", fmt.Errorf("local default team: %w", err))
-				return
-			}
-			if teamID != "" {
-				t, err := s.teams.Get(r.Context(), runmode.LocalDefaultOrgID, teamID)
-				if err != nil {
-					internalError(w, "auth", fmt.Errorf("local team %s: %w", teamID, err))
-					return
-				}
-				if t == nil {
-					// The id came from the teams table one statement ago, and
-					// this read is the same table by (id, org_id) with no
-					// further filter — a miss means the row went away
-					// mid-request, which is corruption rather than an answer.
-					internalError(w, "auth", fmt.Errorf("local default team %s resolved to no row", teamID))
-					return
-				}
-				resp.Teams = append(resp.Teams, teamRow{ID: t.ID, Name: t.Name, OrgID: t.OrgID, Role: t.Role})
-			}
+		// the two reads of that one truth agree. A nil team is the install
+		// nobody has provisioned yet and leaves the list empty, which is an
+		// answer rather than a fault; localDefaultTeam carries the reasoning
+		// for that and for the states it refuses instead.
+		localTeam, err := s.localDefaultTeam(r.Context())
+		if err != nil {
+			internalError(w, "auth", err)
+			return
+		}
+		if localTeam != nil {
+			resp.Teams = append(resp.Teams, teamRow{
+				ID: localTeam.ID, Name: localTeam.Name, OrgID: localTeam.OrgID, Role: localTeam.Role,
+			})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
@@ -1072,6 +1050,44 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// localDefaultTeam resolves the one team a local install has, for /api/me's
+// teams field. It answers (nil, nil) when there is no such team.
+//
+// That nil is a real answer and not a failure. Nothing creates tenant rows at
+// boot or in a migration — provisioning is the explicit "Start your factory"
+// action — so a local database has no org and no team until the operator takes
+// it, and this route answers throughout. An archived sole team resolves to nil
+// too, for the same reason it is absent from every selector, and the field
+// excludes archived teams by contract.
+//
+// Every other outcome is an error rather than a nil team. The field carries the
+// viewer's team grants, so reporting "no teams" for a read that failed — or for
+// an id that resolves to no row, which can only mean it went away between the
+// two statements below — withdraws those grants silently.
+//
+// s.teams is wired by New(); the nil guard is for the bare &Server{} the
+// middleware-shim test builds, like the identity lookups' own guards.
+func (s *Server) localDefaultTeam(ctx context.Context) (*domain.Team, error) {
+	if s.teams == nil {
+		return nil, nil
+	}
+	teamID, err := s.teams.GetDefaultForOrg(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		return nil, fmt.Errorf("local default team: %w", err)
+	}
+	if teamID == "" {
+		return nil, nil
+	}
+	team, err := s.teams.Get(ctx, runmode.LocalDefaultOrgID, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("local team %s: %w", teamID, err)
+	}
+	if team == nil {
+		return nil, fmt.Errorf("local default team %s resolved to no row", teamID)
+	}
+	return team, nil
 }
 
 // handleMeIdentities returns the login identities linked to the signed-in
