@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1079,20 +1080,33 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 // maxBatchTaskIDs caps how many task ids one conversation-list request
 // names, bounding the DB work and response size a single call can trigger.
 // 500 matches the store's IN-list chunk size, so the id set is always one
-// chunk; a larger set is rejected rather than truncated.
+// chunk; a larger set is rejected rather than truncated. It caps the id set
+// only — a request naming no task is bounded by its page like any other list.
 const maxBatchTaskIDs = 500
 
 // conversationListRequest is the body of POST /api/agent/conversations/list.
 //
-// It replaces both of the query-param forms this route used to carry — one
-// task id and a comma-separated batch — because they were the same read with
-// different arities and different response shapes. One route, one shape: rows
-// keyed by task id, which is what the batched form already answered and what
-// every caller (the board, the task drawer) groups by anyway.
+// Every field is optional — `{}` is "every conversation I can see, first
+// page" — and each one narrows: naming no task is no task filter, not an empty
+// selection, which is what lets one route answer both the Board's per-task
+// batch and a resource-wide count. The response shape does not vary with them:
+// rows keyed by task id, which is what every caller (the board, the task
+// drawer) groups by, and which a count-only read answers as an empty map.
 type conversationListRequest struct {
-	// TaskIDs selects the tasks whose conversations to return. At least one,
-	// at most maxBatchTaskIDs.
+	// TaskIDs selects the tasks whose conversations to return. Optional: absent
+	// or empty is no task narrowing — the viewer's whole visible set under RLS,
+	// which is what a resource-wide question ("how many are running") has to be
+	// able to ask. When present, at most maxBatchTaskIDs, each a valid task id.
 	TaskIDs []string `json:"task_ids"`
+	// Statuses narrows to these DISPLAY statuses — the value every surface
+	// shows, which is why a claim phase is a legal value here and the stored
+	// column is not what gets filtered. Empty = every status. An unknown value
+	// is a client fault, not an empty page.
+	Statuses []string `json:"statuses"`
+	// Attention keeps only the conversations waiting on a human: an unanswered
+	// permission prompt, or a not-live conversation still holding an unresolved
+	// artifact. False narrows nothing.
+	Attention bool `json:"attention"`
 	// IncludeMessages adds each task's PRIMARY (newest-started) conversation's
 	// transcript, keyed by that conversation's id — what the Board seeds onto a card.
 	IncludeMessages bool `json:"include_messages"`
@@ -1102,6 +1116,8 @@ type conversationListRequest struct {
 
 type conversationListFilterKey struct {
 	TaskIDs         []string `json:"task_ids"`
+	Statuses        []string `json:"statuses"`
+	Attention       bool     `json:"attention"`
 	IncludeMessages bool     `json:"include_messages"`
 }
 
@@ -1130,6 +1146,13 @@ type conversationListResponse struct {
 // a per-task serial loop read each task at a different transaction boundary,
 // so a status change mid-refresh could return some tasks in the old state and
 // some in the new. One tx removes that flicker class.
+//
+// Two shapes of caller, one read. The Board names its tasks and consumes the
+// grouped envelope. The shell's live rail names none and asks the resource
+// what it holds — "how many are running", "how many need me" — as a count-only
+// page (page_size: 0), which is what a count of rows is under the list
+// contract. Its answer is the viewer's own visible set, because the filters
+// narrow within RLS rather than around it.
 func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -1143,10 +1166,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 	}
 	var v httpx.Validation
 	taskIDs := canonicalStrings(req.TaskIDs)
-	switch {
-	case len(taskIDs) == 0:
-		v.Missing("task_ids")
-	case len(taskIDs) > maxBatchTaskIDs:
+	if len(taskIDs) > maxBatchTaskIDs {
 		v.OutOfRange("task_ids", fmt.Sprintf("task_ids accepts at most %d ids per request; got %d", maxBatchTaskIDs, len(taskIDs)))
 	}
 	for _, id := range taskIDs {
@@ -1156,8 +1176,16 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 			v.Invalid("task_ids", fmt.Sprintf("task_ids contains %q, which is not a valid task id", id))
 		}
 	}
+	statuses := canonicalStrings(req.Statuses)
+	validStatuses := domain.AllConversationStatuses()
+	for _, st := range statuses {
+		if !slices.Contains(validStatuses, st) {
+			v.Invalid("statuses", fmt.Sprintf("unknown status %q; must be one of: %s",
+				st, strings.Join(validStatuses, ", ")))
+		}
+	}
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(conversationListFilterKey{
-		TaskIDs: taskIDs, IncludeMessages: req.IncludeMessages,
+		TaskIDs: taskIDs, Statuses: statuses, Attention: req.Attention, IncludeMessages: req.IncludeMessages,
 	}), maxBatchTaskIDs)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -1168,7 +1196,8 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		resp.Messages = map[string][]domain.MessageDTO{}
 	}
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		convs, total, e := tx.Conversations.ListForTasks(r.Context(), orgID, taskIDs,
+		convs, total, e := tx.Conversations.List(r.Context(), orgID,
+			db.ConversationListFilter{TaskIDs: taskIDs, Statuses: statuses, Attention: req.Attention},
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		if e != nil {
 			return e

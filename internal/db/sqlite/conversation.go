@@ -597,6 +597,43 @@ const sqliteDisplayStatusSQL = `COALESCE(
 		r.status,
 		'')`
 
+// sqliteConversationLiveStatusesSQL is the display statuses that mean a LIVE
+// engagement — `running`, plus every claim phase — as a SQL IN-list body, and
+// the SQLite mirror of the Postgres twin. See that constant for the model:
+// SQL cannot import a Go const, and the conformance suite derives its coverage
+// from domain.AllClaimPhases() so a phase taught to neither dialect fails on
+// both.
+const sqliteConversationLiveStatusesSQL = `'running','fetching','cloning','agent_starting','awaiting_credentials'`
+
+// sqliteUnresolvedArtifactSQL is the SQL twin of
+// domain.HasUnresolvedArtifacts, written against an artifacts alias `art` — the
+// SQLite mirror of the Postgres twin, which carries the model. The one
+// dialect difference is the sentinel read: json_valid() guards the extract
+// here, because details_json is TEXT and json_extract() on an unparseable
+// value raises. A value that is not a JSON object reads as not-ready either
+// way, matching domain's ParseReviewArtifactDetails.
+const sqliteUnresolvedArtifactSQL = `
+	   (art.kind = 'pull_request' AND art.state = 'draft')
+	OR (art.kind = 'review' AND art.state = 'pending'
+	    AND json_valid(art.details_json)
+	    AND COALESCE(json_extract(art.details_json, '$.review_event'), '') <> '')`
+
+// sqliteConversationAttentionSQL is the "YOUR MOVE" predicate — the rail's
+// `needs`, counted per conversation — written against the conversation alias
+// `r`. The SQLite mirror of the Postgres twin, which carries the model.
+const sqliteConversationAttentionSQL = `(
+		EXISTS (
+			SELECT 1 FROM conversation_permissions p
+			WHERE p.conversation_id = r.id AND p.state = 'pending'
+			  AND p.claim_id = (SELECT cl_p.id FROM claims cl_p
+			                    WHERE cl_p.conversation_id = r.id AND cl_p.released_at IS NULL))
+		OR ((` + sqliteDisplayStatusSQL + `) NOT IN (` + sqliteConversationLiveStatusesSQL + `)
+		    AND EXISTS (
+		        SELECT 1 FROM artifacts art
+		        WHERE art.conversation_id = r.id
+		          AND (` + sqliteUnresolvedArtifactSQL + `)))
+	)`
+
 // sqliteConversationReturningColumns is sqliteConversationColumns' RETURNING-safe
 // mirror: the same column list, in the same order, so it feeds scanConversation
 // unchanged, but rewritten for a context that forbids what sqliteConversationColumns
@@ -704,27 +741,33 @@ func (s *conversationStore) ListForTask(ctx context.Context, orgID, taskID strin
 	return convs, rows.Err()
 }
 
-func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string, opts db.ListOpts) ([]domain.Conversation, int, error) {
+func (s *conversationStore) List(ctx context.Context, orgID string, filter db.ConversationListFilter, opts db.ListOpts) ([]domain.Conversation, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
-	}
-	if len(taskIDs) == 0 {
-		return nil, 0, nil
 	}
 	// A window is meaningless across statements, so a windowed read must be a
 	// single IN list. The HTTP route caps its id set at exactly inListChunkSize,
 	// so this refusal is unreachable from a real caller and exists so a future
 	// one fails loudly instead of receiving a window over the first chunk only.
-	if opts.Limit > 0 && len(taskIDs) > inListChunkSize {
-		return nil, 0, fmt.Errorf("sqlite ListForTasks: a windowed read takes at most %d task ids, got %d", inListChunkSize, len(taskIDs))
+	if opts.Limit > 0 && len(filter.TaskIDs) > inListChunkSize {
+		return nil, 0, fmt.Errorf("sqlite conversations List: a windowed read takes at most %d task ids, got %d", inListChunkSize, len(filter.TaskIDs))
+	}
+	// Chunking is over the task-id IN list, so a filter that names none is one
+	// chunk: the whole visible set under one WHERE.
+	chunks := [][]string{nil}
+	if len(filter.TaskIDs) > 0 {
+		chunks = chunkIDs(filter.TaskIDs)
 	}
 
 	total := 0
-	for _, chunk := range chunkIDs(taskIDs) {
-		placeholders, args := inListArgs(chunk)
+	for _, chunk := range chunks {
+		where, args := sqliteConversationListWhere(filter, chunk)
 		var n int
+		// The count runs the same WHERE against the same alias as the page, so
+		// a count-only read (the rail's) and a paged one can't disagree about
+		// what they are counting.
 		if err := s.q.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM conversations WHERE task_id IN (`+placeholders+`)`, args...,
+			`SELECT COUNT(*) FROM conversations r WHERE `+where, args...,
 		).Scan(&n); err != nil {
 			return nil, 0, err
 		}
@@ -739,17 +782,17 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 	// limit (chunkIDs) on the unwindowed path. Ordering by (task_id,
 	// started_at DESC, id) makes a windowed read's pages partition a total
 	// order; on the unwindowed chunked path the order ACROSS chunks is chunk
-	// order, which is all the caller — grouping by run.TaskID — relies on.
+	// order, which is all the caller — grouping by conv.TaskID — relies on.
 	// Same projection as ListForTask.
 	var convs []domain.Conversation
-	for _, chunk := range chunkIDs(taskIDs) {
-		placeholders, args := inListArgs(chunk)
+	for _, chunk := range chunks {
+		where, args := sqliteConversationListWhere(filter, chunk)
 		query := `
 			SELECT ` + sqliteConversationColumns + `
 			FROM conversations r
 			LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id
 			LEFT JOIN agents a ON a.id = r.actor_agent_id
-			WHERE r.task_id IN (` + placeholders + `)
+			WHERE ` + where + `
 			ORDER BY r.task_id, r.started_at DESC, r.id`
 		if opts.Limit > 0 {
 			query += ` LIMIT ? OFFSET ?`
@@ -774,6 +817,36 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 		rows.Close()
 	}
 	return convs, total, nil
+}
+
+// sqliteConversationListWhere renders ConversationStore.List's filter as a
+// WHERE body over the conversation alias `r`, plus its bind args. taskIDs is
+// this statement's chunk of filter.TaskIDs — empty when the filter names no
+// task, which narrows on nothing rather than matching nothing.
+//
+// The artifacts / conversation_permissions reads inside the attention
+// predicate are correlated subqueries rather than joins, so nothing here can
+// multiply the row count — a conversation with three draft PRs is one row and
+// one unit of `needs`.
+func sqliteConversationListWhere(filter db.ConversationListFilter, taskIDs []string) (string, []any) {
+	// This dialect is N=1: there is one org, and the conversations table
+	// carries no org predicate anywhere else in this file either.
+	where := `1=1`
+	var args []any
+	if len(taskIDs) > 0 {
+		placeholders, idArgs := inListArgs(taskIDs)
+		where += ` AND r.task_id IN (` + placeholders + `)`
+		args = append(args, idArgs...)
+	}
+	if len(filter.Statuses) > 0 {
+		placeholders, statusArgs := inListArgs(filter.Statuses)
+		where += ` AND (` + sqliteDisplayStatusSQL + `) IN (` + placeholders + `)`
+		args = append(args, statusArgs...)
+	}
+	if filter.Attention {
+		where += ` AND ` + sqliteConversationAttentionSQL
+	}
+	return where, args
 }
 
 func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, orgID string, query db.PRCoherenceTargetQuery) ([]domain.PRCoherenceTarget, error) {

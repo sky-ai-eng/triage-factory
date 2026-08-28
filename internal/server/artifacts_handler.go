@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
+	"github.com/sky-ai-eng/triage-factory/internal/conversationevent"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -655,6 +656,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// only lifecycle effect is closing the task when this was the LAST
 	// unresolved artifact on an already-terminal blueprint (§3); otherwise a
 	// no-op.
+	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 
 	// Step 4: tell the drafting agent its PR was approved — live if the
@@ -746,6 +748,7 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	// Close the draft PR on GitHub (best-effort). The artifact is already closed; a
 	// GitHub hiccup leaves the PR for reconciliation to retire later. Branch kept.
 	closeDraftPRBestEffort(cleanupCtx, ah.ghResolver, orgID, art)
+	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 	// Tell the drafting agent its draft PR was dismissed (live or via the ledger).
 	ah.injectArtifactNote(orgID, closed)
@@ -763,6 +766,22 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 func artifactPRNumber(art *domain.Artifact) int {
 	_, _, n, _ := domain.ParsePRTarget(art.Target)
 	return n
+}
+
+// pingConversationsResolved announces that an artifact resolution changed the
+// conversations resource, as the payload-free org-scoped ping
+// conversationevent owns.
+//
+// A resolve is the one write that moves a conversation between the shell
+// rail's sets without touching conversations.status: the row is already
+// terminal, and dismissing its last draft PR is the difference between "this
+// is waiting on you" and "this is done". The task_updated the close check
+// below emits covers only the case where the task actually closes — a
+// blueprint that aborted, or one with another unresolved artifact left, emits
+// nothing at all, and the rail's `needs` would sit a decision stale until the
+// next unrelated event.
+func (ah *artifactsHandler) pingConversationsResolved(orgID string) {
+	conversationevent.Publish(ah.ws, orgID)
 }
 
 // closeTaskIfTerminalAndResolved is the shared terminal-on-last task-closure

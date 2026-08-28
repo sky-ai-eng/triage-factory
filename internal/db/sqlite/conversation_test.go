@@ -211,6 +211,30 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 				t.Fatalf("collapse claim times: %v", err)
 			}
 		},
+		Artifact: func(t *testing.T, conversationID, kind, state, detailsJSON string) string {
+			t.Helper()
+			id := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO artifacts (id, conversation_id, team_id, provider, kind, target,
+				                       state, dedup_key, details_json)
+				VALUES (?, ?, ?, 'github', ?, 'o/r#7', ?, ?, ?)
+			`, id, conversationID, runmode.LocalDefaultTeamID, kind, state, id, detailsJSON); err != nil {
+				t.Fatalf("seed artifact: %v", err)
+			}
+			return id
+		},
+		PendingPermission: func(t *testing.T, conversationID, claimID, toolCallID string) string {
+			t.Helper()
+			id := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO conversation_permissions (id, conversation_id, claim_id, tool_call_id,
+				                                      tool_name, state, requested_at)
+				VALUES (?, ?, ?, ?, 'Bash', 'pending', ?)
+			`, id, conversationID, claimID, toolCallID, time.Now().UTC()); err != nil {
+				t.Fatalf("seed permission: %v", err)
+			}
+			return id
+		},
 		StampAgentClaim: func(t *testing.T, taskID, agentID string) {
 			t.Helper()
 			if _, err := conn.Exec(

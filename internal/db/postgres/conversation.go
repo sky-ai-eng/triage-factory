@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -934,6 +935,70 @@ const pgDisplayStatusSQL = `COALESCE(
 		r.status,
 		'')`
 
+// pgConversationLiveStatusesSQL is the display statuses that mean a LIVE
+// engagement — `running`, plus every claim phase — as a SQL IN-list body.
+// Mirrors domain.IsActiveConversationStatus, which is what the run view
+// lights as WORKING and what the rail counts as `running`.
+//
+// SQL cannot import a Go const, so the set is spelled here and held to the Go
+// one by the dual-dialect conformance suite, whose coverage is derived from
+// domain.AllClaimPhases(): a phase added there and not taught to the stores
+// fails on both backends.
+const pgConversationLiveStatusesSQL = `'running','fetching','cloning','agent_starting','awaiting_credentials'`
+
+// pgUnresolvedArtifactSQL is the SQL twin of domain.HasUnresolvedArtifacts,
+// written against an artifacts alias `art`: a draft pull request, or a pending
+// review that reached the ready sentinel (details.review_event, set by
+// finalize-review). A review that was started and never finalized is
+// deliberately NOT unresolved — it would strand a human on an approval card
+// with nothing to approve.
+//
+// The kind/state literals mirror domain.ArtifactKindPullRequest /
+// ArtifactStatePRDraft / ArtifactKindReview / ArtifactStateReviewPending; the
+// conformance suite is what holds them to the Go predicate, since the two
+// definitions have to agree for a count to mean what every card means.
+//
+// details_json is a text column here, so the sentinel read is guarded on the
+// value looking like an object before the jsonb cast — CASE evaluates its
+// WHEN first, so a NULL, an empty string, or anything else that is not an
+// object reads as not-ready, exactly as domain's ParseReviewArtifactDetails
+// error/zero arms do. A value that opens like an object and is not valid JSON
+// is corruption no writer can produce (every writer marshals the struct), and
+// this deliberately raises on it rather than silently counting it as resolved.
+const pgUnresolvedArtifactSQL = `
+	   (art.kind = 'pull_request' AND art.state = 'draft')
+	OR (art.kind = 'review' AND art.state = 'pending'
+	    AND COALESCE(
+	          CASE WHEN LEFT(BTRIM(art.details_json), 1) = '{'
+	               THEN art.details_json::jsonb ->> 'review_event' END, '') <> '')`
+
+// pgConversationAttentionSQL is the "YOUR MOVE" predicate — the rail's
+// `needs`, counted per conversation — written against the conversation alias
+// `r`: an unanswered permission prompt, OR a conversation that is not live and
+// still holds an unresolved artifact.
+//
+// Pending is derived the way PermissionStore.ListPending derives it (state
+// 'pending' AND owned by the conversation's currently-active claim), so a
+// prompt left behind by a process that no longer exists doesn't hold the count
+// up without anything having written its expiry.
+//
+// The liveness half reads the DISPLAY status, not the stored column: a
+// conversation mid-claim carries no stored status at all, and counting it as
+// needing a human while its agent is still working is the exact
+// disagreement-with-the-surface this predicate exists to avoid.
+const pgConversationAttentionSQL = `(
+		EXISTS (
+			SELECT 1 FROM conversation_permissions p
+			WHERE p.org_id = r.org_id AND p.conversation_id = r.id AND p.state = 'pending'
+			  AND p.claim_id = (SELECT cl_p.id FROM claims cl_p
+			                    WHERE cl_p.conversation_id = r.id AND cl_p.released_at IS NULL))
+		OR ((` + pgDisplayStatusSQL + `) NOT IN (` + pgConversationLiveStatusesSQL + `)
+		    AND EXISTS (
+		        SELECT 1 FROM artifacts art
+		        WHERE art.org_id = r.org_id AND art.conversation_id = r.id
+		          AND (` + pgUnresolvedArtifactSQL + `)))
+	)`
+
 // conversationClaimLateral derives the claim-facing Conversation fields from claims:
 // ClaimedAt is the latest claim's claimed_at, Attempts the count of
 // engagements, ExecutorID and phase the active (unreleased) claim's, and
@@ -1084,28 +1149,25 @@ func (s *conversationStore) ListForTask(ctx context.Context, orgID, taskID strin
 	return convs, rows.Err()
 }
 
-func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string, opts db.ListOpts) ([]domain.Conversation, int, error) {
-	// task_id is a uuid column: a non-UUID id (these are client-supplied on the
-	// batched conversation-list path) would fail Postgres parsing with 22P02 →
-	// 500 before the row filter runs, so drop invalid ids up front and treat
-	// them as "no rows" — the read-method convention in uuid.go.
-	taskIDs = filterValidUUIDs(taskIDs)
-	if len(taskIDs) == 0 {
+func (s *conversationStore) List(ctx context.Context, orgID string, filter db.ConversationListFilter, opts db.ListOpts) ([]domain.Conversation, int, error) {
+	where, args, ok := pgConversationListWhere(orgID, filter)
+	if !ok {
 		return nil, 0, nil
 	}
 	var total int
+	// The count runs the same WHERE against the same alias as the page, so a
+	// count-only read (the rail's) and a paged one can't disagree about what
+	// they are counting. App pool (RLS-active): the filtered total is the
+	// caller's own visible set, which is what makes an unnarrowed read a
+	// legitimate answer rather than a cross-team leak.
 	if err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM conversations WHERE org_id = $1 AND task_id = ANY($2)
-	`, orgID, pgUUIDArray(taskIDs)).Scan(&total); err != nil {
+		SELECT COUNT(*) FROM conversations r WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if opts.CountOnly {
 		return []domain.Conversation{}, total, nil
 	}
-	// App pool (RLS-active): rows are team-scoped exactly like ListForTask.
-	// task_id is a uuid column, so the slice binds as a uuid[] literal
-	// through one $N (pgUUIDArray), like artifactStore.ListByConversations — not a
-	// raw []string. Same projection as ListForTask; the caller groups the
+	// Same projection as ListForTask; a caller that named task ids groups the
 	// flat result by TaskID.
 	query := `
 		SELECT ` + pgConversationColumns + `
@@ -1114,11 +1176,10 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		` + conversationClaimLateral + `
 		` + conversationLedgerLateral + `
-		WHERE r.org_id = $1 AND r.task_id = ANY($2)
+		WHERE ` + where + `
 		ORDER BY r.task_id, r.started_at DESC, r.id`
-	args := []any{orgID, pgUUIDArray(taskIDs)}
 	if opts.Limit > 0 {
-		query += ` LIMIT $3 OFFSET $4`
+		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2)
 		args = append(args, opts.Limit, opts.Offset)
 	}
 	rows, err := s.q.QueryContext(ctx, query, args...)
@@ -1136,6 +1197,51 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 		convs = append(convs, r)
 	}
 	return convs, total, rows.Err()
+}
+
+// pgConversationListWhere renders ConversationStore.List's filter as a WHERE
+// body over the conversation alias `r`, plus its bind args. ok=false means the
+// filter can match nothing at all, so the caller answers with an empty result
+// instead of running two queries to learn it.
+//
+// The artifacts / conversation_permissions reads inside the attention
+// predicate are correlated subqueries rather than joins, so nothing here can
+// multiply the row count — a conversation with three draft PRs is one row and
+// one unit of `needs`.
+func pgConversationListWhere(orgID string, filter db.ConversationListFilter) (string, []any, bool) {
+	where := `r.org_id = $1`
+	args := []any{orgID}
+	if len(filter.TaskIDs) > 0 {
+		// task_id is a uuid column: a non-UUID id (these are client-supplied
+		// on the batched conversation-list path) would fail Postgres parsing
+		// with 22P02 → 500 before the row filter runs, so drop invalid ids up
+		// front and treat them as "no rows" — the read-method convention in
+		// uuid.go. A caller that named ids and had every one dropped asked
+		// about nothing, which is not the same request as naming none.
+		ids := filterValidUUIDs(filter.TaskIDs)
+		if len(ids) == 0 {
+			return "", nil, false
+		}
+		// The slice binds as a uuid[] literal through one $N (pgUUIDArray),
+		// like artifactStore.ListByConversations — not a raw []string.
+		args = append(args, pgUUIDArray(ids))
+		where += fmt.Sprintf(` AND r.task_id = ANY($%d)`, len(args))
+	}
+	if len(filter.Statuses) > 0 {
+		// One placeholder per value rather than an array literal: these are
+		// client-supplied names, and a placeholder needs no quoting rules to
+		// be safe under one.
+		marks := make([]string, len(filter.Statuses))
+		for i, st := range filter.Statuses {
+			args = append(args, st)
+			marks[i] = fmt.Sprintf("$%d", len(args))
+		}
+		where += ` AND (` + pgDisplayStatusSQL + `) IN (` + strings.Join(marks, ",") + `)`
+	}
+	if filter.Attention {
+		where += ` AND ` + pgConversationAttentionSQL
+	}
+	return where, args, true
 }
 
 func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, orgID string, query db.PRCoherenceTargetQuery) ([]domain.PRCoherenceTarget, error) {
