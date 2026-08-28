@@ -137,3 +137,49 @@ func TestWithSession_MultiMode_NilAuthDeps_PassesThroughWithoutClaims(t *testing
 		t.Error("OrgIDFrom() returned non-empty in multi mode with nil authDeps; sentinel must NOT bleed across modes")
 	}
 }
+
+// TestHandleMe_LocalMode_CarriesSoleTeamAsAdmin pins the local half of the
+// teams field. Local mode is N=1 — one org, one team, and the single user owns
+// it — so the synthesized response reports that team at role admin, which is
+// the same answer the teams list gives the per-team gates. Runs against the
+// real SQLite stores rather than the bare rig above, because the row it reports
+// comes from the teams store rather than a sentinel constant.
+func TestHandleMe_LocalMode_CarriesSoleTeamAsAdmin(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+
+	s := newTestServer(t)
+
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/me", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Teams []struct {
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			OrgID string `json:"org_id"`
+			Role  string `json:"role"`
+		} `json:"teams"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(body.Teams) != 1 {
+		t.Fatalf("teams = %+v, want the sole local team", body.Teams)
+	}
+	got := body.Teams[0]
+	if got.ID != runmode.LocalDefaultTeamID {
+		t.Errorf("teams[0].id = %q, want %q", got.ID, runmode.LocalDefaultTeamID)
+	}
+	if got.OrgID != runmode.LocalDefaultOrgID {
+		t.Errorf("teams[0].org_id = %q, want %q", got.OrgID, runmode.LocalDefaultOrgID)
+	}
+	if got.Role != "admin" {
+		t.Errorf("teams[0].role = %q, want admin (local's sole user owns its sole team)", got.Role)
+	}
+	if got.Name == "" {
+		t.Error("teams[0].name is empty — the rail renders it")
+	}
+}

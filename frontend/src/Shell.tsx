@@ -106,16 +106,20 @@ export default function Shell() {
     if (!isMulti) return []
     const g: Grant[] = []
     if (orgAdmin) g.push('org-admin')
-    // Team admin is per-team and comes from the viewer's own membership row —
+    // Team admin is per-team and comes from the viewer's own membership rows —
     // an org admin is deliberately NOT a team admin here, which is why this
-    // reads the roles rather than falling back on orgAdmin.
-    if (teams.some((t) => t.role === 'admin')) g.push('team-admin')
+    // reads the roles rather than falling back on orgAdmin. The rows come from
+    // /api/me rather than the teams-list cache because the AuthGate already
+    // blocks first paint on /api/me: read from there, the whole grants picture
+    // resolves in one paint instead of the rail rendering a shape it then
+    // changes when a second request lands.
+    if ((auth?.me?.teams ?? []).some((t) => t.role === 'admin')) g.push('team-admin')
     // The fleet console composes two deployment-scoped gates: the operator
     // identity from /api/me and the entitlement. Both must hold, matching the
     // backend's 404-and-hide.
     if (entLoaded && has(FeatureFleet) && (auth?.me?.is_operator ?? false)) g.push('fleet')
     return g
-  }, [isMulti, orgAdmin, teams, entLoaded, has, auth])
+  }, [isMulti, orgAdmin, entLoaded, has, auth])
 
   const onRoute = useCallback(
     (id: string) => {

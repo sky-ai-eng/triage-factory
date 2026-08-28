@@ -748,7 +748,8 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("{}"))
 }
 
-// handleMe returns the authenticated user's identity + org list.
+// handleMe returns the authenticated user's identity plus their org and team
+// memberships, each with the role the viewer holds.
 // Wrapped in withSession at mount time. Response wire shape is
 // mirrored in the frontend as the canonical `MeResponse` type — the
 // sole identity endpoint in both modes.
@@ -763,6 +764,12 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 		Role string `json:"role"`
 	}
+	type teamRow struct {
+		ID    string `json:"id"`
+		Name  string `json:"name"`
+		OrgID string `json:"org_id"`
+		Role  string `json:"role"`
+	}
 	type response struct {
 		ID              string   `json:"id"`
 		Email           string   `json:"email"`
@@ -772,7 +779,19 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		JiraAccountID   string   `json:"jira_account_id,omitempty"`
 		JiraDisplayName string   `json:"jira_display_name,omitempty"`
 		Orgs            []orgRow `json:"orgs"`
-		ActiveOrgID     string   `json:"active_org_id,omitempty"`
+		// Teams is the viewer's own team-membership rows, across every org
+		// they belong to — hence the org tag on each, since /me spans orgs
+		// where the teams list is scoped to one. Membership rows only: a team
+		// an org admin can see but never joined carries no role and is not
+		// here, which is the teams list's business. Archived teams are
+		// excluded, matching that list. It is what makes the viewer's team
+		// grants reachable without a session cursor: POST /api/teams/list
+		// resolves its org from the session's active org, so a caller holding
+		// no session state could not enumerate its teams at all.
+		//
+		// Not omitempty — [] is an answer ("no teams"), same contract as Orgs.
+		Teams       []teamRow `json:"teams"`
+		ActiveOrgID string    `json:"active_org_id,omitempty"`
 		// OrgCreationEnabled surfaces the instance's TF_PREVENT_ORG_CREATION
 		// toggle (inverted) so the frontend onboarding entry can decide
 		// whether to enable the "create your org" affordance or show the
@@ -814,6 +833,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 				Role: "owner",
 			}},
 			ActiveOrgID: runmode.LocalDefaultOrgID,
+			Teams:       []teamRow{},
 			// Local mode is N=1 with a pre-provisioned org and never
 			// renders the onboarding entry, so the value is moot; report
 			// the permissive default for shape consistency.
@@ -843,6 +863,30 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			resp.GitHubUsername, _ = s.users.GetGitHubLogin(r.Context(), runmode.LocalDefaultUserID, ghHost)
 			resp.JiraAccountID, resp.JiraDisplayName, _ = s.users.GetJiraIdentity(r.Context(), runmode.LocalDefaultUserID, jiraHost)
 		}
+		// The sole local team, which local mode reports the single user as
+		// admin of — the same role the teams list gives the per-team gates, so
+		// the two reads of that one truth agree. s.teams is wired by New();
+		// guard it like s.users for the bare-rig test. A read error is fatal
+		// rather than an empty list: the field carries the viewer's team
+		// grants, and answering "no teams" for a failed read withdraws them
+		// silently.
+		if s.teams != nil {
+			teamID, err := s.teams.GetDefaultForOrg(r.Context(), runmode.LocalDefaultOrgID)
+			if err != nil {
+				internalError(w, "auth", fmt.Errorf("local default team: %w", err))
+				return
+			}
+			if teamID != "" {
+				t, err := s.teams.Get(r.Context(), runmode.LocalDefaultOrgID, teamID)
+				if err != nil {
+					internalError(w, "auth", fmt.Errorf("local team %s: %w", teamID, err))
+					return
+				}
+				if t != nil {
+					resp.Teams = append(resp.Teams, teamRow{ID: t.ID, Name: t.Name, OrgID: t.OrgID, Role: t.Role})
+				}
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 		return
@@ -850,6 +894,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 
 	var resp response
 	resp.Orgs = []orgRow{}
+	resp.Teams = []teamRow{}
 	resp.Email = claims.Email
 	resp.OrgCreationEnabled = runmode.OrgCreationEnabled()
 	// Deployment-operator flag (TFAC-589): a plain lookup of the verified
@@ -923,25 +968,67 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 				return fmt.Errorf("user lookup: %w", err)
 			}
 
-			rows, err := tx.QueryContext(r.Context(), `
-				SELECT o.id::text, o.name, om.role
-				  FROM org_memberships om
-				  JOIN orgs o ON o.id = om.org_id
-				 WHERE om.user_id = tf.current_user_id()
-				 ORDER BY o.name
-			`)
-			if err != nil {
-				return fmt.Errorf("org list: %w", err)
-			}
-			defer rows.Close()
-			for rows.Next() {
-				var o orgRow
-				if err := rows.Scan(&o.ID, &o.Name, &o.Role); err != nil {
-					return fmt.Errorf("org scan: %w", err)
+			// The two membership reads are separate funcs so each result set
+			// is closed by its own defer before the next query issues: a
+			// transaction is one connection, and a still-open result set on it
+			// is a busy connection rather than a second cursor.
+			readOrgs := func() error {
+				rows, err := tx.QueryContext(r.Context(), `
+					SELECT o.id::text, o.name, om.role
+					  FROM org_memberships om
+					  JOIN orgs o ON o.id = om.org_id
+					 WHERE om.user_id = tf.current_user_id()
+					 ORDER BY o.name
+				`)
+				if err != nil {
+					return fmt.Errorf("org list: %w", err)
 				}
-				resp.Orgs = append(resp.Orgs, o)
+				defer rows.Close()
+				for rows.Next() {
+					var o orgRow
+					if err := rows.Scan(&o.ID, &o.Name, &o.Role); err != nil {
+						return fmt.Errorf("org scan: %w", err)
+					}
+					resp.Orgs = append(resp.Orgs, o)
+				}
+				return rows.Err()
 			}
-			return rows.Err()
+
+			// Team memberships carry no org predicate, unlike the teams list:
+			// /me spans every org the viewer belongs to, so each row is tagged
+			// with the org whose team it is. Keyed on tf.current_user_id() like
+			// the org query, so the memberships join is what narrows the rows
+			// and there is no user id parameter to get wrong. deleted_at IS
+			// NULL is the same request-facing filter that hides an archived
+			// team from every selector. Ordered (org_id, name) with an id
+			// tiebreak so the shape is stable across reads.
+			readTeams := func() error {
+				rows, err := tx.QueryContext(r.Context(), `
+					SELECT t.id::text, t.name, t.org_id::text, m.role::text
+					  FROM memberships m
+					  JOIN teams t ON t.id = m.team_id
+					 WHERE m.user_id = tf.current_user_id()
+					   AND t.deleted_at IS NULL
+					 ORDER BY t.org_id, t.name, t.id
+				`)
+				if err != nil {
+					return fmt.Errorf("team list: %w", err)
+				}
+				defer rows.Close()
+				for rows.Next() {
+					var tr teamRow
+					if err := rows.Scan(&tr.ID, &tr.Name, &tr.OrgID, &tr.Role); err != nil {
+						return fmt.Errorf("team scan: %w", err)
+					}
+					resp.Teams = append(resp.Teams, tr)
+				}
+				return rows.Err()
+			}
+
+			if err := readOrgs(); err != nil {
+				return err
+			}
+			return readTeams()
 		},
 	)
 	if err != nil {
