@@ -499,6 +499,14 @@ func TestAuthFlow_Me_NoMemberships_OmitsActiveOrgID(t *testing.T) {
 	if m["id"] != userID.String() {
 		t.Errorf("id = %v, want %s", m["id"], userID)
 	}
+	// teams takes the opposite contract to active_org_id: [] is an answer
+	// ("no teams"), so the key is always there, exactly like orgs.
+	teams, present := m["teams"]
+	if !present {
+		t.Errorf("teams absent from /api/me: %s", raw)
+	} else if arr, ok := teams.([]any); !ok || len(arr) != 0 {
+		t.Errorf("teams = %v, want []", teams)
+	}
 }
 
 // TestAuthFlow_Me_StaleActiveOrgMembership_OmitsActiveOrgID covers the
@@ -1501,5 +1509,155 @@ func TestGoTrueTokenRequests_AreJSON(t *testing.T) {
 	}
 	if got[1].body["refresh_token"] != "refresh-z" {
 		t.Errorf("refresh body fields: %v", got[1].body)
+	}
+}
+
+// meTeam is the shape of one row in /api/me's teams list. Declared once so the
+// membership tests below decode the same contract the frontend's AuthTeam does.
+type meTeam struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	OrgID string `json:"org_id"`
+	Role  string `json:"role"`
+}
+
+// fetchMeTeams drives GET /api/me with sid and returns its teams list.
+func (r *authRig) fetchMeTeams(sid string) []meTeam {
+	r.t.Helper()
+	resp := r.requestWithSid("GET", "/api/me", sid)
+	if resp.StatusCode != http.StatusOK {
+		r.t.Fatalf("/api/me status=%d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		Teams []meTeam `json:"teams"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		r.t.Fatalf("decode /api/me: %v", err)
+	}
+	return body.Teams
+}
+
+// seedTeam inserts a team in orgID, optionally enrolling userID at role, and
+// returns its id. role == "" enrolls nobody — the org-visible team the caller
+// never joined.
+func (r *authRig) seedTeam(orgID uuid.UUID, name, role string, userID uuid.UUID) uuid.UUID {
+	r.t.Helper()
+	var tID string
+	if err := r.h.AdminDB.QueryRow(`
+		INSERT INTO teams (org_id, slug, name) VALUES ($1, $2, $2) RETURNING id::text
+	`, orgID, name).Scan(&tID); err != nil {
+		r.t.Fatalf("insert team %s: %v", name, err)
+	}
+	if role != "" {
+		if _, err := r.h.AdminDB.Exec(
+			`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, $3)`,
+			userID, tID, role); err != nil {
+			r.t.Fatalf("insert membership on %s: %v", name, err)
+		}
+	}
+	return uuid.MustParse(tID)
+}
+
+// TestAuthFlow_Me_TeamMemberships covers /api/me's teams field: the viewer's
+// own membership rows, org-tagged and spanning every org they belong to, with
+// the role they hold. It pins the four boundaries of that set at once — both
+// orgs' teams appear with their own org_id, a viewer role rides through
+// verbatim rather than being flattened to "member", an archived team's
+// membership is gone (the same read filter the teams list applies), and a team
+// the caller can see through org access but never joined is absent, because
+// this field answers membership and not visibility.
+func TestAuthFlow_Me_TeamMemberships(t *testing.T) {
+	r := newAuthRig(t)
+
+	userID := r.seedUser()
+	orgA, teamA := r.seedOrg(userID, "org-a")
+	orgB, teamB := r.seedOrg(userID, "org-b")
+
+	viewerTeam := r.seedTeam(orgA, "reviewers", "viewer", userID)
+	archivedTeam := r.seedTeam(orgA, "sunset", "admin", userID)
+	if _, err := r.h.AdminDB.Exec(
+		`UPDATE teams SET deleted_at = now() WHERE id = $1`, archivedTeam); err != nil {
+		t.Fatalf("archive team: %v", err)
+	}
+	// Visible to the caller (org access is what teams_select gates on) but
+	// never joined — no membership row, so no role to report.
+	unjoinedTeam := r.seedTeam(orgA, "platform", "", userID)
+
+	resp, _ := r.driveCallback(userID)
+	sid := r.sidFromResp(resp)
+
+	teams := r.fetchMeTeams(sid)
+
+	byID := map[string]meTeam{}
+	for _, tm := range teams {
+		byID[tm.ID] = tm
+	}
+	for _, want := range []struct {
+		id    uuid.UUID
+		orgID uuid.UUID
+		role  string
+		name  string
+	}{
+		{teamA, orgA, "admin", "default"},
+		{teamB, orgB, "admin", "default"},
+		{viewerTeam, orgA, "viewer", "reviewers"},
+	} {
+		got, ok := byID[want.id.String()]
+		if !ok {
+			t.Fatalf("team %s (%s) missing from /api/me teams: %+v", want.name, want.id, teams)
+		}
+		if got.OrgID != want.orgID.String() {
+			t.Errorf("team %s org_id = %q, want %q", want.name, got.OrgID, want.orgID)
+		}
+		if got.Role != want.role {
+			t.Errorf("team %s role = %q, want %q", want.name, got.Role, want.role)
+		}
+		if got.Name != want.name {
+			t.Errorf("team %s name = %q, want %q", want.id, got.Name, want.name)
+		}
+	}
+	if _, present := byID[archivedTeam.String()]; present {
+		t.Errorf("archived team %s present in /api/me teams: %+v", archivedTeam, teams)
+	}
+	if _, present := byID[unjoinedTeam.String()]; present {
+		t.Errorf("never-joined team %s present in /api/me teams: %+v", unjoinedTeam, teams)
+	}
+	if len(teams) != 3 {
+		t.Errorf("teams = %+v, want exactly the 3 membership rows", teams)
+	}
+}
+
+// TestAuthFlow_Me_NoActiveOrg_StillCarriesTeams is the reachability point the
+// field exists for. POST /api/teams/list resolves its org from the session's
+// active-org cursor and answers 409 NO_ACTIVE_ORG without one — and moving
+// that cursor is a session verb, so a caller holding no session state could
+// not enumerate its teams at all. /api/me is keyed on the identity alone, so
+// it answers regardless.
+func TestAuthFlow_Me_NoActiveOrg_StillCarriesTeams(t *testing.T) {
+	r := newAuthRig(t)
+
+	userID := r.seedUser()
+	orgID, teamID := r.seedOrg(userID, "cursorless-org")
+
+	resp, _ := r.driveCallback(userID)
+	sid := r.sidFromResp(resp)
+
+	// The OAuth callback seeds the cursor from the earliest membership; clear
+	// it to get the shape a caller with no session state has.
+	if _, err := r.h.AdminDB.Exec(`UPDATE sessions SET active_org_id = NULL`); err != nil {
+		t.Fatalf("clear active org: %v", err)
+	}
+
+	listResp := r.requestWithSid("POST", "/api/teams/list", sid)
+	if listResp.StatusCode != http.StatusConflict {
+		t.Fatalf("POST /api/teams/list status=%d, want 409 (the gap this field closes)", listResp.StatusCode)
+	}
+
+	teams := r.fetchMeTeams(sid)
+	if len(teams) != 1 || teams[0].ID != teamID.String() {
+		t.Fatalf("teams = %+v, want the one membership on %s", teams, teamID)
+	}
+	if teams[0].OrgID != orgID.String() || teams[0].Role != "admin" {
+		t.Errorf("teams[0] = %+v, want org %s role admin", teams[0], orgID)
 	}
 }

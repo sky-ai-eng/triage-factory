@@ -644,6 +644,17 @@ export interface AuthOrg {
   role: string
 }
 
+/** AuthTeam is one team-membership row in MeResponse.teams: a team the
+ *  viewer actually belongs to, tagged with the org it lives in because /me
+ *  spans every org they are a member of. Standalone export beside AuthOrg,
+ *  for the same reason that one exists. */
+export interface AuthTeam {
+  id: string
+  name: string
+  org_id: string
+  role: string
+}
+
 /** GET /api/me response — the canonical "current user" shape, served in
  *  both modes (local mode synthesizes from the users row, multi mode
  *  reads via JWT-context query). All fields except `id` and `orgs` are
@@ -667,6 +678,16 @@ export interface MeResponse {
    *  Aidan Allchin"). Absent when Jira not connected. */
   jira_display_name?: string
   orgs: AuthOrg[]
+  /** The viewer's own team memberships, across every org they belong to,
+   *  each carrying the role they hold there. Membership rows only — a team
+   *  an org admin can see but never joined is not here (that is the teams
+   *  list's business), and archived teams are excluded, matching it. Always
+   *  sent: [] is an answer ("no teams"), same contract as orgs. This is the
+   *  team-tier half of the grants picture, and it arrives on the read the
+   *  AuthGate already blocks first paint on — POST /api/teams/list resolves
+   *  its org from the session's active-org cursor and so is unreachable to a
+   *  caller holding no session state. */
+  teams: AuthTeam[]
   /** Session-scoped active org. Per-session, not per-user — two tabs
    *  of the same user can hold different values. Omitted by the server
    *  when the session has no active org (zero memberships, or the

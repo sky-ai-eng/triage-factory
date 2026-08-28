@@ -1,11 +1,18 @@
 package server
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	_ "modernc.org/sqlite"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -135,5 +142,133 @@ func TestWithSession_MultiMode_NilAuthDeps_PassesThroughWithoutClaims(t *testing
 	}
 	if sawOrgID {
 		t.Error("OrgIDFrom() returned non-empty in multi mode with nil authDeps; sentinel must NOT bleed across modes")
+	}
+}
+
+// TestHandleMe_LocalMode_CarriesSoleTeamAsAdmin pins the local half of the
+// teams field. Local mode is N=1 — one org, one team, and the single user owns
+// it — so the synthesized response reports that team at role admin, which is
+// the same answer the teams list gives the per-team gates. Runs against the
+// real SQLite stores rather than the bare rig above, because the row it reports
+// comes from the teams store rather than a sentinel constant.
+func TestHandleMe_LocalMode_CarriesSoleTeamAsAdmin(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+
+	s := newTestServer(t)
+
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/me", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Teams []struct {
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			OrgID string `json:"org_id"`
+			Role  string `json:"role"`
+		} `json:"teams"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(body.Teams) != 1 {
+		t.Fatalf("teams = %+v, want the sole local team", body.Teams)
+	}
+	got := body.Teams[0]
+	if got.ID != runmode.LocalDefaultTeamID {
+		t.Errorf("teams[0].id = %q, want %q", got.ID, runmode.LocalDefaultTeamID)
+	}
+	if got.OrgID != runmode.LocalDefaultOrgID {
+		t.Errorf("teams[0].org_id = %q, want %q", got.OrgID, runmode.LocalDefaultOrgID)
+	}
+	if got.Role != "admin" {
+		t.Errorf("teams[0].role = %q, want admin (local's sole user owns its sole team)", got.Role)
+	}
+	if got.Name == "" {
+		t.Error("teams[0].name is empty — the rail renders it")
+	}
+}
+
+// TestHandleMe_LocalMode_UnprovisionedInstall_AnswersEmptyTeams pins the
+// fresh-install shape. Nothing creates tenant rows at boot or in a migration —
+// provisioning is the explicit "Start your factory" action — so a local DB has
+// no org and no team until the user takes it, and /api/me is answerable that
+// whole time. The teams field is [] there, not an error: an unprovisioned
+// install is a state, not a fault, and 500ing the identity read would break
+// first run. (The teams store's own doc calls a TEAMLESS ORG a bootstrap bug,
+// which this is not — there is no org here either.)
+//
+// Migrates directly rather than going through newTestServer, whose fixture
+// seeds the synthetic local tenant.
+func TestHandleMe_LocalMode_UnprovisionedInstall_AnswersEmptyTeams(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = database.Close() })
+	if err := db.Migrate(database, "sqlite3"); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	// The fixture is only honest if it really is tenantless.
+	var teams int
+	if err := database.QueryRow(`SELECT count(*) FROM teams`).Scan(&teams); err != nil {
+		t.Fatalf("count teams: %v", err)
+	}
+	if teams != 0 {
+		t.Fatalf("fixture seeded %d teams — this must be the tenantless shape", teams)
+	}
+
+	s := New(database, sqlitestore.New(database))
+
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/me", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — an unprovisioned local install must still get its identity", rec.Code)
+	}
+	var body struct {
+		Teams []struct {
+			ID string `json:"id"`
+		} `json:"teams"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(body.Teams) != 0 {
+		t.Errorf("teams = %+v, want [] before provisioning", body.Teams)
+	}
+}
+
+// teamGetMiss is the real teams store with Get forced to answer "no row". It
+// stages the one state the local arm treats as corruption: the default-team
+// lookup names an id, and reading that id back finds nothing.
+type teamGetMiss struct{ db.TeamsStore }
+
+func (teamGetMiss) Get(context.Context, string, string) (*domain.Team, error) { return nil, nil }
+
+// TestHandleMe_LocalMode_VanishedDefaultTeam_Errors is the other side of the
+// test above. An empty default team is a state; a default team that names a row
+// which is not there is not — the id came from the teams table one statement
+// earlier, and this read is the same table by (id, org_id) with no further
+// filter. Answering [] would withdraw the viewer's team grants and report
+// success for a read that found nothing, so it fails instead.
+func TestHandleMe_LocalMode_VanishedDefaultTeam_Errors(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+
+	s := newTestServer(t)
+	s.teams = teamGetMiss{s.teams}
+
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/me", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 — a default team resolving to no row is corruption, not an empty list (body=%s)",
+			rec.Code, rec.Body.String())
 	}
 }
