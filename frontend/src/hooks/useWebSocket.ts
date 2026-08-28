@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react'
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react'
 import type { WSEvent } from '../types'
 import { toastStore } from '../components/Toast/toastStore'
 
@@ -10,6 +10,38 @@ type Handler = (event: WSEvent) => void
 
 let globalWs: WebSocket | null = null
 const listeners = new Set<Handler>()
+
+// --- Connection state ---
+// Whether the shared socket is currently up, published to React through
+// useWsConnected below. It lives here for the same reason the socket does: the
+// connection outlives every component, so its state cannot be a component's.
+//
+// It starts TRUE — "nothing has gone wrong yet", not "a socket is open". A
+// false here is what the shell renders as "Connection lost · retrying" and
+// what makes every live readout go inert, and claiming that before the first
+// handshake has had a chance to complete would greet every cold load with a
+// failure that is not happening. The first onclose is the first honest false.
+let wsConnected = true
+const connListeners = new Set<() => void>()
+
+function setWsConnected(next: boolean) {
+  if (wsConnected === next) return
+  wsConnected = next
+  for (const fn of connListeners) fn()
+}
+
+// The useSyncExternalStore pair. Both are module-level and stable, which is
+// what keeps the subscription from being torn down and rebuilt every render.
+function subscribeWsConnected(onChange: () => void): () => void {
+  connListeners.add(onChange)
+  return () => {
+    connListeners.delete(onChange)
+  }
+}
+
+function getWsConnected(): boolean {
+  return wsConnected
+}
 
 // --- Auth close-code bridge (TFAC-75) ---
 // The server actively closes a socket when the session behind it is
@@ -119,6 +151,7 @@ function ensureConnected() {
   // surface + focus survives a dropped socket. visible is recomputed here in
   // case focus changed while disconnected.
   ws.onopen = () => {
+    setWsConnected(true)
     presence.visible = computeVisible()
     sendPresence()
   }
@@ -186,6 +219,11 @@ function ensureConnected() {
 
   ws.onclose = (e) => {
     globalWs = null
+    // A close that reaches here is a disconnect a reader should see: the one
+    // deliberate close the app makes — the org switch — detaches this handler
+    // first, so it never announces itself. The reconnect below flips the
+    // signal back on the next open.
+    setWsConnected(false)
     // Session revoked (logout elsewhere, admin kill): hand off to the
     // auth layer to clear state and route to /login, and do NOT
     // reconnect — the cookie is dead, so a retry would 401-loop.
@@ -298,4 +336,24 @@ export function useWebSocket(handler: Handler) {
   useEffect(() => {
     return subscribe(stableHandler)
   }, [stableHandler])
+}
+
+/**
+ * useWsConnected reports whether the shared websocket is up.
+ *
+ * The shell renders `!connected` as offline: live readouts go inert rather
+ * than holding their last value, and the condition is stated once at the foot.
+ * That is the honest reading for a UI whose freshness is push-driven — with no
+ * stream there is no next hint, so a count on screen is a number nobody is
+ * maintaining.
+ *
+ * It does NOT open a socket. It reports on the one the app's event listeners
+ * keep alive, so a page with no useWebSocket subscriber reads the last known
+ * state rather than a connection it caused.
+ */
+export function useWsConnected(): boolean {
+  // useSyncExternalStore rather than an effect + setState: the connection IS an
+  // external store, and this is the API that reads one without a render pass in
+  // which the component holds a value the store has already moved past.
+  return useSyncExternalStore(subscribeWsConnected, getWsConnected, getWsConnected)
 }

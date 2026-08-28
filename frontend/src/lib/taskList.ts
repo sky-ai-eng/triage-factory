@@ -32,6 +32,18 @@ export function queueListBody(teamIds: string[], showSnoozed = false): ListReque
   }
 }
 
+/** The queue's DEPTH: the same filter set the Queued column renders, with the
+ *  page removed. `page_size: 0` is the count-only read — no items, the total
+ *  under those filters — which is what a count of rows is on this API, and
+ *  building it from queueListBody is what keeps the shell rail's number and
+ *  the column it names from drifting apart.
+ *
+ *  No team narrowing, matching the board's own default: the viewer's whole
+ *  visible set under RLS. */
+export function queueCountBody(): ListRequest {
+  return { ...queueListBody([]), page_size: 0 }
+}
+
 /** One lane of the board by status. `claimed` is the claim axis rather than a
  *  lifecycle status — a queued task someone has taken — and is why the board's
  *  Claimed column can't be spelled as a plain status. */

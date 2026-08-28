@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/conversationevent"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
@@ -341,6 +342,13 @@ func (rc *Reconciler) broadcast(orgID string, a domain.Artifact) {
 		ConversationID: a.ConversationID,
 		Data:           map[string]any{"artifact_id": a.ID, "state": a.State},
 	})
+	// And the resource-wide ping beside it, for the counters that follow a SET
+	// rather than one conversation. The event above is addressed to whoever is
+	// watching this conversation and carries what changed on it; the shell rail
+	// is watching neither, and a transition here can be the whole difference
+	// between "waiting on a person" and "done" — a draft PR merged on GitHub
+	// resolves without any surface of ours writing a thing.
+	conversationevent.Publish(rc.ws, orgID)
 }
 
 // nextState computes the artifact's reconciled state from the fetched GitHub

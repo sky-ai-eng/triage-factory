@@ -493,6 +493,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// never flips conversation status or resumes/terminates a blueprint. The
 	// only lifecycle effect is closing the task when this was the LAST
 	// unresolved artifact on an already-terminal blueprint; otherwise a no-op.
+	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, fresh.ConversationID)
 
 	// Tell the drafting agent its review was submitted (live or via the ledger).
@@ -549,6 +550,7 @@ func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request
 	// terminal-on-last task-closure check detached so a client disconnect can't
 	// strand it now that the artifact is resolved.
 	cleanupCtx := context.WithoutCancel(r.Context())
+	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 	// Tell the drafting agent its review was dismissed (live or via the ledger).
 	ah.injectArtifactNote(orgID, dismissed)

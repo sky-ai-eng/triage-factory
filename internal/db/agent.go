@@ -172,6 +172,43 @@ type PRCoherenceTargetQuery struct {
 //     window_state='inactive', and re-seqs every queued row ahead of the
 //     result, so there is no single row a return value could name (the
 //     standard's bulk bucket).
+
+// ConversationListFilter is the filter set ConversationStore.List narrows on.
+// The zero value narrows nothing: every conversation the caller can see, which
+// is the resource-wide question the rail's counts ask.
+//
+// Each field is a NARROWING, never a mode: an absent one is not a second
+// behavior, it is one fewer predicate. That is what lets the Board's read
+// (task ids, no status) and the rail's (statuses, no task) be the same read.
+type ConversationListFilter struct {
+	// TaskIDs narrows to conversations of these tasks. Empty is no task
+	// narrowing — NOT "no tasks", which is why a caller that named ids and
+	// had every one of them rejected as malformed must still get an empty
+	// result rather than the whole set (the impls hold that line).
+	TaskIDs []string
+
+	// Statuses narrows to these DISPLAY statuses — the value the read
+	// projections produce, not the stored column, because the stored column
+	// carries neither `queued` nor `running` (see domain's conversation
+	// status vocabulary). Filtering the column instead would make a count
+	// disagree with every surface: claim-phase setup would be invisible and
+	// an input-woken `open` row would count as open rather than queued.
+	// Empty = every status. Values come from domain.AllConversationStatuses;
+	// the route validates them, and an unrecognized one simply matches
+	// nothing here.
+	Statuses []string
+
+	// Attention keeps only the conversations waiting on a human: one holding
+	// an unanswered permission prompt, or one that is not live and still
+	// holds an unresolved artifact (a draft PR / a finalized pending review —
+	// domain.HasUnresolvedArtifacts). False narrows nothing, the same shape
+	// TaskListFilter.OnlyUnclaimed has.
+	//
+	// Derived, never stored: it is the product's "YOUR MOVE" counted per
+	// conversation, so three prompts on one run are one row.
+	Attention bool
+}
+
 type ConversationStore interface {
 	// --- Lifecycle ---
 
@@ -353,26 +390,28 @@ type ConversationStore interface {
 	// started_at DESC. MemoryMissing + claim fields derived per Get.
 	ListForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error)
 
-	// ListForTasks is the batched form of ListForTask: one page of the
-	// conversations for any of the given task IDs plus the unpaged total, ordered
-	// (task_id, started_at DESC, id). The Board's aggregated conversation fetch
-	// groups the flat result by TaskID, so a board with N tasks costs one
-	// read instead of N.
+	// List is the conversations resource's list read: one page of the
+	// conversations matching filter plus the unpaged total, ordered
+	// (task_id, started_at DESC, id). The Board's aggregated conversation
+	// fetch names its tasks and groups the flat result by TaskID, so a board
+	// with N tasks costs one read instead of N; the shell's live rail names
+	// no task at all and asks the resource-wide question ("how many are
+	// running") a task-keyed read cannot express.
 	//
 	// The order is total, so a windowed read's pages partition the result set
 	// and each task's conversations stay contiguous within it. A zero ListOpts.Limit
 	// means "no window", which is what the internal callers that need every
 	// conversation pass.
 	//
-	// SQLite chunks its IN-list to stay under the variable limit, so an
+	// SQLite chunks its task-id IN-list to stay under the variable limit, so an
 	// UNWINDOWED read's order across distinct tasks is chunk order rather
 	// than task order. A windowed read cannot chunk (a window is meaningless
 	// across statements), so the SQLite impl refuses an id set larger than
 	// one chunk; the HTTP route caps ids at exactly that bound, so a real
 	// caller never reaches the refusal.
 	//
-	// Empty taskIDs returns nil. MemoryMissing + claim fields derived per Get.
-	ListForTasks(ctx context.Context, orgID string, taskIDs []string, opts ListOpts) ([]domain.Conversation, int, error)
+	// MemoryMissing + claim fields derived per Get.
+	List(ctx context.Context, orgID string, filter ConversationListFilter, opts ListOpts) ([]domain.Conversation, int, error)
 
 	// ListPRCoherenceTargetsSystem finds delegation conversations relevant to
 	// one PR event. Relevance is entity-, review-, or checkout-level; EventID

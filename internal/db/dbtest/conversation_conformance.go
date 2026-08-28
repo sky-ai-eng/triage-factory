@@ -137,6 +137,22 @@ type ConversationSeeder struct {
 	// Returns the row's id.
 	SeedRawMessage func(t *testing.T, conversationID, column, rawJSON string) int64
 
+	// Artifact inserts an artifacts row on the conversation and returns its
+	// id. detailsJSON is written verbatim (empty string included), because
+	// the unresolved-artifact predicate reads the review's ready sentinel out
+	// of it and the suite has to be able to stage a value that is not JSON at
+	// all. ArtifactStore owns the table, so this is a seeded precondition
+	// rather than a store call — the conversation list reads it as a
+	// correlated predicate and never writes one.
+	Artifact func(t *testing.T, conversationID, kind, state, detailsJSON string) string
+
+	// PendingPermission inserts a state='pending' conversation_permissions
+	// row owned by claimID. PermissionStore owns the table; the conversation
+	// list only reads it, and "pending" is derived against the conversation's
+	// active claim, so a test has to be able to stage a prompt on a claim it
+	// names rather than on whichever claim happens to be live.
+	PendingPermission func(t *testing.T, conversationID, claimID, toolCallID string) string
+
 	// AgentID returns an identifier suitable for the
 	// StampAgentClaim agentID and the conversation row's actor_agent_id.
 	// Backends use this to thread their own seeded agent row (the
@@ -2373,17 +2389,13 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("ListForTasks_BatchedAcrossTasks", func(t *testing.T) {
+	t.Run("List_BatchedAcrossTasks", func(t *testing.T) {
 		// The batched twin of ListForTask: one query returns conversations for
 		// many tasks, each attributed to its own TaskID, with unknown
-		// ids contributing nothing and empty input a no-op. Backs the
-		// Board's aggregated conversation fetch.
+		// ids contributing nothing. Backs the Board's aggregated conversation
+		// fetch.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-
-		if convs, _, err := store.ListForTasks(ctx, orgID, nil, db.ListOpts{Limit: 200}); err != nil || convs != nil {
-			t.Fatalf("ListForTasks(nil) = (%v, %v), want (nil, nil)", convs, err)
-		}
 
 		entA := seed.Entity(t, "lft-a")
 		evA := seed.Event(t, entA, domain.EventGitHubPROpened)
@@ -2399,9 +2411,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Mix in a valid-but-absent UUID and a non-UUID literal: both must be
 		// tolerated (no rows, no error). The non-UUID guards the Postgres path,
 		// where a uuid[] bind would otherwise 22P02 — filtered per uuid.go.
-		convs, total, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB, uuid.New().String(), "not-a-uuid"}, db.ListOpts{Limit: 200})
+		convs, total, err := store.List(ctx, orgID,
+			db.ConversationListFilter{TaskIDs: []string{taskA, taskB, uuid.New().String(), "not-a-uuid"}},
+			db.ListOpts{Limit: 200})
 		if err != nil {
-			t.Fatalf("ListForTasks: %v", err)
+			t.Fatalf("List: %v", err)
 		}
 		byTask := map[string][]string{}
 		for _, r := range convs {
@@ -2429,13 +2443,15 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		// The pages partition the (task_id, started_at DESC, id) order, and a
 		// task's conversations stay contiguous inside it.
-		page1, _, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB}, db.ListOpts{Limit: 2})
+		page1, _, err := store.List(ctx, orgID,
+			db.ConversationListFilter{TaskIDs: []string{taskA, taskB}}, db.ListOpts{Limit: 2})
 		if err != nil {
-			t.Fatalf("ListForTasks page 1: %v", err)
+			t.Fatalf("List page 1: %v", err)
 		}
-		page2, _, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB}, db.ListOpts{Limit: 2, Offset: 2})
+		page2, _, err := store.List(ctx, orgID,
+			db.ConversationListFilter{TaskIDs: []string{taskA, taskB}}, db.ListOpts{Limit: 2, Offset: 2})
 		if err != nil {
-			t.Fatalf("ListForTasks page 2: %v", err)
+			t.Fatalf("List page 2: %v", err)
 		}
 		if len(page1) != 2 || len(page2) != 1 {
 			t.Fatalf("pages = %d + %d, want 2 + 1", len(page1), len(page2))
@@ -2443,6 +2459,206 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		walked := map[string]bool{page1[0].ID: true, page1[1].ID: true, page2[0].ID: true}
 		if len(walked) != 3 {
 			t.Errorf("paged walk returned a repeat: %v", walked)
+		}
+	})
+
+	t.Run("List_TaskNarrowingIsOptionalButNotEmpty", func(t *testing.T) {
+		// The two zero-adjacent readings the filter has to keep apart: naming
+		// no task is no task filter (the rail's resource-wide question), while
+		// naming tasks that all resolve to nothing is a request about nothing.
+		// Collapsing them would answer a malformed selector with the whole set.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		ent := seed.Entity(t, "lft-opt")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		task := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		seedConversationForTaskTest(t, orgID, task, "running", seed)
+		seedConversationForTaskTest(t, orgID, task, "completed", seed)
+
+		convs, total, err := store.List(ctx, orgID, db.ConversationListFilter{}, db.ListOpts{Limit: 200})
+		if err != nil {
+			t.Fatalf("List unnarrowed: %v", err)
+		}
+		if len(convs) < 2 || total < 2 {
+			t.Errorf("unnarrowed List = %d rows / total %d, want every seeded conversation", len(convs), total)
+		}
+
+		none, noneTotal, err := store.List(ctx, orgID,
+			db.ConversationListFilter{TaskIDs: []string{uuid.New().String()}}, db.ListOpts{Limit: 200})
+		if err != nil {
+			t.Fatalf("List absent task: %v", err)
+		}
+		if len(none) != 0 || noneTotal != 0 {
+			t.Errorf("List(absent task) = %d rows / total %d, want empty", len(none), noneTotal)
+		}
+	})
+
+	t.Run("List_StatusFilterReadsTheDisplayLadder", func(t *testing.T) {
+		// The filter has to run over the DISPLAY status, not the stored
+		// column: `queued` and `running` are derived and never stored, so a
+		// predicate on the column would make the count disagree with every
+		// surface — claim-phase setup invisible, and a fresh mint counting as
+		// nothing at all. The phase set is walked from AllClaimPhases so a
+		// phase added to the vocabulary and taught to neither dialect fails
+		// here rather than silently dropping out of the live count.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		ent := seed.Entity(t, "lft-status")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		task := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		filter := func(statuses ...string) []string {
+			t.Helper()
+			convs, total, err := store.List(ctx, orgID,
+				db.ConversationListFilter{TaskIDs: []string{task}, Statuses: statuses},
+				db.ListOpts{Limit: 200})
+			if err != nil {
+				t.Fatalf("List(%v): %v", statuses, err)
+			}
+			if total != len(convs) {
+				t.Errorf("List(%v): total %d disagrees with %d rows", statuses, total, len(convs))
+			}
+			ids := make([]string, 0, len(convs))
+			for _, c := range convs {
+				ids = append(ids, c.ID)
+			}
+			return ids
+		}
+
+		// A conversation waiting with nobody driving it displays `queued`,
+		// and the stored column says nothing at all — which is the whole
+		// reason this filter cannot read it.
+		queued := seedConversationForTaskTest(t, orgID, task, "running", seed)
+		if _, err := store.ParkOpen(ctx, orgID, queued, db.ParkIdle()); err != nil {
+			t.Fatalf("ParkOpen: %v", err)
+		}
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, queued); err != nil || !ok {
+			t.Fatalf("MarkQueuedForResume: ok=%v err=%v", ok, err)
+		}
+		done := seedConversationForTaskTest(t, orgID, task, "completed", seed)
+
+		if got := filter(domain.StatusQueued); len(got) != 1 || got[0] != queued {
+			t.Errorf("statuses=[queued] = %v, want [%s]", got, queued)
+		}
+		if got := filter(domain.StatusCompleted); len(got) != 1 || got[0] != done {
+			t.Errorf("statuses=[completed] = %v, want [%s]", got, done)
+		}
+		if got := filter(domain.StatusQueued, domain.StatusCompleted); len(got) != 2 {
+			t.Errorf("statuses=[queued,completed] = %v, want both", got)
+		}
+		if got := filter(domain.StatusOpen); len(got) != 0 {
+			t.Errorf("statuses=[open] = %v, want none", got)
+		}
+
+		// An active claim with no phase displays `running`; each phase then
+		// displays as itself. Both are claim state, invisible to the column.
+		if _, err := store.SetExecutorSystem(ctx, orgID, queued, "exec-status", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		if got := filter(domain.StatusRunning); len(got) != 1 || got[0] != queued {
+			t.Errorf("statuses=[running] = %v, want [%s]", got, queued)
+		}
+		if got := filter(domain.StatusQueued); len(got) != 0 {
+			t.Errorf("a claimed conversation still counts as queued: %v", got)
+		}
+		for _, phase := range domain.AllClaimPhases() {
+			if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, queued, phase); err != nil {
+				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
+			}
+			if got := filter(phase); len(got) != 1 || got[0] != queued {
+				t.Errorf("statuses=[%s] = %v, want [%s]", phase, got, queued)
+			}
+			// The live set is what the rail counts as `running`, and every
+			// phase belongs to it.
+			live := append([]string{domain.StatusRunning}, domain.AllClaimPhases()...)
+			if got := filter(live...); len(got) != 1 || got[0] != queued {
+				t.Errorf("phase %s missing from the live status set: %v", phase, got)
+			}
+		}
+	})
+
+	t.Run("List_AttentionIsThePerConversationYourMove", func(t *testing.T) {
+		// The rail's `needs`: an unanswered permission prompt, or a not-live
+		// conversation still holding an unresolved artifact. Counted per
+		// conversation — three prompts on one run are one row — and matching
+		// domain.HasUnresolvedArtifacts on which artifacts count.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		ent := seed.Entity(t, "lft-attn")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		task := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		attention := func() []string {
+			t.Helper()
+			convs, total, err := store.List(ctx, orgID,
+				db.ConversationListFilter{TaskIDs: []string{task}, Attention: true},
+				db.ListOpts{Limit: 200})
+			if err != nil {
+				t.Fatalf("List(attention): %v", err)
+			}
+			if total != len(convs) {
+				t.Errorf("List(attention): total %d disagrees with %d rows", total, len(convs))
+			}
+			ids := make([]string, 0, len(convs))
+			for _, c := range convs {
+				ids = append(ids, c.ID)
+			}
+			return ids
+		}
+
+		// A terminal conversation carrying a draft PR is the plain case; the
+		// same conversation's open PR and its unfinalized review are not.
+		drafted := seedConversationForTaskTest(t, orgID, task, "completed", seed)
+		quiet := seedConversationForTaskTest(t, orgID, task, "completed", seed)
+		seed.Artifact(t, quiet, domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "")
+		seed.Artifact(t, quiet, domain.ArtifactKindReview, domain.ArtifactStateReviewPending,
+			`{"number":7,"review_event":""}`)
+		if got := attention(); len(got) != 0 {
+			t.Errorf("attention with nothing unresolved = %v, want none", got)
+		}
+		seed.Artifact(t, drafted, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		if got := attention(); len(got) != 1 || got[0] != drafted {
+			t.Errorf("attention with a draft PR = %v, want [%s]", got, drafted)
+		}
+		// A finalized pending review counts too, and a second unresolved
+		// artifact on the same conversation is still one row.
+		seed.Artifact(t, drafted, domain.ArtifactKindReview, domain.ArtifactStateReviewPending,
+			`{"number":7,"review_event":"REQUEST_CHANGES"}`)
+		if got := attention(); len(got) != 1 || got[0] != drafted {
+			t.Errorf("two unresolved artifacts on one conversation = %v, want one row", got)
+		}
+
+		// A LIVE conversation's unresolved artifact is not a human's move: the
+		// agent is still working, and the run view lights it as WORKING.
+		live := seedConversationForTaskTest(t, orgID, task, "running", seed)
+		seed.Artifact(t, live, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		if _, err := store.SetExecutorSystem(ctx, orgID, live, "exec-attn", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		if got := attention(); len(got) != 1 || got[0] != drafted {
+			t.Errorf("a live conversation's draft PR counted as attention: %v", got)
+		}
+
+		// A prompt owned by the live claim IS a human's move, whatever the
+		// conversation's status — and two prompts are still one row. A prompt
+		// from a released claim is a question nobody can answer, so it drops
+		// out the moment the claim does, without anything writing its expiry.
+		claims := seed.ClaimRows(t, live)
+		claimID := claims[len(claims)-1].ID
+		seed.PendingPermission(t, live, claimID, "call-1")
+		seed.PendingPermission(t, live, claimID, "call-2")
+		got := attention()
+		if len(got) != 2 {
+			t.Fatalf("attention with a prompted live conversation = %v, want 2 rows", got)
+		}
+		if _, err := store.Complete(ctx, orgID, live, "completed", 0, 0, 0, "", "", "", ""); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		// Its draft PR now counts (it stopped being live), but on its own
+		// merit rather than the orphaned prompts'.
+		if got := attention(); len(got) != 2 {
+			t.Errorf("attention after the claim released = %v, want the two artifact-bearing rows", got)
 		}
 	})
 

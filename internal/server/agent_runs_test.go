@@ -103,18 +103,137 @@ func TestHandleConversations_Batched(t *testing.T) {
 	}
 }
 
-// TestHandleConversations_MissingParams pins that the conversation-list endpoint still
-// requires a task selector — an absent task_ids is a 400, and so is one whose
-// entries are all blank.
-func TestHandleConversations_MissingParams(t *testing.T) {
+// TestHandleConversations_TaskIDsOptional pins the two readings the selector
+// has to keep apart. An ABSENT task_ids is no task narrowing — the whole
+// visible set, which is what lets the rail ask the resource a question no task
+// id can express. A task_ids that is PRESENT and unusable is still a 400: a
+// corrupt filter must never widen the result set by falling back.
+func TestHandleConversations_TaskIDsOptional(t *testing.T) {
 	s := newTestServer(t)
+	convA := seedSteerConversation(t, s.db, "opt-a", "completed")
+	convB := seedSteerConversation(t, s.db, "opt-b", "running")
 
-	if rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{}); rec.Code != http.StatusBadRequest {
-		t.Errorf("list (no task_ids) = %d, want 400", rec.Code)
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list (no task_ids) = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
+	var resp struct {
+		Runs       map[string][]map[string]any `json:"runs"`
+		TotalCount int                         `json:"total_count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	seen := map[string]bool{}
+	for _, rows := range resp.Runs {
+		for _, r := range rows {
+			id, _ := r["ID"].(string)
+			seen[id] = true
+		}
+	}
+	if !seen[convA] || !seen[convB] {
+		t.Errorf("unnarrowed list missed a conversation: got %v, want both %s and %s", seen, convA, convB)
+	}
+	if resp.TotalCount != 2 {
+		t.Errorf("total_count = %d, want 2", resp.TotalCount)
+	}
+
 	if rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
 		map[string]any{"task_ids": []string{" ", " "}}); rec.Code != http.StatusBadRequest {
 		t.Errorf("list (blank task_ids) = %d, want 400", rec.Code)
+	}
+}
+
+// TestHandleConversations_StatusFilter pins the rail's `running` read: the
+// filter names DISPLAY statuses (a claim phase is a legal value), an unknown
+// value is a client fault rather than an empty page, and a count-only page
+// answers the number without a row.
+func TestHandleConversations_StatusFilter(t *testing.T) {
+	s := newTestServer(t)
+	running := seedSteerConversation(t, s.db, "stf-run", "running")
+	_ = seedSteerConversation(t, s.db, "stf-done", "completed")
+	// `running` is DERIVED from an unreleased claim, never stored, so the
+	// display ladder only reads it once the row has one.
+	execSQL(t, s.db, `INSERT INTO claims (id, conversation_id, executor_id, boot_epoch) VALUES (?, ?, 'exec-1', 1)`,
+		uuid.New().String(), running)
+
+	live := append([]string{domain.StatusRunning}, domain.AllClaimPhases()...)
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{
+		"statuses": live, "page_size": 0,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status-filtered count = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var count struct {
+		Runs       map[string][]map[string]any `json:"runs"`
+		TotalCount int                         `json:"total_count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &count); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	if count.TotalCount != 1 {
+		t.Errorf("total_count = %d, want 1 (only the claimed conversation is live)", count.TotalCount)
+	}
+	if len(count.Runs) != 0 {
+		t.Errorf("count-only read returned %d groups of rows; want none", len(count.Runs))
+	}
+
+	// The stored column is not what gets filtered: the seeded row says
+	// 'running' in the column too, but a row whose claim was never minted
+	// reads as queued and must not be counted twice over.
+	rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{
+		"statuses": []string{domain.StatusCompleted}, "page_size": 0,
+	})
+	if err := json.Unmarshal(rec.Body.Bytes(), &count); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	if count.TotalCount != 1 {
+		t.Errorf("completed total_count = %d, want 1", count.TotalCount)
+	}
+
+	rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
+		map[string]any{"statuses": []string{"nonsense"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonInvalidField, "statuses")
+}
+
+// TestHandleConversations_AttentionFilter pins the rail's `needs` read: a
+// not-live conversation holding an unresolved artifact is one unit of
+// attention, and a conversation holding nothing unresolved is none.
+func TestHandleConversations_AttentionFilter(t *testing.T) {
+	s := newTestServer(t)
+	drafted := seedSteerConversation(t, s.db, "att-draft", "completed")
+	_ = seedSteerConversation(t, s.db, "att-quiet", "completed")
+
+	attention := func() int {
+		t.Helper()
+		rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
+			map[string]any{"attention": true, "page_size": 0})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("attention count = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			TotalCount int `json:"total_count"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+		}
+		return resp.TotalCount
+	}
+
+	if got := attention(); got != 0 {
+		t.Errorf("attention with nothing unresolved = %d, want 0", got)
+	}
+	// Two unresolved artifacts on one conversation are still one thing to do.
+	for _, target := range []string{"o/r#1", "o/r#2"} {
+		execSQL(t, s.db, `INSERT INTO artifacts (id, conversation_id, team_id, provider, kind, target, state, dedup_key)
+			VALUES (?, ?, ?, 'github', 'pull_request', ?, 'draft', ?)`,
+			uuid.New().String(), drafted, runmode.LocalDefaultTeamID, target, target)
+	}
+	if got := attention(); got != 1 {
+		t.Errorf("attention counted per artifact, not per conversation: got %d, want 1", got)
 	}
 }
 

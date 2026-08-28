@@ -4,6 +4,8 @@ import UiShell from './ui/shell/Shell'
 import type { Grant, RailCounts } from './ui/shell/routes'
 import type { ThemeChoice } from './ui/shell/Shell'
 import { useOrgHref } from './hooks/useOrgHref'
+import { useRailCounts } from './hooks/useRailCounts'
+import { useWsConnected } from './hooks/useWebSocket'
 import { useOptionalAuth } from './contexts/AuthContext'
 import { useOrgRole } from './hooks/useOrgRole'
 import { useTeams } from './hooks/useTeams'
@@ -139,9 +141,19 @@ export default function Shell() {
   // Rail tails are facts about destinations, and every one of them needs a
   // `total` this API does not return yet (backend-needs.md, items 1-8). Absent
   // rather than zero: a tail reading 0 says "no repositories", which is a claim,
-  // and the rail has no business making it before it knows. Same for the two
-  // live counts and the queue, which pass null and read as `--`.
+  // and the rail has no business making it before it knows.
   const counts: RailCounts = {}
+
+  // The three live counts, and whether the stream feeding them is up. Each
+  // count reads `--` until its own first answer; `offline` inerts all three at
+  // once, because a count nobody is maintaining is worse than no count.
+  //
+  // Read on every route, the full-bleed one below included. Not an oversight:
+  // the rail's numbers stay current while a run is open, so coming back from
+  // one shows the counts rather than three dashes filling in — and what it
+  // costs to keep them is three COUNTs per burst of hints.
+  const { needs, running, queued } = useRailCounts()
+  const connected = useWsConnected()
 
   const route = routeIdFor(pathname)
 
@@ -158,6 +170,7 @@ export default function Shell() {
       {({ immersive, header }) => (
         <UiShell
           immersive={immersive}
+          offline={!connected}
           mode={isMulti ? 'multi' : 'local'}
           grants={grants}
           flags={{
@@ -179,9 +192,9 @@ export default function Shell() {
           subtitle={header?.subtitle}
           actions={header?.actions}
           onTitleSave={header?.onTitleSave}
-          needs={null}
-          running={null}
-          queued={null}
+          needs={needs}
+          running={running}
+          queued={queued}
           counts={counts}
           user={
             isMulti && auth?.me
