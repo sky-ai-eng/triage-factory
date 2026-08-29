@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -62,12 +63,19 @@ type ConversationSeeder struct {
 	// conversations hanging off it.
 	Task func(t *testing.T, entityID, eventType, primaryEventID string) string
 
+	// Team inserts a second team in the org and returns its id, so a subtest
+	// can stage conversations that belong to different teams. The default
+	// team every other callback writes against is the one the factory
+	// seeded; this is the only way to get a SECOND one, which is what the
+	// team narrowing has to be told apart from.
+	Team func(t *testing.T, slug string) string
+
 	// Conversation inserts a conversations row directly and returns its id (conv.ID
 	// when set, a fresh uuid otherwise). ConversationQueueStore.EnqueueConversation is the
 	// only production mint; the conformance suite stages rows in arbitrary
-	// status without driving the queue. Fields honored: ID, TaskID,
-	// PromptID, Status, Model, TriggerType (default manual), TriggerID,
-	// BlueprintRunID.
+	// status without driving the queue. Fields honored: ID, TaskID, TeamID
+	// (default: the org's first team), PromptID, Status, Model, TriggerType
+	// (default manual), TriggerID, BlueprintRunID.
 	Conversation func(t *testing.T, conv domain.Conversation) string
 
 	// ClaimRows returns the conversation's claims rows oldest-first, so
@@ -2575,6 +2583,100 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			if got := filter(live...); len(got) != 1 || got[0] != queued {
 				t.Errorf("phase %s missing from the live status set: %v", phase, got)
 			}
+		}
+	})
+
+	t.Run("List_TeamNarrowingScopesToTheOwningTeam", func(t *testing.T) {
+		// The Overview's scope: "whatever the org · team mark says". The
+		// narrowing reads conversations.team_id, denormalized at mint, so a
+		// team-scoped count needs no task hop — and it composes with the
+		// status filter rather than replacing it, because the Overview always
+		// sends both.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		ent := seed.Entity(t, "lft-team")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		task := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		mine := seed.Team(t, "lft-mine")
+		theirs := seed.Team(t, "lft-theirs")
+		seedFor := func(teamID, status string) string {
+			t.Helper()
+			return seed.Conversation(t, domain.Conversation{
+				TaskID: task, TeamID: teamID, PromptID: conversationTestPrompt(t),
+				Status: status, Model: "m", BlueprintRunID: seed.BlueprintRun(t, task),
+			})
+		}
+		// Terminal statuses, so the display ladder reads them off the stored
+		// column and the composition case turns on the team, not on staging.
+		myDone := seedFor(mine, domain.StatusCompleted)
+		theirDone := seedFor(theirs, domain.StatusCompleted)
+		theirFailed := seedFor(theirs, domain.StatusFailed)
+
+		list := func(filter db.ConversationListFilter) []string {
+			t.Helper()
+			convs, total, err := store.List(ctx, orgID, filter, db.ListOpts{Limit: 200})
+			if err != nil {
+				t.Fatalf("List(%+v): %v", filter, err)
+			}
+			if total != len(convs) {
+				t.Errorf("List(%+v): total %d disagrees with %d rows", filter, total, len(convs))
+			}
+			// The count-only read answers the same number without a row: a
+			// team-scoped count and the page it heads cannot disagree.
+			empty, countOnly, err := store.List(ctx, orgID, filter, db.ListOpts{Limit: 200, CountOnly: true})
+			if err != nil {
+				t.Fatalf("List(%+v, count-only): %v", filter, err)
+			}
+			if len(empty) != 0 {
+				t.Errorf("List(%+v, count-only) returned %d rows; want none", filter, len(empty))
+			}
+			if countOnly != total {
+				t.Errorf("List(%+v): count-only total %d disagrees with the paged %d", filter, countOnly, total)
+			}
+			ids := make([]string, 0, len(convs))
+			for _, c := range convs {
+				ids = append(ids, c.ID)
+				if filter.TeamIDs != nil && !slices.Contains(filter.TeamIDs, c.TeamID) {
+					t.Errorf("List(%+v) returned conversation %s owned by team %s", filter, c.ID, c.TeamID)
+				}
+			}
+			return ids
+		}
+
+		if got := list(db.ConversationListFilter{TeamIDs: []string{mine}}); len(got) != 1 || got[0] != myDone {
+			t.Errorf("team_ids=[mine] = %v, want [%s]", got, myDone)
+		}
+		if got := list(db.ConversationListFilter{TeamIDs: []string{theirs}}); len(got) != 2 {
+			t.Errorf("team_ids=[theirs] = %v, want both %s and %s", got, theirDone, theirFailed)
+		}
+		if got := list(db.ConversationListFilter{TeamIDs: []string{mine, theirs}}); len(got) != 3 {
+			t.Errorf("team_ids=[mine,theirs] = %v, want all three", got)
+		}
+		// Naming no team is no team narrowing — the viewer-wide read the
+		// shell rail asks for — while naming a team that owns nothing is a
+		// request about nothing. Collapsing the two would answer a scoped
+		// count with the whole org's work.
+		if got := list(db.ConversationListFilter{}); len(got) < 3 {
+			t.Errorf("unnarrowed list = %v, want every seeded conversation", got)
+		}
+		if got := list(db.ConversationListFilter{TeamIDs: []string{uuid.New().String()}}); len(got) != 0 {
+			t.Errorf("team_ids=[absent team] = %v, want empty", got)
+		}
+
+		// Composition: the Overview sends team AND statuses, so the two
+		// narrow together. A right-status wrong-team row and a right-team
+		// wrong-status row are both out.
+		got := list(db.ConversationListFilter{
+			TeamIDs: []string{theirs}, Statuses: []string{domain.StatusCompleted},
+		})
+		if len(got) != 1 || got[0] != theirDone {
+			t.Errorf("team_ids=[theirs] + statuses=[completed] = %v, want [%s]", got, theirDone)
+		}
+		if got := list(db.ConversationListFilter{
+			TeamIDs: []string{mine}, Statuses: []string{domain.StatusFailed},
+		}); len(got) != 0 {
+			t.Errorf("team_ids=[mine] + statuses=[failed] = %v, want empty", got)
 		}
 	})
 

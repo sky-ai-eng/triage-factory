@@ -156,6 +156,26 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 			}
 			return id
 		},
+		Team: func(t *testing.T, slug string) string {
+			t.Helper()
+			id := uuid.New().String()
+			// A membership row too: conversations.team_id is FK-checked here,
+			// and a team the seeding user belongs to keeps the fixture
+			// representative of the rows RLS would admit.
+			if _, err := conn.Exec(
+				`INSERT INTO teams (id, org_id, slug, name) VALUES ($1, $2, $3, $4)`,
+				id, orgID, slug+"-"+id[:8], "Conformance "+slug,
+			); err != nil {
+				t.Fatalf("seed team %s: %v", slug, err)
+			}
+			if _, err := conn.Exec(
+				`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`,
+				userID, id,
+			); err != nil {
+				t.Fatalf("seed team membership %s: %v", slug, err)
+			}
+			return id
+		},
 		Conversation: func(t *testing.T, conv domain.Conversation) string {
 			t.Helper()
 			if conv.CreatorUserID == "" && conv.TriggerType != "event" {
@@ -720,15 +740,18 @@ func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, conv domain.Co
 	if conv.CreatorUserID != "" {
 		creator = conv.CreatorUserID
 	}
+	// team_id defaults to the org's first team; a conversation staged for a
+	// team-narrowing test names its own.
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, org_id, task_id, team_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, visibility, creator_user_id,
 		                           blueprint_run_id, blueprint_step_index)
 		VALUES ($1, $2, $3,
-		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+		        COALESCE(NULLIF($12, '')::uuid,
+		                 (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)),
 		        $4, $5, $6, $7, NULLIF($8, '')::uuid, 'team', $9, $10, $11)
 	`, id, orgID, conv.TaskID, conv.PromptID, conv.Status, conv.Model,
-		trigger, conv.TriggerID, creator, conv.BlueprintRunID, stepIdx); err != nil {
+		trigger, conv.TriggerID, creator, conv.BlueprintRunID, stepIdx, conv.TeamID); err != nil {
 		t.Fatalf("seed conversation %s: %v", id, err)
 	}
 	return id

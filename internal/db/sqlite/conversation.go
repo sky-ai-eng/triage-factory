@@ -838,6 +838,16 @@ func sqliteConversationListWhere(filter db.ConversationListFilter, taskIDs []str
 		where += ` AND r.task_id IN (` + placeholders + `)`
 		args = append(args, idArgs...)
 	}
+	if len(filter.TeamIDs) > 0 {
+		// The twin of Postgres' team ANY(): a named set narrows, and a set
+		// naming teams that hold nothing matches nothing rather than widening
+		// back. Local mode is N=1 (one team), so this is effectively inert
+		// here and exists to keep the dialect conformant with the filter's
+		// contract.
+		placeholders, teamArgs := inListArgs(filter.TeamIDs)
+		where += ` AND r.team_id IN (` + placeholders + `)`
+		args = append(args, teamArgs...)
+	}
 	if len(filter.Statuses) > 0 {
 		placeholders, statusArgs := inListArgs(filter.Statuses)
 		where += ` AND (` + sqliteDisplayStatusSQL + `) IN (` + placeholders + `)`

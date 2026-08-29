@@ -199,6 +199,100 @@ func TestHandleConversations_StatusFilter(t *testing.T) {
 	assertFirstError(t, rec, httpx.ReasonInvalidField, "statuses")
 }
 
+// TestHandleConversations_TeamFilter pins the Overview's scope: the counts a
+// team-marked page shows are its own team's, so team_ids narrows to the
+// conversations that team owns and composes with the status filter rather than
+// replacing it. A malformed set is a 400 naming the field, and a set that
+// names a team owning nothing answers zero — never the viewer-wide number the
+// shell rail reads, which is the same page one field apart.
+func TestHandleConversations_TeamFilter(t *testing.T) {
+	s := newTestServer(t)
+	homeA := seedSteerConversation(t, s.db, "team-home-a", "completed")
+	homeB := seedSteerConversation(t, s.db, "team-home-b", "completed")
+	away := seedSteerConversation(t, s.db, "team-away", "failed")
+	otherTeam := uuid.New().String()
+	execSQL(t, s.db, `INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'other', 'Other')`,
+		otherTeam, runmode.LocalDefaultOrgID)
+	execSQL(t, s.db, `UPDATE conversations SET team_id = ? WHERE id = ?`, otherTeam, away)
+
+	type listResp struct {
+		Runs          map[string][]map[string]any `json:"runs"`
+		NextPageToken string                      `json:"next_page_token"`
+		TotalCount    int                         `json:"total_count"`
+	}
+	list := func(body map[string]any) listResp {
+		t.Helper()
+		rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list(%v) = %d, want 200; body=%s", body, rec.Code, rec.Body.String())
+		}
+		var resp listResp
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+		}
+		return resp
+	}
+	ids := func(resp listResp) map[string]bool {
+		out := map[string]bool{}
+		for _, rows := range resp.Runs {
+			for _, r := range rows {
+				id, _ := r["ID"].(string)
+				out[id] = true
+			}
+		}
+		return out
+	}
+
+	home := list(map[string]any{"team_ids": []string{runmode.LocalDefaultTeamID}})
+	if got := ids(home); len(got) != 2 || !got[homeA] || !got[homeB] {
+		t.Errorf("team_ids=[home] = %v, want %s and %s", got, homeA, homeB)
+	}
+	if home.TotalCount != 2 {
+		t.Errorf("team_ids=[home] total_count = %d, want 2", home.TotalCount)
+	}
+	if got := ids(list(map[string]any{"team_ids": []string{otherTeam}})); len(got) != 1 || !got[away] {
+		t.Errorf("team_ids=[other] = %v, want %s", got, away)
+	}
+	// Composition with the status filter — the Overview always sends both.
+	composed := list(map[string]any{
+		"team_ids":  []string{runmode.LocalDefaultTeamID},
+		"statuses":  []string{domain.StatusFailed},
+		"page_size": 0,
+	})
+	if composed.TotalCount != 0 {
+		t.Errorf("team_ids=[home] + statuses=[failed] total_count = %d, want 0 (the failed one is another team's)", composed.TotalCount)
+	}
+
+	// A team that owns nothing counts nothing: a scoped read must never fall
+	// back to the unfiltered set.
+	absent := list(map[string]any{"team_ids": []string{uuid.New().String()}, "page_size": 0})
+	if absent.TotalCount != 0 {
+		t.Errorf("team_ids=[absent team] total_count = %d, want 0", absent.TotalCount)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
+		map[string]any{"team_ids": []string{"not-a-uuid"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed team_ids = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonInvalidField, "team_ids")
+
+	// The token is bound to the filter set it was minted for: a page-2 token
+	// from one team replayed against another is refused rather than served a
+	// window into a different query.
+	first := list(map[string]any{"team_ids": []string{runmode.LocalDefaultTeamID}, "page_size": 1})
+	if first.NextPageToken == "" {
+		t.Fatalf("page 1 of the home team returned no next_page_token; got total_count %d", first.TotalCount)
+	}
+	rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{
+		"team_ids": []string{otherTeam}, "page_size": 1, "page_token": first.NextPageToken,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("token replayed against another team = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonInvalidParam, "page_token")
+}
+
 // TestHandleConversations_AttentionFilter pins the rail's `needs` read: a
 // not-live conversation holding an unresolved artifact is one unit of
 // attention, and a conversation holding nothing unresolved is none.
