@@ -28,6 +28,7 @@ import ScanCard from './ScanCard'
 import SelectionBarCard from './SelectionBarCard'
 import ShellCard from './ShellCard'
 import SourcePartsCard from './SourcePartsCard'
+import SpendRingCard from './SpendRingCard'
 import TableCard from './TableCard'
 import TeamPartsCard from './TeamPartsCard'
 import TooltipCard from './TooltipCard'
@@ -321,6 +322,7 @@ export default function UiGallery() {
             <ScanCard />
             <FlapCountCard />
             <CratePileCard />
+            <SpendRingCard />
             <SelectionBarCard />
             <TableCard />
             <TeamPartsCard />

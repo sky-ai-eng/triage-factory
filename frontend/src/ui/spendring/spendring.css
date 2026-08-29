@@ -1,0 +1,105 @@
+/* SpendRing — see SpendRing.tsx for the reasoning. Geometry only here. */
+
+.sr {
+  position: relative;
+  display: block;
+  aspect-ratio: 1;
+  flex: none;
+  text-decoration: none;
+  color: inherit;
+  transition: opacity 0.16s var(--ease-default);
+}
+a.sr:hover {
+  opacity: 0.86;
+}
+
+/* -90deg so the first band starts at twelve o'clock. overflow visible because
+   a hovered band is 3px thicker than the track and would otherwise be clipped
+   by the viewBox. */
+.sr-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  transform: rotate(-90deg);
+  overflow: visible;
+}
+
+.sr-track {
+  fill: none;
+  stroke: var(--color-tint-3);
+  stroke-width: 14;
+}
+
+.sr-seg {
+  fill: none;
+  cursor: pointer;
+  transition:
+    stroke-dasharray 0.62s var(--ease-default),
+    stroke-width 0.18s var(--ease-default),
+    opacity 0.18s var(--ease-default);
+}
+
+.sr-hole {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  /* The hole is a readout, not a target. Pointing at it must not count as
+     leaving the band underneath. */
+  pointer-events: none;
+}
+.sr-total {
+  /* Scales with the ring, set from `size` in the component. A fixed size meant
+     a 104px ring carried the same readout as a 168px one, and a three-digit
+     total ran through the band on both sides.
+
+     Precision does NOT scale — see `money` in SpendRing.tsx. One rule at every
+     size, or a ring reads differently at 104 than at 168 and they stop being
+     the same component. */
+  font: 500 var(--sr-fig, 16px) / 1 var(--font-mono);
+  color: var(--color-ink-1);
+  letter-spacing: -0.01em;
+  /* Tabular so a figure changing in place does not shuffle its own digits
+     sideways. */
+  font-variant-numeric: tabular-nums;
+}
+.sr-cap {
+  /* Scales with the ring too, but on its own ratio — a caption at half the
+     figure's size stops being legible before the figure does, so it floors at
+     7.5px and the two converge on large rings. */
+  font: 400 var(--sr-cap, 8.5px) / 1 var(--font-mono);
+  letter-spacing: 0.09em;
+  color: var(--color-ink-4);
+  /* The hole is a fixed circular aperture, so the label fits it rather than
+     the other way round: one line, 58% of the ring — the chord that clears the
+     band at the caption's own height, which is below the ring's center and
+     therefore narrower than the hole looks — then an ellipsis.
+
+     Two other routes were built and cut. Two lines: an id breaks at a hyphen
+     and leaves half a line of air, and -webkit-line-clamp declines to add an
+     ellipsis to a line ending in one, so the label read "SONNET-". Crossing
+     the ring with a masked channel behind the text: it bit a visible gap out
+     of the ring's silhouette, which is the ring's whole readability, and 8.5px
+     tracked type over a saturated band is a smear at any ink.
+
+     What actually fixes it is upstream — see shortModelName.ts. */
+  max-width: 58%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+}
+/* Lifts to ink-2 while naming a model. The standing caption is a label and can
+   sit at ink-4; a name is an ANSWER to the pointer and has to be read, and at
+   8.5px with this much tracking ink-4 was not enough for a string anyone needs
+   to parse. */
+.sr-cap[data-open] {
+  color: var(--color-ink-2);
+}
+
+/* Reduced motion needs no branch: the build is a transition, so the
+   tokens/motion.css blanket removing it leaves each band at its true length —
+   the end state, which is the right answer. */
