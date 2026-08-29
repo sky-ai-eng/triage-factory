@@ -104,6 +104,22 @@ func boolean(name, description string) Field {
 	return Field{Name: name, Schema: Schema{Type: "boolean", Description: description}}
 }
 
+// DisplayOnlyParams names, per tool, the arguments the jail never reads.
+//
+// A tool declares one when its input is not legible to a person as-is — a
+// shell command, an opaque id — and the interface needs a sentence to render
+// in that argument's place. The harness passes unknown arguments through its
+// validation and its argument types ignore them, so these reach the jail and
+// are dropped there.
+//
+// The parity guard subtracts them before it compares the two sides: a
+// parameter with no behaviour has nothing for the jail's implementation to
+// agree with, so a divergence here is the declared kind rather than the two
+// sides telling different stories about what a call does.
+var DisplayOnlyParams = map[string][]string{
+	Bash.Name: {"description", "description_past"},
+}
+
 // Sandbox returns the tools the jail implements, in the harness's own order.
 // The order is fixed for the same reason property order is: it is part of
 // what the provider caches.

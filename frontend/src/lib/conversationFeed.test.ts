@@ -51,6 +51,43 @@ describe('appendToFeed', () => {
     expect(feed.lines.map((l) => l.text)).toEqual(['planning', 'Adding comment'])
   })
 
+  it('reads the authored summary off a native bash row, whose tool name is lowercase', () => {
+    // A native conversation calls the tool `bash`, and native is the only
+    // runtime that authors both tenses — so a ticker matching the SDK's `Bash`
+    // alone would miss the summary on exactly the rows that carry one.
+    const feed = appendToFeed(
+      undefined,
+      msg({
+        subtype: 'tool_use',
+        tool_calls: [
+          {
+            id: 'tc-1',
+            name: 'bash',
+            input: {
+              command: 'go test ./internal/sandbox -run TestSampler_Series -count=20',
+              description: 'Reproducing the flake',
+              description_past: 'Ran the sampler test 50x',
+            },
+          },
+        ],
+      }),
+    )
+    // The ticker is a live strip, so it stays in the present tense even though
+    // this row carries a past one.
+    expect(feed.lines.map((l) => l.text)).toEqual(['Reproducing the flake'])
+  })
+
+  it('falls back to the command itself when a bash call carries no summary', () => {
+    const feed = appendToFeed(
+      undefined,
+      msg({
+        subtype: 'tool_use',
+        tool_calls: [{ id: 'tc-1', name: 'bash', input: { command: 'go build ./...' } }],
+      }),
+    )
+    expect(feed.lines.map((l) => l.text)).toEqual(['go build ./...'])
+  })
+
   it('skips thinking and the JSON completion blob on the ticker but still counts their tokens', () => {
     let feed = appendToFeed(
       undefined,
