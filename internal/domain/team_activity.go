@@ -13,11 +13,22 @@ type TeamActivity struct {
 }
 
 // TeamActivityDay is one UTC calendar day's flow across every source:
-// events recorded and tasks created.
+// events recorded, tasks created, pull requests merged, and runs that ended
+// failed. The four are counted over the same window but not the same rows —
+// merged is an event-log fact (a PR in the team's tracked set merged, whether
+// or not TF touched it), failed a conversation fact (a run this team owns
+// reached the failed terminal). Both are plain ints: every team has a defined
+// answer, unlike TeamActivitySource.Events.
+//
+// Merged and Failed have no source axis and so appear here only, never on
+// TeamActivityDaySource: merged is GitHub's alone, and a failed run names no
+// source at all.
 type TeamActivityDay struct {
 	Date   string // YYYY-MM-DD (UTC)
 	Events int
 	Tasks  int
+	Merged int
+	Failed int
 }
 
 // TeamActivityDaySource is one (UTC day, source) cell — the long-format
