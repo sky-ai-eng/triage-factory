@@ -1,5 +1,6 @@
 import type { Message } from '../types'
 import { isSystemNotice } from './messageVoice'
+import { bashHeadline, firstLine, isBashTool } from './toolHeadline'
 
 // conversationFeed — the bounded per-conversation projection the board's AgentCards render from.
 //
@@ -103,16 +104,32 @@ function clip(s: string, n: number): string {
 }
 
 function formatToolCall(name: string, input: Record<string, unknown>): string {
-  if (name === 'Bash') {
-    // Prefer the agent-authored description — the human-readable intent.
-    // The curated exec mappings below cover description-less internal calls.
-    const desc = String(input.description || '')
-    if (desc) return desc
-    const cmd = String(input.command || '')
+  // The ticker is a live strip of what is happening now, so a bash line reads
+  // in the present tense whether or not its result has landed yet — there is
+  // nothing here to pair a call with its result, and past tense on a call
+  // still running would be a claim this projection cannot make.
+  if (isBashTool(name)) return bashHeadline(input, 'running', curatedCommandLine)
+  if (name === 'Read') return `Reading ${basename(String(input.file_path || ''))}`
+  if (name === 'Glob') return `Searching for ${String(input.pattern || 'files')}`
+  if (name === 'Grep') return `Searching for "${String(input.pattern || '').slice(0, 40)}"`
+  return `${name}`
+}
+
+// curatedCommandLine is the ticker's last step: the shell command itself, in
+// the narrow width a card gives it. TF's own exec verbs get named readings —
+// a card has room for "Reading full diff" and not for the argv that means it,
+// and these are commands we author, so the reading is exact rather than a
+// guess at someone else's shell.
+function curatedCommandLine(cmd: string): string {
+  if (cmd.includes('triagefactory exec')) {
     if (cmd.includes('triagefactory exec gh pr view')) return 'Fetching PR details'
-    if (cmd.includes('triagefactory exec gh pr diff') && cmd.includes('--file'))
-      return `Reading diff: ${extractFlag(cmd, '--file')}`
-    if (cmd.includes('triagefactory exec gh pr diff')) return 'Reading full diff'
+    if (cmd.includes('triagefactory exec gh pr diff')) {
+      // The flag's value is what the reading needs, so its value is what the
+      // branch tests: a `--file` with nothing after it reads as the whole
+      // diff rather than as a sentence that stops at its colon.
+      const file = extractFlag(cmd, '--file')
+      return file ? `Reading diff: ${file}` : 'Reading full diff'
+    }
     if (cmd.includes('triagefactory exec gh pr files')) return 'Listing changed files'
     if (cmd.includes('triagefactory exec gh pr review-view')) return 'Expanding previous review'
     if (cmd.includes('triagefactory exec gh pr start-review'))
@@ -132,14 +149,14 @@ function formatToolCall(name: string, input: Record<string, unknown>): string {
     if (cmd.includes('triagefactory exec gh pr comment-update')) return 'Editing comment'
     if (cmd.includes('triagefactory exec gh pr comment-delete')) return 'Deleting comment'
     if (cmd.includes('triagefactory exec gh pr add-comment')) return 'Adding comment'
-    if (cmd.includes('triagefactory exec'))
-      return `Running: ${cmd.split('triagefactory exec ')[1]?.slice(0, 60)}`
-    return `Running command`
+    // An unrecognized exec verb reads as its own argv — but only when there is
+    // argv to read. The applet name can appear with nothing after it, on its
+    // own line, or quoted inside some other command, and each of those splits
+    // to nothing; naming the command itself is the honest answer there.
+    const argv = cmd.split('triagefactory exec ')[1]?.trim()
+    if (argv) return `Running: ${argv.slice(0, 60)}`
   }
-  if (name === 'Read') return `Reading ${basename(String(input.file_path || ''))}`
-  if (name === 'Glob') return `Searching for ${String(input.pattern || 'files')}`
-  if (name === 'Grep') return `Searching for "${String(input.pattern || '').slice(0, 40)}"`
-  return `${name}`
+  return firstLine(cmd) || 'Running command'
 }
 
 function extractFlag(cmd: string, flag: string): string {
