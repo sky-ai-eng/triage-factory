@@ -62,9 +62,6 @@ DROP EXTENSION IF EXISTS supabase_vault CASCADE;
 -- tf.team_in_current_org -> teams); bodies are still parsed at first invocation.
 SET check_function_bodies = false;
 
---
--- Name: membership_role; Type: TYPE; Schema: public; Owner: -
---
 
 CREATE TYPE public.membership_role AS ENUM (
     'admin',
@@ -73,21 +70,12 @@ CREATE TYPE public.membership_role AS ENUM (
 );
 
 
---
--- Name: org_role; Type: TYPE; Schema: public; Owner: -
---
-
 CREATE TYPE public.org_role AS ENUM (
     'owner',
     'admin',
     'member'
 );
 
-
-
---
--- Name: current_org_id(); Type: FUNCTION; Schema: tf; Owner: -
---
 
 -- +goose StatementBegin
 CREATE FUNCTION tf.current_org_id() RETURNS uuid
@@ -103,10 +91,6 @@ $$;
 -- +goose StatementEnd
 
 
---
--- Name: current_user_id(); Type: FUNCTION; Schema: tf; Owner: -
---
-
 -- +goose StatementBegin
 CREATE FUNCTION tf.current_user_id() RETURNS uuid
     LANGUAGE sql STABLE
@@ -120,10 +104,6 @@ CREATE FUNCTION tf.current_user_id() RETURNS uuid
 $$;
 -- +goose StatementEnd
 
-
---
--- Name: guard_org_owner_transfer(); Type: FUNCTION; Schema: tf; Owner: -
---
 
 -- +goose StatementBegin
 CREATE FUNCTION tf.guard_org_owner_transfer() RETURNS trigger
@@ -152,10 +132,6 @@ $$;
 -- +goose StatementEnd
 
 
---
--- Name: guard_org_owners(); Type: FUNCTION; Schema: tf; Owner: -
---
-
 -- SECURITY DEFINER so the owner count reads past RLS: on a self-leave the caller's
 -- own membership row is already gone, so an INVOKER read raises a false 23514.
 -- +goose StatementBegin
@@ -180,10 +156,6 @@ $$;
 -- +goose StatementEnd
 
 
---
--- Name: set_updated_at(); Type: FUNCTION; Schema: tf; Owner: -
---
-
 -- +goose StatementBegin
 CREATE FUNCTION tf.set_updated_at() RETURNS trigger
     LANGUAGE plpgsql
@@ -196,10 +168,6 @@ END;
 $$;
 -- +goose StatementEnd
 
-
---
--- Name: team_in_current_org(uuid); Type: FUNCTION; Schema: tf; Owner: -
---
 
 -- +goose StatementBegin
 CREATE FUNCTION tf.team_in_current_org(target_team uuid) RETURNS boolean
@@ -215,10 +183,6 @@ $$;
 -- +goose StatementEnd
 
 
---
--- Name: user_has_org_access(uuid); Type: FUNCTION; Schema: tf; Owner: -
---
-
 -- +goose StatementBegin
 CREATE FUNCTION tf.user_has_org_access(target_org uuid) RETURNS boolean
     LANGUAGE sql STABLE SECURITY DEFINER
@@ -231,10 +195,6 @@ CREATE FUNCTION tf.user_has_org_access(target_org uuid) RETURNS boolean
 $$;
 -- +goose StatementEnd
 
-
---
--- Name: blueprint_run_is_running(uuid, uuid); Type: FUNCTION; Schema: tf; Owner: -
---
 
 -- Reads one blueprint's running-ness past the creator-scoped blueprint_runs_select
 -- policy, so the resume CAS refuses to un-terminal a completed conversation whose
@@ -263,10 +223,6 @@ $$;
 -- +goose StatementEnd
 
 
---
--- Name: user_in_team(uuid); Type: FUNCTION; Schema: tf; Owner: -
---
-
 -- +goose StatementBegin
 CREATE FUNCTION tf.user_in_team(target_team uuid) RETURNS boolean
     LANGUAGE sql STABLE SECURITY DEFINER
@@ -281,9 +237,6 @@ $$;
 -- +goose StatementEnd
 
 
---
--- Name: user_can_write_team(uuid); Type: FUNCTION; Schema: tf; Owner: -
---
 -- Write-path sibling of user_in_team: membership exists AND the role can write.
 -- Team-scoped write policies gate on this, read policies keep user_in_team; that
 -- split is what makes the viewer role read-only. The join to teams adds
@@ -307,10 +260,6 @@ $$;
 -- +goose StatementEnd
 
 
---
--- Name: user_is_org_admin(uuid); Type: FUNCTION; Schema: tf; Owner: -
---
-
 -- +goose StatementBegin
 CREATE FUNCTION tf.user_is_org_admin(target_org uuid) RETURNS boolean
     LANGUAGE sql STABLE SECURITY DEFINER
@@ -326,10 +275,6 @@ $$;
 -- +goose StatementEnd
 
 
---
--- Name: user_is_org_admin_via_team(uuid); Type: FUNCTION; Schema: tf; Owner: -
---
-
 -- +goose StatementBegin
 CREATE FUNCTION tf.user_is_org_admin_via_team(target_team uuid) RETURNS boolean
     LANGUAGE sql STABLE SECURITY DEFINER
@@ -343,10 +288,6 @@ CREATE FUNCTION tf.user_is_org_admin_via_team(target_team uuid) RETURNS boolean
 $$;
 -- +goose StatementEnd
 
-
---
--- Name: user_is_team_admin(uuid); Type: FUNCTION; Schema: tf; Owner: -
---
 
 -- +goose StatementBegin
 CREATE FUNCTION tf.user_is_team_admin(target_team uuid) RETURNS boolean
@@ -362,10 +303,6 @@ CREATE FUNCTION tf.user_is_team_admin(target_team uuid) RETURNS boolean
 $$;
 -- +goose StatementEnd
 
-
---
--- Name: user_owns_org(uuid); Type: FUNCTION; Schema: tf; Owner: -
---
 
 -- +goose StatementBegin
 CREATE FUNCTION tf.user_owns_org(target_org uuid) RETURNS boolean
@@ -383,9 +320,6 @@ SET default_tablespace = '';
 
 SET default_table_access_method = heap;
 
---
--- Name: agents; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.agents (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -401,12 +335,6 @@ CREATE TABLE public.agents (
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-
-
-
---
--- Name: system_llm_runs; Type: TABLE; Schema: public; Owner: -
---
 
 -- One row per LLM call made by a headless system job (scorer, repo profiler), with
 -- the cost + token breakdown so org spend reconciles with the provider bill.
@@ -435,10 +363,6 @@ CREATE TABLE public.system_llm_runs (
 );
 
 
---
--- Name: access_change_log; Type: TABLE; Schema: public; Owner: -
---
-
 -- Low-volume audit log of governance actions with no external entity: org/team
 -- membership and role changes, credential bind and rotate. Capture only, no read
 -- surface yet. Written on the APP pool in the SAME transaction as the action, so a
@@ -455,10 +379,6 @@ CREATE TABLE public.access_change_log (
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-
---
--- Name: external_actions; Type: TABLE; Schema: public; Owner: -
---
 
 -- Append-only audit log of record: one row per external write TF performs under an
 -- ORG-scoped credential (org GitHub App, org Jira service account). Writes under an
@@ -492,10 +412,6 @@ CREATE TABLE public.external_actions (
 );
 
 
---
--- Name: entities; Type: TABLE; Schema: public; Owner: -
---
-
 CREATE TABLE public.entities (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -518,10 +434,6 @@ CREATE TABLE public.entities (
 );
 
 
---
--- Name: entity_links; Type: TABLE; Schema: public; Owner: -
---
-
 CREATE TABLE public.entity_links (
     from_entity_id uuid NOT NULL,
     to_entity_id uuid NOT NULL,
@@ -531,10 +443,6 @@ CREATE TABLE public.entity_links (
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-
---
--- Name: event_handlers; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.event_handlers (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -573,10 +481,6 @@ CREATE TABLE public.event_handlers (
 );
 
 
---
--- Name: events; Type: TABLE; Schema: public; Owner: -
---
-
 CREATE TABLE public.events (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -589,10 +493,6 @@ CREATE TABLE public.events (
 );
 
 
---
--- Name: events_catalog; Type: TABLE; Schema: public; Owner: -
---
-
 CREATE TABLE public.events_catalog (
     id text NOT NULL,
     source text NOT NULL,
@@ -604,10 +504,6 @@ CREATE TABLE public.events_catalog (
 
 -- goose_db_version is managed by goose itself — do NOT recreate.
 
-
---
--- Name: jira_project_status_rules; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.jira_project_status_rules (
     team_id uuid NOT NULL,
@@ -644,10 +540,6 @@ CREATE TABLE public.jira_project_status_rules (
 );
 
 
---
--- Name: team_github_groups; Type: TABLE; Schema: public; Owner: -
---
-
 -- One row per (team, github_org_login, github_team_slug): a team routing a
 -- GitHub team's review requests to itself. Dumb string labels, no membership
 -- resolution. Pure key tuples — edits are replace-sets, so no UPDATE policy.
@@ -661,10 +553,6 @@ CREATE TABLE public.team_github_groups (
 );
 
 
---
--- Name: team_github_repos; Type: TABLE; Schema: public; Owner: -
---
-
 -- One row per (team, repository): the repos a team tracks, distinct from
 -- team_github_groups above (review routing). Referenced by registry id, so a
 -- rename leaves every row here resolving. org_id is denormalized from the team
@@ -677,10 +565,6 @@ CREATE TABLE public.team_github_repos (
 );
 
 
---
--- Name: memberships; Type: TABLE; Schema: public; Owner: -
---
-
 CREATE TABLE public.memberships (
     user_id uuid NOT NULL,
     team_id uuid NOT NULL,
@@ -689,10 +573,6 @@ CREATE TABLE public.memberships (
 );
 
 
---
--- Name: org_memberships; Type: TABLE; Schema: public; Owner: -
---
-
 CREATE TABLE public.org_memberships (
     user_id uuid NOT NULL,
     org_id uuid NOT NULL,
@@ -700,10 +580,6 @@ CREATE TABLE public.org_memberships (
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-
---
--- Name: org_settings; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.org_settings (
     org_id uuid NOT NULL,
@@ -752,10 +628,6 @@ CREATE TABLE public.org_settings (
 );
 
 
---
--- Name: orgs; Type: TABLE; Schema: public; Owner: -
---
-
 CREATE TABLE public.orgs (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     slug text NOT NULL,
@@ -768,10 +640,6 @@ CREATE TABLE public.orgs (
     deleted_at timestamp with time zone
 );
 
-
---
--- Name: pending_firings; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.pending_firings (
     id bigint NOT NULL,
@@ -792,10 +660,6 @@ CREATE TABLE public.pending_firings (
 );
 
 
---
--- Name: pending_firings_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.pending_firings_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -804,16 +668,8 @@ CREATE SEQUENCE public.pending_firings_id_seq
     CACHE 1;
 
 
---
--- Name: pending_firings_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.pending_firings_id_seq OWNED BY public.pending_firings.id;
 
-
---
--- Name: poller_state; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.poller_state (
     org_id uuid NOT NULL,
@@ -823,10 +679,6 @@ CREATE TABLE public.poller_state (
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-
---
--- Name: prompts; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.prompts (
     id text DEFAULT (gen_random_uuid())::text NOT NULL,
@@ -853,10 +705,6 @@ CREATE TABLE public.prompts (
     CONSTRAINT prompts_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL))))
 );
 
-
---
--- Name: repositories; Type: TABLE; Schema: public; Owner: -
---
 
 -- The registry of the repositories TF works with, and the target every
 -- repository reference in this schema points at. (source, external_id) is the
@@ -887,10 +735,6 @@ CREATE TABLE public.repositories (
 );
 
 
---
--- Name: artifacts; Type: TABLE; Schema: public; Owner: -
---
-
 -- One row per external object a conversation produces (branch, PR, review,
 -- issue, comment); provider + kind discriminate, writers UPSERT on
 -- (org_id, dedup_key). team_id is denormalized from the conversation so reads
@@ -913,10 +757,6 @@ CREATE TABLE public.artifacts (
 );
 
 
---
--- Name: conversation_memory; Type: TABLE; Schema: public; Owner: -
---
-
 CREATE TABLE public.conversation_memory (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -929,10 +769,6 @@ CREATE TABLE public.conversation_memory (
 );
 
 
---
--- Name: conversation_memory_entities; Type: TABLE; Schema: public; Owner: -
---
-
 -- Lets one conversation_memory row reach every entity the run touched, not just
 -- the denormalized entity_id above. Keyed on conversation_id because touches are
 -- recorded mid-run, before the conversation_memory row exists. role is free text.
@@ -944,10 +780,6 @@ CREATE TABLE public.conversation_memory_entities (
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-
---
--- Name: messages; Type: TABLE; Schema: public; Owner: -
---
 
 -- The transcript canon: one row per neutral (OpenAI-shaped) API message, owned
 -- by exactly one conversation. Assembly is a pure function of these rows.
@@ -1012,10 +844,6 @@ CREATE TABLE public.messages (
 );
 
 
---
--- Name: messages_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.messages_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -1024,16 +852,8 @@ CREATE SEQUENCE public.messages_id_seq
     CACHE 1;
 
 
---
--- Name: messages_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.messages_id_seq OWNED BY public.messages.id;
 
-
---
--- Name: conversation_worktrees; Type: TABLE; Schema: public; Owner: -
---
 
 -- One row per (conversation, repository, ref) a run materialized. No ON DELETE
 -- on the repository FK: deleting a repository a run names is refused, not cascaded.
@@ -1046,10 +866,6 @@ CREATE TABLE public.conversation_worktrees (
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-
---
--- Name: conversations; Type: TABLE; Schema: public; Owner: -
---
 
 -- One row per durable agent transcript, whatever the surface. Execution state is
 -- on claims; the transcript and its cost/token ledger are messages.
@@ -1115,12 +931,6 @@ CREATE TABLE public.conversations (
 );
 
 
-
-
---
--- Name: sessions; Type: TABLE; Schema: public; Owner: -
---
-
 CREATE TABLE public.sessions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     user_id uuid NOT NULL,
@@ -1141,10 +951,6 @@ CREATE TABLE public.sessions (
 );
 
 
---
--- Name: swipe_events; Type: TABLE; Schema: public; Owner: -
---
-
 CREATE TABLE public.swipe_events (
     id bigint NOT NULL,
     org_id uuid NOT NULL,
@@ -1156,10 +962,6 @@ CREATE TABLE public.swipe_events (
 );
 
 
---
--- Name: swipe_events_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.swipe_events_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -1168,16 +970,8 @@ CREATE SEQUENCE public.swipe_events_id_seq
     CACHE 1;
 
 
---
--- Name: swipe_events_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.swipe_events_id_seq OWNED BY public.swipe_events.id;
 
-
---
--- Name: task_events; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.task_events (
     task_id uuid NOT NULL,
@@ -1187,10 +981,6 @@ CREATE TABLE public.task_events (
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-
---
--- Name: tasks; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.tasks (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -1229,10 +1019,6 @@ CREATE TABLE public.tasks (
 );
 
 
---
--- Name: task_teams; Type: TABLE; Schema: public; Owner: -
---
-
 -- Teams whose handlers matched the event that spawned the task. A team sees an
 -- unclaimed task iff it is here or owns it; a claimed task consolidates to team_id.
 CREATE TABLE public.task_teams (
@@ -1240,10 +1026,6 @@ CREATE TABLE public.task_teams (
     team_id uuid NOT NULL
 );
 
-
---
--- Name: team_agents; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.team_agents (
     team_id uuid NOT NULL,
@@ -1254,10 +1036,6 @@ CREATE TABLE public.team_agents (
     added_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-
---
--- Name: team_settings; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.team_settings (
     team_id uuid NOT NULL,
@@ -1302,10 +1080,6 @@ CREATE TABLE public.team_settings (
 );
 
 
---
--- Name: teams; Type: TABLE; Schema: public; Owner: -
---
-
 CREATE TABLE public.teams (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -1324,10 +1098,6 @@ CREATE TABLE public.teams (
 );
 
 
---
--- Name: user_settings; Type: TABLE; Schema: public; Owner: -
---
-
 -- Per-user prefs. AI behavior policy is team-scoped (team_settings).
 CREATE TABLE public.user_settings (
     user_id uuid NOT NULL,
@@ -1337,10 +1107,6 @@ CREATE TABLE public.user_settings (
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-
---
--- Name: users; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.users (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -1353,10 +1119,6 @@ CREATE TABLE public.users (
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-
---
--- Name: user_github_identities; Type: TABLE; Schema: public; Owner: -
---
 
 -- Host-scoped GitHub identity bindings: one human can hold a different login on
 -- each GitHub host, so the key is (user_id, github_base_url); an absent row is a
@@ -1380,10 +1142,6 @@ CREATE TABLE public.user_github_identities (
 );
 
 
---
--- Name: user_jira_identities; Type: TABLE; Schema: public; Owner: -
---
-
 -- Host-scoped Jira identity bindings, the sibling of user_github_identities: the
 -- key is (user_id, jira_base_url), matching the per-(user, host) key the Jira PAT
 -- is custodied under ("jira_token/<host>"). account_id is the Atlassian StableID
@@ -1401,235 +1159,111 @@ CREATE TABLE public.user_jira_identities (
 );
 
 
-
-
-
-
---
--- Name: pending_firings id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.pending_firings ALTER COLUMN id SET DEFAULT nextval('public.pending_firings_id_seq'::regclass);
 
-
---
--- Name: messages id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.messages ALTER COLUMN id SET DEFAULT nextval('public.messages_id_seq'::regclass);
 
 
---
--- Name: swipe_events id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.swipe_events ALTER COLUMN id SET DEFAULT nextval('public.swipe_events_id_seq'::regclass);
 
-
---
--- Name: agents agents_id_org_unique; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.agents
     ADD CONSTRAINT agents_id_org_unique UNIQUE (id, org_id);
 
 
---
--- Name: agents agents_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.agents
     ADD CONSTRAINT agents_org_id_key UNIQUE (org_id);
 
-
---
--- Name: agents agents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.agents
     ADD CONSTRAINT agents_pkey PRIMARY KEY (id);
 
 
-
-
-
-
-
-
-
-
---
--- Name: entities entities_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_id_org_id_key UNIQUE (id, org_id);
 
-
---
--- Name: entities entities_org_id_source_source_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_org_id_source_source_id_key UNIQUE (org_id, source, source_id);
 
 
---
--- Name: entities entities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_pkey PRIMARY KEY (id);
 
-
---
--- Name: entity_links entity_links_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.entity_links
     ADD CONSTRAINT entity_links_pkey PRIMARY KEY (from_entity_id, to_entity_id, kind);
 
 
---
--- Name: event_handlers event_handlers_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.event_handlers
     ADD CONSTRAINT event_handlers_id_org_id_key UNIQUE (id, org_id);
 
 
---
--- Name: event_handlers event_handlers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.event_handlers
     ADD CONSTRAINT event_handlers_pkey PRIMARY KEY (org_id, id);
 
-
---
--- Name: event_handlers event_handlers_org_team_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 -- Re-seed idempotency: one shipped handler copy per team; NULL system_slug never collides.
 ALTER TABLE ONLY public.event_handlers
     ADD CONSTRAINT event_handlers_org_team_slug_key UNIQUE (org_id, team_id, system_slug);
 
 
---
--- Name: events_catalog events_catalog_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.events_catalog
     ADD CONSTRAINT events_catalog_pkey PRIMARY KEY (id);
 
-
---
--- Name: events events_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.events
     ADD CONSTRAINT events_id_org_id_key UNIQUE (id, org_id);
 
 
---
--- Name: events events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.events
     ADD CONSTRAINT events_pkey PRIMARY KEY (id);
 
-
---
--- Name: jira_project_status_rules jira_project_status_rules_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.jira_project_status_rules
     ADD CONSTRAINT jira_project_status_rules_pkey PRIMARY KEY (team_id, project_key);
 
 
---
--- Name: team_github_groups team_github_groups_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.team_github_groups
     ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, github_org_login, github_team_slug);
 
-
---
--- Name: team_github_repos team_github_repos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.team_github_repos
     ADD CONSTRAINT team_github_repos_pkey PRIMARY KEY (team_id, repository_id);
 
 
---
--- Name: memberships memberships_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.memberships
     ADD CONSTRAINT memberships_pkey PRIMARY KEY (user_id, team_id);
 
-
---
--- Name: org_memberships org_memberships_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.org_memberships
     ADD CONSTRAINT org_memberships_pkey PRIMARY KEY (user_id, org_id);
 
 
---
--- Name: org_settings org_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.org_settings
     ADD CONSTRAINT org_settings_pkey PRIMARY KEY (org_id);
 
-
---
--- Name: orgs orgs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.orgs
     ADD CONSTRAINT orgs_pkey PRIMARY KEY (id);
 
 
---
--- Name: orgs orgs_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.orgs
     ADD CONSTRAINT orgs_slug_key UNIQUE (slug);
 
-
---
--- Name: pending_firings pending_firings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_pkey PRIMARY KEY (id);
 
 
---
--- Name: poller_state poller_state_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.poller_state
     ADD CONSTRAINT poller_state_pkey PRIMARY KEY (org_id, source, source_id);
 
 
---
--- Name: prompts prompts_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_id_org_id_key UNIQUE (id, org_id);
 
-
---
--- Name: prompts prompts_id_team_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 -- Parent key for blueprint_steps.step_prompt_id's composite FK, so a step can
 -- only bind a prompt its own team owns.
@@ -1637,34 +1271,18 @@ ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_id_team_id_key UNIQUE (id, team_id);
 
 
---
--- Name: prompts prompts_org_team_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 -- Re-seed idempotency: one shipped prompt copy per team; NULL system_slug never collides.
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_org_team_slug_key UNIQUE (org_id, team_id, system_slug);
 
 
---
--- Name: prompts prompts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_pkey PRIMARY KEY (org_id, id);
 
 
---
--- Name: repositories repositories_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.repositories
     ADD CONSTRAINT repositories_pkey PRIMARY KEY (id);
 
-
---
--- Name: repositories repositories_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 -- Composite-FK target for team_github_repos(repository_id, org_id): Postgres
 -- requires a unique constraint over exactly the referenced columns.
@@ -1672,354 +1290,169 @@ ALTER TABLE ONLY public.repositories
     ADD CONSTRAINT repositories_id_org_id_key UNIQUE (id, org_id);
 
 
---
--- Name: system_llm_runs system_llm_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.system_llm_runs
     ADD CONSTRAINT system_llm_runs_pkey PRIMARY KEY (id);
 
-
---
--- Name: access_change_log access_change_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.access_change_log
     ADD CONSTRAINT access_change_log_pkey PRIMARY KEY (id);
 
 
---
--- Name: external_actions external_actions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.external_actions
     ADD CONSTRAINT external_actions_pkey PRIMARY KEY (id);
 
-
---
--- Name: artifacts artifacts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.artifacts
     ADD CONSTRAINT artifacts_pkey PRIMARY KEY (id);
 
 
---
--- Name: conversation_memory conversation_memory_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.conversation_memory
     ADD CONSTRAINT conversation_memory_pkey PRIMARY KEY (id);
 
-
---
--- Name: conversation_memory conversation_memory_conversation_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.conversation_memory
     ADD CONSTRAINT conversation_memory_conversation_id_key UNIQUE (conversation_id);
 
 
---
--- Name: conversation_memory_entities conversation_memory_entities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.conversation_memory_entities
     ADD CONSTRAINT conversation_memory_entities_pkey PRIMARY KEY (conversation_id, entity_id);
 
-
---
--- Name: messages messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.messages
     ADD CONSTRAINT messages_pkey PRIMARY KEY (id);
 
 
---
--- Name: conversation_worktrees conversation_worktrees_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.conversation_worktrees
     ADD CONSTRAINT conversation_worktrees_pkey PRIMARY KEY (conversation_id, repository_id, ref);
 
-
---
--- Name: conversations conversations_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_id_org_id_key UNIQUE (id, org_id);
 
 
---
--- Name: conversations conversations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_pkey PRIMARY KEY (id);
 
-
---
--- Name: sessions sessions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.sessions
     ADD CONSTRAINT sessions_pkey PRIMARY KEY (id);
 
 
---
--- Name: swipe_events swipe_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.swipe_events
     ADD CONSTRAINT swipe_events_pkey PRIMARY KEY (id);
 
-
---
--- Name: task_events task_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.task_events
     ADD CONSTRAINT task_events_pkey PRIMARY KEY (task_id, event_id);
 
 
---
--- Name: tasks tasks_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_id_org_id_key UNIQUE (id, org_id);
 
-
---
--- Name: tasks tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_pkey PRIMARY KEY (id);
 
 
---
--- Name: task_teams task_teams_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.task_teams
     ADD CONSTRAINT task_teams_pkey PRIMARY KEY (task_id, team_id);
 
-
---
--- Name: team_agents team_agents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.team_agents
     ADD CONSTRAINT team_agents_pkey PRIMARY KEY (team_id, agent_id);
 
 
---
--- Name: team_settings team_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.team_settings
     ADD CONSTRAINT team_settings_pkey PRIMARY KEY (team_id);
 
-
---
--- Name: teams teams_org_id_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.teams
     ADD CONSTRAINT teams_org_id_slug_key UNIQUE (org_id, slug);
 
 
---
--- Name: teams teams_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.teams
     ADD CONSTRAINT teams_pkey PRIMARY KEY (id);
 
-
---
--- Name: teams teams_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 -- Composite-FK target for team_github_repos and org_invites; declared ahead of both.
 ALTER TABLE ONLY public.teams
     ADD CONSTRAINT teams_id_org_id_key UNIQUE (id, org_id);
 
 
---
--- Name: user_github_identities user_github_identities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.user_github_identities
     ADD CONSTRAINT user_github_identities_pkey PRIMARY KEY (user_id, github_base_url);
 
-
---
--- Name: user_jira_identities user_jira_identities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.user_jira_identities
     ADD CONSTRAINT user_jira_identities_pkey PRIMARY KEY (user_id, jira_base_url);
 
 
---
--- Name: user_settings user_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.user_settings
     ADD CONSTRAINT user_settings_pkey PRIMARY KEY (user_id);
 
-
---
--- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_pkey PRIMARY KEY (id);
 
 
---
--- Name: agents_org_idx; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX agents_org_idx ON public.agents USING btree (org_id);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
---
--- Name: idx_entities_closed_at; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_entities_closed_at ON public.entities USING btree (closed_at) WHERE (closed_at IS NOT NULL);
 
 
---
--- Name: idx_entities_github_author; Type: INDEX; Schema: public; Owner: -
---
 -- Serves the dashboard PR list's author predicate; expression and partial predicate match it.
 
 CREATE INDEX idx_entities_github_author ON public.entities USING btree (org_id, ((snapshot_json ->> 'author'::text)), last_polled_at DESC) WHERE ((source = 'github'::text) AND (snapshot_json IS NOT NULL));
 
 
---
--- Name: idx_entities_org_source_polled; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_entities_org_source_polled ON public.entities USING btree (org_id, source, last_polled_at);
 
-
---
--- Name: idx_entities_org_state; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_entities_org_state ON public.entities USING btree (org_id, state);
 
 
---
--- Name: idx_entity_links_from_kind; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_entity_links_from_kind ON public.entity_links USING btree (from_entity_id, kind);
 
-
---
--- Name: idx_entity_links_to_kind; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_entity_links_to_kind ON public.entity_links USING btree (to_entity_id, kind);
 
 
---
--- Name: idx_event_handlers_org_event_enabled; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_event_handlers_org_event_enabled ON public.event_handlers USING btree (org_id, event_type) WHERE (enabled = true);
 
-
---
--- Name: idx_event_handlers_org_kind; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_event_handlers_org_kind ON public.event_handlers USING btree (org_id, kind);
 
 
---
--- Name: idx_event_handlers_blueprint; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_event_handlers_blueprint ON public.event_handlers USING btree (org_id, blueprint_id) WHERE (blueprint_id IS NOT NULL);
 
 
---
--- Name: event_handlers_one_trigger_per_blueprint; Type: INDEX; Schema: public; Owner: -
---
 -- At most one trigger per blueprint; blueprint_id IS NOT NULL already implies
 -- kind='trigger'. deleted_at IS NULL frees the slot on soft delete.
 
 CREATE UNIQUE INDEX event_handlers_one_trigger_per_blueprint ON public.event_handlers USING btree (org_id, blueprint_id) WHERE (blueprint_id IS NOT NULL AND deleted_at IS NULL);
 
 
---
--- Name: idx_events_org_entity_created; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_events_org_entity_created ON public.events USING btree (org_id, entity_id, created_at DESC);
 
-
---
--- Name: idx_events_org_entity_occurred; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_events_org_entity_occurred ON public.events USING btree (org_id, entity_id, occurred_at DESC);
 
 
---
--- Name: idx_events_org_type_created; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_events_org_type_created ON public.events USING btree (org_id, event_type, created_at DESC);
 
 
---
--- Name: idx_events_org_type_entity; Type: INDEX; Schema: public; Owner: -
---
 -- Serves the per-org COUNT(DISTINCT entity_id) by event_type: the key order
 -- makes DISTINCT an adjacency dedup, with no temp B-tree.
 
 CREATE INDEX idx_events_org_type_entity ON public.events USING btree (org_id, event_type, entity_id) WHERE (entity_id IS NOT NULL);
 
 
---
--- Name: idx_pending_firings_dedup; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX idx_pending_firings_dedup ON public.pending_firings USING btree (task_id, trigger_id) WHERE (status = ANY (ARRAY['pending'::text, 'draining'::text]));
 
 
---
--- Name: idx_pending_firings_entity_pending; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_pending_firings_entity_pending ON public.pending_firings USING btree (entity_id, queued_at) WHERE (status = 'pending'::text);
 
-
---
--- Name: idx_repositories_org_owner_repo; Type: INDEX; Schema: public; Owner: -
---
 
 -- Repository natural key. source distinguishes providers issuing the same
 -- owner/repo; lower() folds case, since GitHub identifiers are case-insensitive,
@@ -2028,140 +1461,65 @@ CREATE INDEX idx_pending_firings_entity_pending ON public.pending_firings USING 
 CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (org_id, source, lower(owner), lower(repo));
 
 
---
--- Name: idx_repositories_org_owner_repo; Type: INDEX; Schema: public; Owner: -
---
-
 -- Serves the ordered org-wide list the folded key cannot: ORDER BY owner, repo.
 CREATE INDEX idx_repositories_org_owner_repo ON public.repositories USING btree (org_id, owner, repo);
 
 
---
--- Name: idx_system_llm_runs_org_started; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_system_llm_runs_org_started ON public.system_llm_runs USING btree (org_id, started_at DESC);
 
 
---
--- Name: idx_system_llm_runs_org_job_started; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_system_llm_runs_org_job_started ON public.system_llm_runs USING btree (org_id, job, started_at DESC);
 
-
---
--- Name: idx_system_llm_runs_trace_id; Type: INDEX; Schema: public; Owner: -
---
 
 -- Idempotency key: a duplicate Record() for one agentproc invocation is a no-op
 -- via ON CONFLICT instead of double-counting spend. NULL trace_ids don't collide.
 CREATE UNIQUE INDEX idx_system_llm_runs_trace_id ON public.system_llm_runs USING btree (trace_id) WHERE (trace_id IS NOT NULL);
 
 
---
--- Name: idx_access_change_log_org_created; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_access_change_log_org_created ON public.access_change_log USING btree (org_id, created_at DESC);
 
 
---
--- Name: idx_external_actions_dedup; Type: INDEX; Schema: public; Owner: -
 -- Append-only dedup: the branch hook+proxy twin shares a deterministic key and
 -- collapses via ON CONFLICT DO NOTHING; any other duplicate is rejected.
---
 
 CREATE UNIQUE INDEX idx_external_actions_dedup ON public.external_actions USING btree (org_id, dedup_key);
 
 
---
--- Name: idx_external_actions_org_occurred; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_external_actions_org_occurred ON public.external_actions USING btree (org_id, occurred_at DESC);
 
-
---
--- Name: idx_external_actions_team_occurred; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_external_actions_team_occurred ON public.external_actions USING btree (org_id, team_id, occurred_at DESC);
 
 
---
--- Name: idx_external_actions_conversation; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_external_actions_conversation ON public.external_actions USING btree (conversation_id);
 
-
---
--- Name: idx_artifacts_dedup; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX idx_artifacts_dedup ON public.artifacts USING btree (org_id, dedup_key);
 
 
---
--- Name: idx_artifacts_team_created; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_artifacts_team_created ON public.artifacts USING btree (team_id, created_at DESC);
 
-
---
--- Name: idx_artifacts_org_created; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_artifacts_org_created ON public.artifacts USING btree (org_id, created_at DESC);
 
 
---
--- Name: idx_artifacts_conversation; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_artifacts_conversation ON public.artifacts USING btree (conversation_id);
 
-
---
--- Name: idx_conversation_memory_entity_created; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_conversation_memory_entity_created ON public.conversation_memory USING btree (entity_id, created_at);
 
 
---
--- Name: idx_conversation_memory_entity_blueprint; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_conversation_memory_entity_blueprint ON public.conversation_memory USING btree (entity_id, blueprint_run_id);
 
-
---
--- Name: idx_conversation_memory_conversation; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_conversation_memory_conversation ON public.conversation_memory USING btree (conversation_id);
 
 
---
--- Name: idx_conversation_memory_entities_entity; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_conversation_memory_entities_entity ON public.conversation_memory_entities USING btree (org_id, entity_id);
 
 
---
--- Name: idx_messages_conversation; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_messages_conversation ON public.messages USING btree (conversation_id);
 
-
---
--- Name: idx_messages_conversation_seq; Type: INDEX; Schema: public; Owner: -
---
 
 -- Assembly order: the effective sort key is COALESCE(seq, id). The plain
 -- idx_messages_conversation above still serves id-order transcript reads.
@@ -2174,173 +1532,82 @@ CREATE INDEX idx_messages_claim ON public.messages USING btree (claim_id) WHERE 
 CREATE INDEX idx_messages_user ON public.messages USING btree (user_id) WHERE (user_id IS NOT NULL);
 
 
---
--- Name: idx_conversation_worktrees_conversation; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_conversation_worktrees_conversation ON public.conversation_worktrees USING btree (conversation_id);
 
-
---
--- Name: idx_conversations_org_status; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_conversations_org_status ON public.conversations USING btree (org_id, status);
 
 
---
--- Name: idx_conversations_prompt_started; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_conversations_prompt_started ON public.conversations USING btree (prompt_id, started_at DESC);
 
-
---
--- Name: idx_conversations_task; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_conversations_task ON public.conversations USING btree (task_id);
 
 
---
--- Name: idx_conversations_trigger; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_conversations_trigger ON public.conversations USING btree (trigger_id);
 
-
---
--- Name: idx_swipe_events_action_created; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_swipe_events_action_created ON public.swipe_events USING btree (action, created_at);
 
 
---
--- Name: idx_swipe_events_task; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_swipe_events_task ON public.swipe_events USING btree (task_id);
 
-
---
--- Name: idx_task_events_event; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_task_events_event ON public.task_events USING btree (event_id);
 
 
---
--- Name: idx_task_events_task; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_task_events_task ON public.task_events USING btree (task_id);
 
-
---
--- Name: idx_tasks_active_entity_event_dedup; Type: INDEX; Schema: public; Owner: -
---
 
 -- One task per situation: identity is (entity, event_type, dedup_key), independent of
 -- team. Teams are visibility (task_teams): one event matching N teams' rules is one task.
 CREATE UNIQUE INDEX idx_tasks_active_entity_event_dedup ON public.tasks USING btree (entity_id, event_type, dedup_key) WHERE (status <> ALL (ARRAY['done'::text, 'dismissed'::text]));
 
 
---
--- Name: idx_task_teams_team; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_task_teams_team ON public.task_teams USING btree (team_id);
 
-
---
--- Name: idx_tasks_entity; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX idx_tasks_entity ON public.tasks USING btree (entity_id);
 
 
---
--- Name: idx_tasks_org_status; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_tasks_org_status ON public.tasks USING btree (org_id, status);
 
 
---
--- Name: idx_tasks_org_status_priority; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX idx_tasks_org_status_priority ON public.tasks USING btree (org_id, status, priority_score DESC);
 
-
---
--- Name: idx_tasks_rederive_owed; Type: INDEX; Schema: public; Owner: -
---
 
 -- Partial: the owed set is empty in a crash-free cycle, so the index spans only the
 -- rare owed rows. created_at trails org_id because the drain reads oldest-first.
 CREATE INDEX idx_tasks_rederive_owed ON public.tasks USING btree (org_id, created_at) WHERE rederive_owed;
 
 
---
--- Name: conversations_actor_agent_idx; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX conversations_actor_agent_idx ON public.conversations USING btree (actor_agent_id) WHERE (actor_agent_id IS NOT NULL);
 
 CREATE INDEX idx_conversations_parent ON public.conversations USING btree (parent_conversation_id) WHERE (parent_conversation_id IS NOT NULL);
 
 
---
--- Name: conversations_event_trigger_fence; Type: INDEX; Schema: public; Owner: -
---
 -- Fired-fence: one event firing one trigger materializes at most one conversation.
 -- Partial so manual and blueprint-step conversations (NULL) never participate.
 
 CREATE UNIQUE INDEX conversations_event_trigger_fence ON public.conversations USING btree (triggering_event_id, trigger_id) WHERE (triggering_event_id IS NOT NULL);
 
 
---
--- Name: tasks_claimed_agent_idx; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX tasks_claimed_agent_idx ON public.tasks USING btree (claimed_by_agent_id) WHERE (claimed_by_agent_id IS NOT NULL);
 
-
---
--- Name: tasks_claimed_user_idx; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX tasks_claimed_user_idx ON public.tasks USING btree (claimed_by_user_id) WHERE (claimed_by_user_id IS NOT NULL);
 
 
---
--- Name: team_agents_agent_idx; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX team_agents_agent_idx ON public.team_agents USING btree (agent_id);
 
 
---
--- Name: team_agents_team_idx; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX team_agents_team_idx ON public.team_agents USING btree (team_id);
 
-
---
--- Name: team_github_repos_repository_idx; Type: INDEX; Schema: public; Owner: -
---
 
 -- Reverse lookup: which teams track this repository. The primary key leads with
 -- team_id and cannot serve it; the tracked-set semi-joins never pin a team.
 CREATE INDEX team_github_repos_repository_idx ON public.team_github_repos USING btree (repository_id, team_id);
 
-
---
--- Name: user_github_identities_login_lookup_idx; Type: INDEX; Schema: public; Owner: -
---
 
 -- Reverse (host, login) -> user lookup for the routing subscribers. lower(login)
 -- because GitHub logins are case-insensitive while writers store them as captured;
@@ -2348,213 +1615,89 @@ CREATE INDEX team_github_repos_repository_idx ON public.team_github_repos USING 
 CREATE INDEX user_github_identities_login_lookup_idx ON public.user_github_identities USING btree (github_base_url, lower(login));
 
 
---
--- Name: org_memberships org_memberships_keep_owner_on_delete; Type: TRIGGER; Schema: public; Owner: -
---
-
 CREATE TRIGGER org_memberships_keep_owner_on_delete AFTER DELETE ON public.org_memberships REFERENCING OLD TABLE AS affected FOR EACH STATEMENT EXECUTE FUNCTION tf.guard_org_owners();
 
-
---
--- Name: org_memberships org_memberships_keep_owner_on_update; Type: TRIGGER; Schema: public; Owner: -
---
 
 CREATE TRIGGER org_memberships_keep_owner_on_update AFTER UPDATE ON public.org_memberships REFERENCING OLD TABLE AS affected FOR EACH STATEMENT EXECUTE FUNCTION tf.guard_org_owners();
 
 
---
--- Name: orgs orgs_guard_owner_transfer; Type: TRIGGER; Schema: public; Owner: -
---
-
 CREATE TRIGGER orgs_guard_owner_transfer BEFORE UPDATE OF owner_user_id ON public.orgs FOR EACH ROW EXECUTE FUNCTION tf.guard_org_owner_transfer();
 
-
---
--- Name: agents set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
 
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.agents FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
---
--- Name: event_handlers set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
-
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.event_handlers FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
-
---
--- Name: jira_project_status_rules set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
 
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.jira_project_status_rules FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
---
--- Name: org_settings set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
-
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.org_settings FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
-
---
--- Name: orgs set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
 
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.orgs FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
---
--- Name: prompts set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
-
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.prompts FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
-
---
--- Name: repositories set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
 
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.repositories FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
---
--- Name: team_settings set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
-
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.team_settings FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
-
---
--- Name: teams set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
 
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.teams FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
---
--- Name: user_github_identities set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
-
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.user_github_identities FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
-
---
--- Name: user_jira_identities set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
 
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.user_jira_identities FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
---
--- Name: user_settings set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
-
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.user_settings FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
---
--- Name: users set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
-
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
-
---
--- Name: agents agents_github_pat_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.agents
     ADD CONSTRAINT agents_github_pat_user_id_fkey FOREIGN KEY (github_pat_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
 
 
---
--- Name: agents agents_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.agents
     ADD CONSTRAINT agents_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
---
--- Name: entities entities_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: entities entities_owning_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_owning_team_id_fkey FOREIGN KEY (owning_team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
 
-
---
--- Name: entity_links entity_links_from_entity_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.entity_links
     ADD CONSTRAINT entity_links_from_entity_id_org_id_fkey FOREIGN KEY (from_entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
 
 
---
--- Name: entity_links entity_links_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.entity_links
     ADD CONSTRAINT entity_links_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
-
---
--- Name: entity_links entity_links_to_entity_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.entity_links
     ADD CONSTRAINT entity_links_to_entity_id_org_id_fkey FOREIGN KEY (to_entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
 
 
---
--- Name: event_handlers event_handlers_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.event_handlers
     ADD CONSTRAINT event_handlers_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
---
--- Name: event_handlers event_handlers_event_type_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.event_handlers
     ADD CONSTRAINT event_handlers_event_type_fkey FOREIGN KEY (event_type) REFERENCES public.events_catalog(id) ON DELETE RESTRICT;
 
-
---
--- Name: event_handlers event_handlers_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.event_handlers
     ADD CONSTRAINT event_handlers_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
@@ -2564,57 +1707,29 @@ ALTER TABLE ONLY public.event_handlers
 -- section below, after the blueprints table exists.
 
 
---
--- Name: event_handlers event_handlers_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.event_handlers
     ADD CONSTRAINT event_handlers_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
 
-
---
--- Name: events events_entity_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.events
     ADD CONSTRAINT events_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id);
 
 
---
--- Name: events events_event_type_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.events
     ADD CONSTRAINT events_event_type_fkey FOREIGN KEY (event_type) REFERENCES public.events_catalog(id);
 
-
---
--- Name: events events_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.events
     ADD CONSTRAINT events_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: jira_project_status_rules jira_project_status_rules_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.jira_project_status_rules
     ADD CONSTRAINT jira_project_status_rules_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
 
 
---
--- Name: team_github_groups team_github_groups_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.team_github_groups
     ADD CONSTRAINT team_github_groups_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
 
-
---
--- Name: team_github_repos team_github_repos_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 -- Both references carry org_id, so a tracking row cannot straddle two tenants.
 -- No ON UPDATE: moving a team or repository between orgs must be refused.
@@ -2622,161 +1737,81 @@ ALTER TABLE ONLY public.team_github_repos
     ADD CONSTRAINT team_github_repos_team_id_fkey FOREIGN KEY (team_id, org_id) REFERENCES public.teams(id, org_id) ON DELETE CASCADE;
 
 
---
--- Name: team_github_repos team_github_repos_repository_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.team_github_repos
     ADD CONSTRAINT team_github_repos_repository_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE CASCADE;
 
-
---
--- Name: memberships memberships_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.memberships
     ADD CONSTRAINT memberships_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
 
 
---
--- Name: memberships memberships_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.memberships
     ADD CONSTRAINT memberships_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
-
---
--- Name: org_memberships org_memberships_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.org_memberships
     ADD CONSTRAINT org_memberships_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: org_memberships org_memberships_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.org_memberships
     ADD CONSTRAINT org_memberships_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
-
---
--- Name: org_settings org_settings_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.org_settings
     ADD CONSTRAINT org_settings_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: orgs orgs_owner_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.orgs
     ADD CONSTRAINT orgs_owner_user_id_fkey FOREIGN KEY (owner_user_id) REFERENCES public.users(id);
 
-
---
--- Name: pending_firings pending_firings_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
---
--- Name: pending_firings pending_firings_entity_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
 
-
---
--- Name: pending_firings pending_firings_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: pending_firings pending_firings_task_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_task_id_org_id_fkey FOREIGN KEY (task_id, org_id) REFERENCES public.tasks(id, org_id) ON DELETE CASCADE;
 
-
---
--- Name: pending_firings pending_firings_trigger_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_trigger_id_org_id_fkey FOREIGN KEY (trigger_id, org_id) REFERENCES public.event_handlers(id, org_id) ON DELETE CASCADE;
 
 
---
--- Name: pending_firings pending_firings_triggering_event_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
 
-
---
--- Name: poller_state poller_state_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.poller_state
     ADD CONSTRAINT poller_state_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: prompts prompts_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
-
---
--- Name: prompts prompts_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: prompts prompts_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
 
-
---
--- Name: repositories repositories_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.repositories
     ADD CONSTRAINT repositories_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: system_llm_runs system_llm_runs_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.system_llm_runs
     ADD CONSTRAINT system_llm_runs_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
-
---
--- Name: access_change_log access_change_log_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 -- Only org_id carries an FK. actor_user_id / target_user_id / team_id are FK-free so
 -- the audit row survives deletion of the user or team it references.
@@ -2784,35 +1819,19 @@ ALTER TABLE ONLY public.access_change_log
     ADD CONSTRAINT access_change_log_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: external_actions external_actions_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 -- team_id and actor_user_id are FK-free so an audit row outlives the team or
 -- user it names (same rule as access_change_log).
 ALTER TABLE ONLY public.external_actions
     ADD CONSTRAINT external_actions_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: external_actions external_actions_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.external_actions
     ADD CONSTRAINT external_actions_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
 
 
---
--- Name: artifacts artifacts_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.artifacts
     ADD CONSTRAINT artifacts_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
-
---
--- Name: artifacts artifacts_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 -- SET NULL keeps the artifact after its conversation is purged. A composite
 -- (conversation_id, org_id) ref could not, since org_id is NOT NULL.
@@ -2820,65 +1839,33 @@ ALTER TABLE ONLY public.artifacts
     ADD CONSTRAINT artifacts_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
 
 
---
--- Name: artifacts artifacts_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.artifacts
     ADD CONSTRAINT artifacts_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
 
-
---
--- Name: conversation_memory conversation_memory_entity_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.conversation_memory
     ADD CONSTRAINT conversation_memory_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id);
 
 
---
--- Name: conversation_memory conversation_memory_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.conversation_memory
     ADD CONSTRAINT conversation_memory_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
-
---
--- Name: conversation_memory conversation_memory_conversation_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.conversation_memory
     ADD CONSTRAINT conversation_memory_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
---
--- Name: conversation_memory_entities conversation_memory_entities_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.conversation_memory_entities
     ADD CONSTRAINT conversation_memory_entities_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
-
---
--- Name: conversation_memory_entities conversation_memory_entities_entity_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.conversation_memory_entities
     ADD CONSTRAINT conversation_memory_entities_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
 
 
---
--- Name: conversation_memory_entities conversation_memory_entities_conversation_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.conversation_memory_entities
     ADD CONSTRAINT conversation_memory_entities_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
-
---
--- Name: messages messages_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.messages
     ADD CONSTRAINT messages_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
@@ -2887,57 +1874,29 @@ ALTER TABLE ONLY public.messages
     ADD CONSTRAINT messages_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
 
 
---
--- Name: messages messages_conversation_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.messages
     ADD CONSTRAINT messages_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
-
---
--- Name: conversation_worktrees conversation_worktrees_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.conversation_worktrees
     ADD CONSTRAINT conversation_worktrees_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: conversation_worktrees conversation_worktrees_repository_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.conversation_worktrees
     ADD CONSTRAINT conversation_worktrees_repository_id_fkey FOREIGN KEY (repository_id) REFERENCES public.repositories(id);
 
-
---
--- Name: conversation_worktrees conversation_worktrees_conversation_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.conversation_worktrees
     ADD CONSTRAINT conversation_worktrees_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
---
--- Name: conversations conversations_actor_agent_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_actor_agent_fkey FOREIGN KEY (actor_agent_id, org_id) REFERENCES public.agents(id, org_id) ON DELETE SET NULL;
 
 
---
--- Name: conversations conversations_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
-
---
--- Name: conversations conversations_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
@@ -2946,41 +1905,22 @@ ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_parent_id_org_id_fkey FOREIGN KEY (parent_conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
---
--- Name: conversations conversations_prompt_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_prompt_id_org_id_fkey FOREIGN KEY (prompt_id, org_id) REFERENCES public.prompts(id, org_id);
 
-
---
--- Name: conversations conversations_task_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_task_id_org_id_fkey FOREIGN KEY (task_id, org_id) REFERENCES public.tasks(id, org_id);
 
 
---
--- Name: conversations conversations_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
 
-
---
--- Name: conversations conversations_trigger_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_trigger_id_org_id_fkey FOREIGN KEY (trigger_id, org_id) REFERENCES public.event_handlers(id, org_id);
 
 
---
--- Name: conversations conversations_triggering_event_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 -- NULL triggering_event_id (manual / blueprint-step conversations) skips the
 -- check under MATCH SIMPLE.
 
@@ -2988,226 +1928,115 @@ ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
 
 
---
--- Name: sessions sessions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.sessions
     ADD CONSTRAINT sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
---
--- Name: sessions sessions_active_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 -- SET NULL so an org delete leaves sessions with no active org (handler 409).
 
 ALTER TABLE ONLY public.sessions
     ADD CONSTRAINT sessions_active_org_id_fkey FOREIGN KEY (active_org_id) REFERENCES public.orgs(id) ON DELETE SET NULL;
 
 
---
--- Name: swipe_events swipe_events_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.swipe_events
     ADD CONSTRAINT swipe_events_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
-
---
--- Name: swipe_events swipe_events_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.swipe_events
     ADD CONSTRAINT swipe_events_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: swipe_events swipe_events_task_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.swipe_events
     ADD CONSTRAINT swipe_events_task_id_org_id_fkey FOREIGN KEY (task_id, org_id) REFERENCES public.tasks(id, org_id);
 
-
---
--- Name: task_events task_events_event_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.task_events
     ADD CONSTRAINT task_events_event_id_org_id_fkey FOREIGN KEY (event_id, org_id) REFERENCES public.events(id, org_id) ON DELETE CASCADE;
 
 
---
--- Name: task_events task_events_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.task_events
     ADD CONSTRAINT task_events_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
-
---
--- Name: task_events task_events_task_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.task_events
     ADD CONSTRAINT task_events_task_id_org_id_fkey FOREIGN KEY (task_id, org_id) REFERENCES public.tasks(id, org_id) ON DELETE CASCADE;
 
 
---
--- Name: tasks tasks_claimed_agent_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_claimed_agent_fkey FOREIGN KEY (claimed_by_agent_id, org_id) REFERENCES public.agents(id, org_id) ON DELETE SET NULL;
 
-
---
--- Name: tasks tasks_claimed_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_claimed_by_user_id_fkey FOREIGN KEY (claimed_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
 
 
---
--- Name: tasks tasks_close_event_type_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_close_event_type_fkey FOREIGN KEY (close_event_type) REFERENCES public.events_catalog(id);
 
-
---
--- Name: tasks tasks_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
---
--- Name: tasks tasks_entity_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id);
 
-
---
--- Name: tasks tasks_event_type_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_event_type_fkey FOREIGN KEY (event_type) REFERENCES public.events_catalog(id) ON DELETE RESTRICT;
 
 
---
--- Name: tasks tasks_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
-
---
--- Name: tasks tasks_primary_event_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_primary_event_id_org_id_fkey FOREIGN KEY (primary_event_id, org_id) REFERENCES public.events(id, org_id);
 
 
---
--- Name: tasks tasks_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
 
-
---
--- Name: task_teams task_teams_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.task_teams
     ADD CONSTRAINT task_teams_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;
 
 
---
--- Name: task_teams task_teams_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.task_teams
     ADD CONSTRAINT task_teams_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
 
-
---
--- Name: team_agents team_agents_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.team_agents
     ADD CONSTRAINT team_agents_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.agents(id) ON DELETE CASCADE;
 
 
---
--- Name: team_agents team_agents_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.team_agents
     ADD CONSTRAINT team_agents_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
 
-
---
--- Name: team_settings team_settings_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.team_settings
     ADD CONSTRAINT team_settings_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
 
 
---
--- Name: teams teams_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.teams
     ADD CONSTRAINT teams_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
 
-
---
--- Name: teams teams_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.teams
     ADD CONSTRAINT teams_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: user_github_identities user_github_identities_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.user_github_identities
     ADD CONSTRAINT user_github_identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
-
---
--- Name: user_jira_identities user_jira_identities_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.user_jira_identities
     ADD CONSTRAINT user_jira_identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
---
--- Name: user_settings user_settings_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.user_settings
     ADD CONSTRAINT user_settings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
-
---
--- Name: users users_default_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_default_org_id_fkey FOREIGN KEY (default_org_id) REFERENCES public.orgs(id) ON DELETE SET NULL;
@@ -3218,375 +2047,169 @@ ALTER TABLE ONLY public.users
 -- link them. user_identities.auth_user_id bridges them, matched by verified email.
 
 
---
--- Name: agents; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.agents ENABLE ROW LEVEL SECURITY;
 
---
--- Name: agents agents_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY agents_delete ON public.agents FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
 
-
---
--- Name: agents agents_insert; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY agents_insert ON public.agents FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id) AND ((github_pat_user_id IS NULL) OR (EXISTS ( SELECT 1
    FROM public.org_memberships
   WHERE ((org_memberships.user_id = agents.github_pat_user_id) AND (org_memberships.org_id = agents.org_id)))))));
 
 
---
--- Name: agents agents_select; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY agents_select ON public.agents FOR SELECT TO tf_app USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
-
---
--- Name: agents agents_update; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY agents_update ON public.agents FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id) AND ((github_pat_user_id IS NULL) OR (EXISTS ( SELECT 1
    FROM public.org_memberships
   WHERE ((org_memberships.user_id = agents.github_pat_user_id) AND (org_memberships.org_id = agents.org_id)))))));
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
---
--- Name: entities; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.entities ENABLE ROW LEVEL SECURITY;
 
---
--- Name: entities entities_all; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY entities_all ON public.entities USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: entity_links; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.entity_links ENABLE ROW LEVEL SECURITY;
 
---
--- Name: entity_links entity_links_all; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY entity_links_all ON public.entity_links USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: event_handlers; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.event_handlers ENABLE ROW LEVEL SECURITY;
 
---
--- Name: event_handlers event_handlers_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
---
--- Name: event_handlers event_handlers_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 
-
---
--- Name: event_handlers event_handlers_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((creator_user_id = tf.current_user_id()) OR (EXISTS ( SELECT 1
    FROM public.memberships m
   WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = event_handlers.team_id)))))));
 
 
---
--- Name: event_handlers event_handlers_update; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
---
--- Name: events; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.events ENABLE ROW LEVEL SECURITY;
 
---
--- Name: events events_all; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY events_all ON public.events USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: jira_project_status_rules; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.jira_project_status_rules ENABLE ROW LEVEL SECURITY;
 
---
--- Name: jira_project_status_rules jira_rules_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY jira_rules_delete ON public.jira_project_status_rules FOR DELETE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
---
--- Name: jira_project_status_rules jira_rules_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY jira_rules_insert ON public.jira_project_status_rules FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
-
---
--- Name: jira_project_status_rules jira_rules_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY jira_rules_select ON public.jira_project_status_rules FOR SELECT USING ((tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
    FROM public.memberships m
   WHERE ((m.team_id = jira_project_status_rules.team_id) AND (m.user_id = tf.current_user_id()))))));
 
 
---
--- Name: jira_project_status_rules jira_rules_update; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY jira_rules_update ON public.jira_project_status_rules FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
---
--- Name: team_github_groups; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.team_github_groups ENABLE ROW LEVEL SECURITY;
 
---
--- Name: team_github_groups team_github_groups_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY team_github_groups_select ON public.team_github_groups FOR SELECT USING ((tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
    FROM public.memberships m
   WHERE ((m.team_id = team_github_groups.team_id) AND (m.user_id = tf.current_user_id()))))));
 
 
---
--- Name: team_github_groups team_github_groups_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY team_github_groups_insert ON public.team_github_groups FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
-
---
--- Name: team_github_groups team_github_groups_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY team_github_groups_delete ON public.team_github_groups FOR DELETE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
---
--- Name: team_github_repos; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.team_github_repos ENABLE ROW LEVEL SECURITY;
 
---
--- Name: team_github_repos team_github_repos_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY team_github_repos_select ON public.team_github_repos FOR SELECT USING ((tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
    FROM public.memberships m
   WHERE ((m.team_id = team_github_repos.team_id) AND (m.user_id = tf.current_user_id()))))));
 
 
---
--- Name: team_github_repos team_github_repos_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY team_github_repos_insert ON public.team_github_repos FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
-
---
--- Name: team_github_repos team_github_repos_update; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY team_github_repos_update ON public.team_github_repos FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
---
--- Name: team_github_repos team_github_repos_delete; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY team_github_repos_delete ON public.team_github_repos FOR DELETE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
---
--- Name: memberships; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.memberships ENABLE ROW LEVEL SECURITY;
 
---
--- Name: memberships memberships_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY memberships_delete ON public.memberships FOR DELETE USING (((user_id = tf.current_user_id()) OR (tf.team_in_current_org(team_id) AND (tf.user_is_team_admin(team_id) OR tf.user_is_org_admin_via_team(team_id)))));
 
 
---
--- Name: memberships memberships_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY memberships_insert ON public.memberships FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND (tf.user_is_team_admin(team_id) OR tf.user_is_org_admin_via_team(team_id))));
 
-
---
--- Name: memberships memberships_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY memberships_select ON public.memberships FOR SELECT USING (((user_id = tf.current_user_id()) OR (EXISTS ( SELECT 1
    FROM public.teams t
   WHERE ((t.id = memberships.team_id) AND (t.org_id = tf.current_org_id()) AND tf.user_has_org_access(t.org_id))))));
 
 
---
--- Name: memberships memberships_update; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY memberships_update ON public.memberships FOR UPDATE USING ((tf.team_in_current_org(team_id) AND (tf.user_is_team_admin(team_id) OR tf.user_is_org_admin_via_team(team_id)))) WITH CHECK ((tf.team_in_current_org(team_id) AND (tf.user_is_team_admin(team_id) OR tf.user_is_org_admin_via_team(team_id))));
 
 
---
--- Name: org_memberships; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.org_memberships ENABLE ROW LEVEL SECURITY;
 
---
--- Name: org_memberships org_memberships_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY org_memberships_delete ON public.org_memberships FOR DELETE USING (((user_id = tf.current_user_id()) OR ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))));
 
 
---
--- Name: org_memberships org_memberships_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY org_memberships_insert ON public.org_memberships FOR INSERT WITH CHECK ((((user_id = tf.current_user_id()) AND tf.user_owns_org(org_id)) OR ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))));
 
-
---
--- Name: org_memberships org_memberships_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY org_memberships_select ON public.org_memberships FOR SELECT USING (((user_id = tf.current_user_id()) OR tf.user_has_org_access(org_id)));
 
 
---
--- Name: org_memberships org_memberships_update; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY org_memberships_update ON public.org_memberships FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
 
 
---
--- Name: org_settings; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.org_settings ENABLE ROW LEVEL SECURITY;
 
---
--- Name: org_settings org_settings_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY org_settings_delete ON public.org_settings FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
 
 
---
--- Name: org_settings org_settings_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY org_settings_insert ON public.org_settings FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
 
-
---
--- Name: org_settings org_settings_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY org_settings_select ON public.org_settings FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: org_settings org_settings_update; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY org_settings_update ON public.org_settings FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
 
 
---
--- Name: orgs; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.orgs ENABLE ROW LEVEL SECURITY;
 
---
--- Name: orgs orgs_insert; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY orgs_insert ON public.orgs FOR INSERT WITH CHECK ((owner_user_id = tf.current_user_id()));
 
 
---
--- Name: orgs orgs_select; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY orgs_select ON public.orgs FOR SELECT USING ((((id = tf.current_org_id()) AND tf.user_has_org_access(id)) OR (owner_user_id = tf.current_user_id())));
 
-
---
--- Name: orgs orgs_update; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY orgs_update ON public.orgs FOR UPDATE USING (((id = tf.current_org_id()) AND tf.user_is_org_admin(id))) WITH CHECK (((id = tf.current_org_id()) AND tf.user_is_org_admin(id)));
 
 
---
--- Name: pending_firings; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.pending_firings ENABLE ROW LEVEL SECURITY;
 
---
--- Name: pending_firings pending_firings_all; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY pending_firings_all ON public.pending_firings USING ((EXISTS ( SELECT 1
    FROM public.tasks t
@@ -3595,91 +2218,44 @@ CREATE POLICY pending_firings_all ON public.pending_firings USING ((EXISTS ( SEL
   WHERE (t.id = pending_firings.task_id))));
 
 
---
--- Name: poller_state; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.poller_state ENABLE ROW LEVEL SECURITY;
 
---
--- Name: poller_state poller_state_all; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY poller_state_all ON public.poller_state USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: prompts; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.prompts ENABLE ROW LEVEL SECURITY;
 
---
--- Name: prompts prompts_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY prompts_delete ON public.prompts FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
---
--- Name: prompts prompts_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY prompts_insert ON public.prompts FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 
-
---
--- Name: prompts prompts_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((creator_user_id = tf.current_user_id()) OR (EXISTS ( SELECT 1
    FROM public.memberships m
   WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = prompts.team_id)))))));
 
 
---
--- Name: prompts prompts_update; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
---
--- Name: repositories; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.repositories ENABLE ROW LEVEL SECURITY;
 
---
--- Name: repositories repositories_all; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY repositories_all ON public.repositories USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: system_llm_runs; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.system_llm_runs ENABLE ROW LEVEL SECURITY;
 
---
--- Name: system_llm_runs system_llm_runs_all; Type: POLICY; Schema: public; Owner: -
---
 
 -- System-written via the admin pool (BYPASSRLS); tf_app exercises only SELECT.
 CREATE POLICY system_llm_runs_all ON public.system_llm_runs USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: access_change_log; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.access_change_log ENABLE ROW LEVEL SECURITY;
 
---
--- Name: access_change_log access_change_log_all; Type: POLICY; Schema: public; Owner: -
---
 
 -- Written through tf_app inside the claims-bearing transaction of the audited
 -- action. Exception: the invite-accept org_member_granted write is admin-pool,
@@ -3687,15 +2263,8 @@ ALTER TABLE public.access_change_log ENABLE ROW LEVEL SECURITY;
 CREATE POLICY access_change_log_all ON public.access_change_log USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: external_actions; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.external_actions ENABLE ROW LEVEL SECURITY;
 
---
--- Name: external_actions external_actions_all; Type: POLICY; Schema: public; Owner: -
---
 
 -- Org-scoped, not team-scoped. USING gates on org membership, not admin role:
 -- RLS is the cross-org tenant boundary; the within-org role check lives in the
@@ -3703,51 +2272,25 @@ ALTER TABLE public.external_actions ENABLE ROW LEVEL SECURITY;
 CREATE POLICY external_actions_all ON public.external_actions USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: artifacts; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.artifacts ENABLE ROW LEVEL SECURITY;
 
 -- Team-scoped via team_id; artifacts carry no private/org visibility columns.
 
---
--- Name: artifacts artifacts_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY artifacts_delete ON public.artifacts FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
---
--- Name: artifacts artifacts_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY artifacts_insert ON public.artifacts FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
-
---
--- Name: artifacts artifacts_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY artifacts_select ON public.artifacts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
 
 
---
--- Name: artifacts artifacts_update; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY artifacts_update ON public.artifacts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
---
--- Name: conversation_memory; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.conversation_memory ENABLE ROW LEVEL SECURITY;
 
---
--- Name: conversation_memory conversation_memory_all; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY conversation_memory_all ON public.conversation_memory USING ((EXISTS ( SELECT 1
    FROM public.conversations r
@@ -3756,15 +2299,8 @@ CREATE POLICY conversation_memory_all ON public.conversation_memory USING ((EXIS
   WHERE (r.id = conversation_memory.conversation_id))));
 
 
---
--- Name: conversation_memory_entities; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.conversation_memory_entities ENABLE ROW LEVEL SECURITY;
 
---
--- Name: conversation_memory_entities conversation_memory_entities_all; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY conversation_memory_entities_all ON public.conversation_memory_entities USING ((EXISTS ( SELECT 1
    FROM public.conversations r
@@ -3773,15 +2309,8 @@ CREATE POLICY conversation_memory_entities_all ON public.conversation_memory_ent
   WHERE (r.id = conversation_memory_entities.conversation_id))));
 
 
---
--- Name: messages; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
 
---
--- Name: messages messages_all; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY messages_all ON public.messages USING ((EXISTS ( SELECT 1
    FROM public.conversations r
@@ -3790,15 +2319,8 @@ CREATE POLICY messages_all ON public.messages USING ((EXISTS ( SELECT 1
   WHERE (r.id = messages.conversation_id))));
 
 
---
--- Name: conversation_worktrees; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.conversation_worktrees ENABLE ROW LEVEL SECURITY;
 
---
--- Name: conversation_worktrees conversation_worktrees_all; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY conversation_worktrees_all ON public.conversation_worktrees USING ((EXISTS ( SELECT 1
    FROM public.conversations r
@@ -3807,89 +2329,41 @@ CREATE POLICY conversation_worktrees_all ON public.conversation_worktrees USING 
   WHERE (r.id = conversation_worktrees.conversation_id))));
 
 
---
--- Name: conversations; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
 
---
--- Name: conversations conversations_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY conversations_delete ON public.conversations FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_can_write_team(team_id)))));
 
 
---
--- Name: conversations conversations_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY conversations_insert ON public.conversations FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR tf.user_can_write_team(team_id)) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
 
-
---
--- Name: conversations conversations_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY conversations_select ON public.conversations FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)) OR (visibility = 'org'::text))));
 
 
---
--- Name: conversations conversations_update; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY conversations_update ON public.conversations FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_can_write_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_can_write_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
 
 
---
--- Name: sessions; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.sessions ENABLE ROW LEVEL SECURITY;
 
---
--- Name: sessions sessions_modify; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY sessions_modify ON public.sessions USING ((user_id = tf.current_user_id())) WITH CHECK ((user_id = tf.current_user_id()));
 
 
---
--- Name: sessions sessions_select; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY sessions_select ON public.sessions FOR SELECT USING ((user_id = tf.current_user_id()));
 
 
---
--- Name: swipe_events; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.swipe_events ENABLE ROW LEVEL SECURITY;
 
---
--- Name: swipe_events swipe_events_modify; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY swipe_events_modify ON public.swipe_events USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()))) WITH CHECK (((org_id = tf.current_org_id()) AND (creator_user_id = tf.current_user_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: swipe_events swipe_events_select; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY swipe_events_select ON public.swipe_events FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id())));
 
 
---
--- Name: task_events; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.task_events ENABLE ROW LEVEL SECURITY;
 
---
--- Name: task_events task_events_all; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY task_events_all ON public.task_events USING ((EXISTS ( SELECT 1
    FROM public.tasks t
@@ -3898,250 +2372,121 @@ CREATE POLICY task_events_all ON public.task_events USING ((EXISTS ( SELECT 1
   WHERE (t.id = task_events.task_id))));
 
 
---
--- Name: task_teams; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.task_teams ENABLE ROW LEVEL SECURITY;
 
---
--- Name: task_teams task_teams_select; Type: POLICY; Schema: public; Owner: -
---
 
 -- Members may read the visibility-set rows for their own teams. Writes happen
 -- only on the system/admin path, which bypasses RLS; no write policy is needed.
 CREATE POLICY task_teams_select ON public.task_teams FOR SELECT USING (tf.user_in_team(team_id));
 
 
---
--- Name: tasks; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
 
---
--- Name: tasks tasks_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY tasks_delete ON public.tasks FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_can_write_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_can_write_team(team_id)))))));
 
 
---
--- Name: tasks tasks_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY tasks_insert ON public.tasks FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR (team_id IS NOT NULL AND tf.user_can_write_team(team_id))) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
 
-
---
--- Name: tasks tasks_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY tasks_select ON public.tasks FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_in_team(team_id)))) OR (visibility = 'org'::text))));
 
 
---
--- Name: tasks tasks_update; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY tasks_update ON public.tasks FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_can_write_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_can_write_team(team_id)))) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_can_write_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_can_write_team(team_id)))) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
 
 
---
--- Name: team_agents; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.team_agents ENABLE ROW LEVEL SECURITY;
 
---
--- Name: team_agents team_agents_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY team_agents_delete ON public.team_agents FOR DELETE USING ((tf.team_in_current_org(team_id) AND tf.user_can_write_team(team_id)));
 
-
---
--- Name: team_agents team_agents_insert; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY team_agents_insert ON public.team_agents FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_can_write_team(team_id) AND (EXISTS ( SELECT 1
    FROM public.agents a
   WHERE ((a.id = team_agents.agent_id) AND (a.org_id = tf.current_org_id()))))));
 
 
---
--- Name: team_agents team_agents_select; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY team_agents_select ON public.team_agents FOR SELECT TO tf_app USING ((tf.team_in_current_org(team_id) AND tf.user_in_team(team_id)));
 
-
---
--- Name: team_agents team_agents_update; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY team_agents_update ON public.team_agents FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_can_write_team(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_can_write_team(team_id) AND (EXISTS ( SELECT 1
    FROM public.agents a
   WHERE ((a.id = team_agents.agent_id) AND (a.org_id = tf.current_org_id()))))));
 
 
---
--- Name: team_settings; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.team_settings ENABLE ROW LEVEL SECURITY;
 
---
--- Name: team_settings team_settings_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY team_settings_delete ON public.team_settings FOR DELETE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
---
--- Name: team_settings team_settings_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY team_settings_insert ON public.team_settings FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
-
---
--- Name: team_settings team_settings_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY team_settings_select ON public.team_settings FOR SELECT USING ((tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
    FROM public.memberships m
   WHERE ((m.team_id = team_settings.team_id) AND (m.user_id = tf.current_user_id()))))));
 
 
---
--- Name: team_settings team_settings_update; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY team_settings_update ON public.team_settings FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
---
--- Name: teams; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.teams ENABLE ROW LEVEL SECURITY;
 
---
--- Name: teams teams_delete; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY teams_delete ON public.teams FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
 
 
---
--- Name: teams teams_insert; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY teams_insert ON public.teams FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
 
-
---
--- Name: teams teams_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY teams_select ON public.teams FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: teams teams_update; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY teams_update ON public.teams FOR UPDATE USING (((org_id = tf.current_org_id()) AND (tf.user_is_team_admin(id) OR tf.user_is_org_admin(org_id)))) WITH CHECK (((org_id = tf.current_org_id()) AND (tf.user_is_team_admin(id) OR tf.user_is_org_admin(org_id))));
 
 
---
--- Name: user_github_identities; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.user_github_identities ENABLE ROW LEVEL SECURITY;
 
---
--- Name: user_github_identities user_github_identities_modify; Type: POLICY; Schema: public; Owner: -
---
 
 -- Self-only. No org_id leg: a pre-org signup (active_org_id not yet set) must
 -- still be able to bind a PAT-derived identity.
 CREATE POLICY user_github_identities_modify ON public.user_github_identities USING ((user_id = tf.current_user_id())) WITH CHECK ((user_id = tf.current_user_id()));
 
---
--- Name: user_github_identities user_github_identities_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY user_github_identities_select ON public.user_github_identities FOR SELECT USING ((user_id = tf.current_user_id()));
 
 
---
--- Name: user_jira_identities; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.user_jira_identities ENABLE ROW LEVEL SECURITY;
 
---
--- Name: user_jira_identities user_jira_identities_modify; Type: POLICY; Schema: public; Owner: -
---
 
 -- Self-only, like user_github_identities. No org_id leg: a pre-org signup must
 -- still be able to bind a PAT-derived identity.
 CREATE POLICY user_jira_identities_modify ON public.user_jira_identities USING ((user_id = tf.current_user_id())) WITH CHECK ((user_id = tf.current_user_id()));
 
---
--- Name: user_jira_identities user_jira_identities_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY user_jira_identities_select ON public.user_jira_identities FOR SELECT USING ((user_id = tf.current_user_id()));
 
 
---
--- Name: user_settings; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.user_settings ENABLE ROW LEVEL SECURITY;
 
---
--- Name: user_settings user_settings_modify; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY user_settings_modify ON public.user_settings USING ((user_id = tf.current_user_id())) WITH CHECK ((user_id = tf.current_user_id()));
 
 
---
--- Name: user_settings user_settings_select; Type: POLICY; Schema: public; Owner: -
---
-
 CREATE POLICY user_settings_select ON public.user_settings FOR SELECT USING ((user_id = tf.current_user_id()));
 
 
---
--- Name: users; Type: ROW SECURITY; Schema: public; Owner: -
---
-
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 
---
--- Name: users users_modify; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY users_modify ON public.users USING ((id = tf.current_user_id())) WITH CHECK ((id = tf.current_user_id()));
 
-
---
--- Name: users users_select; Type: POLICY; Schema: public; Owner: -
---
 
 CREATE POLICY users_select ON public.users FOR SELECT USING (((id = tf.current_user_id()) OR (EXISTS ( SELECT 1
    FROM public.org_memberships om
   WHERE ((om.user_id = users.id) AND (om.org_id = tf.current_org_id()) AND tf.user_has_org_access(om.org_id))))));
 
-
---
--- Name: SCHEMA public; Type: ACL; Schema: -; Owner: -
---
 
 GRANT USAGE ON SCHEMA public TO postgres;
 GRANT USAGE ON SCHEMA public TO anon;
@@ -4150,104 +2495,52 @@ GRANT USAGE ON SCHEMA public TO service_role;
 GRANT USAGE ON SCHEMA public TO tf_app;
 
 
---
--- Name: SCHEMA tf; Type: ACL; Schema: -; Owner: -
---
-
 GRANT USAGE ON SCHEMA tf TO tf_app;
 
-
---
--- Name: FUNCTION current_org_id(); Type: ACL; Schema: tf; Owner: -
---
 
 REVOKE ALL ON FUNCTION tf.current_org_id() FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.current_org_id() TO tf_app;
 
 
---
--- Name: FUNCTION current_user_id(); Type: ACL; Schema: tf; Owner: -
---
-
 REVOKE ALL ON FUNCTION tf.current_user_id() FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.current_user_id() TO tf_app;
 
-
---
--- Name: FUNCTION team_in_current_org(target_team uuid); Type: ACL; Schema: tf; Owner: -
---
 
 REVOKE ALL ON FUNCTION tf.team_in_current_org(target_team uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.team_in_current_org(target_team uuid) TO tf_app;
 
 
---
--- Name: FUNCTION user_has_org_access(target_org uuid); Type: ACL; Schema: tf; Owner: -
---
-
 REVOKE ALL ON FUNCTION tf.user_has_org_access(target_org uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.user_has_org_access(target_org uuid) TO tf_app;
 
-
---
--- Name: FUNCTION blueprint_run_is_running(p_id uuid, p_org_id uuid); Type: ACL; Schema: tf; Owner: -
---
 
 REVOKE ALL ON FUNCTION tf.blueprint_run_is_running(p_id uuid, p_org_id uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.blueprint_run_is_running(p_id uuid, p_org_id uuid) TO tf_app;
 
 
---
--- Name: FUNCTION user_can_write_team(target_team uuid); Type: ACL; Schema: tf; Owner: -
---
-
 REVOKE ALL ON FUNCTION tf.user_can_write_team(target_team uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.user_can_write_team(target_team uuid) TO tf_app;
 
-
---
--- Name: FUNCTION user_in_team(target_team uuid); Type: ACL; Schema: tf; Owner: -
---
 
 REVOKE ALL ON FUNCTION tf.user_in_team(target_team uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.user_in_team(target_team uuid) TO tf_app;
 
 
---
--- Name: FUNCTION user_is_org_admin(target_org uuid); Type: ACL; Schema: tf; Owner: -
---
-
 REVOKE ALL ON FUNCTION tf.user_is_org_admin(target_org uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.user_is_org_admin(target_org uuid) TO tf_app;
 
-
---
--- Name: FUNCTION user_is_org_admin_via_team(target_team uuid); Type: ACL; Schema: tf; Owner: -
---
 
 REVOKE ALL ON FUNCTION tf.user_is_org_admin_via_team(target_team uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.user_is_org_admin_via_team(target_team uuid) TO tf_app;
 
 
---
--- Name: FUNCTION user_is_team_admin(target_team uuid); Type: ACL; Schema: tf; Owner: -
---
-
 REVOKE ALL ON FUNCTION tf.user_is_team_admin(target_team uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.user_is_team_admin(target_team uuid) TO tf_app;
 
 
---
--- Name: FUNCTION user_owns_org(target_org uuid); Type: ACL; Schema: tf; Owner: -
---
-
 REVOKE ALL ON FUNCTION tf.user_owns_org(target_org uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.user_owns_org(target_org uuid) TO tf_app;
 
-
---
--- Name: TABLE agents; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.agents TO postgres;
 GRANT ALL ON TABLE public.agents TO anon;
@@ -4256,30 +2549,12 @@ GRANT ALL ON TABLE public.agents TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.agents TO tf_app;
 
 
-
-
-
-
-
-
-
-
-
-
---
--- Name: TABLE entities; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.entities TO postgres;
 GRANT ALL ON TABLE public.entities TO anon;
 GRANT ALL ON TABLE public.entities TO authenticated;
 GRANT ALL ON TABLE public.entities TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.entities TO tf_app;
 
-
---
--- Name: TABLE entity_links; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.entity_links TO postgres;
 GRANT ALL ON TABLE public.entity_links TO anon;
@@ -4288,20 +2563,12 @@ GRANT ALL ON TABLE public.entity_links TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.entity_links TO tf_app;
 
 
---
--- Name: TABLE event_handlers; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.event_handlers TO postgres;
 GRANT ALL ON TABLE public.event_handlers TO anon;
 GRANT ALL ON TABLE public.event_handlers TO authenticated;
 GRANT ALL ON TABLE public.event_handlers TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.event_handlers TO tf_app;
 
-
---
--- Name: TABLE events; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.events TO postgres;
 GRANT ALL ON TABLE public.events TO anon;
@@ -4310,20 +2577,12 @@ GRANT ALL ON TABLE public.events TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.events TO tf_app;
 
 
---
--- Name: TABLE events_catalog; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.events_catalog TO postgres;
 GRANT ALL ON TABLE public.events_catalog TO anon;
 GRANT ALL ON TABLE public.events_catalog TO authenticated;
 GRANT ALL ON TABLE public.events_catalog TO service_role;
 GRANT SELECT ON TABLE public.events_catalog TO tf_app;
 
-
---
--- Name: TABLE jira_project_status_rules; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.jira_project_status_rules TO postgres;
 GRANT ALL ON TABLE public.jira_project_status_rules TO anon;
@@ -4332,20 +2591,12 @@ GRANT ALL ON TABLE public.jira_project_status_rules TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.jira_project_status_rules TO tf_app;
 
 
---
--- Name: TABLE team_github_groups; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.team_github_groups TO postgres;
 GRANT ALL ON TABLE public.team_github_groups TO anon;
 GRANT ALL ON TABLE public.team_github_groups TO authenticated;
 GRANT ALL ON TABLE public.team_github_groups TO service_role;
 GRANT SELECT,INSERT,DELETE ON TABLE public.team_github_groups TO tf_app;
 
-
---
--- Name: TABLE team_github_repos; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.team_github_repos TO postgres;
 GRANT ALL ON TABLE public.team_github_repos TO anon;
@@ -4354,20 +2605,12 @@ GRANT ALL ON TABLE public.team_github_repos TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.team_github_repos TO tf_app;
 
 
---
--- Name: TABLE memberships; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.memberships TO postgres;
 GRANT ALL ON TABLE public.memberships TO anon;
 GRANT ALL ON TABLE public.memberships TO authenticated;
 GRANT ALL ON TABLE public.memberships TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.memberships TO tf_app;
 
-
---
--- Name: TABLE org_memberships; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.org_memberships TO postgres;
 GRANT ALL ON TABLE public.org_memberships TO anon;
@@ -4376,20 +2619,12 @@ GRANT ALL ON TABLE public.org_memberships TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.org_memberships TO tf_app;
 
 
---
--- Name: TABLE org_settings; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.org_settings TO postgres;
 GRANT ALL ON TABLE public.org_settings TO anon;
 GRANT ALL ON TABLE public.org_settings TO authenticated;
 GRANT ALL ON TABLE public.org_settings TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.org_settings TO tf_app;
 
-
---
--- Name: TABLE orgs; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.orgs TO postgres;
 GRANT ALL ON TABLE public.orgs TO anon;
@@ -4398,20 +2633,12 @@ GRANT ALL ON TABLE public.orgs TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.orgs TO tf_app;
 
 
---
--- Name: TABLE pending_firings; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.pending_firings TO postgres;
 GRANT ALL ON TABLE public.pending_firings TO anon;
 GRANT ALL ON TABLE public.pending_firings TO authenticated;
 GRANT ALL ON TABLE public.pending_firings TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.pending_firings TO tf_app;
 
-
---
--- Name: SEQUENCE pending_firings_id_seq; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO postgres;
 GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO anon;
@@ -4420,20 +2647,12 @@ GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO service_role;
 GRANT SELECT,USAGE ON SEQUENCE public.pending_firings_id_seq TO tf_app;
 
 
---
--- Name: TABLE poller_state; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.poller_state TO postgres;
 GRANT ALL ON TABLE public.poller_state TO anon;
 GRANT ALL ON TABLE public.poller_state TO authenticated;
 GRANT ALL ON TABLE public.poller_state TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.poller_state TO tf_app;
 
-
---
--- Name: TABLE prompts; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.prompts TO postgres;
 GRANT ALL ON TABLE public.prompts TO anon;
@@ -4442,10 +2661,6 @@ GRANT ALL ON TABLE public.prompts TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.prompts TO tf_app;
 
 
---
--- Name: TABLE repositories; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.repositories TO postgres;
 GRANT ALL ON TABLE public.repositories TO anon;
 GRANT ALL ON TABLE public.repositories TO authenticated;
@@ -4453,20 +2668,12 @@ GRANT ALL ON TABLE public.repositories TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.repositories TO tf_app;
 
 
---
--- Name: TABLE system_llm_runs; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.system_llm_runs TO postgres;
 GRANT ALL ON TABLE public.system_llm_runs TO anon;
 GRANT ALL ON TABLE public.system_llm_runs TO authenticated;
 GRANT ALL ON TABLE public.system_llm_runs TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.system_llm_runs TO tf_app;
 
-
---
--- Name: TABLE access_change_log; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.access_change_log TO postgres;
 GRANT ALL ON TABLE public.access_change_log TO anon;
@@ -4478,10 +2685,6 @@ GRANT ALL ON TABLE public.access_change_log TO service_role;
 GRANT SELECT,INSERT ON TABLE public.access_change_log TO tf_app;
 
 
---
--- Name: TABLE external_actions; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.external_actions TO postgres;
 GRANT ALL ON TABLE public.external_actions TO anon;
 GRANT ALL ON TABLE public.external_actions TO authenticated;
@@ -4492,20 +2695,12 @@ GRANT ALL ON TABLE public.external_actions TO service_role;
 GRANT SELECT,INSERT ON TABLE public.external_actions TO tf_app;
 
 
---
--- Name: TABLE artifacts; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.artifacts TO postgres;
 GRANT ALL ON TABLE public.artifacts TO anon;
 GRANT ALL ON TABLE public.artifacts TO authenticated;
 GRANT ALL ON TABLE public.artifacts TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.artifacts TO tf_app;
 
-
---
--- Name: TABLE conversation_memory; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.conversation_memory TO postgres;
 GRANT ALL ON TABLE public.conversation_memory TO anon;
@@ -4514,20 +2709,12 @@ GRANT ALL ON TABLE public.conversation_memory TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.conversation_memory TO tf_app;
 
 
---
--- Name: TABLE conversation_memory_entities; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.conversation_memory_entities TO postgres;
 GRANT ALL ON TABLE public.conversation_memory_entities TO anon;
 GRANT ALL ON TABLE public.conversation_memory_entities TO authenticated;
 GRANT ALL ON TABLE public.conversation_memory_entities TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.conversation_memory_entities TO tf_app;
 
-
---
--- Name: TABLE messages; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.messages TO postgres;
 GRANT ALL ON TABLE public.messages TO anon;
@@ -4536,20 +2723,12 @@ GRANT ALL ON TABLE public.messages TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.messages TO tf_app;
 
 
---
--- Name: SEQUENCE messages_id_seq; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON SEQUENCE public.messages_id_seq TO postgres;
 GRANT ALL ON SEQUENCE public.messages_id_seq TO anon;
 GRANT ALL ON SEQUENCE public.messages_id_seq TO authenticated;
 GRANT ALL ON SEQUENCE public.messages_id_seq TO service_role;
 GRANT SELECT,USAGE ON SEQUENCE public.messages_id_seq TO tf_app;
 
-
---
--- Name: TABLE conversation_worktrees; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.conversation_worktrees TO postgres;
 GRANT ALL ON TABLE public.conversation_worktrees TO anon;
@@ -4558,26 +2737,12 @@ GRANT ALL ON TABLE public.conversation_worktrees TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.conversation_worktrees TO tf_app;
 
 
---
--- Name: TABLE conversations; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.conversations TO postgres;
 GRANT ALL ON TABLE public.conversations TO anon;
 GRANT ALL ON TABLE public.conversations TO authenticated;
 GRANT ALL ON TABLE public.conversations TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.conversations TO tf_app;
 
-
---
--- Name: TABLE llm_spend; Type: ACL; Schema: public; Owner: -
---
-
-
-
---
--- Name: TABLE sessions; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.sessions TO postgres;
 GRANT ALL ON TABLE public.sessions TO anon;
@@ -4586,20 +2751,12 @@ GRANT ALL ON TABLE public.sessions TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.sessions TO tf_app;
 
 
---
--- Name: TABLE swipe_events; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.swipe_events TO postgres;
 GRANT ALL ON TABLE public.swipe_events TO anon;
 GRANT ALL ON TABLE public.swipe_events TO authenticated;
 GRANT ALL ON TABLE public.swipe_events TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.swipe_events TO tf_app;
 
-
---
--- Name: SEQUENCE swipe_events_id_seq; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON SEQUENCE public.swipe_events_id_seq TO postgres;
 GRANT ALL ON SEQUENCE public.swipe_events_id_seq TO anon;
@@ -4608,20 +2765,12 @@ GRANT ALL ON SEQUENCE public.swipe_events_id_seq TO service_role;
 GRANT SELECT,USAGE ON SEQUENCE public.swipe_events_id_seq TO tf_app;
 
 
---
--- Name: TABLE task_events; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.task_events TO postgres;
 GRANT ALL ON TABLE public.task_events TO anon;
 GRANT ALL ON TABLE public.task_events TO authenticated;
 GRANT ALL ON TABLE public.task_events TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.task_events TO tf_app;
 
-
---
--- Name: TABLE tasks; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.tasks TO postgres;
 GRANT ALL ON TABLE public.tasks TO anon;
@@ -4630,20 +2779,12 @@ GRANT ALL ON TABLE public.tasks TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.tasks TO tf_app;
 
 
---
--- Name: TABLE task_teams; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.task_teams TO postgres;
 GRANT ALL ON TABLE public.task_teams TO anon;
 GRANT ALL ON TABLE public.task_teams TO authenticated;
 GRANT ALL ON TABLE public.task_teams TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.task_teams TO tf_app;
 
-
---
--- Name: TABLE team_agents; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.team_agents TO postgres;
 GRANT ALL ON TABLE public.team_agents TO anon;
@@ -4652,20 +2793,12 @@ GRANT ALL ON TABLE public.team_agents TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.team_agents TO tf_app;
 
 
---
--- Name: TABLE team_settings; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.team_settings TO postgres;
 GRANT ALL ON TABLE public.team_settings TO anon;
 GRANT ALL ON TABLE public.team_settings TO authenticated;
 GRANT ALL ON TABLE public.team_settings TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.team_settings TO tf_app;
 
-
---
--- Name: TABLE teams; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.teams TO postgres;
 GRANT ALL ON TABLE public.teams TO anon;
@@ -4674,20 +2807,12 @@ GRANT ALL ON TABLE public.teams TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.teams TO tf_app;
 
 
---
--- Name: TABLE user_github_identities; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.user_github_identities TO postgres;
 GRANT ALL ON TABLE public.user_github_identities TO anon;
 GRANT ALL ON TABLE public.user_github_identities TO authenticated;
 GRANT ALL ON TABLE public.user_github_identities TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.user_github_identities TO tf_app;
 
-
---
--- Name: TABLE user_jira_identities; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.user_jira_identities TO postgres;
 GRANT ALL ON TABLE public.user_jira_identities TO anon;
@@ -4696,20 +2821,12 @@ GRANT ALL ON TABLE public.user_jira_identities TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.user_jira_identities TO tf_app;
 
 
---
--- Name: TABLE user_settings; Type: ACL; Schema: public; Owner: -
---
-
 GRANT ALL ON TABLE public.user_settings TO postgres;
 GRANT ALL ON TABLE public.user_settings TO anon;
 GRANT ALL ON TABLE public.user_settings TO authenticated;
 GRANT ALL ON TABLE public.user_settings TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.user_settings TO tf_app;
 
-
---
--- Name: TABLE users; Type: ACL; Schema: public; Owner: -
---
 
 GRANT ALL ON TABLE public.users TO postgres;
 GRANT ALL ON TABLE public.users TO anon;
@@ -4718,19 +2835,11 @@ GRANT ALL ON TABLE public.users TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.users TO tf_app;
 
 
---
--- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: public; Owner: -
---
-
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES  TO postgres;
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES  TO anon;
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES  TO authenticated;
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES  TO service_role;
 
-
---
--- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: public; Owner: -
---
 
 ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON SEQUENCES  TO postgres;
 ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON SEQUENCES  TO anon;
@@ -4738,19 +2847,11 @@ ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON S
 ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON SEQUENCES  TO service_role;
 
 
---
--- Name: DEFAULT PRIVILEGES FOR FUNCTIONS; Type: DEFAULT ACL; Schema: public; Owner: -
---
-
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON FUNCTIONS  TO postgres;
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON FUNCTIONS  TO anon;
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON FUNCTIONS  TO authenticated;
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON FUNCTIONS  TO service_role;
 
-
---
--- Name: DEFAULT PRIVILEGES FOR FUNCTIONS; Type: DEFAULT ACL; Schema: public; Owner: -
---
 
 ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON FUNCTIONS  TO postgres;
 ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON FUNCTIONS  TO anon;
@@ -4758,29 +2859,16 @@ ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON F
 ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON FUNCTIONS  TO service_role;
 
 
---
--- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: public; Owner: -
---
-
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES  TO postgres;
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES  TO anon;
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES  TO authenticated;
 ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES  TO service_role;
 
 
---
--- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: public; Owner: -
---
-
 ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON TABLES  TO postgres;
 ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON TABLES  TO anon;
 ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON TABLES  TO authenticated;
 ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON TABLES  TO service_role;
-
-
---
--- PostgreSQL database dump complete
---
 
 
 -- events_catalog is seeded at runtime by db.SeedEventTypes from
@@ -5912,8 +4000,6 @@ REVOKE ALL ON public.seat_claims FROM PUBLIC;
 REVOKE ALL ON public.seat_claims FROM anon, authenticated, service_role;
 
 
-
-
 -- org_slack_workspaces: the (Slack workspace, Slack app) <-> org bind, keyed on
 -- Slack's workspace/team ID (their legacy naming, unrelated to TF teams) and the
 -- app's api_app_id, which rides every event delivery. A workspace may host many
@@ -6790,8 +4876,6 @@ REVOKE ALL ON public.conversation_signals FROM PUBLIC;
 REVOKE ALL ON public.conversation_signals FROM anon, authenticated, service_role;
 
 
-
-
 -- claims: one row per executor engagement with a conversation. At most one
 -- active (released_at IS NULL) claim per conversation. Credential columns
 -- stay NULL in local mode.
@@ -7013,10 +5097,6 @@ REVOKE ALL ON public.workspace_snapshots FROM anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.workspace_snapshots TO tf_system;
 
 
---
--- Name: llm_spend; Type: VIEW; Schema: public; Owner: -
---
-
 -- Unified spend view: one row-per-spend shape UNION-ing the messages ledger
 -- (delegated conversations) and headless system jobs onto a single category
 -- axis. Delegations split manual (per-user) from autonomous; system jobs are
@@ -7072,8 +5152,6 @@ GRANT ALL ON TABLE public.llm_spend TO anon;
 GRANT ALL ON TABLE public.llm_spend TO authenticated;
 GRANT ALL ON TABLE public.llm_spend TO service_role;
 GRANT SELECT ON TABLE public.llm_spend TO tf_app;
-
-
 
 
 -- tf_system: least-privilege executor role. The postgres-postinit-system
