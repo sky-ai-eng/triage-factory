@@ -500,14 +500,13 @@ function ConnectFlow({
         <CopyManifestButton transport="events_api" label="Copy manifest (Events API)" />
       </div>
       <p className="text-reported leading-relaxed text-ink-3">
-        Two ways to receive events:{' '}
-        <strong className="font-medium text-ink-2">Socket Mode</strong> works anywhere —
-        localhost, behind a firewall, no public URL — and is the usual choice;{' '}
+        Two ways to receive events: <strong className="font-medium text-ink-2">Socket Mode</strong>{' '}
+        works anywhere — localhost, behind a firewall, no public URL — and is the usual choice;{' '}
         <strong className="font-medium text-ink-2">Events API</strong> needs a public HTTPS URL
         Slack can reach. Copy the matching manifest into &ldquo;Create an app from a
         manifest,&rdquo; install it to your workspace, then paste the credentials below — hover a{' '}
-        <HelpCircle size={11} className="inline align-[-1px] text-ink-3" /> for where each lives
-        in Slack.
+        <HelpCircle size={11} className="inline align-[-1px] text-ink-3" /> for where each lives in
+        Slack.
       </p>
 
       <label className="block space-y-2">

@@ -320,10 +320,10 @@ export default function TriggerConfigPanel({
                           exit={{ opacity: 0, height: 0 }}
                           className="overflow-hidden text-reported leading-relaxed text-warm bg-warm/10 border border-warm/20 rounded-lg px-3 py-2 mt-2"
                         >
-                          The bot will auto-delegate on matching PRs and issues that no one in
-                          your Triage Factory org owns (e.g. dependabot or outside contributors),
-                          not just your team&rsquo;s — expect more bot activity. It still
-                          won&rsquo;t act on a PR or issue another member owns.
+                          The bot will auto-delegate on matching PRs and issues that no one in your
+                          Triage Factory org owns (e.g. dependabot or outside contributors), not
+                          just your team&rsquo;s — expect more bot activity. It still won&rsquo;t
+                          act on a PR or issue another member owns.
                         </motion.p>
                       )}
                     </AnimatePresence>

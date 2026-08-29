@@ -265,120 +265,120 @@ export default function Cards() {
 
   return (
     <>
-    <div className="flex flex-col items-center justify-center min-h-[70vh] gap-8">
-      {/* Counter + filter toggle */}
-      <div className="flex items-center gap-3 relative">
-        <p className="text-body text-ink-3 font-medium tracking-wide">
-          {tasks.length} item{tasks.length !== 1 ? 's' : ''} in queue
-        </p>
-        <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
-        <button
-          onClick={() => setRulesOpen((o) => !o)}
-          className={`flex items-center gap-1.5 text-ui font-medium px-3 py-1.5 rounded-full border transition-colors ${
-            rulesOpen
-              ? 'bg-warm/10 text-warm border-warm/20'
-              : 'text-ink-3 border-line-1 hover:text-ink-2'
-          }`}
-          title="Task rules"
-        >
-          <SlidersHorizontal size={14} />
-          <span>Rules</span>
-        </button>
-      </div>
-
-      {/* Card stack */}
-      <div className="relative w-full max-w-[400px] h-[380px]">
-        {/* Second card (behind) */}
-        {tasks.length > 1 && (
-          <SwipeCard
-            key={tasks[1].id}
-            task={tasks[1]}
-            isScoring={tasks[1].scoring_status !== 'scored'}
-            style={{
-              zIndex: 1,
-              transform: 'scale(0.96) translateY(10px)',
-              pointerEvents: 'none',
-              filter: 'brightness(0.97)',
-            }}
-            interactive={false}
-          />
-        )}
-
-        {/* Top card (interactive) */}
-        <SwipeCard
-          key={tasks[0].id}
-          task={tasks[0]}
-          isScoring={tasks[0].scoring_status !== 'scored'}
-          onSwipe={swipe}
-          style={{ zIndex: 2 }}
-          interactive
-        />
-      </div>
-
-      {/* Action buttons */}
-      <div className="flex gap-3">
-        <ActionButton
-          onClick={() => swipe('dismiss')}
-          color="dismiss"
-          label="Dismiss"
-          shortcut="←"
-        />
-        <ActionButton
-          onClick={() => swipe('snooze')}
-          color="snooze"
-          label="Snooze"
-          shortcut="↓"
-        />
-        <ActionButton
-          onClick={() => swipe('delegate')}
-          color="delegate"
-          label="Delegate"
-          shortcut="↑"
-        />
-        <ActionButton onClick={() => swipe('claim')} color="claim" label="Claim" shortcut="→" />
-      </div>
-
-      {/* Undo toast */}
-      <AnimatePresence>
-        {undoTask && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 20 }}
-            className="fixed bottom-8 left-1/2 -translate-x-1/2 backdrop-blur-xl bg-raised border border-line-1 rounded-full px-5 py-2.5 flex items-center gap-3 shadow-float shadow-black/5"
+      <div className="flex flex-col items-center justify-center min-h-[70vh] gap-8">
+        {/* Counter + filter toggle */}
+        <div className="flex items-center gap-3 relative">
+          <p className="text-body text-ink-3 font-medium tracking-wide">
+            {tasks.length} item{tasks.length !== 1 ? 's' : ''} in queue
+          </p>
+          <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
+          <button
+            onClick={() => setRulesOpen((o) => !o)}
+            className={`flex items-center gap-1.5 text-ui font-medium px-3 py-1.5 rounded-full border transition-colors ${
+              rulesOpen
+                ? 'bg-warm/10 text-warm border-warm/20'
+                : 'text-ink-3 border-line-1 hover:text-ink-2'
+            }`}
+            title="Task rules"
           >
-            <span className="text-sm text-ink-2">
-              {undoTask.action === 'dismiss'
-                ? 'Dismissed'
-                : undoTask.action === 'claim'
-                  ? 'Claimed'
-                  : undoTask.action === 'delegate'
-                    ? 'Delegated'
-                    : 'Snoozed'}
-            </span>
-            <button onClick={undo} className="text-sm text-warm hover:text-warm/80 font-medium">
-              Undo
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+            <SlidersHorizontal size={14} />
+            <span>Rules</span>
+          </button>
+        </div>
 
-    <PromptPicker
-      open={showPromptPicker}
-      source="blueprints"
-      title="Choose a blueprint"
-      subtitle="Select a blueprint to run for this task"
-      selectLabel="Run"
-      onSelect={delegateWithPrompt}
-      onClose={() => setShowPromptPicker(false)}
-      onEditPrompts={() => {
-        setShowPromptPicker(false)
-        navigate(orgHref('/prompts'))
-      }}
-    />
+        {/* Card stack */}
+        <div className="relative w-full max-w-[400px] h-[380px]">
+          {/* Second card (behind) */}
+          {tasks.length > 1 && (
+            <SwipeCard
+              key={tasks[1].id}
+              task={tasks[1]}
+              isScoring={tasks[1].scoring_status !== 'scored'}
+              style={{
+                zIndex: 1,
+                transform: 'scale(0.96) translateY(10px)',
+                pointerEvents: 'none',
+                filter: 'brightness(0.97)',
+              }}
+              interactive={false}
+            />
+          )}
 
-    <TaskRulesPanel open={rulesOpen} onClose={() => setRulesOpen(false)} />
+          {/* Top card (interactive) */}
+          <SwipeCard
+            key={tasks[0].id}
+            task={tasks[0]}
+            isScoring={tasks[0].scoring_status !== 'scored'}
+            onSwipe={swipe}
+            style={{ zIndex: 2 }}
+            interactive
+          />
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex gap-3">
+          <ActionButton
+            onClick={() => swipe('dismiss')}
+            color="dismiss"
+            label="Dismiss"
+            shortcut="←"
+          />
+          <ActionButton
+            onClick={() => swipe('snooze')}
+            color="snooze"
+            label="Snooze"
+            shortcut="↓"
+          />
+          <ActionButton
+            onClick={() => swipe('delegate')}
+            color="delegate"
+            label="Delegate"
+            shortcut="↑"
+          />
+          <ActionButton onClick={() => swipe('claim')} color="claim" label="Claim" shortcut="→" />
+        </div>
+
+        {/* Undo toast */}
+        <AnimatePresence>
+          {undoTask && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 20 }}
+              className="fixed bottom-8 left-1/2 -translate-x-1/2 backdrop-blur-xl bg-raised border border-line-1 rounded-full px-5 py-2.5 flex items-center gap-3 shadow-float shadow-black/5"
+            >
+              <span className="text-sm text-ink-2">
+                {undoTask.action === 'dismiss'
+                  ? 'Dismissed'
+                  : undoTask.action === 'claim'
+                    ? 'Claimed'
+                    : undoTask.action === 'delegate'
+                      ? 'Delegated'
+                      : 'Snoozed'}
+              </span>
+              <button onClick={undo} className="text-sm text-warm hover:text-warm/80 font-medium">
+                Undo
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      <PromptPicker
+        open={showPromptPicker}
+        source="blueprints"
+        title="Choose a blueprint"
+        subtitle="Select a blueprint to run for this task"
+        selectLabel="Run"
+        onSelect={delegateWithPrompt}
+        onClose={() => setShowPromptPicker(false)}
+        onEditPrompts={() => {
+          setShowPromptPicker(false)
+          navigate(orgHref('/prompts'))
+        }}
+      />
+
+      <TaskRulesPanel open={rulesOpen} onClose={() => setRulesOpen(false)} />
     </>
   )
 }
@@ -655,37 +655,37 @@ function ConfidenceGauge({ value }: { value: number }) {
         className="inline-flex items-center cursor-default"
         onClick={(e) => e.stopPropagation()}
       >
-          <svg width="28" height="18" viewBox="0 0 28 18" fill="none">
-            {/* Arc track */}
-            <path
-              d="M 4 16 A 10 10 0 0 1 24 16"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              className="text-ink-4"
-            />
-            {/* Colored arc fill */}
-            <path
-              d="M 4 16 A 10 10 0 0 1 24 16"
-              stroke={needleColor}
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeDasharray={`${value * 31.4} 31.4`}
-              opacity="0.5"
-            />
-            {/* Needle */}
-            <line
-              x1="14"
-              y1="16"
-              x2={14 + 8 * Math.cos(((angle - 90) * Math.PI) / 180)}
-              y2={16 + 8 * Math.sin(((angle - 90) * Math.PI) / 180)}
-              stroke={needleColor}
-              strokeWidth="1.5"
-              strokeLinecap="round"
-            />
-            {/* Center dot */}
-            <circle cx="14" cy="16" r="1.5" fill={needleColor} />
-          </svg>
+        <svg width="28" height="18" viewBox="0 0 28 18" fill="none">
+          {/* Arc track */}
+          <path
+            d="M 4 16 A 10 10 0 0 1 24 16"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            className="text-ink-4"
+          />
+          {/* Colored arc fill */}
+          <path
+            d="M 4 16 A 10 10 0 0 1 24 16"
+            stroke={needleColor}
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeDasharray={`${value * 31.4} 31.4`}
+            opacity="0.5"
+          />
+          {/* Needle */}
+          <line
+            x1="14"
+            y1="16"
+            x2={14 + 8 * Math.cos(((angle - 90) * Math.PI) / 180)}
+            y2={16 + 8 * Math.sin(((angle - 90) * Math.PI) / 180)}
+            stroke={needleColor}
+            strokeWidth="1.5"
+            strokeLinecap="round"
+          />
+          {/* Center dot */}
+          <circle cx="14" cy="16" r="1.5" fill={needleColor} />
+        </svg>
       </span>
     </Tooltip>
   )
