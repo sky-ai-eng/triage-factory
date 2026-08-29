@@ -120,12 +120,18 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 // handleDashboardPRs returns one page of the caller's PRs from entity
 // snapshots, newest polled first.
 //
-// The response is the standard list envelope even in the unbound-identity case
-// (no GitHub host configured, or no identity bound for it): an empty page with
-// total 0, not a bare `[]` and not a 404. The dashboard is a personal view, so
-// "you have no PRs here yet" and "your GitHub identity isn't bound" are the
-// same empty list to a client — the panel decides what to say about it from
-// /api/me, which is where identity state actually lives.
+// "Mine" is a union of two legs: pull requests my GitHub login authored, and
+// pull requests a run I commissioned opened under the bot's login
+// (entities.commissioned_by_user_id, stamped at the exec recording funnel).
+// The second leg is why an unbound GitHub identity no longer short-circuits
+// the read: a person who has never bound a login can still have asked for work
+// that produced pull requests, and hiding those behind an unrelated missing
+// binding would answer the wrong question. The response is still the standard
+// list envelope in every case — an empty page with total 0, not a bare `[]`
+// and not a 404. The dashboard is a personal view, so "you have no PRs here
+// yet" and "your GitHub identity isn't bound" are the same empty list to a
+// client; the panel decides what to say about it from /api/me, which is where
+// identity state actually lives.
 //
 // POST /api/dashboard/prs/list
 func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
@@ -133,14 +139,16 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	var req httpx.PageRequest
+	var req prListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	var v httpx.Validation
-	// The only filter is the caller's own identity, which the body cannot
-	// name — so every request for this route fingerprints the same.
-	page := httpx.ResolvePage(&v, req, httpx.FilterFingerprint("dashboard-prs"), 0)
+	// The identity legs are the route's subject, not a filter — the body
+	// cannot name them — so the fingerprint is over the states filter and the
+	// scope that says which population this token walks.
+	states := canonicalPRStates(&v, req.States)
+	page := httpx.ResolvePage(&v, req.PageRequest, prListFingerprint("dashboard-prs", "", states), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -159,32 +167,29 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 		if lerr != nil {
 			return lerr
 		}
-		ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
-		if !okHost {
-			return nil
-		}
-		host = ghWeb
-		// Propagate a real lookup failure as a 5xx; only a missing row (->
-		// "", nil) degrades to the empty-dashboard response below. See
-		// handleDashboardStats.
-		username, lerr = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb)
-		if lerr != nil {
-			return lerr
-		}
-		if username == "" {
-			return nil
+		// An unresolvable host and an unbound identity both leave username
+		// empty, which drops the author leg and leaves the commissioned one.
+		// Propagate a real lookup failure as a 5xx: only a missing row (-> "",
+		// nil) is an answer. See handleDashboardStats.
+		if ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL); okHost {
+			host = ghWeb
+			username, lerr = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb)
+			if lerr != nil {
+				return lerr
+			}
 		}
 		var e error
-		prs, total, e = tx.Dashboard.PRs(r.Context(), orgID, username, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
+		prs, total, e = tx.Dashboard.PRs(r.Context(), orgID,
+			db.PRViewer{Login: username, UserID: userID},
+			db.PRListFilter{States: states},
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "dashboard", err)
 		return
 	}
-	if username == "" {
-		httpx.WriteList(w, page, []domain.PRSummaryRow{}, 0)
-		return
-	}
+	// The backfill is about a GitHub identity's history, so it still needs a
+	// bound one; the list above does not.
 	dh.kickBackfill(orgID, userID, username, host)
 	httpx.WriteList(w, page, prs, total)
 }

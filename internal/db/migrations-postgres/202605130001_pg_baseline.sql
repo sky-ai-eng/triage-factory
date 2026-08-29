@@ -424,6 +424,12 @@ CREATE TABLE public.entities (
     description text DEFAULT ''::text NOT NULL,
     state text DEFAULT 'active'::text NOT NULL,
     owning_team_id uuid,
+    -- Who ASKED for the work: the creator of the conversation whose run opened
+    -- this pull request, stamped at the exec recording funnel. Provenance, not
+    -- ownership -- owning_team_id is the structural-owner axis routing reads,
+    -- and this must never be spelled as a second owner. NULL when a human
+    -- opened the object directly, and for every event-triggered run.
+    commissioned_by_user_id uuid,
     last_polled_at timestamp with time zone,
     closed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -1406,6 +1412,12 @@ CREATE INDEX idx_entities_closed_at ON public.entities USING btree (closed_at) W
 CREATE INDEX idx_entities_github_author ON public.entities USING btree (org_id, ((snapshot_json ->> 'author'::text)), last_polled_at DESC) WHERE ((source = 'github'::text) AND (snapshot_json IS NOT NULL));
 
 
+-- Serves the personal pull-request list's commissioned-by leg, OR-ed with the
+-- author predicate above; partial because only a bot-opened PR is ever stamped.
+
+CREATE INDEX idx_entities_commissioned_by ON public.entities USING btree (org_id, commissioned_by_user_id, last_polled_at DESC) WHERE (commissioned_by_user_id IS NOT NULL);
+
+
 CREATE INDEX idx_entities_org_source_polled ON public.entities USING btree (org_id, source, last_polled_at);
 
 
@@ -1677,6 +1689,10 @@ ALTER TABLE ONLY public.entities
 
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_owning_team_id_fkey FOREIGN KEY (owning_team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
+
+
+ALTER TABLE ONLY public.entities
+    ADD CONSTRAINT entities_commissioned_by_user_id_fkey FOREIGN KEY (commissioned_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
 
 
 ALTER TABLE ONLY public.entity_links

@@ -178,6 +178,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// real, request-scoped access path is the tx-bound handle in
 		// txStoresFromTx.
 		TeamActivity: newTeamActivityStore(app),
+		// TeamPRs needs both pools: the page runs on app (the tracked-set
+		// semi-join is bounded by team_github_repos RLS), the member-login
+		// lookup on admin (user_github_identities_select is self-only, so
+		// under RLS a team's list would collapse to the caller's own).
+		TeamPRs: newTeamPRStore(app, admin),
 		// Conversations wires app — every consumer is request-
 		// equivalent (server agent handler, delegate spawner
 		// goroutine spawned from a handler, chains). System-service
@@ -471,6 +476,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Tasks:         newTaskStore(tx, tx),
 		Factory:       newFactoryReadStore(tx),
 		TeamActivity:  newTeamActivityStore(tx),
+		TeamPRs:       newTeamPRStore(tx, tx),
 		// NewForTx is a test door — both pools collapse to the
 		// supplied tx. Tests that exercise the admin-only branch
 		// (event-triggered ConversationStore.Create, or any of the

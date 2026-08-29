@@ -24,16 +24,21 @@ import (
 func TestDashboardStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunDashboardStoreConformance(t, func(t *testing.T) (db.DashboardStore, string, dbtest.PRSnapshotSeederForDashboard) {
+	dbtest.RunDashboardStoreConformance(t, func(t *testing.T) (db.DashboardStore, string, string, dbtest.DashboardSeeder) {
 		t.Helper()
 		h.Reset(t)
-		orgID, _ := seedPgOrgAndUserForDashboard(t, h)
+		orgID, viewerID := seedPgOrgAndUserForDashboard(t, h)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-		seed := func(t *testing.T, snap domain.PRSnapshot) {
-			t.Helper()
-			seedPgPRSnapshot(t, h.AdminDB, orgID, snap)
+		return stores.Dashboard, orgID, viewerID, dbtest.DashboardSeeder{
+			PR: func(t *testing.T, fx dbtest.DashboardPRFixture) string {
+				t.Helper()
+				return seedPgDashboardPR(t, h.AdminDB, orgID, fx)
+			},
+			User: func(t *testing.T, name string) string {
+				t.Helper()
+				return seedPgDashboardUser(t, h, name)
+			},
 		}
-		return stores.Dashboard, orgID, seed
 	})
 }
 
@@ -48,7 +53,7 @@ func TestDashboardStore_Postgres(t *testing.T) {
 func TestDashboardStore_Postgres_OnlyCountsRequestingUser(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, _ := seedPgOrgAndUserForDashboard(t, h)
+	orgID, userID := seedPgOrgAndUserForDashboard(t, h)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
@@ -81,7 +86,7 @@ func TestDashboardStore_Postgres_OnlyCountsRequestingUser(t *testing.T) {
 		t.Errorf("ReviewsGiven = %d, want 1 (my review on other-user's PR)", stats.ReviewsGiven)
 	}
 
-	prs, total, err := stores.Dashboard.PRs(ctx, orgID, me, db.ListOpts{})
+	prs, total, err := stores.Dashboard.PRs(ctx, orgID, db.PRViewer{Login: me, UserID: userID}, db.PRListFilter{}, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("PRs: %v", err)
 	}
@@ -118,17 +123,47 @@ func seedPgOrgAndUserForDashboard(t *testing.T, h *pgtest.Harness) (orgID, userI
 
 func seedPgPRSnapshot(t *testing.T, conn *sql.DB, orgID string, snap domain.PRSnapshot) {
 	t.Helper()
-	blob, err := json.Marshal(snap)
+	seedPgDashboardPR(t, conn, orgID, dbtest.DashboardPRFixture{Snapshot: snap})
+}
+
+// seedPgDashboardPR inserts a github pull-request entity carrying the
+// fixture's snapshot plus the two columns the read consults beside it.
+func seedPgDashboardPR(t *testing.T, conn *sql.DB, orgID string, fx dbtest.DashboardPRFixture) string {
+	t.Helper()
+	blob, err := json.Marshal(fx.Snapshot)
 	if err != nil {
 		t.Fatalf("marshal snapshot: %v", err)
 	}
+	state := fx.EntityState
+	if state == "" {
+		state = "active"
+	}
+	var commissioned any
+	if fx.CommissionedBy != "" {
+		commissioned = fx.CommissionedBy
+	}
 	now := time.Now().UTC()
 	entityID := uuid.New().String()
-	sourceID := fmt.Sprintf("dashboard-conformance-%d-%d", snap.Number, now.UnixNano())
+	sourceID := fmt.Sprintf("dashboard-conformance-%d-%d", fx.Snapshot.Number, now.UnixNano())
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, last_polled_at)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, $6::jsonb, $7, $7)
-	`, entityID, orgID, sourceID, snap.Title, snap.URL, string(blob), now); err != nil {
-		t.Fatalf("seed entity for snapshot %d: %v", snap.Number, err)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, state,
+		                      commissioned_by_user_id, created_at, last_polled_at)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, $6::jsonb, $7, $8, $9, $9)
+	`, entityID, orgID, sourceID, fx.Snapshot.Title, fx.Snapshot.URL, string(blob), state,
+		commissioned, now); err != nil {
+		t.Fatalf("seed entity for snapshot %d: %v", fx.Snapshot.Number, err)
 	}
+	return entityID
+}
+
+// seedPgDashboardUser mints a users row (plus the auth row its FK needs) for
+// the commissioned-by column to point at.
+func seedPgDashboardUser(t *testing.T, h *pgtest.Harness, name string) string {
+	t.Helper()
+	id := uuid.New().String()
+	h.SeedAuthUser(t, id, fmt.Sprintf("dash-conf-%s@test.local", id[:8]))
+	if _, err := h.AdminDB.Exec(`INSERT INTO users (id, display_name) VALUES ($1, $2)`, id, name); err != nil {
+		t.Fatalf("seed user %s: %v", name, err)
+	}
+	return id
 }

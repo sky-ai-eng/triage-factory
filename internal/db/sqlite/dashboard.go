@@ -3,6 +3,8 @@ package sqlite
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -43,8 +45,11 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 
 	for rows.Next() {
 		var snapJSON string
+		// A Scan failure is the driver or the column list disagreeing with
+		// this code, not a bad row: skipping it would drop PRs out of a
+		// statistic with nothing to show for it, since rows.Err() stays nil.
 		if err := rows.Scan(&snapJSON); err != nil {
-			continue
+			return nil, fmt.Errorf("scan pull request snapshot: %w", err)
 		}
 		var snap domain.PRSnapshot
 		if err := json.Unmarshal([]byte(snapJSON), &snap); err != nil {
@@ -94,38 +99,53 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 	return stats, nil
 }
 
-// PRs pages the caller's authored PRs. The author predicate is
-// json_extract(snapshot_json, '$.author'), matching the expression index of
-// the same shape — the Go-side filter it replaced read every GitHub entity in
-// the database on every dashboard load, and a window over that scan would
-// have paged the wrong set (LIMIT applies before the filter, so page 2 could
-// be empty while page 3 has rows).
-func (s *dashboardStore) PRs(ctx context.Context, orgID, username string, opts db.ListOpts) ([]domain.PRSummaryRow, int, error) {
+// PRs pages the caller's own pull requests: authored under their GitHub login,
+// or commissioned by them (a run they asked for opened it under the bot's
+// login). Both legs are SQL predicates, so the window applies to the caller's
+// set rather than to the entity table — the Go-side filter this replaced would
+// have made page 2 of a 3-row set come back empty whenever a stranger's pull
+// request sorted into the first window.
+//
+// A viewer naming neither identity has no population to answer for and gets an
+// empty page rather than the whole install's.
+func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRViewer, f db.PRListFilter, opts db.ListOpts) ([]domain.PRSummaryRow, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
 	}
-	// json_valid() guards the extract: this dialect stores the snapshot as TEXT,
-	// so an unparseable value can exist, and json_extract() on one raises
-	// "malformed JSON" — which would turn a single bad row into a 500 for the
-	// whole dashboard. AND short-circuits, and the expression index carries the
-	// same predicate, so the guard costs nothing and the index still serves the
-	// read. The Go decode below skips a bad row for the same reason.
-	const where = `
-		WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
-		  AND json_valid(snapshot_json)
-		  AND json_extract(snapshot_json, '$.author') = ?`
+	stateClause, err := sqlitePRStateClause(f.States)
+	if err != nil {
+		return nil, 0, err
+	}
+	// Each leg binds only when the viewer carries that id, so an unbound
+	// GitHub identity narrows the list to what they commissioned instead of
+	// matching every row whose author is the empty string.
+	var args []any
+	legs := make([]string, 0, 2)
+	if viewer.Login != "" {
+		args = append(args, viewer.Login)
+		legs = append(legs, `json_extract(e.snapshot_json, '$.author') = ?`)
+	}
+	if viewer.UserID != "" {
+		args = append(args, viewer.UserID)
+		legs = append(legs, `e.commissioned_by_user_id = ?`)
+	}
+	if len(legs) == 0 {
+		return []domain.PRSummaryRow{}, 0, nil
+	}
+
+	where := `
+		WHERE e.source = 'github' AND ` + sqlitePRStateSnapshotGuard + `
+		  AND (` + strings.Join(legs, " OR ") + `)` + stateClause
 
 	var total int
-	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities`+where, username).Scan(&total); err != nil {
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities e`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if opts.CountOnly {
 		return []domain.PRSummaryRow{}, total, nil
 	}
 
-	query := `SELECT snapshot_json FROM entities` + where + `
-		ORDER BY last_polled_at DESC, id`
-	args := []any{username}
+	query := `SELECT e.snapshot_json FROM entities e` + where + sqlitePRSummaryOrder
 	if opts.Limit > 0 {
 		query += ` LIMIT ? OFFSET ?`
 		args = append(args, opts.Limit, opts.Offset)
@@ -134,21 +154,11 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID, username string, opts d
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
-
-	prs := []domain.PRSummaryRow{}
-	for rows.Next() {
-		var snapJSON string
-		if err := rows.Scan(&snapJSON); err != nil {
-			continue
-		}
-		var snap domain.PRSnapshot
-		if err := json.Unmarshal([]byte(snapJSON), &snap); err != nil {
-			continue
-		}
-		prs = append(prs, domain.PRSummaryFromSnapshot(snap))
+	prs, err := sqliteScanPRSummaries(rows)
+	if err != nil {
+		return nil, 0, err
 	}
-	return prs, total, rows.Err()
+	return prs, total, nil
 }
 
 // buildDashboardTimeline reshapes the per-day count map into a
