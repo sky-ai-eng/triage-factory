@@ -93,7 +93,13 @@ beforeEach(() => {
   ws.connected = true
   answers.needs = { runs: {}, total_count: 0 }
   answers.running = { runs: {}, total_count: 0 }
-  answers.seenAt = new Date(Date.now() - 26 * 3600_000).toISOString()
+  // Yesterday at noon LOCAL, so the "yesterday" branch holds at any time of
+  // day the suite runs — a fixed hours-ago offset stops being yesterday when
+  // the clock is near midnight.
+  const yesterdayNoon = new Date()
+  yesterdayNoon.setDate(yesterdayNoon.getDate() - 1)
+  yesterdayNoon.setHours(12, 0, 0, 0)
+  answers.seenAt = yesterdayNoon.toISOString()
   api.apiJSON.mockReset()
   api.apiList.mockReset()
   api.apiJSON.mockImplementation((path: string, options?: { method?: string; body?: string }) => {
@@ -225,7 +231,7 @@ describe('RUNNING', () => {
     // The queued run's prose names the work; the wait is the mark.
     const queued = screen.getByText('Triage the flaking rebalance test')
     expect(queued.className).not.toContain('rr-shim')
-    expect(screen.getByTitle('3 ahead in the queue')).toBeInTheDocument()
+    expect(screen.getByTitle('2 ahead in the queue')).toBeInTheDocument()
     // Two rendered of four: the tail defers to the Board.
     expect(screen.getByText('+2 more on the board')).toBeInTheDocument()
   })

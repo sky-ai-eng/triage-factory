@@ -146,14 +146,15 @@ describe('rows', () => {
       href: '/runs/c1',
     })
   })
-  it('gives a queued row its wait and its place in line', () => {
+  it('gives a queued row its wait and the places ahead of it', () => {
     const r = runningRow(
       conv({ Status: 'queued', QueuedAt: '2026-08-29T11:59:00Z', queue_position: 3 }),
       task({}),
       '/runs/c1',
       NOW,
     )
-    expect(r.queue).toBe(3)
+    // Position 3 in line is two ahead — the mark wears the wait, not the rank.
+    expect(r.queue).toBe(2)
     expect(r.age).toBe('1m')
     expect(r.lifecycle).toBe('queued')
   })

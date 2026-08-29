@@ -153,7 +153,10 @@ export default function RunRows({
             <span className="rr-tail">
               <span className="rr-age">{r.age}</span>
               {r.queue != null ? (
-                <span className="rr-q" title={r.queue + ' ahead in the queue'}>
+                <span
+                  className="rr-q"
+                  title={r.queue === 0 ? 'Next in the queue' : r.queue + ' ahead in the queue'}
+                >
                   <span className="rr-q-dot">·</span>
                   <svg
                     className="rr-q-ico"
@@ -179,9 +182,10 @@ export default function RunRows({
             className={cls}
             href={r.href}
             onClick={(e: MouseEvent) => {
-              // Plain click stays in the app; modified clicks and middle
-              // clicks keep the anchor's own behavior (new tab).
-              if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+              // Plain primary click stays in the app; modified clicks and
+              // non-primary buttons keep the anchor's own behavior (new tab).
+              // Keyboard activation reports button 0 and stays in-app too.
+              if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
               e.preventDefault()
               onPick?.(r)
             }}

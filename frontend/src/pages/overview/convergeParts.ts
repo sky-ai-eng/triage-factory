@@ -16,9 +16,12 @@ export function tones(tone?: 'quiet' | 'warm' | 'ask' | 'cool'): 'q' | 'w' | 'a'
  * outcome twenty-six of twenty-eight strands with no picture left. The sqrt
  * compresses the tail while keeping the order of magnitudes readable.
  *
- * A floor of two per non-empty outcome keeps a small one reading as a bundle
- * rather than a stray line (dropping to one only when the outcome count is too
- * large for the strand budget to afford two each).
+ * The floor of two applies to EVERY outcome, zero included — deliberately: a
+ * small outcome reads as a bundle rather than a stray line, a zero outcome
+ * keeps strands flowing into its endpoint (the count beside it says 0; the
+ * strands are structure), and the offline fan — all counts zeroed — keeps its
+ * shape instead of vanishing. The floor drops to one only when the outcome
+ * count is too large for the strand budget to afford two each.
  */
 export function allocate(outcomes: Array<{ v: number }>, strands: number): number[] {
   const scaled = outcomes.map((o) => Math.sqrt(Math.max(0, o.v)))

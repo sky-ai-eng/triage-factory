@@ -133,7 +133,10 @@ export function runningRow(
     activity: workingProse(conv, task),
     ref: refOf(task),
     age: compactAge(queued ? (conv.QueuedAt ?? conv.StartedAt) : workStartedAt(conv), now),
-    queue: queued ? (conv.queue_position ?? null) : null,
+    // queue_position is the 1-based place in line; the mark wears the places
+    // AHEAD (position − 1), which is the component's contract — position 1 is
+    // nobody ahead, and the mark says so rather than showing a misleading 1.
+    queue: queued && conv.queue_position != null ? conv.queue_position - 1 : null,
     href,
   }
 }
