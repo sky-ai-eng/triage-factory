@@ -270,12 +270,47 @@ func TestHandleConversations_TeamFilter(t *testing.T) {
 		t.Errorf("team_ids=[absent team] total_count = %d, want 0", absent.TotalCount)
 	}
 
+	// An empty list is an ABSENT filter, not an empty selection — the same
+	// reading task_ids has, and the one the shell rail depends on.
+	if got := ids(list(map[string]any{"team_ids": []string{}})); len(got) != 3 {
+		t.Errorf("team_ids=[] = %v, want every conversation (empty is no narrowing)", got)
+	}
+
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
 		map[string]any{"team_ids": []string{"not-a-uuid"}})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("malformed team_ids = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 	assertFirstError(t, rec, httpx.ReasonInvalidField, "team_ids")
+
+	// The cap is on DISTINCT teams and rejects rather than truncates: a
+	// dropped team is a count that reads as work having disappeared.
+	pad := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = uuid.New().String()
+		}
+		return out
+	}
+	if got := list(map[string]any{
+		"team_ids": append([]string{runmode.LocalDefaultTeamID}, pad(maxBatchTeamIDs-1)...), "page_size": 0,
+	}); got.TotalCount != 2 {
+		t.Errorf("at the team cap: total_count = %d, want 2", got.TotalCount)
+	}
+	// Duplicates canonicalize away, so a repeated id spends no cap.
+	dupes := make([]string, maxBatchTeamIDs+10)
+	for i := range dupes {
+		dupes[i] = runmode.LocalDefaultTeamID
+	}
+	if got := list(map[string]any{"team_ids": dupes, "page_size": 0}); got.TotalCount != 2 {
+		t.Errorf("repeated team id counted against the cap: total_count = %d, want 2", got.TotalCount)
+	}
+	rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
+		map[string]any{"team_ids": pad(maxBatchTeamIDs + 1)})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("team_ids over cap = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonOutOfRange, "team_ids")
 
 	// The token is bound to the filter set it was minted for: a page-2 token
 	// from one team replayed against another is refused rather than served a

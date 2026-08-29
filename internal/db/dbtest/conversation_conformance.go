@@ -2637,7 +2637,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			ids := make([]string, 0, len(convs))
 			for _, c := range convs {
 				ids = append(ids, c.ID)
-				if filter.TeamIDs != nil && !slices.Contains(filter.TeamIDs, c.TeamID) {
+				if len(filter.TeamIDs) > 0 && !slices.Contains(filter.TeamIDs, c.TeamID) {
 					t.Errorf("List(%+v) returned conversation %s owned by team %s", filter, c.ID, c.TeamID)
 				}
 			}
@@ -2659,6 +2659,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// count with the whole org's work.
 		if got := list(db.ConversationListFilter{}); len(got) < 3 {
 			t.Errorf("unnarrowed list = %v, want every seeded conversation", got)
+		}
+		// A present-but-empty slice is the same request as an absent one:
+		// len(), never nil-ness, is what decides whether a narrowing exists.
+		if got := list(db.ConversationListFilter{TeamIDs: []string{}}); len(got) < 3 {
+			t.Errorf("team_ids=[] = %v, want every seeded conversation (empty is no narrowing)", got)
 		}
 		if got := list(db.ConversationListFilter{TeamIDs: []string{uuid.New().String()}}); len(got) != 0 {
 			t.Errorf("team_ids=[absent team] = %v, want empty", got)

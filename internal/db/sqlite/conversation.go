@@ -752,6 +752,14 @@ func (s *conversationStore) List(ctx context.Context, orgID string, filter db.Co
 	if opts.Limit > 0 && len(filter.TaskIDs) > inListChunkSize {
 		return nil, 0, fmt.Errorf("sqlite conversations List: a windowed read takes at most %d task ids, got %d", inListChunkSize, len(filter.TaskIDs))
 	}
+	// The team IN-list is never chunked — it goes into every statement whole,
+	// alongside a task chunk — so the route's own (much smaller) cap is what
+	// keeps the statement inside SQLite's variable limit. Refuse loudly rather
+	// than let a future caller meet a "too many SQL variables" driver error
+	// halfway through a paged read.
+	if len(filter.TeamIDs) > inListChunkSize {
+		return nil, 0, fmt.Errorf("sqlite conversations List: takes at most %d team ids, got %d", inListChunkSize, len(filter.TeamIDs))
+	}
 	// Chunking is over the task-id IN list, so a filter that names none is one
 	// chunk: the whole visible set under one WHERE.
 	chunks := [][]string{nil}
