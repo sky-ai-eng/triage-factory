@@ -427,6 +427,77 @@ func TestConversationStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
 	}
 }
 
+// TestConversationStore_SQLite_QueuePositionAcrossIDChunks drives List over a
+// task-id set large enough to be split across statements — the only path where
+// the chunking is visible, and the reason the queue's ranking is read once
+// before the loop rather than derived inside each chunk's own query. Every
+// chunk must see one ranking of the WHOLE queue: a rank computed per chunk
+// would answer a question no chunk narrows, and would rank each chunk against
+// its own snapshot.
+//
+// Only reachable unwindowed: a windowed read of more than one chunk is
+// refused, because a window is meaningless across statements.
+func TestConversationStore_SQLite_QueuePositionAcrossIDChunks(t *testing.T) {
+	conn := newSQLiteForConversationTest(t)
+	seed := newSQLiteConversationSeeder(conn)
+	store := sqlitestore.New(conn).Conversations
+	ctx := context.Background()
+
+	// One queued conversation per task, oldest first. A conversation with no
+	// stored status is mid-flight and unclaimed, which the display ladder
+	// reads as `queued`; started_at is staged on the database's own clock so
+	// the line's order is this fixture's.
+	mk := func(suffix string, ageSeconds int) (taskID, conversationID string) {
+		t.Helper()
+		ent := seed.Entity(t, suffix)
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID = seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		conversationID = seedSQLiteConversation(t, conn, domain.Conversation{
+			TaskID: taskID, PromptID: "p_conversation_test", Model: "m",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
+		})
+		if _, err := conn.Exec(`UPDATE conversations SET started_at = datetime('now', ?) WHERE id = ?`,
+			fmt.Sprintf("-%d seconds", ageSeconds), conversationID); err != nil {
+			t.Fatalf("backdate started_at: %v", err)
+		}
+		return taskID, conversationID
+	}
+	taskA, convA := mk("chunk-a", 300)
+	taskB, convB := mk("chunk-b", 200)
+	taskC, convC := mk("chunk-c", 100)
+
+	// The head of the queue lands in the first chunk and the other two in the
+	// second, so a per-chunk rank would restart the numbering at the chunk
+	// boundary and hand convB position 1.
+	taskIDs := make([]string, 0, 502)
+	taskIDs = append(taskIDs, taskA)
+	for len(taskIDs) < 500 {
+		taskIDs = append(taskIDs, uuid.New().String())
+	}
+	taskIDs = append(taskIDs, taskB, taskC)
+
+	convs, total, err := store.List(ctx, runmode.LocalDefaultOrgID,
+		db.ConversationListFilter{TaskIDs: taskIDs}, db.ListOpts{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("total = %d, want 3", total)
+	}
+	got := map[string]int{}
+	for _, c := range convs {
+		if c.QueuePosition == nil {
+			t.Fatalf("conversation %s is queued but carries no position", c.ID)
+		}
+		got[c.ID] = *c.QueuePosition
+	}
+	for id, want := range map[string]int{convA: 1, convB: 2, convC: 3} {
+		if got[id] != want {
+			t.Errorf("queue position of %s = %d, want %d", id, got[id], want)
+		}
+	}
+}
+
 // TestConversationStore_SQLite_PRCoherenceTargets runs the PR coherence
 // conformance suite against the SQLite impl.
 func TestConversationStore_SQLite_PRCoherenceTargets(t *testing.T) {

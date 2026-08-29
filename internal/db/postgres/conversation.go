@@ -945,6 +945,13 @@ const pgDisplayStatusSQL = `COALESCE(
 // pgDisplayStatusSQL is itself three correlated subqueries, and counting the
 // rows ahead of each row would evaluate the whole ladder once per pair.
 //
+// It rides the page's own statement, where the SQLite twin reads the same
+// ranking as a statement of its own. This dialect binds its id set as one
+// array and so runs one statement per read: the CTE is evaluated once, and
+// the page sees the rank in the snapshot it was ranked in. SQLite has to
+// chunk its IN list across statements, where an inline CTE would re-rank the
+// whole queue per chunk.
+//
 // Two things this deliberately does NOT read, and must not learn to: anything
 // about another org (the position is org-local by contract — see
 // domain.Conversation.QueuePosition), and anything about the fleet — executor
