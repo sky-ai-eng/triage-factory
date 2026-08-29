@@ -186,13 +186,17 @@ export default function TeamSettings() {
   // One 7-day node read feeds every flow figure — the header's task count,
   // the sources band, its meters and its stats — so they all agree by
   // construction. Spend is its own read over the fortnight its label names,
-  // fired only for an admin because the endpoint refuses everyone else.
+  // fired for every reader of the page: what a team spends is the team's, the
+  // same as what it processes.
   const activity = useTeamActivity(teamId, 7)
-  const usage = useTeamUsage(teamId, 14, isAdmin || isOrgAdmin)
+  const usage = useTeamUsage(teamId, 14)
   const flowEvents = activity ? activity.by_source.reduce((n, r) => n + (r.events ?? 0), 0) : null
   const flowTasks = activity ? activity.by_source.reduce((n, r) => n + r.tasks, 0) : null
+  // Null while the read has not answered AND for a member, who is sent no
+  // by_user cut at all — two states the roster renders the same way, because
+  // both are "unknown" and neither is zero.
   const spendByUser = useMemo(
-    () => new Map((usage?.by_user ?? []).map((u) => [u.user_id, u.cost])),
+    () => (usage?.by_user ? new Map(usage.by_user.map((u) => [u.user_id, u.cost])) : null),
     [usage],
   )
 
@@ -419,15 +423,16 @@ export default function TeamSettings() {
         github: m.githubUsername ?? '—',
         role: m.role,
         // repos / tasks / seen still need per-member aggregations the API
-        // does not have. Spend answers once the admin-gated usage read does:
-        // a member absent from by_user then genuinely spent nothing.
+        // does not have. Spend answers once the by_user cut arrives, which it
+        // only does for an admin: a member absent from a cut we HAVE genuinely
+        // spent nothing, while a cut we were never given is a dash.
         repos: '—',
         tasks: '—',
-        spend: usage ? fmtSpendUSD(spendByUser.get(m.userId) ?? 0) : '—',
+        spend: spendByUser ? fmtSpendUSD(spendByUser.get(m.userId) ?? 0) : '—',
         seen: '—',
       }))
       .filter((r) => !q || r.name.toLowerCase().includes(q) || r.github.toLowerCase().includes(q))
-  }, [members, filter, usage, spendByUser])
+  }, [members, filter, spendByUser])
 
   // A team keeps at least one admin, and the database is what enforces it — so
   // a gesture that would empty the seat is never offered, rather than sent and
@@ -474,16 +479,14 @@ export default function TeamSettings() {
           </div>
           <div className="ts-figs">
             <Figure value={loading ? null : members.length} label="members" />
-            {isAdmin ? (
-              <>
-                <span className="ts-div" />
-                <Figure
-                  value={usage ? fmtSpendUSD(usage.total_cost_usd) : null}
-                  label="spent · 14 days"
-                  onClick={() => navigate(orgHref('/usage'))}
-                />
-              </>
-            ) : null}
+            <span className="ts-div" />
+            {/* The team's total, not anyone's: every member sees what their
+                own team spends, the same way they see what it processes. */}
+            <Figure
+              value={usage ? fmtSpendUSD(usage.total_cost_usd) : null}
+              label="spent · 14 days"
+              onClick={() => navigate(orgHref('/usage'))}
+            />
             <span className="ts-div" />
             <Figure value={flowTasks} label="tasks · 7 days" tone="warm" />
           </div>
@@ -537,9 +540,10 @@ export default function TeamSettings() {
                       {m.prices_per_mtok ? money(m.prices_per_mtok.output) + ' / M' : '—'}
                     </span>
                   </div>
-                  {/* Share of the fortnight's model-attributed spend. The
-                      usage read is admin-gated, so a member's tracks stay
-                      unfilled — unknown is not zero. */}
+                  {/* Share of the fortnight's model-attributed spend — a
+                      reading about models, not people, so every member gets it.
+                      Tracks stay unfilled until the read answers: unknown is
+                      not zero. */}
                   <Meter frac={modelShares ? (modelShares.get(m.key) ?? 0) : null} />
                 </div>
               ))}
