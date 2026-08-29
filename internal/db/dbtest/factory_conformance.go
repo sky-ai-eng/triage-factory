@@ -65,6 +65,12 @@ type FactorySeeder struct {
 	// backdate closures into / out of the grace window.
 	CloseEntity func(t *testing.T, entityID string, closedAt time.Time)
 
+	// FinishConversation stamps a terminal status and completed_at on an
+	// already-seeded conversation — the shape the team activity node's
+	// failed cut reads, which windows on when a run ended rather than on
+	// when it started.
+	FinishConversation func(t *testing.T, conversationID, status string, completedAt time.Time)
+
 	// SetConversationMemory upserts a conversation_memory row with the given
 	// agent_content. content="" inserts a literal empty string;
 	// content with whitespace exercises the BTRIM/TRIM derivation

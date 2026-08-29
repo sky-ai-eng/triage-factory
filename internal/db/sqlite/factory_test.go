@@ -138,6 +138,15 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			}
 			return id
 		},
+		FinishConversation: func(t *testing.T, conversationID, status string, completedAt time.Time) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE conversations SET status = ?, completed_at = ? WHERE id = ?`,
+				status, completedAt.UTC(), conversationID,
+			); err != nil {
+				t.Fatalf("finish conversation %s: %v", conversationID, err)
+			}
+		},
 		CloseEntity: func(t *testing.T, entityID string, closedAt time.Time) {
 			t.Helper()
 			if _, err := conn.Exec(

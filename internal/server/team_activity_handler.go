@@ -12,21 +12,29 @@ import (
 // GET /api/teams/{team_id}/activity?since=&until= — the team's flow node.
 //
 // A synthetic read per the API design rules: windowed, unpaginated, fixed
-// named cuts. by_day and by_day_source are the events/tasks series the
-// source pages chart; by_source is the per-source totals band (events,
-// became-tasks, runs) plus each poller's last completed cycle. The window
-// grammar is the usage node's own (parseUsageWindow): RFC3339 or
-// YYYY-MM-DD, defaulting to month-to-date, half-open [since, until).
+// named cuts. by_day carries the whole-team series — events, tasks, merged
+// pull requests, failed runs — and by_day_source splits the first two by
+// source (merged and failed have no source axis); by_source is the
+// per-source totals band (events, became-tasks, runs) plus each poller's
+// last completed cycle. The window grammar is the usage node's own
+// (parseUsageWindow): RFC3339 or YYYY-MM-DD, defaulting to month-to-date,
+// half-open [since, until) — so a caller asking in RFC3339 windows rows,
+// not whole days.
 //
 // Member-gated like the team settings GET: the figures are the team page's,
 // and the team page is every member's. Spend stays on /usage behind its
 // admin gate — the two nodes split exactly on that audience line.
 // --------------------------------------------------------------------
 
+// teamActivityDayJSON is one UTC day. merged and failed are plain ints, not
+// the by-source cut's nullable events: every team has a defined answer for
+// both, so a zero here is a real zero.
 type teamActivityDayJSON struct {
 	Date   string `json:"date"`
 	Events int    `json:"events"`
 	Tasks  int    `json:"tasks"`
+	Merged int    `json:"merged"`
+	Failed int    `json:"failed"`
 }
 
 type teamActivityDaySourceJSON struct {
@@ -105,7 +113,9 @@ func (s *Server) handleTeamActivity(w http.ResponseWriter, r *http.Request) {
 		BySource:    make([]teamActivitySourceJSON, 0, len(activity.BySource)),
 	}
 	for _, d := range activity.ByDay {
-		resp.ByDay = append(resp.ByDay, teamActivityDayJSON{Date: d.Date, Events: d.Events, Tasks: d.Tasks})
+		resp.ByDay = append(resp.ByDay, teamActivityDayJSON{
+			Date: d.Date, Events: d.Events, Tasks: d.Tasks, Merged: d.Merged, Failed: d.Failed,
+		})
 	}
 	for _, d := range activity.ByDaySource {
 		resp.ByDaySource = append(resp.ByDaySource, teamActivityDaySourceJSON{

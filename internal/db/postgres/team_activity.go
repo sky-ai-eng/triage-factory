@@ -16,7 +16,9 @@ import (
 // runs use the task list's two team arms (teamActivityTaskTeamPredicate),
 // so for a member of the subject team the node's totals reconcile with the
 // counts POST /api/tasks/list answers for team_ids + sources +
-// created_since.
+// created_since. The failed cut is the exception on both axes: it reaches no
+// entity and takes no task predicate, scoping on the conversation's own
+// team_id — the team that owns the run.
 //
 // Slack is deliberately absent from teamActivityEventSources: with no
 // tracked set there is no team-scoped definition of "a slack event", so its
@@ -75,6 +77,38 @@ func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID, teamID stri
 		return domain.TeamActivity{}, err
 	}
 
+	// Merged rides the events cut's scoping exactly — same table, same
+	// tracked-set predicate — so the day a client reads as "6 merged" is a
+	// subset of the events it reads beside it. It counts what GitHub told us,
+	// not what TF did: a pull request merged by hand in a tracked repo counts
+	// the same as one a run opened.
+	merged, err := s.dayCounts(ctx, `
+		SELECT to_char(ev.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, COUNT(*)
+		FROM events ev
+		JOIN entities e ON e.id = ev.entity_id AND e.org_id = ev.org_id
+		WHERE ev.org_id = $1 AND ev.event_type = 'github:pr:merged'
+		  AND ev.created_at >= $2 AND ev.created_at < $3
+		  AND `+factoryEntityTrackedForTeams("$4")+`
+		GROUP BY 1`, orgID, sinceArg, untilArg, teamID)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+
+	// Failed is the one cut that reaches no entity: a run that died is the
+	// team's fact whatever it was about, so it scopes on the conversation's
+	// own owning team rather than through its task's entity, and windows on
+	// completed_at — when the failure happened, not when the work started.
+	failed, err := s.dayCounts(ctx, `
+		SELECT to_char(c.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, COUNT(*)
+		FROM conversations c
+		WHERE c.org_id = $1 AND c.status = 'failed'
+		  AND c.completed_at >= $2 AND c.completed_at < $3
+		  AND c.team_id = $4
+		GROUP BY 1`, orgID, sinceArg, untilArg, teamID)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+
 	// Runs are delegated engagements: delegation conversations windowed on
 	// started_at, attributed to a source through their task's entity, team-
 	// scoped by the same task predicate as the tasks cut.
@@ -103,7 +137,14 @@ func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID, teamID stri
 		return domain.TeamActivity{}, err
 	}
 
-	return db.BuildTeamActivity(events, tasks, runs, teamActivityEventSources), nil
+	return db.BuildTeamActivity(db.TeamActivityCuts{
+		Events:           events,
+		Tasks:            tasks,
+		Runs:             runs,
+		Merged:           merged,
+		Failed:           failed,
+		EventsDefinedFor: teamActivityEventSources,
+	}), nil
 }
 
 func (s *teamActivityStore) counts(ctx context.Context, query string, args ...any) ([]db.TeamActivityCount, error) {
@@ -113,4 +154,13 @@ func (s *teamActivityStore) counts(ctx context.Context, query string, args ...an
 	}
 	defer rows.Close()
 	return db.ScanTeamActivityCounts(rows)
+}
+
+func (s *teamActivityStore) dayCounts(ctx context.Context, query string, args ...any) ([]db.TeamActivityDayCount, error) {
+	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return db.ScanTeamActivityDayCounts(rows)
 }

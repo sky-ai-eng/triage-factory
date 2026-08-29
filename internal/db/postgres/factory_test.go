@@ -221,6 +221,15 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			}
 			return id
 		},
+		FinishConversation: func(t *testing.T, conversationID, status string, completedAt time.Time) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE conversations SET status = $1, completed_at = $2 WHERE id = $3 AND org_id = $4`,
+				status, completedAt.UTC(), conversationID, orgID,
+			); err != nil {
+				t.Fatalf("finish conversation: %v", err)
+			}
+		},
 		CloseEntity: func(t *testing.T, entityID string, closedAt time.Time) {
 			t.Helper()
 			if _, err := conn.Exec(

@@ -37,31 +37,65 @@ type TeamActivityCount struct {
 	N      int
 }
 
-// BuildTeamActivity assembles the node's cuts from the three aggregation
-// queries both dialects run: events per (source, day), tasks per (source,
-// day), and delegation runs per source. It exists so the two impls can't
-// drift in how the cuts are derived — each contributes only its own SQL.
+// TeamActivityDayCount is one UTC-day cell and its count — the shape of the
+// cuts with no source axis (see domain.TeamActivityDay).
+type TeamActivityDayCount struct {
+	Day string
+	N   int
+}
+
+// TeamActivityCuts is what one dialect's queries produce and
+// BuildTeamActivity assembles. A struct rather than a positional argument
+// list because Merged and Failed are same-typed neighbours a call site could
+// silently swap.
 //
-// eventsDefinedFor names the sources whose team-scoped event count is
+// EventsDefinedFor names the sources whose team-scoped event count is
 // defined; any other source's Events comes back nil (see
 // domain.TeamActivitySource). Nil means every source is defined — the
 // SQLite/local case, where the team is the org and an unscoped count is the
 // honest answer for every source.
+type TeamActivityCuts struct {
+	// Events and Tasks are per (source, UTC day); Runs is per source.
+	Events []TeamActivityCount
+	Tasks  []TeamActivityCount
+	Runs   map[string]int
+	// Merged and Failed are per UTC day alone.
+	Merged []TeamActivityDayCount
+	Failed []TeamActivityDayCount
+
+	EventsDefinedFor []string
+}
+
+// BuildTeamActivity assembles the node's cuts from the aggregation queries
+// both dialects run. It exists so the two impls can't drift in how the cuts
+// are derived — each contributes only its own SQL.
 //
 // The by-source cut always carries a row for each of the catalog's external
 // sources (EventSources minus "system" — system events have no entity, so no
 // task or run can descend from one), plus any source the data mentions, so
 // the response shape doesn't wobble with traffic.
-func BuildTeamActivity(events, tasks []TeamActivityCount, runs map[string]int, eventsDefinedFor []string) domain.TeamActivity {
+//
+// The by-day cut is the union of every day any cut mentions, not the days the
+// events/tasks queries happened to find: a day whose only fact is a merged
+// pull request — or a failed run — is still a day the team had, and dropping
+// it would make a client's sum over by_day disagree with the store.
+func BuildTeamActivity(cuts TeamActivityCuts) domain.TeamActivity {
 	type cell struct{ events, tasks int }
-	days := map[string]*cell{}
+	type dayCell struct{ events, tasks, merged, failed int }
+	days := map[string]*dayCell{}
 	daySources := map[[2]string]*cell{}
 	sources := map[string]*cell{}
-	at := func(m map[string]*cell, k string) *cell {
-		if m[k] == nil {
-			m[k] = &cell{}
+	atSource := func(k string) *cell {
+		if sources[k] == nil {
+			sources[k] = &cell{}
 		}
-		return m[k]
+		return sources[k]
+	}
+	atDay := func(k string) *dayCell {
+		if days[k] == nil {
+			days[k] = &dayCell{}
+		}
+		return days[k]
 	}
 	atDS := func(k [2]string) *cell {
 		if daySources[k] == nil {
@@ -69,20 +103,28 @@ func BuildTeamActivity(events, tasks []TeamActivityCount, runs map[string]int, e
 		}
 		return daySources[k]
 	}
-	for _, r := range events {
-		at(days, r.Day).events += r.N
+	for _, r := range cuts.Events {
+		atDay(r.Day).events += r.N
 		atDS([2]string{r.Day, r.Source}).events += r.N
-		at(sources, r.Source).events += r.N
+		atSource(r.Source).events += r.N
 	}
-	for _, r := range tasks {
-		at(days, r.Day).tasks += r.N
+	for _, r := range cuts.Tasks {
+		atDay(r.Day).tasks += r.N
 		atDS([2]string{r.Day, r.Source}).tasks += r.N
-		at(sources, r.Source).tasks += r.N
+		atSource(r.Source).tasks += r.N
+	}
+	for _, r := range cuts.Merged {
+		atDay(r.Day).merged += r.N
+	}
+	for _, r := range cuts.Failed {
+		atDay(r.Day).failed += r.N
 	}
 
 	var out domain.TeamActivity
 	for day, c := range days {
-		out.ByDay = append(out.ByDay, domain.TeamActivityDay{Date: day, Events: c.events, Tasks: c.tasks})
+		out.ByDay = append(out.ByDay, domain.TeamActivityDay{
+			Date: day, Events: c.events, Tasks: c.tasks, Merged: c.merged, Failed: c.failed,
+		})
 	}
 	sort.Slice(out.ByDay, func(i, j int) bool { return out.ByDay[i].Date < out.ByDay[j].Date })
 	for k, c := range daySources {
@@ -105,7 +147,7 @@ func BuildTeamActivity(events, tasks []TeamActivityCount, runs map[string]int, e
 	for s := range sources {
 		rowSet[s] = true
 	}
-	for s := range runs {
+	for s := range cuts.Runs {
 		rowSet[s] = true
 	}
 	names := make([]string, 0, len(rowSet))
@@ -114,11 +156,11 @@ func BuildTeamActivity(events, tasks []TeamActivityCount, runs map[string]int, e
 	}
 	sort.Strings(names)
 	for _, s := range names {
-		row := domain.TeamActivitySource{Source: s, Runs: runs[s]}
+		row := domain.TeamActivitySource{Source: s, Runs: cuts.Runs[s]}
 		if c := sources[s]; c != nil {
 			row.Tasks = c.tasks
 		}
-		if eventsDefinedFor == nil || slices.Contains(eventsDefinedFor, s) {
+		if cuts.EventsDefinedFor == nil || slices.Contains(cuts.EventsDefinedFor, s) {
 			n := 0
 			if c := sources[s]; c != nil {
 				n = c.events
@@ -137,6 +179,20 @@ func ScanTeamActivityCounts(rows RowScanner) ([]TeamActivityCount, error) {
 	for rows.Next() {
 		var c TeamActivityCount
 		if err := rows.Scan(&c.Source, &c.Day, &c.N); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ScanTeamActivityDayCounts drains rows of (day, n) into day counts — the
+// same service for the cuts with no source axis.
+func ScanTeamActivityDayCounts(rows RowScanner) ([]TeamActivityDayCount, error) {
+	var out []TeamActivityDayCount
+	for rows.Next() {
+		var c TeamActivityDayCount
+		if err := rows.Scan(&c.Day, &c.N); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
