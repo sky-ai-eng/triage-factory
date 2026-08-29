@@ -15,6 +15,58 @@
   overflow: visible;
 }
 
+/* fill — the container owns the height and the SVG stretches into it, so
+   width and height move together in one layout pass. Off by default because a
+   caller whose container has no definite height would collapse to nothing;
+   with it, the caller no longer needs to measure a width and solve for a
+   viewBox, which is what put JS in the resize path and made the height land a
+   frame late.
+
+   ABSOLUTE, not height:100%, and that is the whole trick. `height: 100%`
+   needs a definite height on every ancestor to resolve, and there is a mount
+   wrapper in between that this file does not control — so it fell back to
+   `auto`, and an SVG at auto height takes its INTRINSIC RATIO. The fan then
+   scaled as a rectangle: height came out at exactly width × 260/740, so
+   widening the column made it taller and a rail toggle moved both axes.
+   Filling the positioned container sidesteps the chain entirely.
+
+   THE CALLER'S CONTAINER MUST BE `position: relative` WITH A DEFINITE HEIGHT.
+
+   Declared AFTER the base rule on purpose: both selectors are one class and
+   one type, so specificity ties and source order is what decides. Above it,
+   height: auto won and this did nothing. */
+.conv-fill {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.conv-fill .convplot {
+  flex: 1;
+  min-height: 0;
+}
+.conv-fill svg {
+  height: 100%;
+}
+/* Wider than the default 34% because in fill mode the top-right corner is
+   usually given to something else, which leaves the headline more room than it
+   has when the fan splays evenly. At 34% "355 events triaged" wrapped to two
+   lines once the column dropped under about 700px, and a headline changing its
+   line count on a rail toggle looks like the component resizing. */
+.conv-fill .convtitle {
+  max-width: 46%;
+}
+/* Fixed type in fill mode. The container-query size below reads --cvr, which
+   in fill mode is a constant 260/740 = .351 rather than the ~.14 a
+   width-derived height produced — so the width term got two and a half times
+   heavier and the labels swung 13.0px to 10.5px on a rail toggle. A number is
+   read, and a read thing holds its size. */
+.conv-fill .cval,
+.conv-fill .cname {
+  font-size: 12.5px;
+}
+
 /* structure first, always — drawn, never lit */
 .crule line {
   stroke: var(--color-line-2);
@@ -235,11 +287,18 @@
 
 /* the title is optional and decorative by nature — it sits over the many,
    where there is no data to read, and never over the endpoints */
+/* z-index because "over" was only true in intent: .convtitle is the FIRST
+   child and .convplot follows it, so with both at auto the strands painted on
+   top of the words. No halo or scrim can fix text that the artwork is drawn
+   over — the glyphs looked semi-transparent because strands were crossing in
+   front of them. The symptom looks like a contrast problem; it is a paint
+   order. */
 .convtitle {
   position: absolute;
   left: 4%;
   top: 50%;
   transform: translateY(-50%);
+  z-index: 2;
   max-width: 34%;
   pointer-events: none;
   display: flex;
@@ -251,7 +310,16 @@
   font-size: 9px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: var(--color-ink-4);
+  /* ink-3, not ink-4. At 9px with .16em of letterspacing over a strand field,
+     ink-4 was asking more of the faintest ink in the ramp than it can give —
+     and the paint-order fix does not help a kicker whose problem is the ink
+     rather than what is behind it. True in light mode too; it was just
+     survivable there. */
+  color: var(--color-ink-3);
+  text-shadow:
+    0 0 2px var(--color-ground),
+    0 0 5px var(--color-ground),
+    0 0 8px var(--color-ground);
 }
 /* Mono, and that is the decode's doing rather than a taste call. Every glyph in
    a scramble is replaced several times before it settles, so in a proportional
@@ -267,6 +335,22 @@
   letter-spacing: -0.015em;
   font-variant-numeric: tabular-nums;
   color: var(--color-ink-1);
+  /* A halo, the cartographer's answer to a label over a busy field: three
+     stacked blurs in the ground color, which build opacity close to the glyph
+     and fall away fast. Not -webkit-text-stroke — a stroke is centred on the
+     glyph outline, so it eats into the letterform and visibly thins mono
+     digits. A shadow sits entirely outside the glyph and leaves the face
+     alone.
+
+     Deliberately too weak to be seen as an effect. The paint order above is
+     what makes the text legible; this only has to cover a strand passing
+     close to a stem on a day when `filtered` dominates and the field goes
+     dense right under the words. A halo strong enough to rescue text that is
+     losing reads as a glow, and that is the wrong instrument for this. */
+  text-shadow:
+    0 0 2px var(--color-ground),
+    0 0 5px var(--color-ground),
+    0 0 9px var(--color-ground);
 }
 .convtitle {
   opacity: 0;
@@ -298,15 +382,27 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .charting .crule line,
-  .charting .cstrand,
-  .charting .cbar,
-  .charting .cendlab,
-  .charting .convtitle {
-    animation-duration: 0.01ms;
-    animation-delay: 0s;
+  /* END STATES, written directly. Every build element rests at its FROM state
+     (opacity 0, scaleY(0), dashoffset 1), and tokens/motion.css blankets
+     `animation: none !important` — which beats any duration/delay override
+     here, so a build that relies on its animation to reach the drawn state
+     never gets there and the instrument is invisible. Stating the end states
+     keeps the .charting gate meaningful (the fan still appears on arrival)
+     while skipping the beats. */
+  .charting .crule line {
+    transform: scaleY(1);
   }
-  .convtitle {
+  .charting .cstrand {
+    stroke-dashoffset: 0;
+  }
+  .charting .cbar {
+    transform: scaleX(1);
+    fill-opacity: 1;
+  }
+  .charting .cendlab {
+    opacity: 1;
+  }
+  .charting .convtitle {
     opacity: 1;
   }
 }

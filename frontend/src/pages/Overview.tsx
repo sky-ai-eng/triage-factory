@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import RunRows from './overview/RunRows'
 import type { RunRowItem } from './overview/RunRows'
-import Converge from './overview/Converge'
-import type { ConvergeOutcome } from './overview/Converge'
+import { Converge } from '../ui/converge/Converge'
+import type { ConvergeOutcome } from '../ui/converge/Converge'
 import {
   donutSegments,
   money,

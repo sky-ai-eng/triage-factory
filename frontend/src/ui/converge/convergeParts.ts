@@ -1,3 +1,5 @@
+import { prefersReducedMotion } from '../shared/useReducedMotion'
+
 // The Converge instrument's pure parts — allocation, tone mapping, and the
 // headline decode — split from the component file because react-refresh
 // objects to a component file that also exports functions, and because the
@@ -47,6 +49,9 @@ export const DECODE_GLYPHS = 'abcdefghijklmnopqrstuvwxyz0123456789'
  * The headline decode: characters churn and settle left to right. Decode stays
  * rationed to one per view — it is the headline or nothing, never the endpoint
  * labels, which are read rather than watched.
+ *
+ * rAF-driven, so the motion blanket cannot reach it: the reduced-motion answer
+ * lives here, and it is the end state written at once.
  */
 export function decodeInto(
   el: HTMLElement | null,
@@ -55,6 +60,10 @@ export function decodeInto(
   glyphs: string = DECODE_GLYPHS,
 ): () => void {
   if (!el) return () => {}
+  if (prefersReducedMotion()) {
+    el.textContent = final
+    return () => {}
+  }
   const t0 = performance.now()
   let raf = 0
   const tick = (now: number) => {

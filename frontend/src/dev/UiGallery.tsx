@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import AcquireCard from './AcquireCard'
+import ConvergeCard from './ConvergeCard'
 import CratePileCard from './CratePileCard'
 import FlapCountCard from './FlapCountCard'
 import PrimitivesCard from './PrimitivesCard'
@@ -325,6 +326,7 @@ export default function UiGallery() {
             <CratePileCard />
             <SpendRingCard />
             <RunRowsCard />
+            <ConvergeCard />
             <SelectionBarCard />
             <TableCard />
             <TeamPartsCard />
