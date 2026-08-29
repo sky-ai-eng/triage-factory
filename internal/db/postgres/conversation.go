@@ -1866,6 +1866,36 @@ func (s *conversationStore) MessagesForConversations(ctx context.Context, orgID 
 	return scanMessageRows(rows)
 }
 
+// NewestAssistantToolCallsForConversations answers with one row per
+// conversation — the newest assistant message's tool calls — see the interface
+// doc for the contract.
+//
+// DISTINCT ON is what makes it one row per conversation rather than one per
+// message: the ORDER BY puts each conversation's newest assistant row first
+// among that conversation's rows, and DISTINCT ON keeps the first of each. The
+// id tiebreaker matters because seq is nullable and two rows can share a value.
+//
+// App pool (RLS-active), and the conversation ids bind as a uuid[] through one
+// $N like every other batched read here.
+func (s *conversationStore) NewestAssistantToolCallsForConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string][]domain.ToolCall, error) {
+	conversationIDs = filterValidUUIDs(conversationIDs)
+	if len(conversationIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT DISTINCT ON (conversation_id) conversation_id, tool_calls::text
+		FROM messages
+		WHERE org_id = $1 AND conversation_id = ANY($2) AND role = 'assistant'
+		  AND NOT (delivered = false AND window_state = 'inactive')
+		ORDER BY conversation_id, COALESCE(seq, (id)::double precision) DESC, id DESC
+	`, orgID, pgUUIDArray(conversationIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return db.ScanNewestToolCalls(rows)
+}
+
 // ListForAssemblySystem returns every row a native loop needs to rebuild this
 // conversation's exact LLM context, ordered by the effective assembly key
 // COALESCE(seq, id). window_state='inactive' rows are excluded (superseded by

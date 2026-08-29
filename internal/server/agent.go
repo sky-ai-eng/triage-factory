@@ -109,7 +109,7 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 				stepCount = lens[conv.BlueprintRunID]
 			}
 		}
-		resp = conversationResponse(conv, counts[conv.ID], arts, stepCount)
+		resp = conversationResponse(conv, counts[conv.ID], arts, stepCount, "")
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -462,7 +462,15 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // OMITTED rather than reported as a misleading false, so a transient DB/RLS hiccup
 // can't hide approval-required work; the client treats their absence as "unknown"
 // and re-derives on the next refresh.
-func conversationResponse(conv *domain.Conversation, artifactCount int, arts []domain.Artifact, stepCount int) map[string]any {
+//
+// currentAction is the derived prose line for a conversation that is actually
+// working — composed by the caller from the newest assistant message's tool
+// calls, "" when there is nothing honest to say (see current_action.go). It is
+// emitted only when non-empty, and the SINGLE-conversation read passes "" on
+// purpose: that route's client is the run station, whose live transcript
+// already shows the call this line would summarize, and buying it there would
+// add a query to a polled route for a field it does not render.
+func conversationResponse(conv *domain.Conversation, artifactCount int, arts []domain.Artifact, stepCount int, currentAction string) map[string]any {
 	out := map[string]any{
 		"ID":            conv.ID,
 		"TaskID":        conv.TaskID,
@@ -505,6 +513,9 @@ func conversationResponse(conv *domain.Conversation, artifactCount int, arts []d
 		"output_tokens":         conv.OutputTokens,
 		"cache_read_tokens":     conv.CacheReadTokens,
 		"cache_creation_tokens": conv.CacheCreationTokens,
+	}
+	if currentAction != "" {
+		out["current_action"] = currentAction
 	}
 	if artifactCount == 0 || len(arts) > 0 {
 		prCount, reviewCount := domain.UnresolvedArtifactCounts(arts)
@@ -1017,9 +1028,16 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 //     it costs no list.
 //   - blueprint_step_count for the conversations that belong to a blueprint: one
 //     StepPlanLengths over the deduped blueprint_run ids.
+//   - current_action for the conversations displaying as `running`: one
+//     NewestAssistantToolCallsForConversations over just those ids, composed
+//     into prose per current_action.go. Only running conversations are read —
+//     every other state already has an honest label of its own, and the newest
+//     tool call on a stopped conversation describes something that is no longer
+//     happening.
 //
-// Deliberately best-effort: a ListByConversations or StepPlanLengths failure drops what
-// that read contributes (logged) but leaves counts and the rest intact. These
+// Deliberately best-effort: a ListByConversations, StepPlanLengths or
+// NewestAssistantToolCallsForConversations failure drops what that read
+// contributes (logged) but leaves counts and the rest intact. These
 // are display annotations on rows the caller can already see, so surfacing the
 // failure would fail a whole board refresh over a badge. Shared by the
 // single-task and batched (task_ids) conversation-list paths.
@@ -1070,9 +1088,30 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 			stepCounts = lens
 		}
 	}
+	// current_action for the conversations that are actually working, and only
+	// those: a queued conversation has nobody driving it, a parked or terminal
+	// one has stopped, and the newest tool call on any of them describes
+	// something that is no longer happening. Their display status already says
+	// what they are (see internal/domain/conversation_status.go); `running` is
+	// the one that says nothing.
+	var running []string
+	for i := range convs {
+		if convs[i].Status == domain.StatusRunning {
+			running = append(running, convs[i].ID)
+		}
+	}
+	toolCalls := map[string][]domain.ToolCall{}
+	if len(running) > 0 {
+		if calls, lerr := tx.Conversations.NewestAssistantToolCallsForConversations(ctx, orgID, running); lerr != nil {
+			serverLog.Warn("newest tool-call batch lookup failed; omitting current_action", "error", lerr)
+		} else {
+			toolCalls = calls
+		}
+	}
 	out := make([]map[string]any, len(convs))
 	for i := range convs {
-		out[i] = conversationResponse(&convs[i], counts[convs[i].ID], artsByConv[convs[i].ID], stepCounts[convs[i].BlueprintRunID])
+		out[i] = conversationResponse(&convs[i], counts[convs[i].ID], artsByConv[convs[i].ID],
+			stepCounts[convs[i].BlueprintRunID], currentAction(toolCalls[convs[i].ID]))
 	}
 	return out, nil
 }

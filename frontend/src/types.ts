@@ -204,6 +204,18 @@ export interface Conversation {
   // since. The MODEL's stop reason is per-turn and rides MessageDTO.
   ParkReason?: string
   ResultSummary: string
+  // current_action is the derived one-line prose for a conversation that is
+  // WORKING — what its agent is doing right now, composed server-side from the
+  // newest assistant message's last tool call. It is the run row's identity
+  // line, since a conversation has no title.
+  //
+  // Present only on `running` rows in a LIST read, and only when the server had
+  // something honest to say: an unknown tool, a call missing its describing
+  // argument, and a turn with no tool calls all omit it. Absent means render
+  // the state label, never a guess. It refreshes on the ordinary refetch
+  // cadence — no websocket event carries it, and the run station's message
+  // stream stays the live view.
+  current_action?: string
   // Outcome is the parsed terminal-envelope outcome
   // (continue|finish|abort), persisted to conversations.outcome. Empty/absent for
   // an infra-error conversation or a step that ended without a recognized conclusion.
