@@ -78,7 +78,13 @@ describe('the save gate — a selection nothing has verified', () => {
     await screen.findByRole('alertdialog')
     await userEvent.click(screen.getByRole('button', { name: /test and save/i }))
 
-    expect(await screen.findByText(/not entitled in this account/)).toBeVisible()
+    // The dialog is a motion surface: its inline style reaches the animate
+    // target on the first ANIMATION FRAME — skipAnimations (test setup) skips
+    // the tween, not the frame — and a microtask-bound test can assert before
+    // jsdom ever fires one, reading the entrance's opacity: 0 as invisible.
+    // Visibility on motion content is therefore awaited, never read directly:
+    // waitFor yields real macrotasks, which is what lets that frame run.
+    await waitFor(() => expect(screen.getByText(/not entitled in this account/)).toBeVisible())
     // Nothing left to press but out: pressing again could only re-learn the
     // same answer.
     expect(screen.queryByRole('button', { name: /test and save|try again/i })).toBeNull()
@@ -97,7 +103,8 @@ describe('the save gate — a selection nothing has verified', () => {
     await screen.findByRole('alertdialog')
     await userEvent.click(screen.getByRole('button', { name: /test and save/i }))
 
-    expect(await screen.findByText(/the provider timed out/)).toBeVisible()
+    // Awaited for the same animation-frame reason as the red-verdict case.
+    await waitFor(() => expect(screen.getByText(/the provider timed out/)).toBeVisible())
     const retry = await screen.findByRole('button', { name: /try again/i })
 
     await userEvent.click(retry)
