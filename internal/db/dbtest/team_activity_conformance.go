@@ -24,8 +24,9 @@ type TeamActivityStoreFactory func(t *testing.T) (store db.TeamActivityStore, or
 // What it deliberately does NOT pin: whether a source's event count is
 // defined (github and jira are defined everywhere; slack diverges by design
 // — defined at N=1 where the team is the org, undefined under the
-// tracked-set rule). Each backend's test file asserts its own side of that
-// divergence.
+// tracked-set rule), nor the scoping of the merged and failed cuts, which
+// only multi-mode has a second team to scope against. Each backend's test
+// file asserts its own side of both.
 func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -45,6 +46,17 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 		seed.EventNullEntity(t, domain.EventSystemPollCompleted, now.Add(-1*time.Hour))
 		taskID := seed.Task(t, entityID, domain.EventGitHubPRCICheckFailed, "", ev, "queued", now.Add(-90*time.Minute))
 		seed.Conversation(t, taskID, "running")
+		// A merged pull request is an ordinary event row, so it counts in
+		// events too — merged is a named subset, not a parallel total.
+		seed.Event(t, entityID, domain.EventGitHubPRMerged, "", now.Add(-3*time.Hour), time.Time{})
+		// A run that died inside the window, and one that died before it.
+		failedIn := seed.Conversation(t, taskID, domain.StatusFailed)
+		seed.FinishConversation(t, failedIn, domain.StatusFailed, now.Add(-45*time.Minute))
+		failedOut := seed.Conversation(t, taskID, domain.StatusFailed)
+		seed.FinishConversation(t, failedOut, domain.StatusFailed, now.Add(-80*time.Hour))
+		// A run that concluded is not a failure, however recently it ended.
+		completed := seed.Conversation(t, taskID, domain.StatusCompleted)
+		seed.FinishConversation(t, completed, domain.StatusCompleted, now.Add(-30*time.Minute))
 
 		got, err := s.TeamActivity(ctx, orgID, teamID, since, until)
 		if err != nil {
@@ -53,13 +65,21 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 
 		// Day-bucket boundaries are timezone-fragile, so the assertions sum
 		// across days rather than pinning which day a row landed in.
-		dayEvents, dayTasks := 0, 0
+		dayEvents, dayTasks, dayMerged, dayFailed := 0, 0, 0, 0
 		for _, d := range got.ByDay {
 			dayEvents += d.Events
 			dayTasks += d.Tasks
+			dayMerged += d.Merged
+			dayFailed += d.Failed
 		}
-		if dayEvents != 2 || dayTasks != 1 {
-			t.Errorf("by_day sums = %d events / %d tasks, want 2 / 1 (window clipped, system row ignored)", dayEvents, dayTasks)
+		if dayEvents != 3 || dayTasks != 1 {
+			t.Errorf("by_day sums = %d events / %d tasks, want 3 / 1 (window clipped, system row ignored)", dayEvents, dayTasks)
+		}
+		if dayMerged != 1 {
+			t.Errorf("by_day merged = %d, want 1", dayMerged)
+		}
+		if dayFailed != 1 {
+			t.Errorf("by_day failed = %d, want 1 (the run that ended outside the window and the completed one don't count)", dayFailed)
 		}
 		dsEvents, dsTasks := 0, 0
 		for _, d := range got.ByDaySource {
@@ -88,8 +108,8 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 			}
 		}
 		gh := bySource["github"]
-		if gh.Events == nil || *gh.Events != 2 || gh.Tasks != 1 || gh.Runs != 1 {
-			t.Errorf("github row = %+v, want events 2 / tasks 1 / runs 1", gh)
+		if gh.Events == nil || *gh.Events != 3 || gh.Tasks != 1 || gh.Runs != 4 {
+			t.Errorf("github row = %+v, want events 3 / tasks 1 / runs 4", gh)
 		}
 		jira := bySource["jira"]
 		if jira.Events == nil || *jira.Events != 0 || jira.Tasks != 0 || jira.Runs != 0 {
@@ -100,6 +120,68 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 			if row.LastPollAt != nil {
 				t.Errorf("%s row carries LastPollAt from the store; poll times are the handler's", row.Source)
 			}
+		}
+	})
+
+	t.Run("a_failed_run_alone_still_makes_a_day", func(t *testing.T) {
+		s, orgID, teamID, seed := mk(t)
+		now := time.Now().UTC()
+		// Failed is the cut that can orphan a day. Merged never can — a
+		// merged pull request is an event row, so its day is already in the
+		// events cut's answer — but a run that died reaches no event and no
+		// entity, so a day whose only fact is a failure exists in that cut
+		// alone. Building by_day by left-joining onto the days the
+		// events/tasks queries found would drop it.
+		entityID := seed.Entity(t, "orphan-day")
+		ev := seed.Event(t, entityID, domain.EventGitHubPROpened, "", now.Add(-80*time.Hour), time.Time{})
+		taskID := seed.Task(t, entityID, domain.EventGitHubPROpened, "", ev, "queued", now.Add(-80*time.Hour))
+		conversationID := seed.Conversation(t, taskID, domain.StatusFailed)
+		seed.FinishConversation(t, conversationID, domain.StatusFailed, now.Add(-90*time.Minute))
+
+		// Nothing else the node buckets falls inside this window.
+		got, err := s.TeamActivity(ctx, orgID, teamID, now.Add(-3*time.Hour), now)
+		if err != nil {
+			t.Fatalf("TeamActivity: %v", err)
+		}
+		if len(got.ByDay) != 1 {
+			t.Fatalf("by_day = %+v, want exactly the failure's day", got.ByDay)
+		}
+		day := got.ByDay[0]
+		if day.Failed != 1 || day.Events != 0 || day.Tasks != 0 || day.Merged != 0 {
+			t.Errorf("by_day row = %+v, want failed 1 and every other count 0", day)
+		}
+	})
+
+	t.Run("window_is_half_open", func(t *testing.T) {
+		s, orgID, teamID, seed := mk(t)
+		// Millisecond precision: SQLite's date functions parse no finer, so
+		// a bound carrying more of it could not be seeded exactly.
+		until := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+		since := until.Add(-2 * time.Hour)
+
+		entityID := seed.Entity(t, "boundary")
+		ev := seed.Event(t, entityID, domain.EventGitHubPRMerged, "", since, time.Time{})
+		seed.Event(t, entityID, domain.EventGitHubPRMerged, "", until, time.Time{})
+		taskID := seed.Task(t, entityID, domain.EventGitHubPRMerged, "", ev, "queued", since)
+		onSince := seed.Conversation(t, taskID, domain.StatusFailed)
+		seed.FinishConversation(t, onSince, domain.StatusFailed, since)
+		onUntil := seed.Conversation(t, taskID, domain.StatusFailed)
+		seed.FinishConversation(t, onUntil, domain.StatusFailed, until)
+
+		got, err := s.TeamActivity(ctx, orgID, teamID, since, until)
+		if err != nil {
+			t.Fatalf("TeamActivity: %v", err)
+		}
+		merged, failed := 0, 0
+		for _, d := range got.ByDay {
+			merged += d.Merged
+			failed += d.Failed
+		}
+		if merged != 1 {
+			t.Errorf("merged = %d, want 1 — [since, until) includes since and excludes until", merged)
+		}
+		if failed != 1 {
+			t.Errorf("failed = %d, want 1 — [since, until) includes since and excludes until", failed)
 		}
 	})
 

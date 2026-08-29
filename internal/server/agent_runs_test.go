@@ -581,6 +581,76 @@ func TestConversationResponse_TokenSums(t *testing.T) {
 	}
 }
 
+// TestConversationResponse_QueuePositionOnlyWhenQueued pins the wire half of
+// the queued run's hourglass: the place in line is emitted only for a row that
+// actually has one, and is ABSENT — no key, not a 0 and not a null — for every
+// other state, so a client renders the mark on presence rather than on a
+// sentinel it would have to know to special-case.
+func TestConversationResponse_QueuePositionOnlyWhenQueued(t *testing.T) {
+	s := newTestServer(t)
+	first := seedSteerConversation(t, s.db, "qpos-first", "")
+	second := seedSteerConversation(t, s.db, "qpos-second", "")
+	claimed := seedSteerConversation(t, s.db, "qpos-claimed", "")
+	done := seedSteerConversation(t, s.db, "qpos-done", "completed")
+
+	// Mid-flight and unclaimed is what the display ladder reads as `queued`:
+	// the stored column carries nothing at all. started_at is set on the
+	// database's own clock so the line's order is this fixture's rather than
+	// the insert timing's — CURRENT_TIMESTAMP resolves to the second, so rows
+	// seeded back-to-back would otherwise tie and fall through to the id.
+	for _, staged := range []struct {
+		id  string
+		age int
+	}{{first, 300}, {second, 200}, {claimed, 400}, {done, 500}} {
+		execSQL(t, s.db, `UPDATE conversations SET started_at = datetime('now', ?) WHERE id = ?`,
+			fmt.Sprintf("-%d seconds", staged.age), staged.id)
+	}
+	for _, id := range []string{first, second, claimed} {
+		execSQL(t, s.db, `UPDATE conversations SET status = NULL WHERE id = ?`, id)
+	}
+	// An unreleased claim takes a conversation out of the line entirely — it
+	// is the oldest row here, so a derivation that ranked by start time alone
+	// would hand it position 1.
+	execSQL(t, s.db, `INSERT INTO claims (id, conversation_id, executor_id, boot_epoch) VALUES (?, ?, 'exec-qpos', 1)`,
+		uuid.New().String(), claimed)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("conversation list = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Runs map[string][]map[string]any `json:"runs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v; body=%s", err, rec.Body.String())
+	}
+	byID := map[string]map[string]any{}
+	for _, convs := range list.Runs {
+		for _, c := range convs {
+			id, _ := c["ID"].(string)
+			byID[id] = c
+		}
+	}
+	for id, want := range map[string]float64{first: 1, second: 2} {
+		conv, ok := byID[id]
+		if !ok {
+			t.Fatalf("conversation %s missing from the list", id)
+		}
+		if got, isNum := conv["queue_position"].(float64); !isNum || got != want {
+			t.Errorf("queue_position of %s = %v, want %v", id, conv["queue_position"], want)
+		}
+	}
+	for _, id := range []string{claimed, done} {
+		conv, ok := byID[id]
+		if !ok {
+			t.Fatalf("conversation %s missing from the list", id)
+		}
+		if _, present := conv["queue_position"]; present {
+			t.Errorf("conversation %s is not queued but carries queue_position %v", id, conv["queue_position"])
+		}
+	}
+}
+
 // TestConversationResponse_CarriesOutcomeAndChainPosition pins the three fields a
 // surface needs to tell a handed-off step from the one that ended the task:
 // the terminal outcome, its abort note, and the owning blueprint's plan

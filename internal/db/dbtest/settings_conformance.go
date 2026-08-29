@@ -57,8 +57,9 @@ type SettingsIDs struct {
 //     CHECK rejects empty strings on both backends).
 //   - JiraStatusRulesStore.ReplaceForTeam bulk-replace semantics:
 //     upsert wins on conflict, missing project keys get pruned.
-//   - UserSettings round-trip is a no-op probe (v1 has no user fields)
-//     that still upserts a row so future tests can assert presence.
+//   - UserSettings round-trips its fields through both arms of the upsert,
+//     each returning the row it stored, and a nil field clears its column —
+//     the write takes the row's end state, not a delta.
 func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -1142,21 +1143,55 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
-	t.Run("UserSettings_TouchAndRead", func(t *testing.T) {
-		// v1 user_settings has no fields — call exercises the upsert
-		// path + read-back contract so future per-user prefs land on
-		// established wiring.
+	t.Run("UserSettings_RoundTripsEveryField_AndReturnsTheStoredRow", func(t *testing.T) {
+		// The write's insert arm and its conflict arm both hand back the row
+		// they persisted, and both are reached here — the second call lands on
+		// the row the first one created.
 		stores, ids := factory(t)
-		if err := stores.Users.UpdateSettings(ctx, ids.UserID, domain.UserSettings{}); err != nil {
-			t.Fatalf("UpdateSettings: %v", err)
+		read := func() (*domain.UserSettings, error) {
+			got, err := stores.Users.GetSettings(ctx, ids.UserID)
+			if err != nil {
+				return nil, err
+			}
+			return &got, nil
 		}
-		got, err := stores.Users.GetSettings(ctx, ids.UserID)
+
+		// Truncated to the second: Postgres stores timestamptz at microsecond
+		// resolution and SQLite round-trips driver text, so a value carrying
+		// finer precision would compare unequal for reasons that are the
+		// dialects' storage rather than this store's contract.
+		seen := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Second)
+		created, err := stores.Users.UpdateSettings(ctx, ids.UserID, domain.UserSettings{OverviewSeenAt: &seen})
 		if err != nil {
-			t.Fatalf("GetSettings: %v", err)
+			t.Fatalf("UpdateSettings (insert): %v", err)
 		}
+		AssertWriteReturnedStoredRow(t, "Users.UpdateSettings (insert)", created, read)
+		if created.OverviewSeenAt == nil || !created.OverviewSeenAt.Equal(seen) {
+			t.Fatalf("OverviewSeenAt = %v; want %v", created.OverviewSeenAt, seen)
+		}
+
+		later := seen.Add(time.Hour)
+		updated, err := stores.Users.UpdateSettings(ctx, ids.UserID, domain.UserSettings{OverviewSeenAt: &later})
+		if err != nil {
+			t.Fatalf("UpdateSettings (conflict arm): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Users.UpdateSettings (conflict arm)", updated, read)
+		if updated.OverviewSeenAt == nil || !updated.OverviewSeenAt.Equal(later) {
+			t.Errorf("OverviewSeenAt = %v; want %v", updated.OverviewSeenAt, later)
+		}
+
+		// updates is the row's end state, not a delta: a nil field clears its
+		// column rather than preserving what was there. The PATCH handler's
+		// "absent keeps" is built on top of this by reading first — it is not
+		// this method's semantics.
+		cleared, err := stores.Users.UpdateSettings(ctx, ids.UserID, domain.UserSettings{})
+		if err != nil {
+			t.Fatalf("UpdateSettings (clear): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Users.UpdateSettings (clear)", cleared, read)
 		var zero domain.UserSettings
-		if !reflect.DeepEqual(got, zero) {
-			t.Errorf("UserSettings = %+v; want zero value", got)
+		if !reflect.DeepEqual(cleared, zero) {
+			t.Errorf("UserSettings after a nil-field write = %+v; want the zero value", cleared)
 		}
 	})
 

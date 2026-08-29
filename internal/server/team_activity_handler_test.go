@@ -3,10 +3,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -24,6 +26,8 @@ type activityBody struct {
 		Date   string `json:"date"`
 		Events int    `json:"events"`
 		Tasks  int    `json:"tasks"`
+		Merged int    `json:"merged"`
+		Failed int    `json:"failed"`
 	} `json:"by_day"`
 	ByDaySource []struct {
 		Date   string `json:"date"`
@@ -105,5 +109,54 @@ func TestTeamActivity_WindowIsValidated(t *testing.T) {
 	rec = doJSON(t, s, http.MethodGet, "/api/teams/default/activity?since=whenever", nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("malformed since: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestTeamActivity_MergedAndFailedAreWindowedByTheAsk drives the day cut's two
+// convergence counts onto the wire, and pins that an RFC3339 since windows
+// ROWS rather than whole days: every fixture row shares one UTC day, and the
+// half of them before the mid-day bound must not be counted. A store that
+// bucketed first and clipped by day would answer 2 and 2.
+func TestTeamActivity_MergedAndFailedAreWindowedByTheAsk(t *testing.T) {
+	s := newTestServer(t)
+	// A fixed past day, so the assertions don't depend on what time the
+	// suite runs — the node's own grammar is UTC either way.
+	const day = "2026-03-10"
+	before, after := day+"T08:00:00Z", day+"T15:00:00Z"
+
+	entityID := fixtureUUID("e_conv")
+	execSQL(t, s.db, `INSERT INTO entities (id, source, source_id, kind, state) VALUES (?, 'github', 'owner/repo#77', 'pr', 'active')`, entityID)
+	for i, at := range []string{before, after} {
+		execSQL(t, s.db,
+			`INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at) VALUES (?, ?, ?, '', '{}', ?)`,
+			fixtureUUID(fmt.Sprintf("ev_merged_%d", i)), entityID, domain.EventGitHubPRMerged, at)
+	}
+	for i, at := range []string{before, after} {
+		conversationID := seedSteerConversation(t, s.db, fmt.Sprintf("conv%d", i), domain.StatusFailed)
+		execSQL(t, s.db, `UPDATE conversations SET completed_at = ? WHERE id = ?`, at, conversationID)
+	}
+
+	rec := doJSON(t, s, http.MethodGet,
+		"/api/teams/default/activity?since="+day+"T12:00:00Z&until="+day+"T23:59:59Z", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body activityBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rec.Body.String())
+	}
+
+	if len(body.ByDay) != 1 || body.ByDay[0].Date != day {
+		t.Fatalf("by_day = %+v, want the one day the fixtures share", body.ByDay)
+	}
+	got := body.ByDay[0]
+	if got.Merged != 1 {
+		t.Errorf("merged = %d, want 1 — the 08:00 merge is before the window opens", got.Merged)
+	}
+	if got.Failed != 1 {
+		t.Errorf("failed = %d, want 1 — the 08:00 failure is before the window opens", got.Failed)
+	}
+	if got.Events != 1 {
+		t.Errorf("events = %d, want 1 — a merge is an event, counted once in each", got.Events)
 	}
 }

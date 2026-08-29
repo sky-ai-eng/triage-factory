@@ -5,6 +5,7 @@ import type { Message, Conversation, ToolCall } from '../../types'
 import { isActiveConversation } from '../../lib/conversationStatus'
 import { isSystemNotice } from '../../lib/messageVoice'
 import { stripWorktree } from '../../lib/worktree'
+import { type BashCallState, bashHeadline, isBashTool } from '../../lib/toolHeadline'
 import { toast } from '../Toast/toastStore'
 import { stationState } from './stationStyle'
 
@@ -448,9 +449,14 @@ const ToolLine = memo(function ToolLine({
   worktree?: string
 }) {
   const [open, setOpen] = useState(false)
+  // A tool row's state is read off its result: absent means the call is still
+  // in flight, and a result that came back an error is a failure. Bash reads
+  // its headline in that state's tense; every other tool describes itself
+  // from its own arguments and doesn't care.
+  const state: BashCallState = !result ? 'running' : result.is_error ? 'failed' : 'succeeded'
   // Collapse the agent's absolute worktree paths to worktree-relative ones
   // everywhere they show up — the headline, the input args, and the output.
-  const headline = stripWorktree(headlineForToolCall(call), worktree)
+  const headline = stripWorktree(headlineForToolCall(call, state), worktree)
   const inputJson = useMemo(
     () => stripWorktree(safeJsonStringify(call.input), worktree),
     [call.input, worktree],
@@ -663,11 +669,12 @@ function clockTime(iso: string): string {
   })
 }
 
-function headlineForToolCall(call: ToolCall): string {
+function headlineForToolCall(call: ToolCall, state: BashCallState): string {
   const input = call.input || {}
-  // Bash: prefer the agent-authored description — the human-readable intent.
-  // The raw command stays one click away in the expanded IN pane.
-  if (call.name === 'Bash') return String(input.description || input.command || '(no command)')
+  // Bash: prefer the agent-authored summary — the human-readable intent — in
+  // whichever tense this row's state calls for. The raw command stays one
+  // click away in the expanded IN pane.
+  if (isBashTool(call.name)) return bashHeadline(input, state) || '(no command)'
   if (call.name === 'Read' || call.name === 'Write' || call.name === 'Edit')
     return String(input.file_path || '(no path)')
   if (call.name === 'Glob') return String(input.pattern || '(no pattern)')

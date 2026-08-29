@@ -279,24 +279,20 @@ type UsersStore interface {
 	// list with.
 	SetLastActingTeam(ctx context.Context, userID, teamID string) error
 
-	// GetSettings returns the user's settings row. Empty for v1
-	// cleanup — the AI model + auto-delegate toggle
-	// moved to team_settings. The store call exists so future
-	// per-user prefs (theme, notification destinations, swipe
-	// sensitivity, onboarding state) can be added without a
-	// signature change. Returns a zero-value UserSettings with nil
-	// error when no row exists yet. Postgres runs on the app pool
+	// GetSettings returns the user's settings row — the per-user prefs; the
+	// AI model + auto-delegate toggle moved to team_settings. Returns a
+	// zero-value UserSettings with nil error when no row exists yet, which is
+	// what every field's absent value already means, so a caller never has to
+	// tell "no row" from "nothing set". Postgres runs on the app pool
 	// (user_settings_select RLS gates by user_id = current_user_id()).
 	GetSettings(ctx context.Context, userID string) (domain.UserSettings, error)
 
-	// UpdateSettings upserts the user's settings row. v1 carries
-	// no per-user fields, so the call is effectively a touch — the
-	// updated_at trigger fires either way. Future prefs land here.
-	// Postgres runs on the app pool (user_settings_modify RLS gates
-	// by user_id = current_user_id()).
-	//
-	// Exempt from the returned-row rule: domain.UserSettings is empty in v1 —
-	// the write is a touch with nothing to hand back. When per-user fields
-	// land, this is a returned-row conversion along with them.
-	UpdateSettings(ctx context.Context, userID string, updates domain.UserSettings) error
+	// UpdateSettings upserts the user's settings row and returns what it
+	// persisted. updates is the WHOLE row's desired end state, not a delta:
+	// every field lands as given, so a nil one clears its column. A caller
+	// applying a partial write reads first and applies onto what it read — the
+	// PATCH handler does exactly that, inside the write's own transaction.
+	// Postgres runs on the app pool (user_settings_modify RLS gates by
+	// user_id = current_user_id()).
+	UpdateSettings(ctx context.Context, userID string, updates domain.UserSettings) (domain.UserSettings, error)
 }

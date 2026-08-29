@@ -51,6 +51,74 @@ describe('appendToFeed', () => {
     expect(feed.lines.map((l) => l.text)).toEqual(['planning', 'Adding comment'])
   })
 
+  it('reads the authored summary off a native bash row, whose tool name is lowercase', () => {
+    // A native conversation calls the tool `bash`, and native is the only
+    // runtime that authors both tenses — so a ticker matching the SDK's `Bash`
+    // alone would miss the summary on exactly the rows that carry one.
+    const feed = appendToFeed(
+      undefined,
+      msg({
+        subtype: 'tool_use',
+        tool_calls: [
+          {
+            id: 'tc-1',
+            name: 'bash',
+            input: {
+              command: 'go test ./internal/sandbox -run TestSampler_Series -count=20',
+              description: 'Reproducing the flake',
+              description_past: 'Ran the sampler test 50x',
+            },
+          },
+        ],
+      }),
+    )
+    // The ticker is a live strip, so it stays in the present tense even though
+    // this row carries a past one.
+    expect(feed.lines.map((l) => l.text)).toEqual(['Reproducing the flake'])
+  })
+
+  it('falls back to the command itself when a bash call carries no summary', () => {
+    const feed = appendToFeed(
+      undefined,
+      msg({
+        subtype: 'tool_use',
+        tool_calls: [{ id: 'tc-1', name: 'bash', input: { command: 'go build ./...' } }],
+      }),
+    )
+    expect(feed.lines.map((l) => l.text)).toEqual(['go build ./...'])
+  })
+
+  // Every curated reading is a sentence or it is not a reading. A branch that
+  // matches on a token's presence and then renders its value can produce a
+  // label that stops mid-phrase — "Running: undefined", "Reading diff: " —
+  // which is worse on a card than the command it was standing in for.
+  it('never renders a curated reading that stops mid-phrase', () => {
+    const line = (command: string) =>
+      appendToFeed(
+        undefined,
+        msg({
+          subtype: 'tool_use',
+          tool_calls: [{ id: 'tc-1', name: 'bash', input: { command } }],
+        }),
+      ).lines[0].text
+
+    // The applet name with no argv after it, on its own line, or quoted inside
+    // another command: each contains "triagefactory exec" and none of them
+    // splits to an argv, so each reads as the command itself.
+    expect(line('triagefactory exec')).toBe('triagefactory exec')
+    expect(line('triagefactory exec\n  gh pr list')).toBe('triagefactory exec …')
+    expect(line('echo "triagefactory exec"')).toBe('echo "triagefactory exec"')
+
+    // --file present but valueless (dangling, or the =value form extractFlag
+    // does not read) falls back to the whole-diff reading, never a bare colon.
+    expect(line('triagefactory exec gh pr diff --file')).toBe('Reading full diff')
+    expect(line('triagefactory exec gh pr diff --file=a.go')).toBe('Reading full diff')
+
+    // The readings that do have their value are untouched.
+    expect(line('triagefactory exec gh pr diff --file a.go')).toBe('Reading diff: a.go')
+    expect(line('triagefactory exec jira issue view SKY-1')).toBe('Running: jira issue view SKY-1')
+  })
+
   it('skips thinking and the JSON completion blob on the ticker but still counts their tokens', () => {
     let feed = appendToFeed(
       undefined,
