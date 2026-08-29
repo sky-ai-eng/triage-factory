@@ -42,21 +42,25 @@ type prListFilterKey struct {
 	States []string `json:"states"`
 }
 
-// resolvePRListPage validates the states filter and resolves the page against
-// a fingerprint over the canonicalized filter set. Faults are appended to v,
-// which the caller flushes with the rest of its field errors, so one response
-// reports every problem. The returned states are canonical (sorted, deduped) —
-// the form the store takes and the fingerprint was computed over.
-func resolvePRListPage(v *httpx.Validation, req prListRequest, scope, teamID string) ([]string, httpx.Page) {
-	states := canonicalStrings(req.States)
-	for _, st := range states {
+// canonicalPRStates validates the states filter and returns it canonicalized
+// (sorted, deduped) — the form the store takes and the fingerprint is computed
+// over. Faults are appended to v, which the caller flushes with the rest of
+// its field errors so one response reports every problem.
+func canonicalPRStates(v *httpx.Validation, states []string) []string {
+	out := canonicalStrings(states)
+	for _, st := range out {
 		if !slices.Contains(domain.PRListStates, st) {
 			v.Invalid("states", fmt.Sprintf("unknown state %q; must be one of: %s",
 				st, strings.Join(domain.PRListStates, ", ")))
 		}
 	}
-	page := httpx.ResolvePage(v, req.PageRequest, httpx.FilterFingerprint(prListFilterKey{
-		Scope: scope, TeamID: teamID, States: states,
-	}), 0)
-	return states, page
+	return out
+}
+
+// prListFingerprint is the filter fingerprint a pull-request list's page token
+// is minted against. Each handler still calls httpx.ResolvePage itself — the
+// page window is the route's own business, and a route that resolved it behind
+// a helper would be one the list-contract ratchet cannot see.
+func prListFingerprint(scope, teamID string, states []string) string {
+	return httpx.FilterFingerprint(prListFilterKey{Scope: scope, TeamID: teamID, States: states})
 }

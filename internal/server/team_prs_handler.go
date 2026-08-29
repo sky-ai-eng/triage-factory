@@ -51,7 +51,8 @@ func (s *Server) handleTeamPRList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v httpx.Validation
-	states, page := resolvePRListPage(&v, req, "team-prs", teamID)
+	states := canonicalPRStates(&v, req.States)
+	page := httpx.ResolvePage(&v, req.PageRequest, prListFingerprint("team-prs", teamID, states), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}

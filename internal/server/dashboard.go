@@ -147,7 +147,8 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 	// The identity legs are the route's subject, not a filter — the body
 	// cannot name them — so the fingerprint is over the states filter and the
 	// scope that says which population this token walks.
-	states, page := resolvePRListPage(&v, req, "dashboard-prs", "")
+	states := canonicalPRStates(&v, req.States)
+	page := httpx.ResolvePage(&v, req.PageRequest, prListFingerprint("dashboard-prs", "", states), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
