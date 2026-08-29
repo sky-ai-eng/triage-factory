@@ -141,7 +141,7 @@ export default function Shell() {
   }, [])
 
   const activeOrg = auth?.orgs?.find((o) => o.id === auth?.serverActiveOrgId) ?? auth?.orgs?.[0]
-  const teamNames = useMemo(() => teams.map((t) => t.name), [teams])
+  const teamRows = useMemo(() => teams.map((t) => ({ id: t.id, name: t.name })), [teams])
 
   // The org · team mark is the SCOPE CONTROL for pages that carry none of
   // their own (the Overview, by design): one persisted selection, seeded like
@@ -155,13 +155,9 @@ export default function Shell() {
     () => ({ teamId: scopeTeam?.id ?? '', teamName: scopeTeam?.name ?? '' }),
     [scopeTeam?.id, scopeTeam?.name],
   )
-  const onTeamChange = useCallback(
-    (name: string) => {
-      const picked = teams.find((t) => t.name === name)
-      if (picked) setPickedTeamId(picked.id)
-    },
-    [teams, setPickedTeamId],
-  )
+  // The shell reports the picked team's ID — names are display-only there,
+  // since nothing makes them unique.
+  const onTeamChange = setPickedTeamId
 
   // Rail tails are facts about destinations, and every one of them needs a
   // `total` this API does not return yet (backend-needs.md, items 1-8). Absent
@@ -205,8 +201,8 @@ export default function Shell() {
             governance: false,
           }}
           org={activeOrg?.name ?? (isMulti ? '' : 'Triage Factory')}
-          team={scope.teamName}
-          teams={teamNames}
+          team={scope.teamId ? { id: scope.teamId, name: scope.teamName } : null}
+          teams={teamRows}
           onTeamChange={onTeamChange}
           route={route}
           onRoute={onRoute}

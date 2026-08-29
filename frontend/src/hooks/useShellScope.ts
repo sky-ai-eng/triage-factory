@@ -16,8 +16,9 @@ export type ShellScope = {
 const NO_SCOPE: ShellScope = { teamId: '', teamName: '' }
 
 export function useShellScope(): ShellScope {
-  // Null when rendered outside the framed shell (the full-bleed run station
-  // mounts its outlet bare) — pages that read the scope only mount framed,
+  // Undefined when rendered outside the framed shell (the full-bleed run
+  // station mounts its outlet bare — an absent context is `undefined` from
+  // the router, never null). Pages that read the scope only mount framed,
   // but a hook must not throw for being asked somewhere else.
-  return useOutletContext<ShellScope | null>() ?? NO_SCOPE
+  return useOutletContext<ShellScope | undefined>() ?? NO_SCOPE
 }

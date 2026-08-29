@@ -97,8 +97,13 @@ export function ShellCard() {
           flags={{ marketplace: marketplace && multi, governance }}
           offline={offline}
           org={multi ? 'sky-ai-eng' : 'Triage Factory'}
-          team="platform"
-          teams={['platform', 'infra', 'growth', 'docs']}
+          team={{ id: 't-platform', name: 'platform' }}
+          teams={[
+            { id: 't-platform', name: 'platform' },
+            { id: 't-infra', name: 'infra' },
+            { id: 't-growth', name: 'growth' },
+            { id: 't-docs', name: 'docs' },
+          ]}
           route={route}
           onRoute={setRoute}
           immersive={immersive}

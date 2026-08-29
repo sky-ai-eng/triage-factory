@@ -25,11 +25,13 @@ export type ShellProps = {
   flags?: Flags
   /** Org name shown beside the sigil. */
   org?: string
-  /** Current team, shown under the org in multi mode. */
-  team?: string
+  /** Current team, shown under the org in multi mode. The id is what keys
+   *  the popup's active row — display names are not unique, so a name is
+   *  never the currency of a selection, only its face. */
+  team?: { id: string; name: string } | null
   /** Teams offered by the scope switcher. */
-  teams?: string[]
-  onTeamChange?: (team: string) => void
+  teams?: Array<{ id: string; name: string }>
+  onTeamChange?: (teamId: string) => void
   /** Active route id, e.g. 'usage' or 'prompts.bindings'. */
   route?: string
   onRoute?: (id: string) => void
@@ -95,7 +97,7 @@ export function Shell({
   grants = [],
   flags = {},
   org = '',
-  team = '',
+  team = null,
   teams = [],
   onTeamChange,
   route = '',
@@ -474,14 +476,14 @@ export function Shell({
           // rather than sitting on top of it.
           onMouseEnter={(e) => {
             if (scope) return
-            tipOn(mode === 'multi' ? `${org} · ${team}` : org)(e)
+            tipOn(mode === 'multi' ? `${org} · ${team?.name ?? ''}` : org)(e)
           }}
           onMouseLeave={tipOff}
         >
           <div className="sh-sigil">{org.slice(0, 2).toUpperCase()}</div>
           <div className="sh-scope">
             <b>{org}</b>
-            <span>{mode === 'multi' ? team : 'local'}</span>
+            <span>{mode === 'multi' ? (team?.name ?? '') : 'local'}</span>
           </div>
         </div>
 
@@ -508,7 +510,7 @@ export function Shell({
               })}
             >
               <b>{org}</b>
-              <span>{team}</span>
+              <span>{team?.name ?? ''}</span>
             </div>
             <div className="sh-poph">TEAMS</div>
             {/* Offline, the list is unknowable. Showing the last one fetched
@@ -525,22 +527,22 @@ export function Shell({
                 />
                 {teams.map((t, i) => (
                   <div
-                    key={t}
-                    className={'sh-popr' + (t === team ? ' on' : '')}
+                    key={t.id}
+                    className={'sh-popr' + (t.id === team?.id ? ' on' : '')}
                     style={{ '--i': i } as CSSProperties}
                     tabIndex={0}
                     role="button"
-                    aria-current={t === team ? 'true' : undefined}
+                    aria-current={t.id === team?.id ? 'true' : undefined}
                     onKeyDown={enter(() => {
                       setScope(false)
-                      onTeamChange?.(t)
+                      onTeamChange?.(t.id)
                     })}
                     onClick={() => {
                       setScope(false)
-                      onTeamChange?.(t)
+                      onTeamChange?.(t.id)
                     }}
                   >
-                    {t}
+                    {t.name}
                   </div>
                 ))}
               </div>

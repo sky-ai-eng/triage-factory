@@ -151,7 +151,9 @@ describe('Shell — Escape belongs to the topmost layer', () => {
 describe('Shell — the rail pin', () => {
   it('persists an explicit toggle but never the transient expansion', async () => {
     const user = userEvent.setup()
-    render(<Shell mode="multi" org="sky" team="platform" grants={['org-admin']} />)
+    render(
+      <Shell mode="multi" org="sky" team={{ id: 't1', name: 'platform' }} grants={['org-admin']} />,
+    )
 
     expect(rail()).not.toHaveClass('open')
 
@@ -206,5 +208,38 @@ describe('Shell — a page can ask for the whole screen', () => {
     // Nothing changed size. A collapse would reflow the page, which is the
     // thing an immersive page is usually escaping.
     expect(rail().className).toBe(widthBefore)
+  })
+})
+
+describe('Shell — the scope switcher trades in team ids', () => {
+  it('reports the clicked row by id, so two same-named teams stay two teams', async () => {
+    // Nothing makes display names unique. The id is the selection's currency;
+    // the name is only its face — resolving by name here silently picked
+    // whichever team with that name sorted first.
+    const user = userEvent.setup()
+    const onTeamChange = vi.fn()
+    render(
+      <Shell
+        mode="multi"
+        org="sky"
+        team={{ id: 't1', name: 'Platform' }}
+        teams={[
+          { id: 't1', name: 'Platform' },
+          { id: 't2', name: 'Platform' },
+        ]}
+        onTeamChange={onTeamChange}
+      />,
+    )
+
+    await user.click(screen.getByText('sky'))
+    const rows = screen.getAllByRole('button', { name: 'Platform' })
+    expect(rows).toHaveLength(2)
+    // Only the CURRENT team's row is marked current, keyed by id — a name
+    // match would mark both.
+    expect(rows[0]).toHaveAttribute('aria-current', 'true')
+    expect(rows[1]).not.toHaveAttribute('aria-current')
+
+    await user.click(rows[1])
+    expect(onTeamChange).toHaveBeenCalledWith('t2')
   })
 })
