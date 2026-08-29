@@ -506,6 +506,17 @@ func conversationResponse(conv *domain.Conversation, artifactCount int, arts []d
 		"cache_read_tokens":     conv.CacheReadTokens,
 		"cache_creation_tokens": conv.CacheCreationTokens,
 	}
+	// The queued run's place in its own org's line, emitted only when the
+	// conversation actually has one — a running, open or terminal
+	// conversation carries no key at all, never a 0 or a null, so a client
+	// renders the mark on presence rather than on a sentinel. Org-local by
+	// contract: it carries no fleet occupancy, no executor identity, no
+	// placement tier and no cross-org term, and must not grow one. See
+	// domain.Conversation.QueuePosition for why a deployment-truthful
+	// position would be a cross-tenant disclosure.
+	if conv.QueuePosition != nil {
+		out["queue_position"] = *conv.QueuePosition
+	}
 	if artifactCount == 0 || len(arts) > 0 {
 		prCount, reviewCount := domain.UnresolvedArtifactCounts(arts)
 		out["has_unresolved_artifacts"] = prCount > 0 || reviewCount > 0

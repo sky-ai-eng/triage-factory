@@ -410,7 +410,10 @@ type ConversationStore interface {
 	// one chunk; the HTTP route caps ids at exactly that bound, so a real
 	// caller never reaches the refusal.
 	//
-	// MemoryMissing + claim fields derived per Get.
+	// MemoryMissing + claim fields derived per Get. QueuePosition is
+	// projected HERE and nowhere else — a place in line is only legible
+	// beside the line, so the point read leaves it nil rather than answering
+	// "3rd" with nothing to be third among.
 	List(ctx context.Context, orgID string, filter ConversationListFilter, opts ListOpts) ([]domain.Conversation, int, error)
 
 	// ListPRCoherenceTargetsSystem finds delegation conversations relevant to
