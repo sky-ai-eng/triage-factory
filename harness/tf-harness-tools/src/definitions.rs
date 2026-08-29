@@ -1,7 +1,18 @@
 //! Model-facing tool definitions: names, descriptions, and JSON parameter
-//! schemas matching pi's TypeBox output for the seven tools. The agent's
-//! behavior depends on these strings, so they are part of the parity
-//! contract.
+//! schemas for the seven tools, matching pi's TypeBox output except where
+//! noted below. The agent's behavior depends on these strings, so they are
+//! part of the parity contract, and a Go-side test compares this whole
+//! document against the registry the model is actually served.
+//!
+//! These are not documentation. [`crate::validate::validate_args`] checks
+//! every call against the schema here before dispatch, so a parameter is
+//! declared only if a wrong-typed value for it should fail the call — which
+//! is the rule even for a parameter no tool implementation reads.
+//!
+//! Divergence from pi: `bash` carries `description` and `description_past`
+//! beyond pi's `{command, timeout}`. A shell command is the only argument in
+//! this set that is not legible to a person, so the model authors a summary
+//! to render in its place. Nothing here executes them.
 
 use serde_json::{json, Value};
 
@@ -27,7 +38,9 @@ pub fn tool_definition(name: &str) -> Option<Value> {
                 "type": "object",
                 "properties": {
                     "command": { "description": "Bash command to execute", "type": "string" },
-                    "timeout": { "description": "Timeout in seconds (optional, no default timeout)", "type": "number" }
+                    "timeout": { "description": "Timeout in seconds (optional, no default timeout)", "type": "number" },
+                    "description": { "description": "What this command is doing, in 1-6 words and present tense: \"Reproducing the flake\", \"Vetting the sandbox package\". Describe the action, never its outcome.", "type": "string" },
+                    "description_past": { "description": "The same summary in past tense, in 1-6 words: \"Ran the sampler test 50x\". You are writing it before the command runs, so describe the action, never a result you cannot know yet.", "type": "string" }
                 },
                 "required": ["command"]
             }

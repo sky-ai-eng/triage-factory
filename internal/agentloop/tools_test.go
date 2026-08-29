@@ -124,7 +124,7 @@ func TestToolDefinitions_MatchHarness(t *testing.T) {
 		registry = append(registry, toolDoc{
 			Name:        tool.Function.Name,
 			Description: *tool.Function.Description,
-			Parameters:  withoutDisplayOnlyParams(t, tool.Function.Name, params),
+			Parameters:  params,
 		})
 	}
 	mine, err := json.Marshal(registry)
@@ -171,13 +171,12 @@ func TestSandboxTools_OmitTheConfigureVerb(t *testing.T) {
 	}
 }
 
-// TestBash_DeclaresItsDisplayOnlyParams pins the divergence the guard above
-// subtracts, so removing the params fails a test rather than quietly
-// re-converging the two sides. A shell command is the one argument in this
-// registry a person cannot read as-is; these are what the interface renders
-// in its place, and neither is required — a model that authors nothing still
-// makes a valid call.
-func TestBash_DeclaresItsDisplayOnlyParams(t *testing.T) {
+// TestBash_DeclaresItsSummaryParams pins the shape of the two params the
+// interface renders in a shell command's place. The guard above already
+// proves the jail declares them identically; this says what they have to be
+// on both sides of it — strings, and never required, so a model that authors
+// no summary still makes a valid call.
+func TestBash_DeclaresItsSummaryParams(t *testing.T) {
 	var bash *schemas.ChatToolFunction
 	for _, tool := range SandboxTools() {
 		if tool.Function != nil && tool.Function.Name == tooldefs.Bash.Name {
@@ -187,14 +186,10 @@ func TestBash_DeclaresItsDisplayOnlyParams(t *testing.T) {
 	if bash == nil {
 		t.Fatalf("the %s tool is missing", tooldefs.Bash.Name)
 	}
-	declared := tooldefs.DisplayOnlyParams[tooldefs.Bash.Name]
-	if want := []string{"description", "description_past"}; !slices.Equal(declared, want) {
-		t.Fatalf("display-only params = %v, want %v", declared, want)
-	}
-	for _, name := range declared {
+	for _, name := range []string{"description", "description_past"} {
 		node, ok := bash.Parameters.Properties.Get(name)
 		if !ok {
-			t.Fatalf("%q is declared display-only but absent from the schema the model reads", name)
+			t.Fatalf("%q is absent from the schema the model reads", name)
 		}
 		raw, err := json.Marshal(node)
 		if err != nil {
@@ -207,37 +202,6 @@ func TestBash_DeclaresItsDisplayOnlyParams(t *testing.T) {
 			t.Errorf("%q is required; an unauthored summary must still make a valid call", name)
 		}
 	}
-}
-
-// withoutDisplayOnlyParams subtracts a tool's display-only arguments from its
-// schema. They carry no behaviour, so the harness has nothing to implement
-// for them and its own definitions do not mention them; comparing them would
-// only report the divergence the registry already declares.
-func withoutDisplayOnlyParams(t *testing.T, tool string, params json.RawMessage) json.RawMessage {
-	t.Helper()
-	names := tooldefs.DisplayOnlyParams[tool]
-	if len(names) == 0 {
-		return params
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(params, &doc); err != nil {
-		t.Fatalf("%s parameters are not JSON: %v", tool, err)
-	}
-	props, ok := doc["properties"].(map[string]any)
-	if !ok {
-		t.Fatalf("%s has no properties to subtract from: %s", tool, params)
-	}
-	for _, name := range names {
-		if _, present := props[name]; !present {
-			t.Fatalf("%s declares %q display-only but does not declare the param", tool, name)
-		}
-		delete(props, name)
-	}
-	out, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return out
 }
 
 // toolDoc is the harness's `--definitions` record shape.

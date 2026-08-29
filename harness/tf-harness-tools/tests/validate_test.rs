@@ -44,6 +44,43 @@ fn wrong_argument_type() {
     );
 }
 
+/// bash's two summary arguments are rendered by the interface and read by no
+/// tool here, and they are validated exactly like the ones that execute. The
+/// schema the model is served and the schema the jail enforces are one
+/// document, so "nothing runs it" is not a reason to accept any shape for it.
+#[test]
+fn wrong_type_for_a_summary_argument_is_still_an_error() {
+    assert_eq!(
+        err_of("bash", json!({ "command": "echo hi", "description": 42 })),
+        "Invalid arguments: \"description\" must be a string"
+    );
+    assert_eq!(
+        err_of(
+            "bash",
+            json!({ "command": "echo hi", "description_past": ["ran", "it"] })
+        ),
+        "Invalid arguments: \"description_past\" must be a string"
+    );
+}
+
+/// The other half of the same contract: neither summary is required, and a
+/// well-formed one never stands between the model and its command.
+#[test]
+fn summary_arguments_are_optional_and_do_not_affect_the_result() {
+    let bare = run_tool("bash", "/tmp", json!({ "command": "echo hi" })).unwrap();
+    let summarized = run_tool(
+        "bash",
+        "/tmp",
+        json!({
+            "command": "echo hi",
+            "description": "Checking the greeting",
+            "description_past": "Checked the greeting",
+        }),
+    )
+    .unwrap();
+    assert_eq!(bare, summarized);
+}
+
 #[test]
 fn non_object_args() {
     assert_eq!(
