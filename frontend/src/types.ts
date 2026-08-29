@@ -211,7 +211,9 @@ export interface Conversation {
   //
   // Present only on `running` rows in a LIST read, and only when the server had
   // something honest to say: an unknown tool, a call missing its describing
-  // argument, and a turn with no tool calls all omit it. Absent means render
+  // argument, and a turn with no tool calls all omit it. Paths arrive already
+  // collapsed to worktree-relative — the server strips the run's worktree root
+  // before applying its length cap, so no client re-parses them. Absent means render
   // the state label, never a guess. It refreshes on the ordinary refetch
   // cadence — no websocket event carries it, and the run station's message
   // stream stays the live view.

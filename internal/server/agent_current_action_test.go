@@ -50,9 +50,17 @@ func TestHandleConversations_CurrentAction(t *testing.T) {
 	// and nothing driving it displays as queued.
 	queuedTask, queued := seed("ca_queued", "running", bash)
 	execSQL(t, s.db, `UPDATE conversations SET status = NULL WHERE id = ?`, queued)
+	// A working conversation whose newest call names an absolute path into its
+	// worktree: the line arrives worktree-relative, the composer's strip
+	// applied against the row's own worktree_path.
+	const wtRoot = "/var/folders/kx/abc/T/triagefactory-runs/ca"
+	strippedTask, stripped := seed("ca_strip", "running", []domain.ToolCall{{
+		ID: "t1", Name: "Read", Input: map[string]any{"file_path": wtRoot + "/internal/server/agent.go"},
+	}})
+	execSQL(t, s.db, `UPDATE conversations SET worktree_path = ? WHERE id = ?`, wtRoot, stripped)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{
-		"task_ids": []string{workingTask, silentTask, openTask, doneTask, failedTask, queuedTask},
+		"task_ids": []string{workingTask, silentTask, openTask, doneTask, failedTask, queuedTask, strippedTask},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -79,6 +87,10 @@ func TestHandleConversations_CurrentAction(t *testing.T) {
 		t.Fatalf("working conversation status = %v, want %q", got["Status"], domain.StatusRunning)
 	} else if got["current_action"] != "Vetting the router" {
 		t.Errorf("current_action = %v, want the authored bash summary", got["current_action"])
+	}
+
+	if got := row(strippedTask, stripped); got["current_action"] != "Reading internal/server/agent.go" {
+		t.Errorf("current_action = %v, want the worktree-relative path", got["current_action"])
 	}
 
 	for _, tc := range []struct {
