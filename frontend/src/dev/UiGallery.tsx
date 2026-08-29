@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import AcquireCard from './AcquireCard'
+import FlapCountCard from './FlapCountCard'
 import PrimitivesCard from './PrimitivesCard'
 import ScanCard from './ScanCard'
 import SelectionBarCard from './SelectionBarCard'
@@ -317,6 +318,7 @@ export default function UiGallery() {
             <PrimitivesCard />
             <TooltipCard />
             <ScanCard />
+            <FlapCountCard />
             <SelectionBarCard />
             <TableCard />
             <TeamPartsCard />
