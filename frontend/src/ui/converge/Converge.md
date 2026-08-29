@@ -7,7 +7,7 @@ outcomes, and the counts are the data.
 ```tsx
 import { Converge } from '../../ui/converge/Converge'
 
-<Converge
+;<Converge
   kicker="SINCE MIDNIGHT"
   title="events triaged"
   titleNode={<FlapCount value={events} size={24} label={events + ' events triaged'} />}
@@ -52,7 +52,7 @@ import { Converge } from '../../ui/converge/Converge'
 ## `height` is a viewBox unit — and `fill` is the other regime
 
 By default the SVG is `height: auto` with `preserveAspectRatio="none"`, so its
-rendered height is *width × (height / 740)*: a caller wanting a fixed pixel
+rendered height is _width × (height / 740)_: a caller wanting a fixed pixel
 height must measure the width and solve for the viewBox — JS in the resize
 path, and a height that lands a frame after the width settles (a rail
 animating open makes the fan snap once the motion finishes).
@@ -67,7 +67,7 @@ size swung 13.0 → 10.5px on a rail toggle — a number is read, and a read thi
 holds its size), and the headline gets 46% width instead of 34% (it wrapped to
 two lines below ~700px, and a headline changing line count on a toggle reads
 as the component resizing). Note the two `.conv svg` rules tie on specificity,
-so the fill override is declared *after* the base one.
+so the fill override is declared _after_ the base one.
 
 ## `endpointBand`
 
@@ -91,7 +91,7 @@ is the ink, not the field). Dark mode is the case to check: the ink ramp
 inverts and the strand tones do not.
 
 **`titleNode`** is for a figure that animates itself. The decode scrambles a
-*string*, so a self-updating count cannot live in `title` — every increment
+_string_, so a self-updating count cannot live in `title` — every increment
 would re-garble the whole sentence, and an increment is not a reveal.
 `titleNode` renders before the decoded words and is left alone; it should
 carry the headline's accessible label (the decoded span is `aria-hidden`
@@ -99,7 +99,7 @@ scenery, and the chart's own `role="img"` names the data).
 
 ## Reduced motion
 
-Two answers, both required. The CSS build elements rest at their *from* states
+Two answers, both required. The CSS build elements rest at their _from_ states
 and the motion blanket is `animation: none !important` — which beats any
 duration override — so the media branch in `converge.css` writes the **end
 states** directly (`.charting` still gates them, so the fan appears on arrival

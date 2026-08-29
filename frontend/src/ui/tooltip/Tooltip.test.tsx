@@ -23,6 +23,20 @@ describe('Tooltip', () => {
     expect(tip()).toHaveTextContent('what the label means')
   })
 
+  it('does not flash on a mouse press — pointer focus defers to the tap, which opens', () => {
+    render(<Tooltip content="what the label means">mark</Tooltip>)
+    const host = screen.getByText('mark').closest('.tip-host')!
+
+    // A real press: pointerdown, then the focus it causes, then the click.
+    // Focus must NOT open here (the flash was open-on-focus + toggle-shut on
+    // the click of the same press); the tap half then opens it cleanly.
+    fireEvent.pointerDown(host)
+    fireEvent.focus(host)
+    expect(tip()).toBeNull()
+    fireEvent.click(host)
+    expect(tip()).not.toBeNull()
+  })
+
   it('opens on focus with no delay at all — a keyboard never crosses anything', () => {
     render(<Tooltip content="definition">mark</Tooltip>)
     const host = screen.getByText('mark').closest('.tip-host')!

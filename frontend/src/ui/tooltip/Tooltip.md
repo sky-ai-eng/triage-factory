@@ -27,7 +27,10 @@ won and the others were removed.
 `TOOLTIP_DELAY` (200ms) is exported and is the delay everywhere. Per-page delays
 ranging 150–650ms are three different products to anyone who opens more than one
 page. Focus opens with **no** delay: a delay guards against a pointer crossing
-the screen, and a keyboard never crosses anything.
+the screen, and a keyboard never crosses anything. Keyboard focus only, though —
+a pointer's focus is a side effect of its press, and the pointer already has its
+own routes in (hover, and the tap). Opening on it too made the press a flash:
+focus opened the hint and the click half of the same press toggled it shut.
 
 ## Definitions, not data
 
@@ -47,7 +50,7 @@ rather than a phrase.
 takes a tab stop and `aria-describedby`, and the tooltip is a real
 `role="tooltip"`.
 
-**`focusable={false}`** — the trigger sits *inside* something already
+**`focusable={false}`** — the trigger sits _inside_ something already
 interactive (a mark on a row that is itself an `<a>`). A tab stop there is
 invalid — an anchor may not contain interactive content — and redundant, so the
 host takes neither and the tooltip becomes `aria-hidden` scenery. **The caller

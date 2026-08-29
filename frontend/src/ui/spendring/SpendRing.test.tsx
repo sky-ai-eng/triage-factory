@@ -84,4 +84,18 @@ describe('SpendRing', () => {
     fireEvent.mouseEnter(document.querySelector('.sr-seg')!)
     expect(cap()).toHaveTextContent('CLAUDE OPUS 5')
   })
+
+  it('shows $0.00 — not the arc guard — when models are present with no spend', () => {
+    // The || 1 protecting the segment division must never reach the figure: a
+    // day whose runs all settled to nothing is a real $0.00 reading.
+    render(
+      <SpendRing
+        models={[
+          { name: 'claude-sonnet-5', v: 0 },
+          { name: 'claude-haiku-4-5', v: 0 },
+        ]}
+      />,
+    )
+    expect(document.querySelector('.sr-total')).toHaveTextContent('$0.00')
+  })
 })

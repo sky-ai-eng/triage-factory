@@ -729,9 +729,10 @@ function TrayRow({ item }: { item: TrayItem }) {
   const draggable = !!item.dragId
   // The tooltip host lives INSIDE the <li> — a wrapper around it would break
   // the list's ul > li nesting — and takes the filling-cell layout so the row
-  // reads exactly as it does without a hint. focusable={false}: the row's own
-  // anchor is the interactive thing, and the panel is a visual expansion of
-  // text the row already carries.
+  // reads exactly as it does without a hint. The mode follows the row's own
+  // interactivity: with an anchor, the anchor is the interactive thing and the
+  // hint is scenery beside it; without one (a queued entity with no URL) the
+  // host takes the tab stop itself, or the hint has no keyboard route at all.
   return (
     <li
       ref={draggable ? drag.setNodeRef : undefined}
@@ -748,7 +749,12 @@ function TrayRow({ item }: { item: TrayItem }) {
       }}
     >
       {item.tooltip ? (
-        <Tooltip content={item.tooltip} wrap={320} focusable={false} className="flex-1 min-w-0">
+        <Tooltip
+          content={item.tooltip}
+          wrap={320}
+          focusable={!item.href}
+          className="flex-1 min-w-0"
+        >
           {rowContent}
         </Tooltip>
       ) : (

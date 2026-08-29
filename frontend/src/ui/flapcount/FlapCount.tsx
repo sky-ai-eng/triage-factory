@@ -59,8 +59,11 @@ export function FlapCount({ value, label, size = 24, format = String }: FlapCoun
 
   // Derived during render, the sanctioned store-previous-props form: React
   // re-renders immediately with the new beat before painting, so the first
-  // visible frame already carries the roll.
-  if (value !== null && value !== beat.value) {
+  // visible frame already carries the roll. Object.is, not !==, because this
+  // guard is what stops the re-render loop — NaN !== NaN forever, and a NaN
+  // value would spin the loop into React's re-render limit instead of just
+  // rendering NaN's digits once.
+  if (value !== null && !Object.is(value, beat.value)) {
     setBeat({
       value,
       from: beat.value,

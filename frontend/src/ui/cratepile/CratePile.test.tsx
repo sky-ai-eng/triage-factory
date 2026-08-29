@@ -26,8 +26,20 @@ describe('compactCount', () => {
     expect(compactCount(340)).toBe('340')
     expect(compactCount(999)).toBe('999')
     expect(compactCount(1249)).toBe('1.2k')
-    expect(compactCount(9950)).toBe('10.0k')
+    expect(compactCount(9949)).toBe('9.9k')
     expect(compactCount(12400)).toBe('12k')
+  })
+
+  it('holds the four-glyph bound where rounding crosses a band', () => {
+    // 9950 rounds to "10.0k" under its own band's format — five glyphs — so
+    // the branch is chosen by the rounded value and it takes the next band.
+    expect(compactCount(9950)).toBe('10k')
+    expect(compactCount(999499)).toBe('999k')
+    expect(compactCount(999500)).toBe('1.0m')
+    expect(compactCount(9950000)).toBe('10m')
+    for (const n of [999, 1000, 9949, 9950, 999499, 999500, 999999999]) {
+      expect(compactCount(n).length).toBeLessThanOrEqual(4)
+    }
   })
 })
 
@@ -56,6 +68,23 @@ describe('CratePile', () => {
     render(<CratePile count={112} />)
     expect(crates()).toHaveLength(36)
     expect(screen.getByRole('img', { name: /112/ })).toBeInTheDocument()
+  })
+
+  it('frames every count by the pallet, so a crate never changes size', () => {
+    // A tight box around the occupied cells made one crate render ~3x its
+    // size in a full pile. The frame is the footprint at every count: the
+    // width of the drawing's coordinate space is the pallet's, whether it
+    // holds zero, one, or a full stack.
+    const widthOf = (count: number) => {
+      const { container, unmount } = render(<CratePile count={count} />)
+      const vb = container.querySelector('.cp-svg')!.getAttribute('viewBox')!
+      unmount()
+      return Number(vb.split(' ')[2])
+    }
+    const zero = widthOf(0)
+    expect(widthOf(1)).toBe(zero)
+    expect(widthOf(17)).toBe(zero)
+    expect(widthOf(40)).toBe(zero)
   })
 
   it('draws the full dashed footprint at zero — the same pallet, nothing on it', () => {

@@ -7,10 +7,19 @@
 //
 // Precision drops as magnitude grows, the same way SpendRing's money rule
 // works. Exact under a thousand, because a backlog of 340 is a number someone
-// acts on; one decimal to ten thousand; whole thousands past that, where the
-// last three digits of a backlog are noise.
+// acts on; one decimal under ten of a unit; whole units past that, where the
+// trailing digits are noise. Each branch is chosen by the ROUNDED value, not
+// the raw one — 9950 rounds to "10.0k", five glyphs, so a value that rounds
+// out of its own precision band takes the next band's format instead.
 export const compactCount = (n: number): string => {
   if (n < 1000) return String(n)
-  if (n < 10000) return (Math.round(n / 100) / 10).toFixed(1) + 'k'
-  return Math.round(n / 1000) + 'k'
+  let v = n
+  for (const unit of ['k', 'm', 'b', 't']) {
+    v /= 1000
+    const tenths = Math.round(v * 10) / 10
+    if (tenths < 10) return tenths.toFixed(1) + unit
+    const whole = Math.round(v)
+    if (whole < 1000) return String(whole) + unit
+  }
+  return Math.round(v) + 't'
 }

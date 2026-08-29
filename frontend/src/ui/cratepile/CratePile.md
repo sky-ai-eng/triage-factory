@@ -5,7 +5,7 @@ A standing count, drawn as a 2.5D pile.
 ```tsx
 import { CratePile } from '../../ui/cratepile/CratePile'
 
-<CratePile
+;<CratePile
   count={openPRs}
   caption="open pull requests"
   captionOne="open pull request"
@@ -21,7 +21,7 @@ backlog, anything that was there yesterday and will be there tomorrow.
 This matters because of where it usually sits. Put a standing figure among
 event figures — spend today, events triaged since midnight — and it gets read
 as an event count. "23 pull requests happened today" is wrong and quietly
-alarming. The pile is what says *this one is a different kind of figure*, and
+alarming. The pile is what says _this one is a different kind of figure_, and
 it says it without a word.
 
 ## The pile is texture with a floor, not a tally
@@ -29,7 +29,7 @@ it says it without a word.
 Nobody is meant to count 23 crates. They are meant to see a pile bigger than
 Friday's. That is the difference from one tile per item, which invites counting
 and then breaks at thirty. It has a floor, and the floor is the point: growth
-has a direction, so a bigger backlog is unmistakably *more stuff* rather than a
+has a direction, so a bigger backlog is unmistakably _more stuff_ rather than a
 longer line.
 
 ## Projection
@@ -51,17 +51,20 @@ occlude one with a higher sum, so one sort covers every overlap with no depth
 testing.
 
 **Crates are keyed on the cell, not on array position.** This is load-bearing.
-A crate added at the top of the pile has a *low* painter sum — (0,0,2) sums to
+A crate added at the top of the pile has a _low_ painter sum — (0,0,2) sums to
 2 — so it sorts near the front of the array. Keyed by index, every crate after
 it shifted one slot, React re-mounted them all, and the entrance re-ran from
 opacity 0 behind its stagger delay. A count going **up** made an existing crate
 vanish for a beat; going down was clean, because removal takes the highest sum,
 which is already last.
 
-**Empty is measured off the full footprint**, not off one crate. A pallet with
-nothing on it is the same pallet, so zero renders at the scale every other
-count does — a dashed 3×3 outline, which reads as *nothing waiting* rather than
-as a graphic that failed to load.
+**Every count is measured off the full footprint**, not off the occupied
+cells. A tight box around the crates made the drawing zoom rather than grow —
+one crate rendered near 3x its size in a full pile, shrinking as crates
+arrived, so a rising backlog read as getting lighter. Framed by the pallet, a
+crate is the same size at every count and the pile visibly fills. Zero is the
+same pallet with nothing on it — a dashed 3×3 outline, which reads as _nothing
+waiting_ rather than as a graphic that failed to load.
 
 ## The figure is bounded at four glyphs
 
@@ -80,7 +83,7 @@ and over the pile.
 
 Height comes from the occupied cells while `width` stays fixed, so an uncapped
 pile climbs forever — at twelve layers it draws about 181px tall in a 98px-wide
-box. Four layers is the cap, for the texture-not-tally reason above: *a lot* is
+box. Four layers is the cap, for the texture-not-tally reason above: _a lot_ is
 the most a pile can honestly say, and past 36 the figure carries the number
 alone, which it was already doing. A surface that genuinely needs to
 distinguish 40 from 90 wants a bar, not a pile.

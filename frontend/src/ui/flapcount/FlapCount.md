@@ -97,6 +97,6 @@ caller should not have to out-specify a rule on the element itself.
 
 The Overview, on both figures that change while someone is watching: the
 `SINCE MIDNIGHT` headline (passed to `Converge` as `titleNode` — the decode
-scrambles a *string*, so a self-animating figure cannot live in `title`), and
+scrambles a _string_, so a self-animating figure cannot live in `title`), and
 the standing pull-request backlog inside `CratePile`. Two counts moving by two
 different mechanics would be the page disagreeing with itself.

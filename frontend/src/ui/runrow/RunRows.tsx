@@ -167,14 +167,19 @@ function splitRef(ref: string): [string, string] {
   return i > 0 ? [ref.slice(0, i), ref.slice(i)] : [ref, '']
 }
 
-// Mono characters that fit the leading reference's 152px column at 11px. Kept
-// in step with `fit-content(152px)` in runrow.css by hand: it decides only
-// whether a tooltip is offered, so being a character or two out costs a
-// tooltip on a reference that just fits, not a wrong layout.
+// Mono characters that fit the leading reference's column at 11px — 22 for
+// the full 152px cap, 17 for the 116px it steps down to under a 470px list.
+// Kept in step with the caps in runrow.css by hand: they decide only whether
+// a tooltip is offered, so being a character or two out costs a tooltip on a
+// reference that just fits, not a wrong layout. The pair has to follow the
+// list's width the same way the CSS container query does, or an 18-character
+// reference clipped by the narrower column would offer no hover to recover
+// its text.
 const REF_CAP = 22
+const REF_CAP_STEPPED = 17
 
 // `value`, not `ref` — React claims that name on any element.
-function Ref({ value, lead }: { value: string; lead: boolean }) {
+function Ref({ value, lead, cap = REF_CAP }: { value: string; lead: boolean; cap?: number }) {
   if (!lead) return <span className="rr-ref">{value}</span>
   // A hand-started run has no upstream entity, and in lead position the column
   // is still there — an empty cell reads as a rendering fault rather than as
@@ -198,7 +203,7 @@ function Ref({ value, lead }: { value: string; lead: boolean }) {
   // Only where the reference can actually be clipped. Not focusable: the row
   // is the anchor, and the words are already in the accessible name of the
   // link — the tooltip restores only what the clipping hid.
-  return value.length > REF_CAP ? (
+  return value.length > cap ? (
     <Tooltip content={value} focusable={false}>
       {mark}
     </Tooltip>
@@ -207,10 +212,13 @@ function Ref({ value, lead }: { value: string; lead: boolean }) {
   )
 }
 
-// Below this the reference column is dropped and the reference moves onto the
-// source glyph as a tooltip. Measured on the LIST, not the window: the same
-// list is a 430px column on Overview and a full-width pane on a card.
+// Below NARROW the reference column is dropped and the reference moves onto
+// the source glyph as a tooltip; between it and STEP the column holds at the
+// tighter 116px cap (the CSS container query's threshold, measured on the
+// same element). On the LIST, not the window: the same list is a 430px column
+// on Overview and a full-width pane on a card.
 const NARROW = 400
+const STEP = 470
 
 export function RunRows({
   rows = [],
@@ -224,14 +232,21 @@ export function RunRows({
   anchor = true,
 }: RunRowsProps) {
   const listRef = useRef<HTMLDivElement | null>(null)
-  const [narrow, setNarrow] = useState(false)
+  // Three bands, one observer: state moves only on a band crossing, so a
+  // pixel-by-pixel resize re-renders nothing.
+  const [band, setBand] = useState<'wide' | 'stepped' | 'narrow'>('wide')
   useEffect(() => {
     const el = listRef.current
     if (!el || typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(([e]) => setNarrow(e.contentRect.width < NARROW))
+    const ro = new ResizeObserver(([e]) => {
+      const w = e.contentRect.width
+      setBand(w < NARROW ? 'narrow' : w < STEP ? 'stepped' : 'wide')
+    })
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+  const narrow = band === 'narrow'
+  const refCap = band === 'stepped' ? REF_CAP_STEPPED : REF_CAP
 
   // A ref column with nothing in it is 11px of gap in front of every sentence,
   // so the lead only takes effect if there is something to lead with.
@@ -290,7 +305,7 @@ export function RunRows({
             {/* Rendered even when empty: the rows are subgrids of one grid and
                 cells place in source order, so a row that skipped its
                 reference would slide its prose into the reference's column. */}
-            {refFirst ? <Ref value={r.ref || ''} lead={true} /> : null}
+            {refFirst ? <Ref value={r.ref || ''} lead={true} cap={refCap} /> : null}
             {/* Prose and tail in ONE cell, divided per row — see runrow.css. A
                 tail track shared across the list makes every plain row's
                 sentence stop short of a queued row's mark. */}
@@ -360,9 +375,12 @@ export function RunRows({
               // Plain primary click stays in the app; modified clicks and
               // non-primary buttons keep the anchor's own behavior (new tab).
               // Keyboard activation reports button 0 and stays in-app too.
+              // With no onPick there is no app route to stay in, so the
+              // anchor navigates normally instead of swallowing the click.
+              if (!onPick) return
               if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
               e.preventDefault()
-              onPick?.(r)
+              onPick(r)
             }}
           >
             {body}

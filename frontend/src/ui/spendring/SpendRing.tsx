@@ -31,8 +31,14 @@ const C = 2 * Math.PI * 40 // circumference at r=40, the viewBox's radius
 //
 // Past about seven characters the ring needs to be bigger. That is a caller
 // decision, and `format` is the override for anyone who disagrees.
-const money = (v: number) =>
-  v < 100 ? '$' + v.toFixed(2) : '$' + Math.round(v).toLocaleString('en-US')
+const money = (v: number) => {
+  // A figure with nothing behind it takes the offline dash, not "$NaN"; a
+  // refund or correction keeps its sign ahead of the currency mark.
+  if (!Number.isFinite(v)) return '--'
+  const a = Math.abs(v)
+  const fig = a < 100 ? '$' + a.toFixed(2) : '$' + Math.round(a).toLocaleString('en-US')
+  return v < 0 ? '-' + fig : fig
+}
 
 export type SpendRingModel = {
   /** Shown uppercased in the hole while the band is hovered. */
@@ -89,7 +95,12 @@ export function SpendRing({
   const live = !offline && models.length > 0
   const h = live ? hover : -1
   const open = h >= 0
-  const total = models.reduce((a, m) => a + m.v, 0) || 1
+  const total = models.reduce((a, m) => a + m.v, 0)
+  // The arc divisor alone guards against zero — the DISPLAYED total must not.
+  // Models present with every value zero is a real reading (a day whose runs
+  // all settled to nothing), and its hole says $0.00; only the segment
+  // geometry needs a nonzero denominator to divide by.
+  const arcTotal = total || 1
 
   const shade = (i: number) =>
     `color-mix(in srgb, var(--color-warm) ${Math.round(100 - (i / Math.max(models.length, 1)) * 58)}%, var(--color-ground))`
@@ -97,7 +108,7 @@ export function SpendRing({
   let acc = 0
   const segs = live
     ? models.map((m, i) => {
-        const len = (m.v / total) * C
+        const len = (m.v / arcTotal) * C
         const off = -acc
         acc += len
         return { i, len, off, color: shade(i) }
@@ -107,7 +118,7 @@ export function SpendRing({
   const label = open ? shorten(models[h].name).toUpperCase() : caption
   const body = (
     <>
-      <svg className="sr-svg" viewBox="0 0 104 104">
+      <svg className="sr-svg" viewBox="0 0 104 104" aria-hidden="true">
         <circle className="sr-track" cx="52" cy="52" r="40" />
         {segs.map((s) => (
           <circle
@@ -139,7 +150,7 @@ export function SpendRing({
         {/* Offline is not zero: a readout with nothing behind it shows a dash
             rather than the last figure it happened to hold. */}
         <span className="sr-total">
-          {offline ? '--' : open ? format(models[h].v) : format(live ? total : 0)}
+          {offline ? '--' : open ? format(models[h].v) : format(total)}
         </span>
         <span className="sr-cap" data-open={open || undefined}>
           {label}

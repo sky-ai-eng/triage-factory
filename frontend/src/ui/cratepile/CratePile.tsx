@@ -107,20 +107,20 @@ export function CratePile({
   cells.sort((a, b) => a.i + a.j + a.k - (b.i + b.j + b.k))
   const layers = Math.max(Math.ceil(cells.length / per), 1)
 
-  const xs: number[] = []
-  const ys: number[] = []
+  // The frame is the PALLET, whatever the count. Measuring a tight box around
+  // the occupied cells instead made the drawing zoom rather than grow: one
+  // crate filled the whole width — near 3x the size it has in a full pile —
+  // and shrank as crates arrived, which reads as the backlog getting lighter.
+  // Seeded with the full footprint, a crate is the same size at every count,
+  // the pile visibly fills the pallet, and the union with the cells' own
+  // extents only adds the height a stacked layer earns.
+  const xs: number[] = [-SHAPE.ny * SHAPE.hw, SHAPE.nx * SHAPE.hw]
+  const ys: number[] = [-hd, (SHAPE.nx + SHAPE.ny - 1) * hd]
   for (const c of cells) {
     const cx = (c.i - c.j) * SHAPE.hw
     const cy = (c.i + c.j) * hd - c.k * SHAPE.ch
     xs.push(cx - SHAPE.hw, cx + SHAPE.hw)
     ys.push(cy - hd, cy + hd + SHAPE.ch)
-  }
-  // Empty is measured off the FULL footprint, not off one crate: a pallet with
-  // nothing on it is the same pallet, so zero has to render at the scale every
-  // other count does.
-  if (!xs.length) {
-    xs.push(-SHAPE.ny * SHAPE.hw, SHAPE.nx * SHAPE.hw)
-    ys.push(-hd, (SHAPE.nx + SHAPE.ny - 1) * hd)
   }
   const x0 = Math.min(...xs)
   const x1 = Math.max(...xs)

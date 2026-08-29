@@ -26,6 +26,13 @@ export function tones(tone?: 'quiet' | 'warm' | 'ask' | 'cool'): 'q' | 'w' | 'a'
  * count is too large for the strand budget to afford two each.
  */
 export function allocate(outcomes: Array<{ v: number }>, strands: number): number[] {
+  // No outcomes is no fan — an early answer, because the remainder pass below
+  // hands strands out round-robin and cannot distribute into nothing. The
+  // budget contract runs the other way too: this expects a handful of
+  // outcomes (the design says four to six) against a larger strand count, and
+  // more outcomes than strands would leave the floors summing past the
+  // budget.
+  if (!outcomes.length) return []
   const scaled = outcomes.map((o) => Math.sqrt(Math.max(0, o.v)))
   const sum = scaled.reduce((a, s) => a + s, 0) || 1
   const raw = scaled.map((s) => (s / sum) * strands)

@@ -160,6 +160,33 @@ describe('lead="ref"', () => {
     expect(line.firstElementChild!.className).toContain('rr-ref')
   })
 
+  it('offers the hover at the stepped cap when the column has stepped down', () => {
+    // Between 400 and 470px the column caps at 116px (~17 mono chars): an
+    // 19-character reference is clipped there, so the tooltip must be
+    // offered — at the wide cap of 22 it would not be.
+    const RO = class {
+      cb: (entries: { contentRect: { width: number } }[]) => void
+      constructor(cb: (entries: { contentRect: { width: number } }[]) => void) {
+        this.cb = cb
+      }
+      observe() {
+        this.cb([{ contentRect: { width: 430 } }])
+      }
+      disconnect() {}
+    }
+    vi.stubGlobal('ResizeObserver', RO)
+    render(<RunRows lead="ref" rows={[row({ ref: 'factory-rebalance#88' })]} />)
+    expect(document.querySelector('.rr-row > .tip-host .rr-ref')).not.toBeNull()
+  })
+
+  it('lets a plain click navigate when the caller wired no onPick', () => {
+    render(<RunRows rows={[row({})]} />)
+    const el = screen.getByText('Replaying 6 commits onto origin/main').closest('a')!
+    // fireEvent returns false when preventDefault was called — a swallowed
+    // click here would strand the row with no navigation at all.
+    expect(fireEvent.click(el, { button: 0 })).toBe(true)
+  })
+
   it('drops the column under 400px and hangs the reference off the glyph', () => {
     const RO = class {
       cb: (entries: { contentRect: { width: number } }[]) => void

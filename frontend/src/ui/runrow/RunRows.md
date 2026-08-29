@@ -6,7 +6,7 @@ else a set of runs is shown.
 ```tsx
 import { RunRows } from '../../ui/runrow/RunRows'
 
-<RunRows
+;<RunRows
   label="NEEDS YOU"
   count={<span style={{ color: 'var(--color-warm)' }}>7</span>}
   rows={items}
@@ -39,7 +39,7 @@ node instead of teaching this component about clocks.
 set per list, never per row.
 
 `lead="activity"` is the original: prose first, reference trailing it in small
-mono. It reads best when the list is a feed scanned for *what is happening*.
+mono. It reads best when the list is a feed scanned for _what is happening_.
 
 `lead="ref"` gives the reference a column of its own ahead of the prose.
 Because every row is a subgrid of one grid, that column is sized by the widest
@@ -107,7 +107,7 @@ that does not exist, dimmer than a real reference so it cannot be mistaken for
 one. It is `aria-hidden`; a missing reference is not worth announcing.
 
 Not the word "manual". The glyph beside it already names the source, and this
-column answers *which one*, not *what kind*. If runs ever carry a short
+column answers _which one_, not _what kind_. If runs ever carry a short
 displayable id, that is a better fill than the dash and should replace it.
 
 Only in lead position. Where the reference trails the prose there is no column
@@ -190,7 +190,7 @@ read-only mode — a run's view is always reachable, including for a run that ca
 no longer be resumed — so `nav: false` is for a row with nowhere to go, never
 for a viewer without permission.
 
-What a row does *not* do is act. No claim, no requeue, no snooze — the Board
+What a row does _not_ do is act. No claim, no requeue, no snooze — the Board
 owns the verbs, and a second place to act on a run is a second place for the
 two to disagree about its state. One target per row is also what makes a 35px
 row safe: the whole band is the hit area.

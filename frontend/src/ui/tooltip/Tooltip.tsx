@@ -177,8 +177,20 @@ export function Tooltip({
   // Focus opens with no delay. A delay keeps a tooltip from flickering under a
   // pointer crossing the screen; a keyboard never crosses anything, so waiting
   // only makes the hint feel broken.
+  //
+  // KEYBOARD focus only, though — marked by the absence of a preceding
+  // pointerdown. A pointer's focus is a side effect of its press, and the
+  // pointer already has its own routes in (hover, and the tap below); opening
+  // on it anyway made the press a flash, focus opening the hint and the click
+  // half of the same press toggling it straight shut.
+  const pointer = useRef(false)
+  const press = () => {
+    pointer.current = true
+  }
   const focus = () => {
-    if (!live) return
+    const fromPointer = pointer.current
+    pointer.current = false
+    if (!live || fromPointer) return
     if (timer.current) clearTimeout(timer.current)
     setOpen(true)
   }
@@ -187,6 +199,9 @@ export function Tooltip({
   // often inside a link, and a tap that navigates instead of explaining leaves
   // touch with no route to the hint at all.
   const tap = (e: MouseEvent) => {
+    // The press flag is consumed by focus on a fresh press and cleared here
+    // for a press on an already-focused host, which fires no focus event.
+    pointer.current = false
     if (!live) return
     e.preventDefault()
     e.stopPropagation()
@@ -205,6 +220,7 @@ export function Tooltip({
       onMouseEnter={show}
       onMouseLeave={hide}
       onClick={live ? tap : undefined}
+      onPointerDown={keyboard ? press : undefined}
       onFocus={keyboard ? focus : undefined}
       onBlur={keyboard ? hide : undefined}
       tabIndex={keyboard ? 0 : undefined}

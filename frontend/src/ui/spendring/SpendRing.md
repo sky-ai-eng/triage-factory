@@ -5,12 +5,12 @@ A spend total that decomposes in its own hole on hover. **No legend, ever.**
 ```tsx
 import { SpendRing } from '../../ui/spendring/SpendRing'
 
-<SpendRing models={byModel.map((m) => ({ name: m.model, v: m.cost }))} href={usageHref} />
+;<SpendRing models={byModel.map((m) => ({ name: m.model, v: m.cost }))} href={usageHref} />
 ```
 
 ## The legend is the design decision
 
-A permanent legend is a *promise of content*. On a zero-spend day it renders
+A permanent legend is a _promise of content_. On a zero-spend day it renders
 blank rows and reads as broken rather than as quiet — which is exactly how this
 component came to exist.
 
@@ -52,13 +52,13 @@ ellipses at 58% of the ring — the chord that clears the band at the caption's
 own height. Pass `shorten={(s) => s}` if the names are already display names.
 
 The open caption sits at **ink-2**, not ink-4: the standing label is a label
-and can be faint; a name is an *answer* to the pointer and has to be read.
+and can be faint; a name is an _answer_ to the pointer and has to be read.
 
 ## A bigger number, and a smaller ring
 
 **Both readouts scale from `size`**, on two ratios. The caption is already near
 the floor of legible mono, so it floors at **7.5px** — 7.5 rather than 8
-because at 8 the caption came out proportionally *larger* on a small ring and
+because at 8 the caption came out proportionally _larger_ on a small ring and
 "SPENT TODAY" ellipsed at 104px. The standing label has to fit at every size.
 
 **The figure drops precision, never characters.** Cents below $100, none above:
