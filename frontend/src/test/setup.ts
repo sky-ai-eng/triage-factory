@@ -9,6 +9,16 @@
 import '@testing-library/jest-dom/vitest'
 import { afterEach, vi } from 'vitest'
 import { cleanup } from '@testing-library/react'
+import { MotionGlobalConfig } from 'motion/react'
+
+// Animations resolve instantly under test. A motion entrance interpolates
+// opacity from 0, and jsdom advances it on real animation frames, so an
+// assertion racing the first frames sees an ancestor still at opacity 0 —
+// which jest-dom's toBeVisible counts as not visible. That makes any
+// "the dialog says X" assertion a coin flip on machine speed rather than a
+// statement about the component. Skipping puts every motion value at its
+// target on the first render, so what a test reads is the settled UI.
+MotionGlobalConfig.skipAnimations = true
 
 // jsdom ships no ResizeObserver; Radix primitives (Popover arrow sizing, etc.)
 // touch it on mount. A no-op stub is enough for the tests, which assert on
