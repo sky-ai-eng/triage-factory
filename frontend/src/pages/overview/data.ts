@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { Conversation, Task } from '../../types'
 import { ACTIVE_STATUSES, isFailedStatus, workStartedAt } from '../../lib/conversationStatus'
 import type { ActivityDay } from '../../hooks/useTeamActivity'
@@ -113,12 +114,14 @@ export function askProse(conv: Conversation): string {
 
 /** One RUNNING row. Age ticks from when work actually began (the claim stamp)
  *  so queue dwell never inflates working time; a queued row's age is its wait
- *  so far, beside the hourglass that says how many sit ahead. */
+ *  so far, beside the hourglass that says how many sit ahead. `renderAge`
+ *  turns that stamp into what the row wears — the page passes a live node
+ *  (ui/shared/LiveText over compactAge), tests pass a frozen clock. */
 export function runningRow(
   conv: Conversation,
   task: Task | undefined,
   href: string,
-  now: number = Date.now(),
+  renderAge: (iso: string) => ReactNode,
 ): RunRowItem {
   const queued = conv.Status === 'queued'
   return {
@@ -127,7 +130,7 @@ export function runningRow(
     lifecycle: lifecycleOf(conv),
     activity: workingProse(conv, task),
     ref: refOf(task),
-    age: compactAge(queued ? (conv.QueuedAt ?? conv.StartedAt) : workStartedAt(conv), now),
+    age: renderAge(queued ? (conv.QueuedAt ?? conv.StartedAt) : workStartedAt(conv)),
     // queue_position is the 1-based place in line; the mark wears the places
     // AHEAD (position − 1), which is the component's contract — position 1 is
     // nobody ahead, and the mark says so rather than showing a misleading 1.
@@ -143,7 +146,7 @@ export function needsRow(
   conv: Conversation,
   task: Task | undefined,
   href: string,
-  now: number = Date.now(),
+  renderAge: (iso: string) => ReactNode,
 ): RunRowItem {
   return {
     id: conv.ID,
@@ -151,7 +154,7 @@ export function needsRow(
     lifecycle: lifecycleOf(conv),
     activity: askProse(conv),
     ref: refOf(task),
-    age: compactAge(conv.CompletedAt ?? conv.StartedAt, now),
+    age: renderAge(conv.CompletedAt ?? conv.StartedAt),
     asks: true,
     href,
   }

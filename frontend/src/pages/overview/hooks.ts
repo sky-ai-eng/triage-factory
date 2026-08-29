@@ -17,8 +17,9 @@ import { utcMidnightISO } from './data'
 // Freshness is the invalidation-ping tier, same machinery as the shell rail:
 // a websocket hint says something moved, the page refetches through REST, and
 // REST carries the scoping. A client that misses a hint is stale, never wrong
-// — and there is no polling loop, because the page's own rule is that nothing
-// on it ticks.
+// — and there is no polling loop. The page's rule is that a tick never
+// fetches: the two wall-clock readouts (the masthead clock here, the row ages
+// via ui/shared/LiveText) recompute locally from time the page already holds.
 
 /**
  * The hints that can move a reading on this page. The rail's curated set, plus
@@ -255,10 +256,10 @@ export function useOpenPRCount(teamId: string, tick: number): number | null {
 }
 
 /**
- * The masthead's clock, updated on the minute. This is the page's one
- * sanctioned tick: the "nothing ticks" rule is about metrics performing, and
- * a clock that holds a stale minute is simply wrong. No animation rides the
- * change — FlapCount is for counts, not clocks.
+ * The masthead's clock, updated on the minute. A wall-clock readout, like the
+ * row ages: the "nothing ticks" rule is about metrics performing, and a clock
+ * that holds a stale minute is simply wrong. No animation rides the change —
+ * FlapCount is for counts, not clocks.
  */
 export function useClock(): { clock: string; date: string } {
   const [now, setNow] = useState(() => new Date())

@@ -58,8 +58,10 @@ export type RunRowItem = {
   activity: string
   /** The source's own reference, written the source's way: `repo#772`, `SKY-412`. */
   ref?: string | null
-  /** Elapsed, pre-formatted: `40s`, `11m`, `18h`. The row does no time math. */
-  age: string
+  /** Elapsed, pre-formatted: `40s`, `11m`, `18h`. The row does no time math —
+   *  a caller who wants the age to stay live passes a self-updating node
+   *  (ui/shared/LiveText) rather than teaching the row about clocks. */
+  age: ReactNode
   /**
    * The run wants a person. Independent of lifecycle — a done run holding an
    * open pull request still asks. Drives the warm tick, and warm is only ever

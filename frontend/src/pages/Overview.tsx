@@ -7,7 +7,15 @@ import type { ConvergeOutcome } from '../ui/converge/Converge'
 import { FlapCount } from '../ui/flapcount/FlapCount'
 import { CratePile } from '../ui/cratepile/CratePile'
 import { SpendRing } from '../ui/spendring/SpendRing'
-import { needsRow, ringModels, runningRow, utcMidnightISO, windowSums } from './overview/data'
+import { LiveText } from '../ui/shared/LiveText'
+import {
+  compactAge,
+  needsRow,
+  ringModels,
+  runningRow,
+  utcMidnightISO,
+  windowSums,
+} from './overview/data'
 import {
   useActivityWindow,
   useClock,
@@ -91,7 +99,13 @@ export default function Overview() {
     [navigate],
   )
 
-  const now = Date.now()
+  // A row's age stays live without anything else on the page moving: the
+  // leaf re-renders only when its own text changes (ui/shared/useLiveText),
+  // so a row past its first minute costs nothing between visible changes.
+  const renderAge = useCallback(
+    (iso: string) => <LiveText compute={(now) => compactAge(iso, now)} />,
+    [],
+  )
 
   const needsTotal = needs?.total ?? null
   const quiet = !offline && needsTotal === 0
@@ -102,9 +116,8 @@ export default function Overview() {
     )
     return rows
       .slice(0, NEEDS_SHOWN)
-      .map((c) => needsRow(c, tasks?.get(c.TaskID), runHref(c.ID), now))
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `now` is stamped per data change, not a tick
-  }, [needs, tasks, runHref])
+      .map((c) => needsRow(c, tasks?.get(c.TaskID), runHref(c.ID), renderAge))
+  }, [needs, tasks, runHref, renderAge])
 
   const runningItems = useMemo<RunRowItem[]>(() => {
     const rows = running?.rows ?? []
@@ -116,9 +129,8 @@ export default function Overview() {
       .sort((a, b) => (a.queue_position ?? 1e9) - (b.queue_position ?? 1e9))
     return [...live, ...queued]
       .slice(0, RUNNING_SHOWN)
-      .map((c) => runningRow(c, tasks?.get(c.TaskID), runHref(c.ID), now))
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `now` is stamped per data change, not a tick
-  }, [running, tasks, runHref])
+      .map((c) => runningRow(c, tasks?.get(c.TaskID), runHref(c.ID), renderAge))
+  }, [running, tasks, runHref, renderAge])
 
   const needsHidden = needsTotal != null ? Math.max(0, needsTotal - needsItems.length) : 0
   const runningHidden = running != null ? Math.max(0, running.total - runningItems.length) : 0

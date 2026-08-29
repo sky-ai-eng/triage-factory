@@ -126,12 +126,16 @@ describe('askProse', () => {
 })
 
 describe('rows', () => {
+  // The page passes a live node; a frozen clock here keeps the age strings
+  // assertable while still exercising the same stamp selection.
+  const frozenAge = (iso: string) => compactAge(iso, NOW)
+
   it('builds a running row that ticks from the claim stamp', () => {
     const r = runningRow(
       conv({ ClaimedAt: '2026-08-29T11:56:00Z', current_action: 'Running go test ./...' }),
       task({}),
       '/runs/c1',
-      NOW,
+      frozenAge,
     )
     expect(r).toMatchObject({
       id: 'c1',
@@ -149,7 +153,7 @@ describe('rows', () => {
       conv({ Status: 'queued', QueuedAt: '2026-08-29T11:59:00Z', queue_position: 3 }),
       task({}),
       '/runs/c1',
-      NOW,
+      frozenAge,
     )
     // Position 3 in line is two ahead — the mark wears the wait, not the rank.
     expect(r.queue).toBe(2)
@@ -161,7 +165,7 @@ describe('rows', () => {
       conv({ Status: 'completed', CompletedAt: '2026-08-29T10:00:00Z', unresolved_pr_count: 1 }),
       task({}),
       '/runs/c1',
-      NOW,
+      frozenAge,
     )
     expect(r.asks).toBe(true)
     expect(r.activity).toBe('Approve the draft pull request')

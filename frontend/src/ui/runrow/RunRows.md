@@ -27,6 +27,11 @@ line — a subject and an activity — give a row two centers of gravity, and th
 gutter between them goes ragged, because a short subject leaves a trench and a
 long one leaves none. That shape was built and cut.
 
+The age arrives pre-formatted; the row does no time math. A caller who wants
+it live passes a self-updating node — `ui/shared/LiveText` with the caller's
+own format — which keeps the once-a-second work confined to the age's text
+node instead of teaching this component about clocks.
+
 ## There is no title
 
 An agent run has no name of its own. What identifies it is the work, and the
