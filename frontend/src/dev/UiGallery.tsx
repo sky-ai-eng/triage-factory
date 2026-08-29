@@ -24,6 +24,7 @@ import AcquireCard from './AcquireCard'
 import CratePileCard from './CratePileCard'
 import FlapCountCard from './FlapCountCard'
 import PrimitivesCard from './PrimitivesCard'
+import RunRowsCard from './RunRowsCard'
 import ScanCard from './ScanCard'
 import SelectionBarCard from './SelectionBarCard'
 import ShellCard from './ShellCard'
@@ -323,6 +324,7 @@ export default function UiGallery() {
             <FlapCountCard />
             <CratePileCard />
             <SpendRingCard />
+            <RunRowsCard />
             <SelectionBarCard />
             <TableCard />
             <TeamPartsCard />
