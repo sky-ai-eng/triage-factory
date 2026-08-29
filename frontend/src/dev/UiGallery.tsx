@@ -22,6 +22,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import AcquireCard from './AcquireCard'
 import PrimitivesCard from './PrimitivesCard'
+import ScanCard from './ScanCard'
 import SelectionBarCard from './SelectionBarCard'
 import ShellCard from './ShellCard'
 import SourcePartsCard from './SourcePartsCard'
@@ -315,6 +316,7 @@ export default function UiGallery() {
             <AcquireCard />
             <PrimitivesCard />
             <TooltipCard />
+            <ScanCard />
             <SelectionBarCard />
             <TableCard />
             <TeamPartsCard />
