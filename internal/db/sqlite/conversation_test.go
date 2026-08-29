@@ -99,12 +99,18 @@ func seedSQLiteConversation(t *testing.T, conn *sql.DB, conv domain.Conversation
 	if conv.TriggerID != "" {
 		triggerID = conv.TriggerID
 	}
+	// An empty status is the mid-flight state — SQL NULL, which the display
+	// ladder reads as `queued` — not the empty string, which is no status.
+	var status any
+	if conv.Status != "" {
+		status = conv.Status
+	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, team_id, visibility,
 		                           creator_user_id, blueprint_run_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?)
-	`, id, conv.TaskID, conv.PromptID, conv.Status, conv.Model,
+	`, id, conv.TaskID, conv.PromptID, status, conv.Model,
 		trigger, triggerID, runmode.LocalDefaultTeamID, creator, conv.BlueprintRunID); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
@@ -154,6 +160,17 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 		},
 		Conversation: func(t *testing.T, conv domain.Conversation) string {
 			return seedSQLiteConversation(t, conn, conv)
+		},
+		BackdateStartedAt: func(t *testing.T, conversationID string, age time.Duration) {
+			t.Helper()
+			// datetime('now', ...) renders the same 'YYYY-MM-DD HH:MM:SS'
+			// shape CURRENT_TIMESTAMP writes, so a backdated row stays
+			// comparable with the ones the column default stamped.
+			if _, err := conn.Exec(
+				`UPDATE conversations SET started_at = datetime('now', ?) WHERE id = ?`,
+				fmt.Sprintf("-%d seconds", int64(age.Seconds())), conversationID); err != nil {
+				t.Fatalf("backdate started_at of %s: %v", conversationID, err)
+			}
 		},
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
 			t.Helper()

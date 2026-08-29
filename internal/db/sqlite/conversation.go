@@ -597,6 +597,27 @@ const sqliteDisplayStatusSQL = `COALESCE(
 		r.status,
 		'')`
 
+// sqliteQueuePositionCTE ranks the display-`queued` conversations by
+// (started_at, id) — the CTE body ConversationStore.List joins its page
+// against, so a queued row carries its place in line and every other row
+// carries SQL NULL. The Postgres twin carries the model, including what the
+// derivation is forbidden to read; this dialect is N=1, so "the org's queue"
+// and "the queue" are the same set and no org predicate appears.
+//
+// A window rather than the per-row correlated count the same answer could be
+// spelled as: sqliteDisplayStatusSQL is itself three correlated subqueries and
+// is written against the alias `r`, so counting the rows ahead of each row
+// would both re-run the whole ladder per pair and need a second copy of it
+// under another alias.
+const sqliteQueuePositionCTE = `
+	queued_positions AS (
+		SELECT r.id AS conversation_id,
+		       ROW_NUMBER() OVER (ORDER BY r.started_at, r.id) AS position
+		FROM conversations r
+		WHERE (` + sqliteDisplayStatusSQL + `) = 'queued'
+	)
+`
+
 // sqliteConversationLiveStatusesSQL is the display statuses that mean a LIVE
 // engagement — `running`, plus every claim phase — as a SQL IN-list body, and
 // the SQLite mirror of the Postgres twin. See that constant for the model:
@@ -733,7 +754,7 @@ func (s *conversationStore) ListForTask(ctx context.Context, orgID, taskID strin
 	var convs []domain.Conversation
 	for rows.Next() {
 		var r domain.Conversation
-		if err := scanConversationRows(rows, &r); err != nil {
+		if err := scanConversation(rows, &r); err != nil {
 			return nil, err
 		}
 		convs = append(convs, r)
@@ -783,15 +804,20 @@ func (s *conversationStore) List(ctx context.Context, orgID string, filter db.Co
 	// started_at DESC, id) makes a windowed read's pages partition a total
 	// order; on the unwindowed chunked path the order ACROSS chunks is chunk
 	// order, which is all the caller — grouping by conv.TaskID — relies on.
-	// Same projection as ListForTask.
+	// ListForTask's projection plus the queue position, which is a list-only
+	// column: the surface that renders a place in line renders a line. The
+	// rank spans the whole queue rather than the chunk, so a chunked read's
+	// positions agree with an unchunked one's.
 	var convs []domain.Conversation
 	for _, chunk := range chunks {
 		where, args := sqliteConversationListWhere(filter, chunk)
 		query := `
-			SELECT ` + sqliteConversationColumns + `
+			WITH ` + sqliteQueuePositionCTE + `
+			SELECT ` + sqliteConversationColumns + `, qp.position
 			FROM conversations r
 			LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id
 			LEFT JOIN agents a ON a.id = r.actor_agent_id
+			LEFT JOIN queued_positions qp ON qp.conversation_id = r.id
 			WHERE ` + where + `
 			ORDER BY r.task_id, r.started_at DESC, r.id`
 		if opts.Limit > 0 {
@@ -804,9 +830,14 @@ func (s *conversationStore) List(ctx context.Context, orgID string, filter db.Co
 		}
 		for rows.Next() {
 			var r domain.Conversation
-			if err := scanConversationRows(rows, &r); err != nil {
+			var position sql.NullInt64
+			if err := scanConversation(rows, &r, &position); err != nil {
 				rows.Close()
 				return nil, 0, err
+			}
+			if position.Valid {
+				p := int(position.Int64)
+				r.QueuePosition = &p
 			}
 			convs = append(convs, r)
 		}
@@ -1953,40 +1984,31 @@ func (s *conversationStore) BlueprintSiblingDurationMsSystem(ctx context.Context
 
 // --- Helpers ---
 
-func scanConversation(row *sql.Row, r *domain.Conversation) error {
-	var queuedAt, completedAt sql.NullTime
-	var claimedAt sql.NullString
-	var costUSD sql.NullFloat64
-	var durationMs, numTurns, blueprintStep sql.NullInt64
-	var parkReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
-
-	if err := row.Scan(
-		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
-		&costUSD, &durationMs, &numTurns, &parkReason, &worktreePath,
-		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
-		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
-		&r.MemoryMissing, &r.ActorAgentName,
-	); err != nil {
-		return err
-	}
-	return finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
-		model, parkReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
+// conversationScanner is satisfied by both *sql.Row and *sql.Rows, so
+// scanConversation serves the point read, the write-returning read and the
+// list reads off one destination list rather than copies kept in step by hand.
+type conversationScanner interface {
+	Scan(dest ...any) error
 }
 
-func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
+// scanConversation scans sqliteConversationColumns into r. extra takes the
+// destinations for whatever a caller appended to that list — the list read's
+// queue position, today — in the order it appended them.
+func scanConversation(sc conversationScanner, r *domain.Conversation, extra ...any) error {
 	var queuedAt, completedAt sql.NullTime
 	var claimedAt sql.NullString
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var parkReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
-	if err := rows.Scan(
+	dest := []any{
 		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &parkReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
-	); err != nil {
+	}
+	if err := sc.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
 	return finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,

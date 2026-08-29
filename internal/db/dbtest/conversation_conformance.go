@@ -67,8 +67,19 @@ type ConversationSeeder struct {
 	// only production mint; the conformance suite stages rows in arbitrary
 	// status without driving the queue. Fields honored: ID, TaskID,
 	// PromptID, Status, Model, TriggerType (default manual), TriggerID,
-	// BlueprintRunID.
+	// BlueprintRunID. An empty Status inserts SQL NULL — the mid-flight
+	// state a fresh mint carries, which the display ladder reads as
+	// `queued` — not an empty string, which is not a status at all.
 	Conversation func(t *testing.T, conv domain.Conversation) string
+
+	// BackdateStartedAt rewrites the conversation's started_at to `age` ago,
+	// on the BACKEND's own clock and in the backend's own storage format, so
+	// the suite can stage a queue whose order is unambiguous without
+	// depending on Go/DB clock skew or on how a driver renders a time.Time.
+	// No store method writes the column after the mint, and the default
+	// resolution is coarse enough (one second, in SQLite) that rows seeded
+	// back-to-back tie.
+	BackdateStartedAt func(t *testing.T, conversationID string, age time.Duration)
 
 	// ClaimRows returns the conversation's claims rows oldest-first, so
 	// the suite can assert mint/release bookkeeping.
@@ -2575,6 +2586,114 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			if got := filter(live...); len(got) != 1 || got[0] != queued {
 				t.Errorf("phase %s missing from the live status set: %v", phase, got)
 			}
+		}
+	})
+
+	t.Run("List_QueuePositionIsTheOrgLocalPlaceInLine", func(t *testing.T) {
+		// The queued run's hourglass: 1-based, ordered by (started_at, id)
+		// over the DISPLAY-queued rows, and absent for every other state. The
+		// number frees the row's prose to name the work instead of every
+		// queued row saying "waiting for a slot", so it has to move when the
+		// line moves — claiming the head repositions everyone behind it on
+		// the next read, with no write to any of their rows.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		ent := seed.Entity(t, "lft-qpos")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		task := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+		positions := func() map[string]*int {
+			t.Helper()
+			convs, _, err := store.List(ctx, orgID,
+				db.ConversationListFilter{TaskIDs: []string{task}}, db.ListOpts{Limit: 200})
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			out := map[string]*int{}
+			for _, c := range convs {
+				out[c.ID] = c.QueuePosition
+			}
+			return out
+		}
+		at := func(got map[string]*int, id string) string {
+			t.Helper()
+			p, ok := got[id]
+			if !ok {
+				t.Fatalf("conversation %s missing from the list", id)
+			}
+			if p == nil {
+				return "none"
+			}
+			return strconv.Itoa(*p)
+		}
+
+		// Three waiting, plus a concluded one that is older than all of them.
+		// Each started_at is staged on the backend's own clock, so the line's
+		// order is this fixture's rather than the insert timing's.
+		first := seedConversationForTaskTest(t, orgID, task, "", seed)
+		second := seedConversationForTaskTest(t, orgID, task, "", seed)
+		third := seedConversationForTaskTest(t, orgID, task, "", seed)
+		done := seedConversationForTaskTest(t, orgID, task, "completed", seed)
+		seed.BackdateStartedAt(t, first, 30*time.Minute)
+		seed.BackdateStartedAt(t, second, 20*time.Minute)
+		seed.BackdateStartedAt(t, third, 10*time.Minute)
+		seed.BackdateStartedAt(t, done, 40*time.Minute)
+
+		got := positions()
+		for id, want := range map[string]string{first: "1", second: "2", third: "3"} {
+			if p := at(got, id); p != want {
+				t.Errorf("queue position of %s = %s, want %s", id, p, want)
+			}
+		}
+		// A terminal row is in no line, however old it is — the oldest
+		// conversation here is deliberately the completed one, so a
+		// derivation that ranked by start time alone would hand it 1.
+		if p := at(got, done); p != "none" {
+			t.Errorf("completed conversation carries queue position %s, want none", p)
+		}
+
+		// Claiming the head takes it out of the line — it displays `running`
+		// now — and everyone behind it moves up by one, off the same read.
+		if _, err := store.SetExecutorSystem(ctx, orgID, first, "exec-qpos", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		got = positions()
+		if p := at(got, first); p != "none" {
+			t.Errorf("claimed head carries queue position %s, want none", p)
+		}
+		for id, want := range map[string]string{second: "1", third: "2"} {
+			if p := at(got, id); p != want {
+				t.Errorf("after the head was claimed, queue position of %s = %s, want %s", id, p, want)
+			}
+		}
+
+		// A deliberate park leaves the line too, and re-entering it by
+		// undelivered input puts the row back — the display ladder's own
+		// `queued` rung, which is why the position has to read the ladder and
+		// not the stored column.
+		if _, err := store.ParkOpen(ctx, orgID, second, db.ParkIdle()); err != nil {
+			t.Fatalf("ParkOpen: %v", err)
+		}
+		got = positions()
+		if p := at(got, second); p != "none" {
+			t.Errorf("parked conversation carries queue position %s, want none", p)
+		}
+		if p := at(got, third); p != "1" {
+			t.Errorf("after the park, queue position of %s = %s, want 1", third, p)
+		}
+		undelivered := false
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: second, Role: "user", Content: "carry on", Delivered: &undelivered,
+		}); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		got = positions()
+		if p := at(got, second); p != "1" {
+			t.Errorf("input-woken conversation queue position = %s, want 1", p)
+		}
+		if p := at(got, third); p != "2" {
+			t.Errorf("after the wake, queue position of %s = %s, want 2", third, p)
 		}
 	})
 
