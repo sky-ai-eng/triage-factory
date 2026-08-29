@@ -207,9 +207,12 @@ $$;
 -- Name: guard_org_owners(); Type: FUNCTION; Schema: tf; Owner: -
 --
 
+-- SECURITY DEFINER because the owner count must be read past RLS: on a
+-- self-leave the caller's own membership row is already gone, so an INVOKER
+-- read sees zero owners and raises a false 23514.
 -- +goose StatementBegin
 CREATE FUNCTION tf.guard_org_owners() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
 BEGIN
@@ -1817,7 +1820,12 @@ CREATE TABLE public.team_settings (
     -- Postgres is net-new and unshipped; the SQLite tree, which HAS shipped,
     -- carries 202608270001_model_enable_sets.sql.
     enabled_models text,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- Grace window (ms) an unattended permission prompt waits before denying
+    -- with "no operator available"; the boolean is the master toggle, false =
+    -- wait out the full permission timeout instead.
+    permission_absent_grace_ms integer DEFAULT 15000 NOT NULL,
+    permission_absent_autodeny_enabled boolean DEFAULT true NOT NULL
 );
 
 
@@ -1935,6 +1943,9 @@ CREATE TABLE public.user_github_identities (
     verified_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- NULL = the one-shot trailing-window dashboard history backfill is still
+    -- owed for this (user, host) identity; a timestamp = done.
+    dashboard_backfilled_at timestamp with time zone,
     CONSTRAINT user_github_identities_source_check CHECK ((source = ANY (ARRAY['pat'::text, 'connect_oauth'::text, 'scim'::text, 'login_claim'::text])))
 );
 
@@ -1972,7 +1983,7 @@ CREATE TABLE public.user_jira_identities (
     verified_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT user_jira_identities_source_check CHECK ((source = ANY (ARRAY['pat'::text, 'connect_oauth'::text, 'scim'::text])))
+    CONSTRAINT user_jira_identities_source_check CHECK ((source = ANY (ARRAY['pat'::text, 'connect_oauth'::text, 'scim'::text, 'cloud_api_token'::text])))
 );
 
 
@@ -6464,10 +6475,6 @@ GRANT ALL ON TABLE public.event_queue TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.event_queue TO tf_app;
 
 
---
--- consolidated from 202606150001_org_jira_apps.sql
---
-
 -- Per-org Atlassian OAuth (3LO) app registration — the (client_id,
 -- client_secret) of the Atlassian app the per-user "Connect Jira"
 -- authorize/token flow runs against. Mirrors org_github_apps but far simpler:
@@ -6522,24 +6529,6 @@ GRANT ALL ON TABLE public.org_jira_apps TO authenticated;
 GRANT ALL ON TABLE public.org_jira_apps TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_jira_apps TO tf_app;
 
-
---
--- consolidated from 202606160001_jira_identity_cloud_source.sql
---
-
--- Widen user_jira_identities.source to admit 'cloud_api_token' — the provenance
--- marker the Cloud per-user API-token bind records (the paste counterpart of the
--- Data Center 'pat'). The value set stays closed (identity provenance is
--- security-relevant); this only adds the one Cloud paste method. Cloud OAuth
--- ('connect_oauth') was already allowed by the baseline.
-ALTER TABLE public.user_jira_identities DROP CONSTRAINT user_jira_identities_source_check;
-ALTER TABLE public.user_jira_identities ADD CONSTRAINT user_jira_identities_source_check
-    CHECK ((source = ANY (ARRAY['pat'::text, 'connect_oauth'::text, 'scim'::text, 'cloud_api_token'::text])));
-
-
---
--- consolidated from 202606170001_org_secrets_app_encrypted.sql
---
 
 --
 -- Secrets are encrypted app-side (AES-256-GCM) rather than delegated to
@@ -6628,37 +6617,6 @@ REVOKE ALL ON public.org_secrets FROM PUBLIC;
 REVOKE ALL ON public.org_secrets FROM anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_secrets TO tf_app;
 
-
---
--- consolidated from 202606170002_dashboard_backfill_marker.sql
---
-
--- dashboard_backfilled_at marks that the one-shot trailing-window dashboard
--- history backfill has run for this (user, host) GitHub identity (TFAC-396).
--- See the SQLite sibling migration for the full rationale. NULL = eligible; a
--- timestamp = done. Written by the claims-free backfill worker through the
--- admin pool (MarkDashboardBackfilledSystem), so it carries no RLS policy of
--- its own beyond the table's existing per-user gates.
-ALTER TABLE public.user_github_identities ADD COLUMN dashboard_backfilled_at timestamp with time zone;
-
-
---
--- consolidated from 202606180001_permission_absent_autodeny.sql
---
-
--- Presence-gated fast auto-deny for unattended permission prompts (TFAC-392).
--- See the SQLite sibling migration for the full rationale. permission_absent_grace_ms
--- is the grace window (ms) an unattended prompt waits before denying with
--- "no operator available"; permission_absent_autodeny_enabled is the master toggle
--- (false = today's full-permTimeout() behavior, byte-for-byte). Both ship NOT NULL
--- with the same defaults as the SQLite tree and domain.DefaultTeamSettings().
-ALTER TABLE public.team_settings ADD COLUMN permission_absent_grace_ms integer NOT NULL DEFAULT 15000;
-ALTER TABLE public.team_settings ADD COLUMN permission_absent_autodeny_enabled boolean NOT NULL DEFAULT true;
-
-
---
--- consolidated from 202606180002_org_invites.sql
---
 
 --
 -- TFAC-416: TF-owned, link-based org invites. An org admin creates an
@@ -6752,54 +6710,6 @@ REVOKE ALL ON public.org_invites FROM PUBLIC;
 REVOKE ALL ON public.org_invites FROM anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_invites TO tf_app;
 
-
---
--- consolidated from 202606180003_guard_org_owners_security_definer.sql
---
-
--- guard_org_owners is the global invariant "every org must retain ≥1 owner",
--- fired by AFTER UPDATE/DELETE statement triggers on org_memberships. The
--- baseline created it SECURITY INVOKER (the default), so its owner-existence
--- check ran under the mutating caller's RLS context — fine for an admin
--- removing/demoting someone (the admin still satisfies org_memberships_select
--- and sees every row), but BROKEN for a self-leave: the DELETE removes the
--- caller's own membership row, and org_memberships_select gates peer rows on
--- tf.user_has_org_access(), which now returns false for the just-departed
--- caller. The check then sees zero rows, concludes the org has no owner, and
--- raises a false 23514 — so a non-owner could never leave.
---
--- A global-invariant guard must evaluate the TRUE org state, not the caller's
--- RLS-filtered view. Make it SECURITY DEFINER (matching every other tf.*
--- helper) so the owner count is read past RLS. The body is otherwise the
--- baseline's verbatim; search_path stays pinned, so the definer rights are
--- safe. Behavior for admin-context mutations is unchanged (they already saw
--- the full set); this only repairs the self-delete case.
-
--- +goose StatementBegin
-CREATE OR REPLACE FUNCTION tf.guard_org_owners() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM affected ao
-    WHERE NOT EXISTS (
-      SELECT 1 FROM org_memberships
-       WHERE org_id = ao.org_id AND role = 'owner'
-    )
-  ) THEN
-    RAISE EXCEPTION 'each org must retain at least one owner role'
-      USING ERRCODE = '23514';
-  END IF;
-  RETURN NULL;
-END;
-$$;
--- +goose StatementEnd
-
-
---
--- consolidated from 202606200001_sso.sql
---
 
 --
 -- TFAC-425 (epic TFAC-422): the TF-owned SSO binding tables. Two tables,
@@ -9168,15 +9078,6 @@ GRANT SELECT ON TABLE public.org_slack_workspaces TO tf_system;
 -- The executor's schema-compatibility assert (internal/db/migrations.go)
 -- reads this and nothing else; no DDL, ever.
 GRANT SELECT ON TABLE public.goose_db_version TO tf_system;
-
--- TFAC-622: backfill one 'primary' conversation_memory_entities row per pre-existing
--- conversation_memory row, so the entity-scoped read switch (entity_links UNION
--- arms, both dead — grep finds zero writers — replaced by membership
--- through this join) is result-identical for every row that exists as of
--- this migration.
-INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role, created_at)
-SELECT org_id, conversation_id, entity_id, 'primary', created_at FROM conversation_memory
-ON CONFLICT (conversation_id, entity_id) DO NOTHING;
 
 -- +goose Down
 SELECT 'down not supported';
