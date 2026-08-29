@@ -1,0 +1,260 @@
+/* RunRows — see RunRows.tsx for the reasoning. Layout notes only here.
+
+   The list is ONE grid and every row is a subgrid of it, so the age column and
+   the prose start line up down the whole list without any row knowing its own
+   width. A per-row flexbox cannot do that: each row would size its own columns
+   and the right edge would wander by a few px per row. */
+
+.rr {
+  display: grid;
+  grid-template-columns: 3px 14px minmax(0, 1fr) auto 10px;
+  align-items: center;
+  column-gap: 11px;
+}
+
+/* The trailing 10px column is a gutter, not a cell. Without it the age sits
+   hard against the container edge and reads as clipped. */
+
+.rr-row {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  align-items: center;
+  padding: 9px 0;
+  border-top: 1px solid var(--color-line-1);
+  text-decoration: none;
+  color: inherit;
+  transition: background 0.16s var(--ease-default);
+}
+.rr-row:first-child {
+  border-top: 0;
+}
+
+/* The whole band is the target. One destination per row is what lets a 35px row
+   be comfortable — density only bites when a row carries controls inside it. */
+a.rr-row:hover {
+  background: var(--color-tint-2);
+}
+.rr-warm.rr-row:hover {
+  background: var(--color-warm-1);
+}
+
+/* For a row with nowhere to go. Not a permission state — every run can be
+   read, including one that can no longer be resumed. */
+.rr-inert {
+  cursor: default;
+}
+
+.rr-tick {
+  align-self: stretch;
+  min-height: 15px;
+  border-radius: 1px;
+  background: var(--color-line-2);
+}
+.rr-warm .rr-tick {
+  background: var(--color-warm);
+}
+.rr-cool .rr-tick {
+  background: var(--color-cool);
+}
+.rr-alarm .rr-tick {
+  background: var(--color-alarm);
+}
+.rr-quiet .rr-tick {
+  background: color-mix(in srgb, var(--color-ink-4) 45%, transparent);
+}
+
+.rr-ico {
+  width: 14px;
+  height: 14px;
+  display: block;
+  stroke: var(--color-ink-4);
+}
+.rr-warm .rr-ico {
+  stroke: var(--color-warm);
+}
+.rr-alarm .rr-ico {
+  stroke: var(--color-alarm);
+}
+
+/* The PROSE dissolves; the reference does not. Masking the pair together made
+   the reference the sacrificial element — prose at flex:none never yielded, so
+   any sentence longer than the line pushed the reference into the fade and it
+   rendered as a cut, ghosted stub. The identity of the row has to survive.
+
+   The fade rides on the prose's own trailing padding, which is what keeps it
+   from dimming a SHORT sentence: text that fits ends before the padding, so the
+   gradient covers empty space and nothing is visibly faded. Text that does not
+   fit runs on into the padding and dissolves there. No measurement, no class
+   toggling, and it holds at any width. */
+.rr-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.rr-act {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  padding-right: 15px;
+  font: 400 12.5px/1.3 var(--font-sans);
+  color: var(--color-ink-2);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 15px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 15px), transparent);
+}
+.rr-quiet .rr-act {
+  color: var(--color-ink-3);
+}
+
+/* Centred, not baseline-aligned. At 11px mono against 12.5px sans the smaller
+   face has less cap height above a shared baseline, so its optical centre falls
+   below the sentence's and it reads as sitting low. */
+.rr-ref {
+  flex: none;
+  font: 400 11px/1.3 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+/* The queue mark. Warm because a wait is a measurement of the fleet, and the
+   count is the only number on the row — a bubble rather than plain digits so it
+   cannot be read as part of the reference beside it. */
+/* Age and queue mark share ONE end-aligned cell, so the column is as wide as
+   the widest tail and every row's right edge lands together. A queued row's
+   time is pushed left by its own mark and nothing else moves. */
+.rr-tail {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  white-space: nowrap;
+}
+.rr-q {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.rr-q-dot {
+  font: 400 10.5px/1 var(--font-mono);
+  color: var(--color-ink-4);
+}
+.rr-q-ico {
+  width: 11px;
+  height: 11px;
+  display: block;
+  stroke: var(--color-ink-4);
+}
+.rr-q-n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: var(--color-warm);
+  color: var(--color-warm-ink);
+  font: 500 9.5px/1 var(--font-mono);
+}
+
+.rr-age {
+  font: 400 10.5px/1 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+/* The activity shimmer, to the board's spec: 2.2s linear, infinite, the
+   gradient clipped to the glyphs. Emission — an agent is acting. Nothing else
+   in the product may use this motion.
+
+   no-repeat is load-bearing: the default tiles the gradient, so a second crest
+   arrives mid-pass and the wrap reads as a skip. At 300% the element is always
+   fully covered, so clipping to text stays safe. */
+.rr-shim {
+  font-weight: 500;
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--color-ink-3) 40%, transparent) 0%,
+    color-mix(in srgb, var(--color-ink-3) 40%, transparent) 42%,
+    var(--color-ink-1) 50%,
+    color-mix(in srgb, var(--color-ink-3) 40%, transparent) 58%,
+    color-mix(in srgb, var(--color-ink-3) 40%, transparent) 100%
+  );
+  background-size: 300% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: rr-sh 2.2s linear infinite;
+}
+@keyframes rr-sh {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0% 0;
+  }
+}
+
+.rr-sec {
+  display: flex;
+  flex-direction: column;
+}
+.rr-head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 0 0 7px;
+}
+.rr-label {
+  font: 400 9px/1 var(--font-mono);
+  letter-spacing: 0.09em;
+  color: var(--color-ink-4);
+}
+.rr-count {
+  font: 500 9px/1 var(--font-mono);
+  color: var(--color-ink-3);
+}
+.rr-count.rr-count-warm {
+  color: var(--color-warm);
+}
+.rr-count.rr-count-cool {
+  color: var(--color-cool);
+}
+
+.rr-empty {
+  padding: 11px 0;
+  font: 400 13px/1.4 var(--font-sans);
+  color: var(--color-ink-2);
+  border-top: 1px solid var(--color-line-1);
+}
+.rr-note {
+  padding: 8px 0 0 28px;
+  font: 400 10.5px/1.5 var(--font-mono);
+}
+.rr-note a {
+  color: var(--color-ink-4);
+  text-decoration: none;
+  transition: color 0.16s var(--ease-default);
+}
+.rr-note a:hover {
+  color: var(--color-ink-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The shimmer is the only thing that carries "working" here, so removing the
+     motion has to leave the text lit rather than transparent. */
+  .rr-shim {
+    animation: none;
+    background: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+    color: var(--color-ink-1);
+  }
+  .rr-row {
+    transition: none;
+  }
+}

@@ -1,0 +1,203 @@
+/* The Overview's layout. One screen at 1440×900, no scroll; below the minimum
+   the page scrolls rather than clipping. Type and controls stay fixed —
+   layout is fluid, and the leftover height collects at the foot rather than
+   being distributed. See pages/Overview.tsx for the reasoning. */
+
+.ov {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 26px 22px;
+  box-sizing: border-box;
+  overflow: auto;
+}
+
+.ov-away {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.ov-away-lead {
+  font: 500 12.5px/1.4 var(--font-sans);
+  color: var(--color-ink-2);
+}
+.ov-away-tail {
+  font: 400 11.5px/1.4 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+.ov-needs {
+  order: 2;
+  flex: none;
+}
+
+/* RUNNING and the day's spend share a wrapping row, so below roughly 800px of
+   content width the donut drops beneath on its own — no breakpoint owns that,
+   which is why it also holds at widths nobody tested. */
+.ov-live {
+  order: 3;
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 26px;
+  align-items: flex-start;
+}
+.ov-runcol {
+  flex: 1 1 460px;
+  min-width: 0;
+}
+
+/* The quiet state: nothing needing you is an ANSWER, stated in words, and the
+   day's figures move up into the space. */
+.ov-quiet {
+  display: flex;
+  align-items: baseline;
+  gap: 26px;
+}
+.ov-quiet-word {
+  font: 400 13px/1.4 var(--font-sans);
+  color: var(--color-ink-2);
+}
+.ov-quiet-figs {
+  margin-left: auto;
+  display: flex;
+  gap: 30px;
+}
+.ov-fig {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.ov-fig-label {
+  font: 400 8.5px/1 var(--font-mono);
+  letter-spacing: 0.09em;
+  color: var(--color-ink-4);
+}
+.ov-fig-value {
+  font: 500 15px/1 var(--font-mono);
+  color: var(--color-ink-1);
+}
+
+/* The day's spend, inline with RUNNING so the live band reads as one row of
+   "right now". A flat ring on purpose — the total in the hole, one warm ramp. */
+.ov-donut {
+  flex: 0 1 330px;
+  min-width: 270px;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ov-donut-head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+.ov-donut-label {
+  font: 400 9px/1 var(--font-mono);
+  letter-spacing: 0.09em;
+  color: var(--color-ink-4);
+}
+.ov-donut-sub {
+  font: 400 9px/1 var(--font-mono);
+  color: var(--color-ink-4);
+}
+/* The chart row centres in the leftover space while the header stays put. */
+.ov-donut-row {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.ov-ring {
+  flex: none;
+  position: relative;
+  width: 104px;
+  height: 104px;
+}
+.ov-ring svg {
+  width: 104px;
+  height: 104px;
+  display: block;
+  transform: rotate(-90deg);
+}
+.ov-ring-seg {
+  animation: ov-fade 0.5s var(--ease-default) both;
+}
+.ov-hole {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+.ov-hole-total {
+  font: 500 14px/1 var(--font-mono);
+  color: var(--color-ink-1);
+}
+.ov-hole-word {
+  font: 400 8px/1 var(--font-mono);
+  letter-spacing: 0.09em;
+  color: var(--color-ink-4);
+}
+.ov-legend {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ov-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.ov-legend-swatch {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+.ov-legend-name {
+  font: 400 11.5px/1 var(--font-sans);
+  color: var(--color-ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ov-legend-value {
+  margin-left: auto;
+  font: 400 11px/1 var(--font-mono);
+  color: var(--color-ink-3);
+}
+
+@keyframes ov-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+/* The convergence is the one thing with a height RANGE, and it does not
+   stretch freely: a plot that flexes without bound flattens the strands to
+   near-horizontal on a tall window, and the minimum stops it squeezing until
+   its own footer overflows. The page measures the pixel room and converts it
+   into Converge's viewBox unit — see the measurement in Overview.tsx. */
+.ov-conv {
+  order: 4;
+  flex: 1;
+  min-height: 197px;
+  max-height: 357px;
+  display: flex;
+  flex-direction: column;
+  padding-top: 14px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ov-ring-seg {
+    animation: none;
+  }
+}

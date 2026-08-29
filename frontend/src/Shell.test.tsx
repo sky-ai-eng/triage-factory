@@ -41,6 +41,15 @@ vi.mock('./hooks/useTeams', () => ({
     refresh: vi.fn(),
     createTeam: vi.fn(),
   }),
+  // The shell's scope selection (the org · team mark). Unresolved here — these
+  // tests are about grants, and an empty teams list resolves no scope anyway.
+  useActiveTeam: () => ({
+    teamId: '',
+    setTeamId: vi.fn(),
+    multi: false,
+    ready: false,
+    teams: [],
+  }),
 }))
 
 vi.mock('./hooks/useEntitlements', () => ({

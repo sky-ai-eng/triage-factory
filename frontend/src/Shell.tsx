@@ -8,7 +8,8 @@ import { useRailCounts } from './hooks/useRailCounts'
 import { useWsConnected } from './hooks/useWebSocket'
 import { useOptionalAuth } from './contexts/AuthContext'
 import { useOrgRole } from './hooks/useOrgRole'
-import { useTeams } from './hooks/useTeams'
+import { useActiveTeam, useTeams } from './hooks/useTeams'
+import type { ShellScope } from './hooks/useShellScope'
 import { FeatureFleet, useEntitlements } from './hooks/useEntitlements'
 import { getStoredTheme, setTheme as applyStoredTheme } from './lib/theme'
 import { ChromeProvider } from './contexts/ChromeContext'
@@ -142,6 +143,26 @@ export default function Shell() {
   const activeOrg = auth?.orgs?.find((o) => o.id === auth?.serverActiveOrgId) ?? auth?.orgs?.[0]
   const teamNames = useMemo(() => teams.map((t) => t.name), [teams])
 
+  // The org · team mark is the SCOPE CONTROL for pages that carry none of
+  // their own (the Overview, by design): one persisted selection, seeded like
+  // every single-team page scope, resolved to a concrete team the moment the
+  // teams list loads (the sole team when there is only one). The resolved team
+  // rides the outlet context so switching in the rail reframes the page in the
+  // same render that moves the mark.
+  const { teamId: pickedTeamId, setTeamId: setPickedTeamId } = useActiveTeam('shell')
+  const scopeTeam = teams.find((t) => t.id === pickedTeamId) ?? teams[0] ?? null
+  const scope = useMemo<ShellScope>(
+    () => ({ teamId: scopeTeam?.id ?? '', teamName: scopeTeam?.name ?? '' }),
+    [scopeTeam?.id, scopeTeam?.name],
+  )
+  const onTeamChange = useCallback(
+    (name: string) => {
+      const picked = teams.find((t) => t.name === name)
+      if (picked) setPickedTeamId(picked.id)
+    },
+    [teams, setPickedTeamId],
+  )
+
   // Rail tails are facts about destinations, and every one of them needs a
   // `total` this API does not return yet (backend-needs.md, items 1-8). Absent
   // rather than zero: a tail reading 0 says "no repositories", which is a claim,
@@ -184,8 +205,9 @@ export default function Shell() {
             governance: false,
           }}
           org={activeOrg?.name ?? (isMulti ? '' : 'Triage Factory')}
-          team={teams[0]?.name ?? ''}
+          team={scope.teamName}
           teams={teamNames}
+          onTeamChange={onTeamChange}
           route={route}
           onRoute={onRoute}
           // The header band is the shell's; what fills it is the page's. A page
@@ -209,7 +231,7 @@ export default function Shell() {
           onThemeChange={onThemeChange}
           onSignOut={isMulti ? () => void auth?.logout() : undefined}
         >
-          <Outlet />
+          <Outlet context={scope} />
         </UiShell>
       )}
     </ChromeProvider>
