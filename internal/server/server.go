@@ -864,6 +864,10 @@ func (s *Server) routes() {
 	// spend node's sibling with the member-level gate (the team page's
 	// figures are every member's; spend stays admin-gated on /usage).
 	s.api("GET /api/teams/{team_id}/activity", s.handleTeamActivity)
+	// The team's pull requests — the PR page's team arm, and (as its
+	// count-only read) the Overview's OPEN PRS figure. Same member-level
+	// gate as the flow node beside it.
+	s.apiMutating("POST /api/teams/{team_id}/prs/list", s.handleTeamPRList)
 	// Org-scoped operations subset (TFAC-589): an org admin's own queue waits +
 	// run durations + failure rates. Org-admin gated, SaaS-safe (no cross-tenant
 	// machine truth) — the org-facing complement to the operator-only fleet console.

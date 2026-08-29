@@ -414,4 +414,21 @@ type EntityStore interface {
 	// like every other method in that store, where a WHERE predicate would
 	// match every row by construction and assert nothing.
 	StampOwningTeamIfUnsetSystem(ctx context.Context, orgID, entityID, teamID string) (stamped bool, err error)
+
+	// StampCommissionedByIfUnsetSystem writes entities.commissioned_by_user_id
+	// under the identical contract, for the other half of the same moment: the
+	// human who ASKED for the run that opened this pull request (the
+	// conversation's creator). Returns stamped=false (no error) when the row
+	// already names one, when userID is empty — an event-triggered run, where
+	// nobody asked — and when no such entity exists.
+	//
+	// It is provenance, not ownership, and the two columns answer to different
+	// readers: routing reads the owning team, the personal pull-request list
+	// reads this. They are written side by side because the funnel is the one
+	// place both values are in hand, not because either implies the other.
+	//
+	// Admin-pool, and stamp-if-NULL for the same convergence reason as its
+	// neighbour: the funnel races the poller's mint of the same entity, first
+	// commit wins, and re-delivery of the same PR-open write is a no-op.
+	StampCommissionedByIfUnsetSystem(ctx context.Context, orgID, entityID, userID string) (stamped bool, err error)
 }

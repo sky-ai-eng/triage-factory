@@ -115,6 +115,30 @@ func (s *entityStore) StampOwningTeamIfUnsetSystem(ctx context.Context, orgID, e
 	return n > 0, nil
 }
 
+// StampCommissionedByIfUnsetSystem is the same statement against the
+// provenance column: the human whose ask produced this pull request. Written
+// beside the owning-team stamp because that is the one moment both values are
+// in hand — the columns are otherwise unrelated, and neither implies the
+// other.
+func (s *entityStore) StampCommissionedByIfUnsetSystem(ctx context.Context, orgID, entityID, userID string) (bool, error) {
+	if userID == "" {
+		return false, nil
+	}
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE entities
+		SET commissioned_by_user_id = $1
+		WHERE org_id = $2 AND id = $3 AND commissioned_by_user_id IS NULL
+	`, userID, orgID, entityID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *entityStore) GetBySource(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error) {
 	return getEntityBySource(ctx, s.q, orgID, source, sourceID)
 }

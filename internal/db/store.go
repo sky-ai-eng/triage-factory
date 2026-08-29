@@ -101,6 +101,13 @@ type Stores struct {
 	// RLS; this non-tx binding exists for wiring symmetry.
 	TeamActivity TeamActivityStore
 
+	// TeamPRs is the team arm of the pull-request list (POST
+	// /api/teams/{team_id}/prs/list, and the Overview's OPEN PRS figure as
+	// its count-only read). Same posture as TeamActivity: read it through
+	// TxStores under the caller's claims, where the tracked-set semi-join is
+	// bounded by team_github_repos RLS.
+	TeamPRs TeamPRStore
+
 	// Conversations owns conversations + messages — agent conversation
 	// lifecycle and transcript (per-engagement execution state lives on
 	// claims). App pool in Postgres; every consumer is
@@ -489,6 +496,7 @@ type TxStores struct {
 	Tasks                    TaskStore
 	Factory                  FactoryReadStore
 	TeamActivity             TeamActivityStore
+	TeamPRs                  TeamPRStore
 	Conversations            ConversationStore
 	Artifacts                ArtifactStore
 	Entities                 EntityStore

@@ -622,6 +622,16 @@ CREATE TABLE public.entities (
     description text DEFAULT ''::text NOT NULL,
     state text DEFAULT 'active'::text NOT NULL,
     owning_team_id uuid,
+    -- commissioned_by_user_id records WHO ASKED for the work that produced
+    -- this object: the creator of the conversation whose run opened the pull
+    -- request, stamped at the exec recording funnel. It is provenance, not
+    -- ownership -- owning_team_id is the structural-owner axis routing reads,
+    -- and this column must never be spelled as a second owner. NULL for
+    -- everything a human opened directly and for every event-triggered run,
+    -- where no human asked. Its one reader is the personal pull-request list,
+    -- which unions it with the author predicate so a PR the bot opened on your
+    -- behalf is one of yours.
+    commissioned_by_user_id uuid,
     last_polled_at timestamp with time zone,
     closed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -2507,6 +2517,19 @@ CREATE INDEX idx_entities_github_author ON public.entities USING btree (org_id, 
 
 
 --
+-- Name: idx_entities_commissioned_by; Type: INDEX; Schema: public; Owner: -
+--
+
+-- Serves the personal pull-request list's second leg (commissioned by me),
+-- which is OR-ed with the author predicate the index above serves. Partial on
+-- the column being set, because a stamp only ever lands on a bot-opened pull
+-- request and every other entity in the org would otherwise be indexed to
+-- answer a question about none of them.
+
+CREATE INDEX idx_entities_commissioned_by ON public.entities USING btree (org_id, commissioned_by_user_id, last_polled_at DESC) WHERE (commissioned_by_user_id IS NOT NULL);
+
+
+--
 -- Name: idx_entities_org_source_polled; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3157,6 +3180,14 @@ ALTER TABLE ONLY public.entities
 
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_owning_team_id_fkey FOREIGN KEY (owning_team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
+
+
+--
+-- Name: entities entities_commissioned_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entities
+    ADD CONSTRAINT entities_commissioned_by_user_id_fkey FOREIGN KEY (commissioned_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
 
 
 --

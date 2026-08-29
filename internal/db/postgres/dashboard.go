@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -87,53 +89,65 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 	return stats, nil
 }
 
-// PRs pages the caller's authored PRs. The author predicate is `snapshot_json
-// ->> 'author'`, matching idx_entities_github_author — the Go-side filter it
-// replaced read every GitHub entity in the org on every dashboard load, and a
-// window over that scan would have paged the wrong set (LIMIT applies before
-// the filter, so page 2 could be empty while page 3 has rows).
-func (s *dashboardStore) PRs(ctx context.Context, orgID, username string, opts db.ListOpts) ([]domain.PRSummaryRow, int, error) {
-	const where = `
-		WHERE org_id = $1 AND source = 'github' AND snapshot_json IS NOT NULL
-		  AND snapshot_json ->> 'author' = $2`
+// PRs pages the caller's own pull requests: authored under their GitHub login,
+// or commissioned by them (a run they asked for opened it under the bot's
+// login). Both legs are SQL predicates matching their indexes —
+// idx_entities_github_author and idx_entities_commissioned_by — because the
+// Go-side filter this replaced read every GitHub entity in the org on every
+// dashboard load, and a window over that scan would have paged the wrong set
+// (LIMIT applies before the filter, so page 2 could be empty while page 3 has
+// rows).
+//
+// A viewer naming neither identity has no population to answer for and gets an
+// empty page rather than the whole org's.
+func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRViewer, f db.PRListFilter, opts db.ListOpts) ([]domain.PRSummaryRow, int, error) {
+	stateClause, err := pgPRStateClause(f.States)
+	if err != nil {
+		return nil, 0, err
+	}
+	// Each leg binds only when the viewer carries that id, so an unbound
+	// GitHub identity narrows the list to what they commissioned instead of
+	// matching every row whose author is the empty string.
+	args := []any{orgID}
+	legs := make([]string, 0, 2)
+	if viewer.Login != "" {
+		args = append(args, viewer.Login)
+		legs = append(legs, fmt.Sprintf("e.snapshot_json ->> 'author' = $%d", len(args)))
+	}
+	if viewer.UserID != "" {
+		args = append(args, viewer.UserID)
+		legs = append(legs, fmt.Sprintf("e.commissioned_by_user_id = $%d", len(args)))
+	}
+	if len(legs) == 0 {
+		return []domain.PRSummaryRow{}, 0, nil
+	}
+
+	where := `
+		WHERE e.org_id = $1 AND e.source = 'github' AND e.snapshot_json IS NOT NULL
+		  AND (` + strings.Join(legs, " OR ") + `)` + stateClause
 
 	var total int
-	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities`+where, orgID, username).Scan(&total); err != nil {
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities e`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if opts.CountOnly {
 		return []domain.PRSummaryRow{}, total, nil
 	}
 
-	query := `SELECT snapshot_json FROM entities` + where + `
-		ORDER BY last_polled_at DESC NULLS LAST, id`
-	args := []any{orgID, username}
+	query := `SELECT e.snapshot_json FROM entities e` + where + pgPRSummaryOrder
 	if opts.Limit > 0 {
-		query += ` LIMIT $3 OFFSET $4`
+		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2)
 		args = append(args, opts.Limit, opts.Offset)
 	}
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
-
-	prs := []domain.PRSummaryRow{}
-	for rows.Next() {
-		var snapJSON []byte
-		if err := rows.Scan(&snapJSON); err != nil {
-			continue
-		}
-		if len(snapJSON) == 0 {
-			continue
-		}
-		var snap domain.PRSnapshot
-		if err := json.Unmarshal(snapJSON, &snap); err != nil {
-			continue
-		}
-		prs = append(prs, domain.PRSummaryFromSnapshot(snap))
+	prs, err := pgScanPRSummaries(rows)
+	if err != nil {
+		return nil, 0, err
 	}
-	return prs, total, rows.Err()
+	return prs, total, nil
 }
 
 // buildDashboardTimeline reshapes the per-day count map into a

@@ -157,7 +157,7 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	// on the common path the two want the same entity — githubAction copies the
 	// artifact's target and url onto the action — and resolving is a
 	// FindOrCreate, not a read.
-	stampPROwnership(ctx, stores, info, a, touched)
+	stampPRAttribution(ctx, stores, info, a, touched)
 }
 
 // --- touched-entity resolution (TFAC-513 §2) ---
@@ -232,7 +232,7 @@ func recordEntityTouch(ctx context.Context, stores db.Stores, info ConversationI
 // two consumers of the same funnel call. The coordinates ride along with the id
 // because reuse is only sound when the second consumer wants the same key, and
 // the two are not the same field: the touch resolves off the external action,
-// the ownership stamp off the artifact.
+// the attribution stamps off the artifact.
 type resolvedEntity struct {
 	entityID string
 	provider string
@@ -250,7 +250,7 @@ func (r resolvedEntity) matches(provider, target string) bool {
 // touch. A nil action (an audit-only write with no external action) touches
 // nothing. See recordEntityTouch for the best-effort + outside-the-tx contract.
 //
-// Returns what it resolved, for stampPROwnership to reuse — see the funnel.
+// Returns what it resolved, for stampPRAttribution to reuse — see the funnel.
 func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction) resolvedEntity {
 	if act == nil {
 		return resolvedEntity{}
@@ -262,18 +262,26 @@ func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInf
 	}
 }
 
-// --- owning-team stamp for a bot-opened PR ---
+// --- attribution stamps for a bot-opened PR ---
 
-// stampPROwnership records the commissioning team on the entity behind a PR the
-// bot just opened, so the router can route that PR's later events to the team
-// whose work produced it.
+// stampPRAttribution records, on the entity behind a PR the bot just opened,
+// the two facts only the run knows: the team that commissioned it
+// (owning_team_id) and the human who asked for it
+// (commissioned_by_user_id).
 //
-// The gap it fills: routing resolves an owner from the entity's author, and the
-// author of a PR TF opened is a bot that maps to no TF user. Nothing else on the
-// PR carries the answer either — the run that opened it does, and this is the
-// only moment the two are in the same place. Left unstamped, the PR's first
-// ci_check_failed finds no owner and mints a task for nobody unless the repo
-// happens to be project-attached.
+// The gap they fill is the same one twice. The author of a PR TF opened is a
+// bot that maps to no TF user, so neither routing's owner nor the personal
+// list's "mine" can be derived from the object itself — the run that opened it
+// carries both answers, and this is the only moment the run and the entity are
+// in the same place. Left unstamped, the PR's first ci_check_failed finds no
+// owner and mints a task for nobody unless the repo happens to be
+// project-attached, and the person who pressed delegate never sees the pull
+// request their own ask produced.
+//
+// The two columns are written together and mean different things: the team is
+// the structural OWNER routing reads, the user is PROVENANCE — who asked —
+// and is never read as a second owner. Each is independently guarded, so a run
+// with a team and no human (an event-triggered one) stamps only the owner.
 //
 // Scoped to kind=pull_request deliberately. A submitted-review artifact shares
 // the owner/repo#N target shape, and reviewing someone else's PR is the clearest
@@ -295,14 +303,15 @@ func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInf
 // only when it names the same (provider, target) the artifact does, so the
 // artifact stays the authority for who owns the PR even if the action beside it
 // ever points somewhere else.
-func stampPROwnership(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, touched resolvedEntity) {
+func stampPRAttribution(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, touched resolvedEntity) {
 	if a == nil || a.Provider != domain.ArtifactProviderGitHub || a.Kind != domain.ArtifactKindPullRequest {
 		return
 	}
 	// Defensive: auto-fire is gated on an owned task and artifacts.team_id is
-	// NOT NULL, so a conversation without a team should not reach here. If one does,
-	// there is no owner to record and the entity keeps its NULL.
-	if info.TeamID == "" || stores.Entities == nil {
+	// NOT NULL, so a conversation without a team should not reach here. A run
+	// with neither a team nor a creator has nothing to attribute, so there is
+	// nothing to resolve an entity for either.
+	if (info.TeamID == "" && info.UserID == "") || stores.Entities == nil {
 		return
 	}
 	entityID := touched.entityID
@@ -310,7 +319,7 @@ func stampPROwnership(ctx context.Context, stores db.Stores, info ConversationIn
 		var err error
 		entityID, err = resolveTouchedEntityInfo(ctx, stores, info, a.Provider, a.Target, a.URL)
 		if err != nil {
-			agenthostLog.Warn("owning-team stamp skipped: entity resolve failed",
+			agenthostLog.Warn("PR attribution stamp skipped: entity resolve failed",
 				"conversation", info.ConversationID, "target", a.Target, "error", err)
 			return
 		}
@@ -322,11 +331,24 @@ func stampPROwnership(ctx context.Context, stores db.Stores, info ConversationIn
 	if err != nil {
 		agenthostLog.Warn("owning-team stamp failed",
 			"conversation", info.ConversationID, "entity", entityID, "target", a.Target, "error", err)
+	} else if stamped {
+		agenthostLog.Info("stamped owning team on bot-opened PR",
+			"conversation", info.ConversationID, "entity", entityID, "target", a.Target, "team", info.TeamID)
+	}
+	// info.UserID is conversations.creator_user_id — the accountable asker, not
+	// whoever drove the turn that ran the create. Empty for an event-triggered
+	// run, where the stamp is correctly a no-op. A failure here is independent
+	// of the one above: neither column is worth losing because the other's
+	// write failed.
+	stamped, err = stores.Entities.StampCommissionedByIfUnsetSystem(ctx, info.OrgID, entityID, info.UserID)
+	if err != nil {
+		agenthostLog.Warn("commissioned-by stamp failed",
+			"conversation", info.ConversationID, "entity", entityID, "target", a.Target, "error", err)
 		return
 	}
 	if stamped {
-		agenthostLog.Info("stamped owning team on bot-opened PR",
-			"conversation", info.ConversationID, "entity", entityID, "target", a.Target, "team", info.TeamID)
+		agenthostLog.Info("stamped commissioning user on bot-opened PR",
+			"conversation", info.ConversationID, "entity", entityID, "target", a.Target, "user", info.UserID)
 	}
 }
 

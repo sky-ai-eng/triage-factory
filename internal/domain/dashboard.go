@@ -34,6 +34,27 @@ type PRSummaryRow struct {
 	HTMLURL   string   `json:"html_url"`
 }
 
+// The pull-request list's state vocabulary. These are the values
+// PRSummaryRow.State renders AND the values the list routes' `states` filter
+// accepts, deliberately the same set: a client narrows by what it reads back,
+// rather than learning a second spelling of the same three answers.
+//
+// GitHub reports a merged pull request as CLOSED with merged=true on one wire
+// shape and as MERGED on another, so "merged" is a state of its own here and
+// "closed" means closed-and-not-merged. A snapshot state outside the three
+// passes through PRSummaryFromSnapshot verbatim rather than being folded into
+// one of them, so a value the UI cannot render stays legible in a bug report.
+const (
+	PRStateOpen   = "open"
+	PRStateMerged = "merged"
+	PRStateClosed = "closed"
+)
+
+// PRListStates is that vocabulary as a list, for the strict validation the
+// pull-request list routes do on their `states` filter — and for the message
+// they name the accepted values in when a caller misses.
+var PRListStates = []string{PRStateOpen, PRStateMerged, PRStateClosed}
+
 // PRSummaryFromSnapshot projects a stored PR snapshot onto the dashboard row.
 // It lives here rather than in each dialect because the projection is between
 // two domain types and has nothing to do with either backend — the two copies
@@ -47,14 +68,14 @@ func PRSummaryFromSnapshot(snap PRSnapshot) PRSummaryRow {
 	state := snap.State
 	switch state {
 	case "OPEN":
-		state = "open"
+		state = PRStateOpen
 	case "CLOSED":
-		state = "closed"
+		state = PRStateClosed
 	case "MERGED":
-		state = "merged"
+		state = PRStateMerged
 	}
 	if snap.Merged {
-		state = "merged"
+		state = PRStateMerged
 	}
 	return PRSummaryRow{
 		Number:    snap.Number,

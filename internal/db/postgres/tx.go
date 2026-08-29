@@ -163,6 +163,11 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		Tasks:        newTaskStore(tx, s.admin),
 		Factory:      newFactoryReadStore(tx),
 		TeamActivity: newTeamActivityStore(tx),
+		// TeamPRs: the page runs through the tx so the tracked-set semi-join
+		// reads under the caller's claims; the admin half stays s.admin so the
+		// member-login lookup can see peers' bindings, which self-only RLS
+		// hides.
+		TeamPRs: newTeamPRStore(tx, s.admin),
 		// Conversations: composed half is tx; admin half stays the
 		// real admin pool so event-triggered Create can route
 		// around RLS. The admin write commits autonomously from

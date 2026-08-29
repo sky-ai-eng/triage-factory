@@ -515,6 +515,26 @@ func newPgEntitySeeder(conn *sql.DB, orgID, userID string) dbtest.EntitySeeder {
 			}
 			return id
 		},
+		User: func(t *testing.T, name string) string {
+			t.Helper()
+			id := uuid.New().String()
+			if _, err := conn.Exec(
+				`INSERT INTO users (id, display_name) VALUES ($1, $2)`, id, name,
+			); err != nil {
+				t.Fatalf("seed user %s: %v", name, err)
+			}
+			return id
+		},
+		CommissionedBy: func(t *testing.T, entityID string) string {
+			t.Helper()
+			var got sql.NullString
+			if err := conn.QueryRow(
+				`SELECT commissioned_by_user_id FROM entities WHERE id = $1`, entityID,
+			).Scan(&got); err != nil {
+				t.Fatalf("read commissioned_by_user_id for %s: %v", entityID, err)
+			}
+			return got.String
+		},
 	}
 }
 

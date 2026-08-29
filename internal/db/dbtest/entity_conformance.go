@@ -26,12 +26,24 @@ type EntityStoreFactory func(t *testing.T) (
 )
 
 // EntitySeeder is a bag of callbacks the conformance suite uses to
-// stage non-entity fixture rows.
+// stage non-entity fixture rows and to read back columns no store method
+// projects.
 type EntitySeeder struct {
 	// Team inserts a team row and returns its id. The owning-team stamp
 	// subtests need two DISTINCT ids that both satisfy the owning_team_id
 	// FK — one to stamp, one to prove a second writer cannot displace it.
 	Team func(t *testing.T, name string) string
+
+	// User inserts a user row and returns its id — the commissioned-by
+	// stamp's FK, and for the same reason two distinct ones are needed.
+	User func(t *testing.T, name string) string
+
+	// CommissionedBy reads entities.commissioned_by_user_id back, or "" when
+	// it is NULL. It is a seeder callback rather than a store method because
+	// nothing in production reads that column by id: the pull-request list
+	// reads it as a SQL predicate, and a getter existing only to be asserted
+	// on would be dead code carrying an interface entry.
+	CommissionedBy func(t *testing.T, entityID string) string
 }
 
 // RunEntityStoreConformance covers the entity-store contract every
@@ -709,6 +721,98 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// has nothing to do about a row that isn't there.
 		if stamped, err := s.StampOwningTeamIfUnsetSystem(ctx, orgID, uuid.New().String(), teamA); err != nil || stamped {
 			t.Errorf("missing entity: got (%v, %v), want (false, nil)", stamped, err)
+		}
+	})
+
+	// StampCommissionedByIfUnsetSystem is the provenance half of the same
+	// moment: who ASKED for the run that opened this pull request. Same
+	// stamp-if-NULL contract, same convergence reason — the funnel races the
+	// poller's mint of the entity, and re-delivery of one PR-open write must
+	// not be a second opinion.
+	t.Run("StampCommissionedByIfUnset_stamps_once_then_refuses", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		asker := seed.User(t, "Asker")
+		interloper := seed.User(t, "Interloper")
+
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#commissioned", "pr", "T", "")
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+
+		stamped, err := s.StampCommissionedByIfUnsetSystem(ctx, orgID, ent.ID, asker)
+		if err != nil || !stamped {
+			t.Fatalf("first stamp: got (%v, %v), want (true, nil)", stamped, err)
+		}
+		if got := seed.CommissionedBy(t, ent.ID); got != asker {
+			t.Errorf("after stamp: commissioned_by_user_id = %q, want %q", got, asker)
+		}
+
+		stamped, err = s.StampCommissionedByIfUnsetSystem(ctx, orgID, ent.ID, interloper)
+		if err != nil || stamped {
+			t.Errorf("stamp over a commissioned entity: got (%v, %v), want (false, nil)", stamped, err)
+		}
+		if got := seed.CommissionedBy(t, ent.ID); got != asker {
+			t.Errorf("commissioner changed under a second stamp: got %q, want %q", got, asker)
+		}
+
+		// An empty user is the event-triggered case: nobody asked, so there is
+		// nothing to record and the row keeps its NULL for no later writer.
+		fresh, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#commissioned-nobody", "pr", "T", "")
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		if stamped, err := s.StampCommissionedByIfUnsetSystem(ctx, orgID, fresh.ID, ""); err != nil || stamped {
+			t.Errorf("empty user: got (%v, %v), want (false, nil)", stamped, err)
+		}
+		if got := seed.CommissionedBy(t, fresh.ID); got != "" {
+			t.Errorf("empty user left a commissioner: got %q", got)
+		}
+
+		// A missing entity is (false, nil): the caller is best-effort and has
+		// nothing to do about a row that isn't there.
+		if stamped, err := s.StampCommissionedByIfUnsetSystem(ctx, orgID, uuid.New().String(), asker); err != nil || stamped {
+			t.Errorf("missing entity: got (%v, %v), want (false, nil)", stamped, err)
+		}
+	})
+
+	// The two stamps are independent columns written at one moment. Neither
+	// may be a precondition for the other: an event-triggered run has a team
+	// and no asker, and each has to land whatever the other did.
+	t.Run("the_two_attribution_stamps_are_independent", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		teamID := seed.Team(t, "Commissioning")
+		asker := seed.User(t, "Asker")
+
+		both, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#both", "pr", "T", "")
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		if stamped, err := s.StampOwningTeamIfUnsetSystem(ctx, orgID, both.ID, teamID); err != nil || !stamped {
+			t.Fatalf("team stamp: got (%v, %v), want (true, nil)", stamped, err)
+		}
+		if stamped, err := s.StampCommissionedByIfUnsetSystem(ctx, orgID, both.ID, asker); err != nil || !stamped {
+			t.Fatalf("user stamp beside a stamped team: got (%v, %v), want (true, nil)", stamped, err)
+		}
+		if team, _ := s.OwningTeamForEntitySystem(ctx, orgID, both.ID); team != teamID {
+			t.Errorf("owning team = %q after the second stamp, want %q", team, teamID)
+		}
+		if got := seed.CommissionedBy(t, both.ID); got != asker {
+			t.Errorf("commissioned by = %q, want %q", got, asker)
+		}
+
+		// The event-triggered shape: a team, nobody to record.
+		auto, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#auto", "pr", "T", "")
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		if stamped, err := s.StampOwningTeamIfUnsetSystem(ctx, orgID, auto.ID, teamID); err != nil || !stamped {
+			t.Fatalf("team stamp: got (%v, %v), want (true, nil)", stamped, err)
+		}
+		if stamped, err := s.StampCommissionedByIfUnsetSystem(ctx, orgID, auto.ID, ""); err != nil || stamped {
+			t.Errorf("empty user beside a stamped team: got (%v, %v), want (false, nil)", stamped, err)
+		}
+		if team, _ := s.OwningTeamForEntitySystem(ctx, orgID, auto.ID); team != teamID {
+			t.Errorf("owning team = %q, want %q — the skipped user stamp must not disturb it", team, teamID)
 		}
 	})
 

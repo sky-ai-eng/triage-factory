@@ -581,6 +581,33 @@ func (s *entityStore) StampOwningTeamIfUnsetSystem(ctx context.Context, orgID, e
 	return n > 0, nil
 }
 
+// StampCommissionedByIfUnsetSystem is the same statement against the
+// provenance column: the human whose ask produced this pull request. Written
+// beside the owning-team stamp because that is the one moment both values are
+// in hand — the columns are otherwise unrelated, and neither implies the
+// other.
+func (s *entityStore) StampCommissionedByIfUnsetSystem(ctx context.Context, orgID, entityID, userID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	if userID == "" {
+		return false, nil
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE entities
+		SET commissioned_by_user_id = ?
+		WHERE id = ? AND commissioned_by_user_id IS NULL
+	`, userID, entityID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // scanEntityRow / scanEntityFromRows return a fresh domain.Entity per
 // invocation. The two flavors mirror database/sql's *Row vs *Rows
 // types since Scan signatures aren't unifiable through a common
