@@ -1,14 +1,19 @@
 import { useEffect, useState } from 'react'
 import { apiJSON } from '../lib/apiClient'
 
-// The team spend slice this surface renders: the headline total and the
-// per-member costs the roster column reads. GET /api/teams/{id}/usage is
-// admin-gated (team admin or org admin), so the hook takes `enabled` and a
-// member never fires a read the server would refuse.
+// The team spend slice this surface renders: the headline total, the model
+// shares, and the per-member costs the roster column reads. GET
+// /api/teams/{id}/usage is member-visible, so every reader of the team page
+// fires it.
+//
+// by_user is the one cut that is not: it names people, and the server holds it
+// to team admin. Absent is not empty — a member gets no key at all, which the
+// roster renders as a dash, while `[]` is a real answer meaning nobody on the
+// team has attributed spend in the window.
 
 export type TeamUsage = {
   total_cost_usd: number
-  by_user: Array<{ user_id: string; display_name: string; cost: number }>
+  by_user?: Array<{ user_id: string; display_name: string; cost: number }>
   /** Model-attributed spend only — system overhead with no model lands in the
    * total but never here, so shares are computed over this list's own sum. */
   by_model: Array<{ model: string; cost: number }>
@@ -18,13 +23,13 @@ function sinceParam(days: number): string {
   return new Date(Date.now() - days * 86400_000).toISOString().slice(0, 10)
 }
 
-export function useTeamUsage(teamId: string, days: number, enabled: boolean): TeamUsage | null {
+export function useTeamUsage(teamId: string, days: number): TeamUsage | null {
   // Stored with the ask it answers — a team or window switch reads null
   // until the new answer lands, with no synchronous reset in the effect.
   const key = `${teamId}:${days}`
   const [got, setGot] = useState<{ key: string; data: TeamUsage } | null>(null)
   useEffect(() => {
-    if (!teamId || !enabled) return
+    if (!teamId) return
     let live = true
     void apiJSON<TeamUsage>(
       `/api/teams/${encodeURIComponent(teamId)}/usage?since=${sinceParam(days)}`,
@@ -38,7 +43,7 @@ export function useTeamUsage(teamId: string, days: number, enabled: boolean): Te
     return () => {
       live = false
     }
-  }, [teamId, days, enabled])
+  }, [teamId, days])
   return got && got.key === key ? got.data : null
 }
 

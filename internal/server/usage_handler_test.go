@@ -295,8 +295,12 @@ func TestUsageEndpoints_Local(t *testing.T) {
 			t.Errorf("/teams total = %v, want 1.25", resp.TotalCostUSD)
 		}
 		// by_user: the local user's manual run (autonomous NULL creator excluded).
-		if len(resp.ByUser) != 1 || resp.ByUser[0].UserID != runmode.LocalDefaultUserID || !floatEq(resp.ByUser[0].Cost, 1.00) {
-			t.Errorf("/teams by_user = %+v, want the local user at 1.00", resp.ByUser)
+		// N=1 is always a team admin, so the per-person cut is always present here.
+		if resp.ByUser == nil {
+			t.Fatalf("/teams by_user absent in local mode, want the sole user's cut")
+		}
+		if byUser := *resp.ByUser; len(byUser) != 1 || byUser[0].UserID != runmode.LocalDefaultUserID || !floatEq(byUser[0].Cost, 1.00) {
+			t.Errorf("/teams by_user = %+v, want the local user at 1.00", byUser)
 		}
 		// by_rule: the autonomous run's trigger, labeled with the blueprint name
 		// (triggers carry a NULL name, so we fall back to the blueprint).

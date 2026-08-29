@@ -29,9 +29,10 @@ export function effectiveModelKeys(
 }
 
 /** Each model's share of the window's model-attributed spend, as a fraction.
- * Null while the usage read has not answered — for a member it never fires,
- * and unknown is not zero. A model absent from the cut genuinely spent
- * nothing, so a miss on this map reads as 0 only for a team-enabled row. */
+ * Null while the usage read has not answered, and unknown is not zero. The cut
+ * itself names models rather than people, so every member receives it. A model
+ * absent from the cut genuinely spent nothing, so a miss on this map reads as 0
+ * only for a team-enabled row. */
 export function spendShares(usage: TeamUsage | null): Map<string, number> | null {
   if (!usage) return null
   const buckets = usage.by_model ?? []
