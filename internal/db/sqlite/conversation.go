@@ -1785,6 +1785,57 @@ func (s *conversationStore) MessagesForConversations(ctx context.Context, orgID 
 	return messages, nil
 }
 
+// NewestAssistantToolCallsForConversations answers with one row per
+// conversation — the newest assistant message's tool calls — see the interface
+// doc for the contract.
+//
+// SQLite has no DISTINCT ON, so the pick is a ROW_NUMBER partitioned by
+// conversation over the same descending order the Postgres twin sorts on, with
+// the id tiebreaker for the rows that share a seq. Chunked like every other
+// ?-placeholder IN list here; a conversation_id falls in exactly one chunk, so
+// no conversation's pick is split across two statements.
+func (s *conversationStore) NewestAssistantToolCallsForConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string][]domain.ToolCall, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if len(conversationIDs) == 0 {
+		return nil, nil
+	}
+	out := map[string][]domain.ToolCall{}
+	for _, chunk := range chunkIDs(conversationIDs) {
+		placeholders := make([]string, len(chunk))
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		rows, err := s.q.QueryContext(ctx, `
+			SELECT conversation_id, tool_calls FROM (
+				SELECT conversation_id, tool_calls,
+				       ROW_NUMBER() OVER (
+				           PARTITION BY conversation_id
+				           ORDER BY COALESCE(seq, id) DESC, id DESC
+				       ) AS rn
+				FROM messages
+				WHERE conversation_id IN (`+strings.Join(placeholders, ", ")+`) AND role = 'assistant'
+				  AND NOT (delivered = 0 AND window_state = 'inactive')
+			) WHERE rn = 1
+		`, args...)
+		if err != nil {
+			return nil, err
+		}
+		batch, err := db.ScanNewestToolCalls(rows)
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		for conversationID, calls := range batch {
+			out[conversationID] = calls
+		}
+	}
+	return out, nil
+}
+
 // ListForAssemblySystem returns every row a native loop needs to rebuild this run's
 // exact LLM context, ordered by the effective assembly key COALESCE(seq, id).
 // window_state='inactive' rows are excluded (superseded by compaction);

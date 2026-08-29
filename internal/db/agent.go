@@ -634,6 +634,30 @@ type ConversationStore interface {
 	// returns nil.
 	MessagesForConversations(ctx context.Context, orgID string, conversationIDs []string) ([]domain.Message, error)
 
+	// NewestAssistantToolCallsForConversations reads the tool calls carried by
+	// each conversation's NEWEST assistant message, keyed by conversation id.
+	// Batched over a set of ids like MessagesForConversations, and for the same
+	// reason: the caller annotates a whole page of conversations at once.
+	//
+	// "Newest" is the same effective assembly key the display read orders on
+	// (COALESCE(seq, id)), descending, so the row this answers with is the row
+	// a reader sees last in the transcript. Withdrawn-pending rows are excluded
+	// on the same terms as Messages — a derivation that named a row the
+	// transcript hides would describe something nobody can go look at.
+	//
+	// Only tool_calls is selected. A message row carries content, reasoning and
+	// content blocks that can each run to megabytes, and none of them is read
+	// here.
+	//
+	// A conversation is ABSENT from the map when its newest assistant message
+	// carries no tool calls, when it has no assistant message at all, and when
+	// the stored tool_calls are unparseable (decoded on the same silent terms
+	// as the display read's own tool_calls). Absent and empty are the same
+	// answer to the only question this read is asked — what is the agent doing
+	// right now — so they are not distinguished. Empty conversationIDs returns
+	// nil.
+	NewestAssistantToolCallsForConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string][]domain.ToolCall, error)
+
 	// ListForAssemblySystem returns every row a native loop needs to rebuild this
 	// conversation's exact LLM context, ordered by the effective assembly key
 	// COALESCE(seq, id). window_state='inactive' rows are excluded

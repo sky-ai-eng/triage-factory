@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"strconv"
 	"testing"
@@ -4012,6 +4013,73 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if got := byConversation[convB]; len(got) != 1 || got[0] != "b-only" {
 			t.Errorf("conversation B messages = %v, want [b-only]", got)
+		}
+	})
+
+	t.Run("NewestAssistantToolCallsForConversations_NewestAssistantRowWins", func(t *testing.T) {
+		// The read behind current_action: per conversation, the tool calls on
+		// its newest ASSISTANT message and nothing else. Two things have to be
+		// true of "newest" for the derived line to describe what the agent is
+		// doing now — a later assistant turn supersedes an earlier one, and a
+		// user or tool row landing after it does not, because neither says
+		// anything about what the agent reached for.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		if calls, err := store.NewestAssistantToolCallsForConversations(ctx, orgID, nil); err != nil || calls != nil {
+			t.Fatalf("NewestAssistantToolCallsForConversations(nil) = (%v, %v), want (nil, nil)", calls, err)
+		}
+
+		working := seedConversationForTest(t, orgID, seed, "running")
+		quiet := seedConversationForTest(t, orgID, seed, "running")
+		bare := seedConversationForTest(t, orgID, seed, "running")
+
+		insert := func(conversationID, role string, calls []domain.ToolCall) {
+			t.Helper()
+			if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
+				ConversationID: conversationID, Role: role, Content: "x", ToolCalls: calls,
+			}); err != nil {
+				t.Fatalf("InsertMessage(%s, %s): %v", conversationID, role, err)
+			}
+		}
+
+		// Superseded by the turn below it.
+		insert(working, "assistant", []domain.ToolCall{{ID: "t0", Name: "read", Input: map[string]any{"path": "stale.go"}}})
+		// The newest assistant turn: two calls, and their order is part of the
+		// answer — the composition reads the LAST one, the call still in flight.
+		insert(working, "assistant", []domain.ToolCall{
+			{ID: "t1", Name: "grep", Input: map[string]any{"pattern": "needle"}},
+			{ID: "t2", Name: "bash", Input: map[string]any{"command": "go test ./..."}},
+		})
+		// Newer rows in the roles this read ignores: the tool result for the
+		// call above, and a person steering mid-run.
+		insert(working, "tool", nil)
+		insert(working, "user", nil)
+
+		// No assistant message at all, and an assistant message carrying no
+		// tool calls: both answer nothing rather than an empty entry.
+		insert(quiet, "user", nil)
+		insert(bare, "assistant", nil)
+
+		// A non-UUID id must be tolerated (no rows, no error), guarding the
+		// Postgres uuid[] bind path like the batched reads above.
+		got, err := store.NewestAssistantToolCallsForConversations(ctx, orgID,
+			[]string{working, quiet, bare, "not-a-uuid"})
+		if err != nil {
+			t.Fatalf("NewestAssistantToolCallsForConversations: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("keyed conversations = %v, want only %s", slices.Sorted(maps.Keys(got)), working)
+		}
+		calls := got[working]
+		if len(calls) != 2 {
+			t.Fatalf("newest turn's calls = %v, want the 2 from the newest assistant row", calls)
+		}
+		if calls[0].Name != "grep" || calls[1].Name != "bash" {
+			t.Errorf("call order = [%s %s], want [grep bash] (stored order preserved)", calls[0].Name, calls[1].Name)
+		}
+		if cmd, _ := calls[1].Input["command"].(string); cmd != "go test ./..." {
+			t.Errorf("last call input[command] = %q, want the stored command (arguments survive the round trip)", cmd)
 		}
 	})
 
