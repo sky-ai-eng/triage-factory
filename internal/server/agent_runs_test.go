@@ -199,6 +199,135 @@ func TestHandleConversations_StatusFilter(t *testing.T) {
 	assertFirstError(t, rec, httpx.ReasonInvalidField, "statuses")
 }
 
+// TestHandleConversations_TeamFilter pins the Overview's scope: the counts a
+// team-marked page shows are its own team's, so team_ids narrows to the
+// conversations that team owns and composes with the status filter rather than
+// replacing it. A malformed set is a 400 naming the field, and a set that
+// names a team owning nothing answers zero — never the viewer-wide number the
+// shell rail reads, which is the same page one field apart.
+func TestHandleConversations_TeamFilter(t *testing.T) {
+	s := newTestServer(t)
+	homeA := seedSteerConversation(t, s.db, "team-home-a", "completed")
+	homeB := seedSteerConversation(t, s.db, "team-home-b", "completed")
+	away := seedSteerConversation(t, s.db, "team-away", "failed")
+	otherTeam := uuid.New().String()
+	execSQL(t, s.db, `INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'other', 'Other')`,
+		otherTeam, runmode.LocalDefaultOrgID)
+	execSQL(t, s.db, `UPDATE conversations SET team_id = ? WHERE id = ?`, otherTeam, away)
+
+	type listResp struct {
+		Runs          map[string][]map[string]any `json:"runs"`
+		NextPageToken string                      `json:"next_page_token"`
+		TotalCount    int                         `json:"total_count"`
+	}
+	list := func(body map[string]any) listResp {
+		t.Helper()
+		rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list(%v) = %d, want 200; body=%s", body, rec.Code, rec.Body.String())
+		}
+		var resp listResp
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+		}
+		return resp
+	}
+	ids := func(resp listResp) map[string]bool {
+		out := map[string]bool{}
+		for _, rows := range resp.Runs {
+			for _, r := range rows {
+				id, _ := r["ID"].(string)
+				out[id] = true
+			}
+		}
+		return out
+	}
+
+	home := list(map[string]any{"team_ids": []string{runmode.LocalDefaultTeamID}})
+	if got := ids(home); len(got) != 2 || !got[homeA] || !got[homeB] {
+		t.Errorf("team_ids=[home] = %v, want %s and %s", got, homeA, homeB)
+	}
+	if home.TotalCount != 2 {
+		t.Errorf("team_ids=[home] total_count = %d, want 2", home.TotalCount)
+	}
+	if got := ids(list(map[string]any{"team_ids": []string{otherTeam}})); len(got) != 1 || !got[away] {
+		t.Errorf("team_ids=[other] = %v, want %s", got, away)
+	}
+	// Composition with the status filter — the Overview always sends both.
+	composed := list(map[string]any{
+		"team_ids":  []string{runmode.LocalDefaultTeamID},
+		"statuses":  []string{domain.StatusFailed},
+		"page_size": 0,
+	})
+	if composed.TotalCount != 0 {
+		t.Errorf("team_ids=[home] + statuses=[failed] total_count = %d, want 0 (the failed one is another team's)", composed.TotalCount)
+	}
+
+	// A team that owns nothing counts nothing: a scoped read must never fall
+	// back to the unfiltered set.
+	absent := list(map[string]any{"team_ids": []string{uuid.New().String()}, "page_size": 0})
+	if absent.TotalCount != 0 {
+		t.Errorf("team_ids=[absent team] total_count = %d, want 0", absent.TotalCount)
+	}
+
+	// An empty list is an ABSENT filter, not an empty selection — the same
+	// reading task_ids has, and the one the shell rail depends on.
+	if got := ids(list(map[string]any{"team_ids": []string{}})); len(got) != 3 {
+		t.Errorf("team_ids=[] = %v, want every conversation (empty is no narrowing)", got)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
+		map[string]any{"team_ids": []string{"not-a-uuid"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed team_ids = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonInvalidField, "team_ids")
+
+	// The cap is on DISTINCT teams and rejects rather than truncates: a
+	// dropped team is a count that reads as work having disappeared.
+	pad := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = uuid.New().String()
+		}
+		return out
+	}
+	if got := list(map[string]any{
+		"team_ids": append([]string{runmode.LocalDefaultTeamID}, pad(maxBatchTeamIDs-1)...), "page_size": 0,
+	}); got.TotalCount != 2 {
+		t.Errorf("at the team cap: total_count = %d, want 2", got.TotalCount)
+	}
+	// Duplicates canonicalize away, so a repeated id spends no cap.
+	dupes := make([]string, maxBatchTeamIDs+10)
+	for i := range dupes {
+		dupes[i] = runmode.LocalDefaultTeamID
+	}
+	if got := list(map[string]any{"team_ids": dupes, "page_size": 0}); got.TotalCount != 2 {
+		t.Errorf("repeated team id counted against the cap: total_count = %d, want 2", got.TotalCount)
+	}
+	rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
+		map[string]any{"team_ids": pad(maxBatchTeamIDs + 1)})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("team_ids over cap = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonOutOfRange, "team_ids")
+
+	// The token is bound to the filter set it was minted for: a page-2 token
+	// from one team replayed against another is refused rather than served a
+	// window into a different query.
+	first := list(map[string]any{"team_ids": []string{runmode.LocalDefaultTeamID}, "page_size": 1})
+	if first.NextPageToken == "" {
+		t.Fatalf("page 1 of the home team returned no next_page_token; got total_count %d", first.TotalCount)
+	}
+	rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{
+		"team_ids": []string{otherTeam}, "page_size": 1, "page_token": first.NextPageToken,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("token replayed against another team = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonInvalidParam, "page_token")
+}
+
 // TestHandleConversations_AttentionFilter pins the rail's `needs` read: a
 // not-live conversation holding an unresolved artifact is one unit of
 // attention, and a conversation holding nothing unresolved is none.
@@ -448,6 +577,76 @@ func TestConversationResponse_TokenSums(t *testing.T) {
 		}
 		if n, isNum := v.(float64); !isNum || n != 0 {
 			t.Errorf("bare conversation %s = %v, want 0", key, v)
+		}
+	}
+}
+
+// TestConversationResponse_QueuePositionOnlyWhenQueued pins the wire half of
+// the queued run's hourglass: the place in line is emitted only for a row that
+// actually has one, and is ABSENT — no key, not a 0 and not a null — for every
+// other state, so a client renders the mark on presence rather than on a
+// sentinel it would have to know to special-case.
+func TestConversationResponse_QueuePositionOnlyWhenQueued(t *testing.T) {
+	s := newTestServer(t)
+	first := seedSteerConversation(t, s.db, "qpos-first", "")
+	second := seedSteerConversation(t, s.db, "qpos-second", "")
+	claimed := seedSteerConversation(t, s.db, "qpos-claimed", "")
+	done := seedSteerConversation(t, s.db, "qpos-done", "completed")
+
+	// Mid-flight and unclaimed is what the display ladder reads as `queued`:
+	// the stored column carries nothing at all. started_at is set on the
+	// database's own clock so the line's order is this fixture's rather than
+	// the insert timing's — CURRENT_TIMESTAMP resolves to the second, so rows
+	// seeded back-to-back would otherwise tie and fall through to the id.
+	for _, staged := range []struct {
+		id  string
+		age int
+	}{{first, 300}, {second, 200}, {claimed, 400}, {done, 500}} {
+		execSQL(t, s.db, `UPDATE conversations SET started_at = datetime('now', ?) WHERE id = ?`,
+			fmt.Sprintf("-%d seconds", staged.age), staged.id)
+	}
+	for _, id := range []string{first, second, claimed} {
+		execSQL(t, s.db, `UPDATE conversations SET status = NULL WHERE id = ?`, id)
+	}
+	// An unreleased claim takes a conversation out of the line entirely — it
+	// is the oldest row here, so a derivation that ranked by start time alone
+	// would hand it position 1.
+	execSQL(t, s.db, `INSERT INTO claims (id, conversation_id, executor_id, boot_epoch) VALUES (?, ?, 'exec-qpos', 1)`,
+		uuid.New().String(), claimed)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("conversation list = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Runs map[string][]map[string]any `json:"runs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v; body=%s", err, rec.Body.String())
+	}
+	byID := map[string]map[string]any{}
+	for _, convs := range list.Runs {
+		for _, c := range convs {
+			id, _ := c["ID"].(string)
+			byID[id] = c
+		}
+	}
+	for id, want := range map[string]float64{first: 1, second: 2} {
+		conv, ok := byID[id]
+		if !ok {
+			t.Fatalf("conversation %s missing from the list", id)
+		}
+		if got, isNum := conv["queue_position"].(float64); !isNum || got != want {
+			t.Errorf("queue_position of %s = %v, want %v", id, conv["queue_position"], want)
+		}
+	}
+	for _, id := range []string{claimed, done} {
+		conv, ok := byID[id]
+		if !ok {
+			t.Fatalf("conversation %s missing from the list", id)
+		}
+		if _, present := conv["queue_position"]; present {
+			t.Errorf("conversation %s is not queued but carries queue_position %v", id, conv["queue_position"])
 		}
 	}
 }

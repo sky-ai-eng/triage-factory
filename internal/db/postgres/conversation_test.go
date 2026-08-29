@@ -156,12 +156,40 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 			}
 			return id
 		},
+		Team: func(t *testing.T, slug string) string {
+			t.Helper()
+			id := uuid.New().String()
+			// A membership row too: conversations.team_id is FK-checked here,
+			// and a team the seeding user belongs to keeps the fixture
+			// representative of the rows RLS would admit.
+			if _, err := conn.Exec(
+				`INSERT INTO teams (id, org_id, slug, name) VALUES ($1, $2, $3, $4)`,
+				id, orgID, slug+"-"+id[:8], "Conformance "+slug,
+			); err != nil {
+				t.Fatalf("seed team %s: %v", slug, err)
+			}
+			if _, err := conn.Exec(
+				`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`,
+				userID, id,
+			); err != nil {
+				t.Fatalf("seed team membership %s: %v", slug, err)
+			}
+			return id
+		},
 		Conversation: func(t *testing.T, conv domain.Conversation) string {
 			t.Helper()
 			if conv.CreatorUserID == "" && conv.TriggerType != "event" {
 				conv.CreatorUserID = userID
 			}
 			return seedPgConversation(t, conn, orgID, conv)
+		},
+		BackdateStartedAt: func(t *testing.T, conversationID string, age time.Duration) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE conversations SET started_at = now() - make_interval(secs => $2) WHERE id = $1`,
+				conversationID, age.Seconds()); err != nil {
+				t.Fatalf("backdate started_at of %s: %v", conversationID, err)
+			}
 		},
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
 			t.Helper()
@@ -419,6 +447,136 @@ func TestConversationStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Fatalf("ListForTask cross-org: %v", err)
 	} else if len(convs) != 0 {
 		t.Errorf("orgB ListForTask(orgA task) returned %d conversations; want 0", len(convs))
+	}
+}
+
+// TestConversationStore_Postgres_QueuePositionIsOrgLocal pins the leak
+// constraint the field is built around: a queued conversation's place in line
+// counts its OWN org's queue and nothing else. The fixture stacks a second org
+// with a longer, older queue in front of the first — under the dispatcher's
+// real claim order (a placement tier, then fewest-active-org first) those rows
+// would move the first org's numbers, and moving them would be one tenant
+// reading another tenant's load off a display field. The deployment-truthful
+// view is the fleet console's, behind the operator gate.
+func TestConversationStore_Postgres_QueuePositionIsOrgLocal(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgA, userA, _ := seedPgConversationOrg(t, h)
+	orgB, userB, _ := seedPgConversationOrg(t, h)
+	seedPgConversationPromptIn(t, h, "p_qpos_A", orgA, userA)
+	seedPgConversationPromptIn(t, h, "p_qpos_B", orgB, userB)
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	// One entity + event + task per org; every conversation below hangs off
+	// its org's task so one List call can name it.
+	mkTask := func(t *testing.T, orgID, userID string) string {
+		t.Helper()
+		entityID := uuid.New().String()
+		eventID := uuid.New().String()
+		taskID := uuid.New().String()
+		if _, err := h.AdminDB.Exec(`
+			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+			VALUES ($1, $2, 'github', $3, 'pr', 'Queue position test', '', '{}'::jsonb, now())
+		`, entityID, orgID, "qpos-"+orgID[:8]); err != nil {
+			t.Fatalf("entity: %v", err)
+		}
+		if _, err := h.AdminDB.Exec(`
+			INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+			VALUES ($1, $2, $3, 'github:pr:opened', '', '{}'::jsonb, now())
+		`, eventID, orgID, entityID); err != nil {
+			t.Fatalf("event: %v", err)
+		}
+		if _, err := h.AdminDB.Exec(`
+			INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status, priority_score)
+			VALUES ($1, $2, $3,
+			        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+			        'team', $4, 'github:pr:opened', '', $5, 'queued', 'pending', 0.5)
+		`, taskID, orgID, userID, entityID, eventID); err != nil {
+			t.Fatalf("task: %v", err)
+		}
+		return taskID
+	}
+	// A conversation with no stored status is mid-flight and unclaimed, which
+	// is what the display ladder reads as `queued`. started_at is backdated on
+	// the server's clock so the line's order is the fixture's.
+	mkQueued := func(t *testing.T, orgID, userID, promptID, taskID string, ageSeconds int) string {
+		t.Helper()
+		id := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
+			TaskID: taskID, PromptID: promptID, Model: "m", CreatorUserID: userID,
+			BlueprintRunID: seedPgBlueprintRun(t, h, orgID, userID, taskID),
+		})
+		if _, err := h.AdminDB.Exec(
+			`UPDATE conversations SET started_at = now() - make_interval(secs => $2) WHERE id = $1`,
+			id, ageSeconds); err != nil {
+			t.Fatalf("backdate started_at: %v", err)
+		}
+		return id
+	}
+	positions := func(t *testing.T, orgID, taskID string) map[string]int {
+		t.Helper()
+		convs, _, err := stores.Conversations.List(ctx, orgID,
+			db.ConversationListFilter{TaskIDs: []string{taskID}}, db.ListOpts{Limit: 200})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		out := map[string]int{}
+		for _, c := range convs {
+			if c.QueuePosition == nil {
+				t.Errorf("conversation %s is queued but carries no position", c.ID)
+				continue
+			}
+			out[c.ID] = *c.QueuePosition
+		}
+		return out
+	}
+
+	taskA := mkTask(t, orgA, userA)
+	taskB := mkTask(t, orgB, userB)
+	// B's queue is longer and entirely older than A's, so any cross-org term
+	// in the derivation shows up as A's numbers starting past 1.
+	firstA := mkQueued(t, orgA, userA, "p_qpos_A", taskA, 120)
+	secondA := mkQueued(t, orgA, userA, "p_qpos_A", taskA, 60)
+	for _, age := range []int{600, 540, 480, 420} {
+		mkQueued(t, orgB, userB, "p_qpos_B", taskB, age)
+	}
+
+	got := positions(t, orgA, taskA)
+	for id, want := range map[string]int{firstA: 1, secondA: 2} {
+		if got[id] != want {
+			t.Errorf("org A queue position of %s = %d, want %d", id, got[id], want)
+		}
+	}
+	// And the other direction: B numbers its own four from 1 without A's rows.
+	if gotB := positions(t, orgB, taskB); len(gotB) != 4 {
+		t.Fatalf("org B listed %d queued conversations, want 4", len(gotB))
+	} else {
+		seen := map[int]bool{}
+		for id, p := range gotB {
+			if p < 1 || p > 4 {
+				t.Errorf("org B queue position of %s = %d, want 1..4", id, p)
+			}
+			if seen[p] {
+				t.Errorf("org B handed position %d to two conversations", p)
+			}
+			seen[p] = true
+		}
+	}
+
+	// Claiming org B's whole queue empties the fleet's line ahead of A and
+	// changes nothing for A: occupancy is not a term here.
+	for id := range positions(t, orgB, taskB) {
+		if _, err := stores.Conversations.SetExecutorSystem(ctx, orgB, id, "exec-qpos-b", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+	}
+	got = positions(t, orgA, taskA)
+	for id, want := range map[string]int{firstA: 1, secondA: 2} {
+		if got[id] != want {
+			t.Errorf("after org B was claimed, org A queue position of %s = %d, want %d", id, got[id], want)
+		}
 	}
 }
 
@@ -720,15 +878,20 @@ func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, conv domain.Co
 	if conv.CreatorUserID != "" {
 		creator = conv.CreatorUserID
 	}
+	// An empty status is the mid-flight state — SQL NULL, which the display
+	// ladder reads as `queued` — not the empty string, which is no status.
+	// team_id defaults to the org's first team; a conversation staged for a
+	// team-narrowing test names its own.
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, org_id, task_id, team_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, visibility, creator_user_id,
 		                           blueprint_run_id, blueprint_step_index)
 		VALUES ($1, $2, $3,
-		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        $4, $5, $6, $7, NULLIF($8, '')::uuid, 'team', $9, $10, $11)
+		        COALESCE(NULLIF($12, '')::uuid,
+		                 (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)),
+		        $4, NULLIF($5, ''), $6, $7, NULLIF($8, '')::uuid, 'team', $9, $10, $11)
 	`, id, orgID, conv.TaskID, conv.PromptID, conv.Status, conv.Model,
-		trigger, conv.TriggerID, creator, conv.BlueprintRunID, stepIdx); err != nil {
+		trigger, conv.TriggerID, creator, conv.BlueprintRunID, stepIdx, conv.TeamID); err != nil {
 		t.Fatalf("seed conversation %s: %v", id, err)
 	}
 	return id

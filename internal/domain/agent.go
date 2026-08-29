@@ -210,6 +210,24 @@ type Conversation struct {
 	QueuedAt    *time.Time
 	ClaimedAt   *time.Time
 	CompletedAt *time.Time
+
+	// QueuePosition is this conversation's place in its OWN ORG's line:
+	// 1-based, ordered by (started_at, id) over the org's display-`queued`
+	// conversations. nil in every other state, and nil on reads that don't
+	// project it — the list reads do, since the surface that renders the
+	// hourglass is a list.
+	//
+	// Org-local is the contract, not an approximation waiting to be
+	// sharpened. The dispatcher's real claim order is a placement tier plus
+	// cross-org fairness (fewest-active-org first), and both are deployment
+	// facts: a position computed from it would tell one tenant about another
+	// tenant's load. So the derivation reads no fleet occupancy, no executor
+	// identity, no placement tier, and no cross-org term, and must not grow
+	// one — in a shared fleet it can therefore understate the wait, which is
+	// accepted. The deployment-truthful view is the fleet console's, behind
+	// the operator gate.
+	QueuePosition *int
+
 	// TotalCostUSD / DurationMs / NumTurns are derived at read time, not
 	// stored: cost is the SUM of the messages ledger's cost_usd stamps,
 	// duration/turns the SUM of the claims' per-engagement telemetry. nil

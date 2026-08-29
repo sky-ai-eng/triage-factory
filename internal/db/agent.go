@@ -187,6 +187,18 @@ type ConversationListFilter struct {
 	// result rather than the whole set (the impls hold that line).
 	TaskIDs []string
 
+	// TeamIDs narrows to conversations owned by these teams —
+	// conversations.team_id, denormalized at mint, so the narrowing needs no
+	// task hop. Empty is no team narrowing, NOT "no teams", and a caller
+	// that named ids and had every one of them rejected as malformed still
+	// gets an empty result rather than the whole set (the impls hold that
+	// line, the same way TaskIDs does).
+	//
+	// It narrows WITHIN the caller's visible set rather than around it: on
+	// Postgres the select policy already bounds which teams' conversations a
+	// viewer sees, so a foreign team id here matches nothing.
+	TeamIDs []string
+
 	// Statuses narrows to these DISPLAY statuses — the value the read
 	// projections produce, not the stored column, because the stored column
 	// carries neither `queued` nor `running` (see domain's conversation
@@ -410,7 +422,10 @@ type ConversationStore interface {
 	// one chunk; the HTTP route caps ids at exactly that bound, so a real
 	// caller never reaches the refusal.
 	//
-	// MemoryMissing + claim fields derived per Get.
+	// MemoryMissing + claim fields derived per Get. QueuePosition is
+	// projected HERE and nowhere else — a place in line is only legible
+	// beside the line, so the point read leaves it nil rather than answering
+	// "3rd" with nothing to be third among.
 	List(ctx context.Context, orgID string, filter ConversationListFilter, opts ListOpts) ([]domain.Conversation, int, error)
 
 	// ListPRCoherenceTargetsSystem finds delegation conversations relevant to

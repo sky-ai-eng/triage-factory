@@ -597,6 +597,28 @@ const sqliteDisplayStatusSQL = `COALESCE(
 		r.status,
 		'')`
 
+// sqliteQueuePositionQuery ranks the display-`queued` conversations by
+// (started_at, id): every queued row's place in line, and no row for anything
+// else. The Postgres twin carries the model, including what the derivation is
+// forbidden to read; this dialect is N=1, so "the org's queue" and "the queue"
+// are the same set and no org predicate appears.
+//
+// A window rather than the per-row correlated count the same answer could be
+// spelled as: sqliteDisplayStatusSQL is itself three correlated subqueries and
+// is written against the alias `r`, so counting the rows ahead of each row
+// would both re-run the whole ladder per pair and need a second copy of it
+// under another alias.
+//
+// It is a statement of its own rather than the CTE the Postgres twin joins
+// against inline, and that divergence is the chunking's: this dialect's List
+// splits its task-id IN list across statements, so an inline CTE would re-rank
+// the WHOLE queue once per chunk to answer a question no chunk narrows — and
+// would rank each chunk against its own snapshot.
+const sqliteQueuePositionQuery = `
+	SELECT r.id, ROW_NUMBER() OVER (ORDER BY r.started_at, r.id)
+	FROM conversations r
+	WHERE (` + sqliteDisplayStatusSQL + `) = 'queued'`
+
 // sqliteConversationLiveStatusesSQL is the display statuses that mean a LIVE
 // engagement — `running`, plus every claim phase — as a SQL IN-list body, and
 // the SQLite mirror of the Postgres twin. See that constant for the model:
@@ -733,7 +755,7 @@ func (s *conversationStore) ListForTask(ctx context.Context, orgID, taskID strin
 	var convs []domain.Conversation
 	for rows.Next() {
 		var r domain.Conversation
-		if err := scanConversationRows(rows, &r); err != nil {
+		if err := scanConversation(rows, &r); err != nil {
 			return nil, err
 		}
 		convs = append(convs, r)
@@ -751,6 +773,14 @@ func (s *conversationStore) List(ctx context.Context, orgID string, filter db.Co
 	// one fails loudly instead of receiving a window over the first chunk only.
 	if opts.Limit > 0 && len(filter.TaskIDs) > inListChunkSize {
 		return nil, 0, fmt.Errorf("sqlite conversations List: a windowed read takes at most %d task ids, got %d", inListChunkSize, len(filter.TaskIDs))
+	}
+	// The team IN-list is never chunked — it goes into every statement whole,
+	// alongside a task chunk — so the route's own (much smaller) cap is what
+	// keeps the statement inside SQLite's variable limit. Refuse loudly rather
+	// than let a future caller meet a "too many SQL variables" driver error
+	// halfway through a paged read.
+	if len(filter.TeamIDs) > inListChunkSize {
+		return nil, 0, fmt.Errorf("sqlite conversations List: takes at most %d team ids, got %d", inListChunkSize, len(filter.TeamIDs))
 	}
 	// Chunking is over the task-id IN list, so a filter that names none is one
 	// chunk: the whole visible set under one WHERE.
@@ -775,6 +805,15 @@ func (s *conversationStore) List(ctx context.Context, orgID string, filter db.Co
 	}
 	if opts.CountOnly {
 		return []domain.Conversation{}, total, nil
+	}
+
+	// The queue position is a list-only column — the surface that renders a
+	// place in line renders a line — and it is read ONCE, here, because the
+	// rank spans the whole queue and so narrows on nothing a chunk varies.
+	// One ranking snapshot serves every chunk.
+	queuePositions, err := s.queuePositions(ctx)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	// ?-placeholder IN list (SQLite has no array bind), mirroring
@@ -804,9 +843,17 @@ func (s *conversationStore) List(ctx context.Context, orgID string, filter db.Co
 		}
 		for rows.Next() {
 			var r domain.Conversation
-			if err := scanConversationRows(rows, &r); err != nil {
+			if err := scanConversation(rows, &r); err != nil {
 				rows.Close()
 				return nil, 0, err
+			}
+			// Attached only to a row THIS statement also read as queued: the
+			// rank came from an earlier one, and a claim landing between the
+			// two must never leave a running row carrying a place in line.
+			// The other direction — queued now, unranked then — is the
+			// field's declared absence, and the mark just doesn't render.
+			if position, ok := queuePositions[r.ID]; ok && r.Status == domain.StatusQueued {
+				r.QueuePosition = &position
 			}
 			convs = append(convs, r)
 		}
@@ -817,6 +864,31 @@ func (s *conversationStore) List(ctx context.Context, orgID string, filter db.Co
 		rows.Close()
 	}
 	return convs, total, nil
+}
+
+// queuePositions reads the whole queue's ranking as id → 1-based place in
+// line, for List to attach to the queued rows of whatever page it returns. A
+// conversation absent from the map is not queued.
+//
+// The map holds the queue, not the page: ROW_NUMBER has to walk every queued
+// row to number any of them, so narrowing the result to a page's ids would
+// save carrying them, never computing them.
+func (s *conversationStore) queuePositions(ctx context.Context) (map[string]int, error) {
+	rows, err := s.q.QueryContext(ctx, sqliteQueuePositionQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	positions := map[string]int{}
+	for rows.Next() {
+		var id string
+		var position int
+		if err := rows.Scan(&id, &position); err != nil {
+			return nil, err
+		}
+		positions[id] = position
+	}
+	return positions, rows.Err()
 }
 
 // sqliteConversationListWhere renders ConversationStore.List's filter as a
@@ -837,6 +909,16 @@ func sqliteConversationListWhere(filter db.ConversationListFilter, taskIDs []str
 		placeholders, idArgs := inListArgs(taskIDs)
 		where += ` AND r.task_id IN (` + placeholders + `)`
 		args = append(args, idArgs...)
+	}
+	if len(filter.TeamIDs) > 0 {
+		// The twin of Postgres' team ANY(): a named set narrows, and a set
+		// naming teams that hold nothing matches nothing rather than widening
+		// back. Local mode is N=1 (one team), so this is effectively inert
+		// here and exists to keep the dialect conformant with the filter's
+		// contract.
+		placeholders, teamArgs := inListArgs(filter.TeamIDs)
+		where += ` AND r.team_id IN (` + placeholders + `)`
+		args = append(args, teamArgs...)
 	}
 	if len(filter.Statuses) > 0 {
 		placeholders, statusArgs := inListArgs(filter.Statuses)
@@ -2004,34 +2086,22 @@ func (s *conversationStore) BlueprintSiblingDurationMsSystem(ctx context.Context
 
 // --- Helpers ---
 
-func scanConversation(row *sql.Row, r *domain.Conversation) error {
-	var queuedAt, completedAt sql.NullTime
-	var claimedAt sql.NullString
-	var costUSD sql.NullFloat64
-	var durationMs, numTurns, blueprintStep sql.NullInt64
-	var parkReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
-
-	if err := row.Scan(
-		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
-		&costUSD, &durationMs, &numTurns, &parkReason, &worktreePath,
-		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
-		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
-		&r.MemoryMissing, &r.ActorAgentName,
-	); err != nil {
-		return err
-	}
-	return finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
-		model, parkReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
+// conversationScanner is satisfied by both *sql.Row and *sql.Rows, so
+// scanConversation serves the point read, the RETURNING read and the list
+// reads off one destination list rather than copies kept in step by hand.
+type conversationScanner interface {
+	Scan(dest ...any) error
 }
 
-func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
+// scanConversation scans sqliteConversationColumns into r.
+func scanConversation(sc conversationScanner, r *domain.Conversation) error {
 	var queuedAt, completedAt sql.NullTime
 	var claimedAt sql.NullString
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var parkReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
-	if err := rows.Scan(
+	if err := sc.Scan(
 		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &parkReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,

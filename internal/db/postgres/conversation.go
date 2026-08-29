@@ -935,6 +935,39 @@ const pgDisplayStatusSQL = `COALESCE(
 		r.status,
 		'')`
 
+// pgQueuePositionCTE ranks the org's display-`queued` conversations by
+// (started_at, id) — the CTE body ConversationStore.List joins its page
+// against, so a row that is queued carries its place in line and every other
+// row carries SQL NULL. It binds $1 as the org id, which is what
+// pgConversationListWhere always puts first.
+//
+// The rank is a window over one pass, not a per-row correlated count:
+// pgDisplayStatusSQL is itself three correlated subqueries, and counting the
+// rows ahead of each row would evaluate the whole ladder once per pair.
+//
+// It rides the page's own statement, where the SQLite twin reads the same
+// ranking as a statement of its own. This dialect binds its id set as one
+// array and so runs one statement per read: the CTE is evaluated once, and
+// the page sees the rank in the snapshot it was ranked in. SQLite has to
+// chunk its IN list across statements, where an inline CTE would re-rank the
+// whole queue per chunk.
+//
+// Two things this deliberately does NOT read, and must not learn to: anything
+// about another org (the position is org-local by contract — see
+// domain.Conversation.QueuePosition), and anything about the fleet — executor
+// identity, placement tier, occupancy. It also runs on the caller's own
+// connection, so under RLS it ranks within the set that caller may already
+// see; a reader can never learn a queued conversation exists by watching the
+// numbers move.
+const pgQueuePositionCTE = `
+	queued_positions AS (
+		SELECT r.id AS conversation_id,
+		       (ROW_NUMBER() OVER (ORDER BY r.started_at, r.id))::int AS position
+		FROM conversations r
+		WHERE r.org_id = $1 AND (` + pgDisplayStatusSQL + `) = 'queued'
+	)
+`
+
 // pgConversationLiveStatusesSQL is the display statuses that mean a LIVE
 // engagement — `running`, plus every claim phase — as a SQL IN-list body.
 // Mirrors domain.IsActiveConversationStatus, which is what the run view
@@ -1141,7 +1174,7 @@ func (s *conversationStore) ListForTask(ctx context.Context, orgID, taskID strin
 	var convs []domain.Conversation
 	for rows.Next() {
 		var r domain.Conversation
-		if err := scanConversationRows(rows, &r); err != nil {
+		if err := scanConversation(rows, &r); err != nil {
 			return nil, err
 		}
 		convs = append(convs, r)
@@ -1167,15 +1200,18 @@ func (s *conversationStore) List(ctx context.Context, orgID string, filter db.Co
 	if opts.CountOnly {
 		return []domain.Conversation{}, total, nil
 	}
-	// Same projection as ListForTask; a caller that named task ids groups the
-	// flat result by TaskID.
+	// ListForTask's projection plus the queue position, which is a list-only
+	// column: the surface that renders a place in line renders a line. A
+	// caller that named task ids groups the flat result by TaskID.
 	query := `
-		SELECT ` + pgConversationColumns + `
+		WITH ` + pgQueuePositionCTE + `
+		SELECT ` + pgConversationColumns + `, qp.position
 		FROM conversations r
 		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		` + conversationClaimLateral + `
 		` + conversationLedgerLateral + `
+		LEFT JOIN queued_positions qp ON qp.conversation_id = r.id
 		WHERE ` + where + `
 		ORDER BY r.task_id, r.started_at DESC, r.id`
 	if opts.Limit > 0 {
@@ -1191,8 +1227,13 @@ func (s *conversationStore) List(ctx context.Context, orgID string, filter db.Co
 	var convs []domain.Conversation
 	for rows.Next() {
 		var r domain.Conversation
-		if err := scanConversationRows(rows, &r); err != nil {
+		var position sql.NullInt64
+		if err := scanConversation(rows, &r, &position); err != nil {
 			return nil, 0, err
+		}
+		if position.Valid {
+			p := int(position.Int64)
+			r.QueuePosition = &p
 		}
 		convs = append(convs, r)
 	}
@@ -1226,6 +1267,17 @@ func pgConversationListWhere(orgID string, filter db.ConversationListFilter) (st
 		// like artifactStore.ListByConversations — not a raw []string.
 		args = append(args, pgUUIDArray(ids))
 		where += fmt.Sprintf(` AND r.task_id = ANY($%d)`, len(args))
+	}
+	if len(filter.TeamIDs) > 0 {
+		// team_id is a uuid column too, so the same drop-invalid-then-refuse
+		// treatment TaskIDs gets: a set that named only unusable ids asked
+		// about nothing, which must not widen back to every team.
+		ids := filterValidUUIDs(filter.TeamIDs)
+		if len(ids) == 0 {
+			return "", nil, false
+		}
+		args = append(args, pgUUIDArray(ids))
+		where += fmt.Sprintf(` AND r.team_id = ANY($%d)`, len(args))
 	}
 	if len(filter.Statuses) > 0 {
 		// One placeholder per value rather than an array literal: these are
@@ -2136,45 +2188,31 @@ func (s *conversationStore) BlueprintSiblingDurationMsSystem(ctx context.Context
 
 // --- Helpers ---
 
-// scanConversation fills r from a single-row QueryRow result. Sibling
-// scanConversationRows handles the rows.Scan case. Both unpack the
-// nullable columns through the same set of intermediates.
-func scanConversation(row *sql.Row, r *domain.Conversation) error {
-	var queuedAt, claimedAt, completedAt sql.NullTime
-	var costUSD sql.NullFloat64
-	var durationMs, numTurns, blueprintStep sql.NullInt64
-	var blueprintRunID sql.NullString
-	var failureKind, parkReason string
-
-	if err := row.Scan(
-		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
-		&costUSD, &durationMs, &numTurns, &parkReason, &r.WorktreePath,
-		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
-		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
-		&r.MemoryMissing, &r.ActorAgentName,
-	); err != nil {
-		return err
-	}
-	r.FailureKind = domain.ConversationFailureKind(failureKind)
-	r.ParkReason = domain.ParkReason(parkReason)
-	finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
-	return nil
+// conversationScanner is satisfied by both *sql.Row and *sql.Rows, so
+// scanConversation serves the point read, the write-returning read and the
+// list reads off one destination list rather than copies kept in step by hand.
+type conversationScanner interface {
+	Scan(dest ...any) error
 }
 
-func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
+// scanConversation scans pgConversationColumns into r. extra takes the
+// destinations for whatever a caller appended to that list — the list read's
+// queue position, today — in the order it appended them.
+func scanConversation(sc conversationScanner, r *domain.Conversation, extra ...any) error {
 	var queuedAt, claimedAt, completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var blueprintRunID sql.NullString
 	var failureKind, parkReason string
 
-	if err := rows.Scan(
+	dest := []any{
 		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &parkReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
-	); err != nil {
+	}
+	if err := sc.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
 	r.FailureKind = domain.ConversationFailureKind(failureKind)
