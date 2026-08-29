@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -204,6 +205,57 @@ func TestMeSettings_OverviewSeenAt_RejectsMalformedValue(t *testing.T) {
 	// The value never reached the row.
 	if got, _ := meSettingsOverviewSeenAt(t, doJSON(t, s, http.MethodGet, "/api/me/settings", nil)); got != "null" {
 		t.Errorf("overview_seen_at after refused writes = %s, want null", got)
+	}
+}
+
+// TestMeSettings_RejectsNonObjectSettings pins the container's own shape. A
+// typed pointer here would read an explicit null as nil — the same thing it
+// reads "absent" as — so a client asking to write settings would get a 200 for
+// a request that wrote nothing, which is the one answer it cannot tell from a
+// real save.
+//
+// null is refused rather than read as "reset everything": the object is the
+// resource, and a reset spelling would silently widen with every pref added,
+// so a client clearing today's one marker would wipe tomorrow's theme.
+func TestMeSettings_RejectsNonObjectSettings(t *testing.T) {
+	s := newTestServer(t)
+
+	// Seed a marker, so a refused body that was silently treated as "absent"
+	// would be invisible in the row and only the status code would show it.
+	seen := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	if rec := doJSON(t, s, http.MethodPatch, "/api/me/settings", map[string]any{
+		"user_settings": map[string]any{"overview_seen_at": seen.Format(time.RFC3339)},
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("seeding PATCH = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	for _, body := range []string{
+		`{"user_settings": null}`,
+		`{"user_settings": 5}`,
+		`{"user_settings": "overview"}`,
+		`{"user_settings": []}`,
+		`{"user_settings": true}`,
+	} {
+		req := httptest.NewRequest(http.MethodPatch, "/api/me/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("PATCH %s = %d, want 400; body=%s", body, rec.Code, rec.Body.String())
+			continue
+		}
+		assertFirstError(t, rec, "INVALID_FIELD", "user_settings")
+	}
+
+	// And the stored marker is untouched by any of them.
+	got, _ := meSettingsOverviewSeenAt(t, doJSON(t, s, http.MethodGet, "/api/me/settings", nil))
+	var stored time.Time
+	if err := json.Unmarshal([]byte(got), &stored); err != nil {
+		t.Fatalf("overview_seen_at %s is not a timestamp after the refused bodies: %v", got, err)
+	}
+	if !stored.Equal(seen) {
+		t.Errorf("overview_seen_at = %v after refused bodies, want the seeded %v", stored, seen)
 	}
 }
 

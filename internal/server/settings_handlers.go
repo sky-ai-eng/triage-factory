@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -81,8 +82,42 @@ func (s *Server) readUserSettings(w http.ResponseWriter, r *http.Request, orgID,
 // row alone entirely; present applies the fields it names. Strict decoding
 // makes a key this resource does not have a named 400 rather than a value
 // quietly dropped, at either level.
+//
+// It is json.RawMessage rather than a *userSettingsFields because a typed
+// pointer reads an explicit null as nil, which is the same thing it reads
+// "absent" as — so `{"user_settings": null}` would answer 200 having written
+// nothing, the one response a client cannot tell from a real save. Here the two
+// are different: absent writes nothing on purpose, and null is refused by name.
 type userSettingsPatch struct {
-	UserSettings *userSettingsFields `json:"user_settings,omitempty"`
+	UserSettings json.RawMessage `json:"user_settings"`
+}
+
+// decodeUserSettingsFields reads the settings object out of the PATCH body.
+//
+// The object is the resource, not a field of it, so the clearing convention
+// does not reach this level: there is no state "the user has no settings", and
+// a null that meant "reset everything" would silently widen with every pref
+// added — a client clearing today's one marker would wipe tomorrow's theme.
+// So null, and every other non-object, is one named fault. The check is
+// explicit because encoding/json cannot attribute it: a type error against a
+// struct target carries no field name, and httpx's decoder needs one to
+// answer INVALID_FIELD rather than a bare INVALID_BODY.
+func decodeUserSettingsFields(w http.ResponseWriter, raw json.RawMessage) (userSettingsFields, bool) {
+	var fields userSettingsFields
+	if value := bytes.TrimLeft(raw, " \t\r\n"); len(value) == 0 || value[0] != '{' {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "user_settings must be an object naming the fields to write; omit it to write nothing",
+			Field:   "user_settings",
+		})
+		return fields, false
+	}
+	// Strict again on the way in, so a misspelled pref inside is a named 400
+	// rather than a key the outer decode already consumed into raw bytes.
+	if !httpx.DecodeJSONStrictBytes(w, raw, &fields) {
+		return fields, false
+	}
+	return fields, true
 }
 
 // userSettingsFields is the settings object inside the PATCH body, declared
@@ -124,7 +159,11 @@ func (s *Server) handleMeSettingsPatch(w http.ResponseWriter, r *http.Request) {
 
 	var known *domain.UserSettings
 	if req.UserSettings != nil {
-		apply, ok := resolveUserSettingsPatch(w, *req.UserSettings)
+		fields, ok := decodeUserSettingsFields(w, req.UserSettings)
+		if !ok {
+			return
+		}
+		apply, ok := resolveUserSettingsPatch(w, fields)
 		if !ok {
 			return
 		}
