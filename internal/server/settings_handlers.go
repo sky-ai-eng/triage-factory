@@ -45,17 +45,24 @@ func (s *Server) handleMeSettingsGet(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	orgID := OrgIDFrom(r.Context())
 
-	resp, ok := s.readUserSettings(w, r, orgID, userID)
+	resp, ok := s.readUserSettings(w, r, orgID, userID, nil)
 	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// readUserSettings reads the settings resource, shared by the GET and the
-// PATCH's read-back so the write answers exactly what a follow-up read would.
-func (s *Server) readUserSettings(w http.ResponseWriter, r *http.Request, orgID, userID string) (userSettingsResponse, bool) {
+// readUserSettings assembles the settings resource, shared by the GET and by
+// the PATCH's answer so the write answers exactly what a follow-up read would.
+// known is the row a caller already holds — the one a save's write just
+// returned — and when non-nil this composes the response around it rather than
+// re-reading the row its own write produced. The GET route passes nil.
+func (s *Server) readUserSettings(w http.ResponseWriter, r *http.Request, orgID, userID string, known *domain.UserSettings) (userSettingsResponse, bool) {
 	var resp userSettingsResponse
+	if known != nil {
+		resp.UserSettings = *known
+		return resp, true
+	}
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		settings, err := tx.Users.GetSettings(r.Context(), userID)
 		if err != nil {
@@ -70,13 +77,37 @@ func (s *Server) readUserSettings(w http.ResponseWriter, r *http.Request, orgID,
 	return resp, true
 }
 
-// userSettingsPatch is the PATCH body. user_settings absent keeps the stored
-// row; present replaces the fields it carries. v1's domain.UserSettings has no
-// fields yet, so strict decoding makes any key inside it a named 400 rather
-// than a value quietly dropped.
+// userSettingsPatch is the PATCH body. user_settings absent leaves the stored
+// row alone entirely; present applies the fields it names. Strict decoding
+// makes a key this resource does not have a named 400 rather than a value
+// quietly dropped, at either level.
 type userSettingsPatch struct {
-	UserSettings *domain.UserSettings `json:"user_settings,omitempty"`
+	UserSettings *userSettingsFields `json:"user_settings,omitempty"`
 }
+
+// userSettingsFields is the settings object inside the PATCH body, declared
+// separately from domain.UserSettings so each field speaks the one clearing
+// convention: absent keeps the stored value, an explicit null clears it, any
+// other value is applied. A typed pointer collapses the first two — both
+// decode to nil — which is the distinction this resource needs, since clearing
+// the marker (back to "never opened") is a thing a client can mean.
+type userSettingsFields struct {
+	OverviewSeenAt json.RawMessage `json:"overview_seen_at"`
+}
+
+// overviewSeenAtField is the dotted path the faults name, since the field is
+// one level in and "overview_seen_at" alone would not say where to look.
+const overviewSeenAtField = "user_settings.overview_seen_at"
+
+// overviewSeenSkew is how far ahead of this server's clock a marker may land.
+// The value is the client's own now, so the two clocks disagree by whatever
+// they disagree by, and refusing a few seconds of ordinary drift would make the
+// write fail for a machine that is merely slightly fast. Past that the value is
+// not drift but a broken clock, and it is refused rather than stored: a marker
+// in the future inverts the away line for as long as it stands, and nothing
+// walks it back — the next visit writes a timestamp EARLIER than the stored
+// one, so every counted-since window reads empty until real time catches up.
+const overviewSeenSkew = 5 * time.Minute
 
 // handleMeSettingsPatch applies a partial update to the caller's settings row
 // and answers the settings resource as a follow-up GET would return it — so a
@@ -91,23 +122,90 @@ func (s *Server) handleMeSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var known *domain.UserSettings
 	if req.UserSettings != nil {
+		apply, ok := resolveUserSettingsPatch(w, *req.UserSettings)
+		if !ok {
+			return
+		}
+		var saved domain.UserSettings
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			return tx.Users.UpdateSettings(r.Context(), userID, *req.UserSettings)
+			// UpdateSettings takes the row's end state, so the partial write is
+			// composed here — read, apply, write — inside the one transaction,
+			// which is what keeps a field this body does not name at the value
+			// it actually had rather than at the value it had a moment ago.
+			current, err := tx.Users.GetSettings(r.Context(), userID)
+			if err != nil {
+				return fmt.Errorf("load user settings: %w", err)
+			}
+			apply(&current)
+			saved, err = tx.Users.UpdateSettings(r.Context(), userID, current)
+			return err
 		}); err != nil {
 			internalError(w, "me/settings", err)
 			return
 		}
+		known = &saved
 	}
 
-	// Read back rather than echo the request: UpdateSettings is exempt from the
-	// returned-row rule while domain.UserSettings is empty (see UsersStore), so
-	// there is no persisted row to hand back from the write itself.
-	resp, ok := s.readUserSettings(w, r, orgID, userID)
+	resp, ok := s.readUserSettings(w, r, orgID, userID, known)
 	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// resolveUserSettingsPatch validates the body and returns the mutation it
+// describes, applied to the stored row inside the write's transaction. Faults
+// are collected in two rounds and flushed separately: shape first (400 — a
+// value cannot be out of range until it parses), then semantics (422).
+func resolveUserSettingsPatch(w http.ResponseWriter, req userSettingsFields) (apply func(*domain.UserSettings), ok bool) {
+	var (
+		shape    httpx.Validation
+		semantic httpx.Validation
+		mutators []func(*domain.UserSettings)
+	)
+
+	// overview_seen_at is the anchor the Overview's away line reads from, and
+	// the client sends its own now. null clears it back to "never opened",
+	// which the page renders as its own sentence rather than as a very old
+	// visit — so it is a state a client can legitimately ask for.
+	if value, st := httpx.PatchString(&shape, req.OverviewSeenAt, overviewSeenAtField); st != httpx.PatchAbsent {
+		switch st {
+		case httpx.PatchClear:
+			mutators = append(mutators, func(u *domain.UserSettings) { u.OverviewSeenAt = nil })
+		case httpx.PatchSet:
+			at, err := time.Parse(time.RFC3339, value)
+			switch {
+			case err != nil:
+				shape.Invalid(overviewSeenAtField, overviewSeenAtField+" must be an RFC3339 timestamp or null")
+			case at.After(time.Now().Add(overviewSeenSkew)):
+				semantic.OutOfRange(overviewSeenAtField, fmt.Sprintf(
+					"%s must not be more than %s ahead of the server's clock", overviewSeenAtField, overviewSeenSkew))
+			default:
+				// UTC on the way in: the value is compared against stored
+				// timestamps and rendered as an absolute instant, and a
+				// local-offset value reads as its wall clock in both places.
+				seen := at.UTC()
+				mutators = append(mutators, func(u *domain.UserSettings) { u.OverviewSeenAt = &seen })
+			}
+		}
+	}
+
+	if shape.Flush(w, http.StatusBadRequest) {
+		return nil, false
+	}
+	if semantic.Flush(w, http.StatusUnprocessableEntity) {
+		return nil, false
+	}
+	// A body naming no field is not an error on this route: the settings
+	// resource answers the state either way, and the two no-change spellings
+	// ({} and {"user_settings": {}}) both mean "tell me where I am".
+	return func(u *domain.UserSettings) {
+		for _, m := range mutators {
+			m(u)
+		}
+	}, true
 }
 
 // --------------------------------------------------------------------

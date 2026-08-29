@@ -1856,12 +1856,30 @@ CREATE TABLE public.teams (
 -- Name: user_settings; Type: TABLE; Schema: public; Owner: -
 --
 
--- Reserved for future per-user prefs (theme, notification destinations,
--- swipe sensitivity, onboarding state). The ai_model + ai_auto_delegate_enabled
--- columns that used to live here moved to team_settings — the team owns
--- the AI behavior policy, users don't override in v1.
+-- Per-user prefs (theme, notification destinations, swipe sensitivity,
+-- onboarding state are the shapes still to come). The ai_model +
+-- ai_auto_delegate_enabled columns that used to live here moved to
+-- team_settings — the team owns the AI behavior policy, users don't override
+-- in v1.
 CREATE TABLE public.user_settings (
     user_id uuid NOT NULL,
+    -- When this user last opened the Overview, which the page's away line
+    -- ("you were last here at 18:40 yesterday") is anchored to and its counts
+    -- are measured from. Written explicitly by the page rather than stamped on
+    -- read: a read that mutates is a read nobody can repeat, and the caller
+    -- that knows a HUMAN looked is the page, not the request log — a rail-count
+    -- refetch on an idle open tab keeps any last-action timestamp perpetually
+    -- fresh while nobody is there.
+    --
+    -- NULL is load-bearing: it means never opened, which the page renders as
+    -- its own thing (an anchor at midnight, said out loud) rather than as a
+    -- very old visit.
+    --
+    -- Keyed by user alone, like the row it sits on, so a multi-org user carries
+    -- one marker across their orgs. Accepted: the value is a display anchor
+    -- read at minute resolution, and per-org markers would be a second table to
+    -- make one sentence per org marginally more accurate.
+    overview_seen_at timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 

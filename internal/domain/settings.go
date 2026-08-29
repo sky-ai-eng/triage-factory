@@ -589,13 +589,22 @@ func DefaultTeamSettingsFor(multiMode bool) TeamSettings {
 	}
 }
 
-// UserSettings is the user-scope settings row (user_settings table).
-// Reserved for future per-user prefs (theme, notification destinations,
-// swipe sensitivity, onboarding state). Empty for v1 — the AI model +
-// auto-delegate toggle that used to live here
-// moved to TeamSettings. The struct stays so the store API can grow
-// fields without a signature change.
-type UserSettings struct{}
+// UserSettings is the user-scope settings row (user_settings table): what a
+// person sets about their own view. Anything a team decides for its members —
+// the AI model, the auto-delegate toggle — is TeamSettings, not here.
+type UserSettings struct {
+	// OverviewSeenAt is when this user last opened the Overview — the anchor
+	// its away line reads from ("you were last here at 18:40 yesterday") and
+	// the point its counts are measured since.
+	//
+	// nil means never opened, which is a different sentence rather than a very
+	// old one: the page says so and falls back to midnight.
+	//
+	// The client writes it, and the row is keyed by user alone, so a multi-org
+	// person carries one marker across their orgs. Both are accepted because
+	// the value anchors a line of prose read at minute resolution, not a query.
+	OverviewSeenAt *time.Time `json:"overview_seen_at"`
+}
 
 // JiraStatusRef is one workflow status as the rules store it: the id Jira's
 // workflow references it by, plus the display name captured beside it.

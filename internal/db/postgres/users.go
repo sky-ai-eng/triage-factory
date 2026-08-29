@@ -339,34 +339,57 @@ func (s *usersStore) SetLastActingTeam(ctx context.Context, userID, teamID strin
 }
 
 func (s *usersStore) GetSettings(ctx context.Context, userID string) (domain.UserSettings, error) {
-	// user_settings is empty: just user_id + updated_at.
-	// The probe stays so callers can detect "row exists" vs "first
-	// touch" later when fields are added; current callers ignore the
-	// difference and consume the zero-value struct either way.
-	var updatedAt sql.NullTime
+	// No row reads as the zero value rather than an error: every field's
+	// absent value already says what "never written" says, so a first-touch
+	// user and a user who has set nothing are the same answer.
+	var seenAt sql.NullTime
 	err := s.q.QueryRowContext(ctx,
-		`SELECT updated_at FROM user_settings WHERE user_id = $1`,
+		`SELECT overview_seen_at FROM user_settings WHERE user_id = $1`,
 		userID,
-	).Scan(&updatedAt)
+	).Scan(&seenAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.UserSettings{}, nil
 	}
 	if err != nil {
 		return domain.UserSettings{}, fmt.Errorf("read user_settings: %w", err)
 	}
-	return domain.UserSettings{}, nil
+	var out domain.UserSettings
+	if seenAt.Valid {
+		at := seenAt.Time.UTC()
+		out.OverviewSeenAt = &at
+	}
+	return out, nil
 }
 
-func (s *usersStore) UpdateSettings(ctx context.Context, userID string, _ domain.UserSettings) error {
-	// Effectively a touch in v1 — no per-user fields yet, the updated_at
-	// trigger fires either way. Future per-user prefs land here.
-	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO user_settings (user_id, updated_at)
-		VALUES ($1, now())
-		ON CONFLICT (user_id) DO UPDATE SET updated_at = now()
-	`, userID)
-	if err != nil {
-		return fmt.Errorf("upsert user_settings: %w", err)
+func (s *usersStore) UpdateSettings(ctx context.Context, userID string, updates domain.UserSettings) (domain.UserSettings, error) {
+	// updates is the row's end state, so every field lands as given and a nil
+	// one clears its column. The partial-write caller composes that end state
+	// from a read in the same transaction.
+	//
+	// The RETURNING runs under user_settings_select on the app pool, which
+	// gates the same user_id the write's own policy does — so the conflict arm
+	// hands its row back rather than yielding zero rows from a statement that
+	// updated one.
+	var seenAt sql.NullTime
+	if updates.OverviewSeenAt != nil {
+		seenAt = sql.NullTime{Time: updates.OverviewSeenAt.UTC(), Valid: true}
 	}
-	return nil
+	var stored sql.NullTime
+	err := s.q.QueryRowContext(ctx, `
+		INSERT INTO user_settings (user_id, overview_seen_at, updated_at)
+		VALUES ($1, $2, now())
+		ON CONFLICT (user_id) DO UPDATE SET
+			overview_seen_at = excluded.overview_seen_at,
+			updated_at       = now()
+		RETURNING overview_seen_at
+	`, userID, seenAt).Scan(&stored)
+	if err != nil {
+		return domain.UserSettings{}, fmt.Errorf("upsert user_settings: %w", err)
+	}
+	var out domain.UserSettings
+	if stored.Valid {
+		at := stored.Time.UTC()
+		out.OverviewSeenAt = &at
+	}
+	return out, nil
 }
