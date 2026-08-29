@@ -27,6 +27,7 @@ import ShellCard from './ShellCard'
 import SourcePartsCard from './SourcePartsCard'
 import TableCard from './TableCard'
 import TeamPartsCard from './TeamPartsCard'
+import TooltipCard from './TooltipCard'
 import './gallery.css'
 
 type Section = 'color' | 'type' | 'elevation' | 'space' | 'components'
@@ -313,6 +314,7 @@ export default function UiGallery() {
             </p>
             <AcquireCard />
             <PrimitivesCard />
+            <TooltipCard />
             <SelectionBarCard />
             <TableCard />
             <TeamPartsCard />
