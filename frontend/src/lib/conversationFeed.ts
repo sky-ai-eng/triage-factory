@@ -123,9 +123,13 @@ function formatToolCall(name: string, input: Record<string, unknown>): string {
 function curatedCommandLine(cmd: string): string {
   if (cmd.includes('triagefactory exec')) {
     if (cmd.includes('triagefactory exec gh pr view')) return 'Fetching PR details'
-    if (cmd.includes('triagefactory exec gh pr diff') && cmd.includes('--file'))
-      return `Reading diff: ${extractFlag(cmd, '--file')}`
-    if (cmd.includes('triagefactory exec gh pr diff')) return 'Reading full diff'
+    if (cmd.includes('triagefactory exec gh pr diff')) {
+      // The flag's value is what the reading needs, so its value is what the
+      // branch tests: a `--file` with nothing after it reads as the whole
+      // diff rather than as a sentence that stops at its colon.
+      const file = extractFlag(cmd, '--file')
+      return file ? `Reading diff: ${file}` : 'Reading full diff'
+    }
     if (cmd.includes('triagefactory exec gh pr files')) return 'Listing changed files'
     if (cmd.includes('triagefactory exec gh pr review-view')) return 'Expanding previous review'
     if (cmd.includes('triagefactory exec gh pr start-review'))
@@ -145,7 +149,12 @@ function curatedCommandLine(cmd: string): string {
     if (cmd.includes('triagefactory exec gh pr comment-update')) return 'Editing comment'
     if (cmd.includes('triagefactory exec gh pr comment-delete')) return 'Deleting comment'
     if (cmd.includes('triagefactory exec gh pr add-comment')) return 'Adding comment'
-    return `Running: ${cmd.split('triagefactory exec ')[1]?.slice(0, 60)}`
+    // An unrecognized exec verb reads as its own argv — but only when there is
+    // argv to read. The applet name can appear with nothing after it, on its
+    // own line, or quoted inside some other command, and each of those splits
+    // to nothing; naming the command itself is the honest answer there.
+    const argv = cmd.split('triagefactory exec ')[1]?.trim()
+    if (argv) return `Running: ${argv.slice(0, 60)}`
   }
   return firstLine(cmd) || 'Running command'
 }
