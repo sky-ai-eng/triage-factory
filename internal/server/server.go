@@ -853,16 +853,17 @@ func (s *Server) routes() {
 	// its org from the session; the team and org routes name their scope in the
 	// path, and the org routes authorize against THAT org rather than whichever
 	// one the session points at.
-	// Scope is role-gated: /me is any org member, /teams/{id} is team-admin OR
-	// org-admin, /orgs/{id} is org-admin. The team/org reads use the admin-pool
-	// ListSpendSystem (the role gate is the authorization for crossing RLS).
+	// Scope is role-gated: /me is any org member, /teams/{id} is membership
+	// (with the per-person by_user cut alone held to team admin), /orgs/{id} is
+	// org-admin. The team/org reads use the admin-pool ListSpendSystem (the
+	// route's gate is the authorization for crossing RLS).
 	uh := &usageHandler{tx: s.tx, az: s.az, conversationQueue: s.allStores.ConversationQueue}
 	s.api("GET /api/me/usage", uh.handleUsageMe)
 	s.api("GET /api/teams/{team_id}/usage", uh.handleUsageTeam)
 	s.api("GET /api/orgs/{org_id}/usage", uh.handleUsageOrg)
 	// The team's flow node — events/tasks/runs cuts over a window, the
-	// spend node's sibling with the member-level gate (the team page's
-	// figures are every member's; spend stays admin-gated on /usage).
+	// spend node's sibling on the same member-level gate: both are the team
+	// page's figures, and the team page is every member's.
 	s.api("GET /api/teams/{team_id}/activity", s.handleTeamActivity)
 	// Org-scoped operations subset (TFAC-589): an org admin's own queue waits +
 	// run durations + failure rates. Org-admin gated, SaaS-safe (no cross-tenant

@@ -1296,15 +1296,17 @@ export interface UsageMeResponse {
   by_day_model?: UsageDayModelBucket[]
 }
 
-/** GET /api/teams/{id}/usage — one team's breakdown (team admin only; an org
- *  admin who isn't a team admin gets a 403 and sees cross-team numbers in the
- *  org rollup instead). */
+/** GET /api/teams/{id}/usage — one team's breakdown, readable by any member of
+ *  the team's org (spend is a team fact, like its events and its failures).
+ *  by_user is the exception: it names people, so it rides along only for a team
+ *  admin and is ABSENT otherwise — absent means "not authorized for this cut",
+ *  `[]` means nobody spent anything. A reader renders the first as a dash. */
 export interface UsageTeamResponse {
   team_id: string
   team_name: string
   total_cost_usd: number
   by_category: UsageCategoryBucket[]
-  by_user: UsageUserBucket[]
+  by_user?: UsageUserBucket[]
   by_rule: UsageRuleBucket[]
   by_model: UsageModelBucket[]
   by_day: UsageDayBucket[]

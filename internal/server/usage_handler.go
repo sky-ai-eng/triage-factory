@@ -21,16 +21,17 @@ import (
 // team's spend is a fact about the team, like its roster:
 //
 //   - GET /api/me/usage           — the caller's own spend (any org member).
-//   - GET /api/teams/{id}/usage   — one team's breakdown (team admin).
+//   - GET /api/teams/{id}/usage   — one team's breakdown (team member; the
+//     by_user cut alone is team admin).
 //   - GET /api/orgs/{id}/usage    — the org rollup (org admin).
 //
 // /me is viewer-relative, so its org comes from the session claims and its
 // subject from the principal; it runs on the APP pool under those claims (RLS
 // + a creator filter scope it to them). /teams names the team in the path and
-// resolves the org from the session, like every other {team_id} route; it is
-// team-admin-only, so its names resolve under the member's own claims, while
-// its spend read uses ListSpendSystem — the authorized cross-RLS read — since
-// the team-admin gate is what authorizes it, not the caller's own claims.
+// resolves the org from the session, like every other {team_id} route; its
+// names resolve under the caller's own claims, while its spend read uses
+// ListSpendSystem — the authorized cross-RLS read — since the route's
+// membership gate is what authorizes it, not the caller's own claims.
 // /orgs names the org in
 // the path and authorizes the caller against THAT org, so an admin of three
 // orgs can read all three without first moving a session cursor: it is the
@@ -114,12 +115,21 @@ type usageMeResponse struct {
 	ByDayModel   []usageDayModelBucket `json:"by_day_model"`
 }
 
+// usageTeamResponse is one team's breakdown. Every cut here is a fact about
+// the team — money, days, models, categories, the team's own rules — except
+// by_user, which names people.
+//
+// ByUser is a POINTER because absent and empty are different answers, and a
+// client must not read one as the other: absent means the caller is not
+// authorized for the per-person cut (they are a member, not an admin), while
+// `[]` means nobody on the team has attributed spend in the window. A reader
+// renders the first as "unknown" and only the second as zero.
 type usageTeamResponse struct {
 	TeamID       string                `json:"team_id"`
 	TeamName     string                `json:"team_name"`
 	TotalCostUSD float64               `json:"total_cost_usd"`
 	ByCategory   []usageCategoryBucket `json:"by_category"`
-	ByUser       []usageUserBucket     `json:"by_user"`
+	ByUser       *[]usageUserBucket    `json:"by_user,omitempty"`
 	ByRule       []usageRuleBucket     `json:"by_rule"`
 	ByModel      []usageModelBucket    `json:"by_model"`
 	ByDay        []usageDayBucket      `json:"by_day"`
@@ -189,19 +199,26 @@ func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUsageTeam returns one team's full breakdown. Gate: TEAM ADMIN — the
-// team's own members. Per-rule (per-blueprint) detail is operational, so it
-// stays with the team; org admins get the cross-team rollup from /api/orgs/{org_id}/usage
-// instead, never another team's per-rule view.
+// handleUsageTeam returns one team's breakdown. Gate: MEMBERSHIP — the same
+// resolution the team's activity node uses, because team spend is a fact about
+// the team in exactly the way its events and failures are, and the two nodes
+// share one audience line. Per-rule (per-blueprint) detail is operational, so
+// it stays with the team; org admins get the cross-team rollup from
+// /api/orgs/{org_id}/usage instead, never another team's per-rule view.
 //
-// Because the caller is a team member, every name resolves under their own RLS:
-// by_rule reads the team's event_handlers / blueprints through the app pool
-// (team-scoped RLS permits a member), and by_user reads org-scoped display
-// names. The spend READ still uses ListSpendSystem — the authorized cross-RLS
-// read, since it is the team-admin gate that authorizes it, not the caller's
-// own claims. by_user groups manual rows by creator; by_rule groups autonomous
-// rows by the firing trigger; system rows (NULL team) never appear (the TeamID
-// filter excludes them).
+// by_user is the one cut that names PEOPLE, and it stays team-admin-only: the
+// admin check runs as a predicate rather than a refusal, so a member gets the
+// whole payload minus that cut. Absent is not empty — see usageTeamResponse.
+//
+// Names resolve under the caller's own claims: by_rule reads the team's
+// event_handlers / blueprints through the app pool (team-scoped RLS permits a
+// member; a rule an org member outside the team may not read comes back
+// unnamed rather than failing the request), and by_user reads org-scoped
+// display names. The spend READ uses ListSpendSystem — the authorized
+// cross-RLS read, since the route's gate is what authorizes it, not the
+// caller's own claims. by_user groups manual rows by creator; by_rule groups
+// autonomous rows by the firing trigger; system rows (NULL team) never appear
+// (the TeamID filter excludes them).
 //
 // GET /api/teams/{team_id}/usage?since=&until=
 func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
@@ -216,14 +233,20 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// Confirm the team is in the caller's org first so a cross-org id 404s
-	// cleanly (non-disclosure) rather than falling through to the 403.
+	// Confirm the team is in the caller's org: a cross-org id 404s cleanly
+	// (non-disclosure), and that answer is the whole route gate — this is the
+	// activity node's resolution, and membership is what authorizes the read.
 	if !h.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
-	// Team admins only — an org admin who isn't on the team gets the org rollup,
-	// not this per-team detail. Writes a 403; short-circuits to allowed in local.
-	if !h.az.RequireTeamAdmin(w, r, orgID, userID, teamID) {
+	// The team-admin check, as a predicate rather than a gate: it decides
+	// whether by_user rides along, never whether the request is answered. A
+	// failed PROBE is still a 500 — a cut dropped because a query errored would
+	// be indistinguishable from a cut withheld by role. Local short-circuits to
+	// admin (N=1).
+	isTeamAdmin, err := h.az.UserIsTeamAdmin(r.Context(), userID, orgID, teamID)
+	if err != nil {
+		internalError(w, "usage", err)
 		return
 	}
 	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
@@ -258,8 +281,12 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		if t != nil {
 			teamName = t.Name
 		}
-		if userProfiles, e = resolveSpendUserProfiles(r.Context(), tx, rows); e != nil {
-			return e
+		// Display names are resolved only for the cut that renders them, so a
+		// member's request never reads the roster it isn't shown.
+		if isTeamAdmin {
+			if userProfiles, e = resolveSpendUserProfiles(r.Context(), tx, rows); e != nil {
+				return e
+			}
 		}
 		ruleNames, e = resolveSpendRuleNames(r.Context(), tx, orgID, rows)
 		return e
@@ -268,17 +295,21 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, usageTeamResponse{
+	resp := usageTeamResponse{
 		TeamID:       teamID,
 		TeamName:     teamName,
 		TotalCostUSD: sumSpendCost(rows),
 		ByCategory:   spendByCategory(rows),
-		ByUser:       spendByUser(rows, userProfiles),
 		ByRule:       spendByRule(rows, ruleNames),
 		ByModel:      spendByModel(rows),
 		ByDay:        spendByDay(rows),
 		ByDayModel:   spendByDayModel(rows),
-	})
+	}
+	if isTeamAdmin {
+		byUser := spendByUser(rows, userProfiles)
+		resp.ByUser = &byUser
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleUsageOrg returns the org rollup across every team + system job. Gate:

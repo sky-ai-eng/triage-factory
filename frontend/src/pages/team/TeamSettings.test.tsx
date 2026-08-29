@@ -116,13 +116,18 @@ const ACTIVITY = {
     { source: 'slack', events: null, tasks: 1, runs: 0, last_poll_at: null },
   ],
 }
+// Opus carries the whole model-attributed window: sonnet is enabled with no
+// spend (a 0% reading), haiku is team-unenabled (a dash, nothing to report).
+const BY_MODEL = [{ model: 'claude-opus-5', cost: 9.3 }]
 const USAGE = {
   total_cost_usd: 12.4,
   by_user: [{ user_id: 'u1', display_name: 'robin', cost: 9.152 }],
-  // Opus carries the whole model-attributed window: sonnet is enabled with no
-  // spend (a 0% reading), haiku is team-unenabled (a dash, nothing to report).
-  by_model: [{ model: 'claude-opus-5', cost: 9.3 }],
+  by_model: BY_MODEL,
 }
+// What a plain member is sent: the same team facts, minus the one cut that
+// names people. by_user is ABSENT, not empty — the whole point of the wire
+// shape, and what the roster's dash depends on.
+const USAGE_MEMBER = { total_cost_usd: 12.4, by_model: BY_MODEL }
 
 // The org's enable-set as the catalog read answers it. GPT X is org-disabled:
 // the team surface must never list it — a model the org has not enabled is an
@@ -190,7 +195,9 @@ beforeEach(() => {
     if (path.endsWith('/github-repos'))
       return Promise.resolve({ repos: ['sky/planner', 'sky/runner'] })
     if (path.includes('/activity?')) return Promise.resolve(ACTIVITY)
-    if (path.includes('/usage?')) return Promise.resolve(USAGE)
+    // The fixture withholds by_user exactly where the server does.
+    if (path.includes('/usage?'))
+      return Promise.resolve(roles.team === 'admin' ? USAGE : USAGE_MEMBER)
     if (path.endsWith('/models')) return Promise.resolve(MODELS_READ)
     // The settings PATCH answers with the resource as a follow-up GET would,
     // which is what the page reconciles its optimistic state from.
@@ -379,6 +386,26 @@ describe('the figures', () => {
     return l?.closest('.ts-fig')?.querySelector('.ts-fig-v')?.textContent ?? null
   }
 
+  /** The roster row whose name cell reads `name`. */
+  const rosterRow = (name: string) => {
+    const row = Array.from(document.querySelectorAll<HTMLElement>('.tb-row')).find((r) =>
+      r.textContent?.includes(name),
+    )
+    if (!row) throw new Error('no roster row for ' + name)
+    return row
+  }
+
+  /** One row's cell under the named column — read by the header's own order, so
+   *  an assertion names the column it is about rather than an index. */
+  const cellUnder = (row: HTMLElement, label: string) => {
+    const cols = Array.from(document.querySelectorAll('.tb-head .tb-col')).map(
+      (e) => e.textContent?.trim() ?? '',
+    )
+    const i = cols.findIndex((c) => c.startsWith(label))
+    if (i < 0) throw new Error('no column ' + label + ' among ' + cols.join(', '))
+    return row.querySelectorAll('[role="cell"]')[i]?.textContent ?? null
+  }
+
   it('fills the header, the band, and the roster from the two reads', async () => {
     renderPage()
     await waitFor(() => expect(screen.getByText('$12.40')).toBeInTheDocument())
@@ -397,22 +424,30 @@ describe('the figures', () => {
     const stats = Array.from(document.querySelectorAll('.ts-stat-v')).map((e) => e.textContent)
     expect(stats).toEqual(['8', '4'])
 
-    // The roster's spend column: a member in by_user shows their cost, a
-    // member absent from it genuinely spent nothing once the read answered.
-    expect(screen.getByText('$9.15')).toBeInTheDocument()
-    expect(screen.getByText('$0.00')).toBeInTheDocument()
+    // The roster's spend column, which an admin does receive: a member in
+    // by_user shows their cost, a member absent from a cut we HAVE genuinely
+    // spent nothing.
+    expect(cellUnder(rosterRow('robin'), 'SPEND · 14D')).toBe('$9.15')
+    expect(cellUnder(rosterRow('dana'), 'SPEND · 14D')).toBe('$0.00')
   })
 
-  it('never fires the spend read for a member, and still fills the flow', async () => {
+  it('gives a member the team spend, and a dash where by_user would be', async () => {
     roles.team = 'member'
     roles.org = false
     renderPage()
     await waitFor(() => expect(figureValue('tasks · 7 days')).toBe('4'))
 
-    // The endpoint is admin-gated; a member firing it would just collect a
-    // refusal. The gate is the hook's enabled flag, so the call never leaves.
-    expect(api.apiJSON.mock.calls.some((c) => String(c[0]).includes('/usage?'))).toBe(false)
-    expect(figureValue('spent · 14 days')).toBeNull()
+    // What a team spends is the team's fact, so the read fires and the
+    // headline lands for a member exactly as it does for an admin.
+    expect(api.apiJSON.mock.calls.some((c) => String(c[0]).includes('/usage?'))).toBe(true)
+    await waitFor(() => expect(figureValue('spent · 14 days')).toBe('$12.40'))
+
+    // The per-person column is the one thing withheld. A member is sent no
+    // by_user cut at all, and a cut we were never given is a dash — never the
+    // $0.00 that would claim they spent nothing.
+    const row = rosterRow('robin')
+    expect(cellUnder(row, 'SPEND · 14D')).toBe('—')
+    expect(row.textContent).not.toMatch(/\$/)
   })
 })
 
@@ -545,9 +580,9 @@ describe('the last admin', () => {
 })
 
 // The models surface: the band cell's preview and the panel it opens into.
-// The reads are the org catalog, the team's settings slice, and the admin-gated
-// spend cut; the writes are one PATCH each — and what a control refuses is as
-// load-bearing as what it sends.
+// The reads are the org catalog, the team's settings slice, and the member-
+// visible spend cut; the writes are one PATCH each — and what a control refuses
+// is as load-bearing as what it sends.
 describe('the models panel', () => {
   /** Scope to the opened panel's table — the band above repeats the names. */
   const table = () => document.querySelector('.ts-tablewrap') as HTMLElement
@@ -609,7 +644,7 @@ describe('the models panel', () => {
     })
   })
 
-  it('gives a member no star, no toggle, and no spend claims', async () => {
+  it('gives a member no star and no toggle, but the same spend readings', async () => {
     roles.team = 'member'
     roles.org = false
     await openPanel()
@@ -617,11 +652,14 @@ describe('the models panel', () => {
     // Absent, not disabled: a verb that 403s is not information.
     expect(table().querySelector('.tb-mark')).toBeNull()
     expect(table().querySelector('.tb-toggle')).toBeNull()
-    // The usage read never fired for them, and unknown is not zero.
-    const values = Array.from(table().querySelectorAll('.tb-share-value')).map(
-      (el) => el.textContent,
-    )
-    expect(values).toEqual(['—', '—', '—'])
+    // % OF SPEND is a reading about models, not people — a member gets it, and
+    // reads it exactly as an admin does.
+    await waitFor(() => {
+      const values = Array.from(table().querySelectorAll('.tb-share-value')).map(
+        (el) => el.textContent,
+      )
+      expect(values).toEqual(['100%', '0%', '—'])
+    })
   })
 
   it('fills the band cell from the reads: enabled models, default, out-price, providers', async () => {
@@ -641,7 +679,24 @@ describe('the models panel', () => {
     expect(within(cell).getByText('$15 / M')).toBeInTheDocument()
     // Distinct providers among the org's enable-set, not a model count.
     expect(within(cell).getByText('1 provider')).toBeInTheDocument()
-    // The admin's spend bars: opus carries the whole cut, sonnet reads zero.
+    // The spend bars: opus carries the whole cut, sonnet reads zero.
+    await waitFor(() => {
+      const fills = Array.from(cell.querySelectorAll<HTMLElement>('.ts-meter-fill')).map(
+        (el) => el.style.width,
+      )
+      expect(fills).toEqual(['100%', '0%'])
+    })
+  })
+
+  it('fills the band cell meters for a member too', async () => {
+    roles.team = 'member'
+    roles.org = false
+    renderPage()
+    await screen.findByText('(default)')
+    const cell = document.querySelector('.ts-band .ts-panel:not(.ts-panel-right)') as HTMLElement
+
+    // by_model names no one, so the tracks fill on the member's own read
+    // rather than staying at the unknown-is-not-zero dash.
     await waitFor(() => {
       const fills = Array.from(cell.querySelectorAll<HTMLElement>('.ts-meter-fill')).map(
         (el) => el.style.width,

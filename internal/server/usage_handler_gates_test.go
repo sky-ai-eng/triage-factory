@@ -149,11 +149,33 @@ func TestUsageHandler_GatesAndScope_Postgres(t *testing.T) {
 		}
 	})
 
-	t.Run("team_member_non_admin_403", func(t *testing.T) {
+	t.Run("team_member_200_without_by_user", func(t *testing.T) {
+		// Team spend is a member-visible team fact; the per-person cut is not.
+		// A member gets the whole payload with by_user ABSENT — not empty,
+		// which would read as "nobody spent anything".
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageTeam(rec, r.req(r.member, r.teamA))
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("/teams/{teamA} as plain member = %d, want 403; body=%s", rec.Code, rec.Body.String())
+		if rec.Code != http.StatusOK {
+			t.Fatalf("/teams/{teamA} as plain member = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp usageTeamResponse
+		mustDecode(t, rec, &resp)
+		if resp.ByUser != nil {
+			t.Errorf("/teams by_user = %+v as a plain member, want absent", *resp.ByUser)
+		}
+		if strings.Contains(rec.Body.String(), `"by_user"`) {
+			t.Errorf("/teams body carries a by_user key for a plain member: %s", rec.Body.String())
+		}
+		// Every other cut is the admin's: the total, the models the donut needs,
+		// the days, and the team's own rules.
+		if !floatEq(resp.TotalCostUSD, 1.25) {
+			t.Errorf("/teams total = %v, want 1.25 (teamA manual + autonomous)", resp.TotalCostUSD)
+		}
+		if len(resp.ByModel) != 2 {
+			t.Errorf("/teams by_model = %+v, want both teamA models", resp.ByModel)
+		}
+		if len(resp.ByRule) != 1 || resp.ByRule[0].RuleName != r.blueprint {
+			t.Errorf("/teams by_rule = %+v, want one rule %q (a rule is team config, not a person)", resp.ByRule, r.blueprint)
 		}
 	})
 
@@ -173,25 +195,46 @@ func TestUsageHandler_GatesAndScope_Postgres(t *testing.T) {
 		if len(resp.ByRule) != 1 || resp.ByRule[0].RuleName != r.blueprint {
 			t.Errorf("/teams by_rule = %+v, want one rule %q (resolved under member claims)", resp.ByRule, r.blueprint)
 		}
-		// by_user surfaces the member who created the teamA spend.
+		// by_user is present for an admin, and surfaces the member who created
+		// the teamA spend.
+		if resp.ByUser == nil {
+			t.Fatalf("/teams by_user absent for a team admin, want the per-person cut")
+		}
 		var sawMember bool
-		for _, u := range resp.ByUser {
+		for _, u := range *resp.ByUser {
 			if u.UserID == r.member {
 				sawMember = true
 			}
 		}
 		if !sawMember {
-			t.Errorf("/teams by_user = %+v, want the member %s present", resp.ByUser, r.member)
+			t.Errorf("/teams by_user = %+v, want the member %s present", *resp.ByUser, r.member)
 		}
 	})
 
-	t.Run("team_org_admin_not_member_403", func(t *testing.T) {
-		// /teams is team-admin-only: an org admin who isn't on teamA is NOT given
-		// that team's per-rule detail — they use the org rollup instead.
+	t.Run("team_org_admin_not_member_200_without_by_user", func(t *testing.T) {
+		// The org admin is a member of teamB, so teamA's spend is now readable to
+		// them as an org member like any other. by_user is NOT: the predicate is
+		// tf.user_is_team_admin, which org-admin does not satisfy — the org
+		// rollup at /api/orgs/{org_id}/usage is where they get people.
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageTeam(rec, r.req(r.orgAdmin, r.teamA))
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("/teams/{teamA} as org admin (not on teamA) = %d, want 403; body=%s", rec.Code, rec.Body.String())
+		if rec.Code != http.StatusOK {
+			t.Fatalf("/teams/{teamA} as org admin (not on teamA) = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp usageTeamResponse
+		mustDecode(t, rec, &resp)
+		if resp.ByUser != nil {
+			t.Errorf("/teams by_user = %+v for an org admin off the team, want absent", *resp.ByUser)
+		}
+	})
+
+	t.Run("team_cross_org_404", func(t *testing.T) {
+		// Non-disclosure is untouched by the widened gate: a team the caller's
+		// org does not contain is not found, never a role refusal.
+		rec := httptest.NewRecorder()
+		r.uh.handleUsageTeam(rec, r.req(r.member, uuid.New().String()))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("/teams/{stranger} = %d, want 404; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 

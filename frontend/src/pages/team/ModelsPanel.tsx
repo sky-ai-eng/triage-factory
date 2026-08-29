@@ -159,8 +159,8 @@ export default function ModelsPanel({
         // Three answers, three inks. A team-unenabled row has nothing to
         // report — dash. An enabled row with no spend reports 0%, a reading
         // and the argument for turning it off. And every row is a dash until
-        // the usage read answers, which for a member is never: the read is
-        // admin-gated and unknown is not zero.
+        // the usage read answers — every member fires it, but unknown is not
+        // zero while it is in flight.
         format: (v: number, r: TableRow) => (shares && r.on ? v + '%' : '—'),
         color: (r) => (r.pct ? 'var(--color-warm)' : 'transparent'),
         valueColor: (r: TableRow) => (shares && r.on ? 'var(--color-ink-2)' : 'var(--color-ink-4)'),
