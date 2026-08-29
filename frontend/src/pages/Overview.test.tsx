@@ -165,7 +165,10 @@ describe('NEEDS YOU', () => {
     await waitFor(() => expect(screen.getByText('Killed at the memory limit')).toBeInTheDocument())
     expect(screen.getByText('Approve the draft pull request')).toBeInTheDocument()
     // The reference is the source's own spelling — GitHub without the owner.
-    expect(screen.getByText('factory-api#761')).toBeInTheDocument()
+    // The reference leads the row in its own column, number split for pinning.
+    expect(document.querySelector('.rr-lead-ref')).not.toBeNull()
+    const refs = [...document.querySelectorAll('.rr-row > .rr-ref')].map((el) => el.textContent)
+    expect(refs).toContain('factory-api#761')
     expect(screen.getByText('SKY-412')).toBeInTheDocument()
     // Every row's one target is its run.
     const row = screen.getByText('Approve the draft pull request').closest('a')

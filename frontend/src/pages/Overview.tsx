@@ -64,6 +64,12 @@ import './overview/overview.css'
 const NEEDS_SHOWN = 3
 const RUNNING_SHOWN = 6
 
+// Both lists lead with the reference, from this one page-level setting: two
+// lists of the same primitive on one page reading in two different orders is
+// the reader doing the component's job twice. The anchor is what keeps a
+// working row's changing action from dragging its own identity sideways.
+const ROW_LEAD = 'ref' as const
+
 export default function Overview() {
   const { teamId } = useShellScope()
   const orgHref = useOrgHref()
@@ -255,6 +261,7 @@ export default function Overview() {
           <div className="ov-rows">
             <RunRows
               label="NEEDS YOU"
+              lead={ROW_LEAD}
               count={
                 <span style={{ color: 'var(--color-warm)' }}>{num(quiet ? 0 : needsTotal)}</span>
               }
@@ -272,6 +279,7 @@ export default function Overview() {
           <div className="ov-rows">
             <RunRows
               label="RUNNING"
+              lead={ROW_LEAD}
               count={<span style={{ color: 'var(--color-cool)' }}>{num(running?.total)}</span>}
               rows={runningItems}
               onPick={onPick}

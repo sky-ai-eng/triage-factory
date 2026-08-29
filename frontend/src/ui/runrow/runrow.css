@@ -1,19 +1,114 @@
 /* RunRows — see RunRows.tsx for the reasoning. Layout notes only here.
 
-   The list is ONE grid and every row is a subgrid of it, so the age column and
-   the prose start line up down the whole list without any row knowing its own
-   width. A per-row flexbox cannot do that: each row would size its own columns
-   and the right edge would wander by a few px per row. */
+   The list is ONE grid and every row is a subgrid of it, so the prose start
+   lines up down the whole list without any row knowing its own width. A
+   per-row flexbox cannot do that: each row would size its own columns and the
+   starts would wander by a few px per row.
+
+   The TAIL is deliberately not part of that. It shares the prose's cell and
+   each row divides it alone, because a shared tail track is as wide as the
+   widest tail in the list and that made every plain row's sentence stop short
+   of a queued row's mark. See .rr-body. */
 
 .rr {
   display: grid;
-  grid-template-columns: 3px 14px minmax(0, 1fr) auto 10px;
+  grid-template-columns: 3px 14px minmax(0, 1fr) 10px;
   align-items: center;
   column-gap: 11px;
+  /* Reserved for the reference cap, which used to respond to the list's own
+     width here. It does not any more — below 400px the column is dropped
+     outright in RunRows.tsx and the reference moves onto the glyph, which
+     needs a measurement JS can act on rather than a query only CSS can see.
+     Kept because a container is also what lets the cap step down once before
+     that. */
+  container-type: inline-size;
 }
 
 /* The trailing 10px column is a gutter, not a cell. Without it the age sits
    hard against the container edge and reads as clipped. */
+
+/* lead="ref": the reference takes a column of its own in front of the prose.
+   `fit-content` sizes it to the widest reference in the LIST, not per row —
+   the whole point of the subgrid — so every sentence in the list starts on the
+   same line and a working row's changing action grows to the right of a fixed
+   anchor instead of pushing its own identity sideways.
+
+   The 152px cap is why it is fit-content and not `auto`: `auto` hands the
+   column to whichever row has the longest reference, and one
+   `platform-control-plane-migrations#1184` in a list of twelve short refs
+   charges every other row for it, squeezing all twelve sentences. Past the cap
+   the reference truncates and the prose keeps its width. 152px is about 22
+   mono characters at 11px, which holds every reference in the shipped set with
+   room over. */
+.rr-lead-ref {
+  --rr-ref-cap: 152px;
+  grid-template-columns: 3px 14px fit-content(var(--rr-ref-cap)) minmax(0, 1fr) 10px;
+}
+/* The cap is stated twice, on the track and on the cell, and the cell is the
+   one that does the work against long content: `fit-content` floors at the
+   track's min-content, and a reference is one unbroken word —
+   `platform-control-plane-migrations#1184` has no break opportunity, so its
+   min-content is its full width and the floor lifts the track straight back
+   past the cap. Capping the cell caps what it can contribute in the first
+   place; the track's cap is then what stops a list of short references from
+   reserving room it does not need.
+
+   One variable for both, because they have to agree — a cell cap above the
+   track cap overhangs the track, a cell cap below it makes the track cap dead
+   code.
+
+   `stretch`, not `start`, so the cell can never be wider than its track. */
+.rr-lead-ref .rr-ref {
+  justify-self: stretch;
+  color: var(--color-ink-3);
+  display: flex;
+  min-width: 0;
+  max-width: var(--rr-ref-cap);
+  overflow: hidden;
+}
+
+/* One step down before the column goes: at a list width where 152px is a third
+   of the row the reference is taking more than it names. Below 400px the
+   column is not narrowed further, it is removed — a 92px reference is a stub
+   with an ellipsis in it, and the tooltip on the glyph says the whole thing
+   instead. A percentage inside `fit-content()` cannot do this job: during
+   intrinsic sizing it has nothing definite to resolve against and the length
+   beside it wins. */
+@container (max-width: 470px) {
+  .rr-lead-ref {
+    --rr-ref-cap: 116px;
+  }
+}
+/* Leading means naming the row, so the reference steps up one rung of ink; it
+   stays mono, which is what keeps it from reading as a title. */
+
+/* A reference over the cap loses its HEAD, never its tail. `factory-api#772`
+   identifies itself by the number: fading or ellipsizing the end leaves
+   `factory-api#7…`, which is the half that does not distinguish it from the
+   next row. So the number is split off at the `#` and pinned, and the repo
+   name ellipsizes into it — `platform-control-pl…#1184`. A reference with no
+   `#` (`SKY-412`, `control-plane`) is one token with no dispensable half, and
+   truncates at the end like ordinary text; none in the shipped set come near
+   the cap. */
+.rr-ref-head {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rr-ref-tail {
+  flex: none;
+}
+/* Absence, not content. Dim enough that it reads as an empty slot at a glance
+   and only resolves into a dash on inspection — but no dimmer, or the column
+   looks broken again for a different reason.
+
+   Scoped under .rr-lead-ref to beat that rule's own `color: ink-3`, which is a
+   two-class selector and outranks a bare `.rr-ref-none`. The dash only ever
+   renders in lead position anyway. */
+.rr-lead-ref .rr-ref-none {
+  color: color-mix(in srgb, var(--color-ink-4) 72%, transparent);
+}
 
 .rr-row {
   grid-column: 1 / -1;
@@ -78,6 +173,34 @@ a.rr-row:hover {
   stroke: var(--color-alarm);
 }
 
+/* The prose and the tail share ONE grid cell and divide it per row, rather
+   than sitting in two tracks. The tail used to be a track of its own, which
+   made it as wide as the widest tail in the LIST — so a queued row's
+   `20s · ⧖ 3` set the column and every plain row's sentence stopped short of
+   its own `12m`, fading against a gap that belonged to a different row. Each
+   row now yields to its own time and nothing else.
+
+   What that gives up is a shared left edge for the tails, and there never was
+   one: the queue mark follows the age, so a queued row's right-most element is
+   the mark and a plain row's is the age. The right edges did align and still
+   do — both are flush to the gutter. */
+.rr-body {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.rr-line {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
 /* The PROSE dissolves; the reference does not. Masking the pair together made
    the reference the sacrificial element — prose at flex:none never yielded, so
    any sentence longer than the line pushed the reference into the fade and it
@@ -88,18 +211,20 @@ a.rr-row:hover {
    the gradient covers empty space and nothing is visibly faded. Text that does
    not fit runs on into the padding and dissolves there. No measurement, no
    class toggling, and it holds at any width. */
-.rr-line {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
 .rr-act {
   flex: 0 1 auto;
   min-width: 0;
+  /* No upper bound on the sentence. There was one — an 86ch measure, on the
+     argument that a 12.5px line past ninety characters stops being scannable —
+     and it put the fade in the middle of the row: on a 950px list the prose
+     dissolved at 600px with 70px of empty ground between it and the `12m` it
+     was supposedly running out of room for. A fade has to land ON something.
+     The row's own time is the only thing it can land on, so the sentence runs
+     to it and the measure argument loses.
+
+     If a row ever does get wide enough for the line to be a genuine reading
+     problem, the answer is a narrower list, not a cap that fades against
+     nothing. */
   overflow: hidden;
   padding-right: 15px;
   font: 400 12.5px/1.3 var(--font-sans);
@@ -126,11 +251,19 @@ a.rr-row:hover {
   font: 400 11px/1.3 var(--font-mono);
   color: var(--color-ink-4);
 }
+/* Leading, unanchored: the reference is first in the row's own line rather
+   than in a column of its own, and takes the same rung of ink the anchored
+   lead does. Whatever leads names the row. */
+.rr-line > .rr-ref:first-child {
+  color: var(--color-ink-3);
+}
 
-/* Age and queue mark share ONE end-aligned cell, so the column is as wide as
-   the widest tail and every row's right edge lands together. A queued row's
-   time is pushed left by its own mark and nothing else moves. */
+/* End-aligned within the row, so the age — or the queue mark that follows it —
+   closes the row flush to the gutter. The gap keeps a sentence that runs long
+   from touching the time it is running into. */
 .rr-tail {
+  flex: none;
+  margin-left: auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;

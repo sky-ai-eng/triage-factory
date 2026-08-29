@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import type { MouseEvent, ReactNode } from 'react'
 import { Scan } from '../scan/Scan'
 import { Tooltip } from '../tooltip/Tooltip'
@@ -11,10 +12,12 @@ import './runrow.css'
 //
 // ONE prose string per row. The row leads with what is happening and everything
 // else is demoted so it cannot be mistaken for a second sentence: the reference
-// trails the prose in small mono, the age closes the row in mono, the source is
-// a glyph. Two sentence-shaped strings of equal rank on one line give the row
-// two centres of gravity and open a ragged trench between them — that shape was
-// tried and cut.
+// in small mono, the age closing the row in mono, the source as a glyph. Two
+// sentence-shaped strings of equal rank on one line give the row two centres of
+// gravity and open a ragged trench between them — that shape was tried and cut.
+//
+// When the prose is too long for the row it dissolves; the reference stays
+// whole. The row's identity is the thing that must survive a narrow window.
 //
 // There is no title, deliberately. An agent run has no name of its own: what
 // identifies it is the work, and the work is already the prose. Where a run
@@ -101,6 +104,30 @@ export type RunRowsProps = {
   more?: ReactNode
   /** Mono line under the list — what the list excludes, say. */
   note?: ReactNode
+  /**
+   * Which of the row's two identities leads.
+   *
+   * `activity` puts the prose first and trails the reference behind it. Reads
+   * best when the rows are a feed you scan top to bottom for WHAT is
+   * happening.
+   *
+   * `ref` gives the reference its own column ahead of the prose. The prose
+   * then grows and shrinks to the RIGHT of a fixed anchor, so a working row
+   * whose current action changes every few seconds no longer drags its own
+   * identity back and forth across the row. Costs the prose the leading
+   * position and one column of width; ignored when no row in the list carries
+   * a reference.
+   */
+  lead?: 'activity' | 'ref'
+  /**
+   * Only read when `lead` is `ref`. `true` puts the reference in its own grid
+   * column, so every sentence in the list starts on the same line. `false`
+   * leaves it packed against the prose in the row's own flex line: the order
+   * changes, the column does not, so each row starts its sentence wherever its
+   * own reference happens to end and the list's left edge of prose goes
+   * ragged. The reference itself no longer moves either way — it is first now.
+   */
+  anchor?: boolean
 }
 
 // Lucide hourglass on the rail's 16 grid, for a queued run's wait.
@@ -132,6 +159,59 @@ function tone(row: RunRowItem): 'warm' | 'alarm' | 'cool' | 'quiet' {
   return 'quiet'
 }
 
+// Split a reference so the identifying half survives truncation. Everything
+// from the last `#` is the tail and is pinned; the rest ellipsizes into it. A
+// reference with no `#` has no dispensable half, so it stays one piece.
+function splitRef(ref: string): [string, string] {
+  const i = ref.lastIndexOf('#')
+  return i > 0 ? [ref.slice(0, i), ref.slice(i)] : [ref, '']
+}
+
+// Mono characters that fit the leading reference's 152px column at 11px. Kept
+// in step with `fit-content(152px)` in runrow.css by hand: it decides only
+// whether a tooltip is offered, so being a character or two out costs a
+// tooltip on a reference that just fits, not a wrong layout.
+const REF_CAP = 22
+
+// `value`, not `ref` — React claims that name on any element.
+function Ref({ value, lead }: { value: string; lead: boolean }) {
+  if (!lead) return <span className="rr-ref">{value}</span>
+  // A hand-started run has no upstream entity, and in lead position the column
+  // is still there — an empty cell reads as a rendering fault rather than as
+  // an absence. So the absence is drawn: an em dash, the same mark a table
+  // uses for a value that does not exist, dimmer than a real reference so it
+  // cannot be mistaken for one. Not the word "manual": the glyph beside it
+  // already says that, and this column answers WHICH one, not WHAT KIND.
+  if (!value)
+    return (
+      <span className="rr-ref rr-ref-none" aria-hidden="true">
+        —
+      </span>
+    )
+  const [head, tail] = splitRef(value)
+  const mark = (
+    <span className="rr-ref">
+      <span className="rr-ref-head">{head}</span>
+      {tail ? <span className="rr-ref-tail">{tail}</span> : null}
+    </span>
+  )
+  // Only where the reference can actually be clipped. Not focusable: the row
+  // is the anchor, and the words are already in the accessible name of the
+  // link — the tooltip restores only what the clipping hid.
+  return value.length > REF_CAP ? (
+    <Tooltip content={value} focusable={false}>
+      {mark}
+    </Tooltip>
+  ) : (
+    mark
+  )
+}
+
+// Below this the reference column is dropped and the reference moves onto the
+// source glyph as a tooltip. Measured on the LIST, not the window: the same
+// list is a 430px column on Overview and a full-width pane on a card.
+const NARROW = 400
+
 export function RunRows({
   rows = [],
   onPick = null,
@@ -140,12 +220,35 @@ export function RunRows({
   count = null,
   more = null,
   note = null,
+  lead = 'activity',
+  anchor = true,
 }: RunRowsProps) {
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const [narrow, setNarrow] = useState(false)
+  useEffect(() => {
+    const el = listRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(([e]) => setNarrow(e.contentRect.width < NARROW))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // A ref column with nothing in it is 11px of gap in front of every sentence,
+  // so the lead only takes effect if there is something to lead with.
+  const refLead = lead === 'ref' && rows.some((r) => r.ref)
+  // Narrow: the reference stops being a column and becomes the glyph's
+  // tooltip. A 92px column is not an anchor, it is a stub with an ellipsis in
+  // it, holding the width the sentence needs to say anything at all. The glyph
+  // is already the row's source mark, so the source's own reference is the one
+  // thing that can hang off it without spending any of the line.
+  const refFirst = refLead && anchor !== false && !narrow
+  const refOnGlyph = refLead && anchor !== false && narrow
   const list = (
-    <div className="rr">
+    <div ref={listRef} className={'rr' + (refFirst ? ' rr-lead-ref' : '')}>
       {rows.map((r) => {
         const live = r.lifecycle === 'working'
         const clickable = r.nav !== false && !!r.href
+        const named = refOnGlyph && !!r.ref
         // The hint is one string for both the tooltip and the mark's
         // aria-label — computing it twice is how the visible words and the
         // announced words drift apart.
@@ -155,64 +258,95 @@ export function RunRows({
             : r.queue === 0
               ? 'Next in the queue'
               : r.queue + ' runs ahead of this one'
+        const glyph = (
+          <svg
+            className="rr-ico"
+            viewBox="0 0 16 16"
+            fill="none"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden={named ? undefined : true}
+            role={named ? 'img' : undefined}
+            aria-label={named ? (r.ref ?? undefined) : undefined}
+          >
+            <path d={GLYPH[r.source]} />
+          </svg>
+        )
         const body = (
           <>
             <span className="rr-tick" />
-            <svg
-              className="rr-ico"
-              viewBox="0 0 16 16"
-              fill="none"
-              strokeWidth="1.4"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <path d={GLYPH[r.source]} />
-            </svg>
-            <span className="rr-line">
-              <Scan className="rr-act" active={live}>
-                {r.activity}
-              </Scan>
-              {r.ref ? <span className="rr-ref">{r.ref}</span> : null}
-            </span>
-            <span className="rr-tail">
-              <span className="rr-age">{r.age}</span>
-              {hint != null ? (
-                /* A real tooltip rather than the native `title` this used to
-                   carry: `title` waits about a second, cannot be styled, and
-                   on a row that is itself an anchor it competes with the
-                   browser's own link hint.
+            {/* The glyph carries the reference only where the column is gone,
+                so the hover is never an echo of words already on the row. Not
+                focusable — the row is the anchor — and the words reach
+                assistive technology through the glyph's own aria-label. */}
+            {named ? (
+              <Tooltip content={r.ref} focusable={false}>
+                {glyph}
+              </Tooltip>
+            ) : (
+              glyph
+            )}
+            {/* Rendered even when empty: the rows are subgrids of one grid and
+                cells place in source order, so a row that skipped its
+                reference would slide its prose into the reference's column. */}
+            {refFirst ? <Ref value={r.ref || ''} lead={true} /> : null}
+            {/* Prose and tail in ONE cell, divided per row — see runrow.css. A
+                tail track shared across the list makes every plain row's
+                sentence stop short of a queued row's mark. */}
+            <span className="rr-body">
+              <span className="rr-line">
+                {/* Unanchored lead: the reference rides in the row's own flex
+                    line ahead of the prose. flex:none keeps it whole, so it is
+                    the prose that dissolves — same rule as when it trails. */}
+                {refLead && !refFirst && !refOnGlyph && r.ref ? (
+                  <Ref value={r.ref} lead={false} />
+                ) : null}
+                <Scan className="rr-act" active={live}>
+                  {r.activity}
+                </Scan>
+                {!refLead && r.ref ? <Ref value={r.ref} lead={false} /> : null}
+              </span>
+              <span className="rr-tail">
+                <span className="rr-age">{r.age}</span>
+                {hint != null ? (
+                  /* A real tooltip rather than the native `title` this used to
+                     carry: `title` waits about a second, cannot be styled, and
+                     on a row that is itself an anchor it competes with the
+                     browser's own link hint.
 
-                   focusable={false} because the row IS the <a>. A tab stop in
-                   here would be invalid — an anchor may not contain
-                   interactive content — and pointless, since the row already
-                   takes focus. So the tooltip is scenery, and the words reach
-                   assistive technology through the mark's own aria-label.
+                     focusable={false} because the row IS the <a>. A tab stop
+                     in here would be invalid — an anchor may not contain
+                     interactive content — and pointless, since the row already
+                     takes focus. So the tooltip is scenery, and the words
+                     reach assistive technology through the mark's own
+                     aria-label.
 
-                   The mark is the whole trigger, dot and glyph included, so
-                   the pointer never has to find a 15px pill exactly. */
-                <Tooltip content={hint} focusable={false}>
-                  <span className="rr-q" role="img" aria-label={hint}>
-                    <span className="rr-q-dot" aria-hidden="true">
-                      ·
+                     The mark is the whole trigger, dot and glyph included, so
+                     the pointer never has to find a 15px pill exactly. */
+                  <Tooltip content={hint} focusable={false}>
+                    <span className="rr-q" role="img" aria-label={hint}>
+                      <span className="rr-q-dot" aria-hidden="true">
+                        ·
+                      </span>
+                      <svg
+                        className="rr-q-ico"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        strokeWidth="1.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d={HOURGLASS} />
+                      </svg>
+                      <span className="rr-q-n" aria-hidden="true">
+                        {r.queue}
+                      </span>
                     </span>
-                    <svg
-                      className="rr-q-ico"
-                      viewBox="0 0 16 16"
-                      fill="none"
-                      strokeWidth="1.4"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden="true"
-                    >
-                      <path d={HOURGLASS} />
-                    </svg>
-                    <span className="rr-q-n" aria-hidden="true">
-                      {r.queue}
-                    </span>
-                  </span>
-                </Tooltip>
-              ) : null}
+                  </Tooltip>
+                ) : null}
+              </span>
             </span>
           </>
         )
