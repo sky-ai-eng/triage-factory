@@ -128,9 +128,7 @@ describe('lead="ref"', () => {
   })
 
   it('draws the absence of an entity as a hidden em dash, never an empty cell', () => {
-    render(
-      <RunRows lead="ref" rows={[row({}), row({ id: 'r2', source: 'manual', ref: null })]} />,
-    )
+    render(<RunRows lead="ref" rows={[row({}), row({ id: 'r2', source: 'manual', ref: null })]} />)
     const dash = document.querySelector('.rr-ref-none')!
     expect(dash).toHaveTextContent('—')
     expect(dash).toHaveAttribute('aria-hidden', 'true')
@@ -155,7 +153,7 @@ describe('lead="ref"', () => {
     expect(document.querySelector('.rr-ref-none')).toBeNull()
   })
 
-  it('anchor={false} keeps the reference first but in the row\'s own line', () => {
+  it("anchor={false} keeps the reference first but in the row's own line", () => {
     render(<RunRows lead="ref" anchor={false} rows={[row({})]} />)
     expect(document.querySelector('.rr')!.className).not.toContain('rr-lead-ref')
     const line = document.querySelector('.rr-line')!

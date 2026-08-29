@@ -119,11 +119,11 @@ describe('page clamp', () => {
   const rect = (o: Partial<DOMRect>) =>
     ({ left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, ...o }) as DOMRect
   const bubble = (r: Partial<DOMRect>) =>
-    vi
-      .spyOn(Element.prototype, 'getBoundingClientRect')
-      .mockImplementation(function (this: Element) {
-        return this.classList?.contains('tip') ? rect(r) : rect({})
-      })
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: Element,
+    ) {
+      return this.classList?.contains('tip') ? rect(r) : rect({})
+    })
   afterEach(() => {
     vi.restoreAllMocks()
     page(0)

@@ -148,9 +148,9 @@ export function RunRowsCard() {
         run. Two independent axes: <code>lifecycle</code> (queued · working · done · failed) and{' '}
         <code>asks</code> (wants a person → the warm tick, whatever the lifecycle). The lead is a
         list-level choice: <code>lead=&quot;ref&quot;</code> anchors the reference in a column of
-        its own so a working row&apos;s changing action grows to the right of it instead of
-        dragging the row&apos;s identity sideways — switch the toggle while the rows scan to see
-        the twitch it fixes. The hand-started row keeps its slot as an em dash.
+        its own so a working row&apos;s changing action grows to the right of it instead of dragging
+        the row&apos;s identity sideways — switch the toggle while the rows scan to see the twitch
+        it fixes. The hand-started row keeps its slot as an em dash.
       </p>
 
       <div style={{ maxWidth: 560 }}>
