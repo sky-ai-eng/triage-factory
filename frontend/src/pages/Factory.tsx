@@ -1,4 +1,4 @@
-import * as Tooltip from '@radix-ui/react-tooltip'
+import { Tooltip } from '../ui/tooltip/Tooltip'
 import {
   DndContext,
   DragOverlay,
@@ -11,7 +11,7 @@ import {
   type DragStartEvent,
 } from '@dnd-kit/core'
 import { Clapperboard } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import PromptPicker from '../components/PromptPicker'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import { toast } from '../components/Toast/toastStore'
@@ -525,19 +525,17 @@ export default function Factory() {
 function StationDrawer({ info }: { info: ClickedStationInfo | null }) {
   const open = info != null
   return (
-    <Tooltip.Provider delayDuration={250}>
-      <div
-        className={`pointer-events-none absolute inset-x-0 bottom-0 z-40 transition-transform duration-[var(--dur-content)] ease-out ${
-          open ? 'translate-y-0' : 'translate-y-full'
-        }`}
-        style={{ height: '46vh' }}
-        aria-hidden={!open}
-      >
-        <div className="pointer-events-auto relative h-full bg-raised/95 backdrop-blur-xl border-t border-line-1 shadow-float shadow-black/[0.12] flex items-stretch p-5">
-          <StationChassis info={info} />
-        </div>
+    <div
+      className={`pointer-events-none absolute inset-x-0 bottom-0 z-40 transition-transform duration-[var(--dur-content)] ease-out ${
+        open ? 'translate-y-0' : 'translate-y-full'
+      }`}
+      style={{ height: '46vh' }}
+      aria-hidden={!open}
+    >
+      <div className="pointer-events-auto relative h-full bg-raised/95 backdrop-blur-xl border-t border-line-1 shadow-float shadow-black/[0.12] flex items-stretch p-5">
+        <StationChassis info={info} />
       </div>
-    </Tooltip.Provider>
+    </div>
   )
 }
 
@@ -559,6 +557,7 @@ function StationChassis({ info }: { info: ClickedStationInfo | null }) {
         body: <QueuedEntityRow entity={e} />,
         href: e.url || undefined,
         tooltip: <EntityTooltip entity={e} />,
+        tooltipText: entityMetaText(e),
         // dragId enables the drag-to-delegate flow — see DndContext in
         // Factory.tsx's top-level component. The runs-tray drop target
         // reads this back from active.id to resolve the entity.
@@ -612,8 +611,13 @@ interface TrayItem {
   body: React.ReactNode
   /** When set, the row becomes an `<a>` opening the URL in a new tab. */
   href?: string
-  /** When set, hovering the row reveals this content in a Radix tooltip. */
+  /** When set, hovering — or focusing — the row reveals this content in the
+   *  house tooltip. */
   tooltip?: React.ReactNode
+  /** The tooltip's words as plain text. Required beside `tooltip` on a row
+   *  with an href: the hover panel is aria-hidden scenery there, and this is
+   *  what the anchor's aria-describedby carries instead. */
+  tooltipText?: string
   /** When set, the row registers as a draggable with this id under the
    *  enclosing DndContext. Used by the station drawer to drag queued
    *  entities onto the runs tray. */
@@ -691,9 +695,9 @@ function Tray({
 // Single tray row. Conditionally renders the row content as an `<a>`
 // when `href` is set so clicking opens the entity in a new tab; the
 // inner content adopts `display: contents` so the anchor doesn't
-// affect the row's flex layout. Wrapping with Radix Tooltip is also
-// conditional — only rows that pass `tooltip` get the hover popup,
-// which keeps Run rows untouched.
+// affect the row's flex layout. The tooltip wrap is also conditional —
+// only rows that pass `tooltip` get the hover panel, which keeps Run
+// rows untouched.
 function TrayRow({ item }: { item: TrayItem }) {
   const interactive = !!item.href
   // useDraggable's disabled flag keeps the hook call stable across
@@ -716,11 +720,19 @@ function TrayRow({ item }: { item: TrayItem }) {
   // anchor sits inside as a "contents" element so its rect is the
   // same as the li's content area — clicking anywhere on the row
   // (except the dot, which is aria-hidden) hits the link.
+  // The anchor's description is the tooltip's words: with an href the hover
+  // panel is aria-hidden scenery, and this hidden sentence is the route its
+  // metadata — which the visible row does not carry — reaches assistive
+  // technology. The panel itself still opens on the anchor's focus (the host
+  // follows focus within it), so it is not mouse-only either.
+  const metaId = useId()
+  const described = !!(item.href && item.tooltip && item.tooltipText)
   const rowContent = item.href ? (
     <a
       href={item.href}
       target="_blank"
       rel="noopener noreferrer"
+      aria-describedby={described ? metaId : undefined}
       className={`${innerClasses} cursor-pointer`}
     >
       {inner}
@@ -729,7 +741,13 @@ function TrayRow({ item }: { item: TrayItem }) {
     <div className={innerClasses}>{inner}</div>
   )
   const draggable = !!item.dragId
-  const li = (
+  // The tooltip host lives INSIDE the <li> — a wrapper around it would break
+  // the list's ul > li nesting — and takes the filling-cell layout so the row
+  // reads exactly as it does without a hint. The mode follows the row's own
+  // interactivity: with an anchor, the anchor is the interactive thing and the
+  // hint is scenery beside it; without one (a queued entity with no URL) the
+  // host takes the tab stop itself, or the hint has no keyboard route at all.
+  return (
     <li
       ref={draggable ? drag.setNodeRef : undefined}
       {...(draggable ? drag.attributes : {})}
@@ -744,38 +762,24 @@ function TrayRow({ item }: { item: TrayItem }) {
         boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.85), 0 1px 2px rgba(0,0,0,0.03)',
       }}
     >
-      {rowContent}
-    </li>
-  )
-  if (!item.tooltip) return li
-  return (
-    <Tooltip.Root>
-      <Tooltip.Trigger asChild>{li}</Tooltip.Trigger>
-      <Tooltip.Portal>
-        <Tooltip.Content
-          side="top"
-          align="start"
-          sideOffset={6}
-          className="z-[100] max-w-[320px] rounded-lg border border-line-1 px-3 py-2.5 text-ui text-ink-1 leading-relaxed animate-in fade-in-0 zoom-in-95"
-          style={{
-            // Opaque base + top-light gradient → bottom-shaded gives the
-            // liquid-glass sheen without bleed-through. Inset highlight
-            // on the top edge sells "polished pane"; layered drop shadow
-            // gives the float/separation from the tray underneath.
-            background: 'linear-gradient(180deg, #fbf9f4 0%, #f1ece0 100%)',
-            boxShadow: [
-              'inset 0 1px 0 rgba(255,255,255,0.7)',
-              'inset 0 -1px 0 rgba(0,0,0,0.04)',
-              '0 1px 2px rgba(0,0,0,0.06)',
-              '0 8px 24px rgba(0,0,0,0.18)',
-            ].join(', '),
-          }}
+      {item.tooltip ? (
+        <Tooltip
+          content={item.tooltip}
+          wrap={320}
+          focusable={!item.href}
+          className="flex-1 min-w-0"
         >
-          {item.tooltip}
-          <Tooltip.Arrow style={{ fill: '#f1ece0' }} />
-        </Tooltip.Content>
-      </Tooltip.Portal>
-    </Tooltip.Root>
+          {rowContent}
+        </Tooltip>
+      ) : (
+        rowContent
+      )}
+      {described ? (
+        <span id={metaId} className="sr-only">
+          {item.tooltipText}
+        </span>
+      ) : null}
+    </li>
   )
 }
 
@@ -794,7 +798,7 @@ function QueuedEntityRow({ entity }: { entity: FactoryEntity }) {
 // truncation) plus source-specific metadata so the user can read the
 // long context without having to click through. Mirrors the columns
 // the old factory's StationDetailOverlay surfaced.
-function EntityTooltip({ entity }: { entity: FactoryEntity }) {
+function entityMeta(entity: FactoryEntity): { k: string; v: string }[] {
   const meta: { k: string; v: string }[] = []
   if (entity.source === 'github') {
     if (entity.repo) meta.push({ k: 'repo', v: entity.repo })
@@ -811,6 +815,20 @@ function EntityTooltip({ entity }: { entity: FactoryEntity }) {
     if (entity.priority) meta.push({ k: 'priority', v: entity.priority })
     if (entity.assignee) meta.push({ k: 'assignee', v: entity.assignee })
   }
+  return meta
+}
+
+// The tooltip's words as one plain sentence, for the row's aria-describedby:
+// the hover panel is aria-hidden scenery, so this is the route by which its
+// metadata — none of which appears in the visible row — reaches assistive
+// technology.
+function entityMetaText(entity: FactoryEntity): string {
+  const title = entity.title || entity.source_id || entity.id
+  return [title, ...entityMeta(entity).map((m) => `${m.k} ${m.v}`)].join(' · ')
+}
+
+function EntityTooltip({ entity }: { entity: FactoryEntity }) {
+  const meta = entityMeta(entity)
   return (
     <div className="space-y-2">
       <div className="font-medium text-card-title leading-snug text-ink-1">

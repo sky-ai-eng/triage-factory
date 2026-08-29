@@ -7,7 +7,16 @@ import { apiJSON } from '../lib/apiClient'
 // by the caller, so a surface fetches the window its chart needs rather than
 // re-deriving one client-side from another window's answer.
 
-export type ActivityDay = { date: string; events: number; tasks: number }
+// merged / failed are plain ints with real zeros: merged counts the tracked
+// set's github:pr:merged events, failed the team's terminally-failed runs —
+// both windowed like events/tasks, so sums over any [since, until) are honest.
+export type ActivityDay = {
+  date: string
+  events: number
+  tasks: number
+  merged: number
+  failed: number
+}
 export type ActivityDaySource = { date: string; source: string; events: number; tasks: number }
 export type ActivitySourceRow = {
   source: string

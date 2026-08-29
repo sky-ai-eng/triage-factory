@@ -8,7 +8,8 @@ import { useRailCounts } from './hooks/useRailCounts'
 import { useWsConnected } from './hooks/useWebSocket'
 import { useOptionalAuth } from './contexts/AuthContext'
 import { useOrgRole } from './hooks/useOrgRole'
-import { useTeams } from './hooks/useTeams'
+import { useActiveTeam, useTeams } from './hooks/useTeams'
+import type { ShellScope } from './hooks/useShellScope'
 import { FeatureFleet, useEntitlements } from './hooks/useEntitlements'
 import { getStoredTheme, setTheme as applyStoredTheme } from './lib/theme'
 import { ChromeProvider } from './contexts/ChromeContext'
@@ -140,7 +141,23 @@ export default function Shell() {
   }, [])
 
   const activeOrg = auth?.orgs?.find((o) => o.id === auth?.serverActiveOrgId) ?? auth?.orgs?.[0]
-  const teamNames = useMemo(() => teams.map((t) => t.name), [teams])
+  const teamRows = useMemo(() => teams.map((t) => ({ id: t.id, name: t.name })), [teams])
+
+  // The org · team mark is the SCOPE CONTROL for pages that carry none of
+  // their own (the Overview, by design): one persisted selection, seeded like
+  // every single-team page scope, resolved to a concrete team the moment the
+  // teams list loads (the sole team when there is only one). The resolved team
+  // rides the outlet context so switching in the rail reframes the page in the
+  // same render that moves the mark.
+  const { teamId: pickedTeamId, setTeamId: setPickedTeamId } = useActiveTeam('shell')
+  const scopeTeam = teams.find((t) => t.id === pickedTeamId) ?? teams[0] ?? null
+  const scope = useMemo<ShellScope>(
+    () => ({ teamId: scopeTeam?.id ?? '', teamName: scopeTeam?.name ?? '' }),
+    [scopeTeam?.id, scopeTeam?.name],
+  )
+  // The shell reports the picked team's ID — names are display-only there,
+  // since nothing makes them unique.
+  const onTeamChange = setPickedTeamId
 
   // Rail tails are facts about destinations, and every one of them needs a
   // `total` this API does not return yet (backend-needs.md, items 1-8). Absent
@@ -184,8 +201,9 @@ export default function Shell() {
             governance: false,
           }}
           org={activeOrg?.name ?? (isMulti ? '' : 'Triage Factory')}
-          team={teams[0]?.name ?? ''}
-          teams={teamNames}
+          team={scope.teamId ? { id: scope.teamId, name: scope.teamName } : null}
+          teams={teamRows}
+          onTeamChange={onTeamChange}
           route={route}
           onRoute={onRoute}
           // The header band is the shell's; what fills it is the page's. A page
@@ -209,7 +227,7 @@ export default function Shell() {
           onThemeChange={onThemeChange}
           onSignOut={isMulti ? () => void auth?.logout() : undefined}
         >
-          <Outlet />
+          <Outlet context={scope} />
         </UiShell>
       )}
     </ChromeProvider>

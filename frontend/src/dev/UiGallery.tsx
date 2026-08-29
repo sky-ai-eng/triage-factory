@@ -21,12 +21,19 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import AcquireCard from './AcquireCard'
+import ConvergeCard from './ConvergeCard'
+import CratePileCard from './CratePileCard'
+import FlapCountCard from './FlapCountCard'
 import PrimitivesCard from './PrimitivesCard'
+import RunRowsCard from './RunRowsCard'
+import ScanCard from './ScanCard'
 import SelectionBarCard from './SelectionBarCard'
 import ShellCard from './ShellCard'
 import SourcePartsCard from './SourcePartsCard'
+import SpendRingCard from './SpendRingCard'
 import TableCard from './TableCard'
 import TeamPartsCard from './TeamPartsCard'
+import TooltipCard from './TooltipCard'
 import './gallery.css'
 
 type Section = 'color' | 'type' | 'elevation' | 'space' | 'components'
@@ -313,6 +320,13 @@ export default function UiGallery() {
             </p>
             <AcquireCard />
             <PrimitivesCard />
+            <TooltipCard />
+            <ScanCard />
+            <FlapCountCard />
+            <CratePileCard />
+            <SpendRingCard />
+            <RunRowsCard />
+            <ConvergeCard />
             <SelectionBarCard />
             <TableCard />
             <TeamPartsCard />

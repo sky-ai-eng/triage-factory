@@ -211,11 +211,20 @@ export interface Conversation {
   //
   // Present only on `running` rows in a LIST read, and only when the server had
   // something honest to say: an unknown tool, a call missing its describing
-  // argument, and a turn with no tool calls all omit it. Absent means render
+  // argument, and a turn with no tool calls all omit it. Paths arrive already
+  // collapsed to worktree-relative — the server strips the run's worktree root
+  // before applying its length cap, so no client re-parses them. Absent means render
   // the state label, never a guess. It refreshes on the ordinary refetch
   // cadence — no websocket event carries it, and the run station's message
   // stream stays the live view.
   current_action?: string
+  // queue_position is the queued run's 1-based place in its own org's line,
+  // derived on read and present ONLY while the display status is queued — a
+  // running, open or terminal row carries no key, never a 0 or null, so the
+  // queue mark renders on presence rather than on a sentinel. Org-local by
+  // contract: it says nothing about fleet occupancy or other tenants, and in a
+  // shared-fleet deployment it can understate the wait.
+  queue_position?: number
   // Outcome is the parsed terminal-envelope outcome
   // (continue|finish|abort), persisted to conversations.outcome. Empty/absent for
   // an infra-error conversation or a step that ended without a recognized conclusion.

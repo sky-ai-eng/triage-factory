@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, useMotionValue, useTransform, AnimatePresence } from 'motion/react'
 import type { PanInfo } from 'motion/react'
-import * as Tooltip from '@radix-ui/react-tooltip'
+import { Tooltip } from '../ui/tooltip/Tooltip'
 import { useNavigate } from 'react-router'
 import type { Task, WSEvent } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
@@ -264,7 +264,7 @@ export default function Cards() {
   }
 
   return (
-    <Tooltip.Provider delayDuration={300}>
+    <>
       <div className="flex flex-col items-center justify-center min-h-[70vh] gap-8">
         {/* Counter + filter toggle */}
         <div className="flex items-center gap-3 relative">
@@ -379,7 +379,7 @@ export default function Cards() {
       />
 
       <TaskRulesPanel open={rulesOpen} onClose={() => setRulesOpen(false)} />
-    </Tooltip.Provider>
+    </>
   )
 }
 
@@ -635,51 +635,10 @@ function ConfidenceGauge({ value }: { value: number }) {
     value >= 0.7 ? 'var(--color-cool)' : value >= 0.4 ? 'var(--color-warm)' : 'var(--color-alarm)'
 
   return (
-    <Tooltip.Root>
-      <Tooltip.Trigger asChild>
-        <span
-          className="inline-flex items-center cursor-default"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <svg width="28" height="18" viewBox="0 0 28 18" fill="none">
-            {/* Arc track */}
-            <path
-              d="M 4 16 A 10 10 0 0 1 24 16"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              className="text-ink-4"
-            />
-            {/* Colored arc fill */}
-            <path
-              d="M 4 16 A 10 10 0 0 1 24 16"
-              stroke={needleColor}
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeDasharray={`${value * 31.4} 31.4`}
-              opacity="0.5"
-            />
-            {/* Needle */}
-            <line
-              x1="14"
-              y1="16"
-              x2={14 + 8 * Math.cos(((angle - 90) * Math.PI) / 180)}
-              y2={16 + 8 * Math.sin(((angle - 90) * Math.PI) / 180)}
-              stroke={needleColor}
-              strokeWidth="1.5"
-              strokeLinecap="round"
-            />
-            {/* Center dot */}
-            <circle cx="14" cy="16" r="1.5" fill={needleColor} />
-          </svg>
-        </span>
-      </Tooltip.Trigger>
-      <Tooltip.Portal>
-        <Tooltip.Content
-          side="top"
-          sideOffset={6}
-          className="z-50 rounded-lg backdrop-blur-xl bg-raised border border-line-1 px-3 py-2 shadow-float shadow-black/5 text-ui max-w-[200px]"
-        >
+    <Tooltip
+      wrap
+      content={
+        <>
           <div className="font-medium text-ink-1 mb-0.5">{label}</div>
           <div className="text-ink-3">
             {pct}% AI confidence —{' '}
@@ -689,10 +648,46 @@ function ConfidenceGauge({ value }: { value: number }) {
                 ? 'may need some human guidance'
                 : 'best handled by a human'}
           </div>
-          <Tooltip.Arrow className="fill-white/80" />
-        </Tooltip.Content>
-      </Tooltip.Portal>
-    </Tooltip.Root>
+        </>
+      }
+    >
+      <span
+        className="inline-flex items-center cursor-default"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <svg width="28" height="18" viewBox="0 0 28 18" fill="none">
+          {/* Arc track */}
+          <path
+            d="M 4 16 A 10 10 0 0 1 24 16"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            className="text-ink-4"
+          />
+          {/* Colored arc fill */}
+          <path
+            d="M 4 16 A 10 10 0 0 1 24 16"
+            stroke={needleColor}
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeDasharray={`${value * 31.4} 31.4`}
+            opacity="0.5"
+          />
+          {/* Needle */}
+          <line
+            x1="14"
+            y1="16"
+            x2={14 + 8 * Math.cos(((angle - 90) * Math.PI) / 180)}
+            y2={16 + 8 * Math.sin(((angle - 90) * Math.PI) / 180)}
+            stroke={needleColor}
+            strokeWidth="1.5"
+            strokeLinecap="round"
+          />
+          {/* Center dot */}
+          <circle cx="14" cy="16" r="1.5" fill={needleColor} />
+        </svg>
+      </span>
+    </Tooltip>
   )
 }
 

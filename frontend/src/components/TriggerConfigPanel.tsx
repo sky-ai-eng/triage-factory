@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import * as Switch from '@radix-ui/react-switch'
-import * as Tooltip from '@radix-ui/react-tooltip'
+import { Tooltip } from '../ui/tooltip/Tooltip'
 import { Info } from 'lucide-react'
 import type { TriggerHandler, EventType } from '../types'
 import EventBadge from './EventBadge'
@@ -234,105 +234,103 @@ export default function TriggerConfigPanel({
 
             {/* Body — a disabled fieldset makes every native control read-only
                 in one place when the viewer can't write (TFAC-447). */}
-            <Tooltip.Provider delayDuration={200}>
-              <fieldset
-                disabled={readOnly}
-                className="flex-1 min-w-0 overflow-y-auto border-0 px-5 py-4 space-y-5 disabled:opacity-70"
+            <fieldset
+              disabled={readOnly}
+              className="flex-1 min-w-0 overflow-y-auto border-0 px-5 py-4 space-y-5 disabled:opacity-70"
+            >
+              {/* Predicate editor */}
+              <Section
+                label="Scope filter"
+                description="Only auto-delegate when event metadata matches these conditions. Leave empty to match all events."
               >
-                {/* Predicate editor */}
-                <Section
-                  label="Scope filter"
-                  description="Only auto-delegate when event metadata matches these conditions. Leave empty to match all events."
-                >
-                  <PredicateEditor
-                    eventType={trigger.event_type}
-                    value={predicate}
-                    onChange={setPredicate}
+                <PredicateEditor
+                  eventType={trigger.event_type}
+                  value={predicate}
+                  onChange={setPredicate}
+                />
+              </Section>
+
+              <div className="border-t border-line-1" />
+
+              {/* Autonomy threshold */}
+              <Section
+                label="Min autonomy suitability"
+                description="0 = fire immediately on event. Higher values defer until AI scores the task above this threshold."
+              >
+                <div className="flex items-center gap-3">
+                  <Slider
+                    value={minAutonomy}
+                    onChange={setMinAutonomy}
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    label="Min autonomy suitability"
                   />
-                </Section>
+                  <span className="text-body font-medium text-ink-1 w-[36px] text-right tabular-nums">
+                    {minAutonomy.toFixed(2)}
+                  </span>
+                </div>
+              </Section>
 
-                <div className="border-t border-line-1" />
+              {/* Breaker threshold */}
+              <Section
+                label="Breaker threshold"
+                description="Consecutive auto-delegation failures before pausing. A successful manual run resets the counter."
+              >
+                <input
+                  type="number"
+                  min={1}
+                  value={breakerThreshold}
+                  onChange={(e) => setBreakerThreshold(Math.max(1, Number(e.target.value)))}
+                  className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
+                />
+              </Section>
 
-                {/* Autonomy threshold */}
-                <Section
-                  label="Min autonomy suitability"
-                  description="0 = fire immediately on event. Higher values defer until AI scores the task above this threshold."
-                >
-                  <div className="flex items-center gap-3">
-                    <Slider
-                      value={minAutonomy}
-                      onChange={setMinAutonomy}
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      label="Min autonomy suitability"
-                    />
-                    <span className="text-body font-medium text-ink-1 w-[36px] text-right tabular-nums">
-                      {minAutonomy.toFixed(2)}
-                    </span>
-                  </div>
-                </Section>
-
-                {/* Breaker threshold */}
-                <Section
-                  label="Breaker threshold"
-                  description="Consecutive auto-delegation failures before pausing. A successful manual run resets the counter."
-                >
-                  <input
-                    type="number"
-                    min={1}
-                    value={breakerThreshold}
-                    onChange={(e) => setBreakerThreshold(Math.max(1, Number(e.target.value)))}
-                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
-                  />
-                </Section>
-
-                {/* Apply to unowned entities — the explicit "watch" reach opt-in
-                    (TFAC-517). On a trigger this grants orphan reach AND fires, so
-                    the whole orphan auto-delegation is configured here. Off by
-                    default; carries an eyes-open warning. Hidden for events the
-                    catalog marks inert (pool / requested-party —
-                    supports_watch=false). */}
-                {!eventWatchInert && (
-                  <>
-                    <div className="border-t border-line-1" />
-                    <div>
-                      <label className="flex items-start gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={appliesToUnowned}
-                          onChange={(e) => setAppliesToUnowned(e.target.checked)}
-                          className="mt-0.5 h-4 w-4 shrink-0 rounded border-line-1 text-warm focus:ring-warm/30"
-                        />
-                        <span>
-                          <span className="block text-ui font-medium text-ink-2">
-                            Apply to entities outside this team
-                          </span>
-                          <span className="block text-reported text-ink-3 mt-0.5">
-                            Also auto-delegate on entities no one on this team owns.
-                          </span>
+              {/* Apply to unowned entities — the explicit "watch" reach opt-in
+                  (TFAC-517). On a trigger this grants orphan reach AND fires, so
+                  the whole orphan auto-delegation is configured here. Off by
+                  default; carries an eyes-open warning. Hidden for events the
+                  catalog marks inert (pool / requested-party —
+                  supports_watch=false). */}
+              {!eventWatchInert && (
+                <>
+                  <div className="border-t border-line-1" />
+                  <div>
+                    <label className="flex items-start gap-2.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={appliesToUnowned}
+                        onChange={(e) => setAppliesToUnowned(e.target.checked)}
+                        className="mt-0.5 h-4 w-4 shrink-0 rounded border-line-1 text-warm focus:ring-warm/30"
+                      />
+                      <span>
+                        <span className="block text-ui font-medium text-ink-2">
+                          Apply to entities outside this team
                         </span>
-                      </label>
-                      <AnimatePresence>
-                        {appliesToUnowned && (
-                          <motion.p
-                            initial={{ opacity: 0, height: 0 }}
-                            animate={{ opacity: 1, height: 'auto' }}
-                            exit={{ opacity: 0, height: 0 }}
-                            className="overflow-hidden text-reported leading-relaxed text-warm bg-warm/10 border border-warm/20 rounded-lg px-3 py-2 mt-2"
-                          >
-                            The bot will auto-delegate on matching PRs and issues that no one in
-                            your Triage Factory org owns (e.g. dependabot or outside contributors),
-                            not just your team&rsquo;s — expect more bot activity. It still
-                            won&rsquo;t act on a PR or issue another member owns.
-                          </motion.p>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  </>
-                )}
-              </fieldset>
-            </Tooltip.Provider>
+                        <span className="block text-reported text-ink-3 mt-0.5">
+                          Also auto-delegate on entities no one on this team owns.
+                        </span>
+                      </span>
+                    </label>
+                    <AnimatePresence>
+                      {appliesToUnowned && (
+                        <motion.p
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: 'auto' }}
+                          exit={{ opacity: 0, height: 0 }}
+                          className="overflow-hidden text-reported leading-relaxed text-warm bg-warm/10 border border-warm/20 rounded-lg px-3 py-2 mt-2"
+                        >
+                          The bot will auto-delegate on matching PRs and issues that no one in your
+                          Triage Factory org owns (e.g. dependabot or outside contributors), not
+                          just your team&rsquo;s — expect more bot activity. It still won&rsquo;t
+                          act on a PR or issue another member owns.
+                        </motion.p>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                </>
+              )}
+            </fieldset>
 
             {/* Footer */}
             <div className="px-5 py-4 border-t border-line-1 shrink-0 flex items-center justify-between">
@@ -412,20 +410,9 @@ function Section({
     <div>
       <div className="flex items-center gap-1.5 mb-2">
         <span className="text-ui font-medium text-ink-2">{label}</span>
-        <Tooltip.Root>
-          <Tooltip.Trigger asChild>
-            <Info size={12} className="text-ink-3 cursor-help" />
-          </Tooltip.Trigger>
-          <Tooltip.Portal>
-            <Tooltip.Content
-              sideOffset={5}
-              className="max-w-[260px] px-3 py-2 rounded-lg bg-ink-1 text-inverse-ink text-reported leading-relaxed shadow-float z-[100]"
-            >
-              {description}
-              <Tooltip.Arrow className="fill-ink-1" />
-            </Tooltip.Content>
-          </Tooltip.Portal>
-        </Tooltip.Root>
+        <Tooltip content={description} wrap>
+          <Info size={12} className="text-ink-3 cursor-help" />
+        </Tooltip>
       </div>
       {children}
     </div>

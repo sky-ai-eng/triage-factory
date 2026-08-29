@@ -1,6 +1,6 @@
-import { render, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import { MemoryRouter, Route, Routes } from 'react-router'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MeResponse } from './types'
 
 // This file is about ONE thing: where the rail's grants come from. The rail's
@@ -27,19 +27,32 @@ vi.mock('./hooks/useOrgRole', () => ({
   useOrgRole: () => ({ role: 'member', isAdmin: false, loading: false }),
 }))
 
-// The teams-list read, deliberately UNRESOLVED — the state the rail is in on
-// first paint. Before this ticket the team-admin grant was derived from this
-// cache, so it could only arrive on a second render.
+// The teams-list read defaults to UNRESOLVED — the state the rail is in on
+// first paint, which is what the grants tests below are about. The scope tests
+// fill `teamsMock` in to drive the org · team mark instead.
+const teamsMock = vi.hoisted(() => ({
+  teams: [] as Array<{ id: string; name: string; slug: string; role: string }>,
+  activeTeamId: '',
+  setTeamId: vi.fn(),
+}))
 vi.mock('./hooks/useTeams', () => ({
   useTeams: () => ({
-    teams: [],
+    teams: teamsMock.teams,
     lastActingTeamId: '',
-    multi: false,
-    loading: true,
-    loaded: false,
+    multi: teamsMock.teams.length > 0,
+    loading: teamsMock.teams.length === 0,
+    loaded: teamsMock.teams.length > 0,
     error: null,
     refresh: vi.fn(),
     createTeam: vi.fn(),
+  }),
+  // The shell's scope selection (the org · team mark).
+  useActiveTeam: () => ({
+    teamId: teamsMock.activeTeamId,
+    setTeamId: teamsMock.setTeamId,
+    multi: teamsMock.teams.length > 0,
+    ready: teamsMock.teams.length > 0,
+    teams: teamsMock.teams,
   }),
 }))
 
@@ -53,6 +66,14 @@ vi.mock('./hooks/useEntitlements', () => ({
 vi.mock('./hooks/useOrgHref', () => ({ useOrgHref: () => (p: string) => p }))
 
 import Shell from './Shell'
+import { useShellScope } from './hooks/useShellScope'
+
+beforeEach(() => {
+  meMock.me = null
+  teamsMock.teams = []
+  teamsMock.activeTeamId = ''
+  teamsMock.setTeamId = vi.fn()
+})
 
 function me(teams: MeResponse['teams']): MeResponse {
   return {
@@ -118,5 +139,45 @@ describe('Shell — grants come from the read that already blocks first paint', 
 
     expect(within(rail()).getByText('Board')).toBeInTheDocument()
     expect(within(rail()).queryByText('Team')).not.toBeInTheDocument()
+  })
+})
+
+// The outlet-context half of the scope control: what a page receives is the
+// RESOLVED team, and both directions of the wiring trade in ids — display
+// names are faces, and nothing makes them unique.
+function ScopeProbe() {
+  const scope = useShellScope()
+  return <div data-testid="scope-probe">{scope.teamId + ':' + scope.teamName}</div>
+}
+
+describe('Shell — the scope mark drives the outlet context by id', () => {
+  it('publishes the picked team to pages and reports a popup pick by id', () => {
+    meMock.me = me([])
+    teamsMock.teams = [
+      { id: 't1', name: 'Platform', slug: 'platform', role: 'member' },
+      { id: 't2', name: 'Platform', slug: 'platform-2', role: 'member' },
+    ]
+    teamsMock.activeTeamId = 't2'
+
+    render(
+      <MemoryRouter initialEntries={['/board']}>
+        <Routes>
+          <Route element={<Shell />}>
+            <Route path="/board" element={<ScopeProbe />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    // Two teams share the face "Platform"; the context carries t2 because the
+    // selection is its id, not its name.
+    expect(screen.getByTestId('scope-probe')).toHaveTextContent('t2:Platform')
+
+    // A pick in the popup reports the clicked row's id straight through.
+    fireEvent.click(screen.getByText('Acme'))
+    const rows = screen.getAllByRole('button', { name: 'Platform' })
+    expect(rows).toHaveLength(2)
+    fireEvent.click(rows[0])
+    expect(teamsMock.setTeamId).toHaveBeenCalledWith('t1')
   })
 })

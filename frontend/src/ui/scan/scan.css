@@ -1,0 +1,140 @@
+/* Scan — see Scan.tsx for the reasoning. The gradient and the timing.
+
+   The crest is painted by clipping a gradient to the glyphs, so the text's own
+   colour is transparent. Anything that removes the animation MUST relight the
+   text, or the row goes invisible rather than still. */
+
+/* Matched on [data-tone] rather than the class alone, and that is a fix rather
+   than a flourish. Scan MERGES a caller's className, so the element is often
+   `scan rr-act` — and a caller's type class setting `color` at equal
+   specificity but later in source order silently overrode `color: transparent`.
+   The glyphs then painted solid and the clipped gradient was hidden behind
+   them: the animation ran, nothing moved. An effect that depends on
+   transparent text cannot lose that declaration to the class it was designed
+   to sit beside. */
+.scan[data-tone] {
+  font-weight: 500;
+  background-image: linear-gradient(
+    100deg,
+    var(--scan-base) 0%,
+    var(--scan-base) 42%,
+    var(--scan-crest) 50%,
+    var(--scan-base) 58%,
+    var(--scan-base) 100%
+  );
+  background-size: 300% 100%;
+  /* Load-bearing. The default tiles the gradient, so a second crest arrives
+     mid-pass and the wrap reads as a skip. At 300% the element is always fully
+     covered, so clipping to text stays safe. */
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: scan-sweep 4.8s linear infinite;
+}
+
+/* The hold is what separates frequency from rate: 46% of 4.8s is the same 2.2s
+   crossing the crest always had, and the first 54% is rest. A pulse every 4.8s
+   reads as a heartbeat; one every 2.2s reads as a loading bar.
+
+   The pass is LINEAR and the crest is wide, and both were tried the other way.
+   A narrower crest (8% of the background rather than 16%) and a two-phase
+   curve that gathered before releasing were built, measured and reverted: the
+   charge only reads as a charge if the release is faster than the cruise, and
+   once the cruise matches the old rate the gather is invisible. Constant speed
+   across a wide crest is the version that looks right. */
+@keyframes scan-sweep {
+  0%,
+  54% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0% 0;
+  }
+}
+
+/* ONE RULE, and it took measuring the ramp to find it:
+   THE CREST IS ALWAYS THE LIGHTER VALUE, AND THE BASE IS WHATEVER READS AT
+   REST. A light passing over text, in both grounds. What changes per ground is
+   where the base has to sit for the text to be readable while it waits.
+
+   Relative luminance, measured:
+     light   ground .915   ink-1 .010   ink-2 .061   ink-3 .133   ink-4 .296
+     dark    ground .007   ink-1 .804   ink-2 .441   ink-3 .228   ink-4 .136
+
+   DARK works with the base mid-ramp: ink-3 (.228) to ink-1 (.804) is a 3.1x
+   step, and both sit far above a .007 ground, so the crest reads as a genuine
+   light source.
+
+   LIGHT was the failure, and the arithmetic says why. ink-3 to ink-1 is the
+   same 3.1x step on paper — but it runs the wrong way, .133 down to .010, and
+   against a .915 ground the eye is adapted bright. "Dark grey to near-black" at
+   12.5px is nowhere near as salient as "mid-grey to near-white" on a dark
+   ground.
+
+   Widening downward cannot fix it: base ink-4 to crest ink-1 is a 5.8x step,
+   but ink-4 rests at 2.8:1 on this ground, and the text sits at base for 2.6s
+   of every 4.8s cycle. Too faint to wait at.
+
+   So the base becomes ink-1 and the crest becomes ink-4 — a 5.8x step, running
+   the RIGHT way, with the resting state the most readable it can be instead of
+   the least. Nearly double the old contrast and better legibility at rest. */
+
+/* Per-ground values are set as CUSTOM PROPERTIES on the theme selector, not as
+   descendant selectors on .scan, so the nearest ancestor that sets them wins.
+
+   Scoped to :root.dark, matching tokens/colors.css. The palette is
+   root-scoped, so a nested <div class="dark"> gets no dark colour tokens — and
+   a bare .dark here would swap the scan's base and crest while --color-ink-1
+   still resolved to the LIGHT palette, painting the light pair onto a dark
+   panel. A component's theme rules have to be scoped exactly as tightly as the
+   tokens they read. */
+:root {
+  --scan-ink-base: var(--color-ink-1);
+  /* Past the end of the ink ramp on purpose. ink-4 is the lightest ink at
+     L .296 against a .915 ground, and as a crest it reads as a soft grey band —
+     present in a still frame, easy to miss in motion at 12.5px. Mixed toward
+     the ground it lands near L .56, so the step from a near-black base is
+     unmistakable. A value this light would be illegible as body text; it is
+     legible here only because it is under a travelling band a quarter of the
+     line wide, with every other glyph still at full ink. That is what makes it
+     a glint. */
+  --scan-ink-crest: color-mix(in srgb, var(--color-ink-4) 45%, var(--color-ground));
+  --scan-cool-base: var(--color-ink-1);
+  --scan-cool-crest: color-mix(in srgb, var(--color-cool) 42%, var(--color-ground));
+}
+:root.dark {
+  --scan-ink-base: var(--color-ink-3);
+  --scan-ink-crest: var(--color-ink-1);
+  --scan-cool-base: var(--color-ink-3);
+  --scan-cool-crest: color-mix(in srgb, var(--color-cool) 62%, var(--color-ink-1));
+}
+
+.scan[data-tone='ink'] {
+  --scan-base: var(--scan-ink-base);
+  --scan-crest: var(--scan-ink-crest);
+}
+
+/* cool — the same rule with hue in the crest. The cool token is LIGHT on dark
+   and DARK on light, so it cannot be used raw in both: on a light ground it is
+   mixed toward the ground until it is a pale glint rather than another dark
+   ink. It costs contrast either way, because a hue step is not a luminance
+   step. */
+.scan[data-tone='cool'] {
+  --scan-base: var(--scan-cool-base);
+  --scan-crest: var(--scan-cool-crest);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Relit, not just stopped. The glyphs are painted by the clipped gradient,
+     so the tokens/motion.css blanket removing the animation alone would leave
+     color: transparent and an invisible line — the exact failure this branch
+     exists to prevent. */
+  .scan[data-tone] {
+    animation: none;
+    background-image: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+    color: var(--color-ink-2);
+  }
+}

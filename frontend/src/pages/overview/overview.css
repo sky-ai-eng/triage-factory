@@ -1,0 +1,141 @@
+/* The Overview's layout. One screen at 1440×900, no scroll; below the minimum
+   the page scrolls rather than clipping. Type and controls stay fixed —
+   layout is fluid, and one region (the convergence) absorbs the slack. See
+   pages/Overview.tsx for the reasoning. */
+
+.ov {
+  /* The page owns its own gutter — the design's 18/26/22 — and cancels the
+     temporary 2rem the shell body still lends every page that has not been
+     rebuilt yet (index.css), the same move the team page's .ts makes. The
+     height buys those margins back so the page still fills the frame; the
+     negative margin and the calc come off together with the scaffold rule. */
+  margin: -2rem;
+  height: calc(100% + 4rem);
+  box-sizing: border-box;
+  overflow: auto;
+}
+
+/* The content column caps at 1440px and centers. Past that, the run rows put
+   their age column half a screen from their prose, and the convergence —
+   which stretches with preserveAspectRatio="none" — flattens its strands
+   toward horizontal. Extra width becomes margin. */
+.ov-col {
+  max-width: 1440px;
+  min-height: 100%;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 26px 22px;
+  box-sizing: border-box;
+}
+
+/* The offline notice, in the slot the away line vacated. Rendered only when
+   offline — it qualifies every readout below it, and stating it once at the
+   top is what lets each readout just go inert. */
+.ov-away {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.ov-away-tail {
+  font: 400 11.5px/1.4 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+/* The convergence LEADS the page and holds the masthead in its top-right
+   corner — strands are highest on the left and descend rightward, so the
+   corner is structurally clear even at the 197px minimum. It is the one
+   region with a height RANGE: rows are a fixed height at every window size
+   and the count of them changes, so leftover height collects here. Converge
+   runs in fill mode — position: relative and a definite (flexed) height are
+   its contract — and the page measures this box only to choose the endpoint
+   band. */
+.ov-conv {
+  position: relative;
+  flex: 1;
+  min-height: 197px;
+  max-height: 430px;
+  display: flex;
+  flex-direction: column;
+  padding-top: 2px;
+}
+
+.ov-mast {
+  position: absolute;
+  top: -2px;
+  right: 10px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+  /* The convergence underneath owns the click (replay); the masthead is a
+     readout, not a control. */
+  pointer-events: none;
+}
+.ov-mast-name {
+  font: 600 44px/1 var(--font-sans);
+  letter-spacing: -0.035em;
+  color: var(--color-ink-1);
+}
+.ov-mast-line {
+  display: flex;
+  align-items: baseline;
+  gap: 13px;
+}
+.ov-mast-clock {
+  font: 500 28px/1 var(--font-mono);
+  color: var(--color-ink-2);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.ov-mast-date {
+  font: 400 14px/1 var(--font-mono);
+  letter-spacing: 0.1em;
+  color: var(--color-ink-4);
+}
+
+/* The pinwheel: the two graphics sit in opposite corners — the pile leads the
+   needs band, the ring closes the running band — and each band is a wrapping
+   flex row, so below roughly 800px of content width the graphic drops onto
+   its own line. No breakpoint owns that; it falls out of the flex basis,
+   which is why it also holds at widths nobody tested. The needs band wraps in
+   REVERSE so that when it collapses the rows go above the pile, keeping NEEDS
+   YOU the first thing read. */
+.ov-needsband {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap-reverse;
+  gap: 44px;
+  align-items: center;
+}
+.ov-liveband {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 44px;
+  align-items: center;
+}
+.ov-rows {
+  flex: 1 1 430px;
+  min-width: 0;
+}
+/* Both graphics size to their own content rather than to a column width: a
+   fixed basis left a band of empty ground on the outer edge of each, and the
+   row lists want that width more than the graphics do. */
+.ov-pile {
+  flex: 0 0 auto;
+  align-self: center;
+  display: flex;
+  align-items: center;
+}
+.ov-ringbox {
+  flex: 0 0 auto;
+  min-width: 0;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}

@@ -42,11 +42,18 @@ const currentActionMaxLen = 140
 // state label ("Working"), which is vague but true; a fabricated action is
 // neither.
 //
+// The agent's paths are absolute paths into its worktree, so the composed line
+// collapses them to worktree-relative before anything else — "Editing
+// internal/server/agent.go", not the temp-root mouthful. That has to happen
+// HERE and not in a client, because the cap below is applied on this side of
+// the wire: a ~70-rune worktree prefix would spend half the cap and push the
+// half that names the file into the ellipsis before any client could strip it.
+//
 // Native tool names come from tooldefs so a rename there carries here rather
 // than silently falling into the unknown arm. The PascalCase spellings beside
 // them are the Claude Code SDK's, which this package cannot import and which
 // are fixed by that SDK anyway.
-func currentAction(calls []domain.ToolCall) string {
+func currentAction(calls []domain.ToolCall, worktree string) string {
 	if len(calls) == 0 {
 		return ""
 	}
@@ -85,7 +92,40 @@ func currentAction(calls []domain.ToolCall) string {
 	case "Task":
 		line = toolArg(call.Input, "description")
 	}
-	return oneLine(line)
+	return oneLine(stripWorktree(line, worktree))
+}
+
+// stripWorktree collapses the run's absolute worktree paths down to paths
+// relative to the worktree root. It runs over the whole composed line rather
+// than only the structured path arguments, because paths ride inside bash
+// commands too. The semantics deliberately match the client's transcript
+// helper (frontend/src/lib/worktree.ts) so the same tool call reads
+// identically on the run station and on a run row — change one and the other
+// must follow.
+//
+// macOS resolves the temp root through the /private symlink, so the agent's
+// paths may carry a /private prefix the stored worktree path omits (or vice
+// versa); both variants are consumed, the /private form first so the bare
+// path it contains is not matched inside it. A bare match — the root itself,
+// no trailing slash — renders as ".", the shell idiom for "right here", so
+// `cd <root>` reads as `cd .` rather than losing its argument.
+func stripWorktree(text, worktree string) string {
+	if text == "" || worktree == "" {
+		return text
+	}
+	wt := strings.TrimRight(worktree, "/")
+	if wt == "" {
+		return text
+	}
+	bare := wt
+	if strings.HasPrefix(wt, "/private/") {
+		bare = wt[len("/private"):]
+	}
+	for _, v := range []string{"/private" + bare, bare} {
+		text = strings.ReplaceAll(text, v+"/", "")
+		text = strings.ReplaceAll(text, v, ".")
+	}
+	return text
 }
 
 // toolPath reads the file or directory argument of a path-taking tool under

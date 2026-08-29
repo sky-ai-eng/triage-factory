@@ -1,5 +1,5 @@
-import * as Tooltip from '@radix-ui/react-tooltip'
 import { motion, useReducedMotion } from 'motion/react'
+import { Tooltip } from '../../ui/tooltip/Tooltip'
 import type { Task } from '../../types'
 import { eventDisplay, eventTone } from '../../lib/eventDisplay'
 import { STEP_VAR, TONE_TEXT, TONE_VAR, type Glow, type StepState, type Tone } from './cardStyle'
@@ -160,27 +160,13 @@ export function EventTag({ eventType }: { eventType?: string }) {
   const info = eventDisplay(eventType)
   const tone = eventTone(eventType)
   return (
-    <Tooltip.Provider delayDuration={200}>
-      <Tooltip.Root>
-        <Tooltip.Trigger asChild>
-          <span
-            className={`cursor-default text-label font-semibold uppercase tracking-[0.09em] ${TONE_TEXT[tone]}`}
-          >
-            {info.label}
-          </span>
-        </Tooltip.Trigger>
-        <Tooltip.Portal>
-          <Tooltip.Content
-            side="top"
-            sideOffset={6}
-            className="z-[100] max-w-[240px] rounded-lg border border-line-1 bg-raised px-3 py-2 text-ui leading-relaxed text-ink-2 shadow-float shadow-black/[0.06] animate-in fade-in-0 zoom-in-95"
-          >
-            {info.description}
-            <Tooltip.Arrow className="fill-raised" />
-          </Tooltip.Content>
-        </Tooltip.Portal>
-      </Tooltip.Root>
-    </Tooltip.Provider>
+    <Tooltip content={info.description} wrap>
+      <span
+        className={`cursor-default text-label font-semibold uppercase tracking-[0.09em] ${TONE_TEXT[tone]}`}
+      >
+        {info.label}
+      </span>
+    </Tooltip>
   )
 }
 

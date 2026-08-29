@@ -159,7 +159,7 @@
 .sh-queue.on .sh-qtext {
   color: var(--color-ink-1);
 }
-.sh-qtext b.tick {
+.sh-qtext b.sh-tick {
   animation: sh-tick 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .sh-count {
@@ -199,7 +199,7 @@
 .sh-rail.open .sh-count span {
   opacity: 1;
 }
-.sh-count b.tick {
+.sh-count b.sh-tick {
   animation: sh-tick 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 }
 @keyframes sh-tick {
@@ -429,7 +429,7 @@
   border-radius: 999px;
   background: var(--color-warm);
 }
-.sh-tail.sh-two .tick {
+.sh-tail.sh-two .sh-tick {
   animation: sh-tick 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .sh-tail.sh-two .cool {

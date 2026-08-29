@@ -1,0 +1,82 @@
+/* CratePile — see CratePile.tsx for the reasoning. Geometry only here. */
+
+.cp {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  /* 12px, not 5. At 5 the figure and the drawing read as one crowded unit; the
+     count is the thing being reported and the pile supports it, so they want a
+     gap that says so. Widened at every count rather than only where a long
+     figure forced it. */
+  gap: 12px;
+  text-decoration: none;
+  color: inherit;
+}
+a.cp {
+  transition: opacity 0.16s var(--ease-default);
+}
+a.cp:hover {
+  opacity: 0.74;
+}
+.cp-bare {
+  gap: 0;
+}
+
+.cp-fig {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding-left: 7px;
+}
+/* The cap belongs to the CAPTION, not to the column. On the column it also
+   bound the figure, so a three-glyph count ran straight out of its own box —
+   which is how "112" ended up overlapping the pile. Now short counts are sized
+   by the caption and long ones by the figure, whichever is wider. */
+.cp-cap {
+  font: 400 10px/1.35 var(--font-sans);
+  color: var(--color-ink-3);
+  max-width: 52px;
+}
+
+.cp-svg {
+  height: auto;
+  display: block;
+  overflow: visible;
+  flex: none;
+}
+
+/* A hairline in the ground colour between crates. Without it two adjacent top
+   faces at the same shade merge into one plateau and the pile stops reading as
+   discrete boxes. */
+.cp-crate path {
+  stroke: var(--color-ground);
+  stroke-width: 0.7;
+  stroke-linejoin: round;
+}
+
+.cp-ghost {
+  fill: none;
+  stroke: var(--color-line-2);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.cp-crate {
+  animation: cp-in 0.34s var(--ease-default) both;
+}
+@keyframes cp-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Reduced motion needs no branch: the entrance ends at the resting position,
+   so the tokens/motion.css blanket removing the animation leaves every crate
+   exactly where it belongs. */

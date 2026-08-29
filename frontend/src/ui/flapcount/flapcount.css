@@ -1,0 +1,107 @@
+/* FlapCount — see FlapCount.tsx for the reasoning. Geometry only here.
+
+   Every height is --flap-h, set by the component from its `size` prop, because
+   the window and the roll distance have to agree exactly: a window one px
+   taller than the travel shows a sliver of the outgoing digit at rest. */
+
+.flap {
+  display: inline-flex;
+  align-items: baseline;
+  /* 3px, not 0. A departure board has visible gaps between flaps, and the gap
+     is also what keeps two adjacent frames from touching once each is inset
+     1px past its digit. */
+  gap: 3px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  font-size: var(--flap-h);
+  line-height: var(--flap-h);
+  letter-spacing: -0.015em;
+  /* Overridable so a caller can gray the figure — a zero backlog or an
+     offline readout is not the same claim as a live one — without the caller
+     having to out-specify a rule on the element itself. */
+  color: var(--flap-ink, var(--color-ink-1));
+}
+
+.flap-v {
+  display: block;
+  height: var(--flap-h);
+  line-height: var(--flap-h);
+}
+
+.flap-d {
+  position: relative;
+  display: block;
+}
+
+.flap-win {
+  position: relative;
+  display: block;
+  height: var(--flap-h);
+  overflow: hidden;
+}
+
+.flap-strip {
+  display: block;
+  animation: flap-roll 0.62s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+/* Rolling UP travels off the outgoing glyph; rolling DOWN arrives onto the
+   incoming one from above. The child order is swapped to match (see the strip
+   in FlapCount.tsx), so both end on the new value — the resting position is
+   child 0 for down and child 1 for up. */
+@keyframes flap-roll {
+  from {
+    transform: none;
+  }
+  to {
+    transform: translateY(calc(-1 * var(--flap-h)));
+  }
+}
+.flap-strip[data-dir='down'] {
+  animation-name: flap-roll-down;
+}
+@keyframes flap-roll-down {
+  from {
+    transform: translateY(calc(-1 * var(--flap-h)));
+  }
+  to {
+    transform: none;
+  }
+}
+
+/* Hollow and warm, never a filled strike: at this size a solid block reads as
+   an alarm and this is an increment. It appears and leaves on its own — an
+   outline that stayed would become part of the number. */
+.flap-frame {
+  position: absolute;
+  inset: -3px -1px;
+  border: 1px solid var(--color-warm);
+  border-radius: 2px;
+  opacity: 0;
+  pointer-events: none;
+  animation: flap-flash 0.92s var(--ease-default) both;
+}
+@keyframes flap-flash {
+  0% {
+    opacity: 0;
+  }
+  16% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* The end state written directly, not just the animation removed: `both` with
+   no run leaves the strip on the digit it used to hold. Each direction rests
+   somewhere different, so each needs its own. The frame needs no branch — it
+   starts at opacity 0 and returns there, so a flash that never runs is simply
+   a flash that did not happen. */
+.flap[data-still] .flap-strip {
+  animation: none;
+  transform: translateY(calc(-1 * var(--flap-h)));
+}
+.flap[data-still] .flap-strip[data-dir='down'] {
+  transform: none;
+}

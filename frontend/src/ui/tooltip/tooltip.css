@@ -1,0 +1,91 @@
+/* Tooltip — see Tooltip.tsx for the reasoning. The surface, and the four
+   entrances, which are the one thing an inline style cannot express. */
+
+.tip-host {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+/* No focus ring of its own: the trigger is a glyph or a pill, and the tooltip
+   appearing IS the focus feedback. A ring around a 15px pill in a dense row
+   reads as a control the reader can operate. */
+.tip-host:focus {
+  outline: none;
+}
+.tip-host:focus-visible {
+  outline: none;
+}
+
+.tip {
+  position: absolute;
+  z-index: 60;
+  background: var(--color-raised);
+  /* The float edge and shadow, because this has left the page — the one
+     surface class in the language that earns chrome. */
+  border: var(--edge-float);
+  box-shadow: var(--shadow-float);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font: 400 11px/1 var(--font-sans);
+  color: var(--color-ink-1);
+  white-space: nowrap;
+  /* A last resort under the measured correction in Tooltip.tsx, and a floor
+     for anything that mounts a tooltip without it: nothing may be wider than
+     the page it is explaining. */
+  max-width: calc(100vw - 16px);
+  /* Never a hover target itself. A tooltip that can be pointed at is a
+     popover, and a popover needs a reason to stay open. */
+  pointer-events: none;
+}
+
+.tip[data-side='top'] {
+  animation: tip-up 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.tip[data-side='bottom'] {
+  animation: tip-down 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.tip[data-side='right'] {
+  animation: tip-right 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.tip[data-side='left'] {
+  animation: tip-left 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Each keyframe restates the resting transform, because an animation's
+   transform outranks the inline one for the whole run — and keeps outranking
+   it under a fill mode. Dropping it here would un-center every tooltip for
+   140ms.
+
+   Which is also why an edge correction is a VARIABLE and not an inline
+   transform alone: the keyframes have to be able to restate it. `--tip-dx`
+   defaults to 0, so an uncorrected tooltip animates exactly as before, and a
+   shifted one animates from and to its shifted position instead of sliding
+   across at the end of the entrance. */
+@keyframes tip-up {
+  from {
+    opacity: 0;
+    transform: translateX(calc(-50% + var(--tip-dx, 0px))) translateY(3px);
+  }
+}
+@keyframes tip-down {
+  from {
+    opacity: 0;
+    transform: translateX(calc(-50% + var(--tip-dx, 0px))) translateY(-3px);
+  }
+}
+@keyframes tip-right {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(-3px);
+  }
+}
+@keyframes tip-left {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(3px);
+  }
+}
+
+/* Reduced motion needs no branch here: the entrance has no fill mode, so the
+   tokens/motion.css blanket removing it leaves the tooltip at its resting
+   position — present, just unanimated. */

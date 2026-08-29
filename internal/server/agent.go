@@ -1126,7 +1126,8 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 	out := make([]map[string]any, len(convs))
 	for i := range convs {
 		out[i] = conversationResponse(&convs[i], counts[convs[i].ID], artsByConv[convs[i].ID],
-			stepCounts[convs[i].BlueprintRunID], currentAction(toolCalls[convs[i].ID]))
+			stepCounts[convs[i].BlueprintRunID],
+			currentAction(toolCalls[convs[i].ID], convs[i].WorktreePath))
 	}
 	return out, nil
 }

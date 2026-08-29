@@ -96,7 +96,7 @@ func TestCurrentAction(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := currentAction(tc.calls); got != tc.want {
+			if got := currentAction(tc.calls, ""); got != tc.want {
 				t.Errorf("currentAction = %q, want %q", got, tc.want)
 			}
 		})
@@ -108,7 +108,7 @@ func TestCurrentAction(t *testing.T) {
 // argument that merely reaches the cap is left whole.
 func TestCurrentAction_Cap(t *testing.T) {
 	long := strings.Repeat("a", 400)
-	got := currentAction([]domain.ToolCall{{ID: "t1", Name: "grep", Input: map[string]any{"pattern": long}}})
+	got := currentAction([]domain.ToolCall{{ID: "t1", Name: "grep", Input: map[string]any{"pattern": long}}}, "")
 	if n := len([]rune(got)); n != currentActionMaxLen {
 		t.Fatalf("capped length = %d runes, want %d", n, currentActionMaxLen)
 	}
@@ -118,7 +118,7 @@ func TestCurrentAction_Cap(t *testing.T) {
 
 	// Exactly at the cap: whole, no ellipsis. "Searching " is 10 runes.
 	atCap := strings.Repeat("b", currentActionMaxLen-len("Searching "))
-	got = currentAction([]domain.ToolCall{{ID: "t1", Name: "grep", Input: map[string]any{"pattern": atCap}}})
+	got = currentAction([]domain.ToolCall{{ID: "t1", Name: "grep", Input: map[string]any{"pattern": atCap}}}, "")
 	if got != "Searching "+atCap {
 		t.Errorf("line at exactly the cap was altered: got %d runes, want %d untouched", len([]rune(got)), currentActionMaxLen)
 	}
@@ -126,11 +126,76 @@ func TestCurrentAction_Cap(t *testing.T) {
 	// Multi-byte runes are counted as runes, not bytes — a cut mid-rune would
 	// put a replacement character on the wire.
 	wide := strings.Repeat("あ", 400)
-	got = currentAction([]domain.ToolCall{{ID: "t1", Name: "grep", Input: map[string]any{"pattern": wide}}})
+	got = currentAction([]domain.ToolCall{{ID: "t1", Name: "grep", Input: map[string]any{"pattern": wide}}}, "")
 	if n := len([]rune(got)); n != currentActionMaxLen {
 		t.Errorf("capped multi-byte length = %d runes, want %d", n, currentActionMaxLen)
 	}
 	if strings.ContainsRune(got, '�') {
 		t.Errorf("capped multi-byte line carries a replacement character: %q", got)
+	}
+}
+
+// TestCurrentAction_WorktreeStrip pins the path collapse: the agent's absolute
+// worktree paths read worktree-relative on the composed line, under the same
+// semantics the client's transcript helper applies (frontend/src/lib/
+// worktree.ts) — /private symlink variants both directions, paths embedded in
+// bash commands, and the bare root as ".".
+func TestCurrentAction_WorktreeStrip(t *testing.T) {
+	const wt = "/var/folders/kx/abc/T/triagefactory-runs/r1"
+	call := func(name string, input map[string]any) []domain.ToolCall {
+		return []domain.ToolCall{{ID: "t1", Name: name, Input: input}}
+	}
+
+	cases := []struct {
+		name     string
+		calls    []domain.ToolCall
+		worktree string
+		want     string
+	}{
+		{"read under the root", call("Read", map[string]any{
+			"file_path": wt + "/internal/server/agent.go",
+		}), wt, "Reading internal/server/agent.go"},
+		{"agent path carries /private the stored root omits", call("Edit", map[string]any{
+			"file_path": "/private" + wt + "/main.go",
+		}), wt, "Editing main.go"},
+		{"stored root carries /private the agent path omits", call("Edit", map[string]any{
+			"file_path": wt + "/main.go",
+		}), "/private" + wt, "Editing main.go"},
+		{"path embedded in a bash command", call("bash", map[string]any{
+			"command": "go test " + wt + "/internal/routing/...",
+		}), wt, "Running go test internal/routing/..."},
+		{"bare root is the working directory", call("bash", map[string]any{
+			"command": "cd " + wt,
+		}), wt, "Running cd ."},
+		{"trailing slash on the stored root", call("Read", map[string]any{
+			"file_path": wt + "/go.mod",
+		}), wt + "/", "Reading go.mod"},
+		{"no worktree leaves the line alone", call("Read", map[string]any{
+			"file_path": wt + "/go.mod",
+		}), "", "Reading " + wt + "/go.mod"},
+		{"a path outside the root is not touched", call("Read", map[string]any{
+			"file_path": "/etc/hosts",
+		}), wt, "Reading /etc/hosts"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := currentAction(tc.calls, tc.worktree); got != tc.want {
+				t.Errorf("currentAction = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	// The strip runs BEFORE the cap — the reason it lives on this side of the
+	// wire at all. A line whose only excess is the worktree prefix arrives
+	// whole; stripped after capping it would have lost its tail to an
+	// ellipsis spent on the prefix.
+	deep := wt + "/" + strings.Repeat("d/", 40) + "leaf.go"
+	got := currentAction(call("Read", map[string]any{"file_path": deep}), wt)
+	want := "Reading " + strings.Repeat("d/", 40) + "leaf.go"
+	if got != want {
+		t.Errorf("strip-then-cap: got %q, want %q", got, want)
+	}
+	if strings.ContainsRune(got, '…') {
+		t.Errorf("prefix spent the cap: %q", got)
 	}
 }

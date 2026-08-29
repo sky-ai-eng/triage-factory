@@ -166,7 +166,9 @@ design and no page in this app, so `flags.governance` is off until one exists.
 Absent, not disabled — the rule the rail applies to features, applied to us.
 
 **The scope switcher and the appearance control do something.** Both were inert
-in the bundle. Teams come in as `teams` and report through `onTeamChange`;
+in the bundle. Teams come in as `teams` and report through `onTeamChange` **by
+id** — a display name is the row's face, not its identity, and nothing makes
+names unique;
 appearance is `theme` + `onThemeChange`, owned by `lib/theme.ts` in the adapter,
 so the rail's control and the Settings page cannot disagree.
 

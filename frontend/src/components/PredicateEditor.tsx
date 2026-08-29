@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import * as Tooltip from '@radix-ui/react-tooltip'
+import { Tooltip } from '../ui/tooltip/Tooltip'
 import { Info } from 'lucide-react'
 import type { FieldSchema } from '../types'
 import IdentityListField from './IdentityListField'
@@ -112,20 +112,9 @@ function FieldRow({ field, eventType, value, onChange }: FieldRowProps) {
       <div className="flex items-center gap-1.5 mb-1.5">
         <label className="text-ui font-medium text-ink-2">{humanize(field.name)}</label>
         {field.description && (
-          <Tooltip.Root>
-            <Tooltip.Trigger asChild>
-              <Info size={12} className="text-ink-3 cursor-help" />
-            </Tooltip.Trigger>
-            <Tooltip.Portal>
-              <Tooltip.Content
-                sideOffset={5}
-                className="max-w-[260px] px-3 py-2 rounded-lg bg-ink-1 text-inverse-ink text-reported leading-relaxed shadow-float z-[100]"
-              >
-                {field.description}
-                <Tooltip.Arrow className="fill-ink-1" />
-              </Tooltip.Content>
-            </Tooltip.Portal>
-          </Tooltip.Root>
+          <Tooltip content={field.description} wrap>
+            <Info size={12} className="text-ink-3 cursor-help" />
+          </Tooltip>
         )}
       </div>
 
