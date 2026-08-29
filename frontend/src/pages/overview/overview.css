@@ -4,7 +4,13 @@
    being distributed. See pages/Overview.tsx for the reasoning. */
 
 .ov {
-  height: 100%;
+  /* The page owns its own gutter — the design's 18/26/22 — and cancels the
+     temporary 2rem the shell body still lends every page that has not been
+     rebuilt yet (index.css), the same move the team page's .ts makes. The
+     height buys those margins back so the page still fills the frame; the
+     negative margin and the calc come off together with the scaffold rule. */
+  margin: -2rem;
+  height: calc(100% + 4rem);
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -45,37 +51,6 @@
 .ov-runcol {
   flex: 1 1 460px;
   min-width: 0;
-}
-
-/* The quiet state: nothing needing you is an ANSWER, stated in words, and the
-   day's figures move up into the space. */
-.ov-quiet {
-  display: flex;
-  align-items: baseline;
-  gap: 26px;
-}
-.ov-quiet-word {
-  font: 400 13px/1.4 var(--font-sans);
-  color: var(--color-ink-2);
-}
-.ov-quiet-figs {
-  margin-left: auto;
-  display: flex;
-  gap: 30px;
-}
-.ov-fig {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.ov-fig-label {
-  font: 400 8.5px/1 var(--font-mono);
-  letter-spacing: 0.09em;
-  color: var(--color-ink-4);
-}
-.ov-fig-value {
-  font: 500 15px/1 var(--font-mono);
-  color: var(--color-ink-1);
 }
 
 /* The day's spend, inline with RUNNING so the live band reads as one row of

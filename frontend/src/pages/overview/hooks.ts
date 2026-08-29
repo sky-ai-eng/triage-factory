@@ -22,10 +22,10 @@ import { utcMidnightISO } from './data'
 
 /**
  * The hints that can move a reading on this page. The rail's curated set, plus
- * `event` (every recorded source event — the convergence's and OPEN PRS' feed;
- * poll cycles burst these, which the debounce collapses to one refetch) and
- * `artifact_updated` (a PR merging moves both MERGED and OPEN PRS without any
- * task necessarily changing).
+ * `event` (every recorded source event — the convergence's feed; poll cycles
+ * burst these, which the debounce collapses to one refetch) and
+ * `artifact_updated` (a PR merging moves the MERGED count without any task
+ * necessarily changing).
  */
 const HINTS = new Set<WSEvent['type']>([
   'event',
@@ -216,30 +216,6 @@ export function useSpendToday(teamId: string, tick: number): TeamUsage | null {
     }
   }, [teamId, tick])
   return got && got.team === teamId ? got.usage : null
-}
-
-/** The team's standing work: open PRs in its tracked repos that it authored or
- *  commissioned — the count-only read of the team PRs list, so this figure and
- *  the PR page's team view are the same number by construction. */
-export function useOpenPRCount(teamId: string, tick: number): number | null {
-  const [got, setGot] = useState<{ team: string; count: number } | null>(null)
-  useEffect(() => {
-    if (!teamId) return
-    let live = true
-    void apiList<unknown>(`/api/teams/${encodeURIComponent(teamId)}/prs/list`, {
-      states: ['open'],
-      page_size: 0,
-    }).then(
-      (page) => {
-        if (live && page.total_count !== null) setGot({ team: teamId, count: page.total_count })
-      },
-      () => {},
-    )
-    return () => {
-      live = false
-    }
-  }, [teamId, tick])
-  return got && got.team === teamId ? got.count : null
 }
 
 type MeSettings = { user_settings?: { overview_seen_at?: string | null } }

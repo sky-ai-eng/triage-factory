@@ -7,8 +7,8 @@ import type { Conversation } from '../types'
 // The Overview's claims, checked against what it actually calls: the away line
 // anchors to the viewer's own marker and stamps a new one; NEEDS YOU and
 // RUNNING are the conversations resource's own filters rendered as rows that
-// navigate to their runs; the quiet state is an answer with the day's figures
-// in it; offline inerts every readout rather than holding stale numbers.
+// navigate to their runs; the quiet state is an answer stated in words;
+// offline inerts every readout rather than holding stale numbers.
 
 const api = vi.hoisted(() => ({
   apiJSON: vi.fn(),
@@ -86,7 +86,6 @@ const answers = vi.hoisted(() => ({
       { model: 'claude-sonnet-5', cost: 13.1 },
     ],
   },
-  prs: 23,
   seenAt: '2026-08-28T18:40:00Z' as string | null,
 }))
 
@@ -115,9 +114,6 @@ beforeEach(() => {
   api.apiList.mockImplementation((path: string) => {
     if (path === '/api/tasks/list') {
       return Promise.resolve({ items: TASKS, next_page_token: '', total_count: TASKS.length })
-    }
-    if (path.includes('/prs/list')) {
-      return Promise.resolve({ items: [], next_page_token: '', total_count: answers.prs })
     }
     return Promise.reject(new Error('unexpected apiList ' + path))
   })
@@ -189,15 +185,14 @@ describe('NEEDS YOU', () => {
     expect(screen.getByText('+5 more on the board')).toBeInTheDocument()
   })
 
-  it('states the quiet answer with the day figures when nothing needs you', async () => {
+  it('states the quiet answer in words when nothing needs you', async () => {
     answers.needs = { runs: {}, total_count: 0 }
     mount()
     await waitFor(() => expect(screen.getByText('Nothing needs you.')).toBeInTheDocument())
-    const figs = screen.getByText('OPEN PRS').closest('.ov-quiet') as HTMLElement
-    expect(within(figs).getByText('$41.20')).toBeInTheDocument()
-    expect(within(figs).getByText('23')).toBeInTheDocument()
-    expect(within(figs).getByText('6')).toBeInTheDocument()
-    expect(within(figs).getByText('296')).toBeInTheDocument()
+    // The answer is a sentence, not a band of figures — the day's numbers
+    // live in the ring and the convergence, not here.
+    expect(screen.queryByText('OPEN PRS')).not.toBeInTheDocument()
+    expect(screen.queryByText('FILTERED')).not.toBeInTheDocument()
   })
 })
 

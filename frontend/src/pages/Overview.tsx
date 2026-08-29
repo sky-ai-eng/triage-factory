@@ -17,7 +17,6 @@ import {
 import {
   useActivityWindow,
   useConversationSets,
-  useOpenPRCount,
   useOverviewSeen,
   useOverviewTick,
   useSpendToday,
@@ -76,7 +75,6 @@ export default function Overview() {
   // page anchors to midnight and reuses that read rather than asking twice.
   const sinceSeen = useActivityWindow(teamId, anchor ?? null, tick)
   const usage = useSpendToday(teamId, tick)
-  const openPRs = useOpenPRCount(teamId, tick)
   const catalog = useModelCatalog()
 
   const daySums = sinceMidnight ? windowSums(sinceMidnight) : null
@@ -221,33 +219,9 @@ export default function Overview() {
           rows={quiet ? [] : needsItems}
           onPick={onPick}
           note={quiet || needs == null ? null : boardNote(needsHidden)}
-          empty={
-            quiet ? (
-              <div className="ov-quiet">
-                <span className="ov-quiet-word">Nothing needs you.</span>
-                <div className="ov-quiet-figs">
-                  <div className="ov-fig">
-                    <span className="ov-fig-label">SPEND</span>
-                    <span className="ov-fig-value">{cash(usage?.total_cost_usd)}</span>
-                  </div>
-                  <div className="ov-fig">
-                    <span className="ov-fig-label">MERGED</span>
-                    <span className="ov-fig-value">{num(daySums?.merged)}</span>
-                  </div>
-                  <div className="ov-fig">
-                    <span className="ov-fig-label">FILTERED</span>
-                    <span className="ov-fig-value">{num(daySums?.filtered)}</span>
-                  </div>
-                  <div className="ov-fig">
-                    <span className="ov-fig-label">OPEN PRS</span>
-                    <span className="ov-fig-value">{num(openPRs)}</span>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              ' '
-            )
-          }
+          // Nothing needing you is an ANSWER, stated in words — not a band of
+          // figures, which the rest of the page already carries.
+          empty={quiet ? 'Nothing needs you.' : ' '}
         />
       </div>
 
