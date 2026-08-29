@@ -10,7 +10,7 @@ import {
   YAxis,
   Tooltip,
 } from 'recharts'
-import * as HintTip from '@radix-ui/react-tooltip'
+import { Tooltip as HintTip } from '../ui/tooltip/Tooltip'
 import TeamSwitch from '../components/TeamSwitch'
 import ActivityFeed from '../components/ActivityFeed'
 import { useOptionalAuth } from '../contexts/AuthContext'
@@ -348,32 +348,19 @@ function Meter({
 
 // InfoHint is a small "?" affordance whose hover popup explains a term — used in
 // the by-team legend so a non-team slice can say what it is without a cryptic
-// inline tag. Styled to match the board/run-detail tooltips.
+// inline tag. The mark exists only for its hint, so the tooltip host is the
+// interactive thing: tab stop, aria-describedby, instant open on focus.
 function InfoHint({ text }: { text: string }) {
   return (
-    <HintTip.Provider delayDuration={150}>
-      <HintTip.Root>
-        <HintTip.Trigger asChild>
-          <button
-            type="button"
-            aria-label="What's this?"
-            className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border border-ink-3/30 font-mono text-[8px] leading-none text-ink-3/70 transition-colors hover:border-warm hover:text-warm"
-          >
-            ?
-          </button>
-        </HintTip.Trigger>
-        <HintTip.Portal>
-          <HintTip.Content
-            side="top"
-            sideOffset={6}
-            className="z-[100] max-w-[240px] rounded-lg border border-line-1 bg-raised px-3 py-2 text-ui leading-relaxed text-ink-2 shadow-float shadow-black/[0.06]"
-          >
-            {text}
-            <HintTip.Arrow className="fill-raised" />
-          </HintTip.Content>
-        </HintTip.Portal>
-      </HintTip.Root>
-    </HintTip.Provider>
+    <HintTip content={text} wrap>
+      <span
+        role="img"
+        aria-label="What's this?"
+        className="inline-flex h-3.5 w-3.5 shrink-0 cursor-help items-center justify-center rounded-full border border-ink-3/30 font-mono text-[8px] leading-none text-ink-3/70 transition-colors hover:border-warm hover:text-warm"
+      >
+        ?
+      </span>
+    </HintTip>
   )
 }
 

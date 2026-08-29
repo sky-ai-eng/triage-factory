@@ -38,7 +38,8 @@ is a label wanting its definition, and that is this instrument.
 
 `wrap` is off by default. A hint that needs a paragraph is documentation, and
 one that wraps unpredictably inside a dense row changes the row's height on
-hover.
+hover. It caps at 220px; pass a number for the rare hint that is a small panel
+rather than a phrase.
 
 ## Two modes, and the wrong one is an accessibility bug
 

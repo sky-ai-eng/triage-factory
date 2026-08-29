@@ -1,4 +1,4 @@
-import * as Tooltip from '@radix-ui/react-tooltip'
+import { Tooltip } from '../ui/tooltip/Tooltip'
 import {
   DndContext,
   DragOverlay,
@@ -525,19 +525,17 @@ export default function Factory() {
 function StationDrawer({ info }: { info: ClickedStationInfo | null }) {
   const open = info != null
   return (
-    <Tooltip.Provider delayDuration={250}>
-      <div
-        className={`pointer-events-none absolute inset-x-0 bottom-0 z-40 transition-transform duration-[var(--dur-content)] ease-out ${
-          open ? 'translate-y-0' : 'translate-y-full'
-        }`}
-        style={{ height: '46vh' }}
-        aria-hidden={!open}
-      >
-        <div className="pointer-events-auto relative h-full bg-raised/95 backdrop-blur-xl border-t border-line-1 shadow-float shadow-black/[0.12] flex items-stretch p-5">
-          <StationChassis info={info} />
-        </div>
+    <div
+      className={`pointer-events-none absolute inset-x-0 bottom-0 z-40 transition-transform duration-[var(--dur-content)] ease-out ${
+        open ? 'translate-y-0' : 'translate-y-full'
+      }`}
+      style={{ height: '46vh' }}
+      aria-hidden={!open}
+    >
+      <div className="pointer-events-auto relative h-full bg-raised/95 backdrop-blur-xl border-t border-line-1 shadow-float shadow-black/[0.12] flex items-stretch p-5">
+        <StationChassis info={info} />
       </div>
-    </Tooltip.Provider>
+    </div>
   )
 }
 
@@ -691,9 +689,9 @@ function Tray({
 // Single tray row. Conditionally renders the row content as an `<a>`
 // when `href` is set so clicking opens the entity in a new tab; the
 // inner content adopts `display: contents` so the anchor doesn't
-// affect the row's flex layout. Wrapping with Radix Tooltip is also
-// conditional — only rows that pass `tooltip` get the hover popup,
-// which keeps Run rows untouched.
+// affect the row's flex layout. The tooltip wrap is also conditional —
+// only rows that pass `tooltip` get the hover panel, which keeps Run
+// rows untouched.
 function TrayRow({ item }: { item: TrayItem }) {
   const interactive = !!item.href
   // useDraggable's disabled flag keeps the hook call stable across
@@ -729,7 +727,12 @@ function TrayRow({ item }: { item: TrayItem }) {
     <div className={innerClasses}>{inner}</div>
   )
   const draggable = !!item.dragId
-  const li = (
+  // The tooltip host lives INSIDE the <li> — a wrapper around it would break
+  // the list's ul > li nesting — and takes the filling-cell layout so the row
+  // reads exactly as it does without a hint. focusable={false}: the row's own
+  // anchor is the interactive thing, and the panel is a visual expansion of
+  // text the row already carries.
+  return (
     <li
       ref={draggable ? drag.setNodeRef : undefined}
       {...(draggable ? drag.attributes : {})}
@@ -744,38 +747,14 @@ function TrayRow({ item }: { item: TrayItem }) {
         boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.85), 0 1px 2px rgba(0,0,0,0.03)',
       }}
     >
-      {rowContent}
+      {item.tooltip ? (
+        <Tooltip content={item.tooltip} wrap={320} focusable={false} className="flex-1 min-w-0">
+          {rowContent}
+        </Tooltip>
+      ) : (
+        rowContent
+      )}
     </li>
-  )
-  if (!item.tooltip) return li
-  return (
-    <Tooltip.Root>
-      <Tooltip.Trigger asChild>{li}</Tooltip.Trigger>
-      <Tooltip.Portal>
-        <Tooltip.Content
-          side="top"
-          align="start"
-          sideOffset={6}
-          className="z-[100] max-w-[320px] rounded-lg border border-line-1 px-3 py-2.5 text-ui text-ink-1 leading-relaxed animate-in fade-in-0 zoom-in-95"
-          style={{
-            // Opaque base + top-light gradient → bottom-shaded gives the
-            // liquid-glass sheen without bleed-through. Inset highlight
-            // on the top edge sells "polished pane"; layered drop shadow
-            // gives the float/separation from the tray underneath.
-            background: 'linear-gradient(180deg, #fbf9f4 0%, #f1ece0 100%)',
-            boxShadow: [
-              'inset 0 1px 0 rgba(255,255,255,0.7)',
-              'inset 0 -1px 0 rgba(0,0,0,0.04)',
-              '0 1px 2px rgba(0,0,0,0.06)',
-              '0 8px 24px rgba(0,0,0,0.18)',
-            ].join(', '),
-          }}
-        >
-          {item.tooltip}
-          <Tooltip.Arrow style={{ fill: '#f1ece0' }} />
-        </Tooltip.Content>
-      </Tooltip.Portal>
-    </Tooltip.Root>
   )
 }
 

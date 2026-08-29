@@ -71,15 +71,20 @@ export type TooltipProps = {
    */
   delay?: number
   /**
-   * Allow two lines, capped at 220px. Off by default: a hint that needs a
-   * paragraph is documentation, and a hint that wraps unpredictably in a dense
-   * row changes the row's height on hover.
+   * Allow wrapping, capped at 220px — or at the given width, for the rare
+   * hint that is a small panel rather than a phrase. Off by default: a hint
+   * that needs a paragraph is documentation, and a hint that wraps
+   * unpredictably in a dense row changes the row's height on hover.
    */
-  wrap?: boolean
+  wrap?: boolean | number
   /** Suppresses the tooltip and the trigger's focusability together. */
   disabled?: boolean
   /** Whether the trigger is the interactive thing. See the note above. */
   focusable?: boolean
+  /** Merged onto the host, for a trigger that has to participate in its
+   *  parent's layout (a flex row's filling cell, say). Layout only — the
+   *  hint's own surface is not restylable. */
+  className?: string
 }
 
 export function Tooltip({
@@ -90,6 +95,7 @@ export function Tooltip({
   wrap = false,
   disabled = false,
   focusable = true,
+  className = '',
 }: TooltipProps) {
   const [open, setOpen] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -137,7 +143,7 @@ export function Tooltip({
 
   return (
     <span
-      className="tip-host"
+      className={('tip-host ' + className).trim()}
       onMouseEnter={show}
       onMouseLeave={hide}
       onClick={live ? tap : undefined}
@@ -163,7 +169,13 @@ export function Tooltip({
           data-side={side}
           style={{
             ...(SIDES[side] ?? SIDES.top),
-            ...(wrap ? { whiteSpace: 'normal', width: 'max-content', maxWidth: 220 } : null),
+            ...(wrap
+              ? {
+                  whiteSpace: 'normal',
+                  width: 'max-content',
+                  maxWidth: typeof wrap === 'number' ? wrap : 220,
+                }
+              : null),
           }}
         >
           {content}

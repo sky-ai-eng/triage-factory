@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useDroppable } from '@dnd-kit/core'
-import * as Tooltip from '@radix-ui/react-tooltip'
+import { Tooltip } from '../../ui/tooltip/Tooltip'
 import {
   animate,
   motion,
@@ -229,30 +229,19 @@ export default function BoardColumn({
           <div className="mb-1.5 flex items-center justify-between px-0.5">
             <div className="flex items-center gap-1.5">
               {onCollapse && (
-                <Tooltip.Provider delayDuration={650}>
-                  <Tooltip.Root>
-                    <Tooltip.Trigger asChild>
-                      <button
-                        type="button"
-                        aria-label={`Collapse ${title}`}
-                        onClick={onCollapse}
-                        className="text-ink-3/50 transition-colors hover:text-ink-2"
-                      >
-                        <ChevronsRightLeft size={14} />
-                      </button>
-                    </Tooltip.Trigger>
-                    <Tooltip.Portal>
-                      <Tooltip.Content
-                        side="top"
-                        sideOffset={6}
-                        className="z-[100] rounded-lg border border-line-1 bg-raised px-2.5 py-1 text-ui text-ink-2 shadow-float shadow-black/[0.06] animate-in fade-in-0 zoom-in-95"
-                      >
-                        Collapse
-                        <Tooltip.Arrow className="fill-raised" />
-                      </Tooltip.Content>
-                    </Tooltip.Portal>
-                  </Tooltip.Root>
-                </Tooltip.Provider>
+                // focusable={false}: the button is the interactive thing and
+                // names itself via aria-label — the hint is scenery, and a
+                // second tab stop around a button would be redundant.
+                <Tooltip content="Collapse" focusable={false}>
+                  <button
+                    type="button"
+                    aria-label={`Collapse ${title}`}
+                    onClick={onCollapse}
+                    className="text-ink-3/50 transition-colors hover:text-ink-2"
+                  >
+                    <ChevronsRightLeft size={14} />
+                  </button>
+                </Tooltip>
               )}
               <h2 className="text-column font-semibold tracking-tight text-ink-1">{title}</h2>
             </div>

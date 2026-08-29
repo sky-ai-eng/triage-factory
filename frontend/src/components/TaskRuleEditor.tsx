@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
-import * as Tooltip from '@radix-ui/react-tooltip'
 import { X } from 'lucide-react'
 import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
@@ -278,218 +277,216 @@ export default function TaskRuleEditor({
             exit={{ opacity: 0, scale: 0.95 }}
             transition={{ duration: 0.15 }}
           >
-            <Tooltip.Provider delayDuration={300}>
-              <div className="pointer-events-auto bg-raised/95 backdrop-blur-2xl border border-line-1 rounded-2xl shadow-float shadow-black/10 w-[520px] max-h-[85vh] flex flex-col overflow-hidden">
-                {/* Header */}
-                <div className="px-6 pt-5 pb-3 flex items-center justify-between shrink-0">
-                  <h2 className="text-column font-semibold text-ink-1">
-                    {isEdit ? 'Edit Task Rule' : 'New Task Rule'}
-                  </h2>
+            <div className="pointer-events-auto bg-raised/95 backdrop-blur-2xl border border-line-1 rounded-2xl shadow-float shadow-black/10 w-[520px] max-h-[85vh] flex flex-col overflow-hidden">
+              {/* Header */}
+              <div className="px-6 pt-5 pb-3 flex items-center justify-between shrink-0">
+                <h2 className="text-column font-semibold text-ink-1">
+                  {isEdit ? 'Edit Task Rule' : 'New Task Rule'}
+                </h2>
+                <button
+                  onClick={onClose}
+                  className="text-ink-3 hover:text-ink-2 transition-colors"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Body — scrollable */}
+              <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5 min-h-0">
+                {/* Team (create mode only — a rule's team is immutable).
+                    Locked to the page's active team on the single-team
+                    prompts page; otherwise the modal's own write picker. */}
+                {!isEdit &&
+                  (lockedTeamId ? (
+                    <div className="text-ui text-ink-3">
+                      Team:{' '}
+                      <span className="font-medium text-ink-2">
+                        {teams.find((t) => t.id === lockedTeamId)?.name ?? 'current team'}
+                      </span>
+                    </div>
+                  ) : (
+                    <TeamPicker value={team} onChange={setTeam} label="Team" />
+                  ))}
+                {/* Event type */}
+                <div>
+                  <label className="block text-ui font-medium text-ink-2 mb-1.5">
+                    Event type
+                  </label>
+                  <select
+                    value={eventType}
+                    onChange={(e) => {
+                      setEventType(e.target.value)
+                      setPredicate({}) // Reset predicate when switching event types in create mode.
+                      setAppliesToUnowned(false) // Reset watch flag — the new event may not support it.
+                    }}
+                    disabled={isEdit}
+                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <option value="">Select event type…</option>
+                    {eventTypes
+                      // system: is bus-only and never routed. An
+                      // unavailable source is hidden for a different reason:
+                      // its events cannot reach this org at all, so a rule
+                      // bound to one would wait forever. The row being
+                      // EDITED is kept regardless — event_type is immutable,
+                      // so dropping it would blank the control on exactly
+                      // the rule the reader opened to fix.
+                      .filter(
+                        (et) =>
+                          et.source !== 'system' &&
+                          (et.id === eventType || canProduce(et.source)),
+                      )
+                      .map((et) => (
+                        <option key={et.id} value={et.id}>
+                          {et.label} ({et.id})
+                        </option>
+                      ))}
+                  </select>
+                  {eventType && !canProduce(sourceKindOf(eventType)) && (
+                    <p className="text-[11px] text-ink-3 mt-1.5 italic">
+                      {sourceUnavailableReason(
+                        sourceKindOf(eventType),
+                        stateOf(sourceKindOf(eventType)),
+                      )}{' '}
+                      This rule can&rsquo;t fire until it is.
+                    </p>
+                  )}
+                </div>
+
+                {/* Name */}
+                <div>
+                  <label className="block text-ui font-medium text-ink-2 mb-1.5">Name</label>
+                  <input
+                    type="text"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="e.g. CI failures on my PRs"
+                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
+                  />
+                </div>
+
+                {/* Predicate */}
+                {eventType && (
+                  <div>
+                    <label className="block text-ui font-medium text-ink-2 mb-2">
+                      When (predicate filter)
+                    </label>
+                    <div className="bg-tint-2 rounded-lg border border-line-1 p-3">
+                      <PredicateEditor
+                        eventType={eventType}
+                        value={predicate}
+                        onChange={setPredicate}
+                      />
+                    </div>
+                    <p className="text-reported text-ink-3 mt-1.5">
+                      Leave all fields on &ldquo;Any&rdquo; to match every event of this type.
+                    </p>
+                  </div>
+                )}
+
+                {/* Priority */}
+                <div>
+                  <label className="block text-ui font-medium text-ink-2 mb-1.5">
+                    Default priority{' '}
+                    <span className="text-ink-3 font-normal">({priority.toFixed(2)})</span>
+                  </label>
+                  <Slider
+                    value={priority}
+                    onChange={setPriority}
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    label="Default priority"
+                  />
+                  <div className="flex justify-between text-label text-ink-3 mt-0.5">
+                    <span>Low</span>
+                    <span>High</span>
+                  </div>
+                </div>
+
+                {/* Apply to unowned entities — the explicit "watch" scope
+                    opt-in (TFAC-517). Off by default; on it surfaces tasks for
+                    entities outside the team (PRs/issues authored by anyone),
+                    so it carries a deliberate eyes-open warning. Hidden for
+                    event types the catalog marks inert (pool / requested-party
+                    — supports_watch=false). */}
+                {!eventWatchInert && (
+                  <div>
+                    <label className="flex items-start gap-2.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={appliesToUnowned}
+                        onChange={(e) => setAppliesToUnowned(e.target.checked)}
+                        className="mt-0.5 h-4 w-4 shrink-0 rounded border-line-1 text-warm focus:ring-warm/30"
+                      />
+                      <span>
+                        <span className="block text-ui font-medium text-ink-2">
+                          Apply to entities outside this team
+                        </span>
+                        <span className="block text-reported text-ink-3 mt-0.5">
+                          Surface matching tasks even when no one on this team owns the entity.
+                        </span>
+                      </span>
+                    </label>
+                    <AnimatePresence>
+                      {appliesToUnowned && (
+                        <motion.p
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: 'auto' }}
+                          exit={{ opacity: 0, height: 0 }}
+                          className="overflow-hidden text-reported leading-relaxed text-warm bg-warm/10 border border-warm/20 rounded-lg px-3 py-2 mt-2"
+                        >
+                          This rule surfaces matching PRs and issues authored by anyone —
+                          including people on other teams and outside contributors — so expect
+                          significantly higher volume. If you also auto-delegate this event, the
+                          bot acts only on the ones no one in your Triage Factory org owns (e.g.
+                          dependabot or external contributors), never on a PR a member owns.
+                        </motion.p>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                )}
+
+                {/* Enabled toggle removed — use the inline toggle in the rules list instead */}
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-4 border-t border-line-1 flex items-center shrink-0">
+                {/* Left: delete — only for user rules. System rules use the enabled toggle instead. */}
+                {isEdit && rule?.source !== 'system' && (
+                  <button
+                    onClick={handleDelete}
+                    disabled={deleting}
+                    className="text-body font-medium text-alarm hover:text-alarm/80 transition-colors disabled:opacity-50"
+                  >
+                    {deleting ? 'Deleting…' : 'Delete'}
+                  </button>
+                )}
+
+                {/* Right: cancel + save */}
+                <div className="ml-auto flex items-center gap-3">
+                  {error && <span className="text-ui text-alarm mr-2">{error}</span>}
                   <button
                     onClick={onClose}
-                    className="text-ink-3 hover:text-ink-2 transition-colors"
+                    className="text-body font-medium text-ink-3 hover:text-ink-2 transition-colors"
                   >
-                    <X size={18} />
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSave}
+                    disabled={
+                      saving ||
+                      !eventType ||
+                      !name.trim() ||
+                      (!isEdit && !lockedTeamId && !teamsLoaded)
+                    }
+                    className="text-body font-semibold text-warm-ink bg-warm hover:bg-warm/90 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-full transition-colors"
+                  >
+                    {saving ? 'Saving…' : isEdit ? 'Save' : 'Create'}
                   </button>
                 </div>
-
-                {/* Body — scrollable */}
-                <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5 min-h-0">
-                  {/* Team (create mode only — a rule's team is immutable).
-                      Locked to the page's active team on the single-team
-                      prompts page; otherwise the modal's own write picker. */}
-                  {!isEdit &&
-                    (lockedTeamId ? (
-                      <div className="text-ui text-ink-3">
-                        Team:{' '}
-                        <span className="font-medium text-ink-2">
-                          {teams.find((t) => t.id === lockedTeamId)?.name ?? 'current team'}
-                        </span>
-                      </div>
-                    ) : (
-                      <TeamPicker value={team} onChange={setTeam} label="Team" />
-                    ))}
-                  {/* Event type */}
-                  <div>
-                    <label className="block text-ui font-medium text-ink-2 mb-1.5">
-                      Event type
-                    </label>
-                    <select
-                      value={eventType}
-                      onChange={(e) => {
-                        setEventType(e.target.value)
-                        setPredicate({}) // Reset predicate when switching event types in create mode.
-                        setAppliesToUnowned(false) // Reset watch flag — the new event may not support it.
-                      }}
-                      disabled={isEdit}
-                      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <option value="">Select event type…</option>
-                      {eventTypes
-                        // system: is bus-only and never routed. An
-                        // unavailable source is hidden for a different reason:
-                        // its events cannot reach this org at all, so a rule
-                        // bound to one would wait forever. The row being
-                        // EDITED is kept regardless — event_type is immutable,
-                        // so dropping it would blank the control on exactly
-                        // the rule the reader opened to fix.
-                        .filter(
-                          (et) =>
-                            et.source !== 'system' &&
-                            (et.id === eventType || canProduce(et.source)),
-                        )
-                        .map((et) => (
-                          <option key={et.id} value={et.id}>
-                            {et.label} ({et.id})
-                          </option>
-                        ))}
-                    </select>
-                    {eventType && !canProduce(sourceKindOf(eventType)) && (
-                      <p className="text-[11px] text-ink-3 mt-1.5 italic">
-                        {sourceUnavailableReason(
-                          sourceKindOf(eventType),
-                          stateOf(sourceKindOf(eventType)),
-                        )}{' '}
-                        This rule can&rsquo;t fire until it is.
-                      </p>
-                    )}
-                  </div>
-
-                  {/* Name */}
-                  <div>
-                    <label className="block text-ui font-medium text-ink-2 mb-1.5">Name</label>
-                    <input
-                      type="text"
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      placeholder="e.g. CI failures on my PRs"
-                      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
-                    />
-                  </div>
-
-                  {/* Predicate */}
-                  {eventType && (
-                    <div>
-                      <label className="block text-ui font-medium text-ink-2 mb-2">
-                        When (predicate filter)
-                      </label>
-                      <div className="bg-tint-2 rounded-lg border border-line-1 p-3">
-                        <PredicateEditor
-                          eventType={eventType}
-                          value={predicate}
-                          onChange={setPredicate}
-                        />
-                      </div>
-                      <p className="text-reported text-ink-3 mt-1.5">
-                        Leave all fields on &ldquo;Any&rdquo; to match every event of this type.
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Priority */}
-                  <div>
-                    <label className="block text-ui font-medium text-ink-2 mb-1.5">
-                      Default priority{' '}
-                      <span className="text-ink-3 font-normal">({priority.toFixed(2)})</span>
-                    </label>
-                    <Slider
-                      value={priority}
-                      onChange={setPriority}
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      label="Default priority"
-                    />
-                    <div className="flex justify-between text-label text-ink-3 mt-0.5">
-                      <span>Low</span>
-                      <span>High</span>
-                    </div>
-                  </div>
-
-                  {/* Apply to unowned entities — the explicit "watch" scope
-                      opt-in (TFAC-517). Off by default; on it surfaces tasks for
-                      entities outside the team (PRs/issues authored by anyone),
-                      so it carries a deliberate eyes-open warning. Hidden for
-                      event types the catalog marks inert (pool / requested-party
-                      — supports_watch=false). */}
-                  {!eventWatchInert && (
-                    <div>
-                      <label className="flex items-start gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={appliesToUnowned}
-                          onChange={(e) => setAppliesToUnowned(e.target.checked)}
-                          className="mt-0.5 h-4 w-4 shrink-0 rounded border-line-1 text-warm focus:ring-warm/30"
-                        />
-                        <span>
-                          <span className="block text-ui font-medium text-ink-2">
-                            Apply to entities outside this team
-                          </span>
-                          <span className="block text-reported text-ink-3 mt-0.5">
-                            Surface matching tasks even when no one on this team owns the entity.
-                          </span>
-                        </span>
-                      </label>
-                      <AnimatePresence>
-                        {appliesToUnowned && (
-                          <motion.p
-                            initial={{ opacity: 0, height: 0 }}
-                            animate={{ opacity: 1, height: 'auto' }}
-                            exit={{ opacity: 0, height: 0 }}
-                            className="overflow-hidden text-reported leading-relaxed text-warm bg-warm/10 border border-warm/20 rounded-lg px-3 py-2 mt-2"
-                          >
-                            This rule surfaces matching PRs and issues authored by anyone —
-                            including people on other teams and outside contributors — so expect
-                            significantly higher volume. If you also auto-delegate this event, the
-                            bot acts only on the ones no one in your Triage Factory org owns (e.g.
-                            dependabot or external contributors), never on a PR a member owns.
-                          </motion.p>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  )}
-
-                  {/* Enabled toggle removed — use the inline toggle in the rules list instead */}
-                </div>
-
-                {/* Footer */}
-                <div className="px-6 py-4 border-t border-line-1 flex items-center shrink-0">
-                  {/* Left: delete — only for user rules. System rules use the enabled toggle instead. */}
-                  {isEdit && rule?.source !== 'system' && (
-                    <button
-                      onClick={handleDelete}
-                      disabled={deleting}
-                      className="text-body font-medium text-alarm hover:text-alarm/80 transition-colors disabled:opacity-50"
-                    >
-                      {deleting ? 'Deleting…' : 'Delete'}
-                    </button>
-                  )}
-
-                  {/* Right: cancel + save */}
-                  <div className="ml-auto flex items-center gap-3">
-                    {error && <span className="text-ui text-alarm mr-2">{error}</span>}
-                    <button
-                      onClick={onClose}
-                      className="text-body font-medium text-ink-3 hover:text-ink-2 transition-colors"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={handleSave}
-                      disabled={
-                        saving ||
-                        !eventType ||
-                        !name.trim() ||
-                        (!isEdit && !lockedTeamId && !teamsLoaded)
-                      }
-                      className="text-body font-semibold text-warm-ink bg-warm hover:bg-warm/90 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-full transition-colors"
-                    >
-                      {saving ? 'Saving…' : isEdit ? 'Save' : 'Create'}
-                    </button>
-                  </div>
-                </div>
               </div>
-            </Tooltip.Provider>
+            </div>
           </motion.div>
         </>
       )}

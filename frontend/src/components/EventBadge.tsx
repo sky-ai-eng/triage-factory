@@ -1,4 +1,4 @@
-import * as Tooltip from '@radix-ui/react-tooltip'
+import { Tooltip } from '../ui/tooltip/Tooltip'
 import { eventDisplay } from '../lib/eventDisplay'
 
 // EventBadge renders the saturated event-type pill used by the filter chips
@@ -31,20 +31,8 @@ export default function EventBadge({
   )
 
   return (
-    <Tooltip.Provider delayDuration={200}>
-      <Tooltip.Root>
-        <Tooltip.Trigger asChild>{badge}</Tooltip.Trigger>
-        <Tooltip.Portal>
-          <Tooltip.Content
-            side="top"
-            sideOffset={6}
-            className="z-[100] max-w-[240px] rounded-lg bg-raised border border-line-1 px-3 py-2 shadow-float shadow-black/[0.06] text-ui text-ink-2 leading-relaxed animate-in fade-in-0 zoom-in-95"
-          >
-            {info.description}
-            <Tooltip.Arrow className="fill-raised" />
-          </Tooltip.Content>
-        </Tooltip.Portal>
-      </Tooltip.Root>
-    </Tooltip.Provider>
+    <Tooltip content={info.description} wrap>
+      {badge}
+    </Tooltip>
   )
 }
