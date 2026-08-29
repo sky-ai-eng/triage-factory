@@ -29,7 +29,6 @@
 }
 
 .ov-needs {
-  order: 2;
   flex: none;
 }
 
@@ -37,7 +36,6 @@
    content width the donut drops beneath on its own — no breakpoint owns that,
    which is why it also holds at widths nobody tested. */
 .ov-live {
-  order: 3;
   flex: none;
   display: flex;
   flex-wrap: wrap;
@@ -181,19 +179,21 @@
   }
 }
 
-/* The convergence is the one thing with a height RANGE, and it does not
+/* The convergence LEADS the page — directly under the away line, before the
+   rows (the design's triage-first arrangement), which is why it needs no rule
+   of space above it, and why DOM order and visual order agree with no `order`
+   overrides. It is also the one thing with a height RANGE, and it does not
    stretch freely: a plot that flexes without bound flattens the strands to
    near-horizontal on a tall window, and the minimum stops it squeezing until
    its own footer overflows. The page measures the pixel room and converts it
    into Converge's viewBox unit — see the measurement in Overview.tsx. */
 .ov-conv {
-  order: 4;
   flex: 1;
   min-height: 197px;
   max-height: 357px;
   display: flex;
   flex-direction: column;
-  padding-top: 14px;
+  padding-top: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -202,6 +202,17 @@ export default function Overview() {
         </span>
       </div>
 
+      <div className="ov-conv" ref={convBox}>
+        <Converge
+          kicker="SINCE MIDNIGHT"
+          title={`${offline || !daySums ? '--' : daySums.events} events triaged`}
+          outcomes={outcomes}
+          strands={28}
+          height={convHeight}
+          replayOnClick
+        />
+      </div>
+
       <div className="ov-needs">
         <RunRows
           label="NEEDS YOU"
@@ -303,17 +314,6 @@ export default function Overview() {
             </div>
           </div>
         </div>
-      </div>
-
-      <div className="ov-conv" ref={convBox}>
-        <Converge
-          kicker="SINCE MIDNIGHT"
-          title={`${offline || !daySums ? '--' : daySums.events} events triaged`}
-          outcomes={outcomes}
-          strands={28}
-          height={convHeight}
-          replayOnClick
-        />
       </div>
     </div>
   )
