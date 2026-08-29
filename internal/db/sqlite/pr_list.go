@@ -61,16 +61,21 @@ func sqlitePRStateClause(states []string) (string, error) {
 const sqlitePRSummaryOrder = `
 	ORDER BY e.last_polled_at DESC, e.id`
 
-// sqliteScanPRSummaries drains a snapshot_json-only result set into rows. A
-// malformed snapshot is skipped rather than failing the page — the same reason
-// the guard above exists.
+// sqliteScanPRSummaries drains a snapshot_json-only result set into rows.
+//
+// The two failure modes are deliberately not the same. A malformed snapshot is
+// one bad stored row, skipped for the same reason the guard above exists. A
+// Scan failure is not a row problem at all — it is the driver or the column
+// list disagreeing with this code — so it fails the read: skipping it would
+// silently serve a short page that rows.Err() reports nothing about, which is
+// a wrong answer wearing a right one's shape.
 func sqliteScanPRSummaries(rows *sql.Rows) ([]domain.PRSummaryRow, error) {
 	defer rows.Close()
 	prs := []domain.PRSummaryRow{}
 	for rows.Next() {
 		var snapJSON string
 		if err := rows.Scan(&snapJSON); err != nil {
-			continue
+			return nil, fmt.Errorf("scan pull request snapshot: %w", err)
 		}
 		var snap domain.PRSnapshot
 		if err := json.Unmarshal([]byte(snapJSON), &snap); err != nil {

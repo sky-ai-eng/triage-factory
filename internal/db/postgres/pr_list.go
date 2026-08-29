@@ -59,16 +59,21 @@ func pgPRStateClause(states []string) (string, error) {
 const pgPRSummaryOrder = `
 	ORDER BY e.last_polled_at DESC NULLS LAST, e.id`
 
-// pgScanPRSummaries drains a snapshot_json-only result set into rows. A
-// malformed or empty snapshot is skipped rather than failing the page — one
-// bad row must not blank a whole list.
+// pgScanPRSummaries drains a snapshot_json-only result set into rows.
+//
+// The two failure modes are deliberately not the same. A malformed or empty
+// snapshot is one bad stored row, skipped so it cannot blank a whole list. A
+// Scan failure is not a row problem at all — it is the driver or the column
+// list disagreeing with this code — so it fails the read: skipping it would
+// silently serve a short page that rows.Err() reports nothing about, which is
+// a wrong answer wearing a right one's shape.
 func pgScanPRSummaries(rows *sql.Rows) ([]domain.PRSummaryRow, error) {
 	defer rows.Close()
 	prs := []domain.PRSummaryRow{}
 	for rows.Next() {
 		var snapJSON []byte
 		if err := rows.Scan(&snapJSON); err != nil {
-			continue
+			return nil, fmt.Errorf("scan pull request snapshot: %w", err)
 		}
 		if len(snapJSON) == 0 {
 			continue

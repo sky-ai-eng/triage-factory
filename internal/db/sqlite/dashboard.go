@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -44,8 +45,11 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 
 	for rows.Next() {
 		var snapJSON string
+		// A Scan failure is the driver or the column list disagreeing with
+		// this code, not a bad row: skipping it would drop PRs out of a
+		// statistic with nothing to show for it, since rows.Err() stays nil.
 		if err := rows.Scan(&snapJSON); err != nil {
-			continue
+			return nil, fmt.Errorf("scan pull request snapshot: %w", err)
 		}
 		var snap domain.PRSnapshot
 		if err := json.Unmarshal([]byte(snapJSON), &snap); err != nil {

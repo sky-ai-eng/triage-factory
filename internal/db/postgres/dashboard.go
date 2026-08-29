@@ -38,8 +38,12 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 
 	for rows.Next() {
 		var snapJSON []byte
+		// A Scan failure is the driver or the column list disagreeing with
+		// this code, not a bad row: skipping it would drop PRs out of a
+		// statistic with nothing to show for it, since rows.Err() stays nil.
+		// A malformed snapshot below IS a bad row, and is skipped.
 		if err := rows.Scan(&snapJSON); err != nil {
-			continue
+			return nil, fmt.Errorf("scan pull request snapshot: %w", err)
 		}
 		if len(snapJSON) == 0 {
 			continue
