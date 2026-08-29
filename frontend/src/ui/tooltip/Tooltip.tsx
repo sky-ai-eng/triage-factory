@@ -1,5 +1,5 @@
-import { useEffect, useId, useRef, useState } from 'react'
-import type { KeyboardEvent, MouseEvent, ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import type { CSSProperties, KeyboardEvent, MouseEvent, ReactNode } from 'react'
 import './tooltip.css'
 
 // Tooltip — the definition of a label, never the value of a datum.
@@ -58,6 +58,14 @@ const SIDES = {
   left: { right: 'calc(100% + 9px)', top: '50%', transform: 'translateY(-50%)' },
 } as const
 
+/** Clearance kept between the bubble and the edge of the page. */
+const EDGE = 8
+const FLIP = { left: 'right', right: 'left', top: 'top', bottom: 'bottom' } as const
+
+/** The measured correction keeping an open bubble on the page. One of three
+ *  shapes, never combined — see the layout effect below for the order. */
+type Adjust = { dx?: number; side?: keyof typeof SIDES; wrap?: number }
+
 export type TooltipProps = {
   /** The trigger. Made focusable so the hint has a keyboard route. */
   children?: ReactNode
@@ -99,8 +107,54 @@ export function Tooltip({
 }: TooltipProps) {
   const [open, setOpen] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pop = useRef<HTMLSpanElement | null>(null)
   const id = useId()
   const live = !disabled && content != null && content !== ''
+
+  // Kept inside the page.
+  //
+  // A centered bubble on a trigger near either edge hangs off the page, and
+  // the half that hangs off is unreadable — on a run row the trigger is a 14px
+  // glyph 39px from the left of a list that may itself be at the left of the
+  // window, so a 300px reference centered on it starts well outside. Measured
+  // rather than guessed: the widths involved are content widths, and the
+  // trigger's distance from the edge is not knowable from CSS.
+  //
+  // Three corrections, in order of how much they change the tooltip:
+  //   - a SHIFT along the page for a top/bottom bubble, which keeps the bubble
+  //     where it was pointing and only slides it clear;
+  //   - a FLIP to the opposite side for a left/right bubble, which cannot
+  //     shift sideways without covering the thing it names;
+  //   - a WRAP, if it is wider than the page can hold at any position — then
+  //     there is nowhere to slide it to and the line has to break instead.
+  // Reset at close (hide/tap), not here: opening therefore mounts a fresh
+  // bubble with no correction on it, so the measurement is always of the
+  // uncorrected position; once a correction is applied it stands until close,
+  // and this cannot oscillate.
+  const [adj, setAdj] = useState<Adjust | null>(null)
+  useLayoutEffect(() => {
+    if (!open || adj) return
+    const el = pop.current
+    const vw = document.documentElement.clientWidth
+    // No page to measure against (an environment without layout): fits.
+    if (!el || !vw) return
+    const r = el.getBoundingClientRect()
+    const room = vw - EDGE * 2
+    const fix: Adjust | null =
+      r.width > room
+        ? { wrap: room }
+        : r.left >= EDGE && r.right <= vw - EDGE
+          ? null
+          : side === 'left' || side === 'right'
+            ? { side: FLIP[side] }
+            : { dx: Math.round(r.left < EDGE ? EDGE - r.left : vw - EDGE - r.right) }
+    if (!fix) return
+    // Measure-then-correct is what a layout effect is for: the write happens
+    // before paint, so the reader never sees the uncorrected position, and the
+    // `adj` guard above means it runs once per open — no cascade.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAdj(fix)
+  }, [open, content, side, adj])
 
   useEffect(
     () => () => {
@@ -117,6 +171,7 @@ export function Tooltip({
   const hide = () => {
     if (timer.current) clearTimeout(timer.current)
     setOpen(false)
+    setAdj(null)
   }
 
   // Focus opens with no delay. A delay keeps a tooltip from flickering under a
@@ -137,9 +192,12 @@ export function Tooltip({
     e.stopPropagation()
     if (timer.current) clearTimeout(timer.current)
     setOpen((v) => !v)
+    // Closing discards the correction; opening starts from none anyway.
+    setAdj(null)
   }
 
   const keyboard = live && focusable
+  const placed = adj?.side ?? side
 
   return (
     <span
@@ -162,21 +220,39 @@ export function Tooltip({
       {children}
       {open ? (
         <span
+          ref={pop}
           id={keyboard ? id : undefined}
           role={keyboard ? 'tooltip' : undefined}
           aria-hidden={keyboard ? undefined : 'true'}
           className="tip"
-          data-side={side}
-          style={{
-            ...(SIDES[side] ?? SIDES.top),
-            ...(wrap
-              ? {
-                  whiteSpace: 'normal',
-                  width: 'max-content',
-                  maxWidth: typeof wrap === 'number' ? wrap : 220,
-                }
-              : null),
-          }}
+          data-side={placed}
+          style={
+            {
+              ...(SIDES[placed] ?? SIDES.top),
+              ...(wrap
+                ? {
+                    whiteSpace: 'normal',
+                    width: 'max-content',
+                    maxWidth: typeof wrap === 'number' ? wrap : 220,
+                  }
+                : null),
+              // The shift is a variable as well as a transform: the entrance
+              // keyframes restate the resting transform and outrank an inline
+              // one for the whole run, so a shifted bubble written inline
+              // alone would animate in centered and jump sideways at the end.
+              // The keyframes read the variable; the inline transform is the
+              // resting position after they finish.
+              ...(adj?.dx
+                ? {
+                    '--tip-dx': adj.dx + 'px',
+                    transform: 'translateX(calc(-50% + ' + adj.dx + 'px))',
+                  }
+                : null),
+              ...(adj?.wrap
+                ? { whiteSpace: 'normal', maxWidth: adj.wrap, overflowWrap: 'anywhere' }
+                : null),
+            } as CSSProperties
+          }
         >
           {content}
         </span>

@@ -29,6 +29,10 @@
   font: 400 11px/1 var(--font-sans);
   color: var(--color-ink-1);
   white-space: nowrap;
+  /* A last resort under the measured correction in Tooltip.tsx, and a floor
+     for anything that mounts a tooltip without it: nothing may be wider than
+     the page it is explaining. */
+  max-width: calc(100vw - 16px);
   /* Never a hover target itself. A tooltip that can be pointed at is a
      popover, and a popover needs a reason to stay open. */
   pointer-events: none;
@@ -50,17 +54,23 @@
 /* Each keyframe restates the resting transform, because an animation's
    transform outranks the inline one for the whole run — and keeps outranking
    it under a fill mode. Dropping it here would un-center every tooltip for
-   140ms. */
+   140ms.
+
+   Which is also why an edge correction is a VARIABLE and not an inline
+   transform alone: the keyframes have to be able to restate it. `--tip-dx`
+   defaults to 0, so an uncorrected tooltip animates exactly as before, and a
+   shifted one animates from and to its shifted position instead of sliding
+   across at the end of the entrance. */
 @keyframes tip-up {
   from {
     opacity: 0;
-    transform: translateX(-50%) translateY(3px);
+    transform: translateX(calc(-50% + var(--tip-dx, 0px))) translateY(3px);
   }
 }
 @keyframes tip-down {
   from {
     opacity: 0;
-    transform: translateX(-50%) translateY(-3px);
+    transform: translateX(calc(-50% + var(--tip-dx, 0px))) translateY(-3px);
   }
 }
 @keyframes tip-right {

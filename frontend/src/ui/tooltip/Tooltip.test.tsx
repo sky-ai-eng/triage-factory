@@ -107,3 +107,82 @@ describe('Tooltip', () => {
     expect(through).toHaveBeenCalled()
   })
 })
+
+describe('page clamp', () => {
+  // jsdom does no layout, so the page and the bubble are stubbed: a viewport
+  // width on the root element, and a rect on any element carrying `.tip`.
+  const page = (width: number) =>
+    Object.defineProperty(document.documentElement, 'clientWidth', {
+      value: width,
+      configurable: true,
+    })
+  const rect = (o: Partial<DOMRect>) =>
+    ({ left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, ...o }) as DOMRect
+  const bubble = (r: Partial<DOMRect>) =>
+    vi
+      .spyOn(Element.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: Element) {
+        return this.classList?.contains('tip') ? rect(r) : rect({})
+      })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    page(0)
+  })
+
+  const open = () => {
+    render(
+      <Tooltip content="platform-control-plane-migrations#1184" focusable={false}>
+        mark
+      </Tooltip>,
+    )
+    fireEvent.mouseEnter(screen.getByText('mark').closest('.tip-host')!)
+    act(() => vi.advanceTimersByTime(TOOLTIP_DELAY))
+    return tip() as HTMLElement
+  }
+
+  it('shifts a top bubble clear of the edge, as the keyframe variable too', () => {
+    page(800)
+    bubble({ left: -40, right: 160, width: 200 })
+    const t = open()
+    // 8px clearance from a left edge at -40 is a 48px slide right.
+    expect(t.style.getPropertyValue('--tip-dx')).toBe('48px')
+    expect(t.style.transform).toBe('translateX(calc(-50% + 48px))')
+    expect(t.dataset.side).toBe('top')
+  })
+
+  it('flips a side bubble instead of sliding it over its trigger', () => {
+    page(800)
+    bubble({ left: 780, right: 920, width: 140 })
+    render(
+      <Tooltip content="off the right edge" side="right">
+        mark
+      </Tooltip>,
+    )
+    fireEvent.mouseEnter(screen.getByText('mark').closest('.tip-host')!)
+    act(() => vi.advanceTimersByTime(TOOLTIP_DELAY))
+    expect((tip() as HTMLElement).dataset.side).toBe('left')
+  })
+
+  it('wraps when no position on the page can hold the line', () => {
+    page(300)
+    bubble({ left: -300, right: 600, width: 900 })
+    const t = open()
+    expect(t.style.whiteSpace).toBe('normal')
+    // The page minus both clearances.
+    expect(t.style.maxWidth).toBe('284px')
+  })
+
+  it('leaves a bubble that fits untouched', () => {
+    page(800)
+    bubble({ left: 300, right: 500, width: 200 })
+    const t = open()
+    expect(t.style.getPropertyValue('--tip-dx')).toBe('')
+    expect(t.style.transform).toBe('translateX(-50%)')
+  })
+
+  it('treats an unmeasurable page as fitting — jsdom has no layout to clamp against', () => {
+    const t = open()
+    expect(t.style.getPropertyValue('--tip-dx')).toBe('')
+    expect(t.dataset.side).toBe('top')
+  })
+})

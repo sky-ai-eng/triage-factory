@@ -69,6 +69,28 @@ app machinery, and it means a trigger inside an `overflow: hidden` ancestor can
 clip its hint — if that happens, the fix is the trigger's container, not a
 portal here.
 
+## It stays on the page
+
+The bubble is centered on its trigger, and a trigger near either edge of the
+page puts half of it outside the window, where it cannot be read. So the
+position is measured once on open and corrected, in the order of how much the
+correction changes the tooltip:
+
+- a **shift** along the page for a `top`/`bottom` bubble — it stays where it
+  was pointing and only slides clear of the edge;
+- a **flip** to the opposite side for `left`/`right`, which cannot slide
+  sideways without covering the thing it names;
+- a **wrap** if the content is wider than the page can hold at any position,
+  since then there is nowhere to slide it to and the line has to break.
+
+Nothing to pass; a tooltip that already fits is untouched and animates exactly
+as before. The shift is applied as `--tip-dx` as well as an inline transform,
+because the entrance keyframes restate the resting transform and outrank an
+inline style for the whole run — written inline alone, a corrected bubble
+animates in centered and jumps sideways at the end. The keyframes read the
+variable, defaulting to `0px`, and `.tip` carries `max-width: calc(100vw -
+16px)` as a floor for any tooltip mounted without the measurement.
+
 ## Reduced motion
 
 Nothing to write back: the entrance has no fill mode, so the motion blanket
