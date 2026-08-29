@@ -1050,6 +1050,10 @@ CREATE TABLE public.team_settings (
     -- SDK permission posture: multi-mode SDK runs force auto, local mode honors
     -- this setting, native runs ignore it.
     auto_mode_enabled boolean DEFAULT true NOT NULL,
+    -- Grace window (ms) an unattended permission prompt waits before denying with
+    -- "no operator available"; the boolean off waits out the full timeout instead.
+    permission_absent_grace_ms integer DEFAULT 15000 NOT NULL,
+    permission_absent_autodeny_enabled boolean DEFAULT true NOT NULL,
     -- Per-team daily LLM spend cap, gated on the governance entitlement. NULL = no
     -- cap, and the app treats 0 the same; the team's spend for the current UTC day
     -- (its own team_id rows only) gates new runs. The read fails open.
@@ -1072,11 +1076,7 @@ CREATE TABLE public.team_settings (
     -- Which of the org's enabled models this team may pick from, as a JSON array
     -- of catalog keys. NULL inherits the org's set, which write and read narrow to.
     enabled_models text,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    -- Grace window (ms) an unattended permission prompt waits before denying with
-    -- "no operator available"; the boolean off waits out the full timeout instead.
-    permission_absent_grace_ms integer DEFAULT 15000 NOT NULL,
-    permission_absent_autodeny_enabled boolean DEFAULT true NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -1134,10 +1134,10 @@ CREATE TABLE public.user_github_identities (
     email text,
     source text NOT NULL,
     verified_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
     -- NULL = the one-shot dashboard history backfill is still owed for this identity.
     dashboard_backfilled_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT user_github_identities_source_check CHECK ((source = ANY (ARRAY['pat'::text, 'connect_oauth'::text, 'scim'::text, 'login_claim'::text])))
 );
 
