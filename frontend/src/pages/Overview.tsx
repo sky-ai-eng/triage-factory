@@ -1,22 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
-import RunRows from './overview/RunRows'
-import type { RunRowItem } from './overview/RunRows'
+import { RunRows } from '../ui/runrow/RunRows'
+import type { RunRowItem } from '../ui/runrow/RunRows'
 import { Converge } from '../ui/converge/Converge'
 import type { ConvergeOutcome } from '../ui/converge/Converge'
-import {
-  donutSegments,
-  money,
-  needsRow,
-  runningRow,
-  seenLead,
-  utcMidnightISO,
-  windowSums,
-} from './overview/data'
+import { FlapCount } from '../ui/flapcount/FlapCount'
+import { CratePile } from '../ui/cratepile/CratePile'
+import { SpendRing } from '../ui/spendring/SpendRing'
+import { needsRow, ringModels, runningRow, utcMidnightISO, windowSums } from './overview/data'
 import {
   useActivityWindow,
+  useClock,
   useConversationSets,
-  useOverviewSeen,
+  useOpenPRCount,
   useOverviewTick,
   useSpendToday,
   useTasksIndex,
@@ -24,15 +20,14 @@ import {
 import { useShellScope } from '../hooks/useShellScope'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { useWsConnected } from '../hooks/useWebSocket'
-import { useModelCatalog } from '../hooks/useModelCatalog'
 import { ACTIVE_STATUSES, workStartedAt } from '../lib/conversationStatus'
 import type { Conversation } from '../types'
 import './overview/overview.css'
 
 // Overview — the first row in WORK, and the page nobody lands on: you land on
 // your last page, not here. So it is not a dashboard you monitor. It is the
-// page you open deliberately, once, to find out what happened while you were
-// away and what is waiting for you.
+// page you open deliberately, once, to find out what happened and what is
+// waiting for you.
 //
 // SCOPE is whatever the org · team mark says — the page has no scope control
 // of its own, and changing team in the rail reframes every figure. That is
@@ -46,9 +41,16 @@ import './overview/overview.css'
 //
 // THE SHAPE IS STATIC, deliberately: a fixed set of sections with
 // deterministic conditional logic only — quiet, offline, nothing running —
-// never a usage pattern or a stored preference. And NOTHING TICKS: the rail's
-// counts are the frame's only moving numbers, ages are stamped per refetch,
-// and the shimmer is emission, not a tick.
+// never a usage pattern or a stored preference. And NOTHING TICKS except the
+// masthead's clock: figures move when data moves, ages are stamped per
+// refetch, and the sweep is emission, not a tick.
+//
+// The layout is the pinwheel: the convergence leads with the masthead in its
+// top-right corner, then the two graphics sit in opposite corners of the two
+// bands — the pile leads NEEDS YOU, the ring closes RUNNING. Each band is a
+// wrapping flex row, so below roughly 800px of content width the graphic
+// drops onto its own line with no breakpoint owning that; NEEDS YOU wraps in
+// reverse so its rows land ABOVE the pile and stay the first thing read.
 
 /** How many rows each section shows before deferring to the Board. */
 const NEEDS_SHOWN = 3
@@ -62,7 +64,7 @@ export default function Overview() {
   const offline = !connected
 
   const tick = useOverviewTick()
-  const anchor = useOverviewSeen()
+  const { clock, date } = useClock()
   // Midnight is stamped once per mount: the convergence's window opens where
   // the day did, and a page that recomputed it per render would tick.
   const midnight = useMemo(() => utcMidnightISO(), [])
@@ -71,7 +73,7 @@ export default function Overview() {
   const tasks = useTasksIndex(teamId, tick)
   const sinceMidnight = useActivityWindow(teamId, midnight, tick)
   const usage = useSpendToday(teamId, tick)
-  const catalog = useModelCatalog()
+  const openPRs = useOpenPRCount(teamId, tick)
 
   const daySums = sinceMidnight ? windowSums(sinceMidnight) : null
 
@@ -80,7 +82,6 @@ export default function Overview() {
   // itself. Unknown is not zero either, so a read that has not answered is a
   // dash too.
   const num = (v: number | null | undefined) => (offline || v == null ? '--' : String(v))
-  const cash = (v: number | null | undefined) => (offline || v == null ? '--' : money(v))
 
   const runHref = useCallback((id: string) => orgHref(`/runs/${id}`), [orgHref])
   const onPick = useCallback(
@@ -122,47 +123,56 @@ export default function Overview() {
   const needsHidden = needsTotal != null ? Math.max(0, needsTotal - needsItems.length) : 0
   const runningHidden = running != null ? Math.max(0, running.total - runningItems.length) : 0
 
-  // The day's spend ring: segments are shares of the model-attributed spend,
-  // while the hole shows the day's whole figure — system overhead has no
-  // model and belongs to the total alone.
-  const segments = offline || !usage ? [] : donutSegments(usage.by_model ?? [])
-  const legend = useMemo(() => {
-    if (offline || !usage) return []
-    const sorted = [...(usage.by_model ?? [])].sort((a, b) => b.cost - a.cost)
-    return sorted.map((m) => ({
-      key: m.model,
-      name: catalog.models.find((c) => c.key === m.model)?.display_name ?? m.model,
-      value: money(m.cost),
-    }))
-  }, [offline, usage, catalog.models])
+  // The board link under a list: what it excludes when it excludes something,
+  // the way in when it does not. The quiet state drops it — "open the board"
+  // under "Nothing needs you." would be an errand with no reason attached.
+  const boardMore = (hidden: number) => (
+    <Link to={orgHref('/board')}>
+      {hidden > 0 ? `+${hidden} more on the board` : 'open the board'}
+    </Link>
+  )
 
-  // Converge's `height` prop is a viewBox unit, not pixels: what renders is
-  // width × (height / 740). So measure the pixel room, clamp THAT, and convert
-  // back — passing the room straight in is how the footer lands below the
-  // fold. Re-measured on resize, plus once after layout settles (the first
-  // pass can run before the flex row has its final width).
+  // The ring is the model-attributed spend; 'forbidden' is the grant that
+  // disagrees, and then the ring goes entirely — the rows take the full
+  // width, one fewer answer rather than a second layout.
+  const spendGone = usage === 'forbidden'
+  const spendModels = useMemo(
+    () => (usage == null || usage === 'forbidden' ? [] : ringModels(usage.by_model ?? [])),
+    [usage],
+  )
+
+  // Converge runs in fill mode — the container's flex height drives the
+  // drawing, so width and height resolve in one layout pass and a rail toggle
+  // reshapes the fan continuously. The measurement survives for one coarse
+  // job: the endpoint band, so the masthead's roughly constant ~104px of
+  // clearance stays a sensible fraction of a plot whose height varies. A band
+  // that lands a frame late shifts a lane by a pixel and nobody sees it; a
+  // HEIGHT that landed a frame late was a visible snap.
   const convBox = useRef<HTMLDivElement | null>(null)
-  const [convHeight, setConvHeight] = useState(190)
+  const [convPx, setConvPx] = useState(300)
   const measure = useCallback(() => {
     const box = convBox.current
-    if (!box || !box.clientWidth) return
-    const room = box.clientHeight - 16
-    const px = Math.max(140, Math.min(300, room))
-    setConvHeight(Math.round((px * 740) / box.clientWidth))
+    if (!box || !box.clientHeight) return
+    setConvPx(box.clientHeight - 16)
   }, [])
   useEffect(() => {
     measure()
-    const raf = requestAnimationFrame(() => requestAnimationFrame(measure))
     let ro: ResizeObserver | null = null
     if (typeof ResizeObserver === 'function' && convBox.current) {
       ro = new ResizeObserver(measure)
       ro.observe(convBox.current)
     }
     return () => {
-      cancelAnimationFrame(raf)
       ro?.disconnect()
     }
   }, [measure])
+  // The band compresses the lanes rather than translating them (the last lane
+  // already sits near the plot floor), and it floors at 0.14 — a window short
+  // enough to need less clearance has no room for a large masthead anyway.
+  const convBand = useMemo<[number, number]>(
+    () => [Math.max(0.14, Math.min(0.42, 104 / (convPx || 300))), 1],
+    [convPx],
+  )
 
   // Offline keeps the outcome names and zeroes their counts, so the fan stays
   // a shape with no claim in it rather than vanishing from the page.
@@ -175,112 +185,99 @@ export default function Overview() {
     ],
     [offline, quiet, daySums, running, needsTotal],
   )
-
-  const boardNote = (hidden: number) => (
-    <Link to={orgHref('/board')}>
-      {hidden > 0 ? `+${hidden} more on the board` : 'open the board'}
-    </Link>
-  )
+  const events = offline || !daySums ? null : daySums.events
 
   return (
     <div className="ov">
-      {/* The lead alone — what changed since is the convergence's and the
-          ring's to say. The tail slot survives only to state the offline
-          condition once. */}
-      <div className="ov-away">
-        <span className="ov-away-lead">{anchor === undefined ? ' ' : seenLead(anchor)}</span>
-        <span className="ov-away-tail">
-          {offline ? 'readouts are inert until the connection returns' : ' '}
-        </span>
-      </div>
+      <div className="ov-col">
+        {/* The away line is gone — it stated a timestamp nothing else on the
+            page was measured against. Its slot survives for the one thing
+            that belongs at the top: the offline condition, stated once,
+            because it qualifies every readout below it. */}
+        {offline ? (
+          <div className="ov-away">
+            <span className="ov-away-tail">readouts are inert until the connection returns</span>
+          </div>
+        ) : null}
 
-      <div className="ov-conv" ref={convBox}>
-        <Converge
-          kicker="SINCE MIDNIGHT"
-          title={`${offline || !daySums ? '--' : daySums.events} events triaged`}
-          outcomes={outcomes}
-          strands={28}
-          height={convHeight}
-          replayOnClick
-        />
-      </div>
-
-      <div className="ov-needs">
-        <RunRows
-          label="NEEDS YOU"
-          count={num(quiet ? 0 : needsTotal)}
-          countTone="warm"
-          rows={quiet ? [] : needsItems}
-          onPick={onPick}
-          note={quiet || needs == null ? null : boardNote(needsHidden)}
-          // Nothing needing you is an ANSWER, stated in words — not a band of
-          // figures, which the rest of the page already carries.
-          empty={quiet ? 'Nothing needs you.' : ' '}
-        />
-      </div>
-
-      <div className="ov-live">
-        <div className="ov-runcol">
-          <RunRows
-            label="RUNNING"
-            count={num(running?.total)}
-            countTone="cool"
-            rows={runningItems}
-            onPick={onPick}
-            empty="Nothing running right now."
-            note={runningHidden > 0 ? boardNote(runningHidden) : null}
+        <div className="ov-conv" ref={convBox}>
+          <div className="ov-mast">
+            <span className="ov-mast-name">Triage Factory</span>
+            <span className="ov-mast-line">
+              <span className="ov-mast-clock">{clock}</span>
+              <span className="ov-mast-date">{date}</span>
+            </span>
+          </div>
+          <Converge
+            kicker="SINCE MIDNIGHT"
+            title="events triaged"
+            titleNode={
+              <FlapCount
+                value={events}
+                size={24}
+                label={(events == null ? 'no' : events) + ' events triaged'}
+              />
+            }
+            outcomes={outcomes}
+            strands={28}
+            height={260}
+            endpointBand={convBand}
+            fill
+            replayOnClick
           />
         </div>
 
-        <div className="ov-donut">
-          <div className="ov-donut-head">
-            <span className="ov-donut-label">TODAY</span>
-            <span className="ov-donut-sub">BY MODEL</span>
+        <div className="ov-needsband">
+          <div className="ov-pile">
+            <CratePile
+              count={openPRs ?? 0}
+              // Unknown is not zero: an unanswered backlog reads as the inert
+              // pallet, never as an empty one.
+              offline={offline || openPRs == null}
+              caption="open pull requests"
+              captionOne="open pull request"
+              href={orgHref('/prs')}
+              onOpen={() => navigate(orgHref('/prs'))}
+            />
           </div>
-          <div className="ov-donut-row">
-            <div className="ov-ring">
-              <svg viewBox="0 0 104 104" aria-hidden="true">
-                <circle
-                  cx="52"
-                  cy="52"
-                  r="40"
-                  fill="none"
-                  stroke="var(--color-tint-3)"
-                  strokeWidth="13"
-                />
-                {segments.map((s, i) => (
-                  <circle
-                    key={i}
-                    className="ov-ring-seg"
-                    cx="52"
-                    cy="52"
-                    r="40"
-                    fill="none"
-                    stroke={s.color}
-                    strokeWidth="13"
-                    strokeDasharray={s.dash}
-                    strokeDashoffset={s.offset}
-                    style={{ animationDelay: s.delay }}
-                  />
-                ))}
-              </svg>
-              <div className="ov-hole">
-                <span className="ov-hole-total">{cash(usage?.total_cost_usd)}</span>
-                <span className="ov-hole-word">SPENT</span>
-              </div>
-            </div>
-            <div className="ov-legend">
-              {/* Index-aligned with the segments: both are the by_model cut
-                  sorted largest first, so slice i's swatch is segment i's shade. */}
-              {legend.map((m, i) => (
-                <div key={m.key} className="ov-legend-row">
-                  <span className="ov-legend-swatch" style={{ background: segments[i]?.color }} />
-                  <span className="ov-legend-name">{m.name}</span>
-                  <span className="ov-legend-value">{m.value}</span>
-                </div>
-              ))}
-            </div>
+          <div className="ov-rows">
+            <RunRows
+              label="NEEDS YOU"
+              count={
+                <span style={{ color: 'var(--color-warm)' }}>{num(quiet ? 0 : needsTotal)}</span>
+              }
+              rows={quiet ? [] : needsItems}
+              onPick={onPick}
+              more={quiet || needs == null ? null : boardMore(needsHidden)}
+              // Nothing needing you is an ANSWER, stated in words — not a band
+              // of figures, which the rest of the page already carries.
+              empty={quiet ? 'Nothing needs you.' : ' '}
+            />
           </div>
+        </div>
+
+        <div className="ov-liveband">
+          <div className="ov-rows">
+            <RunRows
+              label="RUNNING"
+              count={<span style={{ color: 'var(--color-cool)' }}>{num(running?.total)}</span>}
+              rows={runningItems}
+              onPick={onPick}
+              empty="Nothing running right now."
+              more={runningHidden > 0 ? boardMore(runningHidden) : null}
+            />
+          </div>
+          {spendGone ? null : (
+            <div className="ov-ringbox">
+              <SpendRing
+                models={spendModels}
+                // Unanswered is a dash, not a zero-spend claim.
+                offline={offline || usage == null}
+                href={orgHref('/usage')}
+                onOpen={() => navigate(orgHref('/usage'))}
+              />
+            </div>
+          )}
         </div>
       </div>
     </div>

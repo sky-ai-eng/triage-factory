@@ -207,10 +207,12 @@ export function CratePile({
       className="cp"
       href={href}
       onClick={(e) => {
-        if (onOpen) {
-          e.preventDefault()
-          onOpen()
-        }
+        // Plain primary click goes through onOpen (in-app navigation);
+        // modified clicks and non-primary buttons keep the anchor's own
+        // behavior, so the block still opens in a new tab like any link.
+        if (!onOpen || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+        e.preventDefault()
+        onOpen()
       }}
     >
       {fig}

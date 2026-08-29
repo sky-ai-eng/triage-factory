@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { apiJSON, apiList } from '../../lib/apiClient'
+import { HttpError, apiJSON, apiList } from '../../lib/apiClient'
 import { ACTIVE_STATUSES } from '../../lib/conversationStatus'
 import { TASK_LIST_PATH, TASK_PAGE_SIZE } from '../../lib/taskList'
 import { useWebSocket } from '../../hooks/useWebSocket'
@@ -168,8 +168,8 @@ export function useTasksIndex(teamId: string, tick: number): Map<string, Task> |
 }
 
 /** One activity window — GET /api/teams/{id}/activity?since=<RFC3339>. The
- *  convergence asks since midnight; the away line asks since the viewer's
- *  marker. Null while unanswered: unknown is not zero. */
+ *  convergence asks since midnight. Null while unanswered: unknown is not
+ *  zero. */
 export function useActivityWindow(
   teamId: string,
   sinceISO: string | null,
@@ -195,11 +195,16 @@ export function useActivityWindow(
   return got && got.key === key ? got.days : null
 }
 
-/** Today's spend — the usage node since UTC midnight, the same calendar the
- *  backend windows and caps by. Member-visible: the donut needs the total and
- *  the by-model split, neither of which names a person. */
-export function useSpendToday(teamId: string, tick: number): TeamUsage | null {
-  const [got, setGot] = useState<{ team: string; usage: TeamUsage } | null>(null)
+/**
+ * Today's spend — the usage node since UTC midnight, the same calendar the
+ * backend windows and caps by. Member-visible (the ring needs the total and
+ * the by-model split, neither of which names a person), but a deployment
+ * whose grant disagrees answers 403, and that is `'forbidden'` — a different
+ * claim from unanswered: the page removes the ring entirely and the rows take
+ * the full width, one fewer answer rather than a dash that never resolves.
+ */
+export function useSpendToday(teamId: string, tick: number): TeamUsage | 'forbidden' | null {
+  const [got, setGot] = useState<{ team: string; usage: TeamUsage | 'forbidden' } | null>(null)
   useEffect(() => {
     if (!teamId) return
     let live = true
@@ -209,7 +214,10 @@ export function useSpendToday(teamId: string, tick: number): TeamUsage | null {
       (u) => {
         if (live) setGot({ team: teamId, usage: u })
       },
-      () => {},
+      (e) => {
+        if (live && e instanceof HttpError && e.status === 403)
+          setGot({ team: teamId, usage: 'forbidden' })
+      },
     )
     return () => {
       live = false
@@ -218,45 +226,66 @@ export function useSpendToday(teamId: string, tick: number): TeamUsage | null {
   return got && got.team === teamId ? got.usage : null
 }
 
-type MeSettings = { user_settings?: { overview_seen_at?: string | null } }
-
 /**
- * The away line's anchor: the viewer's own last-visit marker. On mount it
- * reads the PRIOR value (that is the anchor this visit renders against), then
- * stamps now — an explicit write, because reads are side-effect-free on this
- * API. One stamp per mount: revisiting the page is a new visit; a hint-driven
- * refetch is not.
- *
- * `undefined` while the read is in flight, `null` when no marker exists yet
- * (the page anchors to midnight and the copy says so).
+ * The standing open pull-request backlog for the pile — the team PRs list's
+ * count-only read (`page_size: 0` is the count under the same filters). The
+ * population is the team's: entities in the repos this team tracks that
+ * members authored or that carry the team as their structural owner.
  */
-export function useOverviewSeen(): string | null | undefined {
-  const [anchor, setAnchor] = useState<string | null | undefined>(undefined)
-  const stamped = useRef(false)
+export function useOpenPRCount(teamId: string, tick: number): number | null {
+  const [got, setGot] = useState<{ team: string; count: number } | null>(null)
   useEffect(() => {
-    if (stamped.current) return
-    stamped.current = true
+    if (!teamId) return
     let live = true
-    void apiJSON<MeSettings>('/api/me/settings')
-      .then((s) => {
-        if (live) setAnchor(s.user_settings?.overview_seen_at ?? null)
-        return apiJSON<MeSettings>('/api/me/settings', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_settings: { overview_seen_at: new Date().toISOString() } }),
-        })
-      })
-      .then(
-        () => {},
-        () => {
-          // The stamp is best-effort; a failed write costs the NEXT visit's
-          // anchor, not this render. A failed READ leaves the midnight anchor.
-          if (live) setAnchor((a) => (a === undefined ? null : a))
-        },
-      )
+    void apiJSON<{ total_count?: number }>(`/api/teams/${encodeURIComponent(teamId)}/prs/list`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ states: ['open'], page_size: 0 }),
+    }).then(
+      (page) => {
+        if (live) setGot({ team: teamId, count: page.total_count ?? 0 })
+      },
+      () => {},
+    )
     return () => {
       live = false
     }
+  }, [teamId, tick])
+  return got && got.team === teamId ? got.count : null
+}
+
+/**
+ * The masthead's clock, updated on the minute. This is the page's one
+ * sanctioned tick: the "nothing ticks" rule is about metrics performing, and
+ * a clock that holds a stale minute is simply wrong. No animation rides the
+ * change — FlapCount is for counts, not clocks.
+ */
+export function useClock(): { clock: string; date: string } {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | null = null
+    // Align to the minute boundary first, so the readout never shows a minute
+    // that ended up to 59 seconds ago.
+    const t = setTimeout(
+      () => {
+        setNow(new Date())
+        interval = setInterval(() => setNow(new Date()), 60_000)
+      },
+      60_000 - (Date.now() % 60_000),
+    )
+    return () => {
+      clearTimeout(t)
+      if (interval) clearInterval(interval)
+    }
   }, [])
-  return anchor
+  return {
+    clock: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+    date: [
+      now.toLocaleDateString([], { weekday: 'short' }),
+      now.getDate(),
+      now.toLocaleDateString([], { month: 'short' }),
+    ]
+      .join(' ')
+      .toUpperCase(),
+  }
 }

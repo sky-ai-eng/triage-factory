@@ -2,13 +2,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import Overview from './Overview'
+import { HttpError } from '../lib/apiClient'
 import type { Conversation } from '../types'
 
-// The Overview's claims, checked against what it actually calls: the away line
-// anchors to the viewer's own marker and stamps a new one; NEEDS YOU and
-// RUNNING are the conversations resource's own filters rendered as rows that
-// navigate to their runs; the quiet state is an answer stated in words;
-// offline inerts every readout rather than holding stale numbers.
+// The Overview's claims, checked against what it actually calls: NEEDS YOU
+// and RUNNING are the conversations resource's own filters rendered as rows
+// that navigate to their runs; the pile is the team PRs list's count-only
+// read; the ring is the usage node's model split with no legend; the quiet
+// state is an answer stated in words; offline inerts every readout rather
+// than holding stale numbers.
 
 const api = vi.hoisted(() => ({
   apiJSON: vi.fn(),
@@ -32,16 +34,6 @@ const ws = vi.hoisted(() => ({ connected: true }))
 vi.mock('../hooks/useWebSocket', () => ({
   useWebSocket: () => {},
   useWsConnected: () => ws.connected,
-}))
-
-vi.mock('../hooks/useModelCatalog', () => ({
-  useModelCatalog: () => ({
-    models: [
-      { key: 'claude-opus-5', display_name: 'Claude Opus 5', provider: 'anthropic' },
-      { key: 'claude-sonnet-5', display_name: 'Claude Sonnet 5', provider: 'anthropic' },
-    ],
-    loaded: true,
-  }),
 }))
 
 function conv(over: Partial<Conversation>): Conversation {
@@ -85,38 +77,39 @@ const answers = vi.hoisted(() => ({
       { model: 'claude-opus-5', cost: 24.8 },
       { model: 'claude-sonnet-5', cost: 13.1 },
     ],
-  },
-  seenAt: '2026-08-28T18:40:00Z' as string | null,
+  } as unknown,
+  usageStatus: 200,
+  openPRs: { total_count: 23 },
 }))
 
 beforeEach(() => {
   ws.connected = true
   answers.needs = { runs: {}, total_count: 0 }
   answers.running = { runs: {}, total_count: 0 }
-  // Yesterday at noon LOCAL, so the "yesterday" branch holds at any time of
-  // day the suite runs — a fixed hours-ago offset stops being yesterday when
-  // the clock is near midnight.
-  const yesterdayNoon = new Date()
-  yesterdayNoon.setDate(yesterdayNoon.getDate() - 1)
-  yesterdayNoon.setHours(12, 0, 0, 0)
-  answers.seenAt = yesterdayNoon.toISOString()
+  answers.usageStatus = 200
+  answers.openPRs = { total_count: 23 }
   api.apiJSON.mockReset()
   api.apiList.mockReset()
-  api.apiJSON.mockImplementation((path: string, options?: { method?: string; body?: string }) => {
-    if (path === '/api/me/settings') {
-      if (options?.method === 'PATCH') {
-        return Promise.resolve({ user_settings: { overview_seen_at: '2026-08-29T12:00:00Z' } })
+  api.apiJSON.mockImplementation(
+    async (path: string, options?: { method?: string; body?: string }) => {
+      if (path === '/api/agent/conversations/list') {
+        const body = JSON.parse(options?.body ?? '{}') as { attention?: boolean }
+        return body.attention ? answers.needs : answers.running
       }
-      return Promise.resolve({ user_settings: { overview_seen_at: answers.seenAt } })
-    }
-    if (path === '/api/agent/conversations/list') {
-      const body = JSON.parse(options?.body ?? '{}') as { attention?: boolean }
-      return Promise.resolve(body.attention ? answers.needs : answers.running)
-    }
-    if (path.includes('/activity?since=')) return Promise.resolve(answers.activity)
-    if (path.includes('/usage?since=')) return Promise.resolve(answers.usage)
-    return Promise.reject(new Error('unexpected apiJSON ' + path))
-  })
+      if (path === '/api/teams/t1/prs/list') {
+        const body = JSON.parse(options?.body ?? '{}') as { states?: string[]; page_size?: number }
+        // The pile is the count-only read: page_size 0 under the open filter.
+        expect(body).toEqual({ states: ['open'], page_size: 0 })
+        return answers.openPRs
+      }
+      if (path.includes('/activity?since=')) return answers.activity
+      if (path.includes('/usage?since=')) {
+        if (answers.usageStatus !== 200) throw new HttpError(answers.usageStatus, 'forbidden')
+        return answers.usage
+      }
+      throw new Error('unexpected apiJSON ' + path)
+    },
+  )
   api.apiList.mockImplementation((path: string) => {
     if (path === '/api/tasks/list') {
       return Promise.resolve({ items: TASKS, next_page_token: '', total_count: TASKS.length })
@@ -133,32 +126,22 @@ function mount() {
   )
 }
 
-describe('the away line', () => {
-  it('anchors to the prior marker and stamps a new one', async () => {
+describe('the masthead', () => {
+  it('states where you are, with the clock beside it', async () => {
     mount()
-    await waitFor(() =>
-      expect(screen.getByText(/You were last here at \d{2}:\d{2} yesterday\./)).toBeInTheDocument(),
+    expect(screen.getByText('Triage Factory')).toBeInTheDocument()
+    expect(document.querySelector('.ov-mast-clock')!.textContent).toMatch(/^\d{2}:\d{2}$/)
+    expect(document.querySelector('.ov-mast-date')!.textContent).toMatch(
+      /^[A-Z]{3} \d{1,2} [A-Z]{3}$/,
     )
-    // The lead is the whole line — what changed since is the convergence's
-    // and the ring's to say, so no sums ride beside it.
-    expect(screen.queryByText(/merged · .* filtered since/)).not.toBeInTheDocument()
-    // The stamp is an explicit PATCH — reads are side-effect-free on this API.
-    const patch = api.apiJSON.mock.calls.find(
-      ([path, opts]) => path === '/api/me/settings' && opts?.method === 'PATCH',
-    )
-    expect(patch).toBeTruthy()
-    const body = JSON.parse((patch![1] as { body: string }).body) as {
-      user_settings: { overview_seen_at: string }
-    }
-    expect(Number.isFinite(Date.parse(body.user_settings.overview_seen_at))).toBe(true)
-  })
-
-  it('anchors to midnight, and says so, before a marker exists', async () => {
-    answers.seenAt = null
-    mount()
-    await waitFor(() =>
-      expect(screen.getByText('Your first look since midnight.')).toBeInTheDocument(),
-    )
+    // The away line is gone; its slot carries only the offline notice, so a
+    // connected page renders nothing there.
+    await waitFor(() => expect(api.apiJSON).toHaveBeenCalled())
+    expect(document.querySelector('.ov-away')).toBeNull()
+    // And nothing reads or stamps a last-seen marker any more.
+    expect(
+      api.apiJSON.mock.calls.filter(([path]) => String(path).includes('/api/me/settings')),
+    ).toHaveLength(0)
   })
 })
 
@@ -187,23 +170,35 @@ describe('NEEDS YOU', () => {
     // Every row's one target is its run.
     const row = screen.getByText('Approve the draft pull request').closest('a')
     expect(row).toHaveAttribute('href', '/runs/c-pr')
-    // Two shown of seven: the rest are the Board's.
-    expect(screen.getByText('+5 more on the board')).toBeInTheDocument()
+    // Two shown of seven: the rest are the Board's, via the aligned more link.
+    const more = screen.getByText('+5 more on the board')
+    expect(more.closest('a')).toHaveAttribute('href', '/board')
+    expect(more.closest('.rr-more')).not.toBeNull()
   })
 
   it('states the quiet answer in words when nothing needs you', async () => {
     answers.needs = { runs: {}, total_count: 0 }
     mount()
     await waitFor(() => expect(screen.getByText('Nothing needs you.')).toBeInTheDocument())
-    // The answer is a sentence, not a band of figures — the day's numbers
-    // live in the ring and the convergence, not here.
-    expect(screen.queryByText('OPEN PRS')).not.toBeInTheDocument()
-    expect(screen.queryByText('FILTERED')).not.toBeInTheDocument()
+    // The answer is a sentence — no figure strip, and no errand to the board
+    // with no reason attached.
+    expect(screen.queryByText('open the board')).not.toBeInTheDocument()
+  })
+})
+
+describe('the pile', () => {
+  it('draws the standing open-PR backlog from the count-only read, as a link to the PR page', async () => {
+    mount()
+    await waitFor(() =>
+      expect(screen.getByRole('img', { name: '23 open pull requests' })).toBeInTheDocument(),
+    )
+    expect(document.querySelectorAll('.cp-crate')).toHaveLength(23)
+    expect(document.querySelector('a.cp')).toHaveAttribute('href', '/prs')
   })
 })
 
 describe('RUNNING', () => {
-  it('leads with the agent action, shimmers only the working row, and marks the queued wait', async () => {
+  it('leads with the agent action, scans only the working row, and marks the queued wait', async () => {
     answers.running = {
       runs: {
         't-a': [
@@ -227,25 +222,38 @@ describe('RUNNING', () => {
     }
     mount()
     const act = await screen.findByText('Replaying 6 commits onto origin/main')
-    expect(act.className).toContain('rr-shim')
-    // The queued run's prose names the work; the wait is the mark.
+    // The sweep is ui/scan — emission, an agent acting.
+    expect(act).toHaveAttribute('data-tone')
+    // The queued run's prose names the work; the wait is the mark, speaking
+    // places-ahead (position 3 in line = 2 ahead).
     const queued = screen.getByText('Triage the flaking rebalance test')
-    expect(queued.className).not.toContain('rr-shim')
-    expect(screen.getByTitle('2 ahead in the queue')).toBeInTheDocument()
+    expect(queued).not.toHaveAttribute('data-tone')
+    expect(screen.getByRole('img', { name: '2 runs ahead of this one' })).toBeInTheDocument()
     // Two rendered of four: the tail defers to the Board.
     expect(screen.getByText('+2 more on the board')).toBeInTheDocument()
   })
+})
 
-  it('splits the day spend by model with the catalog names', async () => {
+describe('the ring', () => {
+  it('shows the model-attributed total in its hole, splitting only on hover — no legend', async () => {
     mount()
-    await waitFor(() => expect(screen.getByText('Claude Opus 5')).toBeInTheDocument())
-    expect(screen.getByText('Claude Sonnet 5')).toBeInTheDocument()
-    expect(screen.getByText('$24.80')).toBeInTheDocument()
-    expect(screen.getByText('$13.10')).toBeInTheDocument()
-    // The hole shows the day's WHOLE figure — scoped, because the quiet band
-    // (this fixture has nothing needing you) states the same figure.
-    const hole = document.querySelector('.ov-hole') as HTMLElement
-    expect(within(hole).getByText('$41.20')).toBeInTheDocument()
+    await waitFor(() => expect(document.querySelector('.sr-total')).toHaveTextContent('$37.90'))
+    expect(document.querySelector('.sr-cap')).toHaveTextContent('SPENT TODAY')
+    expect(document.querySelectorAll('.sr-seg')).toHaveLength(2)
+    // No legend anywhere: the model names appear only in the hole, on hover.
+    expect(screen.queryByText('OPUS-5')).not.toBeInTheDocument()
+    expect(document.querySelector('a.sr')).toHaveAttribute('href', '/usage')
+  })
+
+  it('removes the ring entirely when the grant refuses spend — one fewer answer, not a dash forever', async () => {
+    answers.usageStatus = 403
+    mount()
+    await waitFor(() =>
+      expect(api.apiJSON.mock.calls.some(([path]) => String(path).includes('/usage?since='))).toBe(
+        true,
+      ),
+    )
+    await waitFor(() => expect(document.querySelector('.ov-ringbox')).toBeNull())
   })
 })
 
@@ -258,10 +266,14 @@ describe('offline', () => {
         screen.getByText('readouts are inert until the connection returns'),
       ).toBeInTheDocument(),
     )
-    // The hole reads --, not a stale figure; the fan keeps its outcome names
-    // with zeroed counts rather than vanishing.
-    expect(screen.queryByText('$41.20')).not.toBeInTheDocument()
-    expect(screen.getByText('-- events triaged')).toBeInTheDocument()
+    // The headline figure is an em dash; the ring reads --; the pile draws the
+    // inert pallet; the fan keeps its outcome names with zeroed counts rather
+    // than vanishing.
+    expect(
+      within(document.querySelector('.convtitle') as HTMLElement).getByText('—'),
+    ).toBeInTheDocument()
+    expect(document.querySelector('.sr-total')).toHaveTextContent('--')
+    expect(document.querySelector('.cp-ghost')).not.toBeNull()
     expect(screen.getByText('filtered by rules')).toBeInTheDocument()
   })
 })

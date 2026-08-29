@@ -1,12 +1,12 @@
 import type { Conversation, Task } from '../../types'
 import { ACTIVE_STATUSES, isFailedStatus, workStartedAt } from '../../lib/conversationStatus'
 import type { ActivityDay } from '../../hooks/useTeamActivity'
-import type { RunLifecycle, RunRowItem, RunSource } from './RunRows'
+import type { RunLifecycle, RunRowItem, RunSource } from '../../ui/runrow/RunRows'
 
 // The Overview's pure derivations: conversation + task rows into RunRowItems,
-// activity days into window sums, spend into donut arcs, the away lead's
-// wording. No fetching here — hooks.ts owns the reads, this file owns what
-// they mean on screen, and being pure is what lets the tests pin the wording.
+// activity days into window sums. No fetching here — hooks.ts owns the reads,
+// this file owns what they mean on screen, and being pure is what lets the
+// tests pin the wording.
 
 /** Elapsed as the row wears it: `40s`, `11m`, `18h`, `3d`. The row itself does
  *  no time math. A future timestamp (clock skew) reads as `0s`. */
@@ -18,11 +18,6 @@ export function compactAge(iso: string, now: number = Date.now()): string {
   if (s < 3600) return `${Math.floor(s / 60)}m`
   if (s < 86400) return `${Math.floor(s / 3600)}h`
   return `${Math.floor(s / 86400)}d`
-}
-
-/** Dollars with cents, the day-figure way: `$41.20`. */
-export function money(v: number): string {
-  return '$' + v.toFixed(2)
 }
 
 /** Today's UTC midnight, RFC3339 — the convergence's SINCE MIDNIGHT anchor,
@@ -185,58 +180,13 @@ export function windowSums(days: ActivityDay[]): {
   return { events, merged, failed, filtered: Math.max(0, events - tasks) }
 }
 
-const DAY_MS = 86400_000
-
-/** The away line's lead. The anchor is the viewer's own marker; before one
- *  exists the page anchors to midnight and the copy says so — honest, and it
- *  costs the sentence its point exactly once. */
-export function seenLead(priorISO: string | null, now: number = Date.now()): string {
-  if (!priorISO) return 'Your first look since midnight.'
-  const t = Date.parse(priorISO)
-  if (!Number.isFinite(t)) return 'Your first look since midnight.'
-  const then = new Date(t)
-  const clock = then.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
-  const startOfDay = (ms: number) => {
-    const d = new Date(ms)
-    return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
-  }
-  const dayDiff = Math.round((startOfDay(now) - startOfDay(t)) / DAY_MS)
-  if (dayDiff <= 0) return `You were last here at ${clock}.`
-  if (dayDiff === 1) return `You were last here at ${clock} yesterday.`
-  if (dayDiff < 7)
-    return `You were last here on ${then.toLocaleDateString([], { weekday: 'long' })}.`
-  return `You were last here on ${then.toLocaleDateString([], { day: 'numeric', month: 'short' })}.`
-}
-
-/** r=40 → the ring's circumference, shared by every segment's dash math. */
-export const DONUT_C = 251.33
-
-/** The donut's shade for slice i of n — one warm ramp stepping down, so the
- *  ring stays a single voice rather than a palette. */
-export function donutShade(i: number, n: number): string {
-  return `color-mix(in srgb, var(--color-warm) ${Math.round(100 - (i / Math.max(1, n)) * 58)}%, transparent)`
-}
-
-export type DonutSegment = { dash: string; offset: string; color: string; delay: string }
-
-/** The ring's segments from the by_model cut, largest first. The 2-unit
- *  deduction is the gap between segments; segments are shares of the
- *  model-attributed spend, while the hole shows the day's whole figure —
- *  system overhead has no model and belongs to the total alone. */
-export function donutSegments(byModel: Array<{ model: string; cost: number }>): DonutSegment[] {
-  const sorted = [...byModel].sort((a, b) => b.cost - a.cost)
-  const total = sorted.reduce((a, m) => a + m.cost, 0)
-  if (total <= 0) return []
-  let acc = 0
-  return sorted.map((m, i) => {
-    const len = (m.cost / total) * DONUT_C
-    const seg: DonutSegment = {
-      dash: `${Math.max(0, len - 2).toFixed(2)} ${DONUT_C}`,
-      offset: (-acc).toFixed(2),
-      color: donutShade(i, sorted.length),
-      delay: (0.15 + i * 0.09).toFixed(2) + 's',
-    }
-    acc += len
-    return seg
-  })
+/** The ring's models from the by_model cut, largest first, so the first band
+ *  takes the fullest-warm shade. The ring is the MODEL-ATTRIBUTED spend — its
+ *  hole totals exactly the bands it draws, so the hover figures always sum to
+ *  the standing one; spend with no model behind it (system overhead) belongs
+ *  to the usage page the ring links to. */
+export function ringModels(
+  byModel: Array<{ model: string; cost: number }>,
+): Array<{ name: string; v: number }> {
+  return [...byModel].sort((a, b) => b.cost - a.cost).map((m) => ({ name: m.model, v: m.cost }))
 }

@@ -3,13 +3,11 @@ import type { Conversation, Task } from '../../types'
 import {
   askProse,
   compactAge,
-  donutSegments,
   lifecycleOf,
-  money,
   needsRow,
   refOf,
+  ringModels,
   runningRow,
-  seenLead,
   sourceOf,
   utcMidnightISO,
   windowSums,
@@ -182,41 +180,16 @@ describe('windowSums', () => {
   })
 })
 
-describe('seenLead', () => {
-  it('anchors to midnight, and says so, before a marker exists', () => {
-    expect(seenLead(null, NOW)).toBe('Your first look since midnight.')
-    expect(seenLead('not a time', NOW)).toBe('Your first look since midnight.')
-  })
-  it('names the visit at the resolution a reader thinks in', () => {
-    expect(seenLead('2026-08-29T09:15:00Z', NOW)).toMatch(/^You were last here at \d{2}:\d{2}\.$/)
-    // 26 hours back is the previous calendar day at this test's noon anchor.
-    expect(seenLead('2026-08-28T10:00:00Z', NOW)).toMatch(
-      /^You were last here at \d{2}:\d{2} yesterday\.$/,
-    )
-    expect(seenLead('2026-08-25T10:00:00Z', NOW)).toMatch(/^You were last here on [A-Z][a-z]+\.$/)
-    expect(seenLead('2026-06-01T10:00:00Z', NOW)).toMatch(/^You were last here on /)
-  })
-})
-
-describe('donutSegments / money', () => {
-  it('shares the ring by model, largest first, with the segment gap deducted', () => {
-    const segs = donutSegments([
-      { model: 'claude-sonnet-5', cost: 13.1 },
-      { model: 'claude-opus-5', cost: 24.8 },
+describe('ringModels', () => {
+  it('hands SpendRing the by_model cut largest first, so the first band is fullest-warm', () => {
+    expect(
+      ringModels([
+        { model: 'claude-sonnet-5', cost: 13.1 },
+        { model: 'claude-opus-5', cost: 24.8 },
+      ]),
+    ).toEqual([
+      { name: 'claude-opus-5', v: 24.8 },
+      { name: 'claude-sonnet-5', v: 13.1 },
     ])
-    expect(segs).toHaveLength(2)
-    // Largest first: opus takes the first (fullest-warm) slice.
-    const first = parseFloat(segs[0].dash)
-    const second = parseFloat(segs[1].dash)
-    expect(first).toBeGreaterThan(second)
-    expect(segs[0].offset).toBe('0.00')
-    expect(parseFloat(segs[1].offset)).toBeLessThan(0)
-  })
-  it('draws nothing for a day with no model-attributed spend', () => {
-    expect(donutSegments([])).toEqual([])
-    expect(donutSegments([{ model: 'm', cost: 0 }])).toEqual([])
-  })
-  it('renders dollars with cents', () => {
-    expect(money(41.2)).toBe('$41.20')
   })
 })
