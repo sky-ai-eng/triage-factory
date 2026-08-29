@@ -10,7 +10,6 @@ import {
   needsRow,
   runningRow,
   seenLead,
-  awayTail,
   utcMidnightISO,
   windowSums,
 } from './overview/data'
@@ -71,14 +70,10 @@ export default function Overview() {
   const { needs, running } = useConversationSets(teamId, tick)
   const tasks = useTasksIndex(teamId, tick)
   const sinceMidnight = useActivityWindow(teamId, midnight, tick)
-  // The away tail's window opens at the viewer's marker; with no marker the
-  // page anchors to midnight and reuses that read rather than asking twice.
-  const sinceSeen = useActivityWindow(teamId, anchor ?? null, tick)
   const usage = useSpendToday(teamId, tick)
   const catalog = useModelCatalog()
 
   const daySums = sinceMidnight ? windowSums(sinceMidnight) : null
-  const seenSums = anchor ? (sinceSeen ? windowSums(sinceSeen) : null) : daySums
 
   // Offline is not a loading state: a readout goes inert rather than holding
   // the last number it happened to have — the same rule the rail applies to
@@ -189,14 +184,13 @@ export default function Overview() {
 
   return (
     <div className="ov">
+      {/* The lead alone — what changed since is the convergence's and the
+          ring's to say. The tail slot survives only to state the offline
+          condition once. */}
       <div className="ov-away">
-        <span className="ov-away-lead">{anchor === undefined ? ' ' : seenLead(anchor)}</span>
+        <span className="ov-away-lead">{anchor === undefined ? ' ' : seenLead(anchor)}</span>
         <span className="ov-away-tail">
-          {offline
-            ? 'readouts are inert until the connection returns'
-            : seenSums
-              ? awayTail(seenSums)
-              : ' '}
+          {offline ? 'readouts are inert until the connection returns' : ' '}
         </span>
       </div>
 

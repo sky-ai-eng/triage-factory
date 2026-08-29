@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import type { Conversation, Task } from '../../types'
 import {
   askProse,
-  awayTail,
   compactAge,
   donutSegments,
   lifecycleOf,
@@ -171,14 +170,13 @@ describe('rows', () => {
   })
 })
 
-describe('windowSums / awayTail', () => {
+describe('windowSums', () => {
   it('sums the window and clamps absorption at zero', () => {
     const sums = windowSums([
       { date: '2026-08-28', events: 100, tasks: 4, merged: 5, failed: 1 },
       { date: '2026-08-29', events: 12, tasks: 12, merged: 1, failed: 1 },
     ])
     expect(sums).toEqual({ events: 112, merged: 6, failed: 2, filtered: 96 })
-    expect(awayTail(sums)).toBe('6 merged · 2 failed · 96 filtered since')
     expect(windowSums([{ date: 'd', events: 1, tasks: 5, merged: 0, failed: 0 }]).filtered).toBe(0)
   })
 })

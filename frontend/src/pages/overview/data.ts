@@ -4,7 +4,7 @@ import type { ActivityDay } from '../../hooks/useTeamActivity'
 import type { RunLifecycle, RunRowItem, RunSource } from './RunRows'
 
 // The Overview's pure derivations: conversation + task rows into RunRowItems,
-// activity days into window sums, spend into donut arcs, the away line's
+// activity days into window sums, spend into donut arcs, the away lead's
 // wording. No fetching here — hooks.ts owns the reads, this file owns what
 // they mean on screen, and being pure is what lets the tests pin the wording.
 
@@ -159,8 +159,8 @@ export function needsRow(
   }
 }
 
-/** The four figures the away line and the convergence read from one activity
- *  window: merged and failed summed, filtered = events that became no task.
+/** The convergence's figures from one activity window: merged and failed
+ *  summed, filtered = events that became no task.
  *  Clamped at zero because the two counts are windowed independently and a
  *  task minted just past a boundary must not read as negative absorption. */
 export function windowSums(days: ActivityDay[]): {
@@ -180,11 +180,6 @@ export function windowSums(days: ActivityDay[]): {
     failed += d.failed
   }
   return { events, merged, failed, filtered: Math.max(0, events - tasks) }
-}
-
-/** The away line's tail: what happened since the anchor. */
-export function awayTail(sums: { merged: number; failed: number; filtered: number }): string {
-  return `${sums.merged} merged · ${sums.failed} failed · ${sums.filtered} filtered since`
 }
 
 const DAY_MS = 86400_000

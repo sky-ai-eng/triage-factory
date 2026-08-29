@@ -128,14 +128,14 @@ function mount() {
 }
 
 describe('the away line', () => {
-  it('anchors to the prior marker, sums the window since it, and stamps a new one', async () => {
+  it('anchors to the prior marker and stamps a new one', async () => {
     mount()
     await waitFor(() =>
       expect(screen.getByText(/You were last here at \d{2}:\d{2} yesterday\./)).toBeInTheDocument(),
     )
-    // The tail's window opens at the anchor, so its read fires only after the
-    // marker resolves — its own wait, not a ride on the lead's.
-    expect(await screen.findByText('6 merged · 2 failed · 296 filtered since')).toBeInTheDocument()
+    // The lead is the whole line — what changed since is the convergence's
+    // and the ring's to say, so no sums ride beside it.
+    expect(screen.queryByText(/merged · .* filtered since/)).not.toBeInTheDocument()
     // The stamp is an explicit PATCH — reads are side-effect-free on this API.
     const patch = api.apiJSON.mock.calls.find(
       ([path, opts]) => path === '/api/me/settings' && opts?.method === 'PATCH',
