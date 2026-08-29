@@ -5676,6 +5676,17 @@ CREATE INDEX idx_blueprint_runs_task   ON public.blueprint_runs (task_id, org_id
 CREATE INDEX idx_blueprint_runs_status ON public.blueprint_runs (status) WHERE (status = 'running'::text);
 CREATE INDEX idx_blueprint_runs_actor_agent ON public.blueprint_runs (actor_agent_id) WHERE (actor_agent_id IS NOT NULL);
 CREATE INDEX idx_conversations_blueprint        ON public.conversations (blueprint_run_id, blueprint_step_index);
+-- Team-scoped conversation reads: a team-marked surface narrows the list to
+-- its own team, and both the page and the count beside it carry status /
+-- attention predicates that are DERIVED — correlated subqueries over claims,
+-- messages, artifacts and conversation_permissions — so they cost per
+-- CANDIDATE row and no index can serve them directly. Putting team_id in the
+-- access path is what keeps that per-row work off the rest of the org's
+-- conversations. idx_conversations_org_status does not substitute: it covers
+-- the stored status column, which those predicates never read. org_id leads to
+-- match every WHERE in this store and the RLS policy beside them; the sort
+-- (task_id, started_at DESC, id) leads elsewhere, so no sort key trails here.
+CREATE INDEX idx_conversations_org_team         ON public.conversations (org_id, team_id);
 -- Claim index for the run queue: the dispatcher claims the globally-oldest
 -- eligible conversation (FIFO by started_at, id) under FOR UPDATE SKIP LOCKED.
 -- Partial on the NULL arm of the needs-driving predicate — the mid-flight set,

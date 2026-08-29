@@ -774,6 +774,14 @@ func (s *conversationStore) List(ctx context.Context, orgID string, filter db.Co
 	if opts.Limit > 0 && len(filter.TaskIDs) > inListChunkSize {
 		return nil, 0, fmt.Errorf("sqlite conversations List: a windowed read takes at most %d task ids, got %d", inListChunkSize, len(filter.TaskIDs))
 	}
+	// The team IN-list is never chunked — it goes into every statement whole,
+	// alongside a task chunk — so the route's own (much smaller) cap is what
+	// keeps the statement inside SQLite's variable limit. Refuse loudly rather
+	// than let a future caller meet a "too many SQL variables" driver error
+	// halfway through a paged read.
+	if len(filter.TeamIDs) > inListChunkSize {
+		return nil, 0, fmt.Errorf("sqlite conversations List: takes at most %d team ids, got %d", inListChunkSize, len(filter.TeamIDs))
+	}
 	// Chunking is over the task-id IN list, so a filter that names none is one
 	// chunk: the whole visible set under one WHERE.
 	chunks := [][]string{nil}
@@ -901,6 +909,16 @@ func sqliteConversationListWhere(filter db.ConversationListFilter, taskIDs []str
 		placeholders, idArgs := inListArgs(taskIDs)
 		where += ` AND r.task_id IN (` + placeholders + `)`
 		args = append(args, idArgs...)
+	}
+	if len(filter.TeamIDs) > 0 {
+		// The twin of Postgres' team ANY(): a named set narrows, and a set
+		// naming teams that hold nothing matches nothing rather than widening
+		// back. Local mode is N=1 (one team), so this is effectively inert
+		// here and exists to keep the dialect conformant with the filter's
+		// contract.
+		placeholders, teamArgs := inListArgs(filter.TeamIDs)
+		where += ` AND r.team_id IN (` + placeholders + `)`
+		args = append(args, teamArgs...)
 	}
 	if len(filter.Statuses) > 0 {
 		placeholders, statusArgs := inListArgs(filter.Statuses)

@@ -1095,6 +1095,16 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 // only — a request naming no task is bounded by its page like any other list.
 const maxBatchTaskIDs = 500
 
+// maxBatchTeamIDs caps how many team ids one conversation-list request names.
+// A team set is a view scope — the Overview sends one, a whole-org union sends
+// as many teams as the viewer belongs to — so 100 is generous for the question
+// and still leaves the SQLite statement inside the 999-variable budget the
+// oldest supported build enforces: a full 500-id task chunk plus a team list
+// this size plus the status placeholders. Rejected rather than truncated, like
+// the task cap above, because a silently dropped team is a count that reads as
+// real work disappearing.
+const maxBatchTeamIDs = 100
+
 // conversationListRequest is the body of POST /api/agent/conversations/list.
 //
 // Every field is optional — `{}` is "every conversation I can see, first
@@ -1109,6 +1119,13 @@ type conversationListRequest struct {
 	// which is what a resource-wide question ("how many are running") has to be
 	// able to ask. When present, at most maxBatchTaskIDs, each a valid task id.
 	TaskIDs []string `json:"task_ids"`
+	// TeamIDs narrows to the conversations these teams own. Optional: absent
+	// or empty is no team narrowing — the viewer-wide read the shell rail
+	// asks for. A present set that is unusable is a 400, never a silent
+	// widening back to every team; the Overview's team-scoped counts would
+	// otherwise report another team's work as this team's. When present, at
+	// most maxBatchTeamIDs, each a valid team id.
+	TeamIDs []string `json:"team_ids"`
 	// Statuses narrows to these DISPLAY statuses — the value every surface
 	// shows, which is why a claim phase is a legal value here and the stored
 	// column is not what gets filtered. Empty = every status. An unknown value
@@ -1127,6 +1144,7 @@ type conversationListRequest struct {
 
 type conversationListFilterKey struct {
 	TaskIDs         []string `json:"task_ids"`
+	TeamIDs         []string `json:"team_ids"`
 	Statuses        []string `json:"statuses"`
 	Attention       bool     `json:"attention"`
 	IncludeMessages bool     `json:"include_messages"`
@@ -1187,6 +1205,19 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 			v.Invalid("task_ids", fmt.Sprintf("task_ids contains %q, which is not a valid task id", id))
 		}
 	}
+	teamIDs := canonicalStrings(req.TeamIDs)
+	// Counted after canonicalization, so a client that repeated a team id
+	// spends the cap on distinct teams rather than on its own duplicates.
+	if len(teamIDs) > maxBatchTeamIDs {
+		v.OutOfRange("team_ids", fmt.Sprintf("team_ids accepts at most %d ids per request; got %d", maxBatchTeamIDs, len(teamIDs)))
+	}
+	for _, id := range teamIDs {
+		// conversations.team_id is a uuid column on Postgres, the same reason
+		// the task selector above parses rather than trusting.
+		if _, err := uuid.Parse(id); err != nil {
+			v.Invalid("team_ids", fmt.Sprintf("team id %q is not a valid team id", id))
+		}
+	}
 	statuses := canonicalStrings(req.Statuses)
 	validStatuses := domain.AllConversationStatuses()
 	for _, st := range statuses {
@@ -1196,7 +1227,8 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(conversationListFilterKey{
-		TaskIDs: taskIDs, Statuses: statuses, Attention: req.Attention, IncludeMessages: req.IncludeMessages,
+		TaskIDs: taskIDs, TeamIDs: teamIDs, Statuses: statuses,
+		Attention: req.Attention, IncludeMessages: req.IncludeMessages,
 	}), maxBatchTaskIDs)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -1208,7 +1240,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 	}
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		convs, total, e := tx.Conversations.List(r.Context(), orgID,
-			db.ConversationListFilter{TaskIDs: taskIDs, Statuses: statuses, Attention: req.Attention},
+			db.ConversationListFilter{TaskIDs: taskIDs, TeamIDs: teamIDs, Statuses: statuses, Attention: req.Attention},
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		if e != nil {
 			return e

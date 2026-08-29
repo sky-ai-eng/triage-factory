@@ -1268,6 +1268,17 @@ func pgConversationListWhere(orgID string, filter db.ConversationListFilter) (st
 		args = append(args, pgUUIDArray(ids))
 		where += fmt.Sprintf(` AND r.task_id = ANY($%d)`, len(args))
 	}
+	if len(filter.TeamIDs) > 0 {
+		// team_id is a uuid column too, so the same drop-invalid-then-refuse
+		// treatment TaskIDs gets: a set that named only unusable ids asked
+		// about nothing, which must not widen back to every team.
+		ids := filterValidUUIDs(filter.TeamIDs)
+		if len(ids) == 0 {
+			return "", nil, false
+		}
+		args = append(args, pgUUIDArray(ids))
+		where += fmt.Sprintf(` AND r.team_id = ANY($%d)`, len(args))
+	}
 	if len(filter.Statuses) > 0 {
 		// One placeholder per value rather than an array literal: these are
 		// client-supplied names, and a placeholder needs no quoting rules to

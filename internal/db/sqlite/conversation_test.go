@@ -105,13 +105,19 @@ func seedSQLiteConversation(t *testing.T, conn *sql.DB, conv domain.Conversation
 	if conv.Status != "" {
 		status = conv.Status
 	}
+	// team_id defaults to the local sentinel team; a conversation staged for
+	// a team-narrowing test names its own.
+	teamID := conv.TeamID
+	if teamID == "" {
+		teamID = runmode.LocalDefaultTeamID
+	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, team_id, visibility,
 		                           creator_user_id, blueprint_run_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?)
 	`, id, conv.TaskID, conv.PromptID, status, conv.Model,
-		trigger, triggerID, runmode.LocalDefaultTeamID, creator, conv.BlueprintRunID); err != nil {
+		trigger, triggerID, teamID, creator, conv.BlueprintRunID); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
 	return id
@@ -155,6 +161,17 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 				VALUES (?, ?, ?, '', ?, 'queued', 0.5, 'pending', ?, ?, 'team')
 			`, id, entityID, eventType, primaryEventID, time.Now().UTC(), runmode.LocalDefaultTeamID); err != nil {
 				t.Fatalf("seed task: %v", err)
+			}
+			return id
+		},
+		Team: func(t *testing.T, slug string) string {
+			t.Helper()
+			id := uuid.New().String()
+			if _, err := conn.Exec(
+				`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, ?, ?)`,
+				id, runmode.LocalDefaultOrgID, slug+"-"+id[:8], "Conformance "+slug,
+			); err != nil {
+				t.Fatalf("seed team %s: %v", slug, err)
 			}
 			return id
 		},
