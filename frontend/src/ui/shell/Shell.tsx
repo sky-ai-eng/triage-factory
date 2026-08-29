@@ -183,6 +183,32 @@ export function Shell({
   }
   const tipOff = () => setTip(null)
 
+  // The focus-shown tip exists for the keyboard user tabbing a collapsed
+  // rail's unnamed glyphs, so it is gated on :focus-visible — a pointer
+  // click's focus must not raise it, and neither may the browser RE-focusing
+  // the last-clicked row when the window regains focus (Cmd+Tab back), which
+  // painted a label no pointer would ever leave. The try/catch is for a DOM
+  // that cannot parse the pseudo-class (jsdom), where the gate opens rather
+  // than silently unlabelling the rail for keyboard users.
+  const tipOnKeyFocus = (name: string) => (e: { currentTarget: Element }) => {
+    let keyboard = true
+    try {
+      keyboard = e.currentTarget.matches(':focus-visible')
+    } catch {
+      // Unparseable selector: keep the tip for whoever focused.
+    }
+    if (keyboard) tipOn(name)(e)
+  }
+
+  // A tip describes what the pointer (or focus) is on RIGHT NOW, so leaving
+  // the window ends it: mouseleave never fires on a Cmd+Tab, and a label that
+  // outlives the hand that raised it reads as stuck.
+  useEffect(() => {
+    const off = () => setTip(null)
+    window.addEventListener('blur', off)
+    return () => window.removeEventListener('blur', off)
+  }, [])
+
   const go = (id: string) => {
     onRoute?.(id)
     setPal(false)
@@ -328,7 +354,7 @@ export function Shell({
         onMouseLeave={tipOff}
         // A collapsed rail has no labels, so a keyboard user would otherwise tab
         // through eleven unnamed glyphs.
-        onFocus={tipOn(r.name)}
+        onFocus={tipOnKeyFocus(r.name)}
         onBlur={tipOff}
       >
         <div className="sh-ico">
@@ -340,7 +366,7 @@ export function Shell({
             {/* Keyed by the value: a change remounts the node, which replays
                 sh-tick once. A changing count is an event, marked once and then
                 over — no pulse, no ambient loop. */}
-            <span key={String(needs)} className="warm tick">
+            <span key={String(needs)} className="warm sh-tick">
               <i />
               {readout(needs)}
             </span>
@@ -533,14 +559,14 @@ export function Shell({
           onKeyDown={enter(() => go('queue'))}
           onMouseEnter={tipOn(queueTip)}
           onMouseLeave={tipOff}
-          onFocus={tipOn(queueTip)}
+          onFocus={tipOnKeyFocus(queueTip)}
           onBlur={tipOff}
         >
           <div className="sh-qico">
             <Ico d="inbox" size={17} />
           </div>
           <div className="sh-qtext">
-            <b key={String(queued)} className="tick">
+            <b key={String(queued)} className="sh-tick">
               {readout(queued)}
             </b>{' '}
             in queue
@@ -581,7 +607,7 @@ export function Shell({
                 onKeyDown={enter(() => setDeep(null))}
                 onMouseEnter={tipOn(deepRow ? `Back to ${deepRow.name}` : 'Back')}
                 onMouseLeave={tipOff}
-                onFocus={tipOn(deepRow ? `Back to ${deepRow.name}` : 'Back')}
+                onFocus={tipOnKeyFocus(deepRow ? `Back to ${deepRow.name}` : 'Back')}
                 onBlur={tipOff}
               >
                 <Ico d="back" size={13} />
@@ -604,7 +630,7 @@ export function Shell({
                   // there is, so it has to be able to say its own name.
                   onMouseEnter={tipOn(c.name)}
                   onMouseLeave={tipOff}
-                  onFocus={tipOn(c.name)}
+                  onFocus={tipOnKeyFocus(c.name)}
                   onBlur={tipOff}
                 >
                   <div className="sh-ico">
@@ -627,7 +653,7 @@ export function Shell({
               tabIndex={0}
               onMouseEnter={tipOn('Connection lost · retrying')}
               onMouseLeave={tipOff}
-              onFocus={tipOn('Connection lost · retrying')}
+              onFocus={tipOnKeyFocus('Connection lost · retrying')}
               onBlur={tipOff}
             >
               <div className="sh-ico sh-offico">
