@@ -50,14 +50,17 @@ rather than a phrase.
 takes a tab stop and `aria-describedby`, and the tooltip is a real
 `role="tooltip"`.
 
-**`focusable={false}`** — the trigger sits _inside_ something already
-interactive (a mark on a row that is itself an `<a>`). A tab stop there is
-invalid — an anchor may not contain interactive content — and redundant, so the
-host takes neither and the tooltip becomes `aria-hidden` scenery. **The caller
-then owes the same words to assistive technology by another route**, usually
-`role="img"` plus an `aria-label` on the mark. A visual echo of text that is
-present anyway is not announced twice — the same answer `Table.md` gives for its
-clipped-cell tooltip.
+**`focusable={false}`** — the trigger sits _against_ something already
+interactive: a mark inside a row that is itself an `<a>`, or a host wrapped
+around one. A tab stop there is invalid or redundant, so the host takes
+neither and the tooltip becomes `aria-hidden` scenery. The hint still follows
+the interactive thing's own focus — focus bubbles, so a host wrapping an
+anchor opens when the anchor is tabbed to, and the hint is never mouse-only.
+**The caller still owes the same words to assistive technology by another
+route** — `role="img"` plus an `aria-label` on the mark, or `aria-describedby`
+on the anchor — because a visually-opening scenery hint is silent. A visual
+echo of text that is present anyway is not announced twice — the same answer
+`Table.md` gives for its clipped-cell tooltip.
 
 ## A tap toggles it
 

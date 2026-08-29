@@ -82,6 +82,26 @@ describe('Tooltip', () => {
     expect(t).not.toHaveAttribute('role')
   })
 
+  it('scenery mode follows the focus of the interactive thing it wraps', () => {
+    render(
+      <Tooltip content="repo acme/api · #12 · @jo" focusable={false}>
+        <a href="https://example.com/pr/12">the row</a>
+      </Tooltip>,
+    )
+    const host = screen.getByText('the row').closest('.tip-host')!
+    expect(host).not.toHaveAttribute('tabindex')
+
+    // Tabbing to the anchor bubbles focus through the host: the hint opens
+    // without the host owning a tab stop, so it is never mouse-only.
+    fireEvent.focusIn(screen.getByText('the row'))
+    expect(tip()).not.toBeNull()
+    // Still scenery — the caller owes the words to AT by another route.
+    expect(tip()!.getAttribute('aria-hidden')).toBe('true')
+
+    fireEvent.focusOut(screen.getByText('the row'))
+    expect(tip()).toBeNull()
+  })
+
   it('toggles on tap and swallows the click, so a hint inside a link never navigates', () => {
     const navigated = vi.fn()
     render(

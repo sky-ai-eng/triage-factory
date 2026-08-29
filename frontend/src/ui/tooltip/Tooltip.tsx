@@ -32,13 +32,16 @@ import './tooltip.css'
 //     stop and `aria-describedby`, and the tooltip is a real `role="tooltip"`.
 //     Use it on a badge, a bare glyph, a label in running text.
 //
-//   focusable={false} — the trigger sits INSIDE something already interactive,
-//     which is the case on a run row: the row is an `<a>`. Then a tab stop
-//     here is illegal (an anchor may not contain interactive content) and
-//     pointless (the row already has focus), so the host takes neither and the
-//     tooltip becomes `aria-hidden` scenery. The caller owes the same words to
-//     assistive technology by another route — an `aria-label` on the mark is
-//     the usual one. That is the answer Table.md already gives for its
+//   focusable={false} — the trigger sits against something already
+//     interactive: a mark INSIDE a row that is an `<a>`, or a host WRAPPED
+//     AROUND one. Then a tab stop here is illegal or redundant, so the host
+//     takes neither and the tooltip becomes `aria-hidden` scenery. The hint
+//     still follows the interactive thing's own focus — focus bubbles, so a
+//     host wrapping an anchor opens when the anchor is tabbed to, and the
+//     hint is never mouse-only. The caller owes the same WORDS to assistive
+//     technology by another route — an `aria-label` on the mark, or
+//     `aria-describedby` on the anchor — because a visually-opening scenery
+//     hint is still silent. That is the answer Table.md already gives for its
 //     clipped-cell tooltip: a visual echo of text that is present anyway
 //     should not be announced twice.
 //
@@ -212,6 +215,10 @@ export function Tooltip({
   }
 
   const keyboard = live && focusable
+  // Focus handlers ride `live`, not `keyboard`: in scenery mode the host has
+  // no tab stop of its own, but focus BUBBLES, so a host wrapping an
+  // interactive row still opens when that row is tabbed to. Only the tab stop
+  // and the described-by wiring below are the focusable mode's alone.
   const placed = adj?.side ?? side
 
   return (
@@ -220,13 +227,13 @@ export function Tooltip({
       onMouseEnter={show}
       onMouseLeave={hide}
       onClick={live ? tap : undefined}
-      onPointerDown={keyboard ? press : undefined}
-      onFocus={keyboard ? focus : undefined}
-      onBlur={keyboard ? hide : undefined}
+      onPointerDown={live ? press : undefined}
+      onFocus={live ? focus : undefined}
+      onBlur={live ? hide : undefined}
       tabIndex={keyboard ? 0 : undefined}
       aria-describedby={keyboard && open ? id : undefined}
       onKeyDown={
-        keyboard
+        live
           ? (e: KeyboardEvent) => {
               if (e.key === 'Escape') hide()
             }
