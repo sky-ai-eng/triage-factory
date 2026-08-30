@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { useAuth } from '../contexts/AuthContext'
 import { apiJSON } from '../lib/apiClient'
+import BrandMark from '../components/BrandMark'
 
 /**
  * Identifier-first login (TFAC-427). In a multi-org build an anonymous
@@ -113,7 +114,13 @@ export default function Login() {
     <div className="min-h-screen bg-ground flex items-center justify-center p-4">
       <div className="w-full max-w-sm backdrop-blur-xl bg-raised border border-line-1 rounded-2xl p-8 space-y-6 shadow-float shadow-black/[0.04]">
         <div className="space-y-1.5">
-          <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">Triage Factory</h1>
+          {/* The signed-out door is the one screen with nothing else on it to
+              say whose it is, so the mark and the name are set as one lockup
+              rather than the name alone. */}
+          <h1 className="flex items-center gap-2 text-[22px] font-semibold text-ink-1 tracking-tight">
+            <BrandMark size={20} />
+            Triage Factory
+          </h1>
           <p className="text-body text-ink-3 leading-relaxed">Enter your work email to continue.</p>
         </div>
 

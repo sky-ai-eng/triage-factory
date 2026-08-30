@@ -130,6 +130,9 @@ describe('the masthead', () => {
   it('states where you are, with the clock beside it', async () => {
     mount()
     expect(screen.getByText('Triage Factory')).toBeInTheDocument()
+    // The name is a lockup, not a label: the mark sits inside it so the two
+    // move, size and take their ink together.
+    expect(document.querySelector('.ov-mast-name .ov-mast-glyph')).not.toBeNull()
     expect(document.querySelector('.ov-mast-clock')!.textContent).toMatch(/^\d{2}:\d{2}$/)
     expect(document.querySelector('.ov-mast-date')!.textContent).toMatch(
       /^[A-Z]{3} \d{1,2} [A-Z]{3}$/,
