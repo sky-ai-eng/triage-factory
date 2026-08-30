@@ -5,11 +5,11 @@ import { apiJSON } from '../lib/apiClient'
 import BrandMark from '../components/BrandMark'
 
 /**
- * Identifier-first login (TFAC-427). In a multi-org build an anonymous
- * visitor's org is unknown, so we can't show an org-specific SSO button up
- * front. Instead the visitor types their work email; we look up the exact
- * domain via POST /api/sso/discover and either redirect into that org's SAML
- * connection (start_url) or fall back to GitHub.
+ * Identifier-first login. In a multi-org build an anonymous visitor's org is
+ * unknown, so we can't show an org-specific SSO button up front. Instead the
+ * visitor types their work email; we look up the exact domain via POST
+ * /api/sso/discover and either redirect into that org's SAML connection
+ * (start_url) or fall back to GitHub.
  *
  * GitHub is ALWAYS present — it's the universal bootstrap-floor login. A fresh
  * deployment has no SSO configured yet, so the first admin signs in via GitHub
