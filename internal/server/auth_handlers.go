@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/apitokens"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -122,16 +123,18 @@ func (s *Server) AllowDevFrontendOrigin() {
 
 // SetAuthDeps wires the multi-mode auth dependencies into the server.
 // Local mode never calls this; multi-mode boot calls it once after
-// constructing the verifier + session store and before ListenAndServe.
+// constructing the verifier + session and API-token stores and before
+// ListenAndServe.
 //
-// Also builds the /auth/v1/* reverse proxy and spawns the session
-// reaper goroutine. The goroutine's lifetime is bound to ctx — pass
+// Also builds the /auth/v1/* reverse proxy and spawns the session and
+// API-token reaper goroutines. Their lifetime is bound to ctx — pass
 // the server's shutdown context so reaping exits cleanly. Tests pass
 // a context with t.Cleanup-bound cancel to avoid leaking goroutines.
 func (s *Server) SetAuthDeps(
 	ctx context.Context,
 	verifier *verify.Verifier,
 	sessionStore *sessions.Store,
+	tokenStore *apitokens.Store,
 	gotrueURL, publicURL string,
 	cookieSecret [32]byte,
 ) error {
@@ -152,6 +155,7 @@ func (s *Server) SetAuthDeps(
 	s.authDeps = &authDeps{
 		verifier:       verifier,
 		sessions:       sessionStore,
+		apiTokens:      tokenStore,
 		gotrueRefresh:  s.gotrueRefreshFunc(cfg),
 		gotrueExchange: s.gotrueExchangeFunc(cfg),
 		gotrueSSO:      s.gotrueSSOFunc(cfg),
@@ -163,6 +167,10 @@ func (s *Server) SetAuthDeps(
 	// exits when ctx is cancelled, so server shutdown / test cleanup
 	// drains it without further wiring.
 	go sessionStore.RunReaper(ctx, 10*time.Minute, 30*24*time.Hour)
+	// The API-token reaper runs on the same cadence and window: both tables
+	// hold dead credentials whose only remaining value is the audit trail, and
+	// that trail is what the retention window is sized for.
+	go tokenStore.RunReaper(ctx, 10*time.Minute, 30*24*time.Hour)
 
 	return nil
 }

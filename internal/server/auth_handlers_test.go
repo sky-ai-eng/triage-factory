@@ -20,6 +20,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/apitokens"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -175,7 +176,7 @@ func newAuthRig(t *testing.T) *authRig {
 	// leaking across test runs.
 	rigCtx, rigCancel := context.WithCancel(context.Background())
 	t.Cleanup(rigCancel)
-	if err := s.SetAuthDeps(rigCtx, v, store, "http://gotrue.unused", "http://tf.test", cookieSecret); err != nil {
+	if err := s.SetAuthDeps(rigCtx, v, store, apitokens.NewStore(h.AdminDB), "http://gotrue.unused", "http://tf.test", cookieSecret); err != nil {
 		t.Fatalf("SetAuthDeps: %v", err)
 	}
 

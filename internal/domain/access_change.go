@@ -64,6 +64,13 @@ const (
 	// a pause leaves it alone and only stops events.
 	AccessActionEventSourceDisabled = "event_source_disabled"
 	AccessActionEventSourceEnabled  = "event_source_enabled"
+	// The API-token lifecycle. A token is a credential — it authenticates as
+	// its owner within one org — so it records here rather than in auth_events,
+	// which holds logins: one home per fact. Mint and revoke are separate
+	// discriminators for the same reason the SSO pairs are: an admin scanning
+	// this log is looking for the moment access widened.
+	AccessActionAPITokenCreated = "api_token_created"
+	AccessActionAPITokenRevoked = "api_token_revoked"
 )
 
 // SSO policy action discriminators. Declared here, in core, even though every
@@ -97,6 +104,16 @@ const (
 // same grantOrgMembership seam and records its own source.
 const (
 	AccessSourceSSOJIT = "sso_jit"
+)
+
+// AccessSourceMembershipRemoved is the "source" carried in an
+// api_token_revoked action's DetailJSON when the revocation was the
+// deprovisioning hook rather than the owner deleting their own token: removing
+// a member from an org revokes the tokens they held in it, one row per token.
+// An absent source means a human revoked it deliberately, which is the case
+// the viewer phrases plainly.
+const (
+	AccessSourceMembershipRemoved = "membership_removed"
 )
 
 // Credential kinds carried in a credential_set / credential_removed action's
@@ -188,7 +205,10 @@ func AccessActionsInCategory(category string) []string {
 			AccessActionInviteRevoked,
 		}
 	case AccessCategoryCredential:
-		return []string{AccessActionCredentialSet, AccessActionCredentialRemoved}
+		return []string{
+			AccessActionCredentialSet, AccessActionCredentialRemoved,
+			AccessActionAPITokenCreated, AccessActionAPITokenRevoked,
+		}
 	case AccessCategoryPolicy:
 		return []string{
 			AccessActionSSOConnectionCreated,
@@ -280,5 +300,57 @@ func AccessDetailSSODomain(domain string) string {
 	b, _ := json.Marshal(struct {
 		Domain string `json:"domain,omitempty"`
 	}{Domain: domain})
+	return string(b)
+}
+
+// AccessDetailAPITokenCreated builds the payload for an api_token_created row:
+// which token, what it was called, and the whole of what bounds it — the
+// expiry the minter asked for, the org cap in force at that moment, and any IP
+// allowlist. The cap is captured because it is applied at USE against whatever
+// the setting says then; recording it here is what lets an admin read back the
+// policy the token was minted under rather than today's.
+//
+// Every bound is omitted when absent, and absent means unbounded: no expiry, no
+// cap, no allowlist. Only the token's id, name and prefix are ever required —
+// the secret itself exists in one place and it is not this one.
+//
+// This builder lives in domain rather than beside the audit helpers in
+// internal/server because internal/apitokens writes the row (it composes the
+// audit INSERT into the same transaction as the token write, and importing the
+// server package for a shape would be a cycle) while the audit viewer renders
+// it. Two writers, one shape.
+func AccessDetailAPITokenCreated(tokenID, name, prefix string, expiresAt *time.Time, maxAgeDays *int, allowedCIDRs []string) string {
+	b, _ := json.Marshal(struct {
+		TokenID      string     `json:"token_id"`
+		Name         string     `json:"name"`
+		Prefix       string     `json:"prefix"`
+		ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+		MaxAgeDays   *int       `json:"max_age_days,omitempty"`
+		AllowedCIDRs []string   `json:"allowed_cidrs,omitempty"`
+	}{
+		TokenID:      tokenID,
+		Name:         name,
+		Prefix:       prefix,
+		ExpiresAt:    expiresAt,
+		MaxAgeDays:   maxAgeDays,
+		AllowedCIDRs: allowedCIDRs,
+	})
+	return string(b)
+}
+
+// AccessDetailAPITokenRevoked builds the payload for an api_token_revoked row.
+// It names the token the same way the created row did, so the two ends of a
+// token's life read as one story even after the row itself is reaped.
+//
+// source is AccessSourceMembershipRemoved when the deprovisioning hook revoked
+// the token, and empty when its owner did — the distinction the viewer needs to
+// say "revoked" versus "revoked because they left the org".
+func AccessDetailAPITokenRevoked(tokenID, name, prefix, source string) string {
+	b, _ := json.Marshal(struct {
+		TokenID string `json:"token_id"`
+		Name    string `json:"name"`
+		Prefix  string `json:"prefix"`
+		Source  string `json:"source,omitempty"`
+	}{TokenID: tokenID, Name: name, Prefix: prefix, Source: source})
 	return string(b)
 }

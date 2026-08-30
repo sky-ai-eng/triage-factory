@@ -831,6 +831,10 @@ func (s *Server) routes() {
 			if err != nil {
 				return 0, fmt.Errorf("parse org id: %w", err)
 			}
+			// TODO(TFAC-890): revoke this user's API tokens for the org here
+			// too, via apitokens.Store.RevokeForUserInOrgSystem — a removed
+			// member's headless credentials have to die with their sessions,
+			// and that store's audit row needs the removing admin as its actor.
 			return s.authDeps.sessions.RevokeForUserInOrgSystem(ctx, uid, oid)
 		},
 		publishKick: func(ctx context.Context, userID, sid, orgID string, code int, reason string) {

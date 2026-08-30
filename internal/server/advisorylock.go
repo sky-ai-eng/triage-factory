@@ -91,6 +91,8 @@ func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64,
 //	5 — internal/db/postgres/tasks.go             (entity id, xact;
 //	    entityTaskCreationLockSalt)
 //	8 — this file                                 (org id, session)
+//	0x53454154 ("SEAT") — internal/db/postgres/auth_events.go (seat period, xact)
+//	0x544f4b4e ("TOKN") — internal/apitokens                  (user:org, xact)
 //
 // internal/auth/auth_provision.go's user lock hashes with FNV-1a in Go —
 // a separate un-salted keyspace, listed here only so the next auditor
