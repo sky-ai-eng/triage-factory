@@ -195,6 +195,17 @@ func ValidBaseBranchPushPolicy(s string) bool {
 // this bound so Save blocks before the round-trip.
 const MaxConcurrentClaimsCeiling = 1_000_000
 
+// The band OrgSettings.APITokenMaxAgeDays accepts, mirrored by the Postgres
+// column's own CHECK and by the frontend input so Save blocks before the
+// round-trip. A day is the smallest cap worth expressing (anything shorter is
+// a per-token expires_at, which the minter already controls) and a year the
+// longest that still reads as a policy rather than as no policy at all — an
+// org that wants neither clears the setting.
+const (
+	APITokenMaxAgeDaysMin = 1
+	APITokenMaxAgeDaysMax = 365
+)
+
 // OrgSettings is the org-scope settings row — composed from org_settings and,
 // for the four fields below, org_event_sources.
 //
@@ -310,6 +321,26 @@ type OrgSettings struct {
 	// to 0, so callers always see "unlimited" as 0 and never a negative. Writes
 	// are validated in [0, MaxConcurrentClaimsCeiling] at the handler.
 	MaxConcurrentRuns int
+
+	// APITokenMaxAgeDays is the ceiling on how long any of the org's API
+	// tokens may live, in days, within [APITokenMaxAgeDaysMin,
+	// APITokenMaxAgeDaysMax]. 0 = uncapped (round-trips 0 ↔ NULL) — the same
+	// convention as the two caps above, and the reason the band starts at 1
+	// rather than 0.
+	//
+	// Applied at USE, never stamped into a token at mint: a token's effective
+	// expiry is min(its stored expires_at, its created_at + this cap) computed
+	// against the CURRENT value. So lowering it immediately shortens every
+	// existing token in the org — a token already older than the new cap stops
+	// authenticating on its next request — and raising or clearing it extends
+	// only tokens whose minter did not pin an earlier expires_at of their own.
+	// There is no grandfathering and no sweep job.
+	//
+	// Multi-mode policy: the tokens it governs are a Postgres-only credential,
+	// like sessions. The column is dual-dialect anyway (one column list per
+	// dialect is how a read shape drifts from its twin), so it round-trips in
+	// local mode and nothing reads it there.
+	APITokenMaxAgeDays int
 
 	// MarketplaceEnabled was originally scoped as a ship-dark toggle for the
 	// within-org prompt marketplace (TFAC-535); that turned out to be the

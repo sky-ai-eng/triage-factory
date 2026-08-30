@@ -119,7 +119,7 @@ const orgSettingsColumns = `github_clone_protocol,
 	       anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
 	       background_jobs_model, llm_auth_method,
 	       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
-	       github_credential_class, version`
+	       api_token_max_age_days, github_credential_class, version`
 
 func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSettings, error) {
 	set, err := db.ScanOrgSettingsCore(q.QueryRowContext(ctx, `
@@ -280,6 +280,7 @@ const orgSettingsConflictUpdate = `
 			max_daily_cost_usd = EXCLUDED.max_daily_cost_usd,
 			max_concurrent_runs = EXCLUDED.max_concurrent_runs,
 			marketplace_enabled = EXCLUDED.marketplace_enabled,
+			api_token_max_age_days = EXCLUDED.api_token_max_age_days,
 			version = org_settings.version + 1,
 			updated_at = now()`
 
@@ -312,6 +313,11 @@ func orgSettingsWriteArgs(orgID string, u domain.OrgSettings) []any {
 		nullFloat(u.MaxDailyCostUSD),
 		nullInt(u.MaxConcurrentRuns),
 		u.MarketplaceEnabled,
+		// 0 is "uncapped" and writes NULL, the same 0 ↔ NULL round-trip the two
+		// caps above take. The column's CHECK admits only 1..365, so a value
+		// the handler let through below the band would be an error at the DB
+		// rather than a silently stored non-policy — nullInt keeps 0 out of it.
+		nullInt(u.APITokenMaxAgeDays),
 	}
 }
 
@@ -337,9 +343,10 @@ func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.O
 			anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
 			background_jobs_model, llm_auth_method,
 			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
+			api_token_max_age_days,
 			version, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, now()
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, now()
 		)`+conflict+`
 		RETURNING `+orgSettingsColumns, orgSettingsWriteArgs(orgID, u)...).Scan)
 	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
@@ -367,9 +374,10 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 			max_daily_cost_usd = $8,
 			max_concurrent_runs = $9,
 			marketplace_enabled = $10,
+			api_token_max_age_days = $11,
 			version = version + 1,
 			updated_at = now()
-		WHERE org_id = $1 AND version = $11
+		WHERE org_id = $1 AND version = $12
 		RETURNING `+orgSettingsColumns, args...).Scan)
 	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
 }

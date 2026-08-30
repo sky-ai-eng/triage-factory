@@ -317,6 +317,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			MaxDailyCostUSD:       12.50,
 			MaxConcurrentRuns:     8,
 			MarketplaceEnabled:    true,
+			APITokenMaxAgeDays:    30,
 			// Read-only through this struct: UpdateSettings doesn't own
 			// github_credential_class, so the row keeps its schema default and
 			// the read hands it back. Stated as the expected value rather than
@@ -563,11 +564,14 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	t.Run("OrgSettings_NullableFields_RoundTripEmpty", func(t *testing.T) {
 		// AnthropicAPIKeyRef / BedrockCredentialsRef / GitHubBaseURL /
 		// JiraBaseURL: empty input writes NULL, scans back as "".
-		// MaxDailyCostUSD: 0 input writes NULL, scans back as 0 (TFAC-477's
-		// "no cap" round-trip). MaxConcurrentRuns: 0 input writes NULL, scans
-		// back as 0 ("unlimited"). EnabledModels: a nil set writes NULL and
-		// scans back nil — the absent value, which is NOT the same as a stored
-		// set naming nothing. Pins the ""/0/nil ↔ NULL contract.
+		// MaxDailyCostUSD: 0 input writes NULL, scans back as 0 — the "no cap"
+		// round-trip. MaxConcurrentRuns: 0 input writes NULL, scans back as 0
+		// ("unlimited"). APITokenMaxAgeDays: 0 input writes NULL, scans back as
+		// 0 ("no maximum") — and it MUST write NULL rather than 0, because the
+		// Postgres column's CHECK admits only 1..365. EnabledModels: a nil set
+		// writes NULL and scans back nil — the absent value, which is NOT the
+		// same as a stored set naming nothing.
+		// Pins the ""/0/nil ↔ NULL contract.
 		stores, ids := factory(t)
 		in := domain.OrgSettings{
 			GitHubPollInterval:  5 * time.Minute,
@@ -584,7 +588,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if got.GitHubBaseURL != "" || got.JiraBaseURL != "" ||
 			got.AnthropicAPIKeyRef != "" || got.BedrockCredentialsRef != "" ||
 			got.EnabledModels != nil || got.MaxDailyCostUSD != 0 ||
-			got.MaxConcurrentRuns != 0 {
+			got.MaxConcurrentRuns != 0 || got.APITokenMaxAgeDays != 0 {
 			t.Errorf("nullable empties did not round-trip: %+v", got)
 		}
 	})
@@ -681,6 +685,42 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if got.MaxConcurrentRuns != 0 {
 			t.Errorf("stored negative MaxConcurrentRuns scanned as %v; want 0 (clamped to unlimited)", got.MaxConcurrentRuns)
+		}
+	})
+
+	t.Run("OrgSettings_APITokenMaxAge_SetThenClear", func(t *testing.T) {
+		// A cap inside the band round-trips, and writing 0 clears it back to
+		// "no maximum" (0 ↔ NULL) — the set/clear cycle both cap siblings above
+		// take. The clear is the load-bearing half on Postgres: the column's
+		// CHECK admits only 1..365, so a writer that stored 0 instead of NULL
+		// would fail the statement rather than clear the policy.
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+		set := base
+		set.APITokenMaxAgeDays = domain.APITokenMaxAgeDaysMax
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
+			t.Fatalf("UpdateSettings (set cap): %v", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem after set: %v", err)
+		}
+		if got.APITokenMaxAgeDays != domain.APITokenMaxAgeDaysMax {
+			t.Errorf("after set, APITokenMaxAgeDays = %v; want %v", got.APITokenMaxAgeDays, domain.APITokenMaxAgeDaysMax)
+		}
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+			t.Fatalf("UpdateSettings (clear cap): %v", err)
+		}
+		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem after clear: %v", err)
+		}
+		if got.APITokenMaxAgeDays != 0 {
+			t.Errorf("after clear, APITokenMaxAgeDays = %v; want 0 (no maximum)", got.APITokenMaxAgeDays)
 		}
 	})
 

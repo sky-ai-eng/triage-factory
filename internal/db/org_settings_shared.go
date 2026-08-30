@@ -45,7 +45,8 @@ func ApplyOrgSourceOverrides(set *domain.OrgSettings, github, jira SourceOverrid
 // orgSettingsColumns projects, in that order: github_clone_protocol,
 // anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
 // background_jobs_model, llm_auth_method, max_daily_cost_usd,
-// max_concurrent_runs, marketplace_enabled, github_credential_class, version.
+// max_concurrent_runs, marketplace_enabled, api_token_max_age_days,
+// github_credential_class, version.
 // GitHubBaseURL / GitHubPollInterval / JiraBaseURL / JiraPollInterval are left
 // at the Go zero value — callers apply ApplyOrgSourceOverrides afterward.
 //
@@ -62,13 +63,14 @@ func ScanOrgSettingsCore(scan func(...any) error) (domain.OrgSettings, error) {
 		maxDailyCost                   sql.NullFloat64
 		maxConcurrentRuns              sql.NullInt64
 		marketplaceEnabled             bool
+		apiTokenMaxAgeDays             sql.NullInt64
 		credentialClass                string
 		version                        int
 	)
 	if err := scan(
 		&cloneProto,
 		&anthRef, &bedRef, &enabledModels, &backgroundJobsModel, &llmAuthMethod,
-		&maxDailyCost, &maxConcurrentRuns, &marketplaceEnabled,
+		&maxDailyCost, &maxConcurrentRuns, &marketplaceEnabled, &apiTokenMaxAgeDays,
 		&credentialClass, &version,
 	); err != nil {
 		return domain.OrgSettings{}, err
@@ -88,6 +90,16 @@ func ScanOrgSettingsCore(scan func(...any) error) (domain.OrgSettings, error) {
 	if concurrentRuns < 0 {
 		concurrentRuns = 0
 	}
+	// Same shape, and the same reason on the dialect that needs it: the
+	// Postgres column carries a 1..365 CHECK, but the SQLite twin carries none
+	// (adding one by ALTER TABLE would mean rebuilding org_settings to
+	// constrain a column local mode never reads), so a value below the band
+	// can exist there. Read as 0 — "uncapped" keeps one spelling in Go, and
+	// the settings form is never handed a value its own validator rejects.
+	tokenMaxAge := int(apiTokenMaxAgeDays.Int64) // NULL → 0 (uncapped)
+	if tokenMaxAge < domain.APITokenMaxAgeDaysMin {
+		tokenMaxAge = 0
+	}
 	return domain.OrgSettings{
 		GitHubCloneProtocol:   cloneProto,
 		AnthropicAPIKeyRef:    anthRef.String,
@@ -102,6 +114,7 @@ func ScanOrgSettingsCore(scan func(...any) error) (domain.OrgSettings, error) {
 		MaxDailyCostUSD:    maxDailyCost.Float64, // NULL → 0 (no cap)
 		MaxConcurrentRuns:  concurrentRuns,
 		MarketplaceEnabled: marketplaceEnabled,
+		APITokenMaxAgeDays: tokenMaxAge,
 		// Surfaced verbatim, never coerced to a known value: callers switch on
 		// it and refuse what they don't recognise, which is the whole point of
 		// storing the class instead of inferring it.

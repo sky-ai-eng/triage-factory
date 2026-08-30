@@ -133,11 +133,12 @@ func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		// transition runs the local ssh preflight — a real gate, and one no test
 		// environment can satisfy. The clear still round-trips; it just starts
 		// from the value it ends at.
-		"github_clone_protocol": defaultsCloneProtocol(),
-		"enabled_models":        []string{domain.ModelAliasSonnet},
-		"background_jobs_model": domain.ModelAliasOpus,
-		"max_daily_cost_usd":    42.5,
-		"max_concurrent_runs":   9,
+		"github_clone_protocol":  defaultsCloneProtocol(),
+		"enabled_models":         []string{domain.ModelAliasSonnet},
+		"background_jobs_model":  domain.ModelAliasOpus,
+		"max_daily_cost_usd":     42.5,
+		"max_concurrent_runs":    9,
+		"api_token_max_age_days": 30,
 	})
 
 	defaults := domain.DefaultOrgSettings()
@@ -160,6 +161,7 @@ func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		{"background_jobs_model", ""},
 		{"max_daily_cost_usd", float64(0)},
 		{"max_concurrent_runs", float64(0)},
+		{"api_token_max_age_days", float64(0)},
 	}
 
 	body := map[string]any{}
