@@ -12,9 +12,10 @@
 -- Nullable with no default, and NULL is the whole vocabulary of "no cap" — a 0
 -- sentinel would collide with the 1..365 range the setting accepts, and a
 -- default would be TF picking an expiry policy for an org that never asked for
--- one. The range is enforced app-side here (the Postgres twin carries a CHECK);
--- SQLite's CHECKs cannot be added by ALTER TABLE without a table rebuild, and
--- the setting's write path is the same validator in both dialects.
+-- one. The 1..365 range rides a CHECK on the Postgres twin and nothing here:
+-- SQLite cannot add a CHECK by ALTER TABLE without rebuilding the table, and
+-- rebuilding org_settings to constrain a column local mode never reads would
+-- buy nothing.
 ALTER TABLE org_settings ADD COLUMN api_token_max_age_days INTEGER;
 
 -- +goose Down

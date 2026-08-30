@@ -1,5 +1,6 @@
 // Package apitokens owns public.user_api_tokens: the per-user, org-scoped
-// bearer credentials that give multi mode a headless auth path.
+// bearer credentials a client authenticates with when it has no browser to
+// drive a session cookie through.
 //
 // A token is a sealed session cursor. A session is (user, movable active_org);
 // a token is the same pair with the org fixed at mint, which is why every read
@@ -97,8 +98,8 @@ type Identity struct {
 	// is what authenticated.
 	Email string
 	// AllowedCIDRs is the token's IP allowlist, nil when it has none. Lookup
-	// carries the ranges; whether the caller's address is in them is decided
-	// where the client IP is resolved, not here.
+	// carries the ranges and decides nothing about them: matching a request's
+	// address against them belongs where that address is resolved.
 	AllowedCIDRs []string
 }
 
@@ -267,10 +268,11 @@ func (s *Store) MintSystem(
 
 // LookupSystem resolves a plaintext token to the identity it authenticates as,
 // or (nil, nil) when it matches nothing usable — unknown, revoked, past its own
-// expiry, or past the org's current max-age cap. Those are one answer on
-// purpose: the caller renders 401 and discloses nothing about which.
+// expiry, or past the org's current max-age cap. Those collapse to one answer
+// on purpose, so a caller can refuse without disclosing which.
 //
-// An error return means the database failed, which is a 500 — never a 401.
+// An error return means the database failed, and is not that answer: a caller
+// must not read it as a token that didn't match.
 func (s *Store) LookupSystem(ctx context.Context, raw string) (*Identity, error) {
 	var (
 		id        Identity
@@ -380,8 +382,8 @@ func (s *Store) ListForUserSystem(ctx context.Context, userID string, orgFilter 
 // caller to revoke a token it does not own even by racing.
 //
 // A token id that names nothing, belongs to someone else, or is already revoked
-// is ErrNoSuchToken — the caller's 404. The audit row rides the same
-// transaction as the revocation.
+// is ErrNoSuchToken — one answer for every reason the caller may not act on it.
+// The audit row rides the same transaction as the revocation.
 func (s *Store) RevokeSystem(ctx context.Context, userID, tokenID, actorForAudit string) error {
 	if !isValidUUID(tokenID) || !isValidUUID(userID) {
 		return ErrNoSuchToken
@@ -419,13 +421,13 @@ func (s *Store) RevokeSystem(ctx context.Context, userID, tokenID, actorForAudit
 	return nil
 }
 
-// RevokeForUserInOrgSystem is the deprovisioning hook: removing a member from
-// an org kills the tokens they held IN THAT ORG, at the same site the removal
-// revokes their sessions there. Returns how many were newly revoked.
+// RevokeForUserInOrgSystem is the deprovisioning revoke: it kills every token
+// the user holds IN ONE ORG, which is what removing them from that org has to
+// do to their headless credentials. Returns how many were newly revoked.
 //
-// Org-scoped on purpose, exactly like the session revoke beside it — a token
-// the same user holds in a different org names an access relationship this
-// removal did not touch.
+// Org-scoped on purpose, the same shape as the session revoke it belongs
+// beside — a token the same user holds in a different org names an access
+// relationship such a removal did not touch.
 //
 // One audit row per token, each naming the token owner as its target and
 // carrying the membership_removed source: the actor here is the admin, so
@@ -482,8 +484,8 @@ func (s *Store) RevokeForUserInOrgSystem(ctx context.Context, userID, orgID, act
 	return len(killed), nil
 }
 
-// TouchLastUsedSystem stamps last_used_at. Best-effort by contract: the caller
-// fires it off the request path, and a token that authenticated is no less
+// TouchLastUsedSystem stamps last_used_at. Best-effort by contract, so it is
+// safe to fire off the request path: a token that authenticated is no less
 // valid because the bookkeeping write lost a race.
 func (s *Store) TouchLastUsedSystem(ctx context.Context, tokenID string) error {
 	if !isValidUUID(tokenID) {

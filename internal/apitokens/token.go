@@ -20,8 +20,9 @@ import (
 // unique index over a 256-bit value, and an attacker who could grind that
 // timing would need the hash itself, not the token.
 const (
-	// Prefix is the literal every token starts with. Exported because the
-	// Bearer path recognizes a token by it before spending a lookup.
+	// Prefix is the literal every token starts with. Exported so a caller can
+	// recognize a token by shape, without spending a lookup on a string that
+	// was never one.
 	Prefix = "tf_"
 
 	// secretBytes is the entropy behind the base64url body.
@@ -45,8 +46,8 @@ const (
 )
 
 // ErrInvalidCIDR reports an allowlist entry that is not a canonical IP range.
-// Callers surface it as a bad-field fault, never a server error: the value came
-// from whoever asked for the token.
+// It is a bad-field fault, not a server error: the value came from whoever
+// asked for the token.
 var ErrInvalidCIDR = errors.New("allowed_cidrs entry is not a valid IP range")
 
 // ErrTooManyCIDRs reports an allowlist longer than MaxAllowedCIDRs.

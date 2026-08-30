@@ -629,8 +629,9 @@ CREATE TABLE public.org_settings (
     -- rather than stamped into a token at mint — effective expiry is
     -- min(expires_at, created_at + cap) computed against the CURRENT cap — so
     -- tightening it immediately shortens every existing token in the org, with
-    -- no grandfathering and no sweep job. A mint asking for an expires_at beyond
-    -- the cap is refused, never clamped.
+    -- no grandfathering and no sweep job. Nothing folds it into a stored
+    -- expires_at: a token's row records the expiry it was minted with, and this
+    -- narrows that at every use.
     api_token_max_age_days integer CHECK (api_token_max_age_days IS NULL OR api_token_max_age_days BETWEEN 1 AND 365),
     -- Optimistic-concurrency token for the whole-row settings save: the read
     -- hands it to the client, the write requires it, a stale token gets 409, and
@@ -5126,7 +5127,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.workspace_snapshots TO tf_s
 -- the org fixed at mint, which is why org_id is NOT NULL: there is no
 -- no-tenant token, and multi-org automation holds one token per org.
 -- PG-only like sessions — local mode's synthetic identity is already headless,
--- so the routes over this table 404 there.
+-- so there is nothing there for a token to be.
 -- Only sha256 of the full literal token (the "tf_" prefix included) is stored;
 -- the plaintext escapes exactly once, from the mint call. The hash is unique so
 -- lookup is an index probe rather than a scan-and-compare. token_prefix is the
@@ -5135,11 +5136,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.workspace_snapshots TO tf_s
 -- name is deliberately NOT unique: rotation is mint-a-same-named-replacement,
 -- deploy, revoke-the-old, and a unique name would force a rename into every
 -- rotation.
--- allowed_cidrs is defense in depth, checked in the middleware against the same
--- resolved client IP the rate limiter uses — its integrity is only as good as
--- the deployment's TF_TRUSTED_PROXY_CIDR. NULL means no restriction; an empty
--- array would be a token that can never be used, so the cardinality CHECK
--- refuses one.
+-- allowed_cidrs is defense in depth: the column carries ranges and decides
+-- nothing, and whatever matches a request against them is only as trustworthy
+-- as the deployment's TF_TRUSTED_PROXY_CIDR. NULL means no restriction; an
+-- empty array would be a token that can never be used, so the cardinality
+-- CHECK refuses one.
 -- expires_at is the token's own stored expiry. The org's
 -- org_settings.api_token_max_age_days cap is applied at USE, not stored here, so
 -- tightening it shortens every existing token in the org at once.
