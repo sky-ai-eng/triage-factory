@@ -65,6 +65,11 @@ export interface OrgConfigForm {
   // once across the fleet. Held as a string for the same reasons as
   // max_daily_cost_usd; patchOrgSettings converts it to the wire number.
   max_concurrent_runs: string
+  // Ceiling on how long any of the org's API tokens may live, in days, held as
+  // the raw text input. Empty = "no maximum"; a whole-number string between 1
+  // and 365 is the cap. Held as a string for the same reasons as the two caps
+  // above; patchOrgSettings converts it to the wire number.
+  api_token_max_age_days: string
   // The org's Anthropic API key (BYOK). Blank on load — it's a secret that never
   // leaves the vault, like jira_pat. It is captured ONLY via the validated
   // connectAnthropic endpoint and is not part of OrgSettingsPatch, so the
@@ -134,6 +139,10 @@ export interface OrgSettingsData {
   max_daily_cost_usd: number
   // Org-wide concurrent-run limit; 0 = unlimited. Always present.
   max_concurrent_runs: number
+  // Ceiling on how long any of the org's API tokens may live, in days; 0 = no
+  // maximum. Always present. Readable by any org member, not just the admin who
+  // can change it — the token create form states the cap it is minting under.
+  api_token_max_age_days: number
   // Where the org's Claude credentials come from: 'system' (the host's,
   // resolved by the SDK from the environment the agent subprocess inherits) or
   // 'byok' (the org's own bound material). The EFFECTIVE value — multi always
@@ -185,6 +194,7 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
   llm_auth_method: 'byok',
   max_daily_cost_usd: '',
   max_concurrent_runs: '',
+  api_token_max_age_days: '',
   anthropic_api_key: '',
   bedrock_auth_method: 'bearer',
   bedrock_bearer_token: '',
@@ -224,6 +234,9 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
     // 0 (unlimited) renders as an empty input; any positive limit seeds the
     // numeric string the input edits.
     max_concurrent_runs: org.max_concurrent_runs ? String(org.max_concurrent_runs) : '',
+    // 0 (no maximum) renders as an empty input; any positive cap seeds the
+    // numeric string the input edits.
+    api_token_max_age_days: org.api_token_max_age_days ? String(org.api_token_max_age_days) : '',
     // Secret — never returned by the GET (presence rides has_anthropic_api_key),
     // so it stays blank and a save without a re-typed key leaves the vault key
     // untouched.
@@ -303,9 +316,35 @@ export function concurrentRunsError(raw: string): string | null {
   return null
 }
 
-// numericOrNull converts one of the two cap inputs to its wire value. Blank is
-// the "no cap" / "unlimited" spelling and becomes JSON null, the clearing
-// convention every field on this PATCH shares. A typed value passes through for
+// The band the API-token age cap accepts, mirroring domain.APITokenMaxAgeDaysMin
+// / Max and the Postgres column's own CHECK. Kept in sync with the Go constants
+// by hand (there's no shared source), like MAX_CONCURRENT_RUNS_CEILING above.
+export const API_TOKEN_MAX_AGE_DAYS_MIN = 1
+export const API_TOKEN_MAX_AGE_DAYS_MAX = 365
+
+// apiTokenMaxAgeError is the frontend input-layer validation for the API-token
+// age cap. "No maximum" is expressed by clearing the field (blank), which sends
+// JSON null, so blank is always valid. A typed value must be a whole number
+// inside the band: 0 and negatives are rejected (a zero-day cap would expire
+// every token the moment it was minted, and "no maximum" already has its
+// spelling), fractions are rejected since the column is an integer, and a value
+// past the upper bound is rejected before it can 422. Returns the user-facing
+// message, or null when the input is acceptable. Mirrors the handler's range so
+// Save blocks before the round-trip; the handler remains the enforcement.
+export function apiTokenMaxAgeError(raw: string): string | null {
+  const trimmed = raw.trim()
+  if (trimmed === '') return null
+  const n = Number(trimmed)
+  if (!Number.isFinite(n)) return 'Enter a whole number of days, or leave blank for no maximum.'
+  if (!Number.isInteger(n)) return 'Enter a whole number of days.'
+  if (n < API_TOKEN_MAX_AGE_DAYS_MIN || n > API_TOKEN_MAX_AGE_DAYS_MAX)
+    return `Enter between ${API_TOKEN_MAX_AGE_DAYS_MIN} and ${API_TOKEN_MAX_AGE_DAYS_MAX} days, or leave blank for no maximum.`
+  return null
+}
+
+// numericOrNull converts one of the three cap inputs to its wire value. Blank is
+// the "no cap" / "unlimited" / "no maximum" spelling and becomes JSON null, the
+// clearing convention every field on this PATCH shares. A typed value passes through for
 // the backend to range-check; an unparseable one becomes undefined, which
 // JSON.stringify drops, so the field is omitted and the stored value is left
 // UNTOUCHED rather than silently cleared. Effectively unreachable from a number
@@ -345,6 +384,7 @@ export type OrgSettingsPatch = Partial<
     | 'llm_auth_method'
     | 'max_daily_cost_usd'
     | 'max_concurrent_runs'
+    | 'api_token_max_age_days'
   >
 >
 
@@ -388,6 +428,11 @@ export async function patchOrgSettings(
     body.max_daily_cost_usd = numericOrNull(fields.max_daily_cost_usd)
   if (fields.max_concurrent_runs !== undefined)
     body.max_concurrent_runs = numericOrNull(fields.max_concurrent_runs)
+  // Blank sends null, which clears the cap — and clearing is a real intent: it
+  // lifts the ceiling off every existing token whose minter did not pin an
+  // earlier expiry of its own.
+  if (fields.api_token_max_age_days !== undefined)
+    body.api_token_max_age_days = numericOrNull(fields.api_token_max_age_days)
   try {
     const settings = await apiJSON<OrgSettingsData>(
       `/api/orgs/${encodeURIComponent(orgId)}/settings`,

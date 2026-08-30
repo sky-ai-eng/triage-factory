@@ -56,12 +56,14 @@ import PollerTimingGroup from '../PollerTimingGroup'
 import { inputClass } from '../primitives'
 import JiraAccessGroup from '../JiraAccessGroup'
 import EventSourcesGroup from '../EventSourcesGroup'
+import ApiTokenPolicyGroup from '../ApiTokenPolicyGroup'
 import AtlassianOAuthAppCard from '../AtlassianOAuthAppCard'
 import SlackWorkspacesCard from '../SlackWorkspacesCard'
 import TeamManagementSection from '../../../components/TeamManagementSection'
 import {
   dailyCapError,
   concurrentRunsError,
+  apiTokenMaxAgeError,
   MAX_CONCURRENT_RUNS_CEILING,
   fetchOrgSettings,
   patchOrgSettings,
@@ -297,6 +299,15 @@ export default function OrgSettings({
   // Frontend input-layer validation: a typed limit must be a non-negative whole
   // number (blank or 0 = unlimited). Gates the section's Save + inline message.
   const concurrentRunsErr = concurrentRunsError(draft.org.max_concurrent_runs)
+  const tokenMaxAgeValue = Number(baseline.org.api_token_max_age_days)
+  const tokenMaxAgeSummary =
+    baseline.org.api_token_max_age_days.trim() !== '' && tokenMaxAgeValue > 0
+      ? `${tokenMaxAgeValue} day${tokenMaxAgeValue === 1 ? '' : 's'}`
+      : 'No maximum'
+  // Frontend input-layer validation: a typed cap must be a whole number in the
+  // band (blank = no maximum). Gates the section's Save + inline message; the
+  // handler remains the enforcement.
+  const tokenMaxAgeErr = apiTokenMaxAgeError(draft.org.api_token_max_age_days)
 
   // ── Claude credentials ── Captured via the validated connectAnthropic /
   // connectBedrock endpoints (never the bulk org POST). Local shows the
@@ -838,6 +849,36 @@ export default function OrgSettings({
           </label>
         </div>
       </SettingsSection>
+
+      {/* ── API token lifetime ── The org's ceiling on how long a personal API
+          token may be used for. Multi-mode only: the tokens it governs are a
+          Postgres-only credential and every /api/me/tokens route 404s in local,
+          where the synthetic identity is already headless — so a cap there
+          would govern nothing. The setting itself round-trips in both dialects;
+          only the control is gated. */}
+      {!isLocal && (
+        <SettingsSection
+          title="API token lifetime"
+          summary={tokenMaxAgeSummary}
+          dirty={draft.org.api_token_max_age_days !== baseline.org.api_token_max_age_days}
+          saving={isSaving('api-token-max-age')}
+          saveDisabled={tokenMaxAgeErr !== null}
+          onSave={() =>
+            commitOrgSlice(
+              'api-token-max-age',
+              { api_token_max_age_days: draft.org.api_token_max_age_days },
+              'API token lifetime',
+            )
+          }
+          onCancel={() => revertOrg(['api_token_max_age_days'])}
+        >
+          <ApiTokenPolicyGroup
+            value={draft.org.api_token_max_age_days}
+            onChange={(v) => patch({ org: { ...draft.org, api_token_max_age_days: v } })}
+            error={tokenMaxAgeErr}
+          />
+        </SettingsSection>
+      )}
 
       {/* ── Claude credentials ── Save drives the selected provider's validated
           bind route (connectAnthropic / connectBedrock — never the org settings

@@ -102,7 +102,7 @@ const orgSettingsColumns = `github_clone_protocol,
 	       anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
 	       background_jobs_model, llm_auth_method,
 	       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
-	       github_credential_class, version`
+	       api_token_max_age_days, github_credential_class, version`
 
 func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSettings, error) {
 	set, err := db.ScanOrgSettingsCore(q.QueryRowContext(ctx, `
@@ -268,6 +268,7 @@ const orgSettingsConflictUpdate = `
 			max_daily_cost_usd = excluded.max_daily_cost_usd,
 			max_concurrent_runs = excluded.max_concurrent_runs,
 			marketplace_enabled = excluded.marketplace_enabled,
+			api_token_max_age_days = excluded.api_token_max_age_days,
 			version = org_settings.version + 1,
 			updated_at = CURRENT_TIMESTAMP`
 
@@ -300,6 +301,11 @@ func orgSettingsValues(u domain.OrgSettings) []any {
 		nullFloatValue(u.MaxDailyCostUSD),
 		nullIntValue(u.MaxConcurrentRuns),
 		u.MarketplaceEnabled,
+		// 0 is "uncapped" and writes NULL, the same 0 ↔ NULL round-trip the two
+		// caps above take. Nothing in local mode reads the column — API tokens
+		// are a multi-mode credential — but it is written here all the same, so
+		// the two dialects keep one column list and one read shape.
+		nullIntValue(u.APITokenMaxAgeDays),
 	}
 }
 
@@ -326,8 +332,9 @@ func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.O
 			anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
 			background_jobs_model, llm_auth_method,
 			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
+			api_token_max_age_days,
 			version, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`+conflict+`
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`+conflict+`
 		RETURNING `+orgSettingsColumns, args...).Scan)
 	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
 }
@@ -355,6 +362,7 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 			max_daily_cost_usd = ?,
 			max_concurrent_runs = ?,
 			marketplace_enabled = ?,
+			api_token_max_age_days = ?,
 			version = version + 1,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE org_id = ? AND version = ?

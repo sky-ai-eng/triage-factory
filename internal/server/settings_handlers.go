@@ -802,6 +802,15 @@ type orgSettingsResponse struct {
 	// the form renders the numeric input's current value, "0 / unlimited"
 	// included.
 	MaxConcurrentRuns int `json:"max_concurrent_runs"`
+	// APITokenMaxAgeDays is the ceiling on how long any of the org's API tokens
+	// may live, in days; 0 = no maximum. Always emitted, for the same reason as
+	// the two caps above — the form renders the input's current value, "no
+	// maximum" included.
+	//
+	// Readable by any org member, not just the admin who can write it: the cap
+	// is policy a token minter has to see before choosing an expiry, and the
+	// create form states it.
+	APITokenMaxAgeDays int `json:"api_token_max_age_days"`
 	// LLMAuthMethod is where this org's Claude credentials come from:
 	// "system" (the host's, resolved by the SDK from the environment the agent
 	// subprocess inherits) or "byok" (the org's own bound material). The
@@ -987,6 +996,7 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 		BackgroundJobsModel:       orgSet.BackgroundJobsModel,
 		MaxDailyCostUSD:           orgSet.MaxDailyCostUSD,
 		MaxConcurrentRuns:         orgSet.MaxConcurrentRuns,
+		APITokenMaxAgeDays:        orgSet.APITokenMaxAgeDays,
 		LLMAuthMethod:             domain.EffectiveLLMAuthMethod(orgSet.LLMAuthMethod, !local),
 		HasAnthropicAPIKey:        orgSet.AnthropicAPIKeyRef != "",
 		HasBedrockCreds:           orgSet.BedrockCredentialsRef != "",
@@ -1025,6 +1035,7 @@ type orgSettingsPatch struct {
 	LLMAuthMethod       json.RawMessage `json:"llm_auth_method"`
 	MaxDailyCostUSD     json.RawMessage `json:"max_daily_cost_usd"`
 	MaxConcurrentRuns   json.RawMessage `json:"max_concurrent_runs"`
+	APITokenMaxAgeDays  json.RawMessage `json:"api_token_max_age_days"`
 	// Version is the token the caller read this row at. Required, and a plain
 	// int rather than a patch field: it is not something you can clear, and a
 	// PATCH without it would be exactly the unconditional last-write-wins save
@@ -1184,6 +1195,7 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 		req.GitHubBaseURL, req.GitHubPollInterval, req.GitHubCloneProtocol,
 		req.JiraBaseURL, req.JiraPollInterval, req.EnabledModels,
 		req.BackgroundJobsModel, req.LLMAuthMethod, req.MaxDailyCostUSD, req.MaxConcurrentRuns,
+		req.APITokenMaxAgeDays,
 	) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
@@ -1420,6 +1432,32 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 			next = v
 		}
 		set(func(o *domain.OrgSettings) { o.MaxConcurrentRuns = next })
+	}
+	// The ceiling on how long any of the org's API tokens may live. Null is
+	// "no maximum" and 0 is refused, the third field on this route to take
+	// that convention — and here the band starts at 1 for a second reason: a
+	// cap of zero days would expire every token the moment it was minted,
+	// which is a way to break the org's automation by typing a number the
+	// blank field already has a spelling for.
+	//
+	// Range-checked here even though the Postgres column carries the same
+	// CHECK. The DB is the backstop, not the gate: a CHECK violation is a 500
+	// with nothing naming the field, and the SQLite twin has no CHECK at all.
+	//
+	// Lowering the cap is not softened and takes no confirmation: it is
+	// applied at use, so it immediately shortens every existing token in the
+	// org. That is what the control is for; the UI states the consequence.
+	if v, st := httpx.PatchInt(&shape, req.APITokenMaxAgeDays, "api_token_max_age_days"); st != httpx.PatchAbsent {
+		next := 0
+		if st == httpx.PatchSet {
+			if v < domain.APITokenMaxAgeDaysMin || v > domain.APITokenMaxAgeDaysMax {
+				ranges.OutOfRange("api_token_max_age_days", fmt.Sprintf(
+					"api_token_max_age_days must be between %d and %d, or null for no maximum",
+					domain.APITokenMaxAgeDaysMin, domain.APITokenMaxAgeDaysMax))
+			}
+			next = v
+		}
+		set(func(o *domain.OrgSettings) { o.APITokenMaxAgeDays = next })
 	}
 
 	if shape.Flush(w, http.StatusBadRequest) {
