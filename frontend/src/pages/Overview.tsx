@@ -25,6 +25,7 @@ import {
   useSpendToday,
   useTasksIndex,
 } from './overview/hooks'
+import BrandMark from '../components/BrandMark'
 import { useShellScope } from '../hooks/useShellScope'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { useWsConnected } from '../hooks/useWebSocket'
@@ -220,7 +221,10 @@ export default function Overview() {
 
         <div className="ov-conv" ref={convBox}>
           <div className="ov-mast">
-            <span className="ov-mast-name">Triage Factory</span>
+            <span className="ov-mast-name">
+              <BrandMark className="ov-mast-glyph" />
+              Triage Factory
+            </span>
             <span className="ov-mast-line">
               <span className="ov-mast-clock">{clock}</span>
               <span className="ov-mast-date">{date}</span>

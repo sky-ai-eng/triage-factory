@@ -76,9 +76,22 @@
   pointer-events: none;
 }
 .ov-mast-name {
+  display: flex;
+  align-items: center;
+  gap: 0.22em;
   font: 600 44px/1 var(--font-sans);
   letter-spacing: -0.035em;
   color: var(--color-ink-1);
+}
+.ov-mast-glyph {
+  /* Sized in em so the mark tracks the wordmark, and oversize on purpose: the
+     drawing fills only the middle ten of its sixteen units, so a box matched to
+     the type size would set ink a third short of the cap height and read as a
+     bullet next to the name rather than as one lockup with it. Colour comes
+     from currentColor — the name's own ink. */
+  width: 1.05em;
+  height: 1.05em;
+  flex: none;
 }
 .ov-mast-line {
   display: flex;
