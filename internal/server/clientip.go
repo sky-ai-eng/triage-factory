@@ -38,8 +38,7 @@ const maxXFFHops = 64
 // X-Forwarded-For is client-*appended* (each proxy adds a hop, none
 // overwrites), so its leftmost entry is attacker-controlled. It is trusted
 // ONLY when the direct peer is a configured trusted proxy. The policy
-// (TFAC-488; configured via runmode / TF_TRUSTED_PROXY_CIDR +
-// TF_CAPTURE_CLIENT_IP):
+// (configured via runmode / TF_TRUSTED_PROXY_CIDR + TF_CAPTURE_CLIENT_IP):
 //
 //   - Capture disabled → "" (the IP columns store NULL).
 //   - No trusted-proxy allowlist, or the peer is not in it (direct

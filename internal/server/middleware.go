@@ -243,19 +243,33 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 }
 
 // bearerScheme is the one Authorization scheme this server accepts, matched
-// case-insensitively and followed by exactly one space (RFC 7235 credentials).
-const bearerScheme = "Bearer "
+// case-insensitively.
+const bearerScheme = "Bearer"
 
 // bearerCredential returns the credential from an Authorization header value
 // when it is a well-formed Bearer, and ok=false for anything else — another
-// scheme, a scheme with no credential after it, padding instead of the single
-// space. Callers that only need to know whether a request carries a Bearer at
-// all read the second return value and drop the first.
+// scheme, no separating space, or a scheme with nothing after it. Callers that
+// only need to know whether a request carries a Bearer at all read the second
+// return value and drop the first.
+//
+// The separator is one OR MORE spaces, which is the grammar both RFC 7235
+// (`auth-scheme 1*SP token68`) and RFC 6750 write. A client that doubles the
+// space has sent a valid request with an unambiguous credential in it, so
+// folding the extra into the secret — where it could only ever fail to match a
+// hash — would be us answering 401 to something we are required to accept.
+// Only spaces count: a tab is not SP, and a header split on one is malformed.
 func bearerCredential(header string) (string, bool) {
 	if len(header) <= len(bearerScheme) || !strings.EqualFold(header[:len(bearerScheme)], bearerScheme) {
 		return "", false
 	}
-	return header[len(bearerScheme):], true
+	rest := header[len(bearerScheme):]
+	credential := strings.TrimLeft(rest, " ")
+	if len(credential) == len(rest) || credential == "" {
+		// Nothing separated the scheme from what follows (so this is some
+		// longer scheme name, not Bearer), or nothing followed it at all.
+		return "", false
+	}
+	return credential, true
 }
 
 // serveTokenAuth is withSession's Bearer branch: it resolves an API token to

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -136,6 +137,8 @@ func TestBearerAuth_MalformedCredentialsAllRefuse(t *testing.T) {
 		{"basic auth", "Basic dXNlcjpwYXNz"},
 		{"scheme only", "Bearer"},
 		{"scheme with no credential", "Bearer "},
+		{"scheme with only spaces after it", "Bearer   "},
+		{"no separator", "Bearer" + plaintext},
 		{"tab instead of space", "Bearer\t" + plaintext},
 		{"missing tf_ prefix", "Bearer " + strings.TrimPrefix(plaintext, apitokens.Prefix)},
 		{"no such token", "Bearer tf_" + strings.Repeat("A", 43)},
@@ -150,14 +153,17 @@ func TestBearerAuth_MalformedCredentialsAllRefuse(t *testing.T) {
 		})
 	}
 
-	// Case-insensitive scheme with a single space is the one accepted spelling,
-	// and it must actually work — the negatives above only mean something if
-	// the positive does.
-	_, freshPlaintext := r.mintToken(userID, orgID, "lowercase-scheme")
-	req := httptest.NewRequest("GET", "/api/me", nil)
-	req.Header.Set("Authorization", "bEaReR "+freshPlaintext)
-	if rec := r.serve(req); rec.Code != http.StatusOK {
-		t.Fatalf("lowercase scheme = %d, want 200: %s", rec.Code, rec.Body.String())
+	// The spellings that ARE valid must work, or the negatives above only prove
+	// the route is broken: the scheme is case-insensitive, and the separator is
+	// one or more spaces.
+	for _, spelling := range []string{"bEaReR %s", "Bearer  %s", "BEARER %s"} {
+		_, freshPlaintext := r.mintToken(userID, orgID, "valid-spelling")
+		req := httptest.NewRequest("GET", "/api/me", nil)
+		req.Header.Set("Authorization", fmt.Sprintf(spelling, freshPlaintext))
+		if rec := r.serve(req); rec.Code != http.StatusOK {
+			t.Errorf("header %q = %d, want 200: %s",
+				fmt.Sprintf(spelling, "<token>"), rec.Code, rec.Body.String())
+		}
 	}
 }
 
@@ -364,10 +370,14 @@ func TestBearerCredential(t *testing.T) {
 		{"Bearer tf_abc", "tf_abc", true},
 		{"bearer tf_abc", "tf_abc", true},
 		{"BEARER tf_abc", "tf_abc", true},
-		{"Bearer  tf_abc", " tf_abc", true}, // the extra space is part of the credential
+		// 1*SP is the grammar, so a doubled space is a valid request whose
+		// credential is unambiguous — the extra space is separator, not secret.
+		{"Bearer  tf_abc", "tf_abc", true},
 		{"Bearer", "", false},
 		{"Bearer ", "", false},
+		{"Bearer   ", "", false},
 		{"Bearer\ttf_abc", "", false},
+		{"Bearertf_abc", "", false}, // no separator: a different scheme name
 		{"Token tf_abc", "", false},
 		{"", "", false},
 	} {
@@ -397,8 +407,23 @@ func TestBearerAuth_OrgScopeIsSealed(t *testing.T) {
 	if rec := r.serve(r.bearerReq("GET", "/api/orgs/"+orgA.String(), plaintext)); rec.Code != http.StatusOK {
 		t.Fatalf("token reading its own org = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
+	// Its own org however the caller spells the id: uuid.Parse accepts these and
+	// Postgres equates them, so the scope check has to as well or a token 404s
+	// on an org it names, on a request a session answers 200.
+	for _, spelling := range []string{
+		strings.ToUpper(orgA.String()),
+		strings.ReplaceAll(orgA.String(), "-", ""),
+	} {
+		if rec := r.serve(r.bearerReq("GET", "/api/orgs/"+spelling, plaintext)); rec.Code != http.StatusOK {
+			t.Errorf("token reading its own org as %q = %d, want 200: %s",
+				spelling, rec.Code, rec.Body.String())
+		}
+	}
 	if rec := r.serve(r.bearerReq("GET", "/api/orgs/"+orgB.String(), plaintext)); rec.Code != http.StatusNotFound {
 		t.Fatalf("token reading another org = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	if rec := r.serve(r.bearerReq("GET", "/api/orgs/"+strings.ToUpper(orgB.String()), plaintext)); rec.Code != http.StatusNotFound {
+		t.Fatalf("token reading another org uppercased = %d, want 404: %s", rec.Code, rec.Body.String())
 	}
 	// The same route, same user, session-authed: a session cursor is movable,
 	// so it reaches every membership.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -53,5 +54,53 @@ func TestWriteResolveError_Routing(t *testing.T) {
 				t.Errorf("status = %d, want %d", rec.Code, tc.want)
 			}
 		})
+	}
+}
+
+// TestTokenScopeAllows pins the one rule that separates a token from a session
+// at these gates, including the part that is easy to get wrong: the comparison
+// is between org IDENTITIES, not between the strings two sides happened to
+// spell them with.
+func TestTokenScopeAllows(t *testing.T) {
+	const (
+		orgA = "3f7c1b2e-9a41-4d5f-8b06-2c1d4e5f6a70"
+		orgB = "8c2d5a1f-4b63-42e7-9f10-77aa33bb44cc"
+	)
+	withToken := func(tokenOrg string) *http.Request {
+		r := httptest.NewRequest("GET", "/api/orgs/x", nil)
+		return r.WithContext(httpx.WithTokenAuth(r.Context(),
+			&httpx.TokenAuth{TokenID: "tok-1", OrgID: tokenOrg}))
+	}
+
+	// A session names any org it likes; this gate has nothing to say about it.
+	if !tokenScopeAllows(httptest.NewRequest("GET", "/api/orgs/x", nil), orgB) {
+		t.Error("a session-authed request must pass the scope check for any org")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		path  string
+		allow bool
+	}{
+		{"its own org", orgA, true},
+		{"its own org uppercased", strings.ToUpper(orgA), true},
+		{"its own org unhyphenated", strings.ReplaceAll(orgA, "-", ""), true},
+		{"another org", orgB, false},
+		{"another org uppercased", strings.ToUpper(orgB), false},
+		{"not a uuid", "default", false},
+		{"empty", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tokenScopeAllows(withToken(orgA), tc.path); got != tc.allow {
+				t.Errorf("tokenScopeAllows(token=%s, path=%q) = %v, want %v",
+					orgA, tc.path, got, tc.allow)
+			}
+		})
+	}
+
+	// A non-uuid on BOTH sides still matches exactly, which is what local
+	// mode's sentinel org would need if a token could ever reach it.
+	if !tokenScopeAllows(withToken("default"), "default") {
+		t.Error("two identical non-uuid org ids must compare equal")
 	}
 }

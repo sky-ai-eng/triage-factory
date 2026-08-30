@@ -323,7 +323,24 @@ func writeForbidden(w http.ResponseWriter, msg string) {
 // answering 403 would confirm it does.
 func tokenScopeAllows(r *http.Request, rawOrgID string) bool {
 	tok := httpx.TokenAuthFrom(r.Context())
-	return tok == nil || tok.OrgID == rawOrgID
+	return tok == nil || sameOrgID(tok.OrgID, rawOrgID)
+}
+
+// sameOrgID compares two org ids as IDENTITIES rather than as strings, because
+// the two sides reach here spelled differently: the token's org is canonical
+// text out of the database, while the path or query value is whatever the
+// caller typed. uuid.Parse accepts uppercase and unhyphenated forms, and every
+// gate around this one hands such a value straight to Postgres, which equates
+// them — so a raw string compare would 404 a token on its OWN org for a request
+// a session answers 200. Anything that is not a pair of parseable uuids falls
+// back to exact equality, which is what local mode's sentinel org needs.
+func sameOrgID(a, b string) bool {
+	if a == b {
+		return true
+	}
+	parsedA, errA := uuid.Parse(a)
+	parsedB, errB := uuid.Parse(b)
+	return errA == nil && errB == nil && parsedA == parsedB
 }
 
 // RequireOrgMember validates {org_id} from the URL path and checks the caller
