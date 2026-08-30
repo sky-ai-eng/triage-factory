@@ -21,7 +21,7 @@ import (
 func dialHubClient(t *testing.T, h *Hub, userID, orgID, sid string) *ws.Conn {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h.HandleWS(w, r, userID, orgID, sid)
+		h.HandleWS(w, r, ConnIdentity{UserID: userID, OrgID: orgID, SessionID: sid})
 	}))
 	t.Cleanup(srv.Close)
 	url := strings.Replace(srv.URL, "http://", "ws://", 1)

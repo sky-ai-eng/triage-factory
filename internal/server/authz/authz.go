@@ -170,7 +170,19 @@ func (az *Checker) RequireTeamAdmin(w http.ResponseWriter, r *http.Request, orgI
 
 // RequireOrgAdminRole checks the user is an admin of the given org.
 // Returns 403 on non-admin.
+//
+// Unlike RequireOrgAdmin the org arrives as an argument, and most callers pass
+// the request's own cursor — for those the token-scope check below is
+// trivially true, since the cursor IS the token's org. It earns its place for
+// the handful that let the CALLER name an org (the fleet placement and queue
+// reads take it from ?org=), where a token would otherwise reach an org it was
+// never sealed to just by asking for it. 404 rather than the 403 beneath it,
+// per the disclosure rule.
 func (az *Checker) RequireOrgAdminRole(w http.ResponseWriter, r *http.Request, orgID, userID string) bool {
+	if !tokenScopeAllows(r, orgID) {
+		httpx.NotFound(w, "org")
+		return false
+	}
 	isAdmin, err := az.UserIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
 		httpx.InternalError(w, "authz", fmt.Errorf("org-admin check %s/%s: %w", userID, orgID, err))
@@ -299,6 +311,38 @@ func writeForbidden(w http.ResponseWriter, msg string) {
 	})
 }
 
+// tokenScopeAllows reports whether the caller's credential may address rawOrgID
+// at all, ahead of any question about their role in it.
+//
+// A session cursor is movable, so a session may name any org its holder belongs
+// to and this is always true for one. An API token is that same cursor sealed:
+// its org was fixed at mint and it can never name another, which is a deliberate
+// divergence from sessions — multi-org automation mints one token per org and
+// swaps the Authorization header, never the URLs. Outside its org the answer is
+// 404 by the disclosure rule: to that credential the org does not exist, and
+// answering 403 would confirm it does.
+func tokenScopeAllows(r *http.Request, rawOrgID string) bool {
+	tok := httpx.TokenAuthFrom(r.Context())
+	return tok == nil || sameOrgID(tok.OrgID, rawOrgID)
+}
+
+// sameOrgID compares two org ids as IDENTITIES rather than as strings, because
+// the two sides reach here spelled differently: the token's org is canonical
+// text out of the database, while the path or query value is whatever the
+// caller typed. uuid.Parse accepts uppercase and unhyphenated forms, and every
+// gate around this one hands such a value straight to Postgres, which equates
+// them — so a raw string compare would 404 a token on its OWN org for a request
+// a session answers 200. Anything that is not a pair of parseable uuids falls
+// back to exact equality, which is what local mode's sentinel org needs.
+func sameOrgID(a, b string) bool {
+	if a == b {
+		return true
+	}
+	parsedA, errA := uuid.Parse(a)
+	parsedB, errB := uuid.Parse(b)
+	return errA == nil && errB == nil && parsedA == parsedB
+}
+
 // RequireOrgMember validates {org_id} from the URL path and checks the caller
 // is a member of that org (any role). Returns (orgID, userID, true) on success;
 // writes an error and returns ("", "", false) on failure. The read-only sibling
@@ -306,6 +350,12 @@ func writeForbidden(w http.ResponseWriter, msg string) {
 func (az *Checker) RequireOrgMember(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	rawOrgID := r.PathValue("org_id")
 	if _, err := uuid.Parse(rawOrgID); err != nil {
+		httpx.NotFound(w, "org")
+		return
+	}
+	// Ahead of the membership probe: the caller may well be a member here and
+	// still not be able to reach the org with the credential they used.
+	if !tokenScopeAllows(r, rawOrgID) {
 		httpx.NotFound(w, "org")
 		return
 	}
@@ -335,6 +385,14 @@ func (az *Checker) RequireOrgMember(w http.ResponseWriter, r *http.Request) (org
 func (az *Checker) RequireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	rawOrgID := r.PathValue("org_id")
 	if _, err := uuid.Parse(rawOrgID); err != nil {
+		httpx.NotFound(w, "org")
+		return
+	}
+	// Before the admin probe, and before the membership read on its denial
+	// path: out-of-scope is 404 whatever role the caller holds there, so the
+	// two-valued denial below never gets to disclose an org this credential
+	// cannot name.
+	if !tokenScopeAllows(r, rawOrgID) {
 		httpx.NotFound(w, "org")
 		return
 	}

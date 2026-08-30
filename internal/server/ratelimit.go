@@ -81,8 +81,33 @@ const (
 	signedWebhookBurst = 100.0
 )
 
+// API-token authentication-failure tuning. This tier meters something the two
+// above do not: not requests, but FAILURES. A caller presenting a valid token
+// never touches the bucket however fast it calls — the routes it reaches are
+// authenticated, and capping them would be a throughput limit on legitimate
+// automation, which is not what this is for. What it bounds is guessing: a
+// token is 32 random bytes, so nobody is finding one by search, but a bucket in
+// front of the lookup keeps a flood of forged Bearers from spending a database
+// round-trip each on the way to their 401.
+//
+// The human-login numbers are right for that, and for the same reason: twenty
+// consecutive failures from one address is already past any explicable
+// misconfiguration (a stale token in a deploy, a typo pasted into a CI secret),
+// and one per second after that leaves a broken client retrying without ever
+// looking like a search. It is a separate limiter from the pre-auth tier rather
+// than the same one because the populations are unrelated — a shared budget
+// would let a login flood lock out an org's automation, and vice versa.
+const (
+	// tokenAuthFailureRatePerSec is the sustained per-IP refill of the
+	// failure budget.
+	tokenAuthFailureRatePerSec = 1.0
+	// tokenAuthFailureBurst is how many failures one address may spend
+	// before the sustained rate bites.
+	tokenAuthFailureBurst = 20.0
+)
+
 // rateLimitBucketTTL bounds how long an idle per-IP bucket is retained,
-// shared by both tiers above. A flood of distinct source IPs is the
+// shared by every tier above. A flood of distinct source IPs is the
 // workload that grows the map, and it is also what drives the opportunistic
 // sweep that reclaims it, so the live set stays roughly proportional to
 // recently-active IPs.
@@ -143,19 +168,63 @@ func newIPRateLimiter(ratePerSec, burst float64, ttl time.Duration) *ipRateLimit
 // token when it does. On refusal the second return value is the time
 // until the next token accrues, for the Retry-After header.
 func (l *ipRateLimiter) allow(ip string) (bool, time.Duration) {
-	now := l.now()
-
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	b := l.refillLocked(ip)
+	if b.tokens >= 1 {
+		b.tokens--
+		return true, 0
+	}
+	return false, l.waitLocked(b)
+}
+
+// peek answers the same question as allow without spending anything — the
+// check half of a budget the caller charges separately, when what the budget
+// meters is the OUTCOME of the work rather than the request that asked for it.
+// The API-token path is that shape: a valid credential must cost its holder
+// nothing, so the bucket is consulted before the lookup and charged only once
+// the lookup has failed.
+func (l *ipRateLimiter) peek(ip string) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	b := l.refillLocked(ip)
+	if b.tokens >= 1 {
+		return true, 0
+	}
+	return false, l.waitLocked(b)
+}
+
+// charge spends one token for ip, peek's other half. It reports nothing: the
+// caller has already decided to refuse this request, and whether the bucket ran
+// dry on THIS charge or the previous one only changes what the NEXT request is
+// told. The floor at zero is what keeps that true — without it a flood would
+// bank a negative balance the IP has to refill through before its first honest
+// request is served again.
+func (l *ipRateLimiter) charge(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	b := l.refillLocked(ip)
+	if b.tokens = b.tokens - 1; b.tokens < 0 {
+		b.tokens = 0
+	}
+}
+
+// refillLocked returns ip's bucket, creating it full on first sight and
+// otherwise crediting the tokens that accrued since its last touch. It stamps
+// seen, so every caller (spending or not) keeps the bucket off the sweep.
+// Assumes l.mu is held.
+func (l *ipRateLimiter) refillLocked(ip string) *ipBucket {
+	now := l.now()
 	l.sweepLocked(now)
 
 	b := l.buckets[ip]
 	if b == nil {
-		// First request from this IP: a full bucket, less the token this
-		// request spends.
-		l.buckets[ip] = &ipBucket{tokens: l.burst - 1, last: now, seen: now}
-		return true, 0
+		b = &ipBucket{tokens: l.burst, last: now, seen: now}
+		l.buckets[ip] = b
+		return b
 	}
 
 	// Refill for the elapsed interval, capped at burst. A non-monotonic
@@ -166,23 +235,20 @@ func (l *ipRateLimiter) allow(ip string) (bool, time.Duration) {
 		b.last = now
 	}
 	b.seen = now
+	return b
+}
 
-	if b.tokens >= 1 {
-		b.tokens--
-		return true, 0
-	}
-
-	// Not enough for a whole token: hand back the wait until one accrues.
-	// Guard a non-positive rate (a misconfigured limiter with no refill) so
-	// the division can't panic — production passes preAuthRatePerSec=1, but
-	// keep allow() total for any caller. With no refill a spent bucket never
-	// recovers, so report a fixed back-off rather than +Inf. Placed here, not
-	// at the top, so a zero-rate limiter still honors its burst first.
+// waitLocked is how long until b holds a whole token, for the Retry-After
+// header on a refusal. Guards a non-positive rate (a misconfigured limiter with
+// no refill) so the division can't panic — production passes a positive rate,
+// but keep the refusal path total for any caller. With no refill a spent bucket
+// never recovers, so report a fixed back-off rather than +Inf. Assumes l.mu is
+// held; the receiver is only for l.rate.
+func (l *ipRateLimiter) waitLocked(b *ipBucket) time.Duration {
 	if l.rate <= 0 {
-		return false, time.Second
+		return time.Second
 	}
-	wait := time.Duration((1 - b.tokens) / l.rate * float64(time.Second))
-	return false, wait
+	return time.Duration((1 - b.tokens) / l.rate * float64(time.Second))
 }
 
 // sweepLocked evicts buckets idle longer than ttl so the map can't grow
@@ -239,19 +305,27 @@ func rateLimitWith(limiter *ipRateLimiter, next http.Handler) http.Handler {
 			return
 		}
 		if ok, retryAfter := limiter.allow(clientIP(r)); !ok {
-			// Retry-After is delay-seconds (RFC 7231). Round up so a
-			// sub-second wait still tells the caller to back off, and floor
-			// at 1 — a 0 would invite an instant retry that is still capped.
-			secs := int(math.Ceil(retryAfter.Seconds()))
-			if secs < 1 {
-				secs = 1
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(secs))
-			httpx.WriteErrors(w, http.StatusTooManyRequests, httpx.ErrorItem{
-				Reason: httpx.ReasonRateLimited, Message: "rate limit exceeded",
-			})
+			writeRateLimited(w, retryAfter)
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// writeRateLimited renders the one 429 every tier speaks, so a caller that
+// meters a route and one that meters an outcome (the API-token failure budget,
+// which has no wrapper of its own) are indistinguishable to the client.
+//
+// Retry-After is delay-seconds (RFC 7231). Round up so a sub-second wait still
+// tells the caller to back off, and floor at 1 — a 0 would invite an instant
+// retry that is still capped.
+func writeRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
+	secs := int(math.Ceil(retryAfter.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	httpx.WriteErrors(w, http.StatusTooManyRequests, httpx.ErrorItem{
+		Reason: httpx.ReasonRateLimited, Message: "rate limit exceeded",
 	})
 }

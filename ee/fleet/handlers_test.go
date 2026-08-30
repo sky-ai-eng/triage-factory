@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -204,5 +206,41 @@ func TestSandboxClaimDerivation(t *testing.T) {
 	skewed := sandboxClaim(domain.ExecutorClaim{ID: "c3", ClaimedAt: claimed, ReleasedAt: &backwards}, now)
 	if skewed.DurationS != 0 {
 		t.Errorf("skewed release DurationS = %v, want 0", skewed.DurationS)
+	}
+}
+
+// TestGateRefusesAPITokens pins the credential rule: the console's subject is
+// the deployment, which no org-scoped token can name, so a token-authed caller
+// who would otherwise be admitted gets 403 rather than the 404 the gate uses
+// for callers who must not learn the console exists.
+func TestGateRefusesAPITokens(t *testing.T) {
+	entitlements.Reset()
+	t.Cleanup(entitlements.Reset)
+	entitlements.RegisterDeploymentProvider(fleetLicensed{})
+	// Local mode is a single implicit operator, so the operator half of the
+	// gate passes and the token check is the only thing left to refuse.
+	runmode.SetForTest(t, runmode.ModeLocal)
+
+	h := &handler{}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/fleet/overview", nil)
+	ctx := httpx.WithClaims(context.Background(), &verify.Claims{Subject: "u1", Email: "op@example.com"})
+	ctx = httpx.WithTokenAuth(ctx, &httpx.TokenAuth{TokenID: "tok-1", OrgID: "org-1"})
+	req = req.WithContext(ctx)
+
+	if claims := h.gate(rec, req); claims != nil {
+		t.Fatalf("gate must return nil for a token-authed caller")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("token-authed gate = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+
+	// The same caller, session-authed, is admitted — so the 403 above is about
+	// the credential and nothing else.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/api/fleet/overview", nil).WithContext(
+		httpx.WithClaims(context.Background(), &verify.Claims{Subject: "u1", Email: "op@example.com"}))
+	if claims := h.gate(rec, req); claims == nil {
+		t.Fatalf("session-authed operator must pass the gate, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

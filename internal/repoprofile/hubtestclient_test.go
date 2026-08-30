@@ -38,7 +38,7 @@ func dialHubTestClient(t *testing.T, hub *websocket.Hub) *hubTestClient {
 func dialHubTestClientAs(t *testing.T, hub *websocket.Hub, userID, orgID string) *hubTestClient {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hub.HandleWS(w, r, userID, orgID, "")
+		hub.HandleWS(w, r, websocket.ConnIdentity{UserID: userID, OrgID: orgID})
 	}))
 	t.Cleanup(srv.Close)
 	url := strings.Replace(srv.URL, "http://", "ws://", 1)

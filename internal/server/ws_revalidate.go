@@ -20,11 +20,16 @@ import (
 const DefaultSessionRevalidateInterval = 60 * time.Second
 
 // RunSessionRevalidation runs the kick backstop until ctx is cancelled:
-// on each tick it asks the Hub for every distinct session id backing a
-// live local connection and closes the ones that no longer look up as an
-// active session. A no-op when auth isn't wired (local mode never calls
-// this — see internal/app's gating) so it's safe to start unconditionally
-// from any role that serves HTTP.
+// on each tick it asks the Hub for every distinct credential backing a
+// live local connection and closes the ones that no longer look up as
+// active. Both credential kinds are swept — session cookies and API
+// tokens — because a revoked token has to stop a stream on the same
+// bounded cadence a revoked session does, and nothing else would ever
+// close it: a token carries no logout and the removal kick that reaches
+// sessions is a per-user, per-org broadcast, not a per-credential one.
+// A no-op when auth isn't wired (local mode never calls this — see
+// internal/app's gating) so it's safe to start unconditionally from any
+// role that serves HTTP.
 func (s *Server) RunSessionRevalidation(ctx context.Context, interval time.Duration) {
 	if s.authDeps == nil {
 		serverLog.Warn("session revalidation not started: auth not wired")
@@ -40,12 +45,12 @@ func (s *Server) RunSessionRevalidation(ctx context.Context, interval time.Durat
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s.revalidateSessionsOnce(ctx)
+			s.revalidateCredentialsOnce(ctx)
 		}
 	}
 }
 
-func (s *Server) revalidateSessionsOnce(ctx context.Context) {
+func (s *Server) revalidateCredentialsOnce(ctx context.Context) {
 	n := s.ws.RevalidateSessions(func(sid string) bool {
 		id, err := uuid.Parse(sid)
 		if err != nil {
@@ -67,5 +72,24 @@ func (s *Server) revalidateSessionsOnce(ctx context.Context) {
 	})
 	if n > 0 {
 		serverLog.Info("session revalidation kicked stale local connections", "n", n)
+	}
+
+	if s.authDeps.apiTokens == nil {
+		return
+	}
+	tn := s.ws.RevalidateTokens(func(tokenID string) bool {
+		// LookupSystem takes the plaintext, not the id, so this asks the
+		// question by id directly: is there still a live row here. Same
+		// fail-open-on-error posture as the session sweep, for the same
+		// reason — a DB blip must not disconnect every headless client.
+		live, err := s.authDeps.apiTokens.IsLiveSystem(ctx, tokenID)
+		if err != nil {
+			serverLog.Warn("api token revalidation lookup failed; treating as valid this tick", "token_id", tokenID, "error", err)
+			return true
+		}
+		return live
+	})
+	if tn > 0 {
+		serverLog.Info("api token revalidation kicked stale local connections", "n", tn)
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -117,6 +119,17 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// The Bearer path is the cookie's peer, not its fallback: ANY
+		// Authorization header sends the request here and it is decided here,
+		// however it fails. Falling back to the cookie on a bad token would
+		// mean a request that named a credential got served under a different,
+		// ambient one — the same result-set-widening bug class as a filter that
+		// opens up when it can't parse its input.
+		if header := r.Header.Get("Authorization"); header != "" {
+			s.serveTokenAuth(w, r, next, header)
+			return
+		}
+
 		cookie, err := r.Cookie(s.sidCookieName())
 		if err != nil {
 			writeUnauth(w)
@@ -227,6 +240,187 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// bearerScheme is the one Authorization scheme this server accepts, matched
+// case-insensitively.
+const bearerScheme = "Bearer"
+
+// bearerCredential returns the credential from an Authorization header value
+// when it is a well-formed Bearer, and ok=false for anything else — another
+// scheme, no separating space, or a scheme with nothing after it. Callers that
+// only need to know whether a request carries a Bearer at all read the second
+// return value and drop the first.
+//
+// The separator is one OR MORE spaces, which is the grammar both RFC 7235
+// (`auth-scheme 1*SP token68`) and RFC 6750 write. A client that doubles the
+// space has sent a valid request with an unambiguous credential in it, so
+// folding the extra into the secret — where it could only ever fail to match a
+// hash — would be us answering 401 to something we are required to accept.
+// Only spaces count: a tab is not SP, and a header split on one is malformed.
+func bearerCredential(header string) (string, bool) {
+	if len(header) <= len(bearerScheme) || !strings.EqualFold(header[:len(bearerScheme)], bearerScheme) {
+		return "", false
+	}
+	rest := header[len(bearerScheme):]
+	credential := strings.TrimLeft(rest, " ")
+	if len(credential) == len(rest) || credential == "" {
+		// Nothing separated the scheme from what follows (so this is some
+		// longer scheme name, not Bearer), or nothing followed it at all.
+		return "", false
+	}
+	return credential, true
+}
+
+// serveTokenAuth is withSession's Bearer branch: it resolves an API token to
+// the (user, org) pair a session cookie would have resolved to, and seeds the
+// same request context so every handler downstream is unaware of which
+// credential arrived. Multi-mode only — local mode never reaches here, because
+// withSession's synthetic-identity branch returns before the header is read.
+//
+// Every way this can fail — unknown scheme, no "tf_" prefix, no matching row,
+// revoked, past its stored expiry, past the org's current max-age cap, or an
+// address outside the token's allowlist — answers the same 401. The refusals
+// are deliberately indistinguishable: telling a caller which one applied tells
+// them how close they got.
+//
+// What this does NOT do, deliberately: re-check the principal's org membership,
+// their seat, or whether the org has since turned on SSO. That is not an
+// omission, it is parity — the cookie path checks the same things exactly once,
+// at mint, and leaves per-request enforcement to the RLS membership predicates
+// every read runs under, the authz probes each gate re-runs, and revocation at
+// the moment access is taken away (org removal revokes the org's tokens beside
+// its sessions). A per-request membership read here would buy a few seconds of
+// latency on a removal the revoke already handles, at the cost of a database
+// round-trip on every headless call.
+func (s *Server) serveTokenAuth(w http.ResponseWriter, r *http.Request, next http.Handler, header string) {
+	if s.authDeps.apiTokens == nil {
+		// A wiring gap, not a caller fault: refuse rather than fall through to
+		// a route that would then run with no identity at all. Nothing is
+		// charged to the caller's failure budget for our own missing store.
+		authLog.Warn("bearer auth attempted with no api-token store wired")
+		writeUnauth(w)
+		return
+	}
+
+	// The failure budget is consulted BEFORE the lookup and spent only after
+	// one fails, so a valid token is never rate-limited however fast it calls.
+	// Same client-IP resolution as the limiter's own keying and as the CIDR
+	// check below — one answer to "who is calling" for all three.
+	ip := clientIP(r)
+	limiter := s.tokenAuthFailureLimiter
+	if limiter != nil {
+		if ok, retryAfter := limiter.peek(ip); !ok {
+			writeRateLimited(w, retryAfter)
+			return
+		}
+	}
+	refuse := func() {
+		if limiter != nil {
+			limiter.charge(ip)
+		}
+		writeUnauth(w)
+	}
+
+	raw, ok := bearerCredential(header)
+	if !ok || !strings.HasPrefix(raw, apitokens.Prefix) {
+		// Shape-check before the round-trip: a string that was never a token
+		// cannot match a hash of one, so there is nothing to ask the database.
+		refuse()
+		return
+	}
+
+	// The Bearer path's equivalent of session.lookup, and the same reason for
+	// the span: it is the whole per-request auth cost, and the statement span
+	// underneath it wouldn't say what the read was for.
+	lookupCtx, lookupSpan := tracer.Start(r.Context(), "apitoken.lookup")
+	identity, err := s.authDeps.apiTokens.LookupSystem(lookupCtx, raw)
+	switch {
+	case err != nil:
+		lookupSpan.SetStatus(codes.Error, "lookup failed")
+	case identity == nil:
+		// Not an error: an expired or revoked token is how a credential
+		// normally ends.
+		lookupSpan.SetAttributes(telemetry.Outcome("not_found"))
+	default:
+		lookupSpan.SetAttributes(telemetry.Outcome("found"))
+	}
+	lookupSpan.End()
+	if err != nil {
+		// A database failure is not "no such token": answering 401 here would
+		// tell a caller holding a good credential that it had been revoked.
+		httpx.InternalError(w, "auth", fmt.Errorf("api token lookup: %w", err))
+		return
+	}
+	if identity == nil {
+		refuse()
+		return
+	}
+	if !addrInCIDRs(ip, identity.AllowedCIDRs) {
+		refuse()
+		return
+	}
+
+	// Best-effort last-used bump, backgrounded for the same reason the
+	// session path backgrounds its last-seen write: the store is admin-pool
+	// by construction and the request must not wait on bookkeeping.
+	go func(tokenID string) {
+		if err := s.authDeps.apiTokens.TouchLastUsedSystem(context.Background(), tokenID); err != nil {
+			authLog.Warn("touch last_used failed", "token_id", tokenID, "error", err)
+		}
+	}(identity.TokenID)
+
+	// The claims a token synthesizes carry only what a token knows: the
+	// principal it acts as and that principal's email, for display. There is no
+	// GoTrue login behind this request, so no AuthIdentityID is injected — a
+	// handler that needs one is session-only and says so at its own door.
+	ctx := httpx.WithClaims(r.Context(), &verify.Claims{
+		Subject: identity.UserID,
+		Email:   identity.Email,
+	})
+	// The token's org is the request's tenant, injected exactly where the
+	// session path injects the session cursor's active org. That is what makes
+	// the ~130 cursor-scoped routes work Bearer-only with no re-plumbing.
+	ctx = httpx.WithOrgID(ctx, identity.OrgID)
+	ctx = httpx.WithTokenAuth(ctx, &httpx.TokenAuth{
+		TokenID: identity.TokenID,
+		OrgID:   identity.OrgID,
+	})
+	next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// addrInCIDRs reports whether ip falls inside a token's allowlist. An empty
+// allowlist is no restriction, so it admits everything; a non-empty one that
+// cannot be evaluated — an unparseable address, or none at all because
+// TF_CAPTURE_CLIENT_IP is off — admits nothing. Failing closed is the only
+// honest reading of "only from these addresses" when the address is unknown.
+//
+// Addresses are unmapped before matching: a dual-stack listener hands Go
+// ::ffff:10.0.0.1 for a v4 client, and netip.Prefix.Contains refuses a
+// cross-family comparison, so without this an operator's 10.0.0.0/8 would
+// silently match nothing. An entry that fails to parse is skipped rather than
+// treated as a match — the column stores canonical ranges, so this is
+// unreachable in practice, and skipping keeps a corrupt row from widening the
+// allowlist.
+func addrInCIDRs(ip string, cidrs []string) bool {
+	if len(cidrs) == 0 {
+		return true
+	}
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, c := range cidrs {
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			continue
+		}
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // needsRefresh is true when the JWT will expire within the refresh
@@ -379,6 +573,20 @@ func (s *Server) withCSRFOriginCheck(next http.Handler) http.Handler {
 		}
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		// A Bearer request needs no origin check. This wrapper runs OUTSIDE
+		// withSession, so it sees the header and not whether the token behind
+		// it is any good — and that is sufficient, because what CSRF defends
+		// against is a browser attaching an AMBIENT credential to a request
+		// the user's page did not intend, and a cross-site browser context
+		// cannot attach an Authorization header at all without a CORS
+		// preflight this server never approves. So the header's presence
+		// already says the request was made deliberately by its sender.
+		// Whether the credential is good is withSession's decision, one layer
+		// in, and a bad one is refused there rather than here.
+		if _, ok := bearerCredential(r.Header.Get("Authorization")); ok {
 			next.ServeHTTP(w, r)
 			return
 		}

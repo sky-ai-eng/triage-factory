@@ -829,3 +829,72 @@ func TestTouchLastUsed(t *testing.T) {
 		t.Errorf("TouchLastUsed with a malformed id: %v, want nil", err)
 	}
 }
+
+// TestIsLiveSystem pins the id-keyed liveness probe against the same four
+// deaths LookupSystem answers to, since the websocket sweep that calls it has
+// only an id and must reach the identical verdict.
+func TestIsLiveSystem(t *testing.T) {
+	s, h, userID, orgID := newStoreForTest(t)
+	ctx := context.Background()
+
+	live := func(id string) bool {
+		t.Helper()
+		got, err := s.IsLiveSystem(ctx, id)
+		if err != nil {
+			t.Fatalf("IsLiveSystem: %v", err)
+		}
+		return got
+	}
+
+	fresh, _, err := s.MintSystem(ctx, userID, orgID, "fresh", nil, nil, userID)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if !live(fresh.ID) {
+		t.Error("a freshly minted token reads as dead")
+	}
+
+	revoked, _, err := s.MintSystem(ctx, userID, orgID, "revoked", nil, nil, userID)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if err := s.RevokeSystem(ctx, userID, revoked.ID, userID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if live(revoked.ID) {
+		t.Error("a revoked token reads as live")
+	}
+
+	lapsed, _, err := s.MintSystem(ctx, userID, orgID, "lapsed", nil, nil, userID)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	expire(t, h, lapsed.ID, time.Hour)
+	if live(lapsed.ID) {
+		t.Error("an expired token reads as live")
+	}
+
+	// The org's cap applies here exactly as it does at use: tighten it and a
+	// token that was live a moment ago is not.
+	capped, _, err := s.MintSystem(ctx, userID, orgID, "capped", nil, nil, userID)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	backdate(t, h, capped.ID, 40*24*time.Hour)
+	if !live(capped.ID) {
+		t.Fatal("an old token in an uncapped org reads as dead")
+	}
+	setCap(t, h, orgID, days(30))
+	if live(capped.ID) {
+		t.Error("a token past the org's cap reads as live")
+	}
+
+	// Ids that name nothing are an answer, not an error — including one
+	// Postgres would refuse to cast.
+	if live("00000000-0000-0000-0000-000000000000") {
+		t.Error("an unknown id reads as live")
+	}
+	if got, err := s.IsLiveSystem(ctx, "not-a-uuid"); err != nil || got {
+		t.Errorf("IsLiveSystem(non-uuid) = (%v, %v), want (false, nil)", got, err)
+	}
+}

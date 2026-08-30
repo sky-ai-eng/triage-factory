@@ -1,9 +1,15 @@
 package websocket
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	ws "github.com/coder/websocket"
 )
 
 // fakeBackplane records every event Publish receives, standing in for
@@ -218,5 +224,76 @@ func TestRevalidateSessions_NilHub(t *testing.T) {
 	var h *Hub
 	if got := h.RevalidateSessions(func(string) bool { return false }); got != 0 {
 		t.Fatalf("nil hub RevalidateSessions() = %d, want 0", got)
+	}
+}
+
+// dialHubTokenClient is dialHubClient's Bearer twin: a connection whose
+// credential is an API token rather than a session.
+func dialHubTokenClient(t *testing.T, h *Hub, userID, orgID, tokenID string) *ws.Conn {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.HandleWS(w, r, ConnIdentity{UserID: userID, OrgID: orgID, TokenID: tokenID})
+	}))
+	t.Cleanup(srv.Close)
+	url := strings.Replace(srv.URL, "http://", "ws://", 1)
+	conn, _, err := ws.Dial(context.Background(), url, nil)
+	if err != nil {
+		t.Fatalf("dial hub: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(ws.StatusNormalClosure, "") })
+	return conn
+}
+
+// TestRevalidateTokens_ClosesInvalidAndSparesValid is RevalidateSessions'
+// contract for the Bearer half: a connection whose token fails isValid closes,
+// one whose token still lives is left streaming.
+func TestRevalidateTokens_ClosesInvalidAndSparesValid(t *testing.T) {
+	h := NewHub()
+	revoked := dialHubTokenClient(t, h, "user-1", "org-1", "tok-revoked")
+	live := dialHubTokenClient(t, h, "user-2", "org-1", "tok-live")
+	waitUserConnCount(t, h, "user-1", 1)
+	waitUserConnCount(t, h, "user-2", 1)
+
+	n := h.RevalidateTokens(func(tokenID string) bool {
+		return tokenID != "tok-revoked"
+	})
+	if n != 1 {
+		t.Fatalf("RevalidateTokens closed %d connections, want 1", n)
+	}
+	expectCloseCode(t, revoked, CloseSessionRevoked)
+	expectAlive(t, h, live, "org-1")
+}
+
+// TestRevalidateSweepsDoNotCrossCredentialKinds is what keeps the two sweeps
+// independent: a session sweep must not see token-backed connections, and vice
+// versa, or a store that can only answer for one kind would close the other's
+// sockets by saying no.
+func TestRevalidateSweepsDoNotCrossCredentialKinds(t *testing.T) {
+	h := NewHub()
+	dialHubClient(t, h, "user-1", "org-1", "sid-1")
+	dialHubTokenClient(t, h, "user-2", "org-1", "tok-1")
+	waitUserConnCount(t, h, "user-1", 1)
+	waitUserConnCount(t, h, "user-2", 1)
+
+	h.RevalidateSessions(func(sid string) bool {
+		if sid != "sid-1" {
+			t.Errorf("session sweep saw %q; it must only see session-backed conns", sid)
+		}
+		return true
+	})
+	h.RevalidateTokens(func(tokenID string) bool {
+		if tokenID != "tok-1" {
+			t.Errorf("token sweep saw %q; it must only see token-backed conns", tokenID)
+		}
+		return true
+	})
+}
+
+// TestRevalidateTokens_NilHub matches the rest of the type's nil-receiver
+// convention.
+func TestRevalidateTokens_NilHub(t *testing.T) {
+	var h *Hub
+	if got := h.RevalidateTokens(func(string) bool { return false }); got != 0 {
+		t.Fatalf("nil hub RevalidateTokens() = %d, want 0", got)
 	}
 }

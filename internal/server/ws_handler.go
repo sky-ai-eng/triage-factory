@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // handleWS wraps the hub's HandleWS so the websocket package stays
@@ -14,7 +15,10 @@ import (
 //
 // /api/ws is mounted via s.api(...), so withSession has already run
 // by the time we get here: in local mode both values are the sentinel
-// org/user, in multi mode they're the real session identity.
+// org/user, in multi mode they're the identity the request's credential
+// resolved to — a session cookie's, or an API token's (a non-browser client
+// can set the handshake's Authorization header, so Bearer works here by
+// construction, and the org this scopes to is the one the token is sealed to).
 //
 // Three identity shapes flow through here:
 //
@@ -66,11 +70,17 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var sid string
+	// Which credential authorized the handshake, so the revalidation backstop
+	// can close this socket when that credential dies. Exactly one of the two
+	// is set on an authenticated request, and neither on the unscoped path.
+	id := websocket.ConnIdentity{UserID: userID, OrgID: orgID}
 	if sess := SessionFrom(r.Context()); sess != nil {
-		sid = sess.ID.String()
+		id.SessionID = sess.ID.String()
 	}
-	s.ws.HandleWS(w, r, userID, orgID, sid)
+	if tok := httpx.TokenAuthFrom(r.Context()); tok != nil {
+		id.TokenID = tok.TokenID
+	}
+	s.ws.HandleWS(w, r, id)
 }
 
 // writeNoActiveOrg renders the 409 the FE treats as "this connection has

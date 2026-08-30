@@ -102,7 +102,7 @@ func TestPresentFor_NilHub(t *testing.T) {
 func dialPresenceClient(t *testing.T, h *Hub, orgID string) (*ws.Conn, func()) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h.HandleWS(w, r, "user", orgID, "")
+		h.HandleWS(w, r, ConnIdentity{UserID: "user", OrgID: orgID})
 	}))
 	url := strings.Replace(srv.URL, "http://", "ws://", 1)
 	conn, _, err := ws.Dial(context.Background(), url, nil)
