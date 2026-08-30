@@ -794,6 +794,7 @@ func TestSessionVerbs_RefuseTokenAuth(t *testing.T) {
 		{"logout", "POST", "/api/auth/logout", map[string]any{}},
 		{"logout all", "POST", "/api/auth/logout/all", map[string]any{}},
 		{"invite accept", "POST", "/api/invites/accept", map[string]any{"token": "whatever"}},
+		{"org create", "POST", "/api/orgs", map[string]any{"name": "Token Made This"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -803,6 +804,18 @@ func TestSessionVerbs_RefuseTokenAuth(t *testing.T) {
 				t.Errorf("message %q does not name the session requirement", msg)
 			}
 		})
+	}
+
+	// The refusal is not just a status: nothing was created. A token's org is
+	// sealed at mint, so an org minted under one would be reachable by no
+	// credential its owner holds.
+	var orgs int
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT count(*) FROM orgs WHERE name = 'Token Made This'`).Scan(&orgs); err != nil {
+		t.Fatalf("count orgs: %v", err)
+	}
+	if orgs != 0 {
+		t.Errorf("a token created %d org(s); it must create none", orgs)
 	}
 
 	// The guard is about the credential, not the route: the same calls under a
@@ -880,7 +893,7 @@ func TestSessionVerbs_NonAPITokenBearerOnGuardedRouteIs401(t *testing.T) {
 	userID := r.seedUser()
 	orgID, _ := r.seedOrg(userID, "guarded-401-org")
 
-	for _, path := range []string{"/api/me/active-org", "/api/auth/logout/all", "/api/invites/accept"} {
+	for _, path := range []string{"/api/me/active-org", "/api/auth/logout/all", "/api/invites/accept", "/api/orgs"} {
 		rec := r.tokensJSON("POST", path,
 			map[string]any{"org_id": orgID.String(), "token": "x"}, "", "definitely-not-ours")
 		if rec.Code != http.StatusUnauthorized {
