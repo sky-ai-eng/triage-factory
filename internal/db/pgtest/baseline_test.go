@@ -22,7 +22,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 	h.Reset(t)
 
 	expectedTables := []string{
-		"orgs", "teams", "users", "user_github_identities", "user_jira_identities", "memberships", "org_memberships", "sessions",
+		"orgs", "teams", "users", "user_github_identities", "user_jira_identities", "memberships", "org_memberships", "sessions", "user_api_tokens",
 		"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
 		"team_github_groups", "team_github_repos",
 		"prompts", "events_catalog", "entities", "entity_links", "events",

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/aead"
+	"github.com/sky-ai-eng/triage-factory/internal/apitokens"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
@@ -131,10 +132,15 @@ func (a *App) wireAuth(ctx context.Context) error {
 	}
 
 	sessionStore := sessions.NewStore(a.database, sessionKey)
+	// Same admin handle as the session store, for the same reason: a token
+	// lookup runs before the request has any claims to install, so it cannot
+	// ride RLS.
+	tokenStore := apitokens.NewStore(a.database)
 	if err := a.srv.SetAuthDeps(
 		ctx,
 		verifier,
 		sessionStore,
+		tokenStore,
 		os.Getenv("TF_GOTRUE_URL"),
 		publicURL,
 		cookieKey,

@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/sky-ai-eng/triage-factory/internal/apitokens"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -54,6 +55,12 @@ func SessionFrom(ctx context.Context) *sessions.Session {
 type authDeps struct {
 	verifier *verify.Verifier
 	sessions *sessions.Store
+
+	// apiTokens is the Bearer half of the same identity story: a token is a
+	// session cursor with its org fixed at mint, so it resolves the same
+	// (user, active org) pair the cookie path resolves and lands beside it
+	// rather than in a parallel dependency of its own.
+	apiTokens *apitokens.Store
 
 	// gotrueRefresh performs the refresh-token dance when a JWT is
 	// near expiry. Returns (newJWT, newRefresh, jwtExpiresAtUnix).

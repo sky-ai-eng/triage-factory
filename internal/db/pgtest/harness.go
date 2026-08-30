@@ -426,6 +426,11 @@ func NewInstance(t *testing.T) (adminDB *sql.DB, adminDSN string) {
 var orgScopedTables = []string{
 	// Tenancy:
 	"sessions",
+	// user_api_tokens cascades from both users and orgs, so TRUNCATE CASCADE
+	// would reach it either way; listed with sessions because it is the other
+	// half of the same credential surface and a reader looking for one expects
+	// to find the other.
+	"user_api_tokens",
 	"memberships",
 	"org_memberships",
 	"org_invites",

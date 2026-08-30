@@ -624,6 +624,15 @@ CREATE TABLE public.org_settings (
     -- Stated, not inferred: a missing org_github_apps row also describes an org
     -- on a shared App. UpdateSettings omits it; SetGitHubCredentialClass writes it.
     github_credential_class text DEFAULT 'pat'::text NOT NULL,
+    -- Ceiling on how long any of the org's API tokens may live, in days. NULL
+    -- (the default, and the SQLite twin's too) = uncapped. It is applied at USE
+    -- rather than stamped into a token at mint — effective expiry is
+    -- min(expires_at, created_at + cap) computed against the CURRENT cap — so
+    -- tightening it immediately shortens every existing token in the org, with
+    -- no grandfathering and no sweep job. Nothing folds it into a stored
+    -- expires_at: a token's row records the expiry it was minted with, and this
+    -- narrows that at every use.
+    api_token_max_age_days integer CHECK (api_token_max_age_days IS NULL OR api_token_max_age_days BETWEEN 1 AND 365),
     -- Optimistic-concurrency token for the whole-row settings save: the read
     -- hands it to the client, the write requires it, a stale token gets 409, and
     -- there is no merge. Bumped by OrgsStore.UpdateSettings alone, and it covers
@@ -5111,6 +5120,61 @@ REVOKE ALL ON public.workspace_snapshots FROM anon, authenticated, service_role;
 -- The executor writes the lifecycle, reads it back for the pre-Put supersede
 -- check, and deletes it with the blob at cleanup and in the retention reaper.
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.workspace_snapshots TO tf_system;
+
+
+-- user_api_tokens: per-user, org-scoped bearer credentials — a sealed session
+-- cursor. A session is (user, movable active_org); a token is the same pair with
+-- the org fixed at mint, which is why org_id is NOT NULL: there is no
+-- no-tenant token, and multi-org automation holds one token per org.
+-- PG-only like sessions — local mode's synthetic identity is already headless,
+-- so there is nothing there for a token to be.
+-- Only sha256 of the full literal token (the "tf_" prefix included) is stored;
+-- the plaintext escapes exactly once, from the mint call. The hash is unique so
+-- lookup is an index probe rather than a scan-and-compare. token_prefix is the
+-- first 11 characters of that plaintext ("tf_" + 8), kept so a list can name a
+-- token without holding the secret.
+-- name is deliberately NOT unique: rotation is mint-a-same-named-replacement,
+-- deploy, revoke-the-old, and a unique name would force a rename into every
+-- rotation.
+-- allowed_cidrs is defense in depth: the column carries ranges and decides
+-- nothing, and whatever matches a request against them is only as trustworthy
+-- as the deployment's TF_TRUSTED_PROXY_CIDR. NULL means no restriction; an
+-- empty array would be a token that can never be used, so the cardinality
+-- CHECK refuses one.
+-- expires_at is the token's own stored expiry. The org's
+-- org_settings.api_token_max_age_days cap is applied at USE, not stored here, so
+-- tightening it shortens every existing token in the org at once.
+CREATE TABLE public.user_api_tokens (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id       uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    org_id        uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
+    name          text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 100),
+    token_hash    bytea NOT NULL,
+    token_prefix  text  NOT NULL,
+    allowed_cidrs cidr[] CHECK (allowed_cidrs IS NULL OR cardinality(allowed_cidrs) BETWEEN 1 AND 20),
+    created_at    timestamp with time zone NOT NULL DEFAULT now(),
+    last_used_at  timestamp with time zone,
+    expires_at    timestamp with time zone CHECK (expires_at IS NULL OR expires_at > created_at),
+    revoked_at    timestamp with time zone
+);
+
+CREATE UNIQUE INDEX user_api_tokens_hash_uniq ON public.user_api_tokens (token_hash);
+CREATE INDEX user_api_tokens_user_org_idx ON public.user_api_tokens (user_id, org_id);
+
+ALTER TABLE public.user_api_tokens ENABLE ROW LEVEL SECURITY;
+
+-- The sessions shape: a row is the user's own credential, so the predicate is
+-- the owner and nothing else. internal/apitokens runs on the admin pool (token
+-- lookup happens before any claims exist), so these policies defend the
+-- app-pool surface a later "list my tokens" reader would use, exactly as
+-- sessions' do.
+CREATE POLICY user_api_tokens_modify ON public.user_api_tokens USING ((user_id = tf.current_user_id())) WITH CHECK ((user_id = tf.current_user_id()));
+CREATE POLICY user_api_tokens_select ON public.user_api_tokens FOR SELECT USING ((user_id = tf.current_user_id()));
+
+REVOKE ALL ON public.user_api_tokens FROM PUBLIC;
+REVOKE ALL ON public.user_api_tokens FROM anon, authenticated, service_role;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_api_tokens TO tf_app;
 
 
 -- Unified spend view: one row-per-spend shape UNION-ing the messages ledger

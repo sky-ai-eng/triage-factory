@@ -42,6 +42,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/apitokens"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -342,6 +343,7 @@ func newAuthRigWith(t *testing.T, publicURL string) *authRig {
 		t.Fatalf("seed cookie secret: %v", err)
 	}
 	store := sessions.NewStore(h.AdminDB, sessions.Key(encKey))
+	tokenStore := apitokens.NewStore(h.AdminDB)
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	fake := newSSOFakeGoTrue(t, ssoTestServiceToken)
@@ -353,7 +355,7 @@ func newAuthRigWith(t *testing.T, publicURL string) *authRig {
 	t.Cleanup(rigCancel)
 	// gotrueURL = fake: the real exchange/sso/admin code paths all run against
 	// the fake. gotrueAdminBaseURL derives from this same value.
-	if err := s.SetAuthDeps(rigCtx, v, store, fake.srv.URL, publicURL, cookieSecret); err != nil {
+	if err := s.SetAuthDeps(rigCtx, v, store, tokenStore, fake.srv.URL, publicURL, cookieSecret); err != nil {
 		t.Fatalf("SetAuthDeps: %v", err)
 	}
 
