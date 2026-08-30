@@ -830,6 +830,66 @@ func TestSessionVerbs_LogoutRefusesBearerWithoutSession(t *testing.T) {
 	assertFault(t, rec, http.StatusForbidden, "FORBIDDEN")
 }
 
+// TestSessionVerbs_NonAPITokenBearerIsNotTokenAuth pins the boundary of the
+// guard's header fallback: it asks for OUR token's shape, not for a Bearer.
+//
+// This server accepts exactly one Bearer form. A credential in any other shape
+// is not an API token, so the session verbs must not answer it "you need a
+// session" — that is both untrue and, on the pre-auth logout mount, a change to
+// what a caller who never touched a token gets from a route that has always
+// ignored the header. Logout still ends the session the cookie names.
+func TestSessionVerbs_NonAPITokenBearerIsNotTokenAuth(t *testing.T) {
+	r := newAuthRig(t)
+	userID := r.seedUser()
+	r.seedOrg(userID, "foreign-bearer-org")
+
+	// A GoTrue-style JWT, and a bare opaque string: neither is one of ours.
+	for _, cred := range []string{
+		"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.not.a.tf.token",
+		"some-other-service-credential",
+	} {
+		t.Run(cred[:12], func(t *testing.T) {
+			sid := r.signIn(userID)
+			// Sanity: the cookie alone logs out, so a difference below is the
+			// header's doing.
+			rec := r.tokensJSON("POST", "/api/auth/logout", map[string]any{}, sid, cred)
+			if rec.Code == http.StatusForbidden {
+				t.Fatalf("logout with a non-API-token Bearer = 403; the guard must not "+
+					"claim a credential it does not accept is an API token: %s", rec.Body.String())
+			}
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("logout with a non-API-token Bearer = %d, want 204 (unchanged "+
+					"from before the guard existed): %s", rec.Code, rec.Body.String())
+			}
+			// The session really ended — the route did its work rather than
+			// being waved through.
+			if rec := r.tokensJSON("POST", "/api/me/active-org",
+				map[string]any{"org_id": uuid.NewString()}, sid, ""); rec.Code != http.StatusUnauthorized {
+				t.Errorf("session after logout = %d, want 401 — logout must have revoked it", rec.Code)
+			}
+		})
+	}
+}
+
+// TestSessionVerbs_NonAPITokenBearerOnGuardedRouteIs401 is the same boundary on
+// the routes that DO sit behind withSession: a credential this server does not
+// accept is refused there as an unusable credential, before any handler runs.
+// 401 and not the guard's 403 — the fault is the credential, not the verb.
+func TestSessionVerbs_NonAPITokenBearerOnGuardedRouteIs401(t *testing.T) {
+	r := newAuthRig(t)
+	userID := r.seedUser()
+	orgID, _ := r.seedOrg(userID, "guarded-401-org")
+
+	for _, path := range []string{"/api/me/active-org", "/api/auth/logout/all", "/api/invites/accept"} {
+		rec := r.tokensJSON("POST", path,
+			map[string]any{"org_id": orgID.String(), "token": "x"}, "", "definitely-not-ours")
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s with a non-API-token Bearer = %d, want 401: %s",
+				path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // ---------- mode ----------
 
 // TestAPITokens_LocalMode404 — the routes are multi-only, like every
