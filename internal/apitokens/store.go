@@ -415,6 +415,36 @@ func (s *Store) ListForUserSystem(ctx context.Context, userID string, orgFilter 
 	return out, total, rows.Err()
 }
 
+// GetForUserSystem returns one of the user's own un-revoked tokens, or
+// (nil, nil) when the id names no such row — unknown, someone else's, or
+// already revoked. Those collapse to one answer for the same reason the list
+// hides revoked rows: a token the caller cannot act on is a token that, from
+// where they stand, is not there.
+//
+// It exists because a revoke has two refusals to tell apart and RevokeSystem,
+// which does its check inside the UPDATE's predicate, can only report that
+// nothing matched. A token-authenticated caller revoking its own token in
+// another org must hear 403 rather than 404 — the row IS theirs, it is the
+// credential that may not reach it — and only a read that resolves the row's
+// org before the write can say so.
+func (s *Store) GetForUserSystem(ctx context.Context, userID, tokenID string) (*Token, error) {
+	if !isValidUUID(userID) || !isValidUUID(tokenID) {
+		return nil, nil
+	}
+	tok, err := scanToken(s.db.QueryRowContext(ctx, `
+		SELECT `+tokenColumns+`
+		  FROM `+tokenFrom+`
+		 WHERE t.id = $1 AND t.user_id = $2 AND t.revoked_at IS NULL
+	`, tokenID, userID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get api token: %w", err)
+	}
+	return &tok, nil
+}
+
 // RevokeSystem kills one of the user's own tokens. userID is part of the
 // predicate rather than a check before it: one statement, and no way for a
 // caller to revoke a token it does not own even by racing.

@@ -536,6 +536,13 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "route")
 		return
 	}
+	// A Bearer caller has no session to end. Without this the route would find
+	// no cookie, revoke nothing, and answer 204 — reporting success for work
+	// that never happened, on the one call whose whole purpose is to stop a
+	// credential working.
+	if refuseTokenAuth(w, r, "logging out ends a session; an API token has none — revoke it with DELETE /api/me/tokens/{id}") {
+		return
+	}
 	cookie, err := r.Cookie(s.sidCookieName())
 	if err == nil {
 		if sid, perr := uuid.Parse(cookie.Value); perr == nil {
@@ -602,6 +609,11 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 		// The whole hosted-auth surface is absent in local mode: a route that
 		// doesn't exist in this deployment mode answers 404.
 		notFound(w, "route")
+		return
+	}
+	// Sessions only, same as the single logout: this revokes the caller's
+	// sessions, which is not the set a token holder is asking about.
+	if refuseTokenAuth(w, r, "logging out ends sessions; an API token has none — revoke it with DELETE /api/me/tokens/{id}") {
 		return
 	}
 	claims := ClaimsFrom(r.Context())
@@ -695,6 +707,11 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "route")
 		return
 	}
+	// A token's org is fixed at mint, so there is no cursor here for one to
+	// move — and the credential for the org it wants is the one to send.
+	if refuseTokenAuth(w, r, "switching the active org requires a session; an API token's org is fixed at mint, so use a token issued for that org instead") {
+		return
+	}
 	claims := ClaimsFrom(r.Context())
 	if claims == nil || claims.Subject == runmode.LocalDefaultUserID {
 		// Sentinel-claim caller is the local-mode shim; local mode has
@@ -705,13 +722,7 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := SessionFrom(r.Context())
 	if sess == nil {
-		// A token-authed caller has no cursor to move — a token's org is fixed
-		// at mint — so 401 is the right answer and nothing is wrong with the
-		// wiring. Only a request that carried neither credential means what the
-		// ERROR says, which is why it is conditional.
-		if httpx.TokenAuthFrom(r.Context()) == nil {
-			authLog.Error("active-org update: no session in context, route missing withsession")
-		}
+		authLog.Error("active-org update: no session in context, route missing withsession")
 		writeUnauth(w)
 		return
 	}

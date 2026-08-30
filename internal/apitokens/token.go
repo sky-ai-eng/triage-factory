@@ -40,6 +40,12 @@ const (
 	// growing pile is a sign nobody is deleting what they stopped using.
 	MaxPerUserOrg = 50
 
+	// MaxNameLen bounds a token's display name, after trimming. Mirrors the
+	// table's char_length CHECK, which is the real enforcement — the name is
+	// how its owner tells one credential from another in a list, and past a
+	// line of text it stops doing that.
+	MaxNameLen = 100
+
 	// MaxAllowedCIDRs is the largest IP allowlist a token may carry. Mirrors
 	// the table's cardinality CHECK, which is the real enforcement.
 	MaxAllowedCIDRs = 20
@@ -72,16 +78,46 @@ func hashOf(plaintext string) []byte {
 	return sum[:]
 }
 
-// normalizeCIDRs parses an allowlist into the canonical textual form the cidr
-// column stores, or returns nil for an empty list — a token with no allowlist
-// stores NULL, and an empty array would be a token that can never be used.
+// CanonicalCIDR parses one allowlist entry into the canonical textual form the
+// cidr column stores. Exported because the rule has to hold in two places at
+// once: this package normalizes what it is handed, and the HTTP surface reports
+// every bad entry in one response rather than stopping at the first — a caller
+// fixing a typo should not have to discover the next one on the next request.
+// One function, so the two cannot drift into two definitions of a valid range.
 //
 // A bare address is accepted and read as a single host (the /32 or /128 the
 // column would store anyway), because "let this one machine in" is the common
 // case and making someone spell the mask would only invite them to guess at it.
-// A prefix with bits set below its mask is REFUSED rather than masked: 10.0.0.1/8
-// is either a typo for a host or a typo for a network, and silently picking one
-// is how an allowlist ends up admitting sixteen million addresses nobody meant.
+// A prefix with bits set below its mask is REFUSED rather than masked:
+// 10.0.0.1/8 is either a typo for a host or a typo for a network, and silently
+// picking one is how an allowlist ends up admitting sixteen million addresses
+// nobody meant.
+func CanonicalCIDR(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", fmt.Errorf("%w: empty entry", ErrInvalidCIDR)
+	}
+	if !strings.Contains(s, "/") {
+		addr, err := netip.ParseAddr(s)
+		if err != nil {
+			return "", fmt.Errorf("%w: %q", ErrInvalidCIDR, raw)
+		}
+		return netip.PrefixFrom(addr, addr.BitLen()).String(), nil
+	}
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		return "", fmt.Errorf("%w: %q", ErrInvalidCIDR, raw)
+	}
+	if p.Masked() != p {
+		return "", fmt.Errorf("%w: %q has bits set below its mask (did you mean %s or %s?)",
+			ErrInvalidCIDR, raw, p.Masked(), netip.PrefixFrom(p.Addr(), p.Addr().BitLen()))
+	}
+	return p.String(), nil
+}
+
+// normalizeCIDRs parses a whole allowlist, or returns nil for an empty list —
+// a token with no allowlist stores NULL, and an empty array would be a token
+// that can never be used.
 func normalizeCIDRs(in []string) ([]string, error) {
 	if len(in) == 0 {
 		return nil, nil
@@ -91,27 +127,11 @@ func normalizeCIDRs(in []string) ([]string, error) {
 	}
 	out := make([]string, 0, len(in))
 	for _, raw := range in {
-		s := strings.TrimSpace(raw)
-		if s == "" {
-			return nil, fmt.Errorf("%w: empty entry", ErrInvalidCIDR)
-		}
-		if !strings.Contains(s, "/") {
-			addr, err := netip.ParseAddr(s)
-			if err != nil {
-				return nil, fmt.Errorf("%w: %q", ErrInvalidCIDR, raw)
-			}
-			out = append(out, netip.PrefixFrom(addr, addr.BitLen()).String())
-			continue
-		}
-		p, err := netip.ParsePrefix(s)
+		c, err := CanonicalCIDR(raw)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %q", ErrInvalidCIDR, raw)
+			return nil, err
 		}
-		if p.Masked() != p {
-			return nil, fmt.Errorf("%w: %q has bits set below its mask (did you mean %s or %s?)",
-				ErrInvalidCIDR, raw, p.Masked(), netip.PrefixFrom(p.Addr(), p.Addr().BitLen()))
-		}
-		out = append(out, p.String())
+		out = append(out, c)
 	}
 	return out, nil
 }
