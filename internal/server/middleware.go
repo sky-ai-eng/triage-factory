@@ -272,6 +272,59 @@ func bearerCredential(header string) (string, bool) {
 	return credential, true
 }
 
+// apiTokenCredential returns the API-token credential an Authorization header
+// carries, and ok=false when it carries none: another scheme, a malformed
+// Bearer, or a Bearer holding something that was never one of this server's
+// tokens. The "tf_" prefix is part of the question rather than a validation
+// step after it — a string without it cannot match the hash of a token, so
+// nothing may treat it as one.
+//
+// This is the single definition of "presents an API token", shared by the path
+// that resolves one and the guards that refuse one, so the two cannot drift
+// into disagreeing about what a token even looks like.
+func apiTokenCredential(header string) (string, bool) {
+	raw, ok := bearerCredential(header)
+	if !ok || !strings.HasPrefix(raw, apitokens.Prefix) {
+		return "", false
+	}
+	return raw, true
+}
+
+// refuseTokenAuth answers 403 and returns true when the request is driven by an
+// API token, for a verb whose subject IS the session: moving the active-org
+// cursor, ending a session, accepting an invite into a different org. Those are
+// not permissions a token happens to lack — a token has no cursor to move and
+// no session to end, so there is nothing for the verb to act on.
+//
+// 403 rather than 401, because the credential authenticated fine: the caller is
+// who they say they are, and this is simply not a thing their kind of
+// credential does. A 401 would send an automation off to re-authenticate a
+// token that is working perfectly. The message names the session requirement so
+// the answer is actionable rather than a bare refusal.
+//
+// Two signals, because the guarded routes do not all resolve their credential
+// the same way. TokenAuthFrom is the authoritative one, set by the middleware
+// that actually resolved the token; on a route behind withSession it is the
+// only one that can fire, since a Bearer that failed there never reached a
+// handler. POST /api/auth/logout is the exception it exists for: that route
+// deliberately sits outside withSession — it reads the sid cookie directly so a
+// stale session can still be logged out — so nothing has resolved anything by
+// the time it runs, and the header is all there is to read.
+//
+// That fallback asks for OUR token's shape, not for a Bearer. A credential this
+// server does not accept is not an API token, and answering "you need a
+// session" to one would both be untrue and change what a caller who never used
+// a token gets from a route that has always ignored the header.
+func refuseTokenAuth(w http.ResponseWriter, r *http.Request, requirement string) bool {
+	if httpx.TokenAuthFrom(r.Context()) == nil {
+		if _, presentsToken := apiTokenCredential(r.Header.Get("Authorization")); !presentsToken {
+			return false
+		}
+	}
+	forbidden(w, requirement)
+	return true
+}
+
 // serveTokenAuth is withSession's Bearer branch: it resolves an API token to
 // the (user, org) pair a session cookie would have resolved to, and seeds the
 // same request context so every handler downstream is unaware of which
@@ -322,8 +375,8 @@ func (s *Server) serveTokenAuth(w http.ResponseWriter, r *http.Request, next htt
 		writeUnauth(w)
 	}
 
-	raw, ok := bearerCredential(header)
-	if !ok || !strings.HasPrefix(raw, apitokens.Prefix) {
+	raw, ok := apiTokenCredential(header)
+	if !ok {
 		// Shape-check before the round-trip: a string that was never a token
 		// cannot match a hash of one, so there is nothing to ask the database.
 		refuse()

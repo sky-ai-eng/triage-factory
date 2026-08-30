@@ -126,6 +126,14 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An org a token could create is one no token is scoped to: a token's org
+	// is sealed at mint, so the new org would be reachable by no credential the
+	// caller holds, and the act itself points the session cursor at it. Both
+	// are outside what a token expresses, which is why this is a session verb
+	// like the cursor switch and the invite accept.
+	if refuseTokenAuth(w, r, "creating an org requires a session: an API token is sealed to one org at mint and cannot be scoped to a new one") {
+		return
+	}
 	claims := ClaimsFrom(r.Context())
 	if claims == nil || claims.Subject == runmode.LocalDefaultUserID {
 		// Sentinel-claim caller is the local-mode shim; nothing to do
@@ -135,12 +143,7 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := SessionFrom(r.Context())
 	if sess == nil {
-		// Creating an org points the caller's session cursor at the new one, so
-		// this verb needs a session and a token-authed caller gets 401 — not a
-		// wiring fault, hence the conditional ERROR.
-		if httpx.TokenAuthFrom(r.Context()) == nil {
-			orgsLog.Error("org create: no session in context, route missing withsession")
-		}
+		orgsLog.Error("org create: no session in context, route missing withsession")
 		writeUnauth(w)
 		return
 	}

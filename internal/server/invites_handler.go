@@ -532,6 +532,13 @@ func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Requ
 		notFound(w, "route")
 		return
 	}
+	// Accepting an invite grants membership in a DIFFERENT org and repoints the
+	// session cursor at it — both outside anything a token, sealed to one org
+	// at mint, can express. It also reads the login's verified email, a claim
+	// the token path does not carry.
+	if refuseTokenAuth(w, r, "accepting an invite requires a session: it joins an org an API token is not scoped to, and moves the session cursor there") {
+		return
+	}
 	claims := ClaimsFrom(r.Context())
 	if claims == nil || claims.Subject == runmode.LocalDefaultUserID {
 		writeUnauth(w)
@@ -544,12 +551,7 @@ func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Requ
 	}
 	sess := SessionFrom(r.Context())
 	if sess == nil {
-		// Accepting an invite moves the caller's session cursor into the org
-		// they just joined, so this verb needs a session and a token-authed
-		// caller gets 401 — not a wiring fault, hence the conditional ERROR.
-		if httpx.TokenAuthFrom(r.Context()) == nil {
-			invitesLog.Error("invite accept: no session in context, route missing withsession")
-		}
+		invitesLog.Error("invite accept: no session in context, route missing withsession")
 		writeUnauth(w)
 		return
 	}

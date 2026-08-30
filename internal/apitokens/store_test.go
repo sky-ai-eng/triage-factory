@@ -372,6 +372,47 @@ func TestRevoke(t *testing.T) {
 	}
 }
 
+func TestGetForUserSystem(t *testing.T) {
+	store, h, userID, orgID := newStoreForTest(t)
+	ctx := context.Background()
+
+	tok, _, err := store.MintSystem(ctx, userID, orgID, "readable", nil, []string{"10.0.0.0/8"}, userID)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	got, err := store.GetForUserSystem(ctx, userID, tok.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Get returned no row for the owner's own live token")
+	}
+	// The point read projects the same columns the list does, which is what
+	// lets a caller decide on the org before writing.
+	if got.OrgID != orgID || got.Name != "readable" || got.Prefix != tok.Prefix {
+		t.Errorf("Get = %+v, want the minted row %+v", *got, tok)
+	}
+	if len(got.AllowedCIDRs) != 1 || got.AllowedCIDRs[0] != "10.0.0.0/8" {
+		t.Errorf("allowed_cidrs = %v, want [10.0.0.0/8]", got.AllowedCIDRs)
+	}
+
+	// Every reason the caller may not act on it collapses to the same miss.
+	other := pgtest.SeedUser(t, h, "not-the-owner")
+	if got, err := store.GetForUserSystem(ctx, other, tok.ID); err != nil || got != nil {
+		t.Errorf("Get of another user's token: %v / %+v, want a miss", err, got)
+	}
+	if got, err := store.GetForUserSystem(ctx, userID, "not-a-uuid"); err != nil || got != nil {
+		t.Errorf("Get of a malformed id: %v / %+v, want a miss, not an error", err, got)
+	}
+	if err := store.RevokeSystem(ctx, userID, tok.ID, userID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if got, err := store.GetForUserSystem(ctx, userID, tok.ID); err != nil || got != nil {
+		t.Errorf("Get after revoke: %v / %+v, want a miss — a revoked token is not there", err, got)
+	}
+}
+
 func TestRevokeRefusesAnotherUsersToken(t *testing.T) {
 	store, h, userID, orgID := newStoreForTest(t)
 	ctx := context.Background()
