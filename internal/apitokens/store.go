@@ -132,6 +132,16 @@ const tokenColumns = `t.id::text, t.user_id::text, t.org_id::text, t.name, t.tok
 const tokenFrom = `public.user_api_tokens t
 		  LEFT JOIN public.org_settings os ON os.org_id = t.org_id`
 
+// liveTokenPredicate is what "this token still authenticates" means: not
+// revoked, not past its own stored expiry, and not past the org's max-age cap
+// as that cap reads RIGHT NOW. Written against the `t`/`os` aliases tokenFrom
+// provides, and shared by every read that asks the question, so a tightened cap
+// takes effect identically wherever it is asked.
+const liveTokenPredicate = `t.revoked_at IS NULL
+		   AND (t.expires_at IS NULL OR t.expires_at > now())
+		   AND (os.api_token_max_age_days IS NULL
+		        OR t.created_at + make_interval(days => os.api_token_max_age_days) > now())`
+
 // scanToken decodes one row in tokenColumns order.
 func scanToken(scan func(...any) error) (Token, error) {
 	var (
@@ -296,10 +306,7 @@ func (s *Store) LookupSystem(ctx context.Context, raw string) (*Identity, error)
 		        LIMIT 1
 		  ) em ON true
 		 WHERE t.token_hash = $1
-		   AND t.revoked_at IS NULL
-		   AND (t.expires_at IS NULL OR t.expires_at > now())
-		   AND (os.api_token_max_age_days IS NULL
-		        OR t.created_at + make_interval(days => os.api_token_max_age_days) > now())
+		   AND `+liveTokenPredicate+`
 	`, hashOf(raw)).Scan(&id.TokenID, &id.UserID, &id.OrgID, &id.Email, &cidrsJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -313,6 +320,37 @@ func (s *Store) LookupSystem(ctx context.Context, raw string) (*Identity, error)
 		}
 	}
 	return &id, nil
+}
+
+// IsLiveSystem answers LookupSystem's question for a token already known by
+// id: is this row still one that would authenticate. It exists because the
+// websocket revalidation sweep holds a token ID and not the secret — a
+// connection stashes the id at handshake, never the plaintext, which exists in
+// exactly one place and this is not it — and so cannot ask the question the way
+// the request path does.
+//
+// False means the row is gone, revoked, expired, or past the org's current cap;
+// an error means the database failed and is not that answer, so a caller
+// deciding whether to disconnect somebody should treat it as "ask again later"
+// rather than as a revocation.
+func (s *Store) IsLiveSystem(ctx context.Context, tokenID string) (bool, error) {
+	if !isValidUUID(tokenID) {
+		return false, nil
+	}
+	var live bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT true
+		  FROM `+tokenFrom+`
+		 WHERE t.id = $1
+		   AND `+liveTokenPredicate+`
+	`, tokenID).Scan(&live)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("probe api token liveness: %w", err)
+	}
+	return live, nil
 }
 
 // ListForUserSystem returns the user's un-revoked tokens, newest first, with

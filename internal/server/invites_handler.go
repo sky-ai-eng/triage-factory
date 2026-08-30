@@ -544,8 +544,12 @@ func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Requ
 	}
 	sess := SessionFrom(r.Context())
 	if sess == nil {
-		// withSession sets this; absence is a route-wiring bug.
-		invitesLog.Error("invite accept: no session in context, route missing withsession")
+		// Accepting an invite moves the caller's session cursor into the org
+		// they just joined, so this verb needs a session and a token-authed
+		// caller gets 401 — not a wiring fault, hence the conditional ERROR.
+		if httpx.TokenAuthFrom(r.Context()) == nil {
+			invitesLog.Error("invite accept: no session in context, route missing withsession")
+		}
 		writeUnauth(w)
 		return
 	}

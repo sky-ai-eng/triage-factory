@@ -66,7 +66,7 @@ func TestBackplane_Postgres(t *testing.T) {
 func dialTestClient(t *testing.T, hub *websocket.Hub, userID, orgID, sid string) *ws.Conn {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hub.HandleWS(w, r, userID, orgID, sid)
+		hub.HandleWS(w, r, websocket.ConnIdentity{UserID: userID, OrgID: orgID, SessionID: sid})
 	}))
 	t.Cleanup(srv.Close)
 	url := strings.Replace(srv.URL, "http://", "ws://", 1)

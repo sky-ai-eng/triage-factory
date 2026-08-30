@@ -39,9 +39,10 @@ type Event struct {
 // the browser surfaces them verbatim on the CloseEvent, letting the
 // client distinguish a deliberate kick from a network drop.
 //
-//   - CloseSessionRevoked: the session backing this connection was
-//     revoked (logout / logout-all). The client should clear local auth
-//     state and route to /login WITHOUT reconnecting.
+//   - CloseSessionRevoked: the credential backing this connection was
+//     revoked — the session (logout / logout-all), or the API token that
+//     authorized the handshake. The client should clear local auth state
+//     and route to /login WITHOUT reconnecting.
 //   - CloseMembershipChanged: the user lost membership in the org this
 //     connection was scoped to. The client should refresh its session
 //     view (active org may be gone) and re-handshake, but stay logged
@@ -107,6 +108,12 @@ type client struct {
 	// local-mode clients (no session), which the revoke path never
 	// targets.
 	sid string
+	// tokenID is the API token that authorized this handshake, when a
+	// Bearer header did rather than a cookie. Exactly one of sid and
+	// tokenID is ever set — a request authenticates one way — and the
+	// revalidation sweep reads whichever it is, so a revoked token's socket
+	// dies on the same cadence a revoked session's does.
+	tokenID string
 	// viewing + visible are the client's self-reported presence (TFAC-392),
 	// updated from inbound "presence" control frames in readPump. viewing is
 	// "board", "run:<conversationID>", or "other" (the latter for any non-answer-capable
@@ -144,17 +151,29 @@ func NewHub() *Hub {
 	}
 }
 
+// ConnIdentity is who a websocket connection belongs to and what authorized
+// it, captured at handshake and fixed for the connection's life.
+//
+// UserID and OrgID drive Broadcast's scoping filter. SessionID and TokenID name
+// the credential, so a revalidation sweep can close exactly the connections
+// whose credential died; at most one is set, since a request authenticates one
+// way. Every field empty is the "unscoped" client — pre-auth, local mode, a
+// test hitting the hub without the server pipeline — which receives every event
+// and no sweep targets.
+type ConnIdentity struct {
+	UserID    string
+	OrgID     string
+	SessionID string
+	TokenID   string
+}
+
 // HandleWS is the HTTP handler for websocket upgrade requests. The
 // caller is responsible for extracting identity from r.Context() and
-// passing it in via userID/orgID — this keeps pkg/websocket free of
-// any import on internal/server (which would be the wrong direction
-// architecturally). The wrapper handler that mounts this lives in
-// internal/server and pulls ClaimsFrom + OrgIDFrom before invoking us.
-//
-// Empty values are tolerated: tests that hit the hub directly without
-// the server pipeline get an "unscoped" client that receives every
-// event (matching pre-D9b behavior).
-func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID, sid string) {
+// passing it in — this keeps pkg/websocket free of any import on
+// internal/server (which would be the wrong direction architecturally).
+// The wrapper handler that mounts this lives in internal/server and pulls
+// ClaimsFrom + OrgIDFrom before invoking us.
+func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, id ConnIdentity) {
 	conn, err := ws.Accept(w, r, &ws.AcceptOptions{
 		InsecureSkipVerify: true,
 	})
@@ -166,13 +185,14 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID, si
 	h.mu.Lock()
 	h.connSeq++
 	c := &client{
-		conn:   conn,
-		send:   make(chan []byte, 64),
-		closed: make(chan struct{}),
-		userID: userID,
-		orgID:  orgID,
-		sid:    sid,
-		connID: strconv.FormatUint(h.connSeq, 10),
+		conn:    conn,
+		send:    make(chan []byte, 64),
+		closed:  make(chan struct{}),
+		userID:  id.UserID,
+		orgID:   id.OrgID,
+		sid:     id.SessionID,
+		tokenID: id.TokenID,
+		connID:  strconv.FormatUint(h.connSeq, 10),
 	}
 	h.clients[c] = struct{}{}
 	h.indexLocked(c)
@@ -514,28 +534,49 @@ func (h *Hub) Snapshot() []ConnSnapshot {
 //
 // isValid is called once per DISTINCT sid, not once per connection — a
 // session backing several tabs/devices costs one lookup, and every
-// connection under an invalid sid closes together. Unscoped clients
-// (empty sid — pre-auth, local mode, test harness) are skipped: there is
-// no session to validate. Returns the number of connections closed.
+// connection under an invalid sid closes together. Connections not backed
+// by a session (token-authed, or unscoped — pre-auth, local mode, test
+// harness) are skipped. Returns the number of connections closed.
 //
 // Nil-receiver-safe (returns 0), matching the rest of this type.
 func (h *Hub) RevalidateSessions(isValid func(sid string) bool) int {
+	return h.revalidateBy(func(c *client) string { return c.sid }, isValid, "session revoked")
+}
+
+// RevalidateTokens is RevalidateSessions for Bearer-authenticated
+// connections: same cadence, same closure semantics, same guarantee that a
+// revoked credential's socket dies within one sweep. It is a second method
+// rather than a widened first because the two resolve against different
+// tables, and a caller holding only one of those stores must not be able to
+// close the other's connections by passing a predicate that says no.
+//
+// Nil-receiver-safe (returns 0), matching the rest of this type.
+func (h *Hub) RevalidateTokens(isValid func(tokenID string) bool) int {
+	return h.revalidateBy(func(c *client) string { return c.tokenID }, isValid, "api token revoked")
+}
+
+// revalidateBy is the shared sweep: group live connections by the credential
+// credOf reads off each, ask isValid once per distinct value, and close every
+// connection under one that fails. A client whose credOf is empty carries no
+// credential of that kind and is skipped.
+func (h *Hub) revalidateBy(credOf func(*client) string, isValid func(string) bool, reason string) int {
 	if h == nil {
 		return 0
 	}
 	h.mu.RLock()
-	bySid := make(map[string][]*client)
+	byCred := make(map[string][]*client)
 	for c := range h.clients {
-		if c.sid == "" {
+		id := credOf(c)
+		if id == "" {
 			continue
 		}
-		bySid[c.sid] = append(bySid[c.sid], c)
+		byCred[id] = append(byCred[id], c)
 	}
 	h.mu.RUnlock()
 
 	var closed int
-	for sid, clients := range bySid {
-		if isValid(sid) {
+	for id, clients := range byCred {
+		if isValid(id) {
 			continue
 		}
 		for _, c := range clients {
@@ -543,7 +584,7 @@ func (h *Hub) RevalidateSessions(isValid func(sid string) bool) int {
 				// Best-effort, same rationale as CloseUserConnections: the
 				// connection's own readPump-exit cleanup deindexes it either
 				// way, so an error here (already closing) isn't actionable.
-				_ = c.conn.Close(CloseSessionRevoked, "session revoked")
+				_ = c.conn.Close(CloseSessionRevoked, reason)
 			}(c)
 		}
 		closed += len(clients)

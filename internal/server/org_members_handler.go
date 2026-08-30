@@ -45,6 +45,15 @@ type orgMembersHandler struct {
 	// field is belt-and-suspenders for a future caller that constructs the
 	// handler without it (e.g. a test). Returns the count of revoked rows.
 	revokeUserOrgSessions func(ctx context.Context, userID, orgID string) (int64, error)
+	// revokeUserOrgTokens revokes a removed member's API tokens scoped to one
+	// org — the headless half of the same deprovisioning, and a separate
+	// closure from the session revoke above rather than a second statement
+	// inside it so a failure of either still leaves the other to run. It takes
+	// the removing admin as well as the target because each revocation writes
+	// an audit row, and a log saying an admin revoked a token without saying
+	// whose would be no audit at all. Same late-binding and nil-guard shape as
+	// its sibling. Returns the count of revoked rows.
+	revokeUserOrgTokens func(ctx context.Context, targetUserID, orgID, actorUserID string) (int, error)
 	// publishKick fans the removal's WS-kick to every OTHER control pod
 	// (TFAC-584), on top of the local ws.CloseUserConnections above. Same
 	// late-binding closure shape as revokeUserOrgSessions — SetWSBackplane
@@ -286,6 +295,22 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 				"user", targetID, "org", orgID, "error", err)
 		} else {
 			membershipLog.Info("revoked sessions on membership removal",
+				"user", targetID, "org", orgID, "n", revoked)
+		}
+	}
+	// The same hygiene for the removed member's headless credentials: an API
+	// token is a session cursor with its org fixed, so a removal that killed
+	// only the browser half would leave the org reachable by whatever
+	// automation the member had running. Best-effort for the same reason —
+	// the per-request gates deny the org's data either way — and independent
+	// of the session revoke above so one failing does not skip the other.
+	if h.revokeUserOrgTokens != nil {
+		revoked, err := h.revokeUserOrgTokens(r.Context(), targetID, orgID, userID)
+		if err != nil {
+			membershipLog.Warn("revoke api tokens on membership removal failed",
+				"user", targetID, "org", orgID, "error", err)
+		} else {
+			membershipLog.Info("revoked api tokens on membership removal",
 				"user", targetID, "org", orgID, "n", revoked)
 		}
 	}

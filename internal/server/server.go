@@ -306,6 +306,13 @@ type Server struct {
 	// failing endpoint. Constructed in New so it's never nil; the wrapper
 	// no-ops in local mode. See ratelimit.go.
 	signedWebhookLimiter *ipRateLimiter
+	// tokenAuthFailureLimiter is the per-IP budget the Bearer path charges
+	// when a token fails to authenticate. Unlike the two above it does not
+	// wrap any route: withSession consults it around the lookup itself, so a
+	// working token costs nothing and only a stream of failures is bounded.
+	// Constructed in New so it's never nil; the Bearer path it guards is
+	// multi-mode only. See ratelimit.go.
+	tokenAuthFailureLimiter *ipRateLimiter
 
 	// readyHooks are brain-gated OnReady hooks registered by extensions
 	// during installExtensions (routes()). Collected single-threaded at
@@ -471,11 +478,13 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		mux:              http.NewServeMux(),
 		ws:               websocket.NewHub(),
 	}
-	// Per-IP rate limiters for the pre-auth allowlist and the signed-webhook
-	// tier. Built here (not injected) so a Server is always usable without
-	// external wiring; both wrappers that consult them no-op in local mode.
+	// Per-IP rate limiters for the pre-auth allowlist, the signed-webhook
+	// tier, and API-token authentication failures. Built here (not injected)
+	// so a Server is always usable without external wiring; every consumer
+	// that reads them is inert in local mode.
 	s.preAuthLimiter = newIPRateLimiter(preAuthRatePerSec, preAuthBurst, rateLimitBucketTTL)
 	s.signedWebhookLimiter = newIPRateLimiter(signedWebhookRatePerSec, signedWebhookBurst, rateLimitBucketTTL)
+	s.tokenAuthFailureLimiter = newIPRateLimiter(tokenAuthFailureRatePerSec, tokenAuthFailureBurst, rateLimitBucketTTL)
 	// GitHub credential resolver + its installation-token cache, built from
 	// the same stores. Constructed here (not injected) so a Server is always
 	// usable without external wiring — tests that call New directly get a
@@ -831,11 +840,17 @@ func (s *Server) routes() {
 			if err != nil {
 				return 0, fmt.Errorf("parse org id: %w", err)
 			}
-			// TODO(TFAC-890): revoke this user's API tokens for the org here
-			// too, via apitokens.Store.RevokeForUserInOrgSystem — a removed
-			// member's headless credentials have to die with their sessions,
-			// and that store's audit row needs the removing admin as its actor.
 			return s.authDeps.sessions.RevokeForUserInOrgSystem(ctx, uid, oid)
+		},
+		// The token half of the same deprovisioning. It takes string ids
+		// straight through — the store validates them itself and answers an
+		// unparseable one with "revoked nothing" rather than an error, since
+		// an id that names no row is not a failure to revoke.
+		revokeUserOrgTokens: func(ctx context.Context, targetUserID, orgID, actorUserID string) (int, error) {
+			if s.authDeps == nil || s.authDeps.apiTokens == nil {
+				return 0, errors.New("auth not wired")
+			}
+			return s.authDeps.apiTokens.RevokeForUserInOrgSystem(ctx, targetUserID, orgID, actorUserID)
 		},
 		publishKick: func(ctx context.Context, userID, sid, orgID string, code int, reason string) {
 			if s.wsBackplane != nil {

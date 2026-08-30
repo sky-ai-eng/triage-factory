@@ -290,6 +290,7 @@ const (
 	ctxKeyClaims ctxKey = iota
 	ctxKeyOrgID
 	ctxKeyAuthIdentityID
+	ctxKeyTokenAuth
 )
 
 // WithClaims returns ctx carrying the verified JWT claims. The session
@@ -339,6 +340,36 @@ func WithAuthIdentityID(ctx context.Context, id string) context.Context {
 // identities commonly share an email and so can't be told apart by email alone.
 func AuthIdentityIDFrom(ctx context.Context) string {
 	v, _ := ctx.Value(ctxKeyAuthIdentityID).(string)
+	return v
+}
+
+// TokenAuth marks a request authenticated by an API token rather than a
+// session cookie, and names which token and which org it is sealed to. The auth
+// middleware sets it on the Bearer path only, so its presence IS the answer to
+// "was this a token call" — a session request carries nothing here.
+//
+// OrgID duplicates what WithOrgID injected, deliberately: the org in context is
+// the request's tenant whichever credential supplied it, while this one is the
+// one the token can never leave. The org-scope gates compare a path-named org
+// against THIS value, so they are asking about the credential, not about
+// wherever the request's cursor happens to point.
+type TokenAuth struct {
+	TokenID string
+	OrgID   string
+}
+
+// WithTokenAuth returns ctx carrying the token that authenticated this request.
+func WithTokenAuth(ctx context.Context, t *TokenAuth) context.Context {
+	return context.WithValue(ctx, ctxKeyTokenAuth, t)
+}
+
+// TokenAuthFrom returns the API token backing this request, or nil when a
+// session cookie (or local mode's synthetic identity) did. Callers that gate on
+// credential type — the org-scope probes, the operator console, the session-only
+// verbs — read this rather than sniffing the Authorization header, so the answer
+// comes from the middleware that actually resolved the credential.
+func TokenAuthFrom(ctx context.Context) *TokenAuth {
+	v, _ := ctx.Value(ctxKeyTokenAuth).(*TokenAuth)
 	return v
 }
 

@@ -317,7 +317,7 @@ func dialHubClientOrg(t *testing.T, h *websocket.Hub, orgID string) (*ws.Conn, f
 	t.Helper()
 	before := h.ClientCount()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h.HandleWS(w, r, "user", orgID, "")
+		h.HandleWS(w, r, websocket.ConnIdentity{UserID: "user", OrgID: orgID})
 	}))
 	url := strings.Replace(srv.URL, "http://", "ws://", 1)
 	conn, _, err := ws.Dial(context.Background(), url, nil)

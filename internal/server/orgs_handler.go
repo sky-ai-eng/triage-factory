@@ -135,8 +135,12 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := SessionFrom(r.Context())
 	if sess == nil {
-		// withSession sets this; absence is a route-wiring bug.
-		orgsLog.Error("org create: no session in context, route missing withsession")
+		// Creating an org points the caller's session cursor at the new one, so
+		// this verb needs a session and a token-authed caller gets 401 — not a
+		// wiring fault, hence the conditional ERROR.
+		if httpx.TokenAuthFrom(r.Context()) == nil {
+			orgsLog.Error("org create: no session in context, route missing withsession")
+		}
 		writeUnauth(w)
 		return
 	}
