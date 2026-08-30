@@ -11,7 +11,7 @@ import (
 )
 
 // Wire format of an API token: "tf_" followed by 32 crypto/rand bytes in
-// unpadded base64url (43 characters), for 75 characters total. The recipe is
+// unpadded base64url (43 characters), for 46 characters total. The recipe is
 // the invite token's, one entropy budget for every bearer secret TF mints.
 //
 // The stored hash covers the FULL literal, "tf_" included, so a hash is only
