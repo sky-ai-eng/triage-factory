@@ -330,35 +330,70 @@ func (s *Server) handleGitHubManagedConnect(w http.ResponseWriter, r *http.Reque
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
-// handleGitHubManagedCallback completes the ceremony. See the file comment for
-// the four proofs and the rule they share.
+// managedBindCallback is the front door for the return leg, and the reason that
+// leg is not simply mounted through s.api.
+//
+// Two callers arrive at this one URL and they need opposite treatment. Someone
+// finishing a ceremony this deployment started carries the bind cookie, and
+// what happens next WRITES a credential — so it must be authenticated, and
+// withSession's 401 is exactly right for it. Someone who installed the
+// deployment App straight from its public page on GitHub carries no cookie and,
+// in the ordinary case, no Triage Factory session at all: GitHub's install page
+// is reachable by anyone the account's owner points at it, with no reason ever
+// to have visited TF in that browser. Behind withSession that person gets a
+// JSON 401, which dead-ends a top-level navigation and says nothing true about
+// what happened.
+//
+// So the cookie decides which door, before any session lookup. The pre-auth
+// branch reads nothing, writes nothing, and resolves no identity — it renders
+// one fixed page — which is also why it is not IP-rate-limited: there is no
+// work behind it to flood, and a 429 on a shared NAT would break the flow of
+// the one person it is for. Everything past it stays behind withSession.
 //
 // GET /api/github/managed/callback?code=…&installation_id=…&setup_action=…
-func (s *Server) handleGitHubManagedCallback(w http.ResponseWriter, r *http.Request) {
-	if s.deployCfg == nil || runmode.Current() != runmode.ModeMulti {
-		notFound(w, "route")
-		return
-	}
+func (s *Server) managedBindCallback() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.deployCfg == nil || runmode.Current() != runmode.ModeMulti {
+			// The deployment App is a multi-mode credential, so in local mode
+			// this route does not exist — and a route that doesn't exist in
+			// this deployment mode answers like one that doesn't exist at all.
+			notFound(w, "route")
+			return
+		}
 
-	// The cookie is read and cleared before anything else, so a stale one can
-	// never be replayed — including down the paths that refuse below.
-	cookie, cookieErr := r.Cookie(managedBindCookieName)
+		cookie, err := r.Cookie(managedBindCookieName)
+		if err != nil || cookie.Value == "" {
+			// No cookie is not an error. It is the GitHub-initiated install:
+			// the installation exists and belongs to no workspace, which is an
+			// ordinary state rather than an anomaly.
+			//
+			// TODO(TFAC-931): make the unbound installation recoverable from
+			// here rather than only explaining itself — this page can say what
+			// happened but cannot yet offer the workspace picker that finishes
+			// the job, which is the half that needs a session anyway.
+			s.renderBindUnbound(w)
+			return
+		}
+
+		// The nonce travels as an argument rather than being re-read past the
+		// session middleware, so the completing half has no "what if there is
+		// no cookie" arm to reason about: by construction there is one.
+		nonce := cookie.Value
+		s.withSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.completeManagedBindCallback(w, r, nonce)
+		})).ServeHTTP(w, r)
+	})
+}
+
+// completeManagedBindCallback is the authenticated half: a ceremony this
+// deployment started is coming back. See the file comment for the four proofs
+// and the rule they share.
+func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Request, nonce string) {
+	// Cleared before anything else, so a stale cookie can never be replayed —
+	// including down every path that refuses below.
 	http.SetCookie(w, s.managedBindCookie(r, "", -1))
 
-	if cookieErr != nil || cookie.Value == "" {
-		// No cookie is not an error. It is the GitHub-initiated install:
-		// somebody installed the App from its public page, so GitHub returned
-		// them here with no ceremony behind it. The installation exists and
-		// belongs to no workspace, which is an ordinary state.
-		//
-		// TODO(TFAC-931): make the unbound installation recoverable from here
-		// rather than only explaining itself — this page can say what happened
-		// but cannot yet offer the workspace picker that finishes the job.
-		s.renderBindUnbound(w)
-		return
-	}
-
-	record, err := s.githubPendingBinds.ConsumeSystem(r.Context(), hashBindNonce(cookie.Value), timeNow().UTC())
+	record, err := s.githubPendingBinds.ConsumeSystem(r.Context(), hashBindNonce(nonce), timeNow().UTC())
 	if err != nil {
 		internalError(w, "github-managed-bind", err)
 		return

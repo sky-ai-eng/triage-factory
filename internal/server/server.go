@@ -658,6 +658,15 @@ func (s *Server) routes() {
 	//   GET  /api/invites/preview          — invite-token preview; the
 	//        recipient hasn't authenticated yet, so this can't gate on a
 	//        session. Runs on the admin pool; the token is the bearer secret.
+	//   GET  /api/github/managed/callback  — the deployment-App bind
+	//        callback. Mounted raw and applies withSession ITSELF, to the one
+	//        branch that needs it: a caller carrying the bind cookie is
+	//        completing a ceremony and about to write a credential, so it is
+	//        authenticated as usual, while a caller with no cookie installed
+	//        the App from its public page on GitHub and typically has no
+	//        session at all — that branch resolves no identity, reads nothing
+	//        and writes nothing, so a blanket 401 in front of it would only
+	//        dead-end the one person it exists for.
 	//   POST /api/sso/discover             — identifier-first login lookup;
 	//        the visitor is anonymous (pre-login), so it can't gate on a
 	//        session. No side effect, admin-pool read, privacy-safe reply
@@ -677,7 +686,9 @@ func (s *Server) routes() {
 	// Deliberately NOT wrapped: the OAuth callback (already bounded per-flow
 	// by its HMAC-signed PKCE state cookie + single-use IdP code, so an IP cap
 	// adds ~no protection — and a 429 mid-OAuth on a shared NAT would break a
-	// top-level navigation for no gain), /api/health (platform liveness probes
+	// top-level navigation for no gain), the managed-bind callback (same
+	// shape, and its pre-auth branch renders a fixed page without a single
+	// read — there is no work behind it to flood), /api/health (platform liveness probes
 	// hit it often), /api/config (the AuthGate boot read), the /auth/v1/
 	// GoTrue proxy (rate-limited upstream), and the SPA fallback (every static
 	// asset).
@@ -1285,18 +1296,30 @@ func (s *Server) routes() {
 
 	// The bind ceremony — how a workspace claims an installation of the
 	// DEPLOYMENT App, the one key that serves many workspaces. Multi-mode only
-	// (a local binary ships no shared key), and both halves are top-level
-	// browser navigations rather than fetches, so they ride s.api: the callback
-	// arrives from github.com and a CSRF origin check would reject the very
+	// (a local binary ships no shared key). Both halves are top-level browser
+	// navigations rather than fetches, so neither takes the CSRF origin check:
+	// the callback arrives from github.com, and that gate would reject the very
 	// request the flow depends on. Its CSRF protection is the pending-bind
 	// cookie + record instead, which is a stronger claim than an Origin header
-	// and the only one that works across the GitHub round trip.
+	// and the only one that survives the GitHub round trip.
 	//
 	// The callback carries NO org id, and that is forced: a GitHub App has one
 	// registered callback URL for the whole deployment, so the workspace comes
 	// from the consumed pending-bind record rather than from the path.
+	//
+	// It is also mounted RAW rather than through s.api, and takes withSession
+	// itself — see managedBindCallback. One URL serves two callers: a ceremony
+	// coming back (authenticated, because the next thing it does is write a
+	// credential) and someone who installed the App from its public page on
+	// GitHub, who has no session at all and must not be answered with a JSON
+	// 401. The bind cookie decides which, before any session lookup.
 	s.api("GET /api/orgs/{org_id}/github/managed/connect", s.handleGitHubManagedConnect)
-	s.api("GET "+ManagedBindCallbackPath, s.handleGitHubManagedCallback)
+	// Spelled literally rather than built from ManagedBindCallbackPath: the
+	// pre-auth allowlist is audited by parsing this file, so a mount it cannot
+	// read as a constant string is a mount it cannot check. The two cannot
+	// drift silently — every managed-bind test requests the constant and would
+	// 404 into the unmatched-/api/* handler if this literal disagreed.
+	s.mux.Handle("GET /api/github/managed/callback", s.managedBindCallback())
 
 	// GitHub access either/or transitions. GitHub access is strictly App XOR
 	// PAT per org; these commit the switches and surface the inform-only

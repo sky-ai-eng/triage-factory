@@ -275,11 +275,30 @@ func (r *bindRig) bindCookie(t *testing.T, rec *httptest.ResponseRecorder) *http
 	return nil
 }
 
-// callback drives the GitHub return leg with the given cookie and query.
+// callback drives the GitHub return leg with the given cookie and query, from
+// a signed-in browser — the shape a ceremony coming back has.
 func (r *bindRig) callback(t *testing.T, cookie *http.Cookie, query string) *httptest.ResponseRecorder {
 	t.Helper()
+	return r.serveCallback(t, cookie, query, r.sid)
+}
+
+// callbackSignedOut drives the same URL from a browser with NO Triage Factory
+// session, which is the ordinary shape of a GitHub-initiated install: GitHub's
+// public install page is reachable by anyone the account owner points at it,
+// with no reason ever to have visited TF. Attaching a session by default is how
+// that case hid — every assertion below about the signed-out path goes through
+// here on purpose.
+func (r *bindRig) callbackSignedOut(t *testing.T, cookie *http.Cookie, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	return r.serveCallback(t, cookie, query, "")
+}
+
+func (r *bindRig) serveCallback(t *testing.T, cookie *http.Cookie, query, sid string) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest("GET", ManagedBindCallbackPath+"?"+query, nil)
-	req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: r.sid})
+	if sid != "" {
+		req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
+	}
 	if cookie != nil {
 		req.AddCookie(cookie)
 	}
@@ -585,14 +604,61 @@ func TestManagedBind_NoCookieIsTheUnboundInstall(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
 
-	out := rig.callback(t, nil, defaultCallbackQuery(4242))
-	if out.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200 — a recordless callback is not an error", out.Code)
+	assertUnbound := func(t *testing.T, out *httptest.ResponseRecorder) {
+		t.Helper()
+		if out.Code != http.StatusOK {
+			t.Errorf("status = %d body=%s, want 200 — a recordless callback is not an error",
+				out.Code, out.Body.String())
+		}
+		assertOutcome(t, out, "unbound")
+		rig.assertNothingBound(t)
+		if gh.served("/login/oauth/access_token") {
+			t.Error("the code was exchanged for a callback with no ceremony behind it")
+		}
 	}
-	assertOutcome(t, out, "unbound")
+
+	// The case this branch actually exists for, and the one a session-attaching
+	// test helper hides: the installer has NO Triage Factory session. Nothing
+	// on this path resolves an identity, so a blanket 401 in front of it would
+	// answer the one person it is for with a JSON error and a dead-ended tab.
+	t.Run("signed_out", func(t *testing.T) {
+		assertUnbound(t, rig.callbackSignedOut(t, nil, defaultCallbackQuery(4242)))
+	})
+
+	// The same answer for a TF admin who happens to be signed in — the outcome
+	// is about the missing ceremony, not about who is looking.
+	t.Run("signed_in", func(t *testing.T) {
+		assertUnbound(t, rig.callback(t, nil, defaultCallbackQuery(4242)))
+	})
+}
+
+// TestManagedBind_CompletingWithoutASessionIsRefused pins the other half of the
+// split. The no-cookie door is open to anyone; the door that WRITES is not.
+// Someone bearing a bind cookie is about to have a credential bound into a
+// workspace, so that branch stays behind withSession and answers 401 without
+// one — the ordinary authentication failure, not a bind.
+func TestManagedBind_CompletingWithoutASessionIsRefused(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+	cookie := rig.ceremony(t)
+
+	out := rig.callbackSignedOut(t, cookie, defaultCallbackQuery(4242))
+	if out.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d body=%s, want 401 — completing a bind requires a session",
+			out.Code, out.Body.String())
+	}
 	rig.assertNothingBound(t)
-	if gh.served("/login/oauth/access_token") {
-		t.Error("the code was exchanged for a callback with no ceremony behind it")
+
+	// The record must survive: nothing authenticated happened, so nothing was
+	// spent, and signing in and starting again has to work.
+	var consumed sql.NullTime
+	if err := rig.h.AdminDB.QueryRow(
+		`SELECT consumed_at FROM github_pending_binds WHERE org_id = $1`, rig.orgID.String(),
+	).Scan(&consumed); err != nil {
+		t.Fatalf("read pending bind: %v", err)
+	}
+	if consumed.Valid {
+		t.Error("an unauthenticated callback spent the pending-bind record")
 	}
 }
 
