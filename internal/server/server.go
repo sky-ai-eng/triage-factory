@@ -50,12 +50,12 @@ type Server struct {
 	taskMemory       db.TaskMemoryStore      // conversation_memory writes (human verdict capture on review/PR submit, task-disposition cleanup)
 	secrets          db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
 	teams            db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, prompts)
-	orgs             db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
-	jiraRules        db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
+	orgs             db.OrgsStore            // per-org settings: GitHub/Jira base URLs, poll intervals, clone protocol
+	jiraRules        db.JiraStatusRulesStore // per-team Jira status rules
 	githubApps       db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
 	reachableRepos   db.ReachableReposStore  // the reachable-repo mirror the picker lists from and the team-repos write gate validates against
 	githubDeliveries db.GitHubDeliveryStore  // applied webhook deliveries, so a redelivery is dropped before the mirror write and the bus publish
-	authEvents       db.AuthEventStore       // TFAC-76: SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
+	authEvents       db.AuthEventStore       // SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
 	// tx runs handler-cleanup write batches under the request user's
 	// claims even when the cleanup needs to outlive the request
 	// context. Each cleanup wraps in `s.tx.WithTx(cleanupCtx, orgID,
@@ -76,67 +76,66 @@ type Server struct {
 	mux       *http.ServeMux
 	static    fs.FS
 	ws        *websocket.Hub
-	// wsBackplane is the optional multi-mode cross-pod kick publisher
-	// (TFAC-584), wired via SetWSBackplane. Nil in local mode and before
-	// wiring; every call site nil-checks it, so a session revoke on a
-	// single-pod deployment behaves exactly as before this existed — only
-	// the local s.ws.CloseUserConnections closes anything.
+	// wsBackplane is the optional multi-mode cross-pod kick publisher, wired
+	// via SetWSBackplane. Nil in local mode and before wiring; every call site
+	// nil-checks it, so on a single-pod deployment a session revoke closes
+	// only this pod's own sockets.
 	wsBackplane WSKicker
 	// teamKB is the team knowledge-base seam (internal/kbstore) the /kb routes
-	// read and write through — the object store in multi, plain files under the
-	// state root in local. Wired via SetTeamKB after construction, because the
-	// blob store it is built over is resolved with the rest of the execution
-	// subsystem; teamKBNotifier is its websocket half, built alongside it so
-	// the two can never disagree about which deployment shape they are in.
+	// read and write through — the object store in multi, plain files under
+	// the state root in local. Wired via SetTeamKB after construction, because
+	// the blob store it is built over is resolved with the rest of the
+	// execution subsystem; teamKBNotifier is its websocket half, built
+	// alongside it so the two can never disagree about which deployment shape
+	// they are in.
 	teamKB         kbstore.KB
 	teamKBNotifier *knowledgeevent.Notifier
 	spawner        *delegate.Spawner
-	// reconciler backs the Tier-2 conversation-scoped artifact refresh endpoint
-	// (TFAC-464) — the same Reconciler the background Tier-1 Manager runs.
-	// Wired via SetReconciler after construction; nil until then, so the
-	// endpoint 503s rather than panicking if a request races startup.
+	// reconciler backs the Tier-2 conversation-scoped artifact refresh
+	// endpoint — the same Reconciler the background Tier-1 Manager runs. Wired
+	// via SetReconciler after construction; nil until then, so the endpoint
+	// 503s rather than panicking if a request races startup.
 	reconciler *reconcile.Reconciler
 	// bedrockRole resolves the Bedrock role-mode setup + connect probe's live
-	// AWS calls (TFAC-616). Wired via SetBedrockRoleResolver after
-	// construction; nil in local mode and until then, so the role-setup
-	// endpoint reports "role mode requires the control service" rather than
-	// panicking.
+	// AWS calls. Wired via SetBedrockRoleResolver after construction; nil in
+	// local mode and until then, so the role-setup endpoint reports "role mode
+	// requires the control service" rather than panicking.
 	bedrockRole bedrockRoleResolver
-	// placement backs the GET /api/fleet/placement explainer (TFAC-587): the
-	// computed capacity-weighted rendezvous candidate order for a key. Wired
-	// via SetPlacementResolver after construction; nil until then so the
-	// endpoint 503s rather than panicking if a request races startup.
+	// placement backs the GET /api/fleet/placement explainer: the computed
+	// capacity-weighted rendezvous candidate order for a key. Wired via
+	// SetPlacementResolver after construction; nil until then so the endpoint
+	// 503s rather than panicking if a request races startup.
 	placement placementResolver
 	// modelProber spends one minimal request establishing whether an org's
 	// credentials can invoke a given model. Wired via SetModelProber after
 	// construction; nil in local mode, where nothing probes and the test
 	// routes say the deployment cannot answer.
 	modelProber modelProber
-	// fleetQueue backs the GET /api/fleet/queue view: per-org conversation-queue shares
-	// (active/queued + cap). Satisfied by the ConversationQueue store; a narrow
-	// interface so the handler test can inject canned shares.
+	// fleetQueue backs the GET /api/fleet/queue view: per-org
+	// conversation-queue shares (active/queued + cap). Satisfied by the
+	// ConversationQueue store; a narrow interface so the handler test can
+	// inject canned shares.
 	fleetQueue fleetQueueReader
-	// ghResolver picks the right GitHub credential (org App installation
-	// token → PAT) per request, given the org + target account. The per-repo
-	// handler operations migrated off the old process-global PAT client —
-	// review diff/submit, pending-PR submit, branches, dashboard — resolve
-	// through it, and there is no longer a process-global PAT client. (A few
-	// handlers still build a request-scoped
-	// PAT client directly where they intentionally need the PAT identity — the
-	// repo picker's PAT fallback and GitHub-teams discovery.) Built in New from
-	// the stores, so it's never nil — handlers don't need a guard.
+	// ghResolver picks the right GitHub credential (org App installation token
+	// → PAT) per request, given the org + target account. Every per-repo
+	// handler operation goes through it — review diff/submit, pending-PR
+	// submit, branches, dashboard — and there is no process-global PAT client.
+	// Two paths build a request-scoped PAT client directly because they need
+	// the PAT identity specifically: the repo picker's fallback and
+	// GitHub-teams discovery. Built in New from the stores, so it's never nil
+	// — handlers don't guard.
 	ghResolver ghclient.Resolver
 	// ghTokenCache is the per-installation App-token cache backing ghResolver.
 	// Retained on the Server (not just handed to the resolver) so the paths
-	// that learn a token has died — installation.deleted, installation.suspend,
-	// an App cutover or teardown — can Invalidate it, the same reason
-	// jiraTokenCache is held here. Built in New, never nil.
+	// that learn a token has died — installation.deleted,
+	// installation.suspend, an App cutover or teardown — can Invalidate it,
+	// the same reason jiraTokenCache is held here. Built in New, never nil.
 	ghTokenCache ghclient.TokenCache
-	// jiraResolver routes Jira writes by provenance: ForSystem for
-	// the org/bot service cred, ForUser for the acting user's own stored
-	// credential. User-initiated board claim / undo / requeue resolve via
-	// ForUser so the write is attributed to the user, not the service account.
-	// Built in New from the stores, so it's never nil — handlers don't guard.
+	// jiraResolver routes Jira writes by provenance: ForSystem for the org/bot
+	// service cred, ForUser for the acting user's own stored credential.
+	// User-initiated board claim / undo / requeue resolve via ForUser so the
+	// write is attributed to the user, not the service account. Built in New
+	// from the stores, so it's never nil — handlers don't guard.
 	jiraResolver jira.Resolver
 	// jiraApps owns the org_jira_apps table — per-org Atlassian OAuth app
 	// registrations (the BYO-app override / local-supplied app). The settings
@@ -149,17 +148,17 @@ type Server struct {
 	// connect_available signal that the per-user Jira status endpoint returns.
 	// Built in New, so it's never nil — handlers don't guard.
 	jiraOAuthApps jira.OAuthAppResolver
-	// jiraOAuthMinter performs the stateless Atlassian OAuth HTTP exchanges for
-	// the per-user Connect flow (authorize-code exchange, accessible-resources).
-	// The per-request refresh + rotation write-back lives in the token cache
-	// wired into jiraResolver; this minter is the connect handlers' direct seam.
-	// Built in New, never nil.
+	// jiraOAuthMinter performs the stateless Atlassian OAuth HTTP exchanges
+	// for the per-user Connect flow (authorize-code exchange,
+	// accessible-resources). The per-request refresh + rotation write-back
+	// lives in the token cache wired into jiraResolver; this minter is the
+	// connect handlers' direct seam. Built in New, never nil.
 	jiraOAuthMinter *jiraoauth.Minter
 	// jiraTokenCache is the per-user Cloud OAuth access-token cache backing
 	// jiraResolver's OAuth branch. Retained on the Server (not just handed to
 	// the resolver) so the connect callback + a paste-over-OAuth re-bind can
-	// Invalidate the stale cached token — mirrors how ghTokenCache is reachable
-	// via onInstallationTokensInvalid. Built in New, never nil.
+	// Invalidate the stale cached token — mirrors how ghTokenCache is
+	// reachable via onInstallationTokensInvalid. Built in New, never nil.
 	jiraTokenCache *jiraoauth.TokenCache
 	// Change callbacks accept the orgID of the tenant whose integration
 	// creds just rotated, so the closure can re-resolve via SecretStore.
@@ -185,9 +184,9 @@ type Server struct {
 	// force=true bypasses its TTL — the picker's refresh control and every
 	// credential change. Nil until SetReachTrigger runs.
 	reachTrigger func(orgID string, force bool)
-	// dashboardBackfill seeds a bound user's trailing-window PR history into the
-	// entity store so the personal dashboard isn't blank for history that
-	// predates tracking (TFAC-396). Multi-mode only — wired to the poller's
+	// dashboardBackfill seeds a bound user's trailing-window PR history into
+	// the entity store so the personal dashboard isn't blank for history that
+	// predates tracking. Multi-mode only — wired to the poller's
 	// BackfillUserDashboard; nil in local mode, where per-cycle Phase 1b owns
 	// history. kickDashboardBackfill runs it fire-and-forget, marker-guarded.
 	dashboardBackfill func(ctx context.Context, orgID, userID, login, host string) error
@@ -197,11 +196,11 @@ type Server struct {
 	// (the receiver no-ops the publish if so). Content-event processing
 	// is a downstream subscriber's concern.
 	bus *eventbus.Bus
-	// ingestor is the durable emit seam (events audit row + queue row,
-	// then bus fan-out). nil until SetIngestor runs (wired in
+	// ingestor is the durable emit seam (events audit row + queue row, then
+	// bus fan-out). nil until SetIngestor runs (wired in
 	// internal/app/subsystems.go immediately after ingest.New). Backs
-	// ExtensionAPI.PublishEvent — ee/ ingest must publish through here,
-	// never through the raw bus, or events lose the durable outbox.
+	// ExtensionAPI.PublishEvent — ee/ ingest must publish through here, never
+	// through the raw bus, or events lose the durable outbox.
 	ingestor *ingest.Ingestor
 
 	// onInstallationTokensInvalid fires when an installation's already-minted
@@ -209,9 +208,9 @@ type Server struct {
 	// installation.suspend webhook, and the App-credential change paths — so
 	// the credential resolver's per-installation token cache can drop the
 	// now-dead entry. New wires it to ghTokenCache.Invalidate, so it is set on
-	// every Server; SetInstallationTokensInvalidHook replaces it (tests observe
-	// the firings that way), and callers still nil-guard because that setter
-	// accepts a nil.
+	// every Server; SetInstallationTokensInvalidHook replaces it (tests
+	// observe the firings that way), and callers still nil-guard because that
+	// setter accepts a nil.
 	onInstallationTokensInvalid func(orgID, installationID string)
 
 	// deployCfg holds deployment-identity config (publicURL, HMAC key,
@@ -232,14 +231,10 @@ type Server struct {
 	// when unset (SSO off). The Enterprise Edition registers the real one.
 	loginExt LoginExtension
 
-	// refreshGroup dedupes concurrent JWT refresh attempts per session.
-	// singleflight.Group is the standard "share-the-call-result-across-
-	// concurrent-callers" primitive: at most one gotrue refresh runs
-	// per session ID at a time, and all waiters receive the same
-	// result. The key is cleared once the in-flight call returns, so
-	// there's no per-session state accumulating over process lifetime
-	// (vs the prior sync.Map[uuid]*Mutex which leaked one entry per
-	// session forever).
+	// refreshGroup dedupes concurrent JWT refresh attempts per session: at
+	// most one gotrue refresh runs per session ID at a time, and every waiter
+	// gets that result. The key is cleared once the in-flight call returns, so
+	// no per-session state accumulates over the process lifetime.
 	refreshGroup singleflight.Group
 
 	// inlineScriptHashes is the base64-encoded SHA-256 of each inline
@@ -248,15 +243,13 @@ type Server struct {
 	// script-src as `'sha256-<hash>'` directives.
 	inlineScriptHashes []string
 
-	// githubAppRegMu serializes per-org GitHub App registration so
-	// two concurrent callbacks can't both pass the existence check,
-	// both call GitHub's conversion endpoint, and leave an orphan
-	// App. TFAC-579: this map is now only the LOCAL-mode half of
-	// acquireKeyedLock — sufficient at N=1 (there's no second process to
-	// race), but not across control pods in multi mode, where
-	// acquireKeyedLock instead takes a Postgres session-scoped advisory
-	// lock. Both call sites go through acquireKeyedLock; nothing reaches
-	// into this map directly anymore.
+	// githubAppRegMu serializes per-org GitHub App registration so two
+	// concurrent callbacks can't both pass the existence check, both call
+	// GitHub's conversion endpoint, and leave an orphan App. It is the
+	// LOCAL-mode half of acquireKeyedLock — sufficient at N=1, where no second
+	// process can race, but not across control pods in multi mode, where
+	// acquireKeyedLock takes a Postgres session-scoped advisory lock instead.
+	// Reach it only through acquireKeyedLock.
 	githubAppRegMu sync.Map // map[orgID]*sync.Mutex
 
 	// webhookSecretMu guards the three fields below — the short-TTL per-org
@@ -290,21 +283,21 @@ type Server struct {
 	// and need to drive the failure path deterministically.
 	hookProbe func(ctx context.Context, orgID string, app *domain.OrgGitHubApp, expectedURL string) (githubapp.WebhookHealth, error)
 
-	// preAuthLimiter is the per-IP token-bucket cap on the pre-auth
-	// allowlist routes (TFAC-433). Those mounts run before any session
-	// exists, so they lack the implicit "needs a valid session" bound the
-	// s.api/apiMutating routes get for free; this blunts a single-source
-	// flood (e.g. SSO-discovery domain enumeration). Constructed in New so
-	// it's never nil; the wrapper no-ops in local mode. See ratelimit.go.
+	// preAuthLimiter is the per-IP token-bucket cap on the pre-auth allowlist
+	// routes. Those mounts run before any session exists, so they lack the
+	// implicit "needs a valid session" bound the s.api/apiMutating routes get
+	// for free; this blunts a single-source flood (e.g. SSO-discovery domain
+	// enumeration). Constructed in New so it's never nil; the wrapper no-ops
+	// in local mode. See ratelimit.go.
 	preAuthLimiter *ipRateLimiter
-	// signedWebhookLimiter is the per-IP token-bucket cap for pre-auth
-	// mounts that authenticate themselves via a cryptographic signature
-	// before any side effect (the Slack Events API receiver) — a separate,
-	// much higher-throughput tier than preAuthLimiter's human-login budget,
-	// since a legitimate sender at this tier already proves its
-	// authenticity and a shared low budget would 429 it into looking like a
-	// failing endpoint. Constructed in New so it's never nil; the wrapper
-	// no-ops in local mode. See ratelimit.go.
+	// signedWebhookLimiter is the per-IP token-bucket cap for pre-auth mounts
+	// that authenticate themselves via a cryptographic signature before any
+	// side effect (the Slack Events API receiver) — a separate, much
+	// higher-throughput tier than preAuthLimiter's human-login budget, since a
+	// legitimate sender at this tier already proves its authenticity and a
+	// shared low budget would 429 it into looking like a failing endpoint.
+	// Constructed in New so it's never nil; the wrapper no-ops in local mode.
+	// See ratelimit.go.
 	signedWebhookLimiter *ipRateLimiter
 	// tokenAuthFailureLimiter is the per-IP budget the Bearer path charges
 	// when a token fails to authenticate. Unlike the two above it does not
@@ -317,9 +310,8 @@ type Server struct {
 	// readyHooks are brain-gated OnReady hooks registered by extensions
 	// during installExtensions (routes()). Collected single-threaded at
 	// startup — same no-lock contract as registeredExtensions — then fired
-	// by StartBrainExtensionWorkers every time this pod's brain starts
-	// (TFAC-583; at TF_ROLE=all / local, that's once, at boot — same as
-	// before this ticket).
+	// by StartBrainExtensionWorkers every time this pod's brain starts — at
+	// TF_ROLE=all / local, that is once, at boot.
 	readyHooks []func(context.Context)
 	// replicaSafeHooks are OnReadyReplicaSafe hooks — the escape hatch for
 	// a worker that's safe to run on every pod regardless of brain-lease
@@ -330,10 +322,10 @@ type Server struct {
 	workersStarted sync.Once
 
 	// version is main.Version (the release tag, or "dev" for an unreleased
-	// build), threaded through for GET /readyz (TFAC-573) so an operator
-	// can confirm a deploy landed without shelling into the host. Set via
-	// SetVersion; the zero value "" renders as an empty string rather than
-	// panicking for any Server built without it (bare test constructions).
+	// build), threaded through for GET /readyz so an operator can confirm a
+	// deploy landed without shelling into the host. Set via SetVersion; the
+	// zero value "" renders as an empty string rather than panicking for any
+	// Server built without it (bare test constructions).
 	version string
 	// migrationsOK records that db.Migrate completed successfully at boot,
 	// for GET /readyz's "migrations" hard check. Always set true in
@@ -354,21 +346,19 @@ type Server struct {
 	// failed rather than nil-dereffing.
 	pollerHealth func(ctx context.Context) poller.HealthSnapshot
 	// leaseStatus reports this pod's current view of the background-brain
-	// lease, wired via SetLeaseStatus — role=control in multi mode only
-	// (TFAC-583). nil at role=all / local (the single process always
-	// self-holds, so /readyz's poller hard-check stays byte-identical to
-	// the pre-TFAC-583 contract and omits the `lease` field entirely) and
-	// nil on an executor (no /readyz there — it serves a separate
-	// localhost healthz).
+	// lease, wired via SetLeaseStatus — role=control in multi mode only. Nil
+	// at role=all / local, where the single process always self-holds, so
+	// /readyz hard-checks the poller unconditionally and omits the `lease`
+	// field; nil on an executor too, which serves a separate localhost healthz
+	// instead.
 	leaseStatus LeaseStatusFunc
 }
 
-// agentEnabledForTeam returns the resolved agent and whether the
-// team_agents.enabled flag is true for it *on the given team*. This is
-// the acceptance rule "delegating re-checks
-// team_agents.enabled at delegate time," now correctly scoped to the
-// acting team rather than always the org default — so a
-// multi-team user delegating for team B is gated on B's bot setting.
+// agentEnabledForTeam returns the resolved agent and whether
+// team_agents.enabled is true for it *on the given team*. Delegating re-checks
+// the flag at delegate time, scoped to the ACTING team rather than the org
+// default — so a multi-team user delegating for team B is gated on B's bot
+// setting.
 //
 // Three outcomes the caller maps:
 //   - (a, true, nil)  — proceed with the delegate.
@@ -402,17 +392,16 @@ func (s *Server) agentEnabledForTeam(ctx context.Context, orgID, userID, teamID 
 			return fmt.Errorf("no agent bootstrapped — set up the bot first")
 		}
 		if s.teamAgents == nil {
-			// Pre-D-Claims wiring (tests). Treat as enabled to preserve
-			// the pre-flag behavior for any test path that hasn't wired
-			// teamAgents yet.
+			// No team-agent store wired (bare test constructions): there is
+			// nothing to re-check, so the delegate proceeds.
 			enabled = true
 			return nil
 		}
 		if teamID == "" {
-			// No team supplied (teamless org). Production installs always
-			// have a team (multi-mode org provisioning; local-mode
-			// baseline migration), so this is a bootstrap bug —
-			// surface as disabled rather than minting a wrong-team row.
+			// No team supplied (teamless org). Production installs always have
+			// a team (multi-mode org provisioning; local-mode baseline
+			// migration), so this is a bootstrap bug — surface as disabled
+			// rather than minting a wrong-team row.
 			teamMissing = true
 			return nil
 		}
@@ -440,14 +429,11 @@ func (s *Server) agentEnabledForTeam(ctx context.Context, orgID, userID, teamID 
 	return a, enabled, nil
 }
 
-// New creates a new server with the given database + the full
-// per-resource store bundle, and registers all routes. The Server retains
-// individual store fields rather than a single db.Stores struct so existing
-// handler code keeps working — the constructor just unpacks the bundle once
-// instead of forcing every caller to enumerate 20+ stores positionally.
-//
-// raw *sql.DB stays available for handlers that haven't been
-// ported to a store yet.
+// New creates a server over the given database + the full per-resource store
+// bundle, and registers every route. The Server holds individual store fields
+// rather than the db.Stores struct so a handler names the one store it needs;
+// the constructor unpacks the bundle once. The raw *sql.DB is retained for the
+// few paths that issue SQL directly.
 func New(database *sql.DB, stores db.Stores) *Server {
 	s := &Server{
 		db:               database,
@@ -493,11 +479,11 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// onInstallationTokensInvalid.
 	s.ghTokenCache = ghclient.NewMemoryTokenCache()
 	s.ghResolver = ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, s.ghTokenCache)
-	// Atlassian OAuth app resolver (TFAC-337): per-org override → the
-	// deployment app (multi) / local-supplied (local). The deployment app is
-	// read from the deployment env, and only in multi mode — local has no
-	// deployment default, so DeploymentOAuthAppFromEnv returns the zero app
-	// there and the resolver relies on the org's BYO row.
+	// Atlassian OAuth app resolver: per-org override → the deployment app
+	// (multi) / local-supplied (local). The deployment app is read from the
+	// deployment env, and only in multi mode — local has no deployment
+	// default, so DeploymentOAuthAppFromEnv returns the zero app there and the
+	// resolver relies on the org's BYO row.
 	s.jiraOAuthApps = jira.NewOAuthAppResolver(stores.JiraApps, stores.Secrets, jira.DeploymentOAuthAppFromEnv())
 	// Cloud OAuth minter + per-user access-token cache. The cache reads the
 	// stored refresh token, mints an access token, and writes the rotated
@@ -506,10 +492,9 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// its AuthMethodCloudOAuth branch to.
 	s.jiraOAuthMinter = jiraoauth.NewMinter()
 	s.jiraTokenCache = jiraoauth.NewTokenCache(s.jiraOAuthMinter, s.jiraOAuthApps, stores.Secrets)
-	// Jira write-actor resolver: ForSystem (org/bot cred) +
-	// ForUser (acting user's cred, incl. the Cloud OAuth mint path).
-	// Constructed here like ghResolver so a Server is always usable without
-	// external wiring.
+	// Jira write-actor resolver: ForSystem (org/bot cred) + ForUser (acting
+	// user's cred, incl. the Cloud OAuth mint path). Constructed here like
+	// ghResolver so a Server is always usable without external wiring.
 	s.jiraResolver = jira.NewResolverWithOAuth(stores.Secrets, stores.Orgs, s.jiraTokenCache)
 	s.onInstallationTokensInvalid = func(orgID, installationID string) {
 		s.ghTokenCache.Invalidate(orgID, installationID)
@@ -532,13 +517,12 @@ func (s *Server) ListenAndServe(addr string) error {
 	return s.ListenAndServeContext(context.Background(), addr)
 }
 
-// ListenAndServeContext starts the HTTP server on the given address and
-// shuts it down gracefully when ctx is cancelled (SIGINT/SIGTERM at the
-// process boundary). The mux is wrapped in withSecurityHeaders so every
-// response carries the standard set (HSTS conditionally, CSP,
-// X-Frame-Options, etc.), and in otelhttp outside that — see
-// tracedHandler. Returns nil on a clean ctx-driven shutdown; a
-// non-ErrServerClosed listen error otherwise.
+// ListenAndServeContext starts the HTTP server on the given address and shuts
+// it down gracefully when ctx is cancelled (SIGINT/SIGTERM at the process
+// boundary). The mux is wrapped in withSecurityHeaders so every response
+// carries the standard set (HSTS conditionally, CSP, X-Frame-Options, etc.),
+// and in otelhttp outside that — see tracedHandler. Returns nil on a clean
+// ctx-driven shutdown; a non-ErrServerClosed listen error otherwise.
 func (s *Server) ListenAndServeContext(ctx context.Context, addr string) error {
 	httpSrv := &http.Server{Addr: addr, Handler: s.tracedHandler()}
 
@@ -618,7 +602,7 @@ func (s *Server) routes() {
 	//        checks, compose healthcheck, k8s liveness). Pre-auth so
 	//        the probe doesn't need a session; deliberately doesn't
 	//        consult the DB (see handleHealth).
-	//   GET  /readyz                    — readiness probe (TFAC-573): DB +
+	//   GET  /readyz                    — readiness probe: DB +
 	//        migrations + poller liveness (hard checks, 503 on failure)
 	//        plus poll-staleness + active-claim count (soft signals). Bare
 	//        path (not /api/readyz) by convention — the universal k8s/ALB
@@ -635,26 +619,26 @@ func (s *Server) routes() {
 	//   POST /api/sso/discover             — identifier-first login lookup;
 	//        the visitor is anonymous (pre-login), so it can't gate on a
 	//        session. No side effect, admin-pool read, privacy-safe reply
-	//        (registered with the SSO routes below; see TFAC-427).
+	//        (registered with the SSO routes below).
 	//   /auth/v1/                        — GoTrue reverse proxy; auth
 	//        happens upstream, not in our middleware.
 	//   /api/                            — JSON 404 for any unmatched
-	//        /api/* path (TFAC-409 item 5); no identity dependency.
+	//        /api/* path; no identity dependency.
 	//   /                                — SPA fallback; static-file
 	//        serving with no identity dependency.
 	//
-	// IP rate limiting (TFAC-433): the interactive pre-auth mounts —
-	// oauth start, logout, invite preview, and SSO discovery (registered
-	// below) — are wrapped in s.preAuthRateLimit so an anonymous caller
-	// can't flood them (e.g. discovery domain enumeration). The cap is
-	// declared here at the allowlist, not sprinkled across handlers; it
-	// no-ops in local mode. Deliberately NOT wrapped: the OAuth callback
-	// (already bounded per-flow by its HMAC-signed PKCE state cookie +
-	// single-use IdP code, so an IP cap adds ~no protection — and a 429
-	// mid-OAuth on a shared NAT would break a top-level navigation for no
-	// gain), /api/health (platform liveness probes hit it often),
-	// /api/config (the AuthGate boot read), the /auth/v1/ GoTrue proxy
-	// (rate-limited upstream), and the SPA fallback (every static asset).
+	// IP rate limiting: the interactive pre-auth mounts — oauth start, logout,
+	// invite preview, and SSO discovery (registered below) — are wrapped in
+	// s.preAuthRateLimit so an anonymous caller can't flood them (e.g.
+	// discovery domain enumeration). The cap is declared here at the
+	// allowlist, not sprinkled across handlers; it no-ops in local mode.
+	// Deliberately NOT wrapped: the OAuth callback (already bounded per-flow
+	// by its HMAC-signed PKCE state cookie + single-use IdP code, so an IP cap
+	// adds ~no protection — and a 429 mid-OAuth on a shared NAT would break a
+	// top-level navigation for no gain), /api/health (platform liveness probes
+	// hit it often), /api/config (the AuthGate boot read), the /auth/v1/
+	// GoTrue proxy (rate-limited upstream), and the SPA fallback (every static
+	// asset).
 	//
 	// The GitHub webhook receiver takes the separate signed-webhook tier
 	// rather than this one, alongside the Slack receiver: it authenticates
@@ -682,11 +666,11 @@ func (s *Server) routes() {
 	// platforms use auto-restart on liveness failure and we don't want
 	// a flapping integration to recycle the whole process.
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
-	// Readiness probe (TFAC-573) — bare path (not under /api/*), matching
-	// the universal k8s/ALB probe convention; Go 1.22's ServeMux matches
-	// this exact literal ahead of the "/" SPA catch-all regardless of
-	// registration order. Pre-auth for the same reason as /api/health
-	// above. See readyz_handler.go.
+	// Readiness probe — bare path (not under /api/*), matching the universal
+	// k8s/ALB probe convention; Go 1.22's ServeMux matches this exact literal
+	// ahead of the "/" SPA catch-all regardless of registration order.
+	// Pre-auth for the same reason as /api/health above. See
+	// readyz_handler.go.
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	// /auth/v1/* reverse-proxy to gotrue, wired lazily inside
 	// SetAuthDeps. The closure here re-reads s.authProxy each
@@ -702,21 +686,18 @@ func (s *Server) routes() {
 	}))
 
 	// Integration credentials (GitHub PAT, Jira PAT). Distinct from the
-	// session-auth routes above — these are per-user-stored credentials
-	// for talking to third-party services on the user's behalf, not the
-	// user's own login. Lived under /api/auth/* historically; renamed in
-	// a cleanup so /api/auth/* unambiguously means
-	// "session authentication." Wrapped via s.api/apiMutating since you
-	// need to be logged in to manage your integration credentials.
+	// session-auth routes above — these are per-user-stored credentials for
+	// talking to third-party services on the user's behalf, not the user's own
+	// login, which is why they sit outside /api/auth/*: that prefix means
+	// session authentication and nothing else. Wrapped via s.api/apiMutating —
+	// managing them requires a session.
 	s.api("GET /api/integrations/status", s.handleIntegrationsStatus)
-	// Placement explainer (TFAC-587): the computed rendezvous candidate order
-	// for a key. Org-admin gated inside the handler on ?org= (the fleet
-	// operator identity is TFAC-589). Read-only.
+	// Placement explainer: the computed rendezvous candidate order for a key.
+	// Org-admin gated inside the handler on ?org=. Read-only.
 	s.api("GET /api/fleet/placement", s.handleFleetPlacement)
 	// Fleet queue view: per-org active/queued shares + the org's concurrency
-	// cap. Org-admin gated inside the handler on ?org= (the fleet-wide
-	// operator view is a later ticket, same interim as the placement explainer
-	// above). Read-only.
+	// cap. Org-admin gated inside the handler on ?org=, like the placement
+	// explainer above. Read-only.
 	s.api("GET /api/fleet/queue", s.handleFleetQueue)
 	// Logout-everywhere: must be authenticated to use it (you can only
 	// nuke your own sessions).
@@ -732,13 +713,13 @@ func (s *Server) routes() {
 	s.api("GET /api/me/identities", s.handleMeIdentities)
 	// Switch the session's active org.
 	s.apiMutating("POST /api/me/active-org", s.handleActiveOrgUpdate)
-	// The caller's own API tokens — the headless credential surface. Viewer-
-	// relative like the settings row beside it: a token acts AS its minter, so
-	// nobody may address another's and there is no id in the path. The org a
-	// token is sealed to is a field on the row, not the route's scope, which is
-	// why create takes org_id in its body. Multi-mode only (404 in local).
-	// Both credentials reach these: a session mints the first token, and a
-	// token rotates itself within its own org.
+	// The caller's own API tokens — the headless credential surface.
+	// Viewer-relative like the settings row beside it: a token acts AS its
+	// minter, so nobody may address another's and there is no id in the path.
+	// The org a token is sealed to is a field on the row, not the route's
+	// scope, which is why create takes org_id in its body. Multi-mode only
+	// (404 in local). Both credentials reach these: a session mints the first
+	// token, and a token rotates itself within its own org.
 	s.apiMutating("POST /api/me/tokens", s.handleAPITokenCreate)
 	s.apiMutating("POST /api/me/tokens/list", s.handleAPITokenList)
 	s.apiMutating("DELETE /api/me/tokens/{id}", s.handleAPITokenRevoke)
@@ -754,13 +735,12 @@ func (s *Server) routes() {
 	// The canonical single read for an org: the same {id, name, role} row
 	// /api/me carries per membership. Member-visible; a non-member 404s.
 	s.api("GET /api/orgs/{org_id}", s.handleOrgGet)
-	// multi-team selectors. GET /api/teams is the data source
-	// for the per-page read filter + write-time picker (count-gated to
-	// ≥2 teams in the frontend); it carries the last-acting-team the write
-	// picker seeds from, maintained server-side on each write (no
-	// explicit-set endpoint — it's a recency signal, not a user preference).
-	// POST /api/teams is the org-admin "add team" affordance (multi-only;
-	// 404 in local).
+	// Teams. The list read is the data source for the per-page read filter and
+	// the write-time picker (count-gated to ≥2 teams in the frontend); it
+	// carries the last-acting-team the picker seeds from, maintained
+	// server-side on each write — a recency signal, not a user preference, so
+	// there is no endpoint to set it explicitly. POST /api/teams is the
+	// org-admin "add team" affordance (multi-only; 404 in local).
 	th := &teamsHandler{
 		tx:        s.tx,
 		az:        s.az,
@@ -771,29 +751,25 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/teams", th.handleTeamCreate)
 	// The canonical single read, and the only reader of a team's description.
 	// Any org member may read any team in their org; a cross-org id 404s under
-	// RLS. {team_id} takes the literal "default" in local mode (authz.ResolveTeamID).
+	// RLS. {team_id} takes the literal "default" in local mode
+	// (authz.ResolveTeamID).
 	s.api("GET /api/teams/{team_id}", th.handleTeamGet)
 	// PATCH /api/teams/{team_id} renames a team / edits its description
 	// (multi-only; 404 in local). Gated team-admin-or-org-admin; a plain
 	// member 403s, a cross-org team_id 404s (VerifyTeamInOrg).
 	s.apiMutating("PATCH /api/teams/{team_id}", th.handleTeamUpdate)
-	// Team archive/restore lifecycle (TFAC-448), org-admin only, multi-mode.
-	// Archive soft-deletes + force-stops the team's in-flight delegations
-	// and blocks further writes; restore flips it back (dead conversations
-	// stay dead). The preview + archived-list back the confirm modal and the
-	// org-admin restore surface.
 	// The team's settings row and its Jira project rules, under the team
 	// resource so the path segment the caller asserts is the one the
 	// authorization check is about. The rules are their own replace-set write
-	// rather than a key inside the settings body — a child collection, like the
-	// tracked repos and the github-group mappings, not a field.
+	// rather than a key inside the settings body — a child collection, like
+	// the tracked repos and the github-group mappings, not a field.
 	s.api("GET /api/teams/{team_id}/settings", s.handleTeamSettingsGet)
 	s.apiMutating("PATCH /api/teams/{team_id}/settings", s.handleTeamSettingsPatch)
 	s.apiMutating("PUT /api/teams/{team_id}/jira-projects", s.handleTeamJiraProjectsPut)
 	// The other two child collections, siblings of jira-projects: the team's
-	// tracked GitHub repos and its GitHub-team mappings, both replace-set PUTs.
-	// github-repos, not repos — it reads as the sibling it is and does not
-	// collide with the top-level /api/repos registry resource.
+	// tracked GitHub repos and its GitHub-team mappings, both replace-set
+	// PUTs. github-repos, not repos — it reads as the sibling it is and does
+	// not collide with the top-level /api/repos registry resource.
 	s.api("GET /api/teams/{team_id}/github-repos", s.handleTeamReposGet)
 	s.apiMutating("PUT /api/teams/{team_id}/github-repos", s.handleTeamReposPut)
 	// The team knowledge base. Addressed at the team that OWNS the knowledge,
@@ -809,6 +785,11 @@ func (s *Server) routes() {
 	s.apiMutating("DELETE /api/teams/{team_id}/kb/{path...}", s.handleTeamKnowledgeDelete)
 	s.api("GET /api/teams/{team_id}/github-groups", s.handleTeamGitHubGroupsGet)
 	s.apiMutating("PUT /api/teams/{team_id}/github-groups", s.handleTeamGitHubGroupsPut)
+	// Team archive/restore lifecycle, org-admin only, multi-mode. Archive
+	// soft-deletes + force-stops the team's in-flight delegations and blocks
+	// further writes; restore flips it back, and dead conversations stay dead.
+	// The preview + archived-list back the confirm modal and the org-admin
+	// restore surface.
 	s.apiMutating("POST /api/teams/archived/list", th.handleTeamArchivedList)
 	s.api("GET /api/teams/{team_id}/archive/preview", th.handleTeamArchivePreview)
 	s.apiMutating("POST /api/teams/{team_id}/archive", th.handleTeamArchive)
@@ -829,14 +810,13 @@ func (s *Server) routes() {
 	s.apiMutating("PATCH /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRoleChange)
 	s.apiMutating("DELETE /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRemove)
 
-	// Org People roster: list members + change role + remove.
-	// Multi-mode only (each handler 404s in local). GET is any-member;
-	// PATCH/DELETE gate org-admin (DELETE also allows a self-leave). The
-	// last-owner guard is a DB trigger surfaced as a 409.
-	// revokeUserOrgSessions is read lazily because authDeps lands after
-	// routes() runs (SetAuthDeps); the closure nil-checks it for the boot
-	// race and parses the string ids the handler carries into the UUIDs the
-	// store expects. See TFAC-487.
+	// Org People roster: list members + change role + remove. Multi-mode only
+	// (each handler 404s in local). GET is any-member; PATCH/DELETE gate
+	// org-admin (DELETE also allows a self-leave). The last-owner guard is a
+	// DB trigger surfaced as a 409. revokeUserOrgSessions is read lazily
+	// because authDeps lands after routes() runs (SetAuthDeps); the closure
+	// nil-checks it for the boot race and parses the string ids the handler
+	// carries into the UUIDs the store expects.
 	omh := &orgMembersHandler{tx: s.tx, az: s.az, ws: s.ws,
 		revokeUserOrgSessions: func(ctx context.Context, userID, orgID string) (int64, error) {
 			if s.authDeps == nil {
@@ -878,14 +858,14 @@ func (s *Server) routes() {
 
 	// Usage (spend layer) — the core Usage page's read API, each route under
 	// the scope it reports on: usage is a fact about a caller, a team, or an
-	// org, the same way a roster is. /api/me/usage is viewer-relative and takes
-	// its org from the session; the team and org routes name their scope in the
-	// path, and the org routes authorize against THAT org rather than whichever
-	// one the session points at.
-	// Scope is role-gated: /me is any org member, /teams/{id} is membership
-	// (with the per-person by_user cut alone held to team admin), /orgs/{id} is
-	// org-admin. The team/org reads use the admin-pool ListSpendSystem (the
-	// route's gate is the authorization for crossing RLS).
+	// org, the same way a roster is. /api/me/usage is viewer-relative and
+	// takes its org from the session; the team and org routes name their scope
+	// in the path, and the org routes authorize against THAT org rather than
+	// whichever one the session points at. Scope is role-gated: /me is any org
+	// member, /teams/{id} is membership (with the per-person by_user cut alone
+	// held to team admin), /orgs/{id} is org-admin. The team/org reads use the
+	// admin-pool ListSpendSystem (the route's gate is the authorization for
+	// crossing RLS).
 	uh := &usageHandler{tx: s.tx, az: s.az, conversationQueue: s.allStores.ConversationQueue}
 	s.api("GET /api/me/usage", uh.handleUsageMe)
 	s.api("GET /api/teams/{team_id}/usage", uh.handleUsageTeam)
@@ -898,50 +878,51 @@ func (s *Server) routes() {
 	// count-only read) the Overview's OPEN PRS figure. Same member-level
 	// gate as the flow node beside it.
 	s.apiMutating("POST /api/teams/{team_id}/prs/list", s.handleTeamPRList)
-	// Org-scoped operations subset (TFAC-589): an org admin's own queue waits +
-	// run durations + failure rates. Org-admin gated, SaaS-safe (no cross-tenant
-	// machine truth) — the org-facing complement to the operator-only fleet console.
+	// Org-scoped operations subset: an org admin's own queue waits + run
+	// durations + failure rates. Org-admin gated, SaaS-safe (no cross-tenant
+	// machine truth) — the org-facing complement to the operator-only fleet
+	// console.
 	s.api("GET /api/orgs/{org_id}/usage/ops", uh.handleUsageOrgOps)
-	// Activity feed (EE, FeatureGovernance): the team/org Actions (external-action
-	// audit log) + Objects (artifact history) lenses — same scope gates as the
-	// spend reads above, plus the entitlement (unlicensed → 404).
-	// Two resources, two routes each. The single ?view=-multiplexed /activity
-	// route they replaced answered with two different row shapes and two
-	// different filter vocabularies from one address.
+	// Activity feed (EE, FeatureGovernance): the team/org Actions
+	// (external-action audit log) + Objects (artifact history) lenses — same
+	// scope gates as the spend reads above, plus the entitlement (unlicensed →
+	// 404). Two resources, two routes each: the row shapes and the filter
+	// vocabularies differ, so one address cannot honestly serve both.
 	s.apiMutating("POST /api/teams/{team_id}/usage/artifacts/list", uh.handleUsageTeamArtifacts)
 	s.apiMutating("POST /api/teams/{team_id}/usage/actions/list", uh.handleUsageTeamActions)
 	s.apiMutating("POST /api/orgs/{org_id}/usage/artifacts/list", uh.handleUsageOrgArtifacts)
 	s.apiMutating("POST /api/orgs/{org_id}/usage/actions/list", uh.handleUsageOrgActions)
-	// Per-team daily spend cap (TFAC-482) — org-admin-set, EE/governance-gated
-	// (the handlers 404 when unlicensed). The GET lists every active team + its cap
-	// for the editor (so an idle team can be pre-capped); the PUT writes one cap and
-	// is mutating, so it runs through the CSRF + session wrap. Both write/read the
-	// admin pool: an org admin may cap a team they don't belong to.
+	// Per-team daily spend cap — org-admin-set, EE/governance-gated (the
+	// handlers 404 when unlicensed). The GET lists every active team + its cap
+	// for the editor (so an idle team can be pre-capped); the PUT writes one
+	// cap and is mutating, so it runs through the CSRF + session wrap. Both
+	// write/read the admin pool: an org admin may cap a team they don't belong
+	// to.
 	s.apiMutating("POST /api/orgs/{org_id}/usage/team-caps/list", uh.handleUsageTeamCaps)
 	s.apiMutating("PUT /api/teams/{team_id}/usage/cap", uh.handleUsageTeamCap)
-	// EE governance audit surface (TFAC-484): the access & credential change-log
-	// viewer. Org-admin-gated AND FeatureGovernance-gated (404 unlicensed) inside
-	// the handler — the data is core, only the cross-team lens is Enterprise.
+	// EE governance audit surface: the access & credential change-log viewer.
+	// Org-admin-gated AND FeatureGovernance-gated (404 unlicensed) inside the
+	// handler — the data is core, only the cross-team lens is Enterprise.
 	s.apiMutating("POST /api/orgs/{org_id}/usage/access-log/list", uh.handleUsageAccessLog)
 
-	// Avatar proxy (TFAC-480): serves a user's OAuth-captured avatar same-origin
-	// so it renders under the app's tight `img-src 'self'` CSP instead of being
-	// blocked as a cross-origin image. Any authenticated org member; the target
-	// user_id is resolved under the caller's claims, so RLS scopes it to the
-	// caller + co-org-members (a cross-org id 404s). One process-lifetime fetcher
-	// owns the upstream fetch + cache. Consumed by Usage's by-user roster and the
-	// topbar UserMenu.
+	// Avatar proxy: serves a user's OAuth-captured avatar same-origin so it
+	// renders under the app's tight `img-src 'self'` CSP instead of being
+	// blocked as a cross-origin image. Any authenticated org member; the
+	// target user_id is resolved under the caller's claims, so RLS scopes it
+	// to the caller + co-org-members (a cross-org id 404s). One
+	// process-lifetime fetcher owns the upstream fetch + cache. Consumed by
+	// Usage's by-user roster and the topbar UserMenu.
 	avh := &avatarsHandler{tx: s.tx, fetcher: newAvatarFetcher()}
 	s.api("GET /api/avatars/{user_id}", avh.handleAvatar)
 
-	// Org invites (multi-mode only — each handler 404s in local).
-	// The admin-facing create/list/revoke gate on org-admin and write
-	// through the app pool; preview + accept are the redeem surfaces and run
-	// on the admin pool (the redeem actor holds a token but no membership).
-	// publicURL + setActiveOrg are read lazily because deployCfg/authDeps
-	// land after routes() runs. GET /api/invites/preview is intentionally
-	// pre-auth (the recipient hasn't authenticated yet) — see the
-	// preAuthAllowlist note below + routes_coverage_test.
+	// Org invites (multi-mode only — each handler 404s in local). The
+	// admin-facing create/list/revoke gate on org-admin and write through the
+	// app pool; preview + accept are the redeem surfaces and run on the admin
+	// pool (the redeem actor holds a token but no membership). publicURL +
+	// setActiveOrg are read lazily because deployCfg/authDeps land after
+	// routes() runs. GET /api/invites/preview is intentionally pre-auth (the
+	// recipient hasn't authenticated yet) — see the preAuthAllowlist note
+	// below + routes_coverage_test.
 	ih := &invitesHandler{
 		tx:      s.tx,
 		az:      s.az,
@@ -970,15 +951,16 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/invites/accept", ih.handleInviteAccept)
 	// Pre-auth: the invitee previews the token before signing in. The handler
 	// runs on the admin pool and discloses only org name + role to the token
-	// holder. Listed in preAuthAllowlist; IP-rate-limited (TFAC-433).
+	// holder. Listed in preAuthAllowlist; IP-rate-limited.
 	s.mux.Handle("GET /api/invites/preview", s.preAuthRateLimit(http.HandlerFunc(ih.handleInvitePreview)))
 
 	// Entitlements probe — the deployment's licensed EE feature set. CORE (it
-	// reports the entitlements checker's state and is NOT itself license-gated),
-	// authenticated-session-only: the answer is deployment-level (process-global
-	// TF_LICENSE), so no org/role scoping. The frontend's useEntitlements hook
-	// reads this once to decide which EE surfaces to render; [] in a community /
-	// unlicensed build. See entitlements_handler.go.
+	// reports the entitlements checker's state and is NOT itself
+	// license-gated), authenticated-session-only: the answer is
+	// deployment-level (process-global TF_LICENSE), so no org/role scoping.
+	// The frontend's useEntitlements hook reads this once to decide which EE
+	// surfaces to render; [] in a community / unlicensed build. See
+	// entitlements_handler.go.
 	s.api("GET /api/entitlements", s.handleEntitlements)
 
 	// SSO (connection / domains / break-glass admin surface, the verify-
@@ -988,28 +970,25 @@ func (s *Server) routes() {
 	// and registers the LoginExtension that drives SAML start + the callback's
 	// enforcement/JIT/test forks. Core holds no SSO symbols.
 
-	// The tasks list read. It replaces the former GET /api/queue and
-	// GET /api/tasks outright rather than aliasing them: the two spellings
-	// answered the same nominal filter with different hidden ones
-	// (?status=queued returned claimed and future-snoozed rows the queue
-	// view hides), and one address per read is what keeps that from
-	// happening again. apiMutating is deliberate for a body-carrying read —
-	// see handleTaskList.
 	// Find-or-create the task at a station. The Factory's drop gesture is this
 	// plus POST /api/tasks/{id}/delegate: the task is the row, delegating is
 	// what you then do to it, so the in-between state — task resolved, run not
 	// started — is addressable rather than a partial success buried in one
 	// call's response.
 	s.apiMutating("POST /api/tasks", s.handleTaskCreate)
+	// The one tasks list read: every filtered view of the queue goes through
+	// it, so two spellings of the same read cannot drift into two different
+	// hidden filters. apiMutating is deliberate for a body-carrying read — see
+	// handleTaskList.
 	s.apiMutating("POST /api/tasks/list", s.handleTaskList)
 	s.api("GET /api/tasks/{id}", s.handleTaskGet)
-	// The task's field-write path. It replaces the former /swipe
-	// multiplexer, /snooze and /advance: the lifecycle axis and the wake
-	// time are columns, and a route per column value is how one gesture
-	// grew six arms with different required fields, different authz and
-	// different response shapes. The verbs below survive because each
-	// carries an effect a field write can't express — an external Jira
-	// write, a spawned run, artifact teardown, an audit reversal.
+	// The task's field-write path: the lifecycle axis and the wake time are
+	// columns, so they are PATCHed rather than given a route per value — a
+	// route per value is how one gesture grows arms with different required
+	// fields, different authz and different response shapes. Each verb below
+	// earns its own route by carrying an effect a field write cannot express:
+	// an external Jira write, a spawned run, artifact teardown, an audit
+	// reversal.
 	s.apiMutating("PATCH /api/tasks/{id}", s.handleTaskPatch)
 	s.apiMutating("POST /api/tasks/{id}/claim", s.handleTaskClaim)
 	s.apiMutating("POST /api/tasks/{id}/delegate", s.handleTaskDelegate)
@@ -1019,17 +998,18 @@ func (s *Server) routes() {
 	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
 	s.api("GET /api/agent/conversations/{conversationID}", ag.handleAgentStatus)
 	s.api("GET /api/agent/conversations/{conversationID}/messages", ag.handleMessages)
-	// Conversation-scoped artifact read (A·6, TFAC-465): the conversation's artifacts across
-	// every kind, team-scoped via the conversation. Backs the conversation detail surface (TFAC-470).
+	// Conversation-scoped artifact read: the conversation's artifacts across
+	// every kind, team-scoped via the conversation. Backs the conversation
+	// detail surface.
 	s.api("GET /api/agent/conversations/{conversationID}/artifacts", ag.handleAgentArtifacts)
-	// Conversation-scoped external-action read — the audit log filtered to this conversation.
-	// Its sibling above answers "what objects does this conversation own"; this answers
-	// "what did it do", including the writes that produce no object at all (a
-	// review-thread reply, a refused merge, a denied push).
+	// Conversation-scoped external-action read — the audit log filtered to
+	// this conversation. Its sibling above answers "what objects does this
+	// conversation own"; this answers "what did it do", including the writes
+	// that produce no object at all (a review-thread reply, a refused merge, a
+	// denied push).
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/actions/list", ag.handleAgentActions)
-	// The one conversation-level stop. It replaces the former /cancel and
-	// /interrupt outright rather than aliasing them: two addresses is how they
-	// drifted into two meanings of `open` in the first place.
+	// The one conversation-level stop. A second address for it is how `open`
+	// acquires two meanings.
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/stop", ag.handleAgentStop)
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/message", ag.handleMessage)
 	// The pending set behind the demoted `permission_request` frame: the frame
@@ -1037,8 +1017,9 @@ func (s *Server) routes() {
 	// here, so a refresh / second tab / cold load reconstructs it.
 	s.api("GET /api/agent/conversations/{conversationID}/permissions", ag.handleAgentPermissions)
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}", ag.handleAgentPermission)
-	// Tier-2 conversation-scoped artifact reconcile (TFAC-464): the conversation view polls this
-	// while open to refresh that conversation's non-terminal artifacts against GitHub.
+	// Tier-2 conversation-scoped artifact reconcile: the conversation view
+	// polls this while open to refresh that conversation's non-terminal
+	// artifacts against GitHub.
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/artifacts/refresh", ag.handleArtifactRefresh)
 	s.apiMutating("POST /api/agent/conversations/list", ag.handleConversations)
 
@@ -1085,12 +1066,11 @@ func (s *Server) routes() {
 	s.apiMutating("PATCH /api/repos/{id}", s.handleRepoUpdate)
 	s.apiMutating("POST /api/repos/{id}/branches/list", s.handleRepoBranches)
 	s.apiMutating("POST /api/jira/reachability", handleJiraReachability)
-	// Bedrock role-mode setup (TFAC-616): returns the control service's caller
-	// ARN + the TF-generated External ID so the UI can render a filled
-	// trust-policy snippet. POST (not GET) because first entry generates +
-	// persists the External ID — a state change that needs CSRF protection,
-	// per the mutating-verb convention (route_auth_test enforces GET ≠
-	// apiMutating).
+	// Bedrock role-mode setup: returns the control service's caller ARN + the
+	// TF-generated External ID so the UI can render a filled trust-policy
+	// snippet. POST (not GET) because first entry generates + persists the
+	// External ID — a state change that needs CSRF protection, per the
+	// mutating-verb convention (route_auth_test enforces GET ≠ apiMutating).
 	s.apiMutating("POST /api/bedrock/role-setup", se.handleBedrockRoleSetup)
 	// The Jira project picker's candidates. A proxy list — the rows come from
 	// Jira live, which is what a catalog of dozens behind one org credential
@@ -1115,13 +1095,13 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/jira/stock/claim", s.handleJiraStockClaim)
 	s.apiMutating("POST /api/jira/stock/done", s.handleJiraStockDone)
 
-	// Artifact-id-addressed endpoints back both the GitHub-native PR preview and
-	// the review preview (kind-dispatched inside the handlers). The review path
-	// (TFAC-463) replaced the local pending_reviews path: GET serves the artifact
-	// + live pending-review comments, PATCH stages body/event, the comment routes
-	// edit/delete inline comments on the live pending review, approve submits it,
-	// and dismiss resolves a single artifact (per-item). The task-level
-	// resolve-all (drag-to-Done / Return-to-queue) flows through teardownTaskArtifacts.
+	// Artifact-id-addressed endpoints back both the GitHub-native PR preview
+	// and the review preview (kind-dispatched inside the handlers). A review
+	// lives on GitHub rather than locally: GET serves the artifact + its live
+	// pending-review comments, PATCH stages body/event, the comment routes
+	// edit/delete inline comments on that pending review, approve submits it,
+	// and dismiss resolves a single artifact. The task-level resolve-all
+	// (drag-to-Done / Return-to-queue) flows through teardownTaskArtifacts.
 	ah := &artifactsHandler{tx: s.tx, ws: s.ws, conversations: s.conversations, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
 	// One read for every kind; the writes are kind-scoped sub-resources, so a
 	// review-shaped body can never reach the PR write path.
@@ -1158,8 +1138,8 @@ func (s *Server) routes() {
 	// default `enabled` in opposite directions.
 	eh := &eventHandlersHandler{tx: s.tx, az: s.az}
 	s.apiMutating("POST /api/event-handlers/list", eh.handleEventHandlersList)
-	// The canonical single read: five mutation routes preloaded this row
-	// internally and none would hand it back.
+	// The canonical single read. The mutation routes load this row internally;
+	// this is the only address that hands it back.
 	s.api("GET /api/event-handlers/{id}", eh.handleEventHandlerGet)
 	s.apiMutating("POST /api/event-handlers/rules", eh.handleEventHandlerCreateRule)
 	s.apiMutating("POST /api/event-handlers/triggers", eh.handleEventHandlerCreateTrigger)
@@ -1189,7 +1169,7 @@ func (s *Server) routes() {
 	s.apiMutating("PUT /api/blueprints/{id}", bh.handleBlueprintUpdate)
 	s.apiMutating("DELETE /api/blueprints/{id}", bh.handleBlueprintDelete)
 	// One route for the canvas's bulk read and the per-blueprint read: they
-	// differed only in a filter, and a filter is what a list body is for.
+	// differ only by a filter, and a filter is what a list body is for.
 	s.apiMutating("POST /api/blueprint-steps/list", bh.handleBlueprintStepsAll)
 	s.apiMutating("PUT /api/blueprints/{id}/steps", bh.handleBlueprintStepsPut)
 	s.apiMutating("POST /api/blueprints/{id}/merge", bh.handleBlueprintMerge)
@@ -1200,8 +1180,8 @@ func (s *Server) routes() {
 	s.api("GET /api/blueprint-runs/{id}", bh.handleBlueprintRunGet)
 	s.apiMutating("POST /api/blueprint-runs/{id}/cancel", bh.handleBlueprintRunCancel)
 
-	// Within-org prompt marketplace (TFAC-536) — multi-mode only; every
-	// handler opens with gateMarketplace, which 404s in local mode (see
+	// Within-org prompt marketplace — multi-mode only; every handler opens
+	// with gateMarketplace, which 404s in local mode (see
 	// marketplace_handler.go).
 	mh := &marketplaceHandler{tx: s.tx, az: s.az}
 	s.apiMutating("POST /api/marketplace/listings/list", mh.handleMarketplaceList)
@@ -1213,7 +1193,7 @@ func (s *Server) routes() {
 	s.apiMutating("PUT /api/marketplace/listings/{id}/vote", mh.handleMarketplaceVote)
 	s.apiMutating("DELETE /api/marketplace/listings/{id}/vote", mh.handleMarketplaceUnvote)
 	s.api("GET /api/marketplace/listings/by-source/{source_id}", mh.handleMarketplaceListingBySource)
-	// Install/"copy to my team" (TFAC-538) — materializes the listing's
+	// Install/"copy to my team" — materializes the listing's
 	// current snapshot into the caller's team as a brand-new fork.
 	s.apiMutating("POST /api/marketplace/listings/{id}/install", mh.handleMarketplaceInstall)
 
@@ -1229,45 +1209,47 @@ func (s *Server) routes() {
 	// ripples through access, identity, and webhooks together.
 
 	// GitHub App manifest registration. The launch endpoint serves a
-	// script-free bounce page (carrying its own per-response CSP) that
-	// POSTs the manifest cross-origin to the org's GitHub host; the
-	// callback exchanges the temp code for App credentials. Both validate
-	// org membership + admin role inside the handler via
-	// r.PathValue("org_id"). Works in both local and multi mode.
+	// script-free bounce page (carrying its own per-response CSP) that POSTs
+	// the manifest cross-origin to the org's GitHub host; the callback
+	// exchanges the temp code for App credentials. Both validate org
+	// membership + admin role inside the handler via r.PathValue("org_id").
+	// Works in both local and multi mode.
 	s.api("GET /api/orgs/{org_id}/github/app/register/launch", s.handleGitHubAppRegisterLaunch)
 	s.api("GET /api/orgs/{org_id}/github/app/register/callback", s.handleGitHubAppRegisterCallback)
-	// Bring-your-own-App import: the second way into App mode for orgs
-	// that can't or shouldn't create the App themselves. Validates an App ID +
+	// Bring-your-own-App import: the second way into App mode for orgs that
+	// can't or shouldn't create the App themselves. Validates an App ID +
 	// private key via an app-JWT GET /app, permission-preflights, and persists
-	// through the same path the manifest callback uses (staging rule unchanged).
-	// A JSON fetch from the SPA (not a top-level navigation like launch/callback),
-	// so it rides apiMutating (CSRF). Org-admin (gated inside the handler).
+	// through the same path the manifest callback uses (staging rule
+	// unchanged). A JSON fetch from the SPA (not a top-level navigation like
+	// launch/callback), so it rides apiMutating (CSRF). Org-admin (gated
+	// inside the handler).
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/import", s.handleGitHubAppImport)
 	// Read-only status + install deep-link for the Workspace Settings panel.
 	// Any org member (read), so RequireOrgMember rather than RequireOrgAdmin.
 	s.api("GET /api/orgs/{org_id}/github/app", s.handleGitHubAppStatus)
 	s.api("GET /api/orgs/{org_id}/github/app/install-url", s.handleGitHubAppInstallURL)
-	// On-demand installation reconcile — the "UI panel refresh" half of D11
-	// installation discovery (the poller cycle is the other). Admin-only (the
+	// On-demand installation reconcile — the "UI panel refresh" half of
+	// installation discovery; the poller cycle is the other. Admin-only (the
 	// setup wizard's install step + the Settings App panel call it) and
 	// mode-agnostic. Mutating: it reconciles the installation mirror via the
 	// same API backfill the poller runs, so it rides apiMutating (CSRF).
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/installations/refresh", s.handleGitHubAppInstallationsRefresh)
 	// Replay the App's failed installation webhook deliveries — the repair for
-	// an org whose receiver was rejecting them (no webhook secret, or the wrong
-	// one) while its installation mirror went stale. Admin-only, and mutating
-	// in the sense that matters: it asks GitHub to deliver again, so it rides
-	// apiMutating (CSRF).
+	// an org whose receiver was rejecting them (no webhook secret, or the
+	// wrong one) while its installation mirror went stale. Admin-only, and
+	// mutating in the sense that matters: it asks GitHub to deliver again, so
+	// it rides apiMutating (CSRF).
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/webhook/replay", s.handleGitHubAppWebhookReplay)
 
-	// GitHub access either/or transitions. GitHub access is
-	// strictly App XOR PAT per org; these commit the switches and surface the
-	// inform-only reachability diffs. All org-admin (gated inside the handler).
-	//   - app/cutover: commit a staged PAT→App switch (activate App + delete PAT).
+	// GitHub access either/or transitions. GitHub access is strictly App XOR
+	// PAT per org; these commit the switches and surface the inform-only
+	// reachability diffs. All org-admin (gated inside the handler).
+	//   - app/cutover: commit a staged PAT→App switch (activate the App and
+	//     delete the PAT).
 	//   - pat/switch-to: full App teardown, validate + store the new PAT.
-	//   - DELETE github/app: discard a staged (not-yet-live) App registration.
-	//   - app/cutover-preflight, pat/preflight: inform-only reachability diffs,
-	//     each under the flavor it is a preflight for.
+	//   - DELETE github/app: discard a staged (not-yet-live) registration.
+	//   - app/cutover-preflight, pat/preflight: inform-only reachability
+	//     diffs, each under the flavor it is a preflight for.
 	// The two commits + the discard mutate state (apiMutating, CSRF); the
 	// cutover preflight is a read (api); the PAT preflight POSTs a token to
 	// probe reach but stores nothing — still apiMutating for the same-origin
@@ -1280,17 +1262,17 @@ func (s *Server) routes() {
 
 	// The org integration credentials, each an addressable resource with an
 	// explicit bind + unbind rather than a field on the bulk settings save.
-	// Everything a credential write owes — live validation, the vault write, the
-	// poller re-due, an access change-log row — belongs to exactly one route
-	// per credential, which is what keeps it from being re-derived (and
+	// Everything a credential write owes — live validation, the vault write,
+	// the poller re-due, an access change-log row — belongs to exactly one
+	// route per credential, which is what keeps it from being re-derived (and
 	// forgotten) from whichever fields a bulk save happened to carry. See
-	// org_credentials.go. POST /api/settings/org is now pure config: no secret,
-	// no outbound call, and it can no longer revoke access as a side effect.
-	// The Jira half of the pair is registered with the rest of the Jira
-	// surface below; the rationale above covers both.
-	// The PAT is a credential flavor, and the flavor is the resource: its bind
-	// and unbind here, its preflight and the switch onto it beside them, all
-	// under github/pat as the App's routes sit under github/app.
+	// org_credentials.go. The org config save carries no secret and makes no
+	// outbound call, so it cannot revoke access as a side effect. The Jira
+	// half of the pair is registered with the rest of the Jira surface below;
+	// the rationale above covers both. The PAT is a credential flavor, and the
+	// flavor is the resource: its bind and unbind here, its preflight and the
+	// switch onto it beside them, all under github/pat as the App's routes sit
+	// under github/app.
 	s.apiMutating("PUT /api/orgs/{org_id}/github/pat", s.handleGitHubPATPut)
 	s.apiMutating("DELETE /api/orgs/{org_id}/github/pat", s.handleGitHubPATDelete)
 
@@ -1309,14 +1291,14 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/sources", s.handleOrgSources)
 	// The same collection addressed one element at a time. The read is
 	// member-gated like the list; the write is org admin, because a source is
-	// in no team's tracked set and pausing one lands on every team in the org —
-	// and because unbinding its credential already takes an org admin.
+	// in no team's tracked set and pausing one lands on every team in the org
+	// — and because unbinding its credential already takes an org admin.
 	s.api("GET /api/orgs/{org_id}/sources/{kind}", s.handleOrgSource)
 	s.apiMutating("PATCH /api/orgs/{org_id}/sources/{kind}", s.handleOrgSourcePatch)
 
-	// The org's LLM provider credential — one resource per credential SHAPE, so
-	// a route's required fields are fixed and a blank secret never selects a
-	// second behaviour. Rotation is the PUT with a new value; removal is the
+	// The org's LLM provider credential — one resource per credential SHAPE,
+	// so a route's required fields are fixed and a blank secret never selects
+	// a second behaviour. Rotation is the PUT with a new value; removal is the
 	// DELETE. An org may hold both providers at once: a bind replaces only
 	// material of its own provider, and says so in the response. See
 	// llm_credentials.go.
@@ -1351,9 +1333,9 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/orgs/{org_id}/models/tests", mdh.handleModelTestSweep)
 
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
-	// login to the signed-in user (identity, not access, not login).
-	// start redirects to {github_base_url}/login/oauth/authorize;
-	// callback exchanges the code, whoamis, and writes
+	// login to the signed-in user (identity, not access, not login). start
+	// redirects to {github_base_url}/login/oauth/authorize; callback exchanges
+	// the code, whoamis, and writes
 	// user_github_identities(source='connect_oauth'). Both are GETs reached
 	// via top-level navigation (the start from the gate page, the callback
 	// from GitHub's redirect), so they ride s.api (withSession, no CSRF wrap)
@@ -1388,8 +1370,8 @@ func (s *Server) routes() {
 	// (Jira's user level holds access, not just identity); the PAT path
 	// validates the token, STORES it (per-user vault scope), and derives the
 	// user's Jira identity. DC = paste-a-PAT; connect_available now reflects
-	// whether an Atlassian OAuth app resolves (the Cloud Connect gate). Any org
-	// member binds their own access.
+	// whether an Atlassian OAuth app resolves (the Cloud Connect gate). Any
+	// org member binds their own access.
 	s.api("GET /api/orgs/{org_id}/jira/identity", s.handleJiraIdentityStatus)
 	s.apiMutating("POST /api/orgs/{org_id}/jira/identity/pat", s.handleJiraIdentityPAT)
 
@@ -1398,8 +1380,8 @@ func (s *Server) routes() {
 	// start redirects to auth.atlassian.com/authorize; callback exchanges the
 	// code, resolves the cloud_id, whoamis, and STORES the rotating refresh
 	// token (source='connect_oauth'). Both are GETs reached via top-level
-	// navigation, so they ride s.api (withSession, no CSRF wrap) and carry their
-	// own OAuth state-cookie CSRF defense — the GitHub Connect pattern.
+	// navigation, so they ride s.api (withSession, no CSRF wrap) and carry
+	// their own OAuth state-cookie CSRF defense — the GitHub Connect pattern.
 	//
 	// Frozen for the same reason as the GitHub connect pair above: the
 	// callback is the redirect_uri registered on the Atlassian OAuth app,
@@ -1409,13 +1391,13 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/jira/connect/callback", s.handleJiraConnectCallback)
 
 	// Per-org Atlassian OAuth (3LO) app config — the credential layer the
-	// per-user "Connect Jira" flow runs against (the flow itself is a later
-	// ticket). The Jira sibling of the GitHub App import card: an admin enters
-	// a bring-your-own Atlassian app (client_id + client_secret), which becomes
-	// the per-org override over the deployment app (multi) / is the app itself
-	// (local). status is any-member (the card renders for everyone); import +
-	// delete are admin (gated inside the handler). The two mutators are JSON
-	// fetches from the SPA, so they ride apiMutating (CSRF).
+	// per-user "Connect Jira" flow above runs against. The Jira sibling of the
+	// GitHub App import card: an admin enters a bring-your-own Atlassian app
+	// (client_id + client_secret), which becomes the per-org override over the
+	// deployment app (multi) / is the app itself (local). status is any-member
+	// (the card renders for everyone); import + delete are admin (gated inside
+	// the handler). The two mutators are JSON fetches from the SPA, so they
+	// ride apiMutating (CSRF).
 	s.api("GET /api/orgs/{org_id}/jira/app", s.handleJiraAppStatus)
 	s.apiMutating("POST /api/orgs/{org_id}/jira/app", s.handleJiraAppImport)
 	s.apiMutating("DELETE /api/orgs/{org_id}/jira/app", s.handleJiraAppDelete)
@@ -1443,21 +1425,18 @@ func (s *Server) routes() {
 	// routes take precedence over "/" regardless.
 	s.installExtensions()
 
-	// Unknown /api/* → JSON 404 (TFAC-409 item 5). Without this, the greedy "/"
-	// SPA fallback below answers any unmatched path — including a stray or
-	// typo'd /api/* — with 200 + index.html, which masks client typos and reads
-	// as success to an API consumer. Registered after every real /api/* route:
-	// Go's ServeMux resolves by the most-specific pattern, so a concrete
-	// "GET /api/whatever" still wins over this prefix. This handler is
-	// method-agnostic, so it also absorbs wrong-method requests to a known path
-	// (e.g. DELETE /api/health): they match here and become a JSON 404 rather
-	// than a 405 — the method-aware 405 was never reachable anyway, since the
-	// "/" SPA catch-all already matched every method and turned those into
-	// 200 + index.html. So this is a strict improvement (404 JSON over 200 HTML),
-	// not a 405 regression. Only an unregistered /api/* subtree falls here.
+	// Unknown /api/* → JSON 404. Without this the greedy "/" SPA fallback
+	// below answers any unmatched path — a stray or typo'd /api/* included —
+	// with 200 + index.html, which masks client typos and reads as success to
+	// an API consumer. Go's ServeMux resolves by the most-specific pattern, so
+	// a concrete "GET /api/whatever" still wins over this prefix and only an
+	// unregistered /api/* subtree falls here. The handler is method-agnostic,
+	// so a wrong-method request to a known path (DELETE /api/health, say)
+	// lands here as a JSON 404 rather than a 405.
 	s.mux.HandleFunc("/api/", s.handleAPINotFound)
 
-	// Frontend: serve embedded SPA, with fallback to index.html for client-side routing
+	// Frontend: the embedded SPA, falling back to index.html so client-side
+	// routing resolves.
 	s.mux.HandleFunc("/", s.handleFrontend)
 }
 
@@ -1470,8 +1449,8 @@ func (s *Server) handleAPINotFound(w http.ResponseWriter, r *http.Request) {
 	httpx.NotFound(w, "endpoint")
 }
 
-// handleFrontend serves the embedded React SPA. Non-file requests fall back to index.html
-// so that client-side routing works.
+// handleFrontend serves the embedded React SPA. Non-file requests fall back to
+// index.html so that client-side routing works.
 func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 	if s.static == nil {
 		http.Error(w, "frontend not built — run: cd frontend && pnpm install && pnpm run build", http.StatusNotFound)
@@ -1485,20 +1464,18 @@ func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 		path = strings.TrimPrefix(path, "/")
 	}
 
-	// Try to serve the file directly
 	if _, err := fs.Stat(s.static, path); err == nil {
 		http.ServeFileFS(w, r, s.static, path)
 		return
 	}
 
-	// Fallback to index.html for SPA client-side routing
+	// Anything that isn't a real file is a client-side route.
 	http.ServeFileFS(w, r, s.static, "index.html")
 }
 
-// SetStatic sets the embedded frontend filesystem. Also computes
-// SHA-256 hashes of every inline <script> block in index.html so the
-// CSP middleware can allowlist them via `'sha256-...'` directives —
-// keeps script-src tight without requiring frontend changes.
+// SetStatic sets the embedded frontend filesystem, and hashes every inline
+// <script> block in index.html so the CSP middleware can allowlist them via
+// `'sha256-...'` — script-src stays tight with no frontend change.
 func (s *Server) SetStatic(f fs.FS) {
 	s.static = f
 	hashes, err := computeInlineScriptHashes(f)
@@ -1530,26 +1507,27 @@ func (s *Server) SetTeamKB(kb kbstore.KB) {
 	s.teamKBNotifier = knowledgeevent.NewNotifier(s.ws, members)
 }
 
-// SetOnGitHubChanged registers a callback for GitHub config changes (creds, URL, repos).
-// The callback re-dues the org's GitHub poll so the new credential/repo set
-// applies on the next wake; repo profiling is no longer triggered here — it's
-// driven by the system:poll "profiler" subscriber off that poll's completion.
-// The orgID is the tenant whose creds changed — closure re-resolves via SecretStore.
+// SetOnGitHubChanged registers a callback for GitHub config changes (creds,
+// URL, repos). The callback re-dues the org's GitHub poll so the new
+// credential/repo set applies on the next wake; repo profiling is no longer
+// triggered here — it's driven by the system:poll "profiler" subscriber off
+// that poll's completion. The orgID is the tenant whose creds changed —
+// closure re-resolves via SecretStore.
 //
 // The registered callback is wrapped so a FORCED reachable-repo refresh is
-// kicked for the org alongside the re-due. A creds rotation, an App install, or
-// a host repoint moves which repositories the org can reach without moving the
-// timestamp the mirror's TTL reads, so the mirror is wrong in fact while looking
-// fresh — the one staleness a TTL cannot detect, which is why the explicit force
-// exists at all.
+// kicked for the org alongside the re-due. A creds rotation, an App install,
+// or a host repoint moves which repositories the org can reach without moving
+// the timestamp the mirror's TTL reads, so the mirror is wrong in fact while
+// looking fresh — the one staleness a TTL cannot detect, which is why the
+// explicit force exists at all.
 //
 // The refresh is out of band by construction (it is a Manager trigger, not a
 // call), so this stays as cheap as the eviction it replaces. A repo-TRACKING
 // save also lands here — tracking is not reachability, so that refresh is
 // redundant — and it is left in rather than special-cased: it is one
-// enumeration per human Save gesture, and splitting the hook into
-// "creds changed" and "repos changed" variants would put the burden of picking
-// the right one on six call sites.
+// enumeration per human Save gesture, and splitting the hook into "creds
+// changed" and "repos changed" variants would put the burden of picking the
+// right one on six call sites.
 func (s *Server) SetOnGitHubChanged(fn func(orgID string)) {
 	s.onGitHubChanged = func(orgID string) {
 		s.kickReachRefresh(orgID, true)
@@ -1565,8 +1543,8 @@ func (s *Server) SetOnSourcesChanged(fn func(orgID, kind string)) {
 	s.onSourcesChanged = fn
 }
 
-// SetOnJiraChanged registers a callback for Jira config changes.
-// This restarts only the Jira poller. See SetOnGitHubChanged for orgID semantics.
+// SetOnJiraChanged registers a callback for Jira config changes. This restarts
+// only the Jira poller. See SetOnGitHubChanged for orgID semantics.
 func (s *Server) SetOnJiraChanged(fn func(orgID string)) {
 	s.onJiraChanged = fn
 }
@@ -1591,8 +1569,8 @@ func (s *Server) SetProfilerTrigger(fn func(orgID string, force bool)) {
 // reachable-repo entries are keyed under — the stored class narrowed by the
 // App-XOR-PAT gate, which is the same narrowing the refresh applies when it
 // writes them. The picker and the team-repos write gate both key on it, and
-// keying a read differently from the write is how a mirror reads as empty for an
-// org that has one.
+// keying a read differently from the write is how a mirror reads as empty for
+// an org that has one.
 //
 // Built per call rather than held: it is two store pointers and no state, so
 // constructing it here costs nothing and it always reads whichever stores this
@@ -1607,16 +1585,17 @@ func (s *Server) reachableCredentialClass(ctx context.Context, orgID string) (do
 // refresh control, and every GitHub credential change.
 //
 // Nil until wired — bare test constructions and any role that builds no
-// background managers. kickReachRefresh nil-checks it, so a picker read on such
-// a Server serves whatever the mirror holds and asks for nothing.
+// background managers. kickReachRefresh nil-checks it, so a picker read on
+// such a Server serves whatever the mirror holds and asks for nothing.
 func (s *Server) SetReachTrigger(fn func(orgID string, force bool)) {
 	s.reachTrigger = fn
 }
 
 // kickReachRefresh asks for a reachable-mirror refresh, out of band. It never
 // blocks the caller and never reports failure: a refresh that does not happen
-// costs a staler mirror on the next read, which is the same cost as the TTL not
-// having elapsed yet, and a request has nothing useful to do with the error.
+// costs a staler mirror on the next read, which is the same cost as the TTL
+// not having elapsed yet, and a request has nothing useful to do with the
+// error.
 func (s *Server) kickReachRefresh(orgID string, force bool) {
 	if s.reachTrigger == nil || orgID == "" {
 		return
@@ -1625,25 +1604,25 @@ func (s *Server) kickReachRefresh(orgID string, force bool) {
 }
 
 // SetReconciler registers the shared artifact Reconciler that backs the Tier-2
-// conversation-scoped refresh endpoint (TFAC-464). The same instance the background
-// Tier-1 Manager runs, so a foreground refresh and a background cycle apply the
-// identical reconcile path. Nil until wired — the endpoint 503s until then.
+// conversation-scoped refresh endpoint — the same instance the background
+// Tier-1 Manager runs, so a foreground refresh and a background cycle apply
+// the identical reconcile path. Nil until wired; the endpoint 503s until then.
 func (s *Server) SetReconciler(rc *reconcile.Reconciler) {
 	s.reconciler = rc
 }
 
 // SetBedrockRoleResolver wires the Bedrock role-mode setup + connect-probe
-// resolver (TFAC-616). Called once at startup in multi mode with the shared
+// resolver. Called once at startup in multi mode with the shared
 // *llmcred.Resolver; left nil in local mode (no ambient AWS SDK), where the
 // role-setup endpoint reports the method is control-service only.
 func (s *Server) SetBedrockRoleResolver(r bedrockRoleResolver) {
 	s.bedrockRole = r
 }
 
-// SetModelProber wires the model-availability prober. Called once at startup on
-// every serving process, in either mode — the transport differs (a direct call
-// in multi, the agent runtime in local) but the question and the verdicts do
-// not. Nil until wired: the test routes report the deployment cannot probe.
+// SetModelProber wires the model-availability prober. Called once at startup
+// on every serving process, in either mode — the transport differs (a direct
+// call in multi, the agent runtime in local) but the question and the verdicts
+// do not. Nil until wired: the test routes report the deployment cannot probe.
 func (s *Server) SetModelProber(p modelProber) {
 	s.modelProber = p
 }
@@ -1651,17 +1630,17 @@ func (s *Server) SetModelProber(p modelProber) {
 // SetDashboardBackfiller registers the per-user dashboard-history backfill
 // (the poller's BackfillUserDashboard). Wired in multi mode only — local mode
 // leaves it nil and relies on the per-cycle Phase 1b backfill, so
-// kickDashboardBackfill no-ops there (TFAC-396).
+// kickDashboardBackfill no-ops there.
 func (s *Server) SetDashboardBackfiller(fn func(ctx context.Context, orgID, userID, login, host string) error) {
 	s.dashboardBackfill = fn
 }
 
-// kickDashboardBackfill fires a one-shot dashboard-history backfill for a bound
-// (user, host) and returns immediately — the work runs detached so it never
-// blocks the request (identity bind or dashboard read) that triggered it. The
-// backfiller is marker-guarded downstream, so repeated kicks for an
-// already-backfilled identity are cheap no-ops. No-op when unwired (local mode)
-// or when the identity isn't fully resolved.
+// kickDashboardBackfill fires a one-shot dashboard-history backfill for a
+// bound (user, host) and returns immediately — the work runs detached so it
+// never blocks the request (identity bind or dashboard read) that triggered
+// it. The backfiller is marker-guarded downstream, so repeated kicks for an
+// already-backfilled identity are cheap no-ops. No-op when unwired (local
+// mode) or when the identity isn't fully resolved.
 func (s *Server) kickDashboardBackfill(orgID, userID, login, host string) {
 	fn := s.dashboardBackfill
 	if fn == nil || login == "" || host == "" {
@@ -1683,60 +1662,57 @@ func (s *Server) SetEventBus(bus *eventbus.Bus) {
 	s.bus = bus
 }
 
-// WSKicker is the multi-mode cross-pod session-kick publisher (TFAC-584):
-// the plain *wsbackplane.Backplane satisfies this directly. Every
-// CloseUserConnections call site closes THIS pod's local sockets first,
-// then calls PublishKick so every OTHER control pod does the same for
-// its own local sockets — see internal/wsbackplane's PublishKick doc
-// comment for why the ordering (local close, then publish) is what keeps
-// this from ever echoing.
+// WSKicker is the multi-mode cross-pod session-kick publisher;
+// *wsbackplane.Backplane satisfies it directly. Every CloseUserConnections
+// call site closes THIS pod's local sockets first, then calls PublishKick so
+// every OTHER control pod does the same for its own — see
+// internal/wsbackplane's PublishKick doc for why that ordering is what keeps
+// the kick from echoing.
 type WSKicker interface {
 	PublishKick(ctx context.Context, userID, sid, orgID string, code int, reason string)
 }
 
-// SetWSBackplane wires the multi-mode cross-pod kick publisher
-// (TFAC-584). Wired post-construction in internal/app, mirroring
-// SetEventBus; nil (the default, and always the case in local mode)
-// leaves every kick call site local-only, unchanged from before this
-// existed.
+// SetWSBackplane wires the multi-mode cross-pod kick publisher. Wired
+// post-construction in internal/app, mirroring SetEventBus; nil — the
+// default, and always the case in local mode — leaves every kick call site
+// local-only.
 func (s *Server) SetWSBackplane(b WSKicker) {
 	s.wsBackplane = b
 }
 
 // SetVersion records main.Version (the release tag, or "dev") for GET
-// /readyz (TFAC-573). Wired in internal/app/httpserver.go's buildServer,
-// right after server.New, in both modes.
+// /readyz. Wired in internal/app/httpserver.go's buildServer, right after
+// server.New, in both modes.
 func (s *Server) SetVersion(v string) {
 	s.version = v
 }
 
-// SetMigrationsOK records that db.Migrate completed successfully at boot,
-// for GET /readyz's "migrations" hard check (TFAC-573). Called with true
-// in internal/app/app.go's New, right after buildServer succeeds — by
-// that point openStores has already run db.Migrate to completion (New
-// would have returned its error otherwise), so this simply makes that
-// already-true fact visible to the handler. See the migrationsOK field
-// doc for why the check exists despite always passing today.
+// SetMigrationsOK records that db.Migrate completed successfully at boot, for
+// GET /readyz's "migrations" hard check. Called with true in
+// internal/app/app.go's New, right after buildServer succeeds — by that point
+// openStores has already run db.Migrate to completion (New would have returned
+// its error otherwise), so this simply makes that already-true fact visible to
+// the handler. See the migrationsOK field doc for why the check exists despite
+// always passing today.
 func (s *Server) SetMigrationsOK(ok bool) {
 	s.migrationsOK = ok
 }
 
 // SetPollerManager wires the poller Manager's Health() snapshot into GET
-// /readyz (TFAC-573): the poller-alive hard check plus the per-org
-// poll-staleness soft signal. Takes the bound method value rather than
-// the whole *poller.Manager so readyz_handler.go depends on one function,
-// not the poller package's full surface (PollSoon, RestartAll, etc).
+// /readyz: the poller-alive hard check plus the per-org poll-staleness soft
+// signal. Takes the bound method value rather than the whole *poller.Manager
+// so readyz_handler.go depends on one function, not the poller package's full
+// surface (PollSoon, RestartAll, etc).
 func (s *Server) SetPollerManager(healthFn func(ctx context.Context) poller.HealthSnapshot) {
 	s.pollerHealth = healthFn
 }
 
-// SetLeaseStatus wires the background-brain lease elector's status into
-// GET /readyz (TFAC-583, spec §8.3): the `lease` field, and the switch
-// between the holder's byte-identical-to-TFAC-573 poller hard-check and a
-// standby's informational "standby" report. Called only for role=control
-// (internal/app); leaving it unset (role=all / local, or a bare test
-// construction) makes the handler treat this pod as the holder and omit
-// the `lease` field — the frozen single-process contract.
+// SetLeaseStatus wires the background-brain lease elector's status into GET
+// /readyz: the `lease` field, and the switch between the holder's poller
+// hard-check and a standby's informational "standby" report. Called only for
+// role=control (internal/app); leaving it unset (role=all / local, or a bare
+// test construction) makes the handler treat this pod as the holder and omit
+// the `lease` field — the single-process contract.
 func (s *Server) SetLeaseStatus(fn LeaseStatusFunc) {
 	s.leaseStatus = fn
 }
@@ -1755,8 +1731,7 @@ func (s *Server) SetIngestor(i *ingest.Ingestor) {
 // installation.deleted or installation.suspend webhook, and the App-credential
 // change paths. New already wires that callback to the resolver's own token
 // cache, so this is an override rather than the wiring: whatever it installs
-// takes over, and passing nil disables the invalidate entirely. Its caller
-// today is a test observing which installation a delivery fired for.
+// takes over, and passing nil disables the invalidate entirely.
 func (s *Server) SetInstallationTokensInvalidHook(fn func(orgID, installationID string)) {
 	s.onInstallationTokensInvalid = fn
 }
@@ -1765,13 +1740,12 @@ func (s *Server) SetInstallationTokensInvalidHook(fn func(orgID, installationID 
 // Clears readiness so jiraPollReady reports false until a completion event
 // arrives. Call this before kicking off a Jira poller restart.
 //
-// Backed by the org-scoped poll_readiness table (TFAC-583), not a
-// process-local field: the pod that restarts the poller (any control pod
-// handling the config-save request) is not necessarily the pod that runs
-// it, and is not necessarily the pod that later serves /api/jira/stock —
-// see jiraPollReady. Best-effort: a write failure is logged and the
-// request proceeds; the worst case is a stale readiness read, not a
-// broken save.
+// Backed by the org-scoped poll_readiness table, not a process-local field:
+// the pod that restarts the poller (any control pod handling the config-save
+// request) is not necessarily the pod that runs it, and is not necessarily the
+// pod that later serves /api/jira/stock — see jiraPollReady. Best-effort: a
+// write failure is logged and the request proceeds; the worst case is a stale
+// readiness read, not a broken save.
 func (s *Server) MarkJiraRestarted(ctx context.Context, orgID string) {
 	if err := s.allStores.PollReadiness.MarkRestarted(ctx, orgID, "jira"); err != nil {
 		serverLog.Warn("mark jira poll restarted failed", "org", orgID, "error", err)
@@ -1795,6 +1769,3 @@ func (s *Server) jiraPollReady(ctx context.Context, orgID string) bool {
 	}
 	return ready
 }
-
-// Prompt handlers are in prompts_handler.go
-// Skill import handler is in skills_handler.go
