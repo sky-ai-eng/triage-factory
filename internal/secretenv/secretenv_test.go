@@ -126,3 +126,67 @@ func TestGet_FallsBackToEnvForUncapturedNames(t *testing.T) {
 		t.Fatalf("Get fallback = %q, want the env value", got)
 	}
 }
+
+// TestResolve_DeploymentGitHubAppSecrets: the deployment GitHub App's three
+// undisclosable halves are registered here, and each resolves through the
+// NAME_FILE convention. The file form is the one that matters for these: a
+// multi-line PEM is awkward in a .env and natural as a mounted file, and only a
+// NAME_FILE value stays out of this process's own /proc/environ.
+//
+// It resolves through the real Secrets slice rather than a local list, so
+// dropping a name from that slice fails here rather than silently reverting the
+// secret to plain-env handling.
+func TestResolve_DeploymentGitHubAppSecrets(t *testing.T) {
+	names := []string{
+		"TF_GITHUB_APP_PRIVATE_KEY",
+		"TF_GITHUB_APP_WEBHOOK_SECRET",
+		"TF_GITHUB_APP_CLIENT_SECRET",
+	}
+	// The App ID is not a secret and must not be captured here — it is ordinary
+	// config, and a name in this list is a name Resolve unsets.
+	for _, name := range append(names, "TF_GITHUB_APP_ID") {
+		registered := false
+		for _, s := range Secrets {
+			if s == name {
+				registered = true
+				break
+			}
+		}
+		if want := name != "TF_GITHUB_APP_ID"; registered != want {
+			t.Errorf("Secrets contains %s = %v, want %v", name, registered, want)
+		}
+	}
+
+	dir := t.TempDir()
+	for i, name := range names {
+		path := filepath.Join(dir, name)
+		// Trailing newline is the shape a mounted secret file has; a PEM's
+		// internal newlines must survive it.
+		if err := os.WriteFile(path, []byte(secretFileValue(i)+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(name+"_FILE", path)
+	}
+
+	dst := map[string]string{}
+	if err := resolveInto(dst, Secrets); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	for i, name := range names {
+		if got, want := dst[name], secretFileValue(i); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+		if v := os.Getenv(name + "_FILE"); v != "" {
+			t.Errorf("%s_FILE still in env = %q; resolve must unset it", name, v)
+		}
+	}
+}
+
+// secretFileValue makes each secret's file content distinguishable, and gives
+// the first one internal newlines so the PEM case is actually exercised.
+func secretFileValue(i int) string {
+	if i == 0 {
+		return "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nAAAA\n-----END RSA PRIVATE KEY-----"
+	}
+	return "value-" + strings.Repeat("x", i)
+}
