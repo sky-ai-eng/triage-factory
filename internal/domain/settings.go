@@ -402,9 +402,19 @@ type OrgSettings struct {
 // moment the App is registered, while the PAT stays live until cutover. Do not
 // collapse them.
 //
-// Values are app-validated, not CHECK-constrained — the same convention the
-// other open-set text columns follow (org_settings.background_jobs_model,
-// prompts.source), so a new class costs no DDL on either backend.
+// Values on THIS column are app-validated, not CHECK-constrained — the same
+// convention the other open-set text columns follow
+// (org_settings.background_jobs_model, prompts.source), so a new class costs no
+// DDL here on either backend.
+//
+// Here, and nowhere else. A class is not free of DDL merely because the column
+// that states it is: other tables MIRROR the value under their own constraints,
+// and reachable_repositories is the live example — its credential_class carries
+// a CHECK naming the accepted values, a row-shape CHECK pairing each value with
+// the scope column its rows must hold, and two partial unique indexes each
+// predicated on a literal class. A value that table has not been taught is one
+// it cannot store, and (past the CHECK) one it cannot keep unique either. Ask
+// what mirrors the class before assuming a new one is a Go-only change.
 //
 // "managed_app" — an org riding the deployment's own shared App — had no
 // constant here for as long as the value was unreachable: a constant is a thing

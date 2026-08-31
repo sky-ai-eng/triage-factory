@@ -33,6 +33,16 @@ var ErrUnknownCredentialClass = errors.New("reachcache: unknown github credentia
 // reason: the alternative is keying a managed workspace's reach under another
 // credential system's key, and every read filters on the class — so those rows
 // would be served to, or as, a credential system that did not observe them.
+//
+// The CHECK is not the whole of what stands in the way, and the rest of it is
+// silent. Both uniqueness guarantees on reachable_repositories are PARTIAL
+// indexes predicated on a literal class, so a row keyed under any other value
+// falls outside both and has no uniqueness constraint at all — while the write
+// is a bare ON CONFLICT DO NOTHING, which needs an index to have a conflict to
+// detect and degrades to a plain insert without one. A paginated GitHub listing
+// legitimately repeats a repository when repos are created mid-walk, so the
+// result is duplicate rows and a wrong total_count: the one question this table
+// exists to answer, answered wrongly and quietly.
 var ErrClassNotMirrored = errors.New("reachcache: credential class has no reachable-repo scope")
 
 // ClassResolver answers which credential class an org's reachable entries are
@@ -78,6 +88,13 @@ func (c *ClassResolver) For(ctx context.Context, orgID string) (domain.GitHubCre
 	case domain.GitHubCredentialClassBYOApp:
 		// Falls through to the App-XOR-PAT narrowing below.
 	case domain.GitHubCredentialClassManagedApp:
+		// TODO(TFAC-934): delete this arm once the mirror can key a managed
+		// workspace's reach — the class value admitted, the app_identity index
+		// predicate widened to cover it, and a writer that reaches an org with no
+		// registration row. Until then this refusal is what a managed workspace
+		// gets, which is loud and wrong in the safe direction; falling through
+		// would leave its picker discovering forever off reads that can only
+		// return empty.
 		return "", fmt.Errorf("%w: org=%s class=%q", ErrClassNotMirrored, orgID, class)
 	default:
 		return "", fmt.Errorf("%w: org=%s class=%q", ErrUnknownCredentialClass, orgID, class)
