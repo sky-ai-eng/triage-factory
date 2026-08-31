@@ -202,6 +202,28 @@ func (s *gitHubAppsStore) ListInstallationsForOrgSystem(ctx context.Context, org
 	return s.ListInstallationsForOrg(ctx, orgID)
 }
 
+// InstallationOwnerSystem answers the bind ceremony's uniqueness question. At
+// N=1 there is only ever one org to be the answer, so the query can only ever
+// return the local tenant or nothing — it exists here because the interface is
+// one shape in both dialects, and because the host predicate is real even
+// locally (a local install pointed at a GHES host keys its rows there).
+func (s *gitHubAppsStore) InstallationOwnerSystem(ctx context.Context, githubHost, installationID string) (string, error) {
+	var orgID string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT org_id
+		  FROM org_github_app_installations
+		 WHERE github_host = ? AND installation_id = ? AND removed_at IS NULL
+		 LIMIT 1
+	`, db.EffectiveGitHubHost(githubHost), installationID).Scan(&orgID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read installation owner: %w", err)
+	}
+	return orgID, nil
+}
+
 // UpsertInstallation mirrors one installation, idempotent on installation_id.
 // installed_at is set only on insert (defaulting to CURRENT_TIMESTAMP for a
 // zero InstalledAt) and preserved on conflict; removed_at is cleared so a

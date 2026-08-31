@@ -55,7 +55,17 @@ type Server struct {
 	githubApps       db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
 	reachableRepos   db.ReachableReposStore  // the reachable-repo mirror the picker lists from and the team-repos write gate validates against
 	githubDeliveries db.GitHubDeliveryStore  // applied webhook deliveries, so a redelivery is dropped before the mirror write and the bus publish
-	authEvents       db.AuthEventStore       // SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
+	// githubPendingBinds holds the in-flight deployment-App bind ceremonies —
+	// the durable half of the CSRF pair the managed-bind callback consumes to
+	// learn which workspace a returning installation belongs to.
+	githubPendingBinds db.GitHubPendingBindStore
+
+	// deploymentApp is the deployment's own GitHub App credential, read once
+	// from the environment at construction (multi mode only) and shared with
+	// the resolver. The bind ceremony reads its client secret; nothing else
+	// here touches it.
+	deploymentApp githubapp.DeploymentApp
+	authEvents    db.AuthEventStore // SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
 	// tx runs handler-cleanup write batches under the request user's
 	// claims even when the cleanup needs to outlive the request
 	// context. Each cleanup wraps in `s.tx.WithTx(cleanupCtx, orgID,
@@ -436,33 +446,34 @@ func (s *Server) agentEnabledForTeam(ctx context.Context, orgID, userID, teamID 
 // few paths that issue SQL directly.
 func New(database *sql.DB, stores db.Stores) *Server {
 	s := &Server{
-		db:               database,
-		prompts:          stores.Prompts,
-		swipes:           stores.Swipes,
-		agents:           stores.Agents,
-		teamAgents:       stores.TeamAgents,
-		users:            stores.Users,
-		blueprints:       stores.Blueprints,
-		tasks:            stores.Tasks,
-		conversations:    stores.Conversations,
-		repos:            stores.Repos,
-		events:           stores.Events,
-		taskMemory:       stores.TaskMemory,
-		secrets:          stores.Secrets,
-		teams:            stores.Teams,
-		orgs:             stores.Orgs,
-		jiraRules:        stores.JiraStatusRules,
-		githubApps:       stores.GitHubApps,
-		reachableRepos:   stores.ReachableRepos,
-		githubDeliveries: stores.GitHubDeliveries,
-		jiraApps:         stores.JiraApps,
-		authEvents:       stores.AuthEvents,
-		tx:               stores.Tx,
-		az:               authz.New(database, stores.Tx),
-		fleetQueue:       stores.ConversationQueue,
-		allStores:        stores,
-		mux:              http.NewServeMux(),
-		ws:               websocket.NewHub(),
+		db:                 database,
+		prompts:            stores.Prompts,
+		swipes:             stores.Swipes,
+		agents:             stores.Agents,
+		teamAgents:         stores.TeamAgents,
+		users:              stores.Users,
+		blueprints:         stores.Blueprints,
+		tasks:              stores.Tasks,
+		conversations:      stores.Conversations,
+		repos:              stores.Repos,
+		events:             stores.Events,
+		taskMemory:         stores.TaskMemory,
+		secrets:            stores.Secrets,
+		teams:              stores.Teams,
+		orgs:               stores.Orgs,
+		jiraRules:          stores.JiraStatusRules,
+		githubApps:         stores.GitHubApps,
+		reachableRepos:     stores.ReachableRepos,
+		githubDeliveries:   stores.GitHubDeliveries,
+		githubPendingBinds: stores.GitHubPendingBinds,
+		jiraApps:           stores.JiraApps,
+		authEvents:         stores.AuthEvents,
+		tx:                 stores.Tx,
+		az:                 authz.New(database, stores.Tx),
+		fleetQueue:         stores.ConversationQueue,
+		allStores:          stores,
+		mux:                http.NewServeMux(),
+		ws:                 websocket.NewHub(),
 	}
 	// Per-IP rate limiters for the pre-auth allowlist, the signed-webhook
 	// tier, and API-token authentication failures. Built here (not injected)
@@ -479,11 +490,29 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// onInstallationTokensInvalid.
 	s.ghTokenCache = ghclient.NewMemoryTokenCache()
 	// The deployment App comes off the deployment env, and only in multi mode —
-	// local has no shared App key to ship, so the option resolves to the zero
-	// App there and every org brings its own credential. It is what tier 2 mints
-	// from for an org whose credential class says it rides the shared App.
+	// local has no shared App key to ship, so this resolves to the zero App
+	// there and every org brings its own credential.
+	//
+	// Read ONCE, here, and handed to both consumers: the resolver, which mints
+	// tier-2 installation tokens for an org whose credential class says it rides
+	// the shared App, and the bind ceremony, which needs the client secret for
+	// the OAuth exchange that identifies the person completing an installation.
+	// Two independent env reads would be two answers that could disagree.
+	//
+	// A malformed configuration is logged and left as the zero App rather than
+	// failing the boot: a deployment whose orgs all bring their own App must
+	// still start, and what an absent deployment App means everywhere
+	// downstream is "refuse every managed operation", which is the failing-closed
+	// direction.
+	deploymentApp, err := githubapp.DeploymentAppFromEnv()
+	if err != nil {
+		serverLog.Error("read deployment github app from the environment failed; managed-class orgs will resolve nothing and no workspace can bind one",
+			"error", err)
+		deploymentApp = githubapp.DeploymentApp{}
+	}
+	s.deploymentApp = deploymentApp
 	s.ghResolver = ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, s.ghTokenCache,
-		ghclient.WithDeploymentAppFromEnv())
+		ghclient.WithDeploymentApp(deploymentApp))
 	// Atlassian OAuth app resolver: per-org override → the deployment app
 	// (multi) / local-supplied (local). The deployment app is read from the
 	// deployment env, and only in multi mode — local has no deployment
@@ -1245,6 +1274,21 @@ func (s *Server) routes() {
 	// mutating in the sense that matters: it asks GitHub to deliver again, so
 	// it rides apiMutating (CSRF).
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/webhook/replay", s.handleGitHubAppWebhookReplay)
+
+	// The bind ceremony — how a workspace claims an installation of the
+	// DEPLOYMENT App, the one key that serves many workspaces. Multi-mode only
+	// (a local binary ships no shared key), and both halves are top-level
+	// browser navigations rather than fetches, so they ride s.api: the callback
+	// arrives from github.com and a CSRF origin check would reject the very
+	// request the flow depends on. Its CSRF protection is the pending-bind
+	// cookie + record instead, which is a stronger claim than an Origin header
+	// and the only one that works across the GitHub round trip.
+	//
+	// The callback carries NO org id, and that is forced: a GitHub App has one
+	// registered callback URL for the whole deployment, so the workspace comes
+	// from the consumed pending-bind record rather than from the path.
+	s.api("GET /api/orgs/{org_id}/github/managed/connect", s.handleGitHubManagedConnect)
+	s.api("GET "+ManagedBindCallbackPath, s.handleGitHubManagedCallback)
 
 	// GitHub access either/or transitions. GitHub access is strictly App XOR
 	// PAT per org; these commit the switches and surface the inform-only

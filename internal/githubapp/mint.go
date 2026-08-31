@@ -457,6 +457,25 @@ type installationListItem struct {
 	RepositorySelection string `json:"repository_selection"`
 }
 
+// installation converts one wire item into the domain shape. Shared by the
+// listing and the point read so the two cannot decode the same object into two
+// different pictures of it.
+func (it installationListItem) installation() Installation {
+	inst := Installation{
+		ID:                  it.ID,
+		AccountID:           it.Account.ID,
+		AccountLogin:        it.Account.Login,
+		AccountType:         it.Account.Type,
+		CreatedAt:           it.CreatedAt.UTC(),
+		SuspendedBy:         it.SuspendedBy.Login,
+		RepositorySelection: it.RepositorySelection,
+	}
+	if !it.SuspendedAt.IsZero() {
+		inst.SuspendedAt = it.SuspendedAt.UTC()
+	}
+	return inst
+}
+
 // ListInstallations enumerates every installation of the App via
 // GET /app/installations, authenticated with an app-level JWT. It follows
 // Link-header pagination so an App installed on more than one page of
@@ -500,25 +519,66 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 			return nil, fmt.Errorf("githubapp: parse installations response: %w", err)
 		}
 		for _, it := range page {
-			inst := Installation{
-				ID:                  it.ID,
-				AccountID:           it.Account.ID,
-				AccountLogin:        it.Account.Login,
-				AccountType:         it.Account.Type,
-				CreatedAt:           it.CreatedAt.UTC(),
-				SuspendedBy:         it.SuspendedBy.Login,
-				RepositorySelection: it.RepositorySelection,
-			}
-			if !it.SuspendedAt.IsZero() {
-				inst.SuspendedAt = it.SuspendedAt.UTC()
-			}
-			out = append(out, inst)
+			out = append(out, it.installation())
 		}
 		if next, err = m.nextPage(linkHeader); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
+}
+
+// GetInstallation reads one installation of the App via
+// GET /app/installations/{id}, authenticated with an app-level JWT.
+//
+// It exists for the bind ceremony, whose gates need to know WHICH ACCOUNT an
+// installation targets — is it an organization or a user, and which one — in
+// order to ask GitHub whether the person completing the install administers it.
+// The obvious other source is the association read the ceremony already makes
+// with the user's own token, and it is deliberately not used: that read is a
+// yes/no gate about one installation at one instant, never a source of facts to
+// persist. This is the App speaking about its own installation.
+//
+// A 404 means no such installation for this App — which, on a redirect whose
+// installation_id is an unsigned query parameter, is exactly what a spoofed one
+// looks like. It surfaces as an *APIStatusError so a caller can tell that apart
+// from a GitHub that did not answer; both refuse the bind either way.
+func (m *Minter) GetInstallation(ctx context.Context, installationID int64) (Installation, error) {
+	appJWT, err := m.AppJWT()
+	if err != nil {
+		return Installation{}, err
+	}
+
+	url := fmt.Sprintf("%s/app/installations/%d", m.apiBase, installationID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return Installation{}, fmt.Errorf("githubapp: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+appJWT)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "triage-factory-githubapp")
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return Installation{}, fmt.Errorf("githubapp: get installation: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return Installation{}, &APIStatusError{
+			Op:          "get installation",
+			StatusCode:  resp.StatusCode,
+			BodyExcerpt: truncate(string(body), errorBodyExcerpt),
+		}
+	}
+
+	var item installationListItem
+	if err := json.Unmarshal(body, &item); err != nil {
+		return Installation{}, fmt.Errorf("githubapp: parse installation response: %w", err)
+	}
+	return item.installation(), nil
 }
 
 // errorBodyExcerpt is how much of a failed response is kept for diagnostics.
