@@ -76,7 +76,7 @@ describe('useTranscriptTick', () => {
     expect(result.current).toBe(0)
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(4000)
+      await vi.advanceTimersByTimeAsync(1000)
     })
     expect(result.current).toBe(1)
 
@@ -85,7 +85,7 @@ describe('useTranscriptTick', () => {
       dispatch(row({ id: 4 }))
     })
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(4000)
+      await vi.advanceTimersByTimeAsync(1000)
     })
     expect(result.current).toBe(2)
   })
@@ -96,7 +96,7 @@ describe('useTranscriptTick', () => {
       dispatch(row({ content: 'Now the tests pass, so I will push.', tool_calls: undefined }))
     })
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(4000)
+      await vi.advanceTimersByTimeAsync(1000)
     })
     expect(result.current).toBe(1)
   })
@@ -109,7 +109,7 @@ describe('useTranscriptTick', () => {
       dispatch({ type: 'tasks_updated', data: {} })
     })
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(4000)
+      await vi.advanceTimersByTimeAsync(1000)
     })
     expect(result.current).toBe(0)
   })

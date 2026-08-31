@@ -78,11 +78,11 @@ export function useOverviewTick(): number {
   return useDebouncedTick((ev) => HINTS.has(ev.type), HINT_DEBOUNCE_MS)
 }
 
-/** How long transcript frames coalesce before the running read goes out. Wider
- *  than the hint window on purpose: the line it freshens sits under a 4.8s
- *  scan crest, so ~4s freshness is honest, and the window bounds the cost to
- *  one bounded list read per window while an agent works. */
-const TRANSCRIPT_DEBOUNCE_MS = 4000
+/** How long transcript frames coalesce before the running read goes out. Its
+ *  own knob even though it currently matches the hint window: the two windows
+ *  pace different streams, and this one bounds the cost to one bounded list
+ *  read per window while an agent works. */
+const TRANSCRIPT_DEBOUNCE_MS = 1000
 
 /**
  * The transcript's own tick. A RUNNING row's prose is `current_action`,
