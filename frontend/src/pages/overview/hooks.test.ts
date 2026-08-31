@@ -5,19 +5,34 @@ import { ACTIVE_STATUSES } from '../../lib/conversationStatus'
 import type { Message, WSEvent } from '../../types'
 import { jsonBody } from '../../test/apiResponse'
 
-// The ticks arrive through the singleton websocket. Mocking the module hands
-// the test every handler the hooks registered, so frames can be dispatched
-// synchronously with no socket in play. An array, not a single slot: a
-// re-render registers again, and every copy shares the one debounce timer.
-const handlers: Array<(event: WSEvent) => void> = []
-vi.mock('../../hooks/useWebSocket', () => ({
-  useWebSocket: (handler: (event: WSEvent) => void) => {
-    handlers.push(handler)
-  },
-}))
+// The ticks arrive through the singleton websocket, and the REAL useWebSocket
+// runs here: its stable-subscription + latest-ref behavior is what guarantees
+// a frame is processed once per mounted hook, and a module mock that
+// re-registered per render would process each frame once per re-render and
+// mask exactly that. Only the socket is faked — the module connects through
+// the global WebSocket constructor, so a stub class hands the test the
+// connection's onmessage and frames dispatch through the module's own routing.
+class FakeWebSocket {
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSING = 2
+  static CLOSED = 3
+  readyState = FakeWebSocket.OPEN
+  onopen: (() => void) | null = null
+  onmessage: ((e: { data: string }) => void) | null = null
+  onclose: ((e: { code: number; reason?: string }) => void) | null = null
+  send() {}
+  close() {}
+  constructor() {
+    sockets.push(this)
+  }
+}
+const sockets: FakeWebSocket[] = []
 
+// The module holds one connection for the file's lifetime (that is the
+// singleton's whole point), so the newest fake is the live one.
 function dispatch(event: WSEvent) {
-  for (const fn of [...handlers]) fn(event)
+  sockets[sockets.length - 1]?.onmessage?.({ data: JSON.stringify(event) })
 }
 
 /** One streamed transcript row, in the wire shape broadcastMessage sends. */
@@ -39,8 +54,8 @@ let bodies: Array<Record<string, unknown>> = []
 
 beforeEach(() => {
   vi.useFakeTimers()
-  handlers.length = 0
   bodies = []
+  vi.stubGlobal('WebSocket', FakeWebSocket)
   vi.stubGlobal(
     'fetch',
     vi.fn((_input: unknown, init?: RequestInit) => {
