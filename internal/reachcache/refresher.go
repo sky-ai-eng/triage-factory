@@ -165,11 +165,14 @@ func (r *Refresher) RunOrg(ctx context.Context, orgID string, force bool) (bool,
 	}
 
 	switch class {
-	case domain.GitHubCredentialClassBYOApp:
+	case domain.GitHubCredentialClassBYOApp, domain.GitHubCredentialClassManagedApp:
 		// The App tier's refresh IS the grant reconcile — the same pass the poll
 		// cycle runs, with the same never-empty-on-failure posture. Running it
 		// here rather than duplicating the enumeration is what keeps the two
-		// tiers' answers written by one writer apiece.
+		// tiers' answers written by one writer apiece. Both App classes take it:
+		// what differs between a workspace on its own App and one on the
+		// deployment's is which installations the pass may create, which is the
+		// reconcile's own decision and not a second refresh shape.
 		if err := r.grant(ctx, orgID); err != nil {
 			return false, fmt.Errorf("refresh app grant: %w", err)
 		}
@@ -182,6 +185,11 @@ func (r *Refresher) RunOrg(ctx context.Context, orgID string, force bool) (bool,
 			r.markDeclined(orgID)
 			return false, nil
 		}
+	default:
+		// The resolver refuses a class this build does not know, so nothing
+		// should reach here — and an arm that fell through would announce a
+		// refresh that ran no enumeration at all.
+		return false, fmt.Errorf("refresh reachable repositories: %w: org=%s class=%q", ErrUnknownCredentialClass, orgID, class)
 	}
 
 	r.clearDeclined(orgID)

@@ -410,11 +410,14 @@ type OrgSettings struct {
 // Here, and nowhere else. A class is not free of DDL merely because the column
 // that states it is: other tables MIRROR the value under their own constraints,
 // and reachable_repositories is the live example — its credential_class carries
-// a CHECK naming the accepted values, a row-shape CHECK pairing each value with
-// the scope column its rows must hold, and two partial unique indexes each
-// predicated on a literal class. A value that table has not been taught is one
-// it cannot store, and (past the CHECK) one it cannot keep unique either. Ask
-// what mirrors the class before assuming a new one is a Go-only change.
+// a CHECK naming the accepted values, a row-shape CHECK pairing each class with
+// the scope column its rows must hold, and two partial unique indexes whose
+// predicates enumerate the classes they cover. A value that table has not been
+// taught is one it cannot store, and (past the CHECK) one it cannot keep unique
+// either — the quiet half, since the write inserts ON CONFLICT DO NOTHING and
+// needs an index to have a conflict to detect. Ask what mirrors the class before
+// assuming a new one is a Go-only change; the list above is what a conformance
+// case walks to prove every accepted value is writable.
 //
 // "managed_app" — an org riding the deployment's own shared App — had no
 // constant here for as long as the value was unreachable: a constant is a thing
@@ -455,17 +458,63 @@ const (
 	GitHubCredentialClassManagedApp GitHubCredentialClass = "managed_app"
 )
 
+// AllGitHubCredentialClasses lists every class this build understands, in the
+// order the constants declare them. It is the single definition of the accepted
+// set — Known answers off it — so a class is admitted by adding it here and
+// nowhere else.
+//
+// It is a list rather than a switch because the set is enumerable and the
+// schema mirrors it: reachable_repositories and reachable_scopes CHECK-constrain
+// their own credential_class, so a value this build accepts and those tables
+// refuse is a class that resolves everywhere and stores nowhere. A test walks
+// this list and writes one row per class, which is what turns "remember to
+// widen the CHECKs" into something the build enforces.
+func AllGitHubCredentialClasses() []GitHubCredentialClass {
+	return []GitHubCredentialClass{
+		GitHubCredentialClassPAT,
+		GitHubCredentialClassBYOApp,
+		GitHubCredentialClassManagedApp,
+	}
+}
+
+// AppTierCredentialClasses lists the classes whose credential is a GitHub App
+// installation — the org's own App or the deployment's shared one. What they
+// share is the shape their reachable entries take: the scope one refresh
+// replaces is an installation, so their rows carry an installation_id and no
+// host, hang off the installation row by foreign key, and vanish with it.
+//
+// The PAT tier is the odd one and always has been: it has no installation to
+// hang from, which is why it carries a host instead.
+func AppTierCredentialClasses() []GitHubCredentialClass {
+	return []GitHubCredentialClass{
+		GitHubCredentialClassBYOApp,
+		GitHubCredentialClassManagedApp,
+	}
+}
+
 // Known reports whether c is a class this build understands. A stored value
 // that isn't — a future class written by a newer peer, a hand-edited row — is
 // never coerced to a default; callers refuse instead, so an org resolves no
 // credential rather than the wrong one.
 func (c GitHubCredentialClass) Known() bool {
-	switch c {
-	case GitHubCredentialClassPAT, GitHubCredentialClassBYOApp, GitHubCredentialClassManagedApp:
-		return true
-	default:
-		return false
+	for _, known := range AllGitHubCredentialClasses() {
+		if c == known {
+			return true
+		}
 	}
+	return false
+}
+
+// AppTier reports whether c authenticates as a GitHub App installation, which
+// is what decides the shape of its reachable entries and whether an org's
+// usability is answered by its installations rather than by a stored token.
+func (c GitHubCredentialClass) AppTier() bool {
+	for _, app := range AppTierCredentialClasses() {
+		if c == app {
+			return true
+		}
+	}
+	return false
 }
 
 // DefaultOrgSettings returns the NOT NULL DEFAULT values from the

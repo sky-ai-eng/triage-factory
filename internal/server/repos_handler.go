@@ -248,10 +248,11 @@ type pickerPreflight struct {
 // the org. It writes the response on every false return.
 //
 // The two refusals are deliberately different, and the difference is the
-// first-run dead-end this handler exists to keep diagnosable: an org whose App
-// is registered and active but installed nowhere is told to install it, while
-// everything else gets the generic "not connected". Reporting the first as the
-// second reads as "add a PAT", which is the one thing that will not help.
+// first-run dead-end this handler exists to keep diagnosable: an org whose
+// credential is an App — its own or the deployment's — that is installed
+// nowhere is told to install it, while everything else gets the generic "not
+// connected". Reporting the first as the second reads as "add a PAT", which is
+// the one thing that will not help.
 //
 // A third outcome — "we could not tell" — is neither of those and is reported
 // through pickerPreflight.err rather than as a refusal, because the two claims
@@ -273,28 +274,30 @@ func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, o
 		internalError(w, "repos", err)
 		return pickerPreflight{}, false
 	}
-	if class == domain.GitHubCredentialClassBYOApp {
-		// An active App with at least one installation is usable by definition —
-		// the installations ARE the reach. A read failure here is carried rather
-		// than refused: reporting it would mean claiming "not installed", which
-		// only a successful read of zero installations can support.
+	if class.AppTier() {
+		// An App with at least one installation is usable by definition — the
+		// installations ARE the reach, whether the App is the workspace's own or
+		// the deployment's shared one. A read failure here is carried rather than
+		// refused: reporting it would mean claiming "not installed", which only a
+		// successful read of zero installations can support.
 		insts, err := s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
 		if err != nil {
 			reposLog.Warn("list installations failed; serving the mirror if there is one", "org", orgID, "error", err)
 			return pickerPreflight{class: class, err: err}, true
 		}
 		if len(insts) == 0 {
-			reposLog.Warn("app registered and active but installed on zero accounts", "org", orgID)
+			reposLog.Warn("app usable but installed on zero accounts", "org", orgID, "class", class)
 			writeNotConfigured(w, "the GitHub App is not installed on any account")
 			return pickerPreflight{}, false
 		}
 		return pickerPreflight{class: class}, true
 	}
 
-	// PAT tier. Credentials + per-org base URL read through the app pool inside
-	// WithTx so SecretStore decrypts under the user's claims and
-	// org_settings_select RLS is enforced — the same shape the rest of the
-	// settings surface uses.
+	// PAT tier — the only one left, since both App classes are answered above and
+	// an unknown class never resolves at all. Credentials + per-org base URL read
+	// through the app pool inside WithTx so SecretStore decrypts under the user's
+	// claims and org_settings_select RLS is enforced — the same shape the rest of
+	// the settings surface uses.
 	var (
 		creds  auth.Credentials
 		orgSet domain.OrgSettings

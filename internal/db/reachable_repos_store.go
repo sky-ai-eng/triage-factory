@@ -7,8 +7,8 @@ import (
 )
 
 // ReachableReposStore owns reachable_repositories — the mirror of which
-// repositories an org's GitHub credentials can actually reach, populated by both
-// credential classes and read by every consumer of that question.
+// repositories an org's GitHub credentials can actually reach, populated by
+// every credential class and read by every consumer of that question.
 //
 // # What the mirror is for
 //
@@ -48,12 +48,12 @@ import (
 //
 // # Scoping, and why every read takes a class
 //
-// A row belongs to a credential CLASS ('pat' or 'byo_app') and, within it, to a
-// SCOPE — the installation for an App entry, the host for a PAT entry — which is
-// the unit one refresh replaces atomically. Reads take the org's CURRENT class
-// so an org that switched tiers is never served the reach it used to have; the
-// previous tier's rows are inert until their next refresh replaces them, and
-// they cost a row apiece until then.
+// A row belongs to a credential CLASS — 'pat', or one of the App classes
+// ('byo_app', 'managed_app') — and, within it, to a SCOPE: the installation for
+// an App entry, the host for a PAT entry, which is the unit one refresh replaces
+// atomically. Reads take the org's CURRENT class so an org that switched tiers is
+// never served the reach it used to have; the previous tier's rows are inert
+// until their next refresh replaces them, and they cost a row apiece until then.
 //
 // # Pool split (Postgres)
 //
@@ -77,6 +77,15 @@ type ReachableReposStore interface {
 	// was refreshed, which is what makes a grant of nothing distinguishable from
 	// a refresh that never ran.
 	//
+	// class is the App-tier class the org's entries are keyed under — its own
+	// registration or the deployment's shared App — and it is a parameter rather
+	// than a value read off the rows because the scope marker carries it too:
+	// reachable_scopes is keyed (org_id, credential_class, scope), and a grant of
+	// nothing has no row to read a class from. Marking that scope under the wrong
+	// class would leave an org whose grant is legitimately empty reading as
+	// never-refreshed forever. Rows are stamped from it, so a caller cannot hand
+	// one replace two classes' worth of entries.
+	//
 	// It is deliberately ALL-OR-NOTHING and deliberately never called with a
 	// partial answer. A refresh that cannot reach GitHub, or that got a truncated
 	// listing, must not call this at all — the previous answer stands. A mirror
@@ -90,7 +99,7 @@ type ReachableReposStore interface {
 	//
 	// Exempt from the returned-row rule: it reconciles a whole cache set in
 	// one transaction, so there is no single row a return value could name.
-	ReplaceForInstallationSystem(ctx context.Context, orgID, installationID string, repos []domain.ReachableRepository) error
+	ReplaceForInstallationSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, installationID string, repos []domain.ReachableRepository) error
 
 	// ReplaceForPATSystem is the PAT tier's twin: it replaces the org's ENTIRE
 	// pat-class set with repos observed against host.
@@ -125,6 +134,12 @@ type ReachableReposStore interface {
 	// that silently matched no rows would report success for a grant that is
 	// still on the page.
 	//
+	// It takes no class, unlike the replace beside it. An installation that is
+	// gone reaches nothing under any class, and only the App classes carry an
+	// installation at all, so the delete is addressed by installation and clears
+	// whichever class observed it — the same delete MarkInstallationRemoved
+	// writes inline, which has no class to be told either.
+	//
 	// Exempt from the returned-row rule: it clears a set, so there is no
 	// single row a return value could name.
 	ClearForInstallationSystem(ctx context.Context, orgID, installationID string) error
@@ -135,6 +150,12 @@ type ReachableReposStore interface {
 	// the join re-states that so a row surviving some future write path cannot
 	// leak back into a display. PAT-tier rows are not grant entries and are not
 	// returned.
+	//
+	// TODO(TFAC-932): this read and the two findings below match the 'byo_app'
+	// class alone, so a managed workspace's grant is invisible to all three.
+	// Widening them is the panel's work, since nothing outside internal/db calls
+	// either finding today and the copy that renders them is what decides which
+	// classes hold a grant TF is answerable for.
 	ListForOrgSystem(ctx context.Context, orgID string) ([]domain.ReachableRepository, error)
 
 	// ListReachWithoutPurposeSystem returns the App-tier entries no team in the

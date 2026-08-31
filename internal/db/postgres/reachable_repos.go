@@ -43,28 +43,37 @@ const reachableColumns = `r.org_id, r.credential_class, COALESCE(r.installation_
 // The insert conflicts on the case-folded identity index, which is what makes
 // two casings of one repository in GitHub's own answer collapse to one row
 // instead of aborting the transaction.
-func (s *reachableReposStore) ReplaceForInstallationSystem(ctx context.Context, orgID, installationID string, repos []domain.ReachableRepository) error {
+func (s *reachableReposStore) ReplaceForInstallationSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, installationID string, repos []domain.ReachableRepository) error {
 	if !isValidUUID(orgID) {
 		return fmt.Errorf("replace reachable repositories: invalid org id %q", orgID)
+	}
+	if !class.AppTier() {
+		return fmt.Errorf("replace reachable repositories: %q is not an installation-scoped credential class", class)
 	}
 	if installationID == "" {
 		return fmt.Errorf("replace reachable repositories: empty installation id")
 	}
-	rows, err := normalizeReachable(repos, domain.GitHubCredentialClassBYOApp, installationID, "")
+	rows, err := normalizeReachable(repos, class, installationID, "")
 	if err != nil {
 		return err
 	}
 	return inTx(ctx, s.admin, func(tx queryer) error {
+		// Addressed by installation rather than by (class, installation): the
+		// entries being replaced are this installation's, whatever class observed
+		// them, and only the App classes carry an installation at all. It also
+		// keeps the delete and the insert reading the same key as the identity
+		// index, which spans both App classes — a class-scoped delete could leave
+		// a row the insert then silently conflicts with.
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM reachable_repositories
-			 WHERE org_id = $1 AND credential_class = $2 AND installation_id = $3
-		`, orgID, string(domain.GitHubCredentialClassBYOApp), installationID); err != nil {
+			 WHERE org_id = $1 AND installation_id = $2
+		`, orgID, installationID); err != nil {
 			return fmt.Errorf("clear reachable repositories: %w", err)
 		}
 		if err := insertReachable(ctx, tx, orgID, rows); err != nil {
 			return err
 		}
-		return markScopeRefreshed(ctx, tx, orgID, domain.GitHubCredentialClassBYOApp, installationID, observedAt(rows))
+		return markScopeRefreshed(ctx, tx, orgID, class, installationID, observedAt(rows))
 	})
 }
 
@@ -117,20 +126,22 @@ func (s *reachableReposStore) ClearForInstallationSystem(ctx context.Context, or
 	if installationID == "" {
 		return fmt.Errorf("clear reachable repositories: empty installation id")
 	}
+	classes, classArgs := appTierClassArgs(2)
 	return inTx(ctx, s.admin, func(tx queryer) error {
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM reachable_repositories
-			 WHERE org_id = $1 AND credential_class = $2 AND installation_id = $3
-		`, orgID, string(domain.GitHubCredentialClassBYOApp), installationID); err != nil {
+			 WHERE org_id = $1 AND installation_id = $2
+		`, orgID, installationID); err != nil {
 			return fmt.Errorf("clear reachable repositories: %w", err)
 		}
 		// The scope row goes with the entries: leaving it would keep vouching that
 		// this installation's reach had been established, for an installation that
-		// no longer reaches anything.
+		// no longer reaches anything. Narrowed to the App classes because scope
+		// holds a host for the PAT tier, and this argument is an installation id.
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM reachable_scopes
-			 WHERE org_id = $1 AND credential_class = $2 AND scope = $3
-		`, orgID, string(domain.GitHubCredentialClassBYOApp), installationID); err != nil {
+			 WHERE org_id = $1 AND scope = $2 AND credential_class IN (`+classes+`)
+		`, append([]any{orgID, installationID}, classArgs...)...); err != nil {
 			return fmt.Errorf("clear reachable scope: %w", err)
 		}
 		return nil
@@ -355,6 +366,23 @@ func (s *reachableReposStore) ReachableSlugsSystem(ctx context.Context, orgID st
 		out[slug] = struct{}{}
 	}
 	return out, rows.Err()
+}
+
+// appTierClassArgs renders the App-shaped credential classes as a bound IN list:
+// the placeholders to interpolate, and the values to append to the query's
+// arguments. bound is how many parameters the statement already binds, since
+// this dialect numbers them. Built from the domain list rather than spelled in
+// SQL so a class added there reaches the two statements that ask "is this scope
+// an installation's?" without either being edited.
+func appTierClassArgs(bound int) (string, []any) {
+	classes := domain.AppTierCredentialClasses()
+	placeholders := make([]string, 0, len(classes))
+	args := make([]any, 0, len(classes))
+	for _, class := range classes {
+		args = append(args, string(class))
+		placeholders = append(placeholders, fmt.Sprintf("$%d", bound+len(args)))
+	}
+	return strings.Join(placeholders, ","), args
 }
 
 // normalizeReachable stamps the scope every row in one replace shares and

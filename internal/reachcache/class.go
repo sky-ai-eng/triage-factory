@@ -19,35 +19,9 @@ import (
 // arm, and enumerates against a credential the org does not have.
 var ErrUnknownCredentialClass = errors.New("reachcache: unknown github credential class")
 
-// ErrClassNotMirrored is returned for a credential class the mirror has no
-// place to key entries under. It is a different fault from the one above: the
-// class is one this build knows, and the mirror still cannot hold it.
-//
-// reachable_repositories.credential_class is CHECK-constrained to 'pat' and
-// 'byo_app' on both dialects, and each value names the scope column its rows
-// must carry — an installation for one, a host for the other. So a workspace on
-// the deployment's shared App has nowhere for its reachable entries to live,
-// which is not the same as having none yet.
-//
-// Refusing is the same posture as the unknown arm beside it, for the same
-// reason: the alternative is keying a managed workspace's reach under another
-// credential system's key, and every read filters on the class — so those rows
-// would be served to, or as, a credential system that did not observe them.
-//
-// The CHECK is not the whole of what stands in the way, and the rest of it is
-// silent. Both uniqueness guarantees on reachable_repositories are PARTIAL
-// indexes predicated on a literal class, so a row keyed under any other value
-// falls outside both and has no uniqueness constraint at all — while the write
-// is a bare ON CONFLICT DO NOTHING, which needs an index to have a conflict to
-// detect and degrades to a plain insert without one. A paginated GitHub listing
-// legitimately repeats a repository when repos are created mid-walk, so the
-// result is duplicate rows and a wrong total_count: the one question this table
-// exists to answer, answered wrongly and quietly.
-var ErrClassNotMirrored = errors.New("reachcache: credential class has no reachable-repo scope")
-
 // ClassResolver answers which credential class an org's reachable entries are
-// keyed under. That is the org's stored class NARROWED BY THE APP-XOR-PAT GATE,
-// and the narrowing is not cosmetic:
+// keyed under. That is the org's stored class narrowed by the App-XOR-PAT gate
+// where the org owns its App key, and the narrowing is not cosmetic:
 //
 // The resolver's own rule is that an org's git credential is its ACTIVE App or a
 // borrowed PAT, never both — so an org in the BYO-App system whose App is
@@ -88,14 +62,12 @@ func (c *ClassResolver) For(ctx context.Context, orgID string) (domain.GitHubCre
 	case domain.GitHubCredentialClassBYOApp:
 		// Falls through to the App-XOR-PAT narrowing below.
 	case domain.GitHubCredentialClassManagedApp:
-		// TODO(TFAC-934): delete this arm once the mirror can key a managed
-		// workspace's reach — the class value admitted, the app_identity index
-		// predicate widened to cover it, and a writer that reaches an org with no
-		// registration row. Until then this refusal is what a managed workspace
-		// gets, which is loud and wrong in the safe direction; falling through
-		// would leave its picker discovering forever off reads that can only
-		// return empty.
-		return "", fmt.Errorf("%w: org=%s class=%q", ErrClassNotMirrored, orgID, class)
+		// Returned as it stands, and the narrowing below is skipped rather than
+		// forgotten: it reads an org_github_apps row, and a managed workspace has
+		// none — so there is no Active bit that could stage its App behind a PAT.
+		// The workspace is on the deployment's App or it is not, and its reach is
+		// keyed under that App's installations either way.
+		return class, nil
 	default:
 		return "", fmt.Errorf("%w: org=%s class=%q", ErrUnknownCredentialClass, orgID, class)
 	}
