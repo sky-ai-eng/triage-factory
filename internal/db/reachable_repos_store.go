@@ -7,8 +7,8 @@ import (
 )
 
 // ReachableReposStore owns reachable_repositories — the mirror of which
-// repositories an org's GitHub credentials can actually reach, populated by both
-// credential classes and read by every consumer of that question.
+// repositories an org's GitHub credentials can actually reach, populated by
+// every credential class and read by every consumer of that question.
 //
 // # What the mirror is for
 //

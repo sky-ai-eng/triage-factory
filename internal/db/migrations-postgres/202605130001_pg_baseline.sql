@@ -3306,19 +3306,27 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_github_app_installation
 
 
 -- The reachable-repo cache: one mirror of "which repositories can this org
--- reach", populated by both credential classes and read by the repository
+-- reach", populated by every credential class and read by the repository
 -- picker, the team-repos write gate, and the two App-tier findings below.
 --
 -- It is a cache of an external fact, rebuilt in full per refresh, with no durable
 -- identity — unlike `repositories`, the registry of TF entities that worktrees,
 -- entities, clone state and a hand-set base_branch hang off. It contains
 -- repositories nobody tracks, so it is neither a registry row nor a column on
--- repositories. Both findings read only 'byo_app' rows, since a PAT's reach is
--- not a grant TF holds:
+-- repositories.
 --
 --   * reach without purpose — the App can reach a repository no team tracks;
 --   * scope drift — a team tracks a repository outside the grant, which makes
 --     that repository silently unpollable.
+--
+-- Both findings are statements about a GRANT, which is why neither reads the
+-- 'pat' rows: a PAT's reach is the account's, not something TF was granted. That
+-- exclusion is structural and permanent. The queries also match 'byo_app' alone
+-- among the two App classes, and that one is neither: a managed workspace's
+-- reach is a grant on the same terms, and what it waits on is the surface that
+-- renders these findings. The store interface carries that deferral where the
+-- queries live — this table stores every class the CHECKs below admit, and takes
+-- no view on which of them a reader asks about.
 CREATE TABLE public.reachable_repositories (
     org_id uuid NOT NULL,
     -- Which credential system observed this reach. Part of the key because an org

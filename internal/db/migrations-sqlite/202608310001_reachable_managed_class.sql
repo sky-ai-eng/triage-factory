@@ -31,6 +31,11 @@
 -- the same installation id is not constructible — and one index is strictly
 -- stronger than two.
 --
+-- What does NOT change is which classes the two App-tier findings ask about:
+-- their queries match 'byo_app' alone, and that is a property of the queries
+-- rather than of these tables, which store every class the CHECKs admit. The
+-- store interface carries the deferral where those queries live.
+--
 -- Every change here admits values the previous constraints refused, so no
 -- stored row can violate the new ones and nothing is rewritten or cleaned up.
 -- SQLite cannot ALTER a CHECK or re-predicate an index in place, so both tables
