@@ -27,6 +27,12 @@ import { utcMidnightISO } from './data'
  * burst these, which the debounce collapses to one refetch) and
  * `artifact_updated` (a PR merging moves the MERGED count without any task
  * necessarily changing).
+ *
+ * `message` is deliberately NOT here: an agent streams transcript rows
+ * continuously, and a full round of this page's reads per row would be a
+ * polling loop wearing a push hat. The one reading a transcript row moves —
+ * a RUNNING row's `current_action` — has its own tick (useTranscriptTick),
+ * consumed by the one read that carries it.
  */
 const HINTS = new Set<WSEvent['type']>([
   'event',
@@ -42,18 +48,20 @@ const HINTS = new Set<WSEvent['type']>([
 
 const HINT_DEBOUNCE_MS = 1000
 
-/** A counter that bumps (debounced) when a hint lands. Data hooks put it in
- *  their effect deps, so one burst of hints is one round of refetches. */
-export function useOverviewTick(): number {
+/** One debounced counter over the stream: bumps once per coalescing window in
+ *  which at least one frame matched. Both ticks below are this with a
+ *  different question and a different window. The timer is armed by a match
+ *  and never by its own expiry — a coalescing window, not a poll. */
+function useDebouncedTick(match: (ev: WSEvent) => boolean, windowMs: number): number {
   const [tick, setTick] = useState(0)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useWebSocket((ev) => {
-    if (!HINTS.has(ev.type)) return
+    if (!match(ev)) return
     if (timer.current) return
     timer.current = setTimeout(() => {
       timer.current = null
       setTick((t) => t + 1)
-    }, HINT_DEBOUNCE_MS)
+    }, windowMs)
   })
   useEffect(
     () => () => {
@@ -62,6 +70,39 @@ export function useOverviewTick(): number {
     [],
   )
   return tick
+}
+
+/** A counter that bumps (debounced) when a hint lands. Data hooks put it in
+ *  their effect deps, so one burst of hints is one round of refetches. */
+export function useOverviewTick(): number {
+  return useDebouncedTick((ev) => HINTS.has(ev.type), HINT_DEBOUNCE_MS)
+}
+
+/** How long transcript frames coalesce before the running read goes out. Its
+ *  own knob even though it currently matches the hint window: the two windows
+ *  pace different streams, and this one bounds the cost to one bounded list
+ *  read per window while an agent works. */
+const TRANSCRIPT_DEBOUNCE_MS = 1000
+
+/**
+ * The transcript's own tick. A RUNNING row's prose is `current_action`,
+ * derived server-side from the newest assistant message's tool calls — and the
+ * only frame that says that message moved is `message`, which the page hints
+ * above exclude. Without this tick the line only refreshed when some other
+ * hint happened to land (a poll cycle's event burst, a status flip), which
+ * read as frozen for the whole middle of a run.
+ *
+ * Only an assistant row can move the derivation — the server's pick is the
+ * newest assistant message, tool calls or none, so a prose turn honestly drops
+ * the line back to "Working" — and every other role is skipped unread. The
+ * frames are already on this org-scoped socket either way; consuming them
+ * spends a refetch, not wire.
+ */
+export function useTranscriptTick(): number {
+  return useDebouncedTick(
+    (ev) => ev.type === 'message' && ev.data.role === 'assistant',
+    TRANSCRIPT_DEBOUNCE_MS,
+  )
 }
 
 /** The grouped conversations-list envelope, flattened: rows in the server's
@@ -93,10 +134,17 @@ async function readConversationSet(body: Record<string, unknown>): Promise<Conve
  *   running — the live display statuses plus `queued`, because a queued run
  *             belongs in RUNNING with its hourglass mark rather than in a
  *             section of its own saying "waiting" four times.
+ *
+ * The two reads ride different ticks, which is why they are two effects: both
+ * refetch on the page tick, but only `running` also refetches on the
+ * transcript tick — a transcript row moves `current_action` and nothing in
+ * the attention set, so a working agent must not buy the needs read a
+ * refetch per window.
  */
 export function useConversationSets(
   teamId: string,
   tick: number,
+  transcriptTick: number,
 ): { needs: ConversationSet | null; running: ConversationSet | null } {
   const [got, setGot] = useState<{
     team: string
@@ -117,6 +165,13 @@ export function useConversationSets(
       },
       () => {},
     )
+    return () => {
+      live = false
+    }
+  }, [teamId, tick])
+  useEffect(() => {
+    if (!teamId) return
+    let live = true
     void readConversationSet({
       team_ids: [teamId],
       statuses: [...ACTIVE_STATUSES, 'queued'],
@@ -135,7 +190,7 @@ export function useConversationSets(
     return () => {
       live = false
     }
-  }, [teamId, tick])
+  }, [teamId, tick, transcriptTick])
   return got.team === teamId ? got : { needs: null, running: null }
 }
 
