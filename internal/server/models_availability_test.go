@@ -861,7 +861,7 @@ func TestModelsList_Postgres_UnconfiguredOutranksAStoredGreen(t *testing.T) {
 }
 
 // A multi-mode org that binds nothing is unconfigured, not ambient. There are
-// no host credentials for a hosted deployment to lend — the operator's
+// no host credentials for a multi-mode deployment to lend — the operator's
 // environment is one environment shared by every tenant, and credential
 // resolution refuses such an org outright — so anything softer here would badge
 // a picker full of models whose every run fails on the way out.
@@ -880,7 +880,7 @@ func TestModelsList_Postgres_NothingBoundIsUnconfigured(t *testing.T) {
 
 // And a row hand-written to say the org runs on the host's credentials does not
 // change it: domain.EffectiveLLMAuthMethod resolves the mode's single legal
-// value whatever the column says, because a hosted deployment has none to lend.
+// value whatever the column says, because a multi-mode deployment has none to lend.
 // The settings PATCH refuses to write it at all; this is the backstop for a row
 // that arrived some other way.
 func TestModelsList_Postgres_StoredHostCredentialsAreInert(t *testing.T) {

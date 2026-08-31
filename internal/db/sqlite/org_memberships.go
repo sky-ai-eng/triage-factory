@@ -8,7 +8,7 @@ import (
 )
 
 // orgMembershipsStore is the SQLite impl of db.OrgMembershipsStore. The org
-// People roster is a hosted-only surface (its handlers 404 in local mode),
+// People roster is a multi-only surface (its handlers 404 in local mode),
 // so every method here is multi-only: it exists solely so the local store
 // bundle satisfies the interface. All three return ErrNotApplicableInLocal —
 // they should never be reached at N=1, and a clear error beats a misleading
@@ -27,7 +27,7 @@ func (*orgMembershipsStore) ListWithIdentity(_ context.Context, _, _, _ string, 
 
 // RoleFor is the one method on this store local mode answers rather than
 // refusing: N=1 has exactly one user, who owns the org. Every other method
-// backs a hosted-only surface whose handlers 404 before reaching the store.
+// backs a multi-only surface whose handlers 404 before reaching the store.
 func (*orgMembershipsStore) RoleFor(_ context.Context, _, _ string) (string, error) {
 	return "owner", nil
 }

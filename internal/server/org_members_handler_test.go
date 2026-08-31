@@ -534,7 +534,7 @@ func TestOrgOwnershipTransfer_ThenFormerOwnerCanLeave(t *testing.T) {
 	}
 }
 
-// TestOrgMembers_LocalIs404: the whole surface is hosted-only — every method
+// TestOrgMembers_LocalIs404: the whole surface is multi-only — every method
 // 404s in local mode regardless of identity.
 func TestOrgMembers_LocalIs404(t *testing.T) {
 	r := newOrgMembersRig(t)

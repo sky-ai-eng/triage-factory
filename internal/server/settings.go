@@ -678,7 +678,7 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *http.Request) {
 	// SSH is local-mode-only. PreflightSSH writes the container's
 	// ~/.ssh/known_hosts (accept-new) and probes the operator's ssh-agent —
-	// neither exists in a hosted multi-mode container, and the clone path
+	// neither exists in a multi-mode container, and the clone path
 	// there is hardwired to HTTPS. Refuse rather than run the probe so no SSH
 	// machinery is ever touched in multi mode. The UI hides the button there;
 	// this is the defense-in-depth backstop.

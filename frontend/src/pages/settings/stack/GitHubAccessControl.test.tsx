@@ -189,7 +189,7 @@ describe('GitHubAccessControl · App webhook health', () => {
     installMocks.status = {
       app: null,
       installations: [],
-      using_hosted_default: false,
+      using_deployment_default: false,
       connect_callback_url: '',
       webhook_health: health,
     } satisfies GitHubAppStatus

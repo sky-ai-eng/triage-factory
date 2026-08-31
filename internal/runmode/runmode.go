@@ -172,7 +172,7 @@ func ModeFromEnv(s string) (Mode, error) {
 // silently. Org creation is always a deliberate user action (the
 // onboarding "Start your Factory" CTA → the create-org flow). This
 // flag only toggles whether that page's create affordance is enabled:
-// the default (creation allowed) is right for hosted SaaS and
+// the default (creation allowed) is right for a SaaS deployment and
 // unconfigured self-hosts, while a locked-down self-host sets
 // TF_PREVENT_ORG_CREATION=true to gate access on an admin invite,
 // leaving only the "wait for an invite" path.
@@ -217,7 +217,7 @@ func InitOrgCreationPrevented(prevented bool) error {
 
 // InitOrgCreationFromEnv reads TF_PREVENT_ORG_CREATION from the
 // environment and initializes the toggle. Empty / unset → creation
-// allowed (the safe default for hosted SaaS + unconfigured self-hosts).
+// allowed (the safe default for a SaaS deployment + unconfigured self-hosts).
 //
 // Only meaningful in multi mode — local mode never consults it. main.go
 // gates the call accordingly.

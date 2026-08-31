@@ -18,7 +18,7 @@ import (
 // Center) config + the operator's identity entirely from environment
 // variables, so a keychain-less / browser-less install reaches setup_complete
 // with no manual setup. This is the single-user local-mode experience — NOT
-// the multi-tenant hosted deployment.
+// the multi-tenant deployment.
 //
 // Invariants:
 //   - Local mode only. The app gates the call on a.local() && HeadlessEnabled();

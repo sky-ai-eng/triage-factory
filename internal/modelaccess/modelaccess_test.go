@@ -84,7 +84,7 @@ func TestReady_TurnsOnTheRecordedCredentialSource(t *testing.T) {
 	}
 }
 
-// Multi resolves to BYOK whatever the row says — a hosted deployment has no host
+// Multi resolves to BYOK whatever the row says — a multi-mode deployment has no host
 // credentials to lend — so a row claiming otherwise is inert rather than a way
 // to dispatch against the operator's environment.
 func TestReady_MultiIgnoresAStoredHostCredentialSource(t *testing.T) {

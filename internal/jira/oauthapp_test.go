@@ -23,11 +23,11 @@ func (f *fakeJiraApps) GetForOrgSystem(_ context.Context, _ string) (*domain.Org
 }
 
 // TestResolveOAuthApp_PerOrgOverride: a per-org row + its secret resolve to the
-// override credential — tier 1 wins over the first-party app.
+// override credential — tier 1 wins over the deployment app.
 func TestResolveOAuthApp_PerOrgOverride(t *testing.T) {
 	apps := &fakeJiraApps{app: &domain.OrgJiraApp{ClientID: "org-client", ClientSecretRef: jiraSecretRef}}
 	secrets := &fakeSecrets{sys: map[string]string{jiraSecretRef: "org-secret"}}
-	r := NewOAuthAppResolver(apps, secrets, OAuthApp{ClientID: "fp-client", ClientSecret: "fp-secret"})
+	r := NewOAuthAppResolver(apps, secrets, OAuthApp{ClientID: "dep-client", ClientSecret: "dep-secret"})
 
 	got, source, err := r.Resolve(context.Background(), testOrgID)
 	if err != nil {
@@ -41,24 +41,24 @@ func TestResolveOAuthApp_PerOrgOverride(t *testing.T) {
 	}
 }
 
-// TestResolveOAuthApp_FirstPartyFallback: no per-org row → the deployment
-// first-party app (hosted) resolves.
-func TestResolveOAuthApp_FirstPartyFallback(t *testing.T) {
-	r := NewOAuthAppResolver(&fakeJiraApps{}, &fakeSecrets{}, OAuthApp{ClientID: "fp-client", ClientSecret: "fp-secret"})
+// TestResolveOAuthApp_DeploymentFallback: no per-org row → the deployment
+// app (multi) resolves.
+func TestResolveOAuthApp_DeploymentFallback(t *testing.T) {
+	r := NewOAuthAppResolver(&fakeJiraApps{}, &fakeSecrets{}, OAuthApp{ClientID: "dep-client", ClientSecret: "dep-secret"})
 
 	got, source, err := r.Resolve(context.Background(), testOrgID)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if got.ClientID != "fp-client" || got.ClientSecret != "fp-secret" {
-		t.Fatalf("Resolve = %+v, want first-party", got)
+	if got.ClientID != "dep-client" || got.ClientSecret != "dep-secret" {
+		t.Fatalf("Resolve = %+v, want deployment app", got)
 	}
-	if source != SourceFirstParty {
-		t.Fatalf("source = %v, want SourceFirstParty", source)
+	if source != SourceDeployment {
+		t.Fatalf("source = %v, want SourceDeployment", source)
 	}
 }
 
-// TestResolveOAuthApp_NotConfigured: no per-org row and no first-party app
+// TestResolveOAuthApp_NotConfigured: no per-org row and no deployment app
 // (the local-mode shape) → the typed not-configured error.
 func TestResolveOAuthApp_NotConfigured(t *testing.T) {
 	r := NewOAuthAppResolver(&fakeJiraApps{}, &fakeSecrets{}, OAuthApp{})
@@ -74,31 +74,31 @@ func TestResolveOAuthApp_NotConfigured(t *testing.T) {
 
 // TestResolveOAuthApp_OverrideMissingSecretFallsThrough: a row exists but its
 // secret read clean-and-empty → the override is unusable, so the resolver falls
-// through to the first-party app rather than returning a half-credential.
+// through to the deployment app rather than returning a half-credential.
 func TestResolveOAuthApp_OverrideMissingSecretFallsThrough(t *testing.T) {
 	apps := &fakeJiraApps{app: &domain.OrgJiraApp{ClientID: "org-client", ClientSecretRef: jiraSecretRef}}
-	r := NewOAuthAppResolver(apps, &fakeSecrets{}, OAuthApp{ClientID: "fp-client", ClientSecret: "fp-secret"})
+	r := NewOAuthAppResolver(apps, &fakeSecrets{}, OAuthApp{ClientID: "dep-client", ClientSecret: "dep-secret"})
 
 	got, source, err := r.Resolve(context.Background(), testOrgID)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if got.ClientID != "fp-client" {
-		t.Fatalf("Resolve = %+v, want first-party fallback", got)
+	if got.ClientID != "dep-client" {
+		t.Fatalf("Resolve = %+v, want deployment fallback", got)
 	}
 	// The dead override must NOT be reported as the live source — this is the
 	// state that would otherwise make the settings card claim "configured".
-	if source != SourceFirstParty {
-		t.Fatalf("source = %v, want SourceFirstParty (dead override falls through)", source)
+	if source != SourceDeployment {
+		t.Fatalf("source = %v, want SourceDeployment (dead override falls through)", source)
 	}
 }
 
 // TestResolveOAuthApp_StoreErrorPropagates: a backend read error on the
 // per-org lookup propagates rather than being misreported as not-configured —
-// a transient outage must not silently fall through to the first-party app.
+// a transient outage must not silently fall through to the deployment app.
 func TestResolveOAuthApp_StoreErrorPropagates(t *testing.T) {
 	boom := errors.New("db down")
-	r := NewOAuthAppResolver(&fakeJiraApps{err: boom}, &fakeSecrets{}, OAuthApp{ClientID: "fp", ClientSecret: "fp"})
+	r := NewOAuthAppResolver(&fakeJiraApps{err: boom}, &fakeSecrets{}, OAuthApp{ClientID: "dep", ClientSecret: "dep"})
 
 	_, _, err := r.Resolve(context.Background(), testOrgID)
 	if !errors.Is(err, boom) {

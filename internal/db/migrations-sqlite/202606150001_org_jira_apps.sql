@@ -6,10 +6,10 @@
 -- only the OAuth client credentials.
 --
 -- This row is the per-org OVERRIDE in credential precedence: an org with no
--- row falls back to the deployment first-party app (hosted) or has no app at
--- all (local — where the BYO app IS this row). client_secret_ref is a pointer
--- into the secret store (the OS keychain in local mode); the secret itself
--- never lives in this table, the same shape org_github_apps uses.
+-- row falls back to the deployment app (multi) or has no app at all (local —
+-- where the BYO app IS this row). client_secret_ref is a pointer into the
+-- secret store (the OS keychain in local mode); the secret itself never lives
+-- in this table, the same shape org_github_apps uses.
 CREATE TABLE org_jira_apps (
     org_id                 TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
     client_id              TEXT NOT NULL,

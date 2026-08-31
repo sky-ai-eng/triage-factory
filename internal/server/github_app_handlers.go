@@ -14,12 +14,13 @@ import (
 // githubAppStatusResponse is the read-only shape the Workspace Settings
 // "GitHub access" panel polls to render its state machine. `app` is null
 // when the org has no registered App (the panel offers registration);
-// `using_hosted_default` is true only when a deployment-default App
-// covers the org — always false in local + self-host.
+// `using_deployment_default` is true only when a deployment-level App covers
+// the org — always false in this build, whose credential classes are all the
+// org's own.
 type githubAppStatusResponse struct {
-	App                *githubAppInfo          `json:"app"`
-	Installations      []githubAppInstallation `json:"installations"`
-	UsingHostedDefault bool                    `json:"using_hosted_default"`
+	App                    *githubAppInfo          `json:"app"`
+	Installations          []githubAppInstallation `json:"installations"`
+	UsingDeploymentDefault bool                    `json:"using_deployment_default"`
 	// ConnectCallbackURL is the absolute redirect_uri the App owner must register
 	// on the App for per-user "Connect GitHub" OAuth to work. It's the
 	// same URL buildManifestAndState bakes into a manifest-created App's
@@ -79,7 +80,7 @@ type githubAppInstallation struct {
 // known App-webhook probe answer, or nil when none is known — a nil is rendered
 // as an absent block rather than as a healthy one.
 //
-// class decides using_hosted_default, which is the one field on this payload
+// class decides using_deployment_default, which is the one field on this payload
 // that a nil app cannot answer for. A nil app means "no registration of your
 // own", which is true of a PAT org and would equally be true of an org riding
 // the deployment's own App — and those two want opposite answers here. Both
@@ -96,10 +97,10 @@ func newGitHubAppStatusResponse(class domain.GitHubCredentialClass, app *domain.
 	case domain.GitHubCredentialClassPAT, domain.GitHubCredentialClassBYOApp:
 		// The org owns whatever credential it has — no deployment-level App
 		// stands behind it.
-		resp.UsingHostedDefault = false
+		resp.UsingDeploymentDefault = false
 	default:
 		// Handlers refuse an unknown class before reaching here; this arm is the
-		// backstop. Render no App and claim nothing about a hosted default: a
+		// backstop. Render no App and claim nothing about a deployment default: a
 		// panel that says "no App configured" for an org whose credential system
 		// this build can't name would invite an admin to register a second one.
 		githubAppLog.Error("unknown github credential class in status payload; rendering app:null", "class", class)

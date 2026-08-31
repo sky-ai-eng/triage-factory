@@ -192,7 +192,7 @@ func (s *Server) SetAuthDeps(
 // GET /api/auth/oauth/saml?provider_id=<gotrue-uuid>&return_to=/some/path
 func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
-		// The whole hosted-auth surface is absent in local mode: a route that
+		// The whole multi-mode auth surface is absent in local mode: a route that
 		// doesn't exist in this deployment mode answers 404.
 		notFound(w, "route")
 		return
@@ -295,7 +295,7 @@ func (s *Server) redirectLoginError(w http.ResponseWriter, r *http.Request, code
 // GET /api/auth/callback?state=<csrf>&code=<auth_code>
 func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
-		// The whole hosted-auth surface is absent in local mode: a route that
+		// The whole multi-mode auth surface is absent in local mode: a route that
 		// doesn't exist in this deployment mode answers 404.
 		notFound(w, "route")
 		return
@@ -531,7 +531,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 // POST /api/auth/logout
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
-		// The whole hosted-auth surface is absent in local mode: a route that
+		// The whole multi-mode auth surface is absent in local mode: a route that
 		// doesn't exist in this deployment mode answers 404.
 		notFound(w, "route")
 		return
@@ -606,7 +606,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // POST /api/auth/logout/all
 func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
-		// The whole hosted-auth surface is absent in local mode: a route that
+		// The whole multi-mode auth surface is absent in local mode: a route that
 		// doesn't exist in this deployment mode answers 404.
 		notFound(w, "route")
 		return
@@ -702,7 +702,7 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 // whether the org exists to a user who isn't in it.
 func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
-		// The whole hosted-auth surface is absent in local mode: a route that
+		// The whole multi-mode auth surface is absent in local mode: a route that
 		// doesn't exist in this deployment mode answers 404.
 		notFound(w, "route")
 		return

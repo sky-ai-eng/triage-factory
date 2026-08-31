@@ -79,7 +79,7 @@ func New(conn *sql.DB) db.Stores {
 		// active org set, settings reads/writes from request handlers,
 		// and `...System` settings reads from boot-time goroutines.
 		Orgs: newOrgsStore(conn, conn),
-		// OrgMemberships is a hosted-only surface; the SQLite impl is a
+		// OrgMemberships is a multi-only surface; the SQLite impl is a
 		// stub satisfying the interface (its methods return
 		// ErrNotApplicableInLocal — the /org handlers 404 in local mode).
 		OrgMemberships: newOrgMembershipsStore(),

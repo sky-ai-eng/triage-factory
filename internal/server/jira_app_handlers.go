@@ -24,9 +24,9 @@ import (
 //
 // Storage precedence (resolved by jira.OAuthAppResolver): the per-org row this
 // card writes is the OVERRIDE; an org with no row falls back to the deployment
-// first-party app (hosted) or has nothing (local, where the BYO row IS the
-// app). The client_secret lands in the secret store (Vault hosted / keychain
-// local) via SecretStore — never plaintext in org_jira_apps.
+// app (multi) or has nothing (local, where the BYO row IS the app). The
+// client_secret lands in the secret store (Vault in multi / keychain in local)
+// via SecretStore — never plaintext in org_jira_apps.
 
 // jiraOAuthClientSecretKey is the org-scoped secret key the Atlassian OAuth
 // app's client_secret is custodied under. One app per org, so a fixed key
@@ -35,8 +35,8 @@ import (
 const jiraOAuthClientSecretKey = "jira_oauth_client_secret"
 
 // jiraConnectCallbackURL is the absolute redirect_uri the Atlassian OAuth app
-// must register for the per-user "Connect Jira" flow — hosted
-// "{deployment}/api/orgs/{org}/jira/connect/callback", local
+// must register for the per-user "Connect Jira" flow — in multi
+// "{deployment}/api/orgs/{org}/jira/connect/callback", in local
 // "http://localhost:{port}/...". deployCfg.publicURL already encodes both (the
 // local public URL is the localhost origin), so one expression serves both
 // modes — the same source-of-truth shape connectCallbackURL uses for GitHub.
@@ -67,35 +67,36 @@ type jiraAppInfo struct {
 // jiraAppStatusResponse is the read-only shape the settings card polls.
 //   - App is the per-org override, null when the org has none.
 //   - ConnectAvailable is true exactly when an app resolves (override OR, in
-//     hosted, the deployment first-party) — the same bit the per-user Jira
-//     status endpoint surfaces so the frontend shows the "Connect" button.
-//   - UsingHostedDefault is true when an app resolves but via the first-party
-//     default (no per-org row) — so the card can say "using the hosted app"
-//     rather than offering nothing.
+//     multi, the deployment app) — the same bit the per-user Jira status
+//     endpoint surfaces so the frontend shows the "Connect" button.
+//   - UsingDeploymentDefault is true when an app resolves but via the
+//     deployment default (no per-org row) — so the card can say "using the
+//     deployment app" rather than offering nothing.
 //   - ConnectCallbackURL is the redirect_uri the app owner must register.
 type jiraAppStatusResponse struct {
-	App                *jiraAppInfo `json:"app"`
-	ConnectAvailable   bool         `json:"connect_available"`
-	UsingHostedDefault bool         `json:"using_hosted_default"`
-	ConnectCallbackURL string       `json:"connect_callback_url"`
+	App                    *jiraAppInfo `json:"app"`
+	ConnectAvailable       bool         `json:"connect_available"`
+	UsingDeploymentDefault bool         `json:"using_deployment_default"`
+	ConnectCallbackURL     string       `json:"connect_callback_url"`
 }
 
 // newJiraAppStatusResponse assembles the status payload from the loaded per-org
 // row and the source the resolver actually resolved from. The summary is driven
 // by the resolved source, NOT the raw row, so the three states never diverge:
-//   - SourceOrgOverride → the row is the live app; show it, using_hosted_default=false.
-//   - SourceFirstParty  → app:null + using_hosted_default=true (the hosted app
-//     covers the org — including the case where a per-org row exists but its
-//     secret has gone missing, so the resolver fell through to the first-party).
+//   - SourceOrgOverride → the row is the live app; show it, using_deployment_default=false.
+//   - SourceDeployment  → app:null + using_deployment_default=true (the
+//     deployment app covers the org — including the case where a per-org row
+//     exists but its secret has gone missing, so the resolver fell through to
+//     the deployment app).
 //   - SourceNone        → app:null, connect_available=false.
 //
 // registeredByName is only meaningful for an override (the row's registrant) and
 // is ignored otherwise.
 func newJiraAppStatusResponse(app *domain.OrgJiraApp, source jira.OAuthAppSource, registeredByName, connectCallbackURL string) jiraAppStatusResponse {
 	resp := jiraAppStatusResponse{
-		ConnectAvailable:   source != jira.SourceNone,
-		UsingHostedDefault: source == jira.SourceFirstParty,
-		ConnectCallbackURL: connectCallbackURL,
+		ConnectAvailable:       source != jira.SourceNone,
+		UsingDeploymentDefault: source == jira.SourceDeployment,
+		ConnectCallbackURL:     connectCallbackURL,
 	}
 	if source == jira.SourceOrgOverride && app != nil {
 		resp.App = &jiraAppInfo{
@@ -127,7 +128,7 @@ func (s *Server) jiraRegistrantDisplayName(ctx context.Context, orgID, userID st
 }
 
 // resolveOAuthAppSource reports which tier resolves the org's Atlassian OAuth
-// app (override / first-party / none). A not-configured outcome is the expected
+// app (override / deployment / none). A not-configured outcome is the expected
 // SourceNone; a backend read error is logged and degraded to SourceNone (the
 // signal fails closed rather than failing the caller — both the card status and
 // the per-user Jira status read it). System read: the caller has already
@@ -144,9 +145,8 @@ func (s *Server) resolveOAuthAppSource(r *http.Request, orgID string) jira.OAuth
 }
 
 // connectAvailableForOrg reports whether an Atlassian OAuth app resolves for the
-// org (per-org override or, in hosted, the deployment first-party) — the signal
-// the per-user Jira status endpoint surfaces to gate the one-click Connect
-// button.
+// org (per-org override or, in multi, the deployment app) — the signal the
+// per-user Jira status endpoint surfaces to gate the one-click Connect button.
 func (s *Server) connectAvailableForOrg(r *http.Request, orgID string) bool {
 	return s.resolveOAuthAppSource(r, orgID) != jira.SourceNone
 }
@@ -177,7 +177,7 @@ func (s *Server) handleJiraAppStatus(w http.ResponseWriter, r *http.Request) {
 
 // jiraAppStatusPayload builds the status response for a loaded per-org row,
 // resolving the effective source so the summary reflects what actually resolves
-// (a row with a missing secret reads as the hosted default, not a live
+// (a row with a missing secret reads as the deployment default, not a live
 // override). The registrant lookup runs only when the override is the live app.
 func (s *Server) jiraAppStatusPayload(r *http.Request, orgID, userID string, app *domain.OrgJiraApp) jiraAppStatusResponse {
 	source := s.resolveOAuthAppSource(r, orgID)
@@ -196,7 +196,7 @@ type jiraAppImportRequest struct {
 }
 
 // handleJiraAppImport stores (or replaces) the org's bring-your-own Atlassian
-// OAuth app. Org-admin only; works in both modes — hosted writes a per-org
+// OAuth app. Org-admin only; works in both modes — multi writes a per-org
 // override (the secret lands in Vault), local stores the user-supplied app (the
 // secret lands in the keychain). There is no validation round trip: Atlassian
 // exposes no way to verify an OAuth app's client credentials without running the
@@ -274,7 +274,7 @@ func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 // handleJiraAppDelete removes the org's bring-your-own Atlassian OAuth app —
 // the per-org override row AND its stored client_secret. Org-admin only.
 // Idempotent: a no-op (200) when the org has no override. After this, the org
-// falls back to the deployment first-party app (hosted) or has no app (local).
+// falls back to the deployment app (multi) or has no app (local).
 //
 // DELETE /api/orgs/{org_id}/jira/app
 func (s *Server) handleJiraAppDelete(w http.ResponseWriter, r *http.Request) {
@@ -317,6 +317,6 @@ func (s *Server) handleJiraAppDelete(w http.ResponseWriter, r *http.Request) {
 	jiraAppLog.Info("removed atlassian oauth app", "org", orgID, "user", userID)
 
 	// The row is gone; the payload now reflects whatever still resolves (the
-	// hosted first-party app, or nothing).
+	// deployment app, or nothing).
 	writeJSON(w, http.StatusOK, s.jiraAppStatusPayload(r, orgID, userID, nil))
 }

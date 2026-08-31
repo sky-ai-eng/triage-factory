@@ -51,7 +51,7 @@ var ErrNotOrgOwner = errors.New("db: only the current org owner can transfer own
 // the enrichment bypasses that but stays scoped to the org by a membership
 // join, so it surfaces only the same members the RLS roster already returned.
 //
-// Multi-mode only in practice: the /org surface is hosted-only and its
+// Multi-mode only in practice: the /org surface is multi-only and its
 // handlers 404 in local mode. The SQLite impl exists so the local store
 // bundle satisfies the interface; its mutators return ErrNotApplicableInLocal.
 type OrgMembershipsStore interface {

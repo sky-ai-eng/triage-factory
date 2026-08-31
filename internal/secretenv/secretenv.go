@@ -56,7 +56,7 @@ var Secrets = []string{
 	"TF_COOKIE_SECRET",
 	"TF_LICENSE",                   // signed Enterprise license token
 	"TF_GOTRUE_SERVICE_ROLE_TOKEN", // RS256 admin bearer for GoTrue's SSO admin API
-	"TF_ATLASSIAN_CLIENT_SECRET",   // first-party Atlassian OAuth (3LO) app secret
+	"TF_ATLASSIAN_CLIENT_SECRET",   // deployment Atlassian OAuth (3LO) app secret
 	"TF_DATABASE_URL",
 	"TF_DATABASE_DIRECT_URL",
 	"TF_AUTHENTICATOR_PASSWORD",

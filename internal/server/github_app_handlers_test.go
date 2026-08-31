@@ -64,8 +64,8 @@ func TestGitHubAppStatus_LocalMode_NoApp(t *testing.T) {
 	if len(out.Installations) != 0 {
 		t.Errorf("installations=%v, want empty", out.Installations)
 	}
-	if out.UsingHostedDefault {
-		t.Error("using_hosted_default=true, want false in local mode")
+	if out.UsingDeploymentDefault {
+		t.Error("using_deployment_default=true, want false in local mode")
 	}
 }
 
