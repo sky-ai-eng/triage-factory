@@ -478,7 +478,12 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// installation.suspend webhook drops the dead token from the cache via
 	// onInstallationTokensInvalid.
 	s.ghTokenCache = ghclient.NewMemoryTokenCache()
-	s.ghResolver = ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, s.ghTokenCache)
+	// The deployment App comes off the deployment env, and only in multi mode —
+	// local has no shared App key to ship, so the option resolves to the zero
+	// App there and every org brings its own credential. It is what tier 2 mints
+	// from for an org whose credential class says it rides the shared App.
+	s.ghResolver = ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, s.ghTokenCache,
+		ghclient.WithDeploymentAppFromEnv())
 	// Atlassian OAuth app resolver: per-org override → the deployment app
 	// (multi) / local-supplied (local). The deployment app is read from the
 	// deployment env, and only in multi mode — local has no deployment

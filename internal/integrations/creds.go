@@ -358,40 +358,73 @@ func JiraSystemConfig(c auth.Credentials) (jira.Config, bool) {
 }
 
 // GitHubReady reports whether orgID's GitHub access resolves to a usable
-// credential: a stored PAT (the local env overlay is already folded into creds
-// by Load) or a registered, active App. One derivation stands behind both the
-// setup gate and the org's github event-source availability, so the two cannot
-// drift into disagreeing about whether GitHub is connected.
+// credential. One derivation stands behind both the setup gate and the org's
+// github event-source availability, so the two cannot drift into disagreeing
+// about whether GitHub is connected.
 //
-// Which of the two can apply is the org's credential CLASS, not the presence
-// of an app row: a rowless org is a PAT org today and would equally be an org
-// on a deployment-level shared App, which a row probe would report as
-// unconfigured and send back through setup it does not need. A class this
-// build does not know resolves no App and leaves the PAT signal standing.
+// The org's credential CLASS decides, and it decides FIRST — a stored PAT is
+// not an answer on its own. The question this function is asked is whether a
+// resolution would succeed, so the only honest way to answer it is the way a
+// resolution decides: every arm below mirrors github.activeApp, and the PAT
+// signal stands exactly where that would actually borrow a PAT.
+//
+//	pat          the PAT is the credential. It answers.
+//	byo_app      a live App answers; a registered-but-staged one is the middle
+//	             of a PAT→App switch, where the PAT is still what resolves, so
+//	             there the PAT answers.
+//	managed_app  the deployment's shared App, and NEVER a PAT — resolution
+//	             mints from that App or fails, so a PAT sitting in the secret
+//	             store is a credential this org will never act on and must not
+//	             be read as readiness.
+//	unknown      nothing resolves at all (the resolver refuses the class
+//	             outright), so neither does this.
+//
+// Reading credential presence ahead of the class is the same inference the
+// class column exists to remove, one layer up: it answers "a credential exists"
+// when the question was "would this workspace's credential system use it".
+//
+// The managed arm asks the one question that has an answer here: has this
+// workspace bound the shared App to any account? The App itself is a deployment
+// fact — configured in the operator's environment, not in anything this
+// function can read — so what makes it READY FOR THIS ORG is the bind, which is
+// also the only thing the org can do about it. Zero installations is a
+// workspace that has connected nothing, which is exactly what the setup step
+// exists to prompt.
 //
 // A failed read is an ERROR, never a false. Reporting one as "not connected"
 // is indistinguishable to the caller from the real answer, and a caller that
-// would rather degrade than fail can say so at its own call site.
+// would rather degrade than fail can say so at its own call site — the setup
+// gate does exactly that, falling back to the PAT signal on a store blip.
 func GitHubReady(ctx context.Context, orgs db.OrgsStore, apps db.GitHubAppsStore, orgID string, creds auth.Credentials) (bool, error) {
-	if creds.GitHubPAT != "" {
-		return true, nil
-	}
 	orgSet, err := orgs.GetSettings(ctx, orgID)
 	if err != nil {
 		return false, fmt.Errorf("read org settings: %w", err)
 	}
-	if orgSet.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
-		if !orgSet.GitHubCredentialClass.Known() {
-			credsLog.WarnContext(ctx, "unknown github credential class; github access resolves from the pat signal alone",
-				"org", orgID, "class", orgSet.GitHubCredentialClass)
+	switch orgSet.GitHubCredentialClass {
+	case domain.GitHubCredentialClassBYOApp:
+		app, err := apps.GetForOrg(ctx, orgID)
+		if err != nil {
+			return false, fmt.Errorf("read org github app: %w", err)
 		}
+		if app != nil && app.Active && app.ClientID != "" {
+			return true, nil
+		}
+		// No App, or one still staged behind a live PAT: the PAT is what this
+		// org resolves through until the cutover flips it.
+		return creds.GitHubPAT != "", nil
+	case domain.GitHubCredentialClassManagedApp:
+		insts, err := apps.ListInstallationsForOrg(ctx, orgID)
+		if err != nil {
+			return false, fmt.Errorf("read org github app installations: %w", err)
+		}
+		return len(insts) > 0, nil
+	case domain.GitHubCredentialClassPAT:
+		return creds.GitHubPAT != "", nil
+	default:
+		credsLog.WarnContext(ctx, "unknown github credential class; reporting github unconfigured",
+			"org", orgID, "class", orgSet.GitHubCredentialClass)
 		return false, nil
 	}
-	app, err := apps.GetForOrg(ctx, orgID)
-	if err != nil {
-		return false, fmt.Errorf("read org github app: %w", err)
-	}
-	return app != nil && app.Active && app.ClientID != "", nil
 }
 
 // GitHubReadySystem is the system/background twin of GitHubReady, for callers
@@ -400,25 +433,35 @@ func GitHubReady(ctx context.Context, orgs db.OrgsStore, apps db.GitHubAppsStore
 // reads. The creds bundle it takes was loaded with LoadSystem by the same
 // caller. System-code-only, same discipline as LoadSystem.
 func GitHubReadySystem(ctx context.Context, orgs db.OrgsStore, apps db.GitHubAppsStore, orgID string, creds auth.Credentials) (bool, error) {
-	if creds.GitHubPAT != "" {
-		return true, nil
-	}
 	orgSet, err := orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
 		return false, fmt.Errorf("read org settings: %w", err)
 	}
-	if orgSet.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
-		if !orgSet.GitHubCredentialClass.Known() {
-			credsLog.WarnContext(ctx, "unknown github credential class; github access resolves from the pat signal alone",
-				"org", orgID, "class", orgSet.GitHubCredentialClass)
+	switch orgSet.GitHubCredentialClass {
+	case domain.GitHubCredentialClassBYOApp:
+		app, err := apps.GetForOrgSystem(ctx, orgID)
+		if err != nil {
+			return false, fmt.Errorf("read org github app: %w", err)
 		}
+		if app != nil && app.Active && app.ClientID != "" {
+			return true, nil
+		}
+		// No App, or one still staged behind a live PAT: the PAT is what this
+		// org resolves through until the cutover flips it.
+		return creds.GitHubPAT != "", nil
+	case domain.GitHubCredentialClassManagedApp:
+		insts, err := apps.ListInstallationsForOrgSystem(ctx, orgID)
+		if err != nil {
+			return false, fmt.Errorf("read org github app installations: %w", err)
+		}
+		return len(insts) > 0, nil
+	case domain.GitHubCredentialClassPAT:
+		return creds.GitHubPAT != "", nil
+	default:
+		credsLog.WarnContext(ctx, "unknown github credential class; reporting github unconfigured",
+			"org", orgID, "class", orgSet.GitHubCredentialClass)
 		return false, nil
 	}
-	app, err := apps.GetForOrgSystem(ctx, orgID)
-	if err != nil {
-		return false, fmt.Errorf("read org github app: %w", err)
-	}
-	return app != nil && app.Active && app.ClientID != "", nil
 }
 
 // ClearGitHub removes GitHub credentials for orgID.

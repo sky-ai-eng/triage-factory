@@ -55,7 +55,7 @@ func TestInstallationFor_ResolvesRenamedAccountByID(t *testing.T) {
 		t.Fatalf("resolved installation %q; want 456", inst.InstallationID)
 	}
 
-	tok, err := r.installationToken(context.Background(), "org-1", activeApp(), inst, gh.srv.URL)
+	tok, err := r.installationToken(context.Background(), "org-1", resolvedApp{org: activeApp()}, inst, gh.srv.URL)
 	if err != nil {
 		t.Fatalf("installationToken for a renamed account: %v", err)
 	}

@@ -620,9 +620,10 @@ CREATE TABLE public.org_settings (
     -- Ship-dark org toggle for the within-org prompt marketplace. Default false:
     -- the UI renders it grayed out as "coming soon"; enforcement is not wired yet.
     marketplace_enabled boolean DEFAULT false NOT NULL,
-    -- 'pat' or 'byo_app' today, 'managed_app' reserved; app-validated, no CHECK.
-    -- Stated, not inferred: a missing org_github_apps row also describes an org
-    -- on a shared App. UpdateSettings omits it; SetGitHubCredentialClass writes it.
+    -- 'pat', 'byo_app', or 'managed_app' (the deployment's shared App, which no
+    -- path writes yet); app-validated, no CHECK. Stated, not inferred: a missing
+    -- org_github_apps row also describes an org on a shared App. UpdateSettings
+    -- omits it; SetGitHubCredentialClass writes it.
     github_credential_class text DEFAULT 'pat'::text NOT NULL,
     -- Ceiling on how long any of the org's API tokens may live, in days. NULL
     -- (the default, and the SQLite twin's too) = uncapped. It is applied at USE

@@ -72,6 +72,30 @@ func TestClassResolver(t *testing.T) {
 		})
 	}
 
+	t.Run("the managed class has nowhere to be keyed, and is refused", func(t *testing.T) {
+		// A workspace on the deployment's shared App reaches repositories
+		// through installations, but reachable_repositories.credential_class
+		// admits 'pat' and 'byo_app' only — each naming the scope column its
+		// rows carry. So there is no key for these entries, which is a different
+		// thing from there being none yet, and either of the two values on offer
+		// would file a managed workspace's reach under a credential system that
+		// did not observe it.
+		r := NewClassResolver(
+			fakeOrgs{settings: domain.OrgSettings{GitHubCredentialClass: domain.GitHubCredentialClassManagedApp}},
+			fakeApps{},
+		)
+		got, err := r.For(ctx, "org-1")
+		if !errors.Is(err, ErrClassNotMirrored) {
+			t.Errorf("err = %v; want ErrClassNotMirrored", err)
+		}
+		if errors.Is(err, ErrUnknownCredentialClass) {
+			t.Error("the managed class came back as unknown; it is a class this build resolves, and reading the refusal as \"unrecognised\" sends a reader hunting for a spelling mistake")
+		}
+		if got != "" {
+			t.Errorf("class = %q alongside the refusal; a refused resolution keys nothing", got)
+		}
+	})
+
 	t.Run("unknown class is refused, not defaulted", func(t *testing.T) {
 		// Taking the PAT arm for a credential system this build does not
 		// recognise would enumerate against a credential the org does not have.

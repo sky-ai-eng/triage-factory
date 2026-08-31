@@ -86,8 +86,11 @@ type Manager struct {
 // role support) — only for callers that don't wire llmcred.
 func NewManager(stores db.Stores, llm llmResolver) *Manager {
 	return &Manager{
-		stores:       stores,
-		ghResolver:   ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil),
+		stores: stores,
+		// Deployment App from the env, same as the API server's resolver: this is
+		// the brain-side resolver that seals a run's git credential, so a managed
+		// org's run gets a token minted from the shared App rather than nothing.
+		ghResolver:   ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil, ghclient.WithDeploymentAppFromEnv()),
 		jiraResolver: jira.NewResolver(stores.Secrets, stores.Orgs),
 		llm:          llm,
 	}
