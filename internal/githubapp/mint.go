@@ -521,6 +521,12 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 	return out, nil
 }
 
+// errorBodyExcerpt is how much of a failed response is kept for diagnostics.
+// The read above it is bounded at a megabyte to survive a proxy answering with
+// something enormous; what is worth keeping out of that is the first few lines,
+// which is where GitHub puts the message.
+const errorBodyExcerpt = 512
+
 // APIStatusError is a non-2xx answer from an App-JWT-authenticated endpoint —
 // GetApp, which is where a refused status has to be told apart from a transport
 // failure. It carries the status alongside the message so a caller can tell one
@@ -532,14 +538,22 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 // Op names the operation rather than the URL, since the URL carries the
 // configured API base and the message is read by operators, not resolved by
 // machines.
+//
+// BodyExcerpt is named for what it is. An error value outlives the request that
+// produced it and travels wherever the error travels — a log line, a wrapped
+// error held for the length of a retry loop — so it keeps a bounded excerpt
+// rather than the whole response, and says so in the field name: a field called
+// Body that is silently clipped is a trap for anyone who later inspects or
+// marshals one. Truncation happens once, at construction, so the megabyte the
+// reader was willing to accept does not stay reachable from the error.
 type APIStatusError struct {
-	Op         string
-	StatusCode int
-	Body       string
+	Op          string
+	StatusCode  int
+	BodyExcerpt string
 }
 
 func (e *APIStatusError) Error() string {
-	return fmt.Sprintf("githubapp: %s: status %d, body: %s", e.Op, e.StatusCode, truncate(e.Body, 512))
+	return fmt.Sprintf("githubapp: %s: status %d, body: %s", e.Op, e.StatusCode, e.BodyExcerpt)
 }
 
 // App is the App's own metadata, returned by GET /app authenticated with an
@@ -607,7 +621,11 @@ func (m *Minter) GetApp(ctx context.Context) (App, error) {
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return App{}, &APIStatusError{Op: "get app", StatusCode: resp.StatusCode, Body: string(body)}
+		return App{}, &APIStatusError{
+			Op:          "get app",
+			StatusCode:  resp.StatusCode,
+			BodyExcerpt: truncate(string(body), errorBodyExcerpt),
+		}
 	}
 
 	var parsed appResponse
