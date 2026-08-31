@@ -521,6 +521,27 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 	return out, nil
 }
 
+// APIStatusError is a non-2xx answer from an App-JWT-authenticated endpoint —
+// GetApp, which is where a refused status has to be told apart from a transport
+// failure. It carries the status alongside the message so a caller can tell one
+// refusal from another. 401 is the one that most needs telling apart: it is what
+// GitHub answers a JWT whose iss does not match the signing key, so it means the
+// App ID and private key are not a pair — which wants a different operator
+// message from a GitHub that is simply not answering.
+//
+// Op names the operation rather than the URL, since the URL carries the
+// configured API base and the message is read by operators, not resolved by
+// machines.
+type APIStatusError struct {
+	Op         string
+	StatusCode int
+	Body       string
+}
+
+func (e *APIStatusError) Error() string {
+	return fmt.Sprintf("githubapp: %s: status %d, body: %s", e.Op, e.StatusCode, truncate(e.Body, 512))
+}
+
 // App is the App's own metadata, returned by GET /app authenticated with an
 // app-level JWT. A GitHub App authenticates itself: minting a JWT off the App's
 // private key and calling /app yields the App's slug, owner, granted permission
@@ -586,8 +607,7 @@ func (m *Minter) GetApp(ctx context.Context) (App, error) {
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return App{}, fmt.Errorf("githubapp: get app: status %d, body: %s",
-			resp.StatusCode, truncate(string(body), 512))
+		return App{}, &APIStatusError{Op: "get app", StatusCode: resp.StatusCode, Body: string(body)}
 	}
 
 	var parsed appResponse

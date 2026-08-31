@@ -28,8 +28,18 @@
 #   fly secrets set TF_SESSION_ENCRYPTION_KEY="$(openssl rand -hex 32)"
 #   fly secrets set TF_COOKIE_SECRET="$(openssl rand -hex 32)"
 #   fly secrets set TF_SECRET_ENCRYPTION_KEY="$(openssl rand -hex 32)"
-#   fly secrets set TF_GITHUB_APP_PRIVATE_KEY="$(cat github-app.pem)"
+#
+# The deployment GitHub App — one App key serving every workspace on this
+# deployment. Set all four or none; a strict subset is refused rather than
+# silently half-configured. The App's slug and client id are deliberately
+# absent: TF reads those back from GET /app with a JWT it signs itself.
 #   fly secrets set TF_GITHUB_APP_ID='123456'
+#   fly secrets set TF_GITHUB_APP_PRIVATE_KEY="$(cat github-app.pem)"
+#   fly secrets set TF_GITHUB_APP_WEBHOOK_SECRET='...'
+#   fly secrets set TF_GITHUB_APP_CLIENT_SECRET='...'
+# The webhook secret and client secret are the values GitHub shows once on
+# the App's settings page; the App ID is not itself secret, but it is
+# per-deployment and so is set the same way rather than committed to [env].
 #
 # NOT here: the GoTrue RS256 keypair (GOTRUE_JWT_KEYS /
 # GOTRUE_JWT_SECRET). Those live on the GoTrue deployment's secrets,
