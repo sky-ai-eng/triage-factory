@@ -24,6 +24,7 @@ import {
   useOverviewTick,
   useSpendToday,
   useTasksIndex,
+  useTranscriptTick,
 } from './overview/hooks'
 import BrandMark from '../components/BrandMark'
 import { useShellScope } from '../hooks/useShellScope'
@@ -79,12 +80,15 @@ export default function Overview() {
   const offline = !connected
 
   const tick = useOverviewTick()
+  // The transcript's own tick, so a RUNNING row's action line moves while the
+  // agent does — it feeds the conversation sets alone, on the running read.
+  const transcriptTick = useTranscriptTick()
   const { clock, date } = useClock()
   // Midnight is stamped once per mount: the convergence's window opens where
   // the day did, and a page that recomputed it per render would tick.
   const midnight = useMemo(() => utcMidnightISO(), [])
 
-  const { needs, running } = useConversationSets(teamId, tick)
+  const { needs, running } = useConversationSets(teamId, tick, transcriptTick)
   const tasks = useTasksIndex(teamId, tick)
   const sinceMidnight = useActivityWindow(teamId, midnight, tick)
   const usage = useSpendToday(teamId, tick)
