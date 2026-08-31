@@ -316,11 +316,14 @@ func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, orgID, in
 			return err
 		}
 		// And the scope marker: an installation that reaches nothing must not keep
-		// vouching that its reach was ever established.
+		// vouching that its reach was ever established. Narrowed to the App
+		// classes because scope holds a host for the PAT tier, and this argument
+		// is an installation id.
+		classes, classArgs := appTierClassArgs()
 		_, err = tx.ExecContext(ctx, `
 			DELETE FROM reachable_scopes
-			 WHERE org_id = ? AND credential_class = 'byo_app' AND scope = ?
-		`, orgID, installationID)
+			 WHERE org_id = ? AND scope = ? AND credential_class IN (`+classes+`)
+		`, append([]any{orgID, installationID}, classArgs...)...)
 		return err
 	})
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -43,10 +44,12 @@ type reachHarness struct {
 func wireReachRefresh(t *testing.T, s *Server) *reachHarness {
 	t.Helper()
 	h := &reachHarness{}
-	grant := grantmirror.NewReconciler(s.githubApps, s.reachableRepos, s.ghResolver)
-	h.refresher = reachcache.NewRefresher(
-		reachcache.NewClassResolver(s.orgs, s.githubApps),
-		s.reachableRepos, s.ghResolver, grant.RunOrg, nil)
+	// One class resolver for the writer and the reads, exactly as the app wires
+	// it: the two keying an org differently is a mirror that reads as empty for
+	// an org that has one.
+	classes := reachcache.NewClassResolver(s.orgs, s.githubApps)
+	grant := grantmirror.NewReconciler(s.githubApps, s.reachableRepos, s.ghResolver, classes)
+	h.refresher = reachcache.NewRefresher(classes, s.reachableRepos, s.ghResolver, grant.RunOrg, nil)
 	s.SetReachTrigger(func(orgID string, force bool) {
 		h.triggers.Add(1)
 		if force {
@@ -586,5 +589,86 @@ func TestGitHubReposRefreshForcesPastTheTTL(t *testing.T) {
 	}
 	if got := gh.userRepos.Load(); got <= spent {
 		t.Errorf("%d enumerations after the refresh control; want more than the %d before it", got, spent)
+	}
+}
+
+// seedManagedWorkspace makes the local org one that rides the deployment's
+// shared App: the class, and the installations it bound. There is deliberately
+// no org_github_apps row — that table is one row per org with a UNIQUE app_id,
+// so a workspace on a shared App cannot hold one, which is the whole reason the
+// class is a stated column rather than an inference from row presence.
+func seedManagedWorkspace(t *testing.T, s *Server, installationIDs ...string) {
+	t.Helper()
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	if _, err := s.orgs.SetGitHubCredentialClass(ctx, org, domain.GitHubCredentialClassManagedApp); err != nil {
+		t.Fatalf("set github credential class: %v", err)
+	}
+	for i, id := range installationIDs {
+		if _, err := s.githubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			InstallationID: id,
+			OrgID:          org,
+			AccountType:    "Organization",
+			AccountLogin:   fmt.Sprintf("acct-%d", i),
+		}); err != nil {
+			t.Fatalf("upsert installation %s: %v", id, err)
+		}
+	}
+}
+
+// The picker read for a workspace on the deployment's shared App. It used to
+// fail before it read a row: the class resolved to a refusal, and the handler
+// treats an unresolvable class as fatal — deliberately, since showing another
+// credential system's idea of the reach is worse than showing an error. With the
+// mirror able to hold the class, it is an ordinary store-backed list with a real
+// count, and nothing about the response distinguishes it from any other tier.
+func TestPickerServesAManagedWorkspaceFromTheMirror(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	seedManagedWorkspace(t, srv, "111")
+	if err := srv.reachableRepos.ReplaceForInstallationSystem(context.Background(),
+		runmode.LocalDefaultOrgID, domain.GitHubCredentialClassManagedApp, "111",
+		[]domain.ReachableRepository{
+			{OrgID: runmode.LocalDefaultOrgID, Owner: "acme", Repo: "api"},
+			{OrgID: runmode.LocalDefaultOrgID, Owner: "acme", Repo: "web"},
+		}); err != nil {
+		t.Fatalf("seed the mirror: %v", err)
+	}
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("picker = %d for a managed workspace; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var page pickerPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode page: %v; body=%s", err, rec.Body.String())
+	}
+	if page.Status != githubRepoStatusReady {
+		t.Errorf("status = %q; want %q", page.Status, githubRepoStatusReady)
+	}
+	if page.TotalCount != 2 || len(page.Items) != 2 {
+		t.Fatalf("page = %d items / total_count %d; want 2 and 2", len(page.Items), page.TotalCount)
+	}
+	if page.Items[0].FullName != "acme/api" || page.Items[1].FullName != "acme/web" {
+		t.Errorf("items = %v; want acme/api then acme/web", page.Items)
+	}
+}
+
+// A managed workspace that has bound nothing is told what will help. Its
+// usability is its installations, exactly as for a workspace on its own App, and
+// the PAT tier's "GitHub is not connected" would read as "add a token" — the one
+// thing that cannot help a workspace whose credential is an App it has yet to
+// install anywhere.
+func TestPickerManagedWorkspaceWithNothingBoundIsNotToldToAddAToken(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	seedManagedWorkspace(t, srv)
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("picker = %d for a managed workspace with nothing bound; want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "not installed on any account") {
+		t.Errorf("refusal = %s; want the one that names the installation", body)
 	}
 }

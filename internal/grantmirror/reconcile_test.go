@@ -26,14 +26,18 @@ type fakeApps struct {
 
 	backfillErr   error
 	backfillCalls int
-	listErr       error
-	installs      []domain.OrgGitHubAppInstallation
+	// registrationReads counts reads of the org's own App registration — the row
+	// a managed workspace does not have and must not be asked for.
+	registrationReads int
+	listErr           error
+	installs          []domain.OrgGitHubAppInstallation
 	// listedAfterBackfill records whether the installation read happened after
 	// the existence reconcile, which is the ordering the whole pass depends on.
 	listedAfterBackfill bool
 }
 
 func (f *fakeApps) GetForOrgSystem(context.Context, string) (*domain.OrgGitHubApp, error) {
+	f.registrationReads++
 	return f.app, nil
 }
 
@@ -51,15 +55,21 @@ func (f *fakeApps) ListInstallationsForOrgSystem(_ context.Context, _ string) ([
 // holds but whether it was touched at all — the difference between "left alone"
 // and "rewritten with the same content" is the invariant under test.
 type fakeMirror struct {
-	rows     map[string][]string // installation id → slugs
+	rows map[string][]string // installation id → slugs
+	// classes records the class each scope was written under: the key every read
+	// filters on, so a pass that writes the right slugs under the wrong class
+	// mirrors into a place nothing looks.
+	classes  map[string]domain.GitHubCredentialClass
 	replaces int
 	cleared  []string
 	err      error
 }
 
-func newFakeMirror() *fakeMirror { return &fakeMirror{rows: map[string][]string{}} }
+func newFakeMirror() *fakeMirror {
+	return &fakeMirror{rows: map[string][]string{}, classes: map[string]domain.GitHubCredentialClass{}}
+}
 
-func (f *fakeMirror) ReplaceForInstallationSystem(_ context.Context, _, installationID string, repos []domain.ReachableRepository) error {
+func (f *fakeMirror) ReplaceForInstallationSystem(_ context.Context, _ string, class domain.GitHubCredentialClass, installationID string, repos []domain.ReachableRepository) error {
 	f.replaces++
 	if f.err != nil {
 		return f.err
@@ -69,6 +79,7 @@ func (f *fakeMirror) ReplaceForInstallationSystem(_ context.Context, _, installa
 		slugs = append(slugs, r.Slug())
 	}
 	f.rows[installationID] = slugs
+	f.classes[installationID] = class
 	return nil
 }
 
@@ -159,8 +170,29 @@ func live(installationID, login string) domain.OrgGitHubAppInstallation {
 	}
 }
 
+// fakeClasses stands in for reachcache.ClassResolver: one fixed answer per
+// test, since what the resolver decides is settled elsewhere and what matters
+// here is which pass that answer selects.
+type fakeClasses struct {
+	class domain.GitHubCredentialClass
+	err   error
+}
+
+func (f fakeClasses) For(context.Context, string) (domain.GitHubCredentialClass, error) {
+	return f.class, f.err
+}
+
+// newReconciler builds the pass for a workspace that owns its App key, which is
+// the shape every case below takes bar the managed ones. The staged and PAT
+// cases keep this class deliberately: the registration gate they pin runs before
+// the class selects anything, so the answer the live resolver would narrow to
+// changes nothing about what they assert.
 func newReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, grants clientSource) *Reconciler {
-	return &Reconciler{apps: apps, mirror: mirror, clients: grants}
+	return newReconcilerAs(domain.GitHubCredentialClassBYOApp, apps, mirror, grants)
+}
+
+func newReconcilerAs(class domain.GitHubCredentialClass, apps db.GitHubAppsStore, mirror db.ReachableReposStore, grants clientSource) *Reconciler {
+	return &Reconciler{apps: apps, mirror: mirror, clients: grants, classes: fakeClasses{class: class}}
 }
 
 func TestRunOrg_MirrorsEachInstallationsGrant(t *testing.T) {
@@ -391,9 +423,9 @@ type capturingMirror struct {
 	onReplace func([]domain.ReachableRepository)
 }
 
-func (c *capturingMirror) ReplaceForInstallationSystem(ctx context.Context, orgID, installationID string, repos []domain.ReachableRepository) error {
+func (c *capturingMirror) ReplaceForInstallationSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, installationID string, repos []domain.ReachableRepository) error {
 	c.onReplace(repos)
-	return c.fakeMirror.ReplaceForInstallationSystem(ctx, orgID, installationID, repos)
+	return c.fakeMirror.ReplaceForInstallationSystem(ctx, orgID, class, installationID, repos)
 }
 
 func TestSplitFullName(t *testing.T) {
@@ -463,5 +495,93 @@ func TestRunOrg_PATOrgReconcilesNothingAndFailsNothing(t *testing.T) {
 	}
 	if mirror.replaces != 0 || len(mirror.cleared) != 0 {
 		t.Error("mirror was touched for an org with no App registration; want untouched")
+	}
+}
+
+func TestRunOrg_BYOOrgKeysItsEntriesUnderItsOwnClass(t *testing.T) {
+	// The class is what every read filters on, so the right slugs under the wrong
+	// class are entries nothing serves. A workspace on its own App keys them
+	// 'byo_app'.
+	apps := &fakeApps{app: activeApp(), installs: []domain.OrgGitHubAppInstallation{live("1", "acme")}}
+	mirror := newFakeMirror()
+	grants := fakeGrants{byLogin: map[string]grantAnswer{
+		"acme": {repos: []github.UserRepo{repo("acme/api", 10)}, complete: true},
+	}}
+
+	if err := newReconciler(apps, mirror, grants).RunOrg(context.Background(), testOrg); err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+	if got := mirror.classes["1"]; got != domain.GitHubCredentialClassBYOApp {
+		t.Errorf("installation 1 keyed under %q; want %q", got, domain.GitHubCredentialClassBYOApp)
+	}
+}
+
+func TestRunOrg_ManagedWorkspaceRefreshesWhatItBoundAndDiscoversNothing(t *testing.T) {
+	// A workspace on the deployment's shared App holds no registration row and
+	// can hold none, so the two reads the BYO preamble makes are not skipped for
+	// speed: the registration read has no row to find, and the existence
+	// reconcile asks a shared key a question that answers with every tenant's
+	// installations. What the org bound is the whole of what it reaches.
+	apps := &fakeApps{installs: []domain.OrgGitHubAppInstallation{live("7", "acme")}}
+	mirror := newFakeMirror()
+	grants := fakeGrants{byLogin: map[string]grantAnswer{
+		"acme": {repos: []github.UserRepo{repo("acme/api", 10)}, complete: true},
+	}}
+
+	reconciler := newReconcilerAs(domain.GitHubCredentialClassManagedApp, apps, mirror, grants)
+	if err := reconciler.RunOrg(context.Background(), testOrg); err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+	if apps.backfillCalls != 0 {
+		t.Errorf("the existence reconcile ran %d times for a managed workspace; want 0 — it discovers, and only the bind may", apps.backfillCalls)
+	}
+	if apps.registrationReads != 0 {
+		t.Errorf("the org's own App registration was read %d times for a managed workspace; want 0 — there is no row", apps.registrationReads)
+	}
+	if got := mirror.rows["7"]; len(got) != 1 || got[0] != "acme/api" {
+		t.Errorf("bound installation's mirror = %v; want [acme/api]", got)
+	}
+	if got := mirror.classes["7"]; got != domain.GitHubCredentialClassManagedApp {
+		t.Errorf("installation 7 keyed under %q; want %q", got, domain.GitHubCredentialClassManagedApp)
+	}
+	if len(mirror.rows) != 1 {
+		t.Errorf("mirror holds %d scopes; want 1 — a refresh may update what the org bound and create nothing else", len(mirror.rows))
+	}
+}
+
+func TestRunOrg_ManagedWorkspaceWithNothingBoundWritesNothing(t *testing.T) {
+	// An installed-but-never-bound workspace is an ordinary state, not an
+	// anomaly. Its refresh has nothing to refresh, and inventing an installation
+	// for it is exactly the discovery the shared key cannot do safely.
+	apps := &fakeApps{}
+	mirror := newFakeMirror()
+	// A grant source that fails the test if it is consulted at all.
+	grants := fakeGrants{resolveErr: map[string]error{"acme": errors.New("nothing is bound")}}
+
+	reconciler := newReconcilerAs(domain.GitHubCredentialClassManagedApp, apps, mirror, grants)
+	if err := reconciler.RunOrg(context.Background(), testOrg); err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+	if mirror.replaces != 0 || len(mirror.cleared) != 0 {
+		t.Error("mirror was touched for a managed workspace with no bound installation; want untouched")
+	}
+}
+
+func TestRunOrg_UnresolvableClassStopsThePass(t *testing.T) {
+	// The class is the key the entries are written under. Without it the pass
+	// could only guess, and a guess writes a whole org's reach where nothing
+	// reads it — so it stops before the first upstream call.
+	apps := &fakeApps{app: activeApp(), installs: []domain.OrgGitHubAppInstallation{live("1", "acme")}}
+	mirror := newFakeMirror()
+	reconciler := &Reconciler{
+		apps: apps, mirror: mirror, clients: fakeGrants{},
+		classes: fakeClasses{err: errors.New("settings unreadable")},
+	}
+
+	if err := reconciler.RunOrg(context.Background(), testOrg); err == nil {
+		t.Fatal("RunOrg returned nil with an unresolvable credential class; want the failure surfaced")
+	}
+	if apps.backfillCalls != 0 || mirror.replaces != 0 {
+		t.Error("the pass proceeded past an unresolvable class; want nothing asked and nothing written")
 	}
 }

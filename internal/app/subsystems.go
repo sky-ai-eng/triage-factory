@@ -185,7 +185,15 @@ func (a *App) buildAI() {
 	// makes it the App tier's refresh (TTL-gated, forceable). One reconcile
 	// object, two cadences — rather than a second enumeration path that could
 	// disagree with the first about what an installation reaches.
-	a.grantReconciler = grantmirror.NewReconciler(a.stores.GitHubApps, a.stores.ReachableRepos, a.ghResolver)
+	//
+	// The class resolver is built once and shared with the reachable-cache
+	// refresher below: it is what says whether an org's entries are keyed under
+	// its own App, the deployment's, or its PAT, and the writer and the reads
+	// keying one org differently is a mirror that reads as empty for an org that
+	// has one. Stateless — two store pointers — so sharing it costs nothing and
+	// buys the guarantee.
+	reachClasses := reachcache.NewClassResolver(a.stores.Orgs, a.stores.GitHubApps)
+	a.grantReconciler = grantmirror.NewReconciler(a.stores.GitHubApps, a.stores.ReachableRepos, a.ghResolver, reachClasses)
 
 	// Reachable-repo cache: per-org Runners refreshing the mirror the repository
 	// picker and the team-repos write gate both read. Sibling to the profiler in
@@ -195,13 +203,12 @@ func (a *App) buildAI() {
 	// the pollers themselves need. It is kicked by the reads that care —
 	// a stale-mirror picker open — and forced by every credential change.
 	//
-	// The class resolver is built from the same two stores the server builds its
-	// own from: it is stateless, so two copies are two callers of one pair of
-	// reads rather than two answers, and keeping the definition in one type is
-	// what stops writer and reader from keying an org differently.
+	// Same class resolver the reconcile above holds, and the server builds its own
+	// from the same two stores: it is stateless, so two copies are two callers of
+	// one pair of reads rather than two answers, and keeping the definition in one
+	// type is what stops writer and reader from keying an org differently.
 	a.reachCache = reachcache.NewManager(reachcache.NewRefresher(
-		reachcache.NewClassResolver(a.stores.Orgs, a.stores.GitHubApps),
-		a.stores.ReachableRepos, a.ghResolver, a.grantReconciler.RunOrg, a.wsHub,
+		reachClasses, a.stores.ReachableRepos, a.ghResolver, a.grantReconciler.RunOrg, a.wsHub,
 	))
 	// SetReachTrigger: same relay-wrapper reasoning as SetScorerTrigger above —
 	// the picker read and the refresh control may land on a standby control pod,

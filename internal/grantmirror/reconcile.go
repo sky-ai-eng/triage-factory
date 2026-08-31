@@ -67,6 +67,18 @@ func (s resolverSource) grantListerFor(ctx context.Context, orgID, accountLogin 
 	return s.resolver.ClientFor(ctx, orgID, accountLogin)
 }
 
+// classResolver answers which credential class an org's reachable entries are
+// keyed under. Satisfied by reachcache.ClassResolver, which is deliberately the
+// same object the reads use: writer and reader keying one org differently is a
+// mirror that reads as empty for an org that has one.
+//
+// Declared here rather than imported so this package keeps depending on nothing
+// but the stores it writes through — the reachable cache drives this pass, not
+// the other way round.
+type classResolver interface {
+	For(ctx context.Context, orgID string) (domain.GitHubCredentialClass, error)
+}
+
 // Reconciler refreshes one org's installation mirror. It is stateless — every
 // credential is resolved fresh per pass through the resolver — so a config
 // change that hot-swaps credentials is honored without rebuilding it, and one
@@ -99,20 +111,23 @@ type Reconciler struct {
 	apps    db.GitHubAppsStore
 	mirror  db.ReachableReposStore
 	clients clientSource
+	classes classResolver
 }
 
 // NewReconciler builds a Reconciler over the App-installation store, the grant
-// mirror, and the per-(org, account) GitHub client resolver — App installation
-// token in multi, keychain PAT in local, exactly as every other GitHub-facing
-// background pass resolves.
-func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resolver github.Resolver) *Reconciler {
-	return &Reconciler{apps: apps, mirror: mirror, clients: resolverSource{resolver: resolver}}
+// mirror, the per-(org, account) GitHub client resolver — App installation token
+// in multi, keychain PAT in local, exactly as every other GitHub-facing
+// background pass resolves — and the class resolver that says which credential
+// system an org's entries are keyed under.
+func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resolver github.Resolver, classes classResolver) *Reconciler {
+	return &Reconciler{apps: apps, mirror: mirror, clients: resolverSource{resolver: resolver}, classes: classes}
 }
 
 // RunOrg reconciles one org: first that the set of installations TF believes in
 // is the set GitHub reports, then what each of those installations can reach.
 //
-// Existence comes first and is not optional. It used to be reconciled by pull in
+// Existence comes first for a workspace that owns its App key, and for that
+// workspace it is not optional. It used to be reconciled by pull in
 // LOCAL MODE ONLY — the poller's backfill was gated on it, on the reasoning that
 // webhooks cannot reach a laptop — which left multi mode with no timer-driven
 // convergence at all: the mirror moved only on a delivery, the Settings refresh
@@ -123,32 +138,65 @@ func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resol
 // reconcile against a response the grant pass needs in hand anyway: the same
 // GET /app/installations that reports each installation's repository_selection.
 //
+// A workspace on the deployment's shared App takes the second half only: with
+// one key serving every workspace, the same call returns other tenants'
+// installations, so which of them belong here is a fact the bind asserts and a
+// refresh may never invent. It refreshes what the org has already bound, and
+// creates nothing.
+//
 // Per-installation failures do not abort the pass — one account's expired
 // credential must not stop another account's grant from refreshing — but the
 // first is returned once the loop finishes so the failure is visible to the
 // caller rather than only to the log.
 func (r *Reconciler) RunOrg(ctx context.Context, orgID string) error {
-	// A store failure here is the one thing that stops the pass: without a
-	// trustworthy installation set, "GitHub no longer reports this" and "we
-	// could not ask" are indistinguishable, and acting on the second as if it
-	// were the first is how a mirror empties itself. A no-op for an org with no
-	// registered App.
-	if err := r.apps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
-		return fmt.Errorf("reconcile installations: %w", err)
+	// The class decides both halves of the preamble below and the key every
+	// entry is written under, so it is resolved first and threaded down rather
+	// than inferred per site. It is the EFFECTIVE class — an org whose App is
+	// registered but not yet active borrows a PAT, and its reach is that PAT's.
+	class, err := r.classes.For(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("resolve credential class: %w", err)
 	}
 
-	// A registered-but-inactive App is one staged mid PAT→App switch. Its
-	// installations must still be discovered — the cutover preflight verifies
-	// them before the bit flips, which is why the existence reconcile above has
-	// no active gate — but its tier-1 mint is switched off, so every grant read
-	// below would resolve to the org PAT and take a guaranteed 403 from an
-	// endpoint that accepts installation tokens only. Asking anyway would spend
-	// a request per installation per cycle to log an error that says nothing.
-	app, err := r.apps.GetForOrgSystem(ctx, orgID)
-	if err != nil {
-		return fmt.Errorf("read app registration: %w", err)
+	if class != domain.GitHubCredentialClassManagedApp {
+		// A store failure here is the one thing that stops the pass: without a
+		// trustworthy installation set, "GitHub no longer reports this" and "we
+		// could not ask" are indistinguishable, and acting on the second as if it
+		// were the first is how a mirror empties itself. A no-op for an org with no
+		// registered App.
+		if err := r.apps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
+			return fmt.Errorf("reconcile installations: %w", err)
+		}
+
+		// A registered-but-inactive App is one staged mid PAT→App switch. Its
+		// installations must still be discovered — the cutover preflight verifies
+		// them before the bit flips, which is why the existence reconcile above has
+		// no active gate — but its tier-1 mint is switched off, so every grant read
+		// below would resolve to the org PAT and take a guaranteed 403 from an
+		// endpoint that accepts installation tokens only. Asking anyway would spend
+		// a request per installation per cycle to log an error that says nothing.
+		app, err := r.apps.GetForOrgSystem(ctx, orgID)
+		if err != nil {
+			return fmt.Errorf("read app registration: %w", err)
+		}
+		if app == nil || !app.Active {
+			return nil
+		}
 	}
-	if app == nil || !app.Active {
+	// A managed workspace takes neither of those steps, and skipping them is the
+	// point rather than an optimization. It holds no org_github_apps row and can
+	// hold none — that table is one row per org with a UNIQUE app_id, so N orgs
+	// cannot each name the one shared App — so the registration read would answer
+	// nil and the gate above would exit having written nothing. And the existence
+	// reconcile DISCOVERS: with one key serving every workspace, GET
+	// /app/installations returns other tenants' installations, and which of them
+	// belong here is a fact only the bind asserts. So a managed refresh may update
+	// what it already believes and may never create it.
+
+	// An org on the PAT tier has no grant to mirror at all: its reach is the
+	// account enumeration the reachable cache owns, keyed under its own class.
+	// Nothing below could write an entry it would ever read.
+	if !class.AppTier() {
 		return nil
 	}
 
@@ -167,7 +215,7 @@ func (r *Reconciler) RunOrg(ctx context.Context, orgID string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := r.reconcileInstallation(ctx, orgID, inst); err != nil {
+		if err := r.reconcileInstallation(ctx, orgID, class, inst); err != nil {
 			grantMirrorLog.ErrorContext(ctx, "reconcile installation grant failed",
 				"org", orgID, "installation", inst.InstallationID, "account", inst.AccountLogin, "error", err)
 			fail(err)
@@ -180,7 +228,7 @@ func (r *Reconciler) RunOrg(ctx context.Context, orgID string) error {
 // exactly as it was. There is no third outcome: every early return here is a
 // deliberate decision to keep the previous answer, and nothing writes a grant
 // it cannot vouch for as complete.
-func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) error {
+func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, class domain.GitHubCredentialClass, inst domain.OrgGitHubAppInstallation) error {
 	// A suspended installation refuses every token minted from it, so the grant
 	// cannot be read — but the grant still EXISTS, unchanged, and resumes intact
 	// on unsuspend. Reconciling it would turn a 403 into "this installation now
@@ -240,7 +288,10 @@ func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, in
 		})
 	}
 
-	return r.mirror.ReplaceForInstallationSystem(ctx, orgID, inst.InstallationID, entries)
+	// The org's own class, not a literal: the same installation loop serves a
+	// workspace on its own App and one on the deployment's, and the class is what
+	// the reads key on.
+	return r.mirror.ReplaceForInstallationSystem(ctx, orgID, class, inst.InstallationID, entries)
 }
 
 // splitFullName splits GitHub's "owner/repo" into its halves. It refuses

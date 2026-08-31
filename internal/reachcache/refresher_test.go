@@ -201,3 +201,40 @@ func TestRunOrgDeclinedBackoffExpiresWithTheTTL(t *testing.T) {
 		t.Error("the declined stamp outlived the TTL window")
 	}
 }
+
+// Both App classes refresh through the grant reconcile, and neither reaches the
+// PAT enumeration. A managed workspace routed to the PAT arm would enumerate
+// GET /user/repos against a credential it does not have; one routed nowhere at
+// all would announce a refresh that ran nothing.
+func TestRunOrgAppClassesRefreshThroughTheGrantReconcile(t *testing.T) {
+	ctx := context.Background()
+	for _, class := range domain.AppTierCredentialClasses() {
+		t.Run(string(class), func(t *testing.T) {
+			var grants int
+			r := NewRefresher(
+				NewClassResolver(
+					fakeOrgs{settings: domain.OrgSettings{GitHubCredentialClass: class}},
+					fakeApps{app: &domain.OrgGitHubApp{Active: true}},
+				),
+				&fakeReachMirror{},
+				// A resolver with no host, so the PAT arm — if it were taken — would
+				// decline rather than write, and the write assertion below would
+				// catch the misrouting.
+				fakeResolver{},
+				func(context.Context, string) error { grants++; return nil },
+				nil,
+			)
+
+			wrote, err := r.RunOrg(ctx, "org-1", true)
+			if err != nil {
+				t.Fatalf("RunOrg: %v", err)
+			}
+			if !wrote {
+				t.Error("a forced App-tier refresh reported no write")
+			}
+			if grants != 1 {
+				t.Errorf("grant reconcile ran %d times; want 1", grants)
+			}
+		})
+	}
+}

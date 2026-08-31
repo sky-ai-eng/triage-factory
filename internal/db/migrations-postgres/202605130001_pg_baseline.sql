@@ -3326,11 +3326,11 @@ CREATE TABLE public.reachable_repositories (
     -- filters on the org's CURRENT class, so the other tier's rows are inert.
     credential_class text NOT NULL
         CONSTRAINT reachable_repositories_class_check
-        CHECK (credential_class IN ('pat', 'byo_app')),
+        CHECK (credential_class IN ('pat', 'byo_app', 'managed_app')),
     -- The credential INSTANCE the reach was observed through — the scope one
-    -- refresh replaces atomically. The App tier hangs off the installation row,
-    -- which records its GitHub deployment and cascades on uninstall; the PAT tier
-    -- has none, so it carries the host directly.
+    -- refresh replaces atomically. Both App classes hang off the installation
+    -- row, which records its GitHub deployment and cascades on uninstall; the
+    -- PAT tier has none, so it carries the host directly.
     installation_id text,
     host text,
     -- The issuing provider, carried so the registry join is written against the
@@ -3358,8 +3358,8 @@ CREATE TABLE public.reachable_repositories (
     -- Exactly one scope column per class: with both, a row has two answers to
     -- what one refresh replaces; with neither, it can never be replaced.
     CONSTRAINT reachable_repositories_scope_check
-        CHECK ((credential_class = 'byo_app' AND installation_id IS NOT NULL AND host IS NULL)
-            OR (credential_class = 'pat'     AND installation_id IS NULL     AND host IS NOT NULL))
+        CHECK ((credential_class IN ('byo_app', 'managed_app') AND installation_id IS NOT NULL AND host IS NULL)
+            OR (credential_class = 'pat' AND installation_id IS NULL AND host IS NOT NULL))
 );
 
 ALTER TABLE ONLY public.reachable_repositories
@@ -3367,13 +3367,20 @@ ALTER TABLE ONLY public.reachable_repositories
     FOREIGN KEY (org_id, installation_id)
     REFERENCES public.org_github_app_installations (org_id, installation_id) ON DELETE CASCADE;
 
--- The natural key per class, case-folded like repositories_identity: GitHub
--- identifiers are case-insensitive, so a case-sensitive index behind a
+-- The natural key per scope shape, case-folded like repositories_identity:
+-- GitHub identifiers are case-insensitive, so a case-sensitive index behind a
 -- case-insensitive guard admits duplicates when two writers race. Two partial
 -- indexes, not one over coalesce(installation_id, host), which would collide.
+--
+-- Both App classes share the App predicate rather than taking an index each:
+-- the key already contains installation_id, an installation belongs to exactly
+-- one App, and an org holds one class at a time, so a cross-class collision on
+-- the same installation id is not constructible. A class outside both
+-- predicates would carry no uniqueness constraint at all, and the writer's
+-- ON CONFLICT DO NOTHING would have no conflict to detect.
 CREATE UNIQUE INDEX reachable_repositories_app_identity
     ON public.reachable_repositories USING btree (org_id, installation_id, lower(owner), lower(repo))
-    WHERE credential_class = 'byo_app';
+    WHERE credential_class IN ('byo_app', 'managed_app');
 
 CREATE UNIQUE INDEX reachable_repositories_pat_identity
     ON public.reachable_repositories USING btree (org_id, host, lower(owner), lower(repo))
@@ -3421,9 +3428,9 @@ CREATE TABLE public.reachable_scopes (
     org_id uuid NOT NULL,
     credential_class text NOT NULL
         CONSTRAINT reachable_scopes_class_check
-        CHECK (credential_class IN ('pat', 'byo_app')),
-    -- The credential instance one refresh replaces: installation id for
-    -- byo_app, host for pat. Opaque text, never joined on.
+        CHECK (credential_class IN ('pat', 'byo_app', 'managed_app')),
+    -- The credential instance one refresh replaces: the installation id for the
+    -- App classes, the host for pat. Opaque text, never joined on.
     scope text NOT NULL,
     refreshed_at timestamp with time zone DEFAULT now() NOT NULL
 );
