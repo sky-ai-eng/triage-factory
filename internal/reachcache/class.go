@@ -19,6 +19,22 @@ import (
 // arm, and enumerates against a credential the org does not have.
 var ErrUnknownCredentialClass = errors.New("reachcache: unknown github credential class")
 
+// ErrClassNotMirrored is returned for a credential class the mirror has no
+// place to key entries under. It is a different fault from the one above: the
+// class is one this build knows, and the mirror still cannot hold it.
+//
+// reachable_repositories.credential_class is CHECK-constrained to 'pat' and
+// 'byo_app' on both dialects, and each value names the scope column its rows
+// must carry — an installation for one, a host for the other. So a workspace on
+// the deployment's shared App has nowhere for its reachable entries to live,
+// which is not the same as having none yet.
+//
+// Refusing is the same posture as the unknown arm beside it, for the same
+// reason: the alternative is keying a managed workspace's reach under another
+// credential system's key, and every read filters on the class — so those rows
+// would be served to, or as, a credential system that did not observe them.
+var ErrClassNotMirrored = errors.New("reachcache: credential class has no reachable-repo scope")
+
 // ClassResolver answers which credential class an org's reachable entries are
 // keyed under. That is the org's stored class NARROWED BY THE APP-XOR-PAT GATE,
 // and the narrowing is not cosmetic:
@@ -56,11 +72,15 @@ func (c *ClassResolver) For(ctx context.Context, orgID string) (domain.GitHubCre
 		return "", fmt.Errorf("read github credential class: %w", err)
 	}
 	class := set.GitHubCredentialClass
-	if !class.Known() {
-		return "", fmt.Errorf("%w: org=%s class=%q", ErrUnknownCredentialClass, orgID, class)
-	}
-	if class != domain.GitHubCredentialClassBYOApp {
+	switch class {
+	case domain.GitHubCredentialClassPAT:
 		return class, nil
+	case domain.GitHubCredentialClassBYOApp:
+		// Falls through to the App-XOR-PAT narrowing below.
+	case domain.GitHubCredentialClassManagedApp:
+		return "", fmt.Errorf("%w: org=%s class=%q", ErrClassNotMirrored, orgID, class)
+	default:
+		return "", fmt.Errorf("%w: org=%s class=%q", ErrUnknownCredentialClass, orgID, class)
 	}
 	if c.apps == nil {
 		// No App-registration store wired at all, so no App can be active here

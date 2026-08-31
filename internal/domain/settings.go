@@ -406,14 +406,20 @@ type OrgSettings struct {
 // other open-set text columns follow (org_settings.background_jobs_model,
 // prompts.source), so a new class costs no DDL on either backend.
 //
-// "managed_app" — an org riding the deployment's own shared App — is a reserved
-// future value. Nothing writes it today and it deliberately has no constant
-// here: a constant is a thing a writer can reach for, and the shared App needs
-// a resolver tier, a scoped reconcile, and a static webhook path before any org
-// may legitimately carry the value. Until then it must be unreachable rather
-// than merely unused. That is also why every switch on this type carries an
-// explicit unknown arm that refuses instead of falling through to the pat arm:
-// a build that meets a class it does not know must fail where it is seen.
+// "managed_app" — an org riding the deployment's own shared App — had no
+// constant here for as long as the value was unreachable: a constant is a thing
+// a writer can reach for, and the shared App needed a resolver tier, a scoped
+// reconcile, and a static webhook path before any org could legitimately carry
+// the value. The resolver tier now exists, so the constant below is safe to
+// define — but STILL NOTHING WRITES IT. The bind ceremony is what first sets an
+// org's class to managed_app; until then the value is one this build can
+// resolve and no path can produce. The rule that withheld it is worth keeping:
+// a class becomes reachable when the machinery behind it exists, not when a
+// caller wants the name.
+//
+// That is also why every switch on this type carries an explicit unknown arm
+// that refuses instead of falling through to the pat arm: a build that meets a
+// class it does not know must fail where it is seen.
 type GitHubCredentialClass string
 
 const (
@@ -425,6 +431,18 @@ const (
 	// its private key; an org_github_apps row exists. Set at registration /
 	// import, including while the App is still staged behind a live PAT.
 	GitHubCredentialClassBYOApp GitHubCredentialClass = "byo_app"
+
+	// GitHubCredentialClassManagedApp — the org rides the deployment's own
+	// shared GitHub App, whose identity and key live in the operator's
+	// environment. NO org_github_apps row exists, and none can: that table is
+	// one row per org with a UNIQUE app_id, so N orgs cannot each hold a row
+	// naming the one shared App. The org's own rows are its installations —
+	// which accounts it bound the shared App on.
+	//
+	// Multi mode only in effect: a distributed local binary ships no shared
+	// key, so githubapp.DeploymentAppFromEnv returns the zero App there and a
+	// local org resolves nothing under this class.
+	GitHubCredentialClassManagedApp GitHubCredentialClass = "managed_app"
 )
 
 // Known reports whether c is a class this build understands. A stored value
@@ -433,7 +451,7 @@ const (
 // credential rather than the wrong one.
 func (c GitHubCredentialClass) Known() bool {
 	switch c {
-	case GitHubCredentialClassPAT, GitHubCredentialClassBYOApp:
+	case GitHubCredentialClassPAT, GitHubCredentialClassBYOApp, GitHubCredentialClassManagedApp:
 		return true
 	default:
 		return false

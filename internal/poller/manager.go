@@ -862,10 +862,10 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	m.recordGitHubCursor(orgID, resumeFrom, rl)
 }
 
-// orgHasRegisteredApp reports whether the org's live GitHub credential is an
-// active App of its own. It is the poll cycle's App-vs-PAT dispatch gate (and,
-// downstream of that, what keeps a PAT org from paying a no-op installation
-// backfill round-trip each cycle).
+// orgHasRegisteredApp reports whether the org's live GitHub credential is a
+// GitHub App — its own, or the deployment's shared one. It is the poll cycle's
+// App-vs-PAT dispatch gate (and, downstream of that, what keeps a PAT org from
+// paying a no-op installation backfill round-trip each cycle).
 //
 // The first question is the org's credential CLASS, not whether an
 // org_github_apps row exists: "no row" is the shape of a PAT org and would
@@ -909,6 +909,20 @@ func (m *Manager) orgHasRegisteredApp(ctx context.Context, orgID string) bool {
 		// live credential is still the PAT — the class and the Active bit
 		// answering their two different questions.
 		return app != nil && app.Active
+	case domain.GitHubCredentialClassManagedApp:
+		// The class is the whole answer here, and there is no second read to
+		// make: an org riding the deployment App holds no registration row, so
+		// there is no Active bit that could stage it behind a PAT — the staged
+		// window the BYO arm reads exists only for an org that owns its key.
+		//
+		// Whether the deployment App is usable is not this gate's question
+		// either. Fanning out per installation is what the class decides; the
+		// credential is chosen one layer down by the resolver, which refuses a
+		// managed org outright when the shared App is unconfigured or fails its
+		// preflight. The cycle then reports degraded and polls nothing, which is
+		// the correct outcome and not one a false here could produce — false
+		// would poll as a PAT the workspace never chose.
+		return true
 	default:
 		githubLog.Warn("unknown github credential class; polling as PAT this cycle",
 			"org", orgID, "class", set.GitHubCredentialClass)

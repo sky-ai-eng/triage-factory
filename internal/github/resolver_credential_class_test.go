@@ -9,6 +9,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
+// unknownCredentialClass is a class no build defines: a value written by a
+// newer peer, or a hand-edited row. It is deliberately not a real class name —
+// "managed_app" stood in here until this build learned to resolve it, and what
+// these tests pin is the refusal, not the string.
+const unknownCredentialClass = domain.GitHubCredentialClass("not-a-credential-class")
+
 // TestResolver_UnknownCredentialClass_Refuses pins the direction this ticket
 // cares about most: a credential class the build doesn't recognise is refused,
 // not resolved as PAT.
@@ -27,7 +33,7 @@ func TestResolver_UnknownCredentialClass_Refuses(t *testing.T) {
 		return NewResolver(
 			&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_present_but_not_ours"}},
 			&fakeApps{app: nil},
-			&fakeOrgs{base: "https://github.com", class: domain.GitHubCredentialClass("managed_app")},
+			&fakeOrgs{base: "https://github.com", class: unknownCredentialClass},
 			&fakeAgents{},
 			nil,
 		)
@@ -92,7 +98,7 @@ func TestResolver_UnknownCredentialClass_StampsNoIdentity(t *testing.T) {
 	r := NewResolver(
 		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_present"}},
 		&fakeApps{app: nil},
-		&fakeOrgs{base: "https://github.com", class: domain.GitHubCredentialClass("managed_app")},
+		&fakeOrgs{base: "https://github.com", class: unknownCredentialClass},
 		&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "acme-bot"}},
 		nil,
 	)

@@ -82,11 +82,16 @@ type githubAppInstallation struct {
 //
 // class decides using_deployment_default, which is the one field on this payload
 // that a nil app cannot answer for. A nil app means "no registration of your
-// own", which is true of a PAT org and would equally be true of an org riding
-// the deployment's own App — and those two want opposite answers here. Both
-// classes this build knows are the org's OWN credential, so both report false;
-// the reserved shared-App class is the arm that would report true, and it gets
-// to be a visible new case rather than a silent inherited default.
+// own", which is true of a PAT org and equally true of an org riding the
+// deployment's own App — and those two want opposite answers here. The two
+// own-credential classes report false; the managed class is the arm that
+// reports true, and it says so from the class rather than from the absence of a
+// row, which is the same absence the PAT arm has.
+//
+// This one boolean is the whole of the managed rendering for now: the panel
+// still shows a managed workspace no App block, because it has no App of its
+// own to show. What that workspace's panel should show instead — the bound
+// installations and their accounts — is its own ticket.
 func newGitHubAppStatusResponse(class domain.GitHubCredentialClass, app *domain.OrgGitHubApp, insts []domain.OrgGitHubAppInstallation, registeredByName, connectCallbackURL string, health *githubAppWebhookHealth) githubAppStatusResponse {
 	resp := githubAppStatusResponse{
 		Installations:      make([]githubAppInstallation, 0, len(insts)),
@@ -98,6 +103,12 @@ func newGitHubAppStatusResponse(class domain.GitHubCredentialClass, app *domain.
 		// The org owns whatever credential it has — no deployment-level App
 		// stands behind it.
 		resp.UsingDeploymentDefault = false
+	case domain.GitHubCredentialClassManagedApp:
+		// The org's credential IS the deployment's App. There is no row to
+		// render and there never will be one, so app stays nil below and this
+		// field is what tells the panel that nil means "riding the shared App"
+		// rather than "nothing configured".
+		resp.UsingDeploymentDefault = true
 	default:
 		// Handlers refuse an unknown class before reaching here; this arm is the
 		// backstop. Render no App and claim nothing about a deployment default: a
@@ -246,6 +257,18 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 	// mirror is read through the System (claims-free) door here — the admin gate
 	// already authorized orgID, and the backfill below is itself a System
 	// operation.
+	//
+	// The managed class is refused here DELIBERATELY, and not because there is
+	// nothing to reconcile — there is, and the button would be useful. Refresh
+	// means reconcile, and the reconcile below stamps this org's id on every
+	// installation GET /app/installations reports. Under one App key serving many
+	// workspaces that listing is every tenant's installations, so an unscoped
+	// reconcile would claim them all for whoever pressed the button — and because
+	// the removal diff runs against this org's own set, nothing would ever undo
+	// it. The refusal lifts when the reconcile is scoped to what a workspace
+	// actually bound, not before.
+	// TODO(TFAC-924): open this to the managed class once the reconcile refreshes
+	// bound installations only and never discovers.
 	class, err := s.githubCredentialClass(ctx, orgID)
 	if err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {

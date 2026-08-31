@@ -50,7 +50,7 @@ func TestInstallationToken_SuspendedIsNeverServedFromCache(t *testing.T) {
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
 
-	tok, err := r.installationToken(context.Background(), "org-1", activeApp(), inst, gh.srv.URL)
+	tok, err := r.installationToken(context.Background(), "org-1", resolvedApp{org: activeApp()}, inst, gh.srv.URL)
 	if err != nil {
 		t.Fatalf("installationToken: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestInstallationToken_UnsuspendedStillServesFromCache(t *testing.T) {
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
 
-	tok, err := r.installationToken(context.Background(), "org-1", activeApp(), inst, gh.srv.URL)
+	tok, err := r.installationToken(context.Background(), "org-1", resolvedApp{org: activeApp()}, inst, gh.srv.URL)
 	if err != nil {
 		t.Fatalf("installationToken: %v", err)
 	}

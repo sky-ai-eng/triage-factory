@@ -60,6 +60,12 @@ func TestCredentialClass_PATBind(t *testing.T) {
 	assertCredentialClass(t, s, domain.GitHubCredentialClassPAT, "a PAT bind")
 }
 
+// unknownCredentialClass is a credential class no build defines — the value
+// these tests seed to exercise the refusing arms. It has to be a string nobody
+// will ever ship, because what the arms pin is the REFUSAL, and any real class
+// name would eventually be implemented out from under the assertion.
+const unknownCredentialClass = domain.GitHubCredentialClass("not-a-credential-class")
+
 // TestCredentialClass_PATBindRefusedForUnknownClass pins the fail-closed arm on
 // the one site where the missing-row inference would resolve to a WRITE.
 //
@@ -80,8 +86,11 @@ func TestCredentialClass_PATBindRefusedForUnknownClass(t *testing.T) {
 	ctx := context.Background()
 
 	// A class from a newer peer. No App row — the shape that makes the XOR gate
-	// wave this through.
-	if _, err := s.orgs.SetGitHubCredentialClass(ctx, runmode.LocalDefaultOrgID, domain.GitHubCredentialClass("managed_app")); err != nil {
+	// wave this through. The value is deliberately one no build will ever
+	// define: "managed_app" used to stand in here and became a class this build
+	// knows, which would have turned this test into an assertion about the
+	// deployment App instead of about an unrecognised class.
+	if _, err := s.orgs.SetGitHubCredentialClass(ctx, runmode.LocalDefaultOrgID, unknownCredentialClass); err != nil {
 		t.Fatalf("seed unknown class: %v", err)
 	}
 
@@ -95,7 +104,7 @@ func TestCredentialClass_PATBindRefusedForUnknownClass(t *testing.T) {
 	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "" {
 		t.Errorf("a refused bind stored a PAT: %q", v)
 	}
-	if got := orgCredentialClass(t, s); got != domain.GitHubCredentialClass("managed_app") {
+	if got := orgCredentialClass(t, s); got != unknownCredentialClass {
 		t.Errorf("a refused bind rewrote the class to %q; want it untouched", got)
 	}
 }

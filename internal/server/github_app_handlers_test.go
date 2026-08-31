@@ -171,6 +171,50 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 	})
 }
 
+// TestNewGitHubAppStatusResponse_UsingDeploymentDefault walks all three
+// credential classes through the one field on this payload that a nil App
+// cannot answer for.
+//
+// A nil App means "no registration of your own", which is equally true of a PAT
+// workspace and a workspace riding the deployment's shared App — and the two
+// want opposite answers. This boolean is what lets the panel tell them apart,
+// which is why it is read off the class rather than off the absence of a row.
+func TestNewGitHubAppStatusResponse_UsingDeploymentDefault(t *testing.T) {
+	byo := &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "123", Slug: "acme-bot", Active: true}
+	insts := []domain.OrgGitHubAppInstallation{{InstallationID: "456", AccountType: "Organization", AccountLogin: "acme"}}
+
+	for _, tc := range []struct {
+		name        string
+		class       domain.GitHubCredentialClass
+		app         *domain.OrgGitHubApp
+		wantDefault bool
+		wantApp     bool
+	}{
+		{"pat", domain.GitHubCredentialClassPAT, nil, false, false},
+		{"byo app", domain.GitHubCredentialClassBYOApp, byo, false, true},
+		// No App block, because there is no registration of the workspace's own
+		// to render — and the boolean is what stops that reading as "nothing
+		// configured, go register one".
+		{"managed app", domain.GitHubCredentialClassManagedApp, nil, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := newGitHubAppStatusResponse(tc.class, tc.app, insts, "", "", nil)
+			if resp.UsingDeploymentDefault != tc.wantDefault {
+				t.Errorf("using_deployment_default=%v, want %v", resp.UsingDeploymentDefault, tc.wantDefault)
+			}
+			if (resp.App != nil) != tc.wantApp {
+				t.Errorf("app=%+v, want present=%v", resp.App, tc.wantApp)
+			}
+			// A managed workspace's installations are its own rows and are
+			// rendered like anyone else's — they are what it bound the shared
+			// App on.
+			if len(resp.Installations) != 1 {
+				t.Errorf("installations=%d, want 1", len(resp.Installations))
+			}
+		})
+	}
+}
+
 // TestGitHubAppStatus_BadOrgID rejects a non-UUID path segment with 404.
 func TestGitHubAppStatus_BadOrgID(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -321,6 +365,36 @@ func TestGitHubAppInstallationsRefresh_NoApp(t *testing.T) {
 	}
 	if fake.backfillCalls != 0 {
 		t.Errorf("backfill called %d times, want 0 when no App is registered", fake.backfillCalls)
+	}
+}
+
+// TestGitHubAppInstallationsRefresh_ManagedClass_Refuses pins a refusal that is
+// deliberate rather than incidental. A managed workspace HAS installations to
+// reconcile, and this button would be useful for it — and it is refused anyway,
+// because the reconcile behind it stamps the requesting org's id on every
+// installation GET /app/installations reports. Under one App key serving many
+// workspaces that listing is every tenant's, so the button would claim them all
+// for whoever pressed it, permanently: the removal diff runs against the
+// requester's own set and would never undo it.
+func TestGitHubAppInstallationsRefresh_ManagedClass_Refuses(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	fake := &fakeGitHubAppsStore{
+		insts: []domain.OrgGitHubAppInstallation{
+			{InstallationID: "inst-1", OrgID: runmode.LocalDefaultOrgID, AccountType: "Organization", AccountLogin: "acme-eng"},
+		},
+	}
+	s.githubApps = fake
+	if _, err := s.orgs.SetGitHubCredentialClass(context.Background(), runmode.LocalDefaultOrgID, domain.GitHubCredentialClassManagedApp); err != nil {
+		t.Fatalf("set credential class: %v", err)
+	}
+
+	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s, want 404", rec.Code, rec.Body.String())
+	}
+	if fake.backfillCalls != 0 {
+		t.Errorf("backfill called %d times for a managed workspace; an unscoped reconcile under a shared key is the hazard this refusal exists for", fake.backfillCalls)
 	}
 }
 

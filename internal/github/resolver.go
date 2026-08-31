@@ -152,9 +152,12 @@ type ScopedRepoResolver interface {
 //
 //	tier 1  the org's own GitHub App installation token for the target
 //	        account — short-lived (~1h), repo-scoped, revocable.
-//	tier 2  a deployment-default (shared) App installation token. DEFERRED;
-//	        the resolver leaves a numbered gap so that a future tier
-//	        slots in between tiers 1 and 3 without renumbering.
+//	tier 2  the deployment App's installation token for the target account
+//	        — one App key serving many workspaces, its identity and key in
+//	        the operator's environment. Same shape as tier 1 and the same
+//	        no-PAT-fallback rule; what differs is where the signing key comes
+//	        from and that the org holds no registration row (see
+//	        deploymentapp.go).
 //	tier 3  PAT-borrow: the org's stored github_pat (keychain in local
 //	        mode, Vault in multi mode). Identical to the pre-resolver path.
 //
@@ -250,17 +253,73 @@ type resolver struct {
 	cache      TokenCache
 	coverage   *repoCoverageCache
 	rateLimits *rateLimitRegistry
+	deployment *deploymentAppSource
+}
+
+// ResolverOption configures a resolver at construction. There is one today —
+// the deployment App — and it is an option rather than a parameter because
+// most construction sites cannot serve a managed org at all: the local-mode
+// CLI's agenthost has no deployment App by definition, and a site that passes
+// nothing gets a resolver that refuses the managed class instead of one that
+// half-supports it.
+type ResolverOption func(*resolver)
+
+// WithDeploymentApp supplies the deployment GitHub App this resolver mints
+// tier-2 credentials from. The zero App is "none configured", which is what
+// every local-mode process has and what a multi deployment whose orgs all
+// bring their own App has.
+func WithDeploymentApp(app githubapp.DeploymentApp) ResolverOption {
+	return func(r *resolver) { r.deployment = newDeploymentAppSource(app) }
+}
+
+// WithDeploymentAppFromEnv reads the deployment App from the environment
+// (githubapp.DeploymentAppFromEnv — the zero App in local mode, where a
+// distributed binary can ship no shared key). It is what every wiring site
+// that can serve a managed org uses, so the read and its failure handling are
+// spelled once.
+//
+// A partially configured App is logged and dropped rather than half-used:
+// construction is all-or-none upstream, and the resolver's answer to "no
+// deployment App" is to refuse every managed resolution. Failing closed is the
+// same trade the rest of this file makes — a wrong refusal costs a retry, and
+// resolving under a credential nobody finished configuring does not.
+func WithDeploymentAppFromEnv() ResolverOption {
+	app, err := githubapp.DeploymentAppFromEnv()
+	if err != nil {
+		ghResolverLog.Error("read deployment github app from the environment failed; managed-class orgs will resolve nothing",
+			"error", err)
+		app = githubapp.DeploymentApp{}
+	}
+	return WithDeploymentApp(app)
 }
 
 // NewResolver builds a Resolver. A nil cache gets a fresh in-memory one.
 // Each instance owns its own rate-limit registry (see RateLimitReader) —
 // process-local, in-memory state, so there's nothing for a caller to
 // inject or share.
-func NewResolver(secrets db.SecretStore, apps db.GitHubAppsStore, orgs db.OrgsStore, agents db.AgentStore, cache TokenCache) Resolver {
+func NewResolver(secrets db.SecretStore, apps db.GitHubAppsStore, orgs db.OrgsStore, agents db.AgentStore, cache TokenCache, opts ...ResolverOption) Resolver {
 	if cache == nil {
 		cache = NewMemoryTokenCache()
 	}
-	return &resolver{secrets: secrets, apps: apps, orgs: orgs, agents: agents, cache: cache, coverage: newRepoCoverageCache(), rateLimits: newRateLimitRegistry()}
+	r := &resolver{
+		secrets:    secrets,
+		apps:       apps,
+		orgs:       orgs,
+		agents:     agents,
+		cache:      cache,
+		coverage:   newRepoCoverageCache(),
+		rateLimits: newRateLimitRegistry(),
+		// A source over the zero App: no deployment App unless an option
+		// supplies one, but always something for the managed arm to ask. A nil
+		// here would make a construction site that never heard of tier 2 — the
+		// local CLI's agenthost, a test rig — panic on the first managed
+		// resolution instead of refusing it.
+		deployment: newDeploymentAppSource(githubapp.DeploymentApp{}),
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // The production resolver implements the optional per-repo-scoping extensions
@@ -302,11 +361,11 @@ func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client
 
 	// App XOR PAT (see activeApp): an active App is the org's credential — mint
 	// its installation token for target or fail; never borrow a PAT.
-	app, err := r.activeApp(ctx, orgID, oc.class)
+	app, err := r.activeApp(ctx, orgID, oc.class, fixedHost(base))
 	if err != nil {
 		return nil, err
 	}
-	if app != nil {
+	if app.present() {
 		tok, terr := r.appToken(ctx, orgID, app, target, base)
 		if terr != nil {
 			return nil, terr
@@ -353,11 +412,11 @@ func (r *resolver) ClientForRepoWithIdentity(ctx context.Context, orgID, owner, 
 
 	// Active App → the App client for owner/repo (gated on coverage), or an
 	// error. Never a PAT.
-	app, err := r.activeApp(ctx, orgID, oc.class)
+	app, err := r.activeApp(ctx, orgID, oc.class, fixedHost(base))
 	if err != nil {
 		return nil, IdentityUnknown, err
 	}
-	if app != nil {
+	if app.present() {
 		return r.appClientForRepo(ctx, orgID, app, owner, repo, base)
 	}
 
@@ -464,9 +523,99 @@ func (r *resolver) credentialClassFor(ctx context.Context, orgID string) (domain
 	return set.GitHubCredentialClass, nil
 }
 
-// activeApp returns the org's registered App when the org is in the BYO-App
-// credential system AND that App is active (so the App is the live git
-// credential), else nil — meaning the PAT tier.
+// hostResolver defers resolving the org's GitHub host to the arm that needs
+// one, which is only ever the managed arm: establishing the deployment App's
+// identity is a call to a particular GitHub, and the two entry points that read
+// the class alone (HasAnyCredential, OrgIdentityFor) deliberately resolve no
+// host — for every other class they would pay a settings read, and possibly a
+// secret read, for a value they discard.
+type hostResolver func() (string, error)
+
+// fixedHost is the resolver for the entry points that already resolved the
+// org's host alongside its class, off the one settings row orgContextFor read.
+func fixedHost(base string) hostResolver {
+	return func() (string, error) { return base, nil }
+}
+
+// lazyHost resolves the org's host on demand, for the entry points that read
+// the class alone and would otherwise never need one.
+func (r *resolver) lazyHost(ctx context.Context, orgID string) hostResolver {
+	return func() (string, error) { return r.githubBaseFor(ctx, orgID) }
+}
+
+// resolvedApp is the App a resolution mints from, in whichever of the two
+// shapes a credential class produces: the org's own registration row (BYO — the
+// key in the org's secret store under app.PEMRef), or the deployment App
+// (managed — the key in the operator's environment, and no row at all).
+//
+// It exists because a managed org HAS no row and cannot have one: org_github_apps
+// is one row per org with a UNIQUE app_id, so N orgs cannot each hold a row
+// naming the one shared App. That is the whole reason the credential class is a
+// stated column rather than an inference from row presence, and it is why
+// everything downstream of the class switch takes this instead of a
+// *domain.OrgGitHubApp. The zero value is "no App" — the PAT tier.
+//
+// minterFor is the single site that knows where an App's signing key comes
+// from. Nothing else needs to.
+type resolvedApp struct {
+	// org is the org's own registration row, non-nil exactly on the BYO arm.
+	org *domain.OrgGitHubApp
+	// deployment is the preflight-established deployment App, non-nil exactly
+	// on the managed arm.
+	deployment *deploymentAppState
+}
+
+// present reports whether an App resolved at all. False is the PAT tier — and
+// only ever reached from a class whose arm says so, never from a read that
+// happened to come back empty.
+func (a resolvedApp) present() bool { return a.org != nil || a.deployment != nil }
+
+// slug is the App's registration slug, from whichever half holds it. It is what
+// the bot account is called ("<slug>[bot]").
+func (a resolvedApp) slug() string {
+	if a.deployment != nil {
+		return a.deployment.identity.Slug
+	}
+	if a.org != nil {
+		return a.org.Slug
+	}
+	return ""
+}
+
+// botUserID is the bot account's numeric id, or 0 when unknown. Unknown is a
+// supported state on both arms — a NULL org_github_apps.bot_user_id, or a bot
+// lookup that failed during the preflight — and degrades the commit email to
+// the plain noreply form rather than failing anything.
+func (a resolvedApp) botUserID() int64 {
+	if a.deployment != nil {
+		return a.deployment.botUserID
+	}
+	if a.org != nil {
+		return a.org.BotUserID
+	}
+	return 0
+}
+
+// commitIdentityReady reports whether this App is one the org is actually
+// committing as, so OrgIdentityFor stamps its bot identity rather than falling
+// through to the PAT tier's login.
+//
+// The BYO arm requires Active: a staged App (registered, not yet cut over) is
+// an org still committing as its PAT. The managed arm has no such window — a
+// managed org has no per-org row whose Active bit could stage anything, and the
+// deployment App it rides was established by a preflight that already refused
+// every unusable answer.
+func (a resolvedApp) commitIdentityReady() bool {
+	if a.deployment != nil {
+		return a.deployment.identity.Slug != ""
+	}
+	return a.org != nil && a.org.Active && a.org.Slug != ""
+}
+
+// activeApp returns the App the org's resolution mints from — its own
+// registration row when the org is in the BYO-App credential system AND that
+// App is active, or the deployment App when the org rides the shared one — else
+// the zero resolvedApp, meaning the PAT tier.
 //
 // This is the App-XOR-PAT gate. An org's git credential is its active App OR a
 // borrowed PAT, never both stably: the migration flow deletes the PAT at App
@@ -478,20 +627,22 @@ func (r *resolver) credentialClassFor(ctx context.Context, orgID string) (domain
 // tier is reached only when there is no active App.
 //
 // Which arm runs is decided by the org's credential CLASS, not by whether an
-// App row happens to exist. The distinction is the entire point: "no row" is
-// the shape of a PAT org today and would equally be the shape of an org riding
-// a deployment-level shared App, so inferring PAT from a missing row is a guess
-// that is right only by accident. A class this build doesn't know is refused
+// App row happens to exist. The distinction is the entire point, and it is no
+// longer hypothetical: "no row" is the shape of a PAT org AND the shape of an
+// org riding the deployment's shared App, two arms that want opposite
+// credentials. Inferring PAT from a missing row would now be wrong for a real
+// class rather than a future one. A class this build doesn't know is refused
 // outright rather than resolved as PAT — an org must fail where someone sees
 // it, not quietly act on a credential it does not have.
 //
 // class arrives as a resolved parameter rather than a read of its own, so it is
 // the same value the caller resolved its base URL alongside — one settings row,
-// one snapshot, one decision.
-func (r *resolver) activeApp(ctx context.Context, orgID string, class domain.GitHubCredentialClass) (*domain.OrgGitHubApp, error) {
+// one snapshot, one decision. host is the same value, deferred: see
+// hostResolver for why only one arm evaluates it.
+func (r *resolver) activeApp(ctx context.Context, orgID string, class domain.GitHubCredentialClass, host hostResolver) (resolvedApp, error) {
 	switch class {
 	case domain.GitHubCredentialClassPAT:
-		return nil, nil
+		return resolvedApp{}, nil
 
 	case domain.GitHubCredentialClassBYOApp:
 		app, err := r.apps.GetForOrgSystem(ctx, orgID)
@@ -503,17 +654,34 @@ func (r *resolver) activeApp(ctx context.Context, orgID string, class domain.Git
 			// this path ends in ErrNoGitHubCredentials either way.
 			ghResolverLog.Warn("read app registration failed; falling back to the PAT tier for this resolution",
 				"org", orgID, "error", err)
-			return nil, nil
+			return resolvedApp{}, nil
 		}
 		// nil or staged (active=false) is the PAT tier: during a PAT→App switch
 		// the org is already in the App system while the PAT is still live.
 		if app == nil || !app.Active {
-			return nil, nil
+			return resolvedApp{}, nil
 		}
-		return app, nil
+		return resolvedApp{org: app}, nil
+
+	case domain.GitHubCredentialClassManagedApp:
+		// The deployment App, established on first use and cached. Every failure
+		// arm below returns an error rather than the zero resolvedApp, and that
+		// is the no-PAT-fallback rule made structural: the managed class has no
+		// path through this function that reaches the PAT tier, whatever goes
+		// wrong. An org whose workspace never chose a PAT must not act on one
+		// because the shared App had a bad afternoon.
+		base, err := host()
+		if err != nil {
+			return resolvedApp{}, err
+		}
+		state, err := r.deployment.resolve(ctx, base)
+		if err != nil {
+			return resolvedApp{}, fmt.Errorf("%w: org=%s", err, orgID)
+		}
+		return resolvedApp{deployment: state}, nil
 
 	default:
-		return nil, fmt.Errorf("%w: org=%s class=%q", ErrUnknownCredentialClass, orgID, class)
+		return resolvedApp{}, fmt.Errorf("%w: org=%s class=%q", ErrUnknownCredentialClass, orgID, class)
 	}
 }
 
@@ -522,7 +690,7 @@ func (r *resolver) activeApp(ctx context.Context, orgID string, class domain.Git
 // activeApp that the org's credential is the App). Shares the installation
 // TokenCache with ClientFor so the API client and the host-side git clone
 // resolve identically.
-func (r *resolver) appToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, target, base string) (githubapp.Token, error) {
+func (r *resolver) appToken(ctx context.Context, orgID string, app resolvedApp, target, base string) (githubapp.Token, error) {
 	inst, err := r.installationFor(ctx, orgID, accountByLogin(target))
 	if err != nil {
 		return githubapp.Token{}, err
@@ -546,7 +714,7 @@ func (r *resolver) appToken(ctx context.Context, orgID string, app *domain.OrgGi
 // an indeterminate probe (5xx) fails open with the App client and is not cached;
 // a negative is not cached, so a repo newly added to the grant is picked up on
 // the next call.
-func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app *domain.OrgGitHubApp, owner, repo, base string) (*Client, Identity, error) {
+func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app resolvedApp, owner, repo, base string) (*Client, Identity, error) {
 	tok, err := r.appToken(ctx, orgID, app, owner, base)
 	if err != nil {
 		return nil, IdentityUnknown, err
@@ -574,7 +742,7 @@ func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app *doma
 // TokenCache: that cache is keyed by installation only, so a scoped token
 // written there would later be served to an unscoped caller. A scoped mint is
 // ~once per (run, repo); the gitproxy keeps its own per-repo cache.
-func (r *resolver) appScopedToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, owner, repo, base string, permissions map[string]string) (githubapp.Token, error) {
+func (r *resolver) appScopedToken(ctx context.Context, orgID string, app resolvedApp, owner, repo, base string, permissions map[string]string) (githubapp.Token, error) {
 	inst, err := r.installationFor(ctx, orgID, accountByLogin(owner))
 	if err != nil {
 		return githubapp.Token{}, err
@@ -603,11 +771,11 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 	// App XOR PAT (see activeApp): an active App is the org's credential —
 	// resolve its installation token (shared cache + mint path with ClientFor)
 	// or fail; never fall to a PAT.
-	app, err := r.activeApp(ctx, orgID, oc.class)
+	app, err := r.activeApp(ctx, orgID, oc.class, fixedHost(base))
 	if err != nil {
 		return githubapp.Token{}, err
 	}
-	if app != nil {
+	if app.present() {
 		return r.appToken(ctx, orgID, app, target, base)
 	}
 
@@ -644,11 +812,11 @@ func (r *resolver) TokenForRepoScoped(ctx context.Context, orgID, owner, repo st
 		return githubapp.Token{}, err
 	}
 	base := oc.base
-	app, err := r.activeApp(ctx, orgID, oc.class)
+	app, err := r.activeApp(ctx, orgID, oc.class, fixedHost(base))
 	if err != nil {
 		return githubapp.Token{}, err
 	}
-	if app != nil {
+	if app.present() {
 		return r.appScopedToken(ctx, orgID, app, owner, repo, base, permissions)
 	}
 	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
@@ -674,11 +842,11 @@ func (r *resolver) TokenForReposScoped(ctx context.Context, orgID, owner string,
 		return githubapp.Token{}, err
 	}
 	base := oc.base
-	app, err := r.activeApp(ctx, orgID, oc.class)
+	app, err := r.activeApp(ctx, orgID, oc.class, fixedHost(base))
 	if err != nil {
 		return githubapp.Token{}, err
 	}
-	if app != nil {
+	if app.present() {
 		return r.appReposScopedToken(ctx, orgID, app, owner, repos, base, permissions)
 	}
 	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
@@ -697,7 +865,7 @@ func (r *resolver) TokenForReposScoped(ctx context.Context, orgID, owner string,
 // channel's single token. Same no-cache rationale: a scoped mint bypasses the
 // installation TokenCache (keyed by installation only) so a scoped token is
 // never served to an unscoped caller.
-func (r *resolver) appReposScopedToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, owner string, repos []string, base string, permissions map[string]string) (githubapp.Token, error) {
+func (r *resolver) appReposScopedToken(ctx context.Context, orgID string, app resolvedApp, owner string, repos []string, base string, permissions map[string]string) (githubapp.Token, error) {
 	inst, err := r.installationFor(ctx, orgID, accountByLogin(owner))
 	if err != nil {
 		return githubapp.Token{}, err
@@ -724,11 +892,11 @@ func (r *resolver) ClientForRepoScoped(ctx context.Context, orgID, owner, repo s
 		return nil, IdentityUnknown, err
 	}
 	base := oc.base
-	app, err := r.activeApp(ctx, orgID, oc.class)
+	app, err := r.activeApp(ctx, orgID, oc.class, fixedHost(base))
 	if err != nil {
 		return nil, IdentityUnknown, err
 	}
-	if app != nil {
+	if app.present() {
 		tok, terr := r.appScopedToken(ctx, orgID, app, owner, repo, base, permissions)
 		if terr != nil {
 			return nil, IdentityUnknown, terr
@@ -759,11 +927,11 @@ func (r *resolver) HasAnyCredential(ctx context.Context, orgID string) (bool, er
 	if err != nil {
 		return false, err
 	}
-	app, err := r.activeApp(ctx, orgID, class)
+	app, err := r.activeApp(ctx, orgID, class, r.lazyHost(ctx, orgID))
 	if err != nil {
 		return false, err
 	}
-	if app != nil {
+	if app.present() {
 		insts, err := r.apps.ListInstallationsForOrgSystem(ctx, orgID)
 		if err != nil {
 			return false, fmt.Errorf("list installations for org %s: %w", orgID, err)
@@ -777,20 +945,41 @@ func (r *resolver) HasAnyCredential(ctx context.Context, orgID string) (bool, er
 	return pat != "", nil
 }
 
-// appForIdentity returns the App registration OrgIdentityFor should consider
-// for class, or nil when the class has no App behind it. Split out so the
-// class switch is a switch — the arm a future shared-App class needs is a new
-// case here, not a condition threaded into the identity expression.
-func (r *resolver) appForIdentity(ctx context.Context, orgID string, class domain.GitHubCredentialClass) (*domain.OrgGitHubApp, error) {
+// appForIdentity returns the App OrgIdentityFor should consider for class, or
+// the zero resolvedApp when the class has no App behind it. Split out from
+// activeApp so the class switch is a switch — the shared-App arm is a case
+// here, not a condition threaded into the identity expression.
+//
+// It differs from activeApp in what it does NOT decide: the BYO arm hands back
+// a staged registration and lets the caller weigh Active, because the identity
+// question ("what is this org committing as") and the credential question
+// ("what may this org mint with") read that bit differently. Only the deployment
+// arm is shared wholesale, since establishing it is the same preflight either
+// way and its answer is cached.
+func (r *resolver) appForIdentity(ctx context.Context, orgID string, class domain.GitHubCredentialClass, host hostResolver) (resolvedApp, error) {
 	switch class {
 	case domain.GitHubCredentialClassPAT:
-		return nil, nil
+		return resolvedApp{}, nil
 	case domain.GitHubCredentialClassBYOApp:
-		return r.apps.GetForOrgSystem(ctx, orgID)
+		app, err := r.apps.GetForOrgSystem(ctx, orgID)
+		if err != nil {
+			return resolvedApp{}, err
+		}
+		return resolvedApp{org: app}, nil
+	case domain.GitHubCredentialClassManagedApp:
+		base, err := host()
+		if err != nil {
+			return resolvedApp{}, err
+		}
+		state, err := r.deployment.resolve(ctx, base)
+		if err != nil {
+			return resolvedApp{}, err
+		}
+		return resolvedApp{deployment: state}, nil
 	default:
 		// Unreachable: the caller gates on Known() first. Kept explicit so an
 		// added class fails here rather than silently resolving as PAT.
-		return nil, fmt.Errorf("%w: org=%s class=%q", ErrUnknownCredentialClass, orgID, class)
+		return resolvedApp{}, fmt.Errorf("%w: org=%s class=%q", ErrUnknownCredentialClass, orgID, class)
 	}
 }
 
@@ -830,21 +1019,31 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	// installations the App has). A staged/inactive App or a read error skips to
 	// PAT rather than claiming an identity the org isn't acting as — during a
 	// PAT→App switch the org is in the App system but still committing as its PAT.
-	if app, err := r.appForIdentity(ctx, orgID, class); err == nil && app != nil && app.Active && app.Slug != "" {
-		name = app.Slug + "[bot]"
+	if app, err := r.appForIdentity(ctx, orgID, class, r.lazyHost(ctx, orgID)); err == nil && app.commitIdentityReady() {
+		name = app.slug() + "[bot]"
 		// The numeric-id noreply form links a bot's commits to its account on
 		// github.com (contribution graph + Verified co-author badge); the plain
 		// "<slug>[bot]@..." form does NOT reliably link for bot accounts. Use the
 		// numeric form when the bot user id is known (org_github_apps.bot_user_id,
 		// fetched best-effort at registration), else fall back to the plain form —
 		// today's behavior, never a worse state (TFAC-474).
-		if app.BotUserID != 0 {
-			email = strconv.FormatInt(app.BotUserID, 10) + "+" + name + "@users.noreply.github.com"
+		if id := app.botUserID(); id != 0 {
+			email = strconv.FormatInt(id, 10) + "+" + name + "@users.noreply.github.com"
 		} else {
 			email = name + "@users.noreply.github.com"
 		}
 		return name, email, true
 	}
+	// A managed org has no PAT tier to fall to. Its credential is the deployment
+	// App — activeApp refuses rather than borrowing a PAT — so the cached PAT
+	// login below would be an identity for a credential the workspace is not
+	// acting as, stamped precisely when the shared App is unusable and nobody is
+	// looking at commit authorship. Stamp nothing instead, exactly as an
+	// unrecognised class does, and let the agent inherit ambient git config.
+	if class == domain.GitHubCredentialClassManagedApp {
+		return "", "", false
+	}
+
 	// PAT tier: the identity the org PAT authenticates as. The agents columns
 	// cache both values at PAT bind but are deliberately not cleared
 	// when the PAT is removed (clearing would mean chasing every scattered
@@ -975,7 +1174,7 @@ func (r *resolver) installationFor(ctx context.Context, orgID string, target acc
 // that knows. Dropping the entry and minting fresh keeps the failure honest:
 // GitHub answers for its own suspension, and the moment it is lifted the next
 // mint succeeds with nothing stale in the way.
-func (r *resolver) installationToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, inst domain.OrgGitHubAppInstallation, base string) (githubapp.Token, error) {
+func (r *resolver) installationToken(ctx context.Context, orgID string, app resolvedApp, inst domain.OrgGitHubAppInstallation, base string) (githubapp.Token, error) {
 	if inst.Suspended() {
 		r.cache.Invalidate(orgID, inst.InstallationID)
 	} else if tok, ok := r.cache.Get(orgID, inst.InstallationID); ok {
@@ -998,24 +1197,43 @@ func (r *resolver) installationToken(ctx context.Context, orgID string, app *dom
 	return tok, nil
 }
 
-// minterFor builds a githubapp.Minter from the org's stored App PEM + App ID,
+// minterFor builds the githubapp.Minter an App's tokens are signed with,
 // pinned at the org's API base. Shared by the cached full-install mint
-// (installationToken) and the uncached repo-scoped mint (appScopedToken).
-func (r *resolver) minterFor(ctx context.Context, orgID string, app *domain.OrgGitHubApp, base string) (*githubapp.Minter, error) {
-	pem, err := r.secrets.GetSystem(ctx, orgID, app.PEMRef)
+// (installationToken) and the uncached repo-scoped mints.
+//
+// This is the ONE site that knows where an App's signing key lives, and the two
+// answers are genuinely different places rather than two rows: the BYO arm
+// reads the org's own PEM out of its secret store, and the managed arm signs
+// with the deployment key held in the operator's environment, which no secret
+// store has an org to hang on. Everything above this function works in
+// resolvedApp and never asks.
+func (r *resolver) minterFor(ctx context.Context, orgID string, app resolvedApp, base string) (*githubapp.Minter, error) {
+	if app.deployment != nil {
+		// Already preflighted by activeApp — the App is configured, GitHub
+		// answered for it, and it holds the members permission — so this only
+		// builds the signer.
+		return r.deployment.app.Minter(ghbase.APIBase(base))
+	}
+	if app.org == nil {
+		// Unreachable: every caller reached here through activeApp, which
+		// returns an App or an error. Explicit so a future arm that forgets to
+		// fill either half fails here rather than nil-dereferencing.
+		return nil, fmt.Errorf("%w: org=%s: no app to mint from", ErrNoGitHubCredentials, orgID)
+	}
+	pem, err := r.secrets.GetSystem(ctx, orgID, app.org.PEMRef)
 	if err != nil {
 		return nil, fmt.Errorf("read app pem: %w", err)
 	}
 	if pem == "" {
-		return nil, fmt.Errorf("app pem secret %q not found", app.PEMRef)
+		return nil, fmt.Errorf("app pem secret %q not found", app.org.PEMRef)
 	}
 	key, err := githubapp.ParsePrivateKey([]byte(pem))
 	if err != nil {
 		return nil, err
 	}
-	appID, err := strconv.ParseInt(app.AppID, 10, 64)
+	appID, err := strconv.ParseInt(app.org.AppID, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("parse app id %q: %w", app.AppID, err)
+		return nil, fmt.Errorf("parse app id %q: %w", app.org.AppID, err)
 	}
 	return githubapp.NewMinter(githubapp.Config{
 		PrivateKey: key,

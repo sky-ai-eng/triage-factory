@@ -79,19 +79,19 @@ func (s *Server) webhookSecretFor(ctx context.Context, orgID string) (string, er
 // and therefore nothing a delivery could be verified against, so every delivery
 // claiming to be for it is unauthenticated by construction. Reading a missing
 // registration row as "PAT" would be an inference that holds only while PAT is
-// the single rowless shape — an org on a deployment-level shared App has no row
-// either, and its deliveries verify against a deployment secret this arm never
-// reaches.
+// the single rowless shape — an org on the deployment's shared App has no row
+// either, and its deliveries verify against a deployment secret this function
+// deliberately never reaches.
 //
 // System (claims-free) reads throughout: the receiver is pre-auth and has only
 // a trusted org_id from the URL.
 //
-// The four ways an org can have no secret — a credential class this build
-// doesn't understand, a PAT org, no registration row, a hookless App — collapse
-// into one empty return on purpose. The caller answers every one of them
-// exactly as it answers a bad signature, so an unauthenticated caller cannot
-// use the reply to learn which orgs have an App registered. Only a genuine
-// store failure comes back as an error.
+// The five ways an org can have no secret — a credential class this build
+// doesn't understand, a PAT org, a managed org, no registration row, a hookless
+// App — collapse into one empty return on purpose. The caller answers every one
+// of them exactly as it answers a bad signature, so an unauthenticated caller
+// cannot use the reply to learn which orgs have an App registered. Only a
+// genuine store failure comes back as an error.
 func (s *Server) resolveWebhookSecret(ctx context.Context, orgID string) (string, error) {
 	class, err := s.githubCredentialClass(ctx, orgID)
 	if err != nil {
@@ -101,7 +101,28 @@ func (s *Server) resolveWebhookSecret(ctx context.Context, orgID string) (string
 		}
 		return "", err
 	}
-	if class != domain.GitHubCredentialClassBYOApp {
+	switch class {
+	case domain.GitHubCredentialClassBYOApp:
+		// The one class with a secret to find. Falls through to the registration
+		// read below.
+	case domain.GitHubCredentialClassManagedApp:
+		// A managed org has a webhook secret — the deployment's — and this
+		// function must still answer nothing, which is why the arm exists rather
+		// than being folded into a catch-all.
+		//
+		// Its deliveries do not arrive here at all. The per-org URL names a
+		// tenant in its path and is verified against that tenant's own secret;
+		// the shared App signs every tenant's deliveries with ONE secret, so
+		// returning it here would make this endpoint accept a delivery for any
+		// workspace as long as the URL named one — an attacker picking the org id
+		// and GitHub supplying the signature. The shared App's deliveries land on
+		// a route with no org in its path, which verifies first and only then
+		// works out whose installation it was.
+		return "", nil
+	case domain.GitHubCredentialClassPAT:
+		return "", nil
+	default:
+		// Unreachable: githubCredentialClass refuses an unknown class above.
 		return "", nil
 	}
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
