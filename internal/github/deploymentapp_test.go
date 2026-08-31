@@ -110,6 +110,104 @@ func TestDeploymentAppSource_ConcurrentMissesCoalesce(t *testing.T) {
 	}
 }
 
+// TestDeploymentAppSource_LeaderCancellationDoesNotPoisonTheFlight pins the
+// property that makes the singleflight safe to share: the caller that happens
+// to lead a flight is an accident of scheduling, and its context must not
+// decide anyone else's outcome.
+//
+// Two halves, and the second is the one that bites under load. A caller that
+// gives up gets its OWN error — not a verdict on the deployment App, which
+// nothing has established. And the flight it abandoned still finishes and still
+// caches, so the next caller reads an answer instead of starting another flight
+// for the next leader to abandon. Without that, every resolution during a burst
+// of short-deadline callers stampedes, and the cache never warms.
+func TestDeploymentAppSource_LeaderCancellationDoesNotPoisonTheFlight(t *testing.T) {
+	src, preflights, _ := stubbedSource(t, testDeploymentApp(t))
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	inner := src.preflight
+	src.preflight = func(ctx context.Context, m *githubapp.Minter) (githubapp.DeploymentAppIdentity, error) {
+		entered <- struct{}{}
+		<-release
+		return inner(ctx, m)
+	}
+
+	leaderCtx, cancel := context.WithCancel(context.Background())
+	leaderErr := make(chan error, 1)
+	go func() {
+		_, err := src.resolve(leaderCtx, "https://ghe.acme.test")
+		leaderErr <- err
+	}()
+
+	<-entered // the flight is in GitHub, holding
+	cancel()  // and its leader walks away
+
+	// The leader returns promptly rather than waiting out the flight it no
+	// longer cares about, and says what happened to IT.
+	select {
+	case err := <-leaderErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("leader err = %v; want its own context error", err)
+		}
+		if errors.Is(err, ErrDeploymentAppUnavailable) {
+			t.Error("a cancelled caller was told the deployment App is unavailable; nothing established that, and the next resolution is about to succeed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a cancelled caller stayed blocked on the flight it abandoned")
+	}
+
+	close(release) // GitHub answers the flight nobody is waiting on
+
+	// The answer is there for whoever comes next, off the same single preflight.
+	state, err := src.resolve(context.Background(), "https://ghe.acme.test")
+	if err != nil {
+		t.Fatalf("resolve after the leader left: %v", err)
+	}
+	if state == nil || state.identity.Slug != deploymentSlug {
+		t.Fatalf("state = %+v; want the established identity", state)
+	}
+	if got := atomic.LoadInt32(preflights); got != 1 {
+		t.Errorf("preflight ran %d times; want 1 — the abandoned flight established the answer rather than being thrown away", got)
+	}
+}
+
+// TestDeploymentAppSource_WaiterKeepsItsOwnDeadline is the same rule from the
+// other side: a caller with a tight deadline coalesced behind a slow flight
+// fails on its own terms, and takes nobody with it.
+func TestDeploymentAppSource_WaiterKeepsItsOwnDeadline(t *testing.T) {
+	src, preflights, _ := stubbedSource(t, testDeploymentApp(t))
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	inner := src.preflight
+	src.preflight = func(ctx context.Context, m *githubapp.Minter) (githubapp.DeploymentAppIdentity, error) {
+		entered <- struct{}{}
+		<-release
+		return inner(ctx, m)
+	}
+
+	leaderErr := make(chan error, 1)
+	go func() {
+		_, err := src.resolve(context.Background(), "https://ghe.acme.test")
+		leaderErr <- err
+	}()
+	<-entered
+
+	// A second caller joins the flight with almost no time left.
+	waiterCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := src.resolve(waiterCtx, "https://ghe.acme.test"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("waiter err = %v; want its own deadline", err)
+	}
+
+	close(release)
+	if err := <-leaderErr; err != nil {
+		t.Errorf("the leader failed after an impatient waiter gave up: %v", err)
+	}
+	if got := atomic.LoadInt32(preflights); got != 1 {
+		t.Errorf("preflight ran %d times; want 1", got)
+	}
+}
+
 // TestDeploymentAppSource_UnconfiguredRefusesWithoutAsking pins that a
 // deployment with no shared App refuses immediately. There is nothing to ask
 // GitHub about, and asking would spend a round trip per resolution on a

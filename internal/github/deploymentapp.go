@@ -62,6 +62,16 @@ const deploymentAppTTL = 5 * time.Minute
 // out a full TTL before anything works again.
 const deploymentAppFailureTTL = 30 * time.Second
 
+// deploymentAppEstablishTimeout bounds one flight's two reads. It is a
+// backstop rather than the working limit — both underlying HTTP clients cap a
+// request at 30s — and it exists because the flight runs detached from every
+// caller's context (see resolve), so nothing else would ever cut it short.
+//
+// Unlike a caller giving up, this expiring IS an answer: GitHub did not respond
+// in a minute, which is what ErrDeploymentAppUnreachable means, and it caches
+// for the failure window like any other.
+const deploymentAppEstablishTimeout = 60 * time.Second
+
 // deploymentAppState is what a completed preflight establishes about the
 // deployment App: the identity GitHub reports, plus the bot account's numeric
 // id when it could be read.
@@ -105,8 +115,9 @@ type deploymentAppSource struct {
 	// now is injectable for tests; production leaves it nil → time.Now.
 	now func() time.Time
 
-	ttl        time.Duration
-	failureTTL time.Duration
+	ttl              time.Duration
+	failureTTL       time.Duration
+	establishTimeout time.Duration
 
 	// group coalesces concurrent misses on one host into a single preflight.
 	// Without it a cold cache under a poll cycle's fan-out would spend one
@@ -119,12 +130,13 @@ type deploymentAppSource struct {
 
 func newDeploymentAppSource(app githubapp.DeploymentApp) *deploymentAppSource {
 	return &deploymentAppSource{
-		app:        app,
-		preflight:  githubapp.PreflightDeploymentApp,
-		botUserID:  fetchBotUserID,
-		ttl:        deploymentAppTTL,
-		failureTTL: deploymentAppFailureTTL,
-		entries:    make(map[string]deploymentAppEntry),
+		app:              app,
+		preflight:        githubapp.PreflightDeploymentApp,
+		botUserID:        fetchBotUserID,
+		ttl:              deploymentAppTTL,
+		failureTTL:       deploymentAppFailureTTL,
+		establishTimeout: deploymentAppEstablishTimeout,
+		entries:          make(map[string]deploymentAppEntry),
 	}
 }
 
@@ -141,9 +153,14 @@ func (s *deploymentAppSource) timeNow() time.Time {
 func (s *deploymentAppSource) configured() bool { return s.app.Configured() }
 
 // resolve returns the deployment App's established state for the org's GitHub
-// host, or an error — never (nil, nil). Every failure arm is
-// ErrDeploymentAppUnavailable with the cause wrapped, so the one thing a caller
-// can do with a failure is refuse, which is the one thing it may do.
+// host, or an error — never (nil, nil). Every failure arm that says something
+// about the App is ErrDeploymentAppUnavailable with the cause wrapped, so the
+// one thing a caller can do with such a failure is refuse, which is the one
+// thing it may do. The single arm that is NOT is this caller's own context
+// ending, which is a fact about the call rather than about the App.
+//
+// Either way there is no third answer: a resolution that does not establish the
+// App fails, and no path here reaches a PAT.
 func (s *deploymentAppSource) resolve(ctx context.Context, base string) (*deploymentAppState, error) {
 	if !s.configured() {
 		return nil, fmt.Errorf("%w: %w", ErrDeploymentAppUnavailable, githubapp.ErrNoDeploymentApp)
@@ -153,30 +170,59 @@ func (s *deploymentAppSource) resolve(ctx context.Context, base string) (*deploy
 		return state, err
 	}
 
-	// The singleflight result is shared by every caller that joined this
-	// flight, including its error — which is correct here: they are all asking
-	// the same question of the same host and there is one answer.
+	// One flight per host, and its outcome is shared by everyone waiting on it —
+	// correct here, because they are all asking the same question of the same
+	// GitHub and there is one answer.
 	type result struct {
 		state *deploymentAppState
 		err   error
 	}
-	out, _, _ := s.group.Do(apiBase, func() (any, error) {
+	ch := s.group.DoChan(apiBase, func() (any, error) {
 		// A second look under the flight: the caller this one coalesced behind
 		// may already have stored an answer.
 		if state, err, ok := s.cached(apiBase); ok {
 			return result{state: state, err: err}, nil
 		}
-		state, err := s.establish(ctx, base, apiBase)
-		// A caller that gave up says nothing about the App, so its error is not
-		// an answer to cache: storing it would let one abandoned request refuse
-		// every other resolution for the failure window.
-		if err == nil || ctx.Err() == nil {
-			s.store(apiBase, state, err)
-		}
+		// The flight runs on a context of its OWN — detached from whichever
+		// caller happened to lead it, and bounded by its own deadline. Two
+		// things follow and both are the point.
+		//
+		// Whoever arrived first is an accident of scheduling, so their context
+		// must not decide anyone else's outcome. Under the leader's context, one
+		// abandoned request or one caller with a tight deadline would fail every
+		// resolution coalesced behind it, with an error about a context those
+		// callers never held.
+		//
+		// And the work has to finish even when its leader leaves. A flight that
+		// dies with its leader leaves the cache cold, so the next wave stampedes
+		// into a new flight that its own leader can abandon in turn — a cache
+		// that never warms precisely when load is highest. Detached, one
+		// preflight establishes the answer for everyone, including the callers
+		// still on their way.
+		//
+		// WithoutCancel rather than Background: the values ride along, so the
+		// call stays inside the leader's trace instead of opening a rootless
+		// span nobody goes looking for.
+		workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.establishTimeout)
+		defer cancel()
+		state, err := s.establish(workCtx, base, apiBase)
+		s.store(apiBase, state, err)
 		return result{state: state, err: err}, nil
 	})
-	res := out.(result)
-	return res.state, res.err
+
+	select {
+	case out := <-ch:
+		res := out.Val.(result)
+		return res.state, res.err
+	case <-ctx.Done():
+		// THIS caller gave up. The flight carries on for everyone else, and the
+		// error says what actually happened rather than passing a verdict on the
+		// App: nothing here establishes that the deployment App is unusable, so
+		// it is deliberately not ErrDeploymentAppUnavailable, and the answer this
+		// flight is still on its way to caching is what the next resolution
+		// finds.
+		return nil, fmt.Errorf("resolve deployment app for %s: %w", apiBase, ctx.Err())
+	}
 }
 
 // establish runs the two reads that turn the configured App into a usable one.
