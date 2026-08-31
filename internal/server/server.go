@@ -262,6 +262,14 @@ type Server struct {
 	// Reach it only through acquireKeyedLock.
 	githubAppRegMu sync.Map // map[orgID]*sync.Mutex
 
+	// githubInstallationBindMu is the same mechanism over a different keyspace:
+	// one installation on one GitHub host, rather than one workspace. The
+	// managed bind's uniqueness check asks a question ACROSS workspaces — does
+	// any other org already hold this installation — which a per-org lock
+	// cannot serialize, because the two racers hold different org keys.
+	// Local-mode half of acquireKeyedLock; reach it only through that.
+	githubInstallationBindMu sync.Map // map["<installationID> <host>"]*sync.Mutex
+
 	// webhookSecretMu guards the three fields below — the short-TTL per-org
 	// cache of the secret the pre-auth GitHub webhook receiver verifies
 	// deliveries against. Resolving it costs a settings read, a registration

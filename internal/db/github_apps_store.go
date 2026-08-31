@@ -125,6 +125,12 @@ type GitHubAppsStore interface {
 	// workspace. A removed row is not an owner — an uninstalled installation
 	// reaches nothing, and re-binding it is an ordinary new bind.
 	//
+	// This read is a check, not a guarantee. Nothing in the schema stops a
+	// second org writing the same (host, installation_id) between this call and
+	// the caller's write, so a caller enforcing uniqueness has to serialize
+	// itself on the installation's identity — a lock keyed by the ORG cannot,
+	// since the two racers hold different org keys.
+	//
 	// System (claims-free) by construction: the question spans orgs, so no
 	// caller's claims could authorize it. Admin pool in Postgres, like the
 	// installation writes.

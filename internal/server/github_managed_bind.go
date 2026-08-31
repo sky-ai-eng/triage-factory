@@ -535,10 +535,40 @@ func (s *Server) writeManagedBinding(ctx context.Context, orgID, userID, ghWeb s
 	installationID := strconv.FormatInt(inst.ID, 10)
 	host := db.EffectiveGitHubHost(ghWeb)
 
-	// Uniqueness, inside the lock. An installation another workspace holds must
-	// not be bound here; re-binding one this workspace already holds is
-	// idempotent rather than an error, which is what makes a retry after a
-	// browser back-button harmless.
+	// A SECOND lock, keyed by the installation rather than by the workspace,
+	// and it is what makes the uniqueness check below mean anything.
+	//
+	// The org lock above serializes this workspace's credential transitions
+	// against each other. Uniqueness is not that question: it asks whether
+	// ANOTHER workspace holds this installation, and two workspaces racing to
+	// claim one hold two DIFFERENT org keys — so under the org lock alone both
+	// read owner == "" and both write, landing one installation in two tenants.
+	// The lock has to be keyed by the thing being claimed.
+	//
+	// TODO(TFAC-929): this is the only enforcement. org_github_app_installations
+	// deliberately carries no UNIQUE (github_host, installation_id) index yet —
+	// it ships paired with the scoped reconcile — so there is no database
+	// backstop under this, and a claim path that does not take this lock is
+	// unguarded rather than merely slower.
+	//
+	// The key is the id then the host, joined by a space. Order matters: the id
+	// is decimal digits and can hold no space, so the first space is
+	// unambiguously the separator and no two distinct pairs can spell one key.
+	// (The obvious NUL separator is not available — Postgres text cannot carry
+	// one, and the lock key is a bound text parameter.)
+	//
+	// Taken while holding the org lock and never the other way round — see the
+	// salt's registry entry for why that ordering is deadlock-free.
+	instRelease, err := s.acquireKeyedLock(ctx, &s.githubInstallationBindMu,
+		githubInstallationBindLockSalt, installationID+" "+host)
+	if err != nil {
+		return nil, err
+	}
+	defer instRelease()
+
+	// An installation another workspace holds must not be bound here;
+	// re-binding one this workspace already holds is idempotent rather than an
+	// error, which is what makes a retry after a browser back-button harmless.
 	owner, err := s.githubApps.InstallationOwnerSystem(ctx, host, installationID)
 	if err != nil {
 		return nil, err

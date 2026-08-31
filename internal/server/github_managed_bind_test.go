@@ -229,6 +229,28 @@ func newBindRig(t *testing.T, gh *fakeGitHub) *bindRig {
 	return &bindRig{authRig: rig, gh: gh, ghBase: ghBase, orgID: org, userID: user, sid: sid}
 }
 
+// sibling returns a second workspace on the SAME server, with its own admin
+// session and its GitHub pointed at the same fake — what a race between two
+// tenants over one installation needs, and something two separate rigs (two
+// servers) could not express.
+func (r *bindRig) sibling(t *testing.T, slug string) *bindRig {
+	t.Helper()
+	user := r.seedUser()
+	org, _ := r.seedOrg(user, slug+"-"+uuid.NewString()[:8])
+	resp, _ := r.driveCallback(user)
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO org_event_sources (org_id, kind, base_url)
+		VALUES ($1, 'github', $2)
+		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = $2
+	`, org.String(), r.ghBase); err != nil {
+		t.Fatalf("seed org_event_sources: %v", err)
+	}
+	return &bindRig{
+		authRig: r.authRig, gh: r.gh, ghBase: r.ghBase,
+		orgID: org, userID: user, sid: r.sidFromResp(resp),
+	}
+}
+
 // connect drives the Connect click and returns the response.
 func (r *bindRig) connect(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
@@ -846,6 +868,74 @@ func TestManagedBind_SecondAccountIsAdditive(t *testing.T) {
 	}
 	if !gh.served("/api/v3/orgs/acme-labs/memberships/octocat") {
 		t.Error("the second bind skipped the authority gate; every bind runs the full ceremony")
+	}
+}
+
+// TestManagedBind_TwoWorkspacesRacingOneInstallation is the cross-tenant half
+// of uniqueness, and it is the case a lock keyed by the ORG cannot catch: the
+// two racers hold different org keys, so an org-keyed lock lets both read
+// "nobody owns this" and both write, landing one GitHub account in two
+// workspaces.
+//
+// The sequential refusal next door passes with or without the installation
+// lock. This is the test that does not.
+func TestManagedBind_TwoWorkspacesRacingOneInstallation(t *testing.T) {
+	gh := newFakeGitHub()
+	first := newBindRig(t, gh)
+	second := first.sibling(t, "rival-org")
+
+	// Both admins administer the same GitHub account and both complete a real
+	// ceremony, so every gate passes for both. Only uniqueness separates them.
+	racers := []*bindRig{first, second}
+	cookies := make([]*http.Cookie, len(racers))
+	for i, rig := range racers {
+		cookies[i] = rig.ceremony(t)
+	}
+
+	var (
+		start sync.WaitGroup
+		done  sync.WaitGroup
+		mu    sync.Mutex
+		wins  int
+	)
+	start.Add(1)
+	for i, rig := range racers {
+		done.Add(1)
+		go func(rig *bindRig, cookie *http.Cookie) {
+			defer done.Done()
+			req := httptest.NewRequest("GET", ManagedBindCallbackPath+"?"+defaultCallbackQuery(4242), nil)
+			req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: rig.sid})
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			start.Wait()
+			rig.srv.mux.ServeHTTP(rec, req)
+			mu.Lock()
+			defer mu.Unlock()
+			if rec.Code == http.StatusFound {
+				wins++
+			}
+		}(rig, cookies[i])
+	}
+	start.Done()
+	done.Wait()
+
+	if wins != 1 {
+		t.Errorf("%d of %d workspaces bound the same installation, want exactly 1", wins, len(racers))
+	}
+
+	// The assertion that matters is the row count, not the status: one
+	// installation may be live in exactly one workspace, whatever either
+	// caller was told.
+	var holders int
+	if err := first.h.AdminDB.QueryRow(`
+		SELECT count(*) FROM org_github_app_installations
+		 WHERE github_host = $1 AND installation_id = '4242' AND removed_at IS NULL
+	`, first.ghBase).Scan(&holders); err != nil {
+		t.Fatalf("count holders: %v", err)
+	}
+	if holders != 1 {
+		t.Errorf("installation 4242 is live in %d workspaces, want 1 — "+
+			"the uniqueness check must serialize on the installation, not on the org", holders)
 	}
 }
 

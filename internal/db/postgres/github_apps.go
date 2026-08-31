@@ -188,10 +188,11 @@ func (s *gitHubAppsStore) ListInstallationsForOrgSystem(ctx context.Context, org
 // does any org already hold this installation on this host? Admin pool, because
 // the question spans orgs and no caller's claims could authorize it.
 //
-// LIMIT 1 is not an arbitrary narrowing — a live installation may belong to at
-// most one org, which the uniqueness index will eventually enforce in the
-// schema. Until it does, taking the first row is what makes the refusal fire on
-// a set that a bug has already made ambiguous, rather than erroring on it.
+// LIMIT 1 is not an arbitrary narrowing. Policy is that a live installation
+// belongs to at most one org, and the schema does not enforce it — there is no
+// UNIQUE (github_host, installation_id) index, so the caller's lock is the only
+// thing holding the invariant. Taking the first row is what makes the refusal
+// fire on a set a bug has already made ambiguous, rather than erroring on it.
 func (s *gitHubAppsStore) InstallationOwnerSystem(ctx context.Context, githubHost, installationID string) (string, error) {
 	var orgID string
 	err := s.admin.QueryRowContext(ctx, `
