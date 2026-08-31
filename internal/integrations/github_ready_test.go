@@ -110,20 +110,72 @@ func TestGitHubReady_EveryCredentialClass(t *testing.T) {
 	}
 }
 
-// TestGitHubReady_PATShortCircuitsEveryClass pins that a stored PAT still
-// answers first, whatever the class says. The env overlay is folded into creds
-// upstream, so this is also the headless-install path.
-func TestGitHubReady_PATShortCircuitsEveryClass(t *testing.T) {
+// TestGitHubReady_PATAnswersOnlyWhereItWouldBeBorrowed is the rule that keeps
+// this gate honest: a stored PAT is not readiness by itself, it is readiness
+// only for a class whose resolution would actually reach for it.
+//
+// The managed rows are the ones that matter. A workspace on the deployment's
+// shared App resolves from that App or fails — github.activeApp has no path
+// from the managed class to the PAT tier — so a PAT left in its secret store is
+// a credential it will never act on. Reporting it as connected would tell a
+// founder their setup is finished on the strength of a token nothing will use,
+// and would tell the event-source probe that GitHub can produce events for an
+// org that cannot poll.
+//
+// Reading credential presence before the class is the same inference the class
+// column exists to remove, and this test is where it stays removed.
+func TestGitHubReady_PATAnswersOnlyWhereItWouldBeBorrowed(t *testing.T) {
 	ctx := context.Background()
-	for _, class := range []domain.GitHubCredentialClass{
-		domain.GitHubCredentialClassPAT,
-		domain.GitHubCredentialClassBYOApp,
-		domain.GitHubCredentialClassManagedApp,
+	live := &domain.OrgGitHubApp{Active: true, ClientID: "Iv1.byo"}
+	staged := &domain.OrgGitHubApp{Active: false, ClientID: "Iv1.byo"}
+	bound := []domain.OrgGitHubAppInstallation{{InstallationID: "456", AccountLogin: "acme"}}
+
+	for _, tc := range []struct {
+		name  string
+		class domain.GitHubCredentialClass
+		app   *domain.OrgGitHubApp
+		insts []domain.OrgGitHubAppInstallation
+		want  bool
+	}{
+		// The PAT is the credential. The env overlay folds into creds upstream,
+		// so this is also the headless-install path.
+		{"pat class", domain.GitHubCredentialClassPAT, nil, nil, true},
+		// The staged window of a PAT→App switch: the class already says App
+		// while the PAT is still what resolves. The PAT must keep answering here
+		// or a mid-switch org reads as disconnected.
+		{"byo app staged behind the pat", domain.GitHubCredentialClassBYOApp, staged, nil, true},
+		{"byo app class with no row", domain.GitHubCredentialClassBYOApp, nil, nil, true},
+		// The App answers; the PAT is beside the point either way.
+		{"byo app live", domain.GitHubCredentialClassBYOApp, live, nil, true},
+		// The leak: a credential the resolver would never borrow, and nothing
+		// bound that could stand in for it.
+		{"managed app with a stray pat and nothing bound", domain.GitHubCredentialClassManagedApp, nil, nil, false},
+		// Ready on the bind, not on the PAT sitting beside it.
+		{"managed app bound, stray pat irrelevant", domain.GitHubCredentialClassManagedApp, nil, bound, true},
+		// Nothing resolves under a class this build cannot name, the PAT
+		// included, so neither does this.
+		{"unknown class", domain.GitHubCredentialClass("not-a-credential-class"), live, bound, false},
 	} {
-		got, err := GitHubReady(ctx, readyOrgs{class: class}, readyApps{}, "org-1", auth.Credentials{GitHubPAT: "ghp_x"})
-		if err != nil || !got {
-			t.Errorf("class %q: GitHubReady = (%v, %v); want (true, nil)", class, got, err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			orgs := readyOrgs{class: tc.class}
+			apps := readyApps{app: tc.app, insts: tc.insts}
+			creds := auth.Credentials{GitHubPAT: "ghp_present"}
+
+			got, err := GitHubReady(ctx, orgs, apps, "org-1", creds)
+			if err != nil {
+				t.Fatalf("GitHubReady: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("GitHubReady = %v with a PAT in the store; want %v", got, tc.want)
+			}
+			gotSys, err := GitHubReadySystem(ctx, orgs, apps, "org-1", creds)
+			if err != nil {
+				t.Fatalf("GitHubReadySystem: %v", err)
+			}
+			if gotSys != got {
+				t.Errorf("GitHubReadySystem = %v; GitHubReady = %v; the two doors must answer alike", gotSys, got)
+			}
+		})
 	}
 }
 
