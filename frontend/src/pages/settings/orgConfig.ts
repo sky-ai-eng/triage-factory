@@ -20,7 +20,7 @@ export type BedrockAuthMethod = 'role' | 'bearer' | 'access_keys'
 // the Claude Code SDK resolves auth from the inherited environment — a
 // subscription login, an exported ANTHROPIC_API_KEY, Bedrock or Vertex vars),
 // 'byok' is the org's own bound material. Local only offers the first; multi
-// always reads 'byok', because a hosted deployment has no host credentials to
+// always reads 'byok', because a multi-mode deployment has no host credentials to
 // lend and the backend refuses to store the other value there.
 export type ClaudeCredentialSource = 'system' | 'byok'
 

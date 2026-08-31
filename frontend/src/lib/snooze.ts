@@ -4,7 +4,7 @@
  *  nothing else, so the preset vocabulary lives here rather than on the
  *  server. That is where it belongs: "tomorrow" means the user's own next
  *  morning, and a server resolving the word would resolve it against its own
- *  clock and zone — which for a hosted deployment is nobody's morning. */
+ *  clock and zone — which for a multi-tenant deployment is nobody's morning. */
 
 export type SnoozePreset = '1h' | '2h' | '4h' | 'tomorrow'
 

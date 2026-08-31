@@ -87,7 +87,7 @@ func (a *App) wireAuth(ctx context.Context) error {
 	a.deployPublicURL = publicURL
 
 	// Org-creation toggle. Unset → creation allowed (right default for
-	// hosted SaaS + unconfigured self-hosts); a locked-down self-host sets
+	// a SaaS deployment + unconfigured self-hosts); a locked-down self-host sets
 	// TF_PREVENT_ORG_CREATION=true. A non-boolean value fails here so a
 	// typo in .env surfaces loudly at boot.
 	if err := runmode.InitOrgCreationFromEnv(); err != nil {

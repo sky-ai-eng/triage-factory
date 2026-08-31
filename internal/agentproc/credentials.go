@@ -241,9 +241,9 @@ var credentialEnvKeys = []string{
 // Multi-mode behavior:
 //
 //   - empty OrgID → error. Hard caller bug; refuse loudly rather than silently
-//     leaking the parent process's env (which in a hosted container would be the
-//     operator-supplied shared key, which is the exact cross-tenant bleed this
-//     path exists to prevent).
+//     leaking the parent process's env (which in a multi-mode container would
+//     be the operator-supplied shared key, which is the exact cross-tenant
+//     bleed this path exists to prevent).
 //   - orgID set, no credentials configured at all → ErrNoCredentialsConfigured.
 //     Caller surfaces however its UX dictates; we don't fall back to the parent
 //     env.

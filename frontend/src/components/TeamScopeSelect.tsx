@@ -11,7 +11,7 @@ interface Props {
 
 // TeamScopeSelect is the per-page read filter — a *multi-team* view
 // scope. It renders nothing unless the viewer belongs to ≥2 teams (the
-// same count gate that covers local + hosted-solo with no mode branch).
+// same count gate that covers local + solo multi with no mode branch).
 // Optional by design: the empty set is "all my teams" (the union);
 // checking teams narrows the page to their union. The board can show
 // {A}, {A,B}, all, or none — there's no single-team coupling, which is

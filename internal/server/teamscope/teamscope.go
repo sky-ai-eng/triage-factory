@@ -134,7 +134,7 @@ func ResolveActingNoStamp(ctx context.Context, teams db.TeamsStore, users db.Use
 //     membership re-check and falls through.
 //
 //  3. Sole team — when the caller has exactly one team, that team. This is the
-//     only path a solo (local or hosted-1-team) caller ever takes, and it is
+//     only path a solo (local or a 1-team multi org) caller ever takes, and it is
 //     byte-identical to the pre-PR1 hardcoded default: ListForUser orders
 //     oldest-first, and a 1-team org's only team is its default team.
 //

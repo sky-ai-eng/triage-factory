@@ -29,7 +29,7 @@ import (
 // a CSP violation and the picture never loads.
 //
 // Rather than widen img-src to a per-deployment allowlist of provider CDNs, we
-// proxy the image through this first-party endpoint: the browser only ever
+// proxy the image through this same-origin endpoint: the browser only ever
 // loads /api/avatars/{id} (same-origin → CSP stays `'self'`), and the server
 // fetches + caches the upstream image. This is option (a) from the in-code
 // TODO the ticket cites; it keeps the CSP tight and avoids composing the Jira
@@ -381,7 +381,7 @@ type avatarsHandler struct {
 	fetcher *avatarFetcher
 }
 
-// handleAvatar proxies one user's OAuth avatar first-party so it renders under
+// handleAvatar proxies one user's OAuth avatar same-origin so it renders under
 // the app's `img-src 'self'` CSP (TFAC-480).
 //
 // Gate: any authenticated org member (the session wrap + requireOrg). The target

@@ -72,7 +72,7 @@ func jiraTokenKey(host string) string {
 // `account` is the bound display name (the human-recognizable label, the Jira
 // analog of GitHub's @login); `host` is the org's Jira host the credential is
 // keyed under. `connect_available` reflects whether an Atlassian OAuth app
-// resolves for the org (per-org override / deployment first-party) — the gate
+// resolves for the org (per-org override / the deployment app) — the gate
 // for offering the one-click Cloud "Connect" button.
 type jiraIdentityStatusResponse struct {
 	Connected        bool   `json:"connected"`
@@ -184,7 +184,7 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	// connect_available is true exactly when an Atlassian OAuth app resolves
-	// for the org (per-org override or, in hosted, the deployment first-party).
+	// for the org (per-org override or, in multi, the deployment app).
 	// The frontend shows the one-click "Connect" button only then; otherwise it
 	// offers just the paste-a-PAT/token path. The button drives the
 	// authorize/callback flow below (handleJiraConnectStart /
@@ -428,7 +428,7 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 // retained (Jira's user level must act as the user).
 //
 // Available only when an Atlassian OAuth app resolves for the org (per-org
-// override or, hosted, the deployment first-party) — the same connect_available
+// override or, in multi, the deployment app) — the same connect_available
 // gate the status endpoint surfaces. Cloud only: a Data Center org has no
 // OAuth, and the start handler bounces it back to the paste path.
 
@@ -495,7 +495,7 @@ func (s *Server) handleJiraConnectStart(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Resolve the org's Atlassian OAuth app (per-org override → first-party).
+	// Resolve the org's Atlassian OAuth app (per-org override → deployment).
 	// A system read (the caller already authorized orgID); ErrNoAtlassianOAuthApp
 	// is the expected "no app configured" state, not a backend failure.
 	app, _, err := s.jiraOAuthApps.Resolve(r.Context(), orgID)

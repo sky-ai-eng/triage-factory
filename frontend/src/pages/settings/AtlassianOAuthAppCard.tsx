@@ -84,7 +84,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
     if (busy) return
     if (
       !window.confirm(
-        'Remove this Atlassian OAuth app? The one-click Connect option will stop working unless a hosted app covers your workspace.',
+        'Remove this Atlassian OAuth app? The one-click Connect option will stop working unless a deployment app covers your workspace.',
       )
     ) {
       return
@@ -114,7 +114,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
         client ID and secret here. The secret is stored encrypted and never leaves your deployment.
       </p>
 
-      {/* Current state: a per-org override, the hosted default, or nothing. */}
+      {/* Current state: a per-org override, the deployment default, or nothing. */}
       {hasOverride && (
         <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3 text-ui text-ink-2">
           <div className="flex items-center gap-2">
@@ -131,9 +131,10 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
           )}
         </div>
       )}
-      {!hasOverride && status?.using_hosted_default && (
+      {!hasOverride && status?.using_deployment_default && (
         <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3 text-ui text-ink-2">
-          Using the hosted Atlassian app. Add your own below to override it for this workspace.
+          Using this deployment's Atlassian app. Add your own below to override it for this
+          workspace.
         </div>
       )}
 

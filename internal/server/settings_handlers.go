@@ -1380,7 +1380,7 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	// llm_auth_method names where the org's Claude credentials come from, and
 	// it is the one settings field whose legal values depend on the deployment:
 	// "system" means the agent subprocess inherits the host's environment, and
-	// a hosted deployment's environment is one environment shared by every
+	// a multi-mode deployment's environment is one environment shared by every
 	// tenant. Refused there rather than stored-and-ignored, so an admin is told
 	// no instead of being left with a row that reads one way and runs another.
 	//
@@ -1513,7 +1513,7 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 
 // orgSettingsSSHPreflight gates the transition INTO SSH clone mode. Local-mode
 // only — PreflightSSH writes the container's ~/.ssh/known_hosts and probes the
-// operator's ssh-agent, neither of which belongs in a hosted runtime. In multi
+// operator's ssh-agent, neither of which belongs in a multi-mode runtime. In multi
 // mode the ssh write is already rejected above, so the explicit mode gate makes
 // the no-SSH-in-multi guarantee provable at this call site too.
 //

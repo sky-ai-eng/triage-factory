@@ -266,7 +266,7 @@ func TestTeamRename_NonUUIDTeamIs404(t *testing.T) {
 	}
 }
 
-// TestTeamRename_LocalIs404: the rename surface is hosted-only — PATCH 404s in
+// TestTeamRename_LocalIs404: the rename surface is multi-only — PATCH 404s in
 // local mode (N=1 has one team and hides team management).
 func TestTeamRename_LocalIs404(t *testing.T) {
 	r := newTeamRenameRig(t)

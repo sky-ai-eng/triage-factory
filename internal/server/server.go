@@ -144,7 +144,7 @@ type Server struct {
 	// the app the per-user Connect flow runs against.
 	jiraApps db.JiraAppsStore
 	// jiraOAuthApps resolves the Atlassian OAuth app for an org (per-org
-	// override → deployment first-party in hosted; local-supplied BYO else
+	// override → the deployment app in multi; local-supplied BYO else
 	// not-configured). Backs the Jira app settings card's status + the
 	// connect_available signal that the per-user Jira status endpoint returns.
 	// Built in New, so it's never nil — handlers don't guard.
@@ -493,12 +493,12 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// onInstallationTokensInvalid.
 	s.ghTokenCache = ghclient.NewMemoryTokenCache()
 	s.ghResolver = ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, s.ghTokenCache)
-	// Atlassian OAuth app resolver (TFAC-337): per-org override → deployment
-	// first-party (hosted) / local-supplied (local). The first-party app is
-	// read from the deployment env, and only in hosted mode — local has no
-	// first-party default, so FirstPartyOAuthAppFromEnv returns the zero app
+	// Atlassian OAuth app resolver (TFAC-337): per-org override → the
+	// deployment app (multi) / local-supplied (local). The deployment app is
+	// read from the deployment env, and only in multi mode — local has no
+	// deployment default, so DeploymentOAuthAppFromEnv returns the zero app
 	// there and the resolver relies on the org's BYO row.
-	s.jiraOAuthApps = jira.NewOAuthAppResolver(stores.JiraApps, stores.Secrets, jira.FirstPartyOAuthAppFromEnv())
+	s.jiraOAuthApps = jira.NewOAuthAppResolver(stores.JiraApps, stores.Secrets, jira.DeploymentOAuthAppFromEnv())
 	// Cloud OAuth minter + per-user access-token cache. The cache reads the
 	// stored refresh token, mints an access token, and writes the rotated
 	// refresh token back (PutUserSystem) — the structural difference from the
@@ -759,7 +759,7 @@ func (s *Server) routes() {
 	// ≥2 teams in the frontend); it carries the last-acting-team the write
 	// picker seeds from, maintained server-side on each write (no
 	// explicit-set endpoint — it's a recency signal, not a user preference).
-	// POST /api/teams is the org-admin "add team" affordance (hosted-only;
+	// POST /api/teams is the org-admin "add team" affordance (multi-only;
 	// 404 in local).
 	th := &teamsHandler{
 		tx:        s.tx,
@@ -774,7 +774,7 @@ func (s *Server) routes() {
 	// RLS. {team_id} takes the literal "default" in local mode (authz.ResolveTeamID).
 	s.api("GET /api/teams/{team_id}", th.handleTeamGet)
 	// PATCH /api/teams/{team_id} renames a team / edits its description
-	// (hosted-only; 404 in local). Gated team-admin-or-org-admin; a plain
+	// (multi-only; 404 in local). Gated team-admin-or-org-admin; a plain
 	// member 403s, a cross-org team_id 404s (VerifyTeamInOrg).
 	s.apiMutating("PATCH /api/teams/{team_id}", th.handleTeamUpdate)
 	// Team archive/restore lifecycle (TFAC-448), org-admin only, multi-mode.
@@ -924,7 +924,7 @@ func (s *Server) routes() {
 	// the handler — the data is core, only the cross-team lens is Enterprise.
 	s.apiMutating("POST /api/orgs/{org_id}/usage/access-log/list", uh.handleUsageAccessLog)
 
-	// Avatar proxy (TFAC-480): serves a user's OAuth-captured avatar first-party
+	// Avatar proxy (TFAC-480): serves a user's OAuth-captured avatar same-origin
 	// so it renders under the app's tight `img-src 'self'` CSP instead of being
 	// blocked as a cross-origin image. Any authenticated org member; the target
 	// user_id is resolved under the caller's claims, so RLS scopes it to the
@@ -1412,10 +1412,10 @@ func (s *Server) routes() {
 	// per-user "Connect Jira" flow runs against (the flow itself is a later
 	// ticket). The Jira sibling of the GitHub App import card: an admin enters
 	// a bring-your-own Atlassian app (client_id + client_secret), which becomes
-	// the per-org override over the deployment first-party app (hosted) / is the
-	// app itself (local). status is any-member (the card renders for everyone);
-	// import + delete are admin (gated inside the handler). The two mutators are
-	// JSON fetches from the SPA, so they ride apiMutating (CSRF).
+	// the per-org override over the deployment app (multi) / is the app itself
+	// (local). status is any-member (the card renders for everyone); import +
+	// delete are admin (gated inside the handler). The two mutators are JSON
+	// fetches from the SPA, so they ride apiMutating (CSRF).
 	s.api("GET /api/orgs/{org_id}/jira/app", s.handleJiraAppStatus)
 	s.apiMutating("POST /api/orgs/{org_id}/jira/app", s.handleJiraAppImport)
 	s.apiMutating("DELETE /api/orgs/{org_id}/jira/app", s.handleJiraAppDelete)

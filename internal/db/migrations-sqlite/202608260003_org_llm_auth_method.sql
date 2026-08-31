@@ -25,9 +25,9 @@
 -- The DEFAULT is the local answer, and it is what makes the choice a default
 -- rather than a demand: local mode is single-user and zero-configuration, so a
 -- fresh install arrives already on the host's credentials and never has to
--- pick. Postgres/multi defaults to 'byok' instead — a hosted deployment has no
--- host credentials to lend (the operator's environment would be shared by
--- every tenant, and credential resolution refuses outright there), so 'byok'
+-- pick. Postgres/multi defaults to 'byok' instead — a multi-mode deployment
+-- has no host credentials to lend (the operator's environment would be shared
+-- by every tenant, and credential resolution refuses outright there), so 'byok'
 -- is not a default so much as the only value multi has.
 ALTER TABLE org_settings
     ADD COLUMN llm_auth_method TEXT NOT NULL DEFAULT 'system';

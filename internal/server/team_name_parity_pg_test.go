@@ -13,7 +13,7 @@ import (
 )
 
 // createReq builds a POST /api/teams as callerID, seeded with the same claims +
-// active org the rename rig's req does. Both team-name doors are hosted-only
+// active org the rename rig's req does. Both team-name doors are multi-only
 // (404 in local), so the parity assertion lives on the Postgres rig.
 func (r *teamRenameRig) createReq(callerID string, body any) *http.Request {
 	b, _ := json.Marshal(body)

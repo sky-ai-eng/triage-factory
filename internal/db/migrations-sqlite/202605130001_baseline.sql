@@ -349,9 +349,9 @@ CREATE TABLE org_settings (
     jira_base_url           TEXT,
     jira_poll_interval      TEXT NOT NULL DEFAULT '5m0s',
     -- Vault refs (not raw secrets) for Anthropic / Bedrock credentials.
-    -- NULL means "use deployment default" on hosted SaaS or "not configured
-    -- yet" on self-host. Self-host single-tenant deployments typically leave
-    -- both NULL and supply ANTHROPIC_API_KEY via env to the spawner.
+    -- NULL means "use the deployment default" or "not configured yet" on a
+    -- self-host. Self-host single-tenant deployments typically leave both NULL
+    -- and supply ANTHROPIC_API_KEY via env to the spawner.
     anthropic_api_key_ref   TEXT,
     bedrock_credentials_ref TEXT,
     -- Max model tier the org permits teams/users to pick. NULL means no cap

@@ -17,8 +17,8 @@ func jiraAppPath() string {
 	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira/app"
 }
 
-// TestJiraApp_LocalMode_StatusEmpty: with no per-org app and no first-party
-// (local has none), status reports app:null and connect_available=false.
+// TestJiraApp_LocalMode_StatusEmpty: with no per-org app and no deployment
+// app (local has none), status reports app:null and connect_available=false.
 func TestJiraApp_LocalMode_StatusEmpty(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -38,8 +38,8 @@ func TestJiraApp_LocalMode_StatusEmpty(t *testing.T) {
 	if out.ConnectAvailable {
 		t.Error("connect_available=true, want false with no app configured")
 	}
-	if out.UsingHostedDefault {
-		t.Error("using_hosted_default=true, want false in local mode")
+	if out.UsingDeploymentDefault {
+		t.Error("using_deployment_default=true, want false in local mode")
 	}
 }
 
@@ -137,7 +137,7 @@ func TestJiraApp_LocalMode_DeleteClearsConnectAvailable(t *testing.T) {
 // TestJiraApp_DeadOverrideRowNotShownAsConfigured: a per-org row whose secret
 // has gone missing must NOT read as a configured override — the status summary
 // is driven by what the resolver actually resolves, not the raw row. In local
-// mode (no first-party), the dead row resolves to nothing: app:null,
+// mode (no deployment app), the dead row resolves to nothing: app:null,
 // connect_available=false.
 func TestJiraApp_DeadOverrideRowNotShownAsConfigured(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -169,10 +169,10 @@ func TestJiraApp_DeadOverrideRowNotShownAsConfigured(t *testing.T) {
 		t.Errorf("app=%+v, want nil (dead override must not read as configured)", out.App)
 	}
 	if out.ConnectAvailable {
-		t.Error("connect_available=true, want false (dead override, no first-party in local)")
+		t.Error("connect_available=true, want false (dead override, no deployment app in local)")
 	}
-	if out.UsingHostedDefault {
-		t.Error("using_hosted_default=true, want false (no first-party in local)")
+	if out.UsingDeploymentDefault {
+		t.Error("using_deployment_default=true, want false (no deployment app in local)")
 	}
 }
 

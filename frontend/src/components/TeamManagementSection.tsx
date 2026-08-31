@@ -13,8 +13,8 @@ import ArchiveTeamModal from './ArchiveTeamModal'
 
 // TeamManagementSection is the org-admin "add team" affordance.
 // It lives in Settings (org admin), NOT in the scope dropdowns — it's how
-// a solo hosted user grows past one team, at which point the count-gated
-// selectors begin rendering. Hosted-only: the caller gates it on
+// a solo multi-mode user grows past one team, at which point the count-gated
+// selectors begin rendering. Multi-only: the caller gates it on
 // multi-mode + org-admin, so it never renders in local mode.
 //
 // Deliberately minimal — just enough to exercise the ≥2-team path

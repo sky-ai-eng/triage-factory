@@ -186,7 +186,7 @@ func TestModelForSettings_Refusals(t *testing.T) {
 	})
 
 	// Multi resolves to BYOK whatever the row says, so the same org is refused
-	// there even having chosen the host's credentials — a hosted deployment has
+	// there even having chosen the host's credentials — a multi-mode deployment has
 	// none to lend.
 	t.Run("multi refuses a stored host credential source", func(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeMulti)

@@ -209,7 +209,7 @@ type TeamsStore interface {
 
 	// Create inserts a new team in the org and enrolls the creator as a
 	// team admin in the same transaction, returning the new row. The
-	// org-admin "add team" affordance is how a solo hosted user grows
+	// org-admin "add team" affordance is how a solo multi-mode user grows
 	// past one team (at which point the count-gated selectors begin
 	// rendering). Postgres routes through the app pool: teams_insert RLS
 	// gates org-admin, and the sibling memberships insert is permitted

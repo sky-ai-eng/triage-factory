@@ -9,11 +9,11 @@ import "time"
 // secret, only the OAuth client credentials.
 //
 // One row per org (org_id is the PK). The row is the per-org OVERRIDE in the
-// credential precedence: an org with no row falls back to the deployment
-// first-party app (hosted) or has no app at all (local — where the BYO app IS
-// this row). The client_secret never lives in this table — ClientSecretRef is
-// a pointer into the secret store (Vault in multi mode, the OS keychain in
-// local), the same shape OrgGitHubApp.ClientSecretRef uses.
+// credential precedence: an org with no row falls back to the deployment app
+// (multi) or has no app at all (local — where the BYO app IS this row). The
+// client_secret never lives in this table — ClientSecretRef is a pointer into
+// the secret store (Vault in multi mode, the OS keychain in local), the same
+// shape OrgGitHubApp.ClientSecretRef uses.
 type OrgJiraApp struct {
 	OrgID              string
 	ClientID           string

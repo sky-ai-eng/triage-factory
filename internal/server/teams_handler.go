@@ -243,7 +243,7 @@ func validateTeamName(v *httpx.Validation, name string) string {
 // PATCH /api/teams/{team_id}  body: { "name"?: "...", "description"?: "..." }
 func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		// Hosted-only: local mode has exactly one team by construction and
+		// Multi-only: local mode has exactly one team by construction and
 		// hides the whole team-management surface. A route that doesn't
 		// exist in this deployment mode is a 404, not a 501.
 		notFound(w, "route")
@@ -355,7 +355,7 @@ func (th *teamsHandler) requireTeamAdminOrOrgAdmin(w http.ResponseWriter, r *htt
 	return true
 }
 
-// handleTeamCreate is the org-admin "add team" affordance — the hosted-
+// handleTeamCreate is the org-admin "add team" affordance — the multi-
 // only path a solo user takes to grow past one team, at which point the
 // count-gated selectors begin rendering. Multi-mode only (local is N=1);
 // 404 in local matches the "feature absent" posture. Gated on org-admin;
@@ -364,7 +364,7 @@ func (th *teamsHandler) requireTeamAdminOrOrgAdmin(w http.ResponseWriter, r *htt
 // POST /api/teams  body: { "name": "<display name>", "slug"?: "<slug>" }
 func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		// Hosted-only: local mode has exactly one team by construction. A
+		// Multi-only: local mode has exactly one team by construction. A
 		// route absent in this mode is a 404, not a 501.
 		notFound(w, "route")
 		return

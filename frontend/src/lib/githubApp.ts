@@ -97,7 +97,7 @@ export interface GitHubAppWebhookHealth {
 export interface GitHubAppStatus {
   app: GitHubAppInfo | null
   installations: GitHubAppInstallation[]
-  using_hosted_default: boolean
+  using_deployment_default: boolean
   // null when there's no App, no deployment identity to compare a hook URL
   // against, or no probe answer yet. Absent means NOT KNOWN — never "fine".
   webhook_health: GitHubAppWebhookHealth | null

@@ -77,7 +77,7 @@ const (
 // given the stored org setting and whether the deployment is multi-mode.
 //
 // Multi-mode is ALWAYS LLMAuthBYOK, independent of the stored value: there are
-// no host credentials for a hosted deployment to lend, because the operator's
+// no host credentials for a multi-mode deployment to lend, because the operator's
 // environment is one environment shared by every tenant. Storing the other
 // value there is refused on the way in, so the disagreement should not arise;
 // resolving it here as well is what makes a row that arrived some other way
@@ -480,7 +480,7 @@ func DefaultOrgSettings() OrgSettings {
 //
 // Multi-mode is ALWAYS "https", independent of the stored value: a GitHub App
 // installation token is an HTTPS bearer credential that cannot be used over
-// SSH at all, and the hosted runtime container has no ssh-agent / key /
+// SSH at all, and the multi-mode runtime container has no ssh-agent / key /
 // known_hosts. The write path refuses an "ssh" value in multi, but a stored one
 // can still reach here — a legacy row, or a row written outside the API — so the
 // read coerces rather than trusting the column.

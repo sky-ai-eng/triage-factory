@@ -22,15 +22,16 @@ export interface JiraAppInfo {
 
 export interface JiraAppStatus {
   // The per-org override, null when the org has none (it uses the deployment
-  // first-party app in hosted, or has no app in local).
+  // app in multi, or has no app in local).
   app: JiraAppInfo | null
-  // True exactly when an app resolves (override OR, in hosted, the deployment
-  // first-party) — the same bit the per-user Jira status endpoint surfaces to
-  // gate the one-click "Connect" button.
+  // True exactly when an app resolves (override OR, in multi, the deployment
+  // app) — the same bit the per-user Jira status endpoint surfaces to gate the
+  // one-click "Connect" button.
   connect_available: boolean
-  // True when an app resolves but via the first-party default (no per-org row)
-  // — so the card can say "using the hosted app" rather than offering nothing.
-  using_hosted_default: boolean
+  // True when an app resolves but via the deployment default (no per-org row)
+  // — so the card can say "using the deployment app" rather than offering
+  // nothing.
+  using_deployment_default: boolean
   // The absolute redirect_uri the app owner must register on their Atlassian
   // OAuth app. Empty when no deployment identity is configured.
   connect_callback_url: string
@@ -87,7 +88,7 @@ export async function importJiraApp(
 
 // deleteJiraApp removes the org's bring-your-own Atlassian OAuth app (the row
 // and its stored client_secret). Idempotent. After this the org falls back to
-// the deployment first-party app (hosted) or has no app (local).
+// the deployment app (multi) or has no app (local).
 //
 // DELETE /api/orgs/{org_id}/jira/app
 export async function deleteJiraApp(orgId: string): Promise<JiraAppStatus> {

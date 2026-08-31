@@ -71,10 +71,10 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 // heavyweight, slow-to-reverse commitment: submitting a domain to the browser
 // preload list hardcodes "HTTPS-only, including every subdomain" into shipped
 // browser binaries for that whole registrable domain. That's the right call for
-// a single hosted SaaS on a domain its operator controls, but a footgun to
+// a single SaaS deployment on a domain its operator controls, but a footgun to
 // default-on in the self-host image, where operators run TF on a subdomain of a
 // larger domain they may not be entitled to commit org-wide. So it's strictly
-// opt-in: the hosted deploy sets TF_HSTS_PRELOAD=true (and submits its domain),
+// opt-in: the SaaS deploy sets TF_HSTS_PRELOAD=true (and submits its domain),
 // self-hosters leave it unset. See TFAC-409 item 4.
 func buildHSTS(deployHTTPS bool) string {
 	if !deployHTTPS {
@@ -110,7 +110,7 @@ func hstsPreloadEnabled() bool {
 //
 // img-src stays `'self' data:` even with avatar rendering live: OAuth-CDN
 // avatars (avatars.githubusercontent.com, the org's Jira host, ...) are served
-// first-party through the /api/avatars/{id} proxy (TFAC-480), so no external
+// same-origin through the /api/avatars/{id} proxy (TFAC-480), so no external
 // host is punched into the policy. See the img-src note below.
 func (s *Server) buildCSP() string {
 	// Each script-src hash is a `'sha256-<base64>'` entry. Joined
@@ -121,7 +121,7 @@ func (s *Server) buildCSP() string {
 		scriptSources = append(scriptSources, fmt.Sprintf("'sha256-%s'", h))
 	}
 
-	// img-src: 'self' covers the favicon, first-party assets, AND user/member
+	// img-src: 'self' covers the favicon, the app's own assets, AND user/member
 	// avatars — those render through the same-origin /api/avatars/{id} proxy
 	// (avatars_handler.go), which fetches + caches the OAuth-CDN image server-
 	// side. `data:` covers base64-embedded SVGs that some libs emit.

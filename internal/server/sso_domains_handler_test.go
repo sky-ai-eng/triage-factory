@@ -7,7 +7,7 @@ import (
 
 // TestSSODomainRoutes_LocalAreNotFound: SSO domain claim/verification is a
 // multi-org concept. In local mode (N=1) every route 404s — the "feature
-// absent" posture matching the invite routes and teams_handler's hosted-only
+// absent" posture matching the invite routes and teams_handler's multi-only
 // create (runmode.ModeLocal → http.NotFound in the shared gate).
 func TestSSODomainRoutes_LocalAreNotFound(t *testing.T) {
 	s := newTestServer(t)

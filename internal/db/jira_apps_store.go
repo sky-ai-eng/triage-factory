@@ -8,11 +8,11 @@ import (
 
 // JiraAppsStore owns the org_jira_apps table — per-org Atlassian OAuth (3LO)
 // app registrations (the BYO-app override / local-supplied app). One row per
-// org (org_id is the PK); orgs using the deployment first-party app have no
-// row. The client_secret is stored in the secret store (Vault in multi mode,
-// the OS keychain in local) via SecretStore; this table holds only the ref
-// name. Mirrors GitHubAppsStore, minus installations (an Atlassian OAuth app
-// has none).
+// org (org_id is the PK); orgs using the deployment app have no row. The
+// client_secret is stored in the secret store (Vault in multi mode, the OS
+// keychain in local) via SecretStore; this table holds only the ref name.
+// Mirrors GitHubAppsStore, minus installations (an Atlassian OAuth app has
+// none).
 //
 // # Pool split (Postgres)
 //
@@ -29,8 +29,8 @@ import (
 // BYO app is written here too (its secret lands in the keychain).
 type JiraAppsStore interface {
 	// GetForOrg returns the org's registered Atlassian OAuth app, or nil when
-	// the org has no per-org override (it uses the deployment first-party app,
-	// hosted, or has none, local). sql.ErrNoRows is folded into the nil return.
+	// the org has no per-org override (it uses the deployment app in multi, or
+	// has none in local). sql.ErrNoRows is folded into the nil return.
 	GetForOrg(ctx context.Context, orgID string) (*domain.OrgJiraApp, error)
 
 	// GetForOrgSystem mirrors GetForOrg but routes through the admin pool with

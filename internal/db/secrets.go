@@ -18,7 +18,7 @@ var ErrSecretStoreUnavailable = errors.New("secret store not available on this r
 //go:generate go run github.com/vektra/mockery/v2 --name=SecretStore --output=./mocks --case=underscore --with-expecter
 
 // SecretStore is the secret bag — GitHub PATs, Jira tokens, any other
-// long-lived credential the hosted product needs to custody. It has
+// long-lived credential the product needs to custody. It has
 // two scopes: per-org (Put/Get/GetSystem/Delete) for tenant-wide
 // credentials, and per-user (PutUser/GetUser/GetUserSystem/DeleteUser)
 // for credentials bound to one (org, user) pair — the Jira "act as

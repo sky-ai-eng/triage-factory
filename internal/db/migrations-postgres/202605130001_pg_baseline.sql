@@ -593,8 +593,8 @@ CREATE TABLE public.org_settings (
     -- Postgres means multi mode, where an SSH clone has nothing to authenticate
     -- with: a GitHub App installation token is an HTTPS bearer credential.
     github_clone_protocol text DEFAULT 'https'::text NOT NULL,
-    -- org_secrets key refs, not raw secrets. NULL = deployment default (hosted)
-    -- or not configured yet (self-host); rotation never touches this row.
+    -- org_secrets key refs, not raw secrets. NULL = the deployment default or
+    -- not configured yet (self-host); rotation never touches this row.
     anthropic_api_key_ref text,
     bedrock_credentials_ref text,
     -- 'system' (host credentials, resolved by the SDK from the environment) or
@@ -3159,7 +3159,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.blueprint_runs  TO tf_app;
 --
 -- Per-org GitHub App registration + installation tracking.
 --
--- Orgs on the deployment-default (hosted) App have NO org_github_apps row. The
+-- Orgs on the deployment-default App have NO org_github_apps row. The
 -- `_ref` columns hold org_secrets key pointers, so App secrets never live in the
 -- relational schema. Installations are 1:N from an org with no pointer back: an
 -- org has at most one App registered at a time, so org_id resolves it.
@@ -3536,7 +3536,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.event_queue TO tf_app;
 
 
 -- Per-org Atlassian OAuth (3LO) app registration for the per-user "Connect
--- Jira" flow; an org with no row falls back to the deployment first-party app.
+-- Jira" flow; an org with no row falls back to the deployment app.
 -- client_secret_ref is an org_secrets key pointer, written via SecretStore.
 
 CREATE TABLE public.org_jira_apps (

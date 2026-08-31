@@ -483,7 +483,7 @@ func TestTeamMembers_CrossOrgTeamIs404(t *testing.T) {
 	}
 }
 
-// TestTeamMembers_LocalMutatorsAre404: the roster WRITES are hosted-only —
+// TestTeamMembers_LocalMutatorsAre404: the roster WRITES are multi-only —
 // every mutator 404s in local mode regardless of identity, because N=1 has
 // nobody to enrol, promote or remove. The list read is deliberately absent
 // from this table: it is the one roster every consumer reads, in both modes,
