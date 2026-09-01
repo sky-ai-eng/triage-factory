@@ -288,6 +288,29 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 		}
 	})
 
+	t.Run("AnOrgTheStoreCannotIdentifyIsRefused", func(t *testing.T) {
+		// One outcome, two routes. Postgres keys orgs by uuid and guards the id
+		// before it reaches a cast that would fail anyway; SQLite keys them by
+		// text, where an id naming nothing simply matches no settings row. What
+		// must not differ by dialect is the answer: an org this method cannot
+		// identify is one it must not reconcile, and it says so rather than
+		// quietly doing nothing.
+		store, _ := mk(t)
+		body := listing(acct{111, "acme"})
+		_, calls := fakeGitHub(t, http.StatusOK, &body)
+
+		// A malformed id and a well-formed one naming no org: the first is what
+		// separates the dialects, the second is what neither can look up.
+		for _, orgID := range []string{"not-a-uuid", "3f2b7c14-0000-4000-8000-000000000000"} {
+			if err := store.RefreshManagedInstallations(ctx, orgID, deployment); err == nil {
+				t.Errorf("RefreshManagedInstallations(%q) succeeded; want a refusal", orgID)
+			}
+		}
+		if got := calls.Load(); got != 0 {
+			t.Errorf("listing fetched %d times for an unidentifiable org; want 0", got)
+		}
+	})
+
 	t.Run("AnUnconfiguredDeploymentAppIsRefused", func(t *testing.T) {
 		// The ordinary state of a deployment whose orgs all bring their own App
 		// — and an outage for one that does not. A managed workspace whose shared

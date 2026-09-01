@@ -507,6 +507,13 @@ func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID
 	// identify is one it must not reconcile. Refused rather than skipped —
 	// unlike the discovering sibling, which is invoked speculatively per poll
 	// cycle, every caller of this one asked for a specific workspace.
+	//
+	// The refusal is what matters, not this guard: org_id is a uuid column, so
+	// without it the settings read below fails on the cast instead, which is the
+	// same outcome wearing a driver's error message. The SQLite twin needs no
+	// equivalent for that reason — its org_id is TEXT, so an id naming nothing
+	// simply matches no settings row and takes the refusal below. Both dialects
+	// answer an unknown org the same way, which the conformance suite pins.
 	if !isValidUUID(orgID) {
 		return fmt.Errorf("refresh managed installations: %q is not an org id", orgID)
 	}

@@ -127,16 +127,14 @@ func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resol
 // is the set GitHub reports, then what each of those installations can reach.
 //
 // Existence comes first for a workspace that owns its App key, and for that
-// workspace it is not optional. It used to be reconciled by pull in
-// LOCAL MODE ONLY — the poller's backfill was gated on it, on the reasoning that
-// webhooks cannot reach a laptop — which left multi mode with no timer-driven
-// convergence at all: the mirror moved only on a delivery, the Settings refresh
-// button, or the cutover preflight. An org whose deliveries never arrive then
-// reports zero installations, the poll cycle reports degraded and skips
-// entirely, and the repository picker blanks. Reconciling existence here, in
-// both modes, is what removes that failure mode, and it costs one extra
-// reconcile against a response the grant pass needs in hand anyway: the same
-// GET /app/installations that reports each installation's repository_selection.
+// workspace it is not optional. Every other thing that moves the mirror is
+// event-shaped — a delivery, the Settings refresh button, the cutover preflight
+// — so without a timer an org whose deliveries do not arrive reports zero
+// installations, at which point the poll cycle reports degraded and skips
+// entirely and the repository picker blanks. This is the timer, in both modes,
+// and the call it spends is one the mirror wants regardless: GET
+// /app/installations is also the only thing that reports each installation's
+// repository_selection.
 //
 // A workspace on the deployment's shared App takes the second half only: with
 // one key serving every workspace, the same call returns other tenants'
