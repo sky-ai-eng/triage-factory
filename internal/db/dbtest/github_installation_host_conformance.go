@@ -164,6 +164,72 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		}
 	})
 
+	t.Run("InstallationOwnerIsHostScoped", func(t *testing.T) {
+		// The uniqueness gate of the bind ceremony, and it asks the same
+		// host-scoped question the column exists for: an id alone names nothing,
+		// because two deployments number installations independently.
+		store, seed := mk(t)
+		owner := seed.User(t)
+		orgA := seed.Org(t, owner)
+
+		if _, err := store.UpsertInstallation(ctx, install(orgA, "456", ghes, "acme")); err != nil {
+			t.Fatalf("UpsertInstallation: %v", err)
+		}
+
+		got, err := store.InstallationOwnerSystem(ctx, ghes, "456")
+		if err != nil {
+			t.Fatalf("InstallationOwnerSystem: %v", err)
+		}
+		if got != orgA {
+			t.Errorf("owner of (%s, 456) = %q; want %q", ghes, got, orgA)
+		}
+
+		// A trailing slash is the same deployment, so it must find the same row
+		// — the lookup normalizes its argument exactly as the write does.
+		if got, err = store.InstallationOwnerSystem(ctx, ghes+"/", "456"); err != nil {
+			t.Fatalf("InstallationOwnerSystem (trailing slash): %v", err)
+		}
+		if got != orgA {
+			t.Errorf("owner of (%s/, 456) = %q; want %q — the host argument must normalize", ghes, got, orgA)
+		}
+
+		// The same number on another deployment is another installation, and
+		// nobody holds it.
+		if got, err = store.InstallationOwnerSystem(ctx, db.DefaultGitHubHost, "456"); err != nil {
+			t.Fatalf("InstallationOwnerSystem (other host): %v", err)
+		}
+		if got != "" {
+			t.Errorf("owner of (%s, 456) = %q; want \"\" — that id is another deployment's",
+				db.DefaultGitHubHost, got)
+		}
+	})
+
+	t.Run("InstallationOwnerIgnoresRemovedAndUnknown", func(t *testing.T) {
+		// An uninstalled installation reaches nothing, so it owns nothing:
+		// re-binding it is an ordinary new bind, not a collision with the
+		// workspace that once had it.
+		store, seed := mk(t)
+		org := seed.Org(t, seed.User(t))
+
+		if got, err := store.InstallationOwnerSystem(ctx, ghes, "999"); err != nil || got != "" {
+			t.Fatalf("InstallationOwnerSystem on an unknown installation = (%q, %v); want (\"\", nil)", got, err)
+		}
+
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghes, "acme")); err != nil {
+			t.Fatalf("UpsertInstallation: %v", err)
+		}
+		if _, err := store.MarkInstallationRemoved(ctx, org, "456"); err != nil {
+			t.Fatalf("MarkInstallationRemoved: %v", err)
+		}
+		got, err := store.InstallationOwnerSystem(ctx, ghes, "456")
+		if err != nil {
+			t.Fatalf("InstallationOwnerSystem: %v", err)
+		}
+		if got != "" {
+			t.Errorf("owner of a removed installation = %q; want \"\"", got)
+		}
+	})
+
 	t.Run("SameInstallationIDOnOneHostIsNotRefusedYet", func(t *testing.T) {
 		// Pins the deferral, not an endorsement. Policy says an installation
 		// belongs to exactly one workspace per host, and this is the write that

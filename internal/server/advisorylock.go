@@ -91,6 +91,8 @@ func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64,
 //	5 — internal/db/postgres/tasks.go             (entity id, xact;
 //	    entityTaskCreationLockSalt)
 //	8 — this file                                 (org id, session)
+//	9 — this file                                 (github host + installation
+//	    id, session; githubInstallationBindLockSalt)
 //	0x53454154 ("SEAT") — internal/db/postgres/auth_events.go (seat period, xact)
 //	0x544f4b4e ("TOKN") — internal/apitokens                  (user:org, xact)
 //
@@ -99,4 +101,18 @@ func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64,
 // doesn't go hunting for its salt.
 const (
 	githubAppRegRMWLockSalt int64 = 8
+
+	// githubInstallationBindLockSalt namespaces the managed bind's
+	// installation-identity lock. It is a SECOND keyspace rather than a second
+	// key in the org one because the two answer different questions — "one
+	// credential transition per workspace at a time" and "one workspace may
+	// claim this installation" — and because an org id and a host+installation
+	// string sharing a keyspace would be two unrelated domains colliding by
+	// accident.
+	//
+	// Lock ORDER, where both are held: the org lock first, then this one. That
+	// order is total because nothing takes this lock without already holding
+	// the org lock, and nothing waits on an org lock while holding this one, so
+	// no cycle can form.
+	githubInstallationBindLockSalt int64 = 9
 )

@@ -184,6 +184,32 @@ func (s *gitHubAppsStore) ListInstallationsForOrgSystem(ctx context.Context, org
 	return listInstallations(ctx, s.admin, orgID)
 }
 
+// InstallationOwnerSystem answers the bind ceremony's uniqueness question:
+// does any org already hold this installation on this host? Admin pool, because
+// the question spans orgs and no caller's claims could authorize it.
+//
+// LIMIT 1 is not an arbitrary narrowing. Policy is that a live installation
+// belongs to at most one org, and the schema does not enforce it — there is no
+// UNIQUE (github_host, installation_id) index, so the caller's lock is the only
+// thing holding the invariant. Taking the first row is what makes the refusal
+// fire on a set a bug has already made ambiguous, rather than erroring on it.
+func (s *gitHubAppsStore) InstallationOwnerSystem(ctx context.Context, githubHost, installationID string) (string, error) {
+	var orgID string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT org_id
+		  FROM org_github_app_installations
+		 WHERE github_host = $1 AND installation_id = $2 AND removed_at IS NULL
+		 LIMIT 1
+	`, db.EffectiveGitHubHost(githubHost), installationID).Scan(&orgID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read installation owner: %w", err)
+	}
+	return orgID, nil
+}
+
 // pgGitHubAppInstallationColumns is the canonical projection of an
 // org_github_app_installations row, in the order scanGitHubAppInstallation
 // reads them — everything but removed_at, which the domain type omits (see

@@ -206,12 +206,25 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 			// nodes are filtered out, so only the read permission is needed,
 			// not status delivery.
 			"statuses": "read",
-			// members:read is required for GET /orgs/{org}/teams under an
-			// App installation token — without it the team-mapping import
+			// members:read carries TWO independent jobs, and a scope-
+			// minimization pass that sees only the first will drop the second
+			// without noticing.
+			//
+			// It is required for GET /orgs/{org}/teams under an App
+			// installation token — without it the team-mapping import
 			// (teams/{team_id}/github-groups) and the poller's
 			// deletion-reconcile both 403 and silently see zero teams in
 			// App-only orgs (no PAT fallback). Read-only: TF lists teams,
 			// never edits membership.
+			//
+			// And it is the ONLY organization permission this manifest
+			// requests, which is the whole of what restricts installing this
+			// App on an organization to that organization's owners: GitHub
+			// applies the owners-only rule to an App that asks for
+			// organization permissions, and to no other. Remove it and a repo
+			// admin can install the workspace's App — a guard that lives
+			// nowhere in this codebase, because it is enforced entirely by
+			// GitHub in response to this one line.
 			"members": "read",
 		},
 		"default_events": []string{

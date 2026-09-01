@@ -108,6 +108,34 @@ type GitHubAppsStore interface {
 	// collapses to the same query.
 	ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error)
 
+	// InstallationOwnerSystem reports which org holds installationID on
+	// githubHost as a LIVE installation (removed_at IS NULL), or "" when none
+	// does. It is the uniqueness gate of the bind ceremony: with one App key
+	// serving many workspaces, an installation GitHub reports is not
+	// self-evidently anybody's, and binding one that another workspace already
+	// holds would hand that account's repositories to a second tenant.
+	//
+	// Scoped by host as well as id because an installation id is unique per
+	// GitHub deployment and not universally — a self-host aggregating two GHES
+	// instances can hold the same number twice, meaning two unrelated
+	// installations.
+	//
+	// It returns the org id and nothing else, which is the whole answer a
+	// caller may have: the refusal it feeds must never name the other
+	// workspace. A removed row is not an owner — an uninstalled installation
+	// reaches nothing, and re-binding it is an ordinary new bind.
+	//
+	// This read is a check, not a guarantee. Nothing in the schema stops a
+	// second org writing the same (host, installation_id) between this call and
+	// the caller's write, so a caller enforcing uniqueness has to serialize
+	// itself on the installation's identity — a lock keyed by the ORG cannot,
+	// since the two racers hold different org keys.
+	//
+	// System (claims-free) by construction: the question spans orgs, so no
+	// caller's claims could authorize it. Admin pool in Postgres, like the
+	// installation writes.
+	InstallationOwnerSystem(ctx context.Context, githubHost, installationID string) (string, error)
+
 	// UpsertInstallation mirrors one installation into
 	// org_github_app_installations. Idempotent on the (org_id,
 	// installation_id) composite key; ON CONFLICT it refreshes the

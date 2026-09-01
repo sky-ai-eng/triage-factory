@@ -230,3 +230,33 @@ func (s ReachableCacheState) StaleAt(now time.Time, ttl time.Duration) bool {
 	}
 	return now.Sub(s.ObservedAt) >= ttl
 }
+
+// GitHubPendingBind is one initiated bind ceremony: an admin clicked Connect,
+// TF minted a nonce, and the browser left for GitHub carrying it in a cookie.
+// The row is what the callback consumes to learn WHICH workspace the returning
+// installation belongs to — the redirect from GitHub cannot say, because its
+// installation_id is an unsigned, guessable query parameter GitHub's own
+// documentation says not to trust.
+//
+// It is durable rather than in-process because the pod that serves the Connect
+// click is not necessarily the pod that serves the callback. An in-memory map
+// would work in development and fail intermittently under load, which is the
+// worst failure shape a security control can have.
+//
+// NonceHash is the SHA-256 of the nonce in lowercase hex — never the nonce
+// itself, so a database read yields nothing that can complete a bind. The
+// browser's cookie holds the only copy of the plaintext.
+type GitHubPendingBind struct {
+	NonceHash string
+	OrgID     string
+	// UserID is the admin who started the ceremony. The callback requires the
+	// returning session to be that same person, so a cookie replayed into
+	// somebody else's browser consumes nothing.
+	UserID    string
+	CreatedAt time.Time
+	ExpiresAt time.Time
+	// ConsumedAt is when the callback spent this record, zero while it is
+	// unspent. Consumption is a conditional update rather than a read then a
+	// write, so two concurrent callbacks cannot both find it unspent.
+	ConsumedAt time.Time
+}

@@ -109,7 +109,12 @@ func New(conn *sql.DB) db.Stores {
 		// the one connection. Wired in local mode too — a local install GitHub
 		// can reach runs the same pre-auth receiver.
 		GitHubDeliveries: newGitHubDeliveryStore(conn),
-		JiraApps:         newJiraAppsStore(conn),
+		// GitHubPendingBinds is admin-pool-only in Postgres; SQLite collapses
+		// to the one connection. Nothing writes it in a local install (the bind
+		// ceremony needs a deployment App), but the impl is real so the
+		// conformance suite runs against both dialects.
+		GitHubPendingBinds: newGitHubPendingBindStore(conn),
+		JiraApps:           newJiraAppsStore(conn),
 		// ShippedDefaults is what BootstrapNewOrg/BootstrapNewTeam call.
 		// Phase 3 (handlers) reuses the eventHandlers store built above
 		// instead of duplicating its Seed SQL.

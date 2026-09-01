@@ -3494,6 +3494,60 @@ REVOKE ALL ON public.github_webhook_deliveries FROM PUBLIC;
 REVOKE ALL ON public.github_webhook_deliveries FROM anon, authenticated, service_role;
 
 
+-- The pending-bind record: one row per initiated deployment-App bind ceremony.
+--
+-- When one App key serves many workspaces, the org<->installation mapping has
+-- no source. GitHub's post-install redirect cannot be that source — it is an
+-- unsigned GET whose installation_id is sequential, and GitHub's own
+-- documentation says not to rely on it — so TF asserts the mapping itself, and
+-- this row plus a cookie is what proves the assertion belongs to the workspace
+-- that asked for it. The threat it stops is planting: an attacker completes an
+-- install themselves, then induces a signed-in TF admin to load our callback
+-- with their code and installation id, putting the attacker's repositories into
+-- the victim's workspace.
+--
+-- Durable rather than in-process because the pod that serves the Connect click
+-- need not be the pod that serves the callback. An in-memory map would work in
+-- development and fail intermittently under load.
+--
+-- nonce_hash is the SHA-256 of the nonce in lowercase hex; the plaintext lives
+-- only in the browser's cookie, so reading this table yields nothing that can
+-- complete a bind. It is the primary key because it is also the lookup: the
+-- callback knows the nonce and nothing else, which is why the org and the
+-- initiating user are columns here rather than parameters the callback could
+-- supply for itself.
+--
+-- user_id is a soft reference with no foreign key: the callback compares it
+-- against the returning session's own subject, so an id naming nobody can only
+-- fail the comparison — it is never dereferenced, and a cascade would buy
+-- nothing a fifteen-minute expiry does not.
+--
+-- Admin-pool-only, and forced rather than chosen: the consume reads the row BY
+-- ITS NONCE HASH and learns the org from it, so the org an RLS policy would
+-- gate on is the read's output, not an input. The nonce is the authorization,
+-- exactly as an invite token is on the redeem path; the org-admin check that
+-- authorizes the create lives in the handler, which is the only place it can.
+-- RLS enabled with no policy (deny-by-default) plus REVOKE ALL from PUBLIC and
+-- the app roles.
+CREATE TABLE public.github_pending_binds (
+    nonce_hash  text PRIMARY KEY,
+    org_id      uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
+    user_id     uuid NOT NULL,
+    created_at  timestamptz NOT NULL,
+    expires_at  timestamptz NOT NULL,
+    consumed_at timestamptz
+);
+
+-- Serves the prune, the only query that doesn't go through the primary key.
+CREATE INDEX github_pending_binds_expires_at_idx
+    ON public.github_pending_binds (expires_at);
+
+ALTER TABLE public.github_pending_binds ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.github_pending_binds FROM PUBLIC;
+REVOKE ALL ON public.github_pending_binds FROM anon, authenticated, service_role;
+
+
 --
 -- Durable router event queue (transactional outbox). The in-memory bus drops
 -- events for slow subscribers under burst; the router drains this instead. The

@@ -311,6 +311,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// and github_webhook_deliveries has RLS enabled with no policy at all,
 		// so there is no app-pool caller to wire.
 		GitHubDeliveries: newGitHubDeliveryStore(admin),
+		// GitHubPendingBinds: admin pool only. The consume finds its row by
+		// nonce hash and learns the org from it, so there is no org for an RLS
+		// policy to gate on before the read; github_pending_binds has RLS
+		// enabled with no policy at all, and the nonce is the authorization.
+		GitHubPendingBinds: newGitHubPendingBindStore(admin),
 		// JiraApps: app pool for request-handler reads/writes (RLS-gated);
 		// admin pool for the no-claims read the OAuth-app resolver needs.
 		JiraApps: newJiraAppsStore(app, admin),
