@@ -40,9 +40,10 @@ type GitHubInstallationHostFactory func(t *testing.T) (db.GitHubAppsStore, GitHu
 //     login and unlike the account id;
 //   - the negative space this column exists FOR: two orgs on different GitHub
 //     deployments may hold the same numeric installation_id, because that id is
-//     unique per deployment and not universally.
-//
-// Plus the deferral it also exists for — see the last subtest.
+//     unique per deployment and not universally;
+//   - and the mirror of that, which the column is half the key of: on ONE
+//     deployment, an installation belongs to exactly one workspace, refused by a
+//     unique index over live rows rather than by any caller's filter.
 func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHostFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -230,15 +231,17 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		}
 	})
 
-	t.Run("SameInstallationIDOnOneHostIsNotRefusedYet", func(t *testing.T) {
-		// Pins the deferral, not an endorsement. Policy says an installation
-		// belongs to exactly one workspace per host, and this is the write that
-		// would violate it — but it is unreachable today, because every
-		// workspace owns its own App key and an org's key can neither list nor
-		// mint against another org's installation. The enforcing index ships
-		// with the deployment-level App, paired with a scoped reconcile; when it
-		// does, this subtest is the one that has to be rewritten, which is the
-		// point of having it.
+	t.Run("SameInstallationIDOnOneHostIsRefused", func(t *testing.T) {
+		// One installation belongs to exactly one workspace per host, and the
+		// index enforces it rather than a filter somewhere upstream. The grant is
+		// not divisible, installation.deleted fires once, the rate budget is
+		// shared, and the account owner cannot enumerate who rides their
+		// installation — two workspaces on one installation is not a state
+		// anything downstream can represent.
+		//
+		// The refusal is the whole assertion, but so is what it leaves behind:
+		// the workspace that already held the installation keeps its row exactly
+		// as it was, so a rejected claim costs the incumbent nothing.
 		store, seed := mk(t)
 		owner := seed.User(t)
 		orgA, orgB := seed.Org(t, owner), seed.Org(t, owner)
@@ -246,14 +249,45 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		if _, err := store.UpsertInstallation(ctx, install(orgA, "456", ghes, "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (org A): %v", err)
 		}
-		if _, err := store.UpsertInstallation(ctx, install(orgB, "456", ghes, "acme")); err != nil {
-			t.Fatalf("UpsertInstallation (org B, same host + installation id): %v", err)
+		if _, err := store.UpsertInstallation(ctx, install(orgB, "456", ghes, "other")); err == nil {
+			t.Fatal("UpsertInstallation (org B, same host + installation id) succeeded; want a uniqueness refusal")
 		}
-		if got := only(t, store, orgA).GitHubHost; got != ghes {
-			t.Errorf("org A GitHubHost = %q after org B claimed the same id; want %q", got, ghes)
+
+		gotA := only(t, store, orgA)
+		if gotA.GitHubHost != ghes || gotA.AccountLogin != "acme" {
+			t.Errorf("org A row = (%q, %q) after org B's refused claim; want (%q, %q) — the incumbent is untouched",
+				gotA.GitHubHost, gotA.AccountLogin, ghes, "acme")
 		}
-		if got := only(t, store, orgB).GitHubHost; got != ghes {
-			t.Errorf("org B GitHubHost = %q; want %q", got, ghes)
+		insts, err := store.ListInstallationsForOrgSystem(ctx, orgB)
+		if err != nil {
+			t.Fatalf("ListInstallationsForOrgSystem (org B): %v", err)
+		}
+		if len(insts) != 0 {
+			t.Errorf("org B holds %d installations; want 0 — a refused claim writes nothing", len(insts))
+		}
+	})
+
+	t.Run("RemovedInstallationFreesItsIDOnThatHost", func(t *testing.T) {
+		// The uniqueness index is partial on live rows, and this is what that
+		// buys. An uninstalled installation reaches nothing and therefore holds
+		// nothing, so the id becoming another workspace's is an ordinary bind
+		// rather than a collision — the same answer InstallationOwnerSystem
+		// already gives for a removed row.
+		store, seed := mk(t)
+		owner := seed.User(t)
+		orgA, orgB := seed.Org(t, owner), seed.Org(t, owner)
+
+		if _, err := store.UpsertInstallation(ctx, install(orgA, "456", ghes, "acme")); err != nil {
+			t.Fatalf("UpsertInstallation (org A): %v", err)
+		}
+		if _, err := store.MarkInstallationRemoved(ctx, orgA, "456"); err != nil {
+			t.Fatalf("MarkInstallationRemoved: %v", err)
+		}
+		if _, err := store.UpsertInstallation(ctx, install(orgB, "456", ghes, "other")); err != nil {
+			t.Fatalf("UpsertInstallation (org B, after org A's removal): %v", err)
+		}
+		if got := only(t, store, orgB).AccountLogin; got != "other" {
+			t.Errorf("org B AccountLogin = %q; want %q", got, "other")
 		}
 	})
 }

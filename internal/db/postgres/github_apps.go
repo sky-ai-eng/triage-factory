@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 )
 
 // gitHubAppsStore holds two pools. app is the claims-checked request-handler
@@ -484,6 +485,62 @@ func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgI
 		return err
 	}
 	active, err := s.activeInstallationIDs(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	return db.ReconcileInstallations(insts, active,
+		func(i domain.OrgGitHubAppInstallation) error { _, err := s.UpsertInstallation(ctx, i); return err },
+		func(id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, id); return err },
+	)
+}
+
+// RefreshManagedInstallations reconciles a workspace that rides the DEPLOYMENT
+// App. See the GitHubAppsStore interface doc for the invariant it holds: the
+// managed reconcile refreshes bound rows and creates none.
+//
+// The class and the org's GitHub base URL come off one read, as the sibling's
+// registration + base URL do — same admin pool, same LEFT JOIN onto
+// org_event_sources, so a settings row with no per-source override resolves to
+// the public host rather than dropping the org.
+func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID string, deployment githubapp.DeploymentApp) error {
+	// An id that is not a uuid names no org, and an org this method cannot
+	// identify is one it must not reconcile. Refused rather than skipped —
+	// unlike the discovering sibling, which is invoked speculatively per poll
+	// cycle, every caller of this one asked for a specific workspace.
+	if !isValidUUID(orgID) {
+		return fmt.Errorf("refresh managed installations: %q is not an org id", orgID)
+	}
+	var class, baseURL string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT st.github_credential_class, COALESCE(es.base_url, '')
+		  FROM org_settings st
+		  LEFT JOIN org_event_sources es ON es.org_id = st.org_id AND es.kind = 'github'
+		 WHERE st.org_id = $1
+	`, orgID).Scan(&class, &baseURL)
+	if errors.Is(err, sql.ErrNoRows) {
+		// No settings row is no credential class, which is not the managed one.
+		return fmt.Errorf("refresh managed installations: org %s has no settings row", orgID)
+	}
+	if err != nil {
+		return fmt.Errorf("read org_settings for managed refresh: %w", err)
+	}
+	if domain.GitHubCredentialClass(class) != domain.GitHubCredentialClassManagedApp {
+		return fmt.Errorf("refresh managed installations: org %s is on credential class %q", orgID, class)
+	}
+
+	active, err := s.activeInstallationIDs(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	// Nothing bound is the ordinary state of a workspace that has not completed
+	// a bind, and there is nothing a listing could tell us about it: no row to
+	// refresh, and creating one is the thing this method may never do. Answered
+	// without spending the API call.
+	if len(active) == 0 {
+		return nil
+	}
+
+	insts, err := db.RefreshBoundInstallations(ctx, deployment, orgID, baseURL, active)
 	if err != nil {
 		return err
 	}

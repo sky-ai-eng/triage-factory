@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 )
 
 // GitHubAppsStore owns the org_github_apps table — per-org GitHub App
@@ -33,9 +34,10 @@ import (
 // SetInstallationSuspension and MarkInstallationRemoved each keep their
 // documented no-op-on-absent-row contract: a miss is (nil, nil), not an
 // error, matching GetForOrg's own nil-on-absent shape rather than an
-// ErrNoSuchX sentinel. DeleteForOrg (a delete) and
-// BackfillInstallationsFromAPI (set reconciliation from a provider
-// enumeration) stay exempt, each stated at the method.
+// ErrNoSuchX sentinel. DeleteForOrg (a delete) and the two reconciles
+// (BackfillInstallationsFromAPI / RefreshManagedInstallations — set
+// reconciliation from a provider enumeration) stay exempt, each stated at the
+// method.
 type GitHubAppsStore interface {
 	// GetForOrg returns the org's registered GitHub App, or nil if
 	// the org has no App registration (uses the deployment default
@@ -210,16 +212,24 @@ type GitHubAppsStore interface {
 	// resource of its own. Admin pool in Postgres.
 	MarkInstallationRemoved(ctx context.Context, orgID, installationID string) (*domain.OrgGitHubAppInstallation, error)
 
-	// BackfillInstallationsFromAPI is the reconcile / system-of-record:
-	// it mints an App JWT from the org's App PEM (read via
-	// SecretStore.GetSystem), calls GET {apiBase}/app/installations,
-	// upserts every installation returned, and soft-removes any active
-	// row GitHub no longer reports (so a missed installation.deleted
-	// webhook or an API-only deployment converges). v1 is per-org Apps
-	// only, so every returned installation unambiguously belongs to
-	// orgID. A no-op when the org has no registered App. Runs in all
-	// modes; the invocation (poller cycle + UI refresh) is a separate
-	// concern.
+	// BackfillInstallationsFromAPI is the reconcile / system-of-record for a
+	// workspace that brought its OWN App: it mints an App JWT from the org's
+	// App PEM (read via SecretStore.GetSystem), calls GET
+	// {apiBase}/app/installations, upserts every installation returned, and
+	// soft-removes any active row GitHub no longer reports (so a missed
+	// installation.deleted webhook or an API-only deployment converges). It
+	// DISCOVERS, and may, because the org's own App key is the tenant boundary:
+	// that key lists the installations of that App and no others, so every
+	// installation it returns unambiguously belongs to orgID. A no-op when the
+	// org has no registered App. Runs in all modes; the invocation (poller
+	// cycle + UI refresh) is a separate concern.
+	//
+	// It is therefore structurally not the managed class's reconcile, and needs
+	// no class check to stay out of it: a workspace riding the deployment App
+	// holds no org_github_apps row and can hold none — that table is one row per
+	// org with a UNIQUE app_id, so N orgs cannot each name the one shared App —
+	// so this method finds nothing to mint a JWT from and returns. See
+	// RefreshManagedInstallations for what such a workspace gets instead.
 	//
 	// Reconciles for any REGISTERED App regardless of its active flag: a
 	// staged App (active=false, mid PAT→App switch) must still be able to
@@ -232,6 +242,40 @@ type GitHubAppsStore interface {
 	// set from a provider enumeration, so there is no single row a return
 	// value could name.
 	BackfillInstallationsFromAPI(ctx context.Context, orgID string) error
+
+	// RefreshManagedInstallations is the same reconcile for a workspace on the
+	// DEPLOYMENT App — the one App key that serves many workspaces — and the
+	// difference is the whole point: for the managed class the reconcile
+	// REFRESHES; it never DISCOVERS. It may update rows that already exist and
+	// may never create one. Discovery belongs exclusively to the bind ceremony,
+	// which is the only thing that can assert an installation is this
+	// workspace's.
+	//
+	// Concretely it lists GET {apiBase}/app/installations under the deployment
+	// key, keeps only the installations this org has already bound, and applies
+	// that filtered set: account_login, account_id, the suspension pair and
+	// repository_selection converge on the bound rows, and a bound installation
+	// GitHub no longer reports is soft-removed, cascading to its reachable-repo
+	// rows exactly as MarkInstallationRemoved does. Every other tenant's
+	// installation in that listing is left entirely alone — not written and
+	// removed, never written.
+	//
+	// deployment is a parameter rather than an ambient read because the
+	// deployment App is operator environment config read once at boot and handed
+	// to its consumers; two independent reads are two answers that can disagree.
+	// An unconfigured one (the ordinary state of a local process, and of a
+	// deployment whose orgs all bring their own App) is an error, not a silent
+	// no-op — a managed org whose shared key has gone missing must fail where
+	// someone can see it.
+	//
+	// It refuses an org that is not on the managed class, and that refusal is
+	// load-bearing rather than defensive tidiness: run against a BYO org, this
+	// would diff that org's bound installations against a listing produced by a
+	// key that has never seen them and soft-remove every one.
+	//
+	// Exempt from the returned-row rule for the same reason as the method
+	// above: a whole set reconciled from a provider enumeration names no row.
+	RefreshManagedInstallations(ctx context.Context, orgID string, deployment githubapp.DeploymentApp) error
 }
 
 // ErrGitHubAppExists is returned by CreateForOrg when the org already

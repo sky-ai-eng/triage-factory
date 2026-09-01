@@ -37,28 +37,11 @@ UPDATE org_github_app_installations
                ''),
            'https://github.com');
 
--- What this column deliberately does NOT get is a
--- UNIQUE (github_host, installation_id) index.
---
--- The policy it would enforce is real: an installation belongs to exactly one
--- workspace per host. The grant is not divisible, `installation.deleted` fires
--- once, the rate budget is shared, and the account owner cannot enumerate who
--- rides their installation. What makes it unenforceable-by-index today is
--- structural rather than caution — every workspace owns its own App key, so
--- GET /app/installations under one org's key returns only that org's
--- installations, and an upsert runs only for a delivery HMAC-verified against
--- that org's own webhook secret. No write path exists by which one workspace
--- claims another's installation id, and a row that somehow claimed one would
--- be inert: the claiming org's App key cannot mint a token against an
--- installation it does not own, so GitHub answers 404.
---
--- The index becomes load-bearing the moment a deployment-level App exists,
--- because one PEM then lists every tenant's installations. It has to land
--- there PAIRED with scoping that reconcile to installations the org actually
--- bound — an advisory lock is not a substitute, because the failure to prevent
--- is a background job attributing every tenant's installation to one org, and
--- a lock orders writes rather than validating them.
--- TODO(TFAC-802): ship the uniqueness index together with a scoped reconcile.
+-- The column is also half of the uniqueness key an installation is held under —
+-- UNIQUE (github_host, installation_id) on live rows, which a later migration
+-- adds. The host has to be in that key: GitHub numbers installations per
+-- deployment rather than universally, so keying on installation_id alone would
+-- refuse a self-host's second GHES instance its legitimate reuse of a number.
 
 -- +goose Down
 SELECT 'down not supported';

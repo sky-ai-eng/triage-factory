@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 )
 
 // gitHubAppsStore is the SQLite (local-mode) impl. One connection — no RLS,
@@ -397,6 +398,55 @@ func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgI
 		return err
 	}
 	active, err := s.activeInstallationIDs(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	return db.ReconcileInstallations(insts, active,
+		func(i domain.OrgGitHubAppInstallation) error { _, err := s.UpsertInstallation(ctx, i); return err },
+		func(id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, id); return err },
+	)
+}
+
+// RefreshManagedInstallations reconciles a workspace that rides the DEPLOYMENT
+// App. See the GitHubAppsStore interface doc for the invariant it holds: the
+// managed reconcile refreshes bound rows and creates none.
+//
+// Local mode never reaches this — a distributed binary ships no shared App key,
+// so no local org carries the managed class — but the impl is real rather than
+// a stub, because the dual-dialect conformance suite is what pins the invariant
+// and a stub would pin nothing.
+func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID string, deployment githubapp.DeploymentApp) error {
+	var class, baseURL string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT st.github_credential_class, COALESCE(es.base_url, '')
+		  FROM org_settings st
+		  LEFT JOIN org_event_sources es ON es.org_id = st.org_id AND es.kind = 'github'
+		 WHERE st.org_id = ?
+	`, orgID).Scan(&class, &baseURL)
+	if errors.Is(err, sql.ErrNoRows) {
+		// No settings row is no credential class, which is not the managed one.
+		return fmt.Errorf("refresh managed installations: org %s has no settings row", orgID)
+	}
+	if err != nil {
+		return fmt.Errorf("read org_settings for managed refresh: %w", err)
+	}
+	if domain.GitHubCredentialClass(class) != domain.GitHubCredentialClassManagedApp {
+		return fmt.Errorf("refresh managed installations: org %s is on credential class %q", orgID, class)
+	}
+
+	active, err := s.activeInstallationIDs(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	// Nothing bound is the ordinary state of a workspace that has not completed
+	// a bind, and there is nothing a listing could tell us about it: no row to
+	// refresh, and creating one is the thing this method may never do. Answered
+	// without spending the API call.
+	if len(active) == 0 {
+		return nil
+	}
+
+	insts, err := db.RefreshBoundInstallations(ctx, deployment, orgID, baseURL, active)
 	if err != nil {
 		return err
 	}

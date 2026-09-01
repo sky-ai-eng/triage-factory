@@ -627,11 +627,14 @@ func (s *Server) writeManagedBinding(ctx context.Context, orgID, userID, ghWeb s
 	// read owner == "" and both write, landing one installation in two tenants.
 	// The lock has to be keyed by the thing being claimed.
 	//
-	// TODO(TFAC-929): this is the only enforcement. org_github_app_installations
-	// deliberately carries no UNIQUE (github_host, installation_id) index yet —
-	// it ships paired with the scoped reconcile — so there is no database
-	// backstop under this, and a claim path that does not take this lock is
-	// unguarded rather than merely slower.
+	// The lock is not the only enforcement, and it is still the one that
+	// matters here: org_github_app_installations carries a UNIQUE
+	// (github_host, installation_id) index over live rows, so a claim path that
+	// skips this lock is refused by the database rather than admitted. What the
+	// lock buys is the DIFFERENCE between a refusal and a constraint violation —
+	// the loser of a race reads the winner's row and returns the refusal below,
+	// instead of taking a write error out of a transaction and rendering it as
+	// an internal failure to a user who did nothing wrong.
 	//
 	// The key is the id then the host, joined by a space. Order matters: the id
 	// is decimal digits and can hold no space, so the first space is
