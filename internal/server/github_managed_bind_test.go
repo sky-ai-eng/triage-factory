@@ -692,6 +692,15 @@ func TestManagedBind_ConsumedRecord(t *testing.T) {
 	// back button, or a copied URL.
 	out := rig.callback(t, cookie, defaultCallbackQuery(4242))
 	assertOutcome(t, out, "link_expired")
+
+	// And the replay must not have touched what the first bind wrote: still
+	// one installation, still the same class.
+	if n := rig.installationCount(t); n != 1 {
+		t.Errorf("%d installation rows after replaying a spent cookie, want the 1 the first bind wrote", n)
+	}
+	if class := rig.credentialClass(t); class != string(domain.GitHubCredentialClassManagedApp) {
+		t.Errorf("credential class = %q after a replay, want it unchanged at managed_app", class)
+	}
 }
 
 func TestManagedBind_UnknownNonce(t *testing.T) {
@@ -874,6 +883,14 @@ func TestManagedBind_OrgAlreadyHoldsAPAT(t *testing.T) {
 		seedPAT(t, rig)
 
 		assertOutcome(t, rig.connect(t), "credential_pat_in_use")
+		rig.assertNothingBound(t)
+		var n int
+		if err := rig.h.AdminDB.QueryRow(`SELECT count(*) FROM github_pending_binds`).Scan(&n); err != nil {
+			t.Fatalf("count pending binds: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("%d pending-bind records written by a refused Connect, want 0", n)
+		}
 	})
 
 	t.Run("authoritative_at_write", func(t *testing.T) {
@@ -885,6 +902,60 @@ func TestManagedBind_OrgAlreadyHoldsAPAT(t *testing.T) {
 		assertOutcome(t, out, "credential_pat_in_use")
 		rig.assertNothingBound(t)
 	})
+}
+
+// TestManagedBind_BearerTokenCannotComplete pins the substitute for a check
+// this route structurally cannot make.
+//
+// withSession treats a Bearer API token as the cookie's peer: any Authorization
+// header sends the request down that branch, so the identity the handler reads
+// would be the TOKEN's owner. Every other org-admin route defends the token's
+// sealed org with tokenScopeAllows against the {org_id} in its path — and this
+// route has no org in its path, by construction, so there is nothing for that
+// gate to attach to.
+//
+// The case that makes it concrete: one person administers two workspaces,
+// starts a ceremony for THIS one in a browser, and completes it on a request
+// that also carries a token sealed to the OTHER. Identity would resolve off the
+// token while the cookie decides the org — a credential bound outside the scope
+// its token was minted for.
+func TestManagedBind_BearerTokenCannotComplete(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+	cookie := rig.ceremony(t)
+
+	// The same person also administers a second workspace and holds a LIVE
+	// token sealed to it. Both halves matter: a bogus header would be refused
+	// by the middleware and would prove nothing about this route.
+	otherOrg, _ := rig.seedOrg(rig.userID, "second-org-"+uuid.NewString()[:8])
+	_, plaintext := rig.mintToken(rig.userID, otherOrg, "stray-header")
+
+	req := httptest.NewRequest("GET", ManagedBindCallbackPath+"?"+defaultCallbackQuery(4242), nil)
+	req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: rig.sid})
+	req.AddCookie(cookie)
+	// A proxy or tool stamping a stray Authorization header is all it takes:
+	// any such header sends withSession down the token branch, and from there
+	// the identity the handler reads is the token's.
+	req.Header.Set("Authorization", "Bearer "+plaintext)
+	rec := httptest.NewRecorder()
+	rig.srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusFound {
+		t.Fatal("a token-authenticated request completed the bind")
+	}
+	rig.assertNothingBound(t)
+
+	// And the ceremony survives: nothing was proven, so nothing was spent, and
+	// the admin can finish in the browser they started in.
+	var consumed sql.NullTime
+	if err := rig.h.AdminDB.QueryRow(
+		`SELECT consumed_at FROM github_pending_binds WHERE org_id = $1`, rig.orgID.String(),
+	).Scan(&consumed); err != nil {
+		t.Fatalf("read pending bind: %v", err)
+	}
+	if consumed.Valid {
+		t.Error("a token-authenticated callback spent the pending-bind record")
+	}
 }
 
 // --- Idempotence and concurrency -------------------------------------------
@@ -1112,6 +1183,7 @@ func TestManagedBind_RefusalSetIsClosedAndDistinct(t *testing.T) {
 		refuseNoOAuthSetting,
 		refuseStaleCeremony,
 		refuseNoInstallation,
+		refuseSessionRequired,
 		refuseNotWorkspaceAdmin,
 		refuseIdentityUnproven,
 		refuseInstallationUnreadable,

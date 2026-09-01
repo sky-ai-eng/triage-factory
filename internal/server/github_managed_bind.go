@@ -158,6 +158,15 @@ var (
 			"Start again from Workspace Settings.",
 	}
 
+	// An API token tried to complete a ceremony. See the gate for why this
+	// leg takes a session specifically.
+	refuseSessionRequired = bindRefusal{
+		code:   "session_required",
+		status: http.StatusUnauthorized,
+		message: "Finish connecting GitHub from the browser you started in, signed in to Triage Factory. " +
+			"An API token can't complete this step.",
+	}
+
 	// The TF-side authorization re-check at write time. The record was written
 	// by an admin; the role is read again here because minutes have passed.
 	refuseNotWorkspaceAdmin = bindRefusal{
@@ -392,6 +401,35 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 	// Cleared before anything else, so a stale cookie can never be replayed —
 	// including down every path that refuses below.
 	http.SetCookie(w, s.managedBindCookie(r, "", -1))
+
+	// A SESSION, specifically, and this is the substitute for a check this
+	// route structurally cannot make.
+	//
+	// withSession treats a Bearer API token as the cookie's peer, not its
+	// fallback: any Authorization header sends the request down that branch and
+	// it is decided there, so claims.Subject below would be the TOKEN's owner.
+	// Every other org-admin route defends the token's sealed org with
+	// tokenScopeAllows against the {org_id} in its path — and this route has no
+	// org in its path to check, by construction. Its org comes from a record the
+	// caller does not name. Without this gate a user who administers two
+	// workspaces could start a ceremony for one in a browser and complete it on
+	// a request that also carried a token sealed to the OTHER, binding a
+	// credential outside the scope that token was minted for.
+	//
+	// Requiring a session is the honest fix rather than re-deriving the scope
+	// check, because every proof this leg consumes is browser state: the cookie
+	// is set on a navigation and read on a navigation, and the `code` reaches us
+	// only because GitHub redirected a browser. A token holder cannot have
+	// started this ceremony, so there is nothing for one to legitimately finish.
+	// Same shape as invite-accept and org-create, which read the session for the
+	// same reason.
+	//
+	// Checked BEFORE the record is consumed: nothing has been proven yet, so a
+	// stray header on a proxied request must not spend the admin's ceremony.
+	if SessionFrom(r.Context()) == nil {
+		s.renderBindOutcome(w, "", refuseSessionRequired)
+		return
+	}
 
 	record, err := s.githubPendingBinds.ConsumeSystem(r.Context(), hashBindNonce(nonce), timeNow().UTC())
 	if err != nil {

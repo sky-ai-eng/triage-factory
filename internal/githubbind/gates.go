@@ -48,6 +48,19 @@ import (
 // late, and the caller is a browser waiting on a redirect.
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
+// maxInstallationPages bounds the association walk. The timeout above bounds
+// one request; nothing bounded the LOOP, so a host that answers every page with
+// another rel="next" — a misconfigured GHES, a proxy rewriting Link headers —
+// would keep a browser waiting indefinitely, fifteen seconds at a time.
+//
+// It is a liveness guard and not a business limit, which is why it is set where
+// no real answer can reach it: GitHub serves 100 installations per page, so this
+// is fifty thousand installations for ONE user. Exceeding it is not a large
+// account, it is a host that is not paginating. Hitting it refuses, like every
+// other thing this package cannot determine — a truncated listing must never
+// read as "not associated".
+const maxInstallationPages = 500
+
 var (
 	// ErrNotAssociated is the association gate's definitive no: GitHub
 	// answered, and the installation is not one this user can see. On a
@@ -105,7 +118,11 @@ type Actor struct {
 func Associated(ctx context.Context, baseURL, token string, installationID int64) error {
 	apiBase := ghbase.APIBase(baseURL)
 	next := apiBase + "/user/installations?per_page=100"
-	for next != "" {
+	for pages := 0; next != ""; pages++ {
+		if pages >= maxInstallationPages {
+			return fmt.Errorf("%w: the installations listing did not end within %d pages",
+				ErrUndetermined, maxInstallationPages)
+		}
 		body, link, err := get(ctx, next, token)
 		if err != nil {
 			return err
@@ -196,10 +213,20 @@ func orgAdmin(ctx context.Context, baseURL, token, org, username string) error {
 	}
 	switch membership.Role {
 	case "admin":
-		if membership.State != "active" {
+		// The role is right; the membership still has to be live. State gets
+		// the same treatment as the role — a value this build can rank decides,
+		// and anything else is undetermined. An absent or empty state in
+		// particular is not evidence of anything, so reporting it as "you are
+		// not an admin" would be a verdict nobody reached.
+		switch membership.State {
+		case "active":
+			return nil
+		case "pending":
 			return ErrNotAdmin
+		default:
+			return fmt.Errorf("%w: unrecognised organization membership state %q",
+				ErrUndetermined, membership.State)
 		}
-		return nil
 	case "member", "billing_manager":
 		return ErrNotAdmin
 	default:
@@ -254,7 +281,8 @@ func get(ctx context.Context, endpoint, token string) (body []byte, link string,
 //
 // A mismatch is an error rather than a quiet stop, because a listing that
 // silently truncates would turn "your token is associated with this
-// installation" into "it is not".
+// installation" into "it is not". A walk that never ends is refused the same
+// way, by the page cap at the top of this file.
 func nextPage(apiBase, link string) (string, error) {
 	next := nextPageURL(link)
 	if next == "" {

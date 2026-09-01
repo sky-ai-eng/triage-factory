@@ -88,6 +88,32 @@ func TestAssociated(t *testing.T) {
 		}
 	})
 
+	t.Run("EndlessPaginationRefuses", func(t *testing.T) {
+		// A host that answers every page with another rel="next" — a
+		// misconfigured GHES, a proxy rewriting Link headers — must not keep a
+		// browser waiting indefinitely. The per-request timeout does not bound
+		// the loop; the page cap does.
+		var (
+			base   string
+			served int
+		)
+		base = fakeGitHub(t, func(w http.ResponseWriter, _ *http.Request) {
+			served++
+			w.Header().Set("Link", `<`+base+`/user/installations?page=next>; rel="next"`)
+			fmt.Fprint(w, `{"installations":[{"id":11}]}`)
+		})
+		err := Associated(ctx, base, "ghu_test", 42)
+		if !errors.Is(err, ErrUndetermined) {
+			t.Errorf("Associated = %v, want ErrUndetermined", err)
+		}
+		if errors.Is(err, ErrNotAssociated) {
+			t.Error("a listing that never ended must not read as a definitive no")
+		}
+		if served > maxInstallationPages {
+			t.Errorf("served %d pages, want no more than the cap of %d", served, maxInstallationPages)
+		}
+	})
+
 	t.Run("TransportFailureIsUndetermined", func(t *testing.T) {
 		// A GitHub that never answers is not evidence of anything.
 		err := Associated(ctx, "http://127.0.0.1:1", "ghu_test", 42)
@@ -170,6 +196,27 @@ func TestAuthority_OrganizationTarget(t *testing.T) {
 		base := membership(t, http.StatusOK, `{"state":"pending","role":"admin"}`)
 		if err := Authority(ctx, base, "ghu_test", target, actor); !errors.Is(err, ErrNotAdmin) {
 			t.Errorf("Authority = %v, want ErrNotAdmin", err)
+		}
+	})
+
+	t.Run("MissingStateIsUndetermined", func(t *testing.T) {
+		// An absent state is not evidence that the caller is not an admin. It
+		// fails safe either way, but the copy differs — "try again" rather than
+		// "you're not an admin of acme" — so the classification has to be right.
+		base := membership(t, http.StatusOK, `{"role":"admin"}`)
+		err := Authority(ctx, base, "ghu_test", target, actor)
+		if !errors.Is(err, ErrUndetermined) {
+			t.Errorf("Authority = %v, want ErrUndetermined", err)
+		}
+		if errors.Is(err, ErrNotAdmin) {
+			t.Error("a missing membership state must not read as a definitive no")
+		}
+	})
+
+	t.Run("UnknownStateIsUndetermined", func(t *testing.T) {
+		base := membership(t, http.StatusOK, `{"state":"suspended","role":"admin"}`)
+		if err := Authority(ctx, base, "ghu_test", target, actor); !errors.Is(err, ErrUndetermined) {
+			t.Errorf("Authority = %v, want ErrUndetermined", err)
 		}
 	})
 
