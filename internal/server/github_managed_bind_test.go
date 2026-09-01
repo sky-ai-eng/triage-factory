@@ -719,25 +719,58 @@ func TestManagedBind_UnknownNonce(t *testing.T) {
 	}
 }
 
+// TestManagedBind_SessionIsNotTheInitiator covers a browser carrying somebody
+// else's still-live ceremony cookie — a shared machine, since the cookie is
+// HttpOnly, SameSite=Lax and path-scoped and so is not reachable cross-site.
+// The cookie proves a browser; the record proves the person.
 func TestManagedBind_SessionIsNotTheInitiator(t *testing.T) {
-	gh := newFakeGitHub()
-	rig := newBindRig(t, gh)
-	cookie := rig.ceremony(t)
-
-	// A second admin of the same workspace, arriving with the first one's
-	// cookie. The cookie proves a browser; the record proves the person.
-	other := rig.seedUser()
-	if _, err := rig.h.AdminDB.Exec(
-		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'admin')`,
-		other, rig.orgID.String()); err != nil {
-		t.Fatalf("insert org_membership: %v", err)
+	// signIn re-points the rig's session at another user and returns the rig.
+	signIn := func(t *testing.T, rig *bindRig, user uuid.UUID) {
+		t.Helper()
+		resp, _ := rig.driveCallback(user)
+		rig.sid = rig.sidFromResp(resp)
 	}
-	resp, _ := rig.driveCallback(other)
-	rig.sid = rig.sidFromResp(resp)
 
-	out := rig.callback(t, cookie, defaultCallbackQuery(4242))
-	assertOutcome(t, out, "link_expired")
-	rig.assertNothingBound(t)
+	// Being an admin of the same workspace is not enough: the record names a
+	// PERSON, and a colleague who did not start this ceremony did not start it.
+	t.Run("another_admin_of_the_same_workspace", func(t *testing.T) {
+		rig := newBindRig(t, newFakeGitHub())
+		cookie := rig.ceremony(t)
+
+		other := rig.seedUser()
+		if _, err := rig.h.AdminDB.Exec(
+			`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'admin')`,
+			other, rig.orgID.String()); err != nil {
+			t.Fatalf("insert org_membership: %v", err)
+		}
+		signIn(t, rig, other)
+
+		out := rig.callback(t, cookie, defaultCallbackQuery(4242))
+		assertOutcome(t, out, "link_expired")
+		rig.assertNothingBound(t)
+	})
+
+	// The disclosure case: a signed-in user with no relationship to the
+	// ceremony's workspace at all. The refusal must not name it — a back-link
+	// into its settings would hand out an org id they never asked for, which is
+	// the same thing the bound-elsewhere refusal is careful never to do.
+	t.Run("an_unrelated_user_is_told_nothing_about_the_workspace", func(t *testing.T) {
+		rig := newBindRig(t, newFakeGitHub())
+		cookie := rig.ceremony(t)
+
+		// Their own workspace, so they have a session; no membership in the
+		// one whose ceremony the cookie belongs to.
+		outsider := rig.seedUser()
+		rig.seedOrg(outsider, "outsider-org-"+uuid.NewString()[:8])
+		signIn(t, rig, outsider)
+
+		out := rig.callback(t, cookie, defaultCallbackQuery(4242))
+		assertOutcome(t, out, "link_expired")
+		rig.assertNothingBound(t)
+		if body := out.Body.String(); strings.Contains(body, rig.orgID.String()) {
+			t.Errorf("the refusal names the ceremony's workspace to an unrelated user: %s", body)
+		}
+	})
 }
 
 func TestManagedBind_RoleRevokedMidCeremony(t *testing.T) {
@@ -940,8 +973,11 @@ func TestManagedBind_BearerTokenCannotComplete(t *testing.T) {
 	rec := httptest.NewRecorder()
 	rig.srv.mux.ServeHTTP(rec, req)
 
-	if rec.Code == http.StatusFound {
-		t.Fatal("a token-authenticated request completed the bind")
+	// The specific refusal, not merely "not a redirect": an unrelated 500 would
+	// also fail to bind, and would also pass a test that only checked that.
+	assertOutcome(t, rec, "session_required")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d body=%s, want 401", rec.Code, rec.Body.String())
 	}
 	rig.assertNothingBound(t)
 

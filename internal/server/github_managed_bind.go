@@ -449,7 +449,16 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 	// still hold it now rather than when they clicked.
 	claims := httpx.ClaimsFrom(r.Context())
 	if claims == nil || claims.Subject != record.UserID {
-		s.renderBindOutcome(w, record.OrgID, refuseStaleCeremony)
+		// The one refusal below that renders with NO org, and the difference is
+		// the point. Every other arm here is answering the person who started
+		// the ceremony, so a back-link into their own workspace's settings is
+		// both useful and something they already know. This viewer is a
+		// different signed-in user holding a colleague's still-live cookie — a
+		// shared machine — and has proven no relationship to the record's
+		// workspace at all. Naming it in a back-link would hand out an org id
+		// they never asked for, which is the disclosure the bound-elsewhere
+		// refusal is careful to avoid two arms down.
+		s.renderBindOutcome(w, "", refuseStaleCeremony)
 		return
 	}
 	userID := claims.Subject
