@@ -141,8 +141,8 @@ func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resol
 // A workspace on the deployment's shared App takes the second half only: with
 // one key serving every workspace, the same call returns other tenants'
 // installations, so which of them belong here is a fact the bind asserts and a
-// refresh may never invent. It refreshes what the org has already bound, and
-// creates nothing.
+// refresh may never invent. The grant half then runs over what that workspace
+// has already bound, and creates nothing.
 //
 // Per-installation failures do not abort the pass — one account's expired
 // credential must not stop another account's grant from refreshing — but the
@@ -183,15 +183,27 @@ func (r *Reconciler) RunOrg(ctx context.Context, orgID string) error {
 			return nil
 		}
 	}
-	// A managed workspace takes neither of those steps, and skipping them is the
-	// point rather than an optimization. It holds no org_github_apps row and can
-	// hold none — that table is one row per org with a UNIQUE app_id, so N orgs
-	// cannot each name the one shared App — so the registration read would answer
-	// nil and the gate above would exit having written nothing. And the existence
-	// reconcile DISCOVERS: with one key serving every workspace, GET
-	// /app/installations returns other tenants' installations, and which of them
-	// belong here is a fact only the bind asserts. So a managed refresh may update
-	// what it already believes and may never create it.
+	// A managed workspace takes neither of those steps, and the two skips are not
+	// the same decision.
+	//
+	// Skipping the DISCOVERY is the point rather than an optimization: with one
+	// key serving every workspace, GET /app/installations returns other tenants'
+	// installations, and which of them belong here is a fact only the bind
+	// asserts. (The registration read would answer nil regardless — such a
+	// workspace holds no org_github_apps row and can hold none, that table being
+	// one row per org with a UNIQUE app_id, so N orgs cannot each name the one
+	// shared App.)
+	//
+	// Skipping the REFRESH is not the point, and it leaves a managed workspace's
+	// installation set converging on webhook deliveries alone — which GitHub
+	// never retries, and which for an account rename do not exist at all. A
+	// scoped refresh that may safely run now exists
+	// (GitHubAppsStore.RefreshManagedInstallations); what it still needs is a
+	// caller shaped for one shared key, since a listing per org per cycle would
+	// spend one rate budget N times over.
+	// TODO(TFAC-935): refresh the managed installation set from one
+	// deployment-wide listing per cycle, fanned out to the orgs that bound each
+	// installation.
 
 	// An org on the PAT tier has no grant to mirror at all: its reach is the
 	// account enumeration the reachable cache owns, keyed under its own class.
