@@ -540,6 +540,9 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "org already has a GitHub App registered; remove it first"})
 		return
 	}
+	// TODO(TFAC-937): a managed_app org has no App row and passes this gate,
+	// registering its own App beside live deployment-App installation rows.
+	// Refuse it, naming the disconnect as the way out, once that verb exists.
 
 	// Resolve the conversion host through the resolver (settings → github_url
 	// secret → github.com), not the org_settings column alone, so a GHES /

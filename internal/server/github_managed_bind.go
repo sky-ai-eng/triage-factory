@@ -781,6 +781,11 @@ func (s *Server) deploymentAppIdentity(ctx context.Context, orgID string) (ghWeb
 	if err != nil {
 		return "", identity, nil, fmt.Errorf("resolve github base for org %s: %w", orgID, err)
 	}
+	// TODO(TFAC-936): the deployment App lives on one GitHub and nothing here
+	// knows which, so a workspace pointed elsewhere is preflighted against the
+	// wrong GitHub and refused with a message about the App rather than about
+	// the host. Once TF_DEFAULT_GITHUB_HOST exists, refuse a mismatched
+	// workspace before any preflight, naming both hosts.
 	minter, merr := s.deploymentApp.Minter(ghbase.APIBase(ghWeb))
 	if merr != nil {
 		githubAppLog.Warn("managed bind: deployment app minter unavailable", "org", orgID, "error", merr)

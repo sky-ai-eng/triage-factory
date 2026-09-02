@@ -87,9 +87,13 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	// resolve to a WRITE: an org whose credential lives somewhere this build
 	// can't see would silently acquire a PAT and be recorded as a PAT org.
 	//
-	// Only the unknown arm needs saying. A byo_app org is caught by the App-row
-	// gate below with its own, more useful message, and a pat org is exactly who
-	// this endpoint is for.
+	// A byo_app org is caught by the App-row gate below with its own, more
+	// useful message, and a pat org is exactly who this endpoint is for.
+	//
+	// TODO(TFAC-937): a managed_app org passes both gates — known class, no App
+	// row — and so acquires a PAT and flips to pat while its bound installation
+	// rows stay live. Refuse it here, naming the disconnect as the way out, once
+	// that verb exists.
 	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)

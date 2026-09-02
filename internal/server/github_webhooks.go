@@ -60,25 +60,8 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	eventName := r.Header.Get("X-GitHub-Event")
-	if eventName == "" {
-		badRequest(w, "missing X-GitHub-Event header")
-		return
-	}
-	sigHeader := r.Header.Get("X-Hub-Signature-256")
-	if sigHeader == "" {
-		// No signature to check against — treat as unauthenticated.
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBody+1))
-	if err != nil {
-		badRequest(w, "could not read request body")
-		return
-	}
-	if len(body) > maxWebhookBody {
-		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+	eventName, sigHeader, body, ok := readWebhookDelivery(w, r)
+	if !ok {
 		return
 	}
 
@@ -89,11 +72,13 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	// org with nothing to verify against resolves to "", which is answered
 	// below exactly as a bad signature is.
 	//
-	// TODO(TFAC-802): those reads still happen BEFORE verification. Per-org
-	// webhook URLs force the order — the secret is reachable only through the
-	// org, so org → secret → verify is the only one available. The
-	// shared-App receiver inverts it, resolving a deployment-level secret
-	// before any org is known.
+	// Those reads happen BEFORE verification, and the per-org URL is what
+	// forces the order: the secret is reachable only through the org, so
+	// org → secret → verify is the only order available here. The cache and
+	// the limiter bound what an unauthenticated caller can spend on it. The
+	// deployment receiver (handleDeploymentGitHubWebhook) has the other order
+	// — its one secret is in hand before any org is, so nothing there reads a
+	// store until the signature has passed.
 	secret, err := s.webhookSecretFor(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "github-webhook", err)
@@ -113,7 +98,61 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Signature verified past this point.
+	d, ok := parseVerifiedDelivery(w, r, eventName, body)
+	if !ok {
+		return
+	}
+	s.applyWebhookDelivery(w, r, orgID, eventName, d)
+}
 
+// readWebhookDelivery performs the checks both receivers run before either
+// has a secret in hand: the event name, the presence of a signature header, and
+// a bounded read of the body. Every refusal here is about the request's shape
+// and depends on nothing behind the route, so it is the same answer on every
+// attempt and touches no store. ok=false means a reply has been written.
+func readWebhookDelivery(w http.ResponseWriter, r *http.Request) (eventName, sigHeader string, body []byte, ok bool) {
+	eventName = r.Header.Get("X-GitHub-Event")
+	if eventName == "" {
+		badRequest(w, "missing X-GitHub-Event header")
+		return "", "", nil, false
+	}
+	sigHeader = r.Header.Get("X-Hub-Signature-256")
+	if sigHeader == "" {
+		// No signature to check against — treat as unauthenticated.
+		w.WriteHeader(http.StatusUnauthorized)
+		return "", "", nil, false
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBody+1))
+	if err != nil {
+		badRequest(w, "could not read request body")
+		return "", "", nil, false
+	}
+	if len(body) > maxWebhookBody {
+		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+		return "", "", nil, false
+	}
+	return eventName, sigHeader, body, true
+}
+
+// verifiedDelivery is what a delivery is reduced to between the signature
+// check and the dedup gate: its GUID, the parsed payload when it is an
+// installation event, and the installation id that keys the gate — "" for a
+// delivery naming no installation.
+type verifiedDelivery struct {
+	deliveryID     string
+	install        *installationWebhook
+	installationID string
+}
+
+// parseVerifiedDelivery runs the structural checks a VERIFIED delivery has to
+// pass before anything is recorded about it: the delivery GUID, and for an
+// installation event the payload itself. Both are properties of the delivery
+// alone, so a failure here is a 4xx that repeats on every attempt — which is
+// what makes it safe to run ahead of the dedup gate and unsafe to run behind
+// it (see applyWebhookDelivery). No store is read. ok=false means a reply has
+// been written.
+func parseVerifiedDelivery(w http.ResponseWriter, r *http.Request, eventName string, body []byte) (verifiedDelivery, bool) {
 	// Dedup gates ahead of every side effect — the mirror write and the bus
 	// publish alike. GitHub never auto-retries a failed delivery, but it
 	// redelivers on demand (the Redeliver button; POST
@@ -127,7 +166,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		// promise for that delivery — refused as structurally bad, like a
 		// delivery naming no event.
 		badRequest(w, "missing X-GitHub-Delivery header")
-		return
+		return verifiedDelivery{}, false
 	}
 
 	// Structural validation of the payload runs BEFORE the gate, so a delivery
@@ -141,7 +180,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		var perr error
 		if install, perr = parseInstallationWebhook(body); perr != nil {
 			badRequest(w, perr.Error())
-			return
+			return verifiedDelivery{}, false
 		}
 	}
 
@@ -154,8 +193,17 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	} else {
 		installationID = deliveryInstallationID(body)
 	}
+	return verifiedDelivery{deliveryID: deliveryID, install: install, installationID: installationID}, true
+}
 
-	fresh, err := s.githubDeliveries.MarkDeliveredSystem(r.Context(), installationID, deliveryID)
+// applyWebhookDelivery is the tail both receivers share once the tenant is
+// known: the dedup gate, then the installation-lifecycle write or the bus
+// publish, under orgID. It is the first thing on either route that writes,
+// which is why the gate is its first move — a delivery that reaches here has
+// been verified and structurally validated, and everything it does from here
+// is a side effect the gate has to precede.
+func (s *Server) applyWebhookDelivery(w http.ResponseWriter, r *http.Request, orgID, eventName string, d verifiedDelivery) {
+	fresh, err := s.githubDeliveries.MarkDeliveredSystem(r.Context(), d.installationID, d.deliveryID)
 	if err != nil {
 		internalError(w, "github-webhook", err)
 		return
@@ -167,17 +215,17 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		// absorb. Debug, not warn — an operator replaying a delivery is
 		// ordinary, not a fault.
 		githubAppLog.Debug("dropping duplicate github webhook delivery",
-			"org", orgID, "event", eventName, "delivery", deliveryID)
+			"org", orgID, "event", eventName, "delivery", d.deliveryID)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
-	if install != nil {
-		s.applyInstallationEvent(w, r, orgID, deliveryID, *install)
+	if d.install != nil {
+		s.applyInstallationEvent(w, r, orgID, d.deliveryID, *d.install)
 		return
 	}
 
-	s.publishWebhookEvent(orgID, eventName, deliveryID)
+	s.publishWebhookEvent(orgID, eventName, d.deliveryID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
