@@ -98,13 +98,11 @@ func (s *Server) handleDeploymentGitHubWebhook(w http.ResponseWriter, r *http.Re
 	// The first store read on this route, and it happens only for a delivery
 	// GitHub signed. Live rows only: a removed installation reaches nothing, so
 	// a delivery for one is as unbound as a delivery for an installation the
-	// mirror has never seen.
-	//
-	// TODO(TFAC-937): this routes on the row, not the org's credential class.
-	// Nothing removes a workspace's bound rows when it leaves managed_app, and
-	// the PAT / BYO doors do not refuse a managed workspace, so a workspace that
-	// bound a PAT keeps receiving the deployment App's deliveries here until the
-	// disconnect verb and the door guards exist.
+	// mirror has never seen. It routes on the row and never on the org's
+	// credential class, and that is safe because the two cannot disagree: the
+	// disconnect verb soft-removes the rows in the same motion it resets the
+	// class, and every other credential door refuses a managed workspace that
+	// still holds a live row.
 	orgID, err := s.githubApps.InstallationOwnerSystem(r.Context(), host, d.installationID)
 	if err != nil {
 		internalError(w, "github-webhook", err)

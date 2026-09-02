@@ -168,6 +168,12 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	case path == "/api/v3/user":
 		fmt.Fprintf(w, `{"id":%d,"login":%q}`, f.actorID, f.actorLogin)
 
+	// The PAT bind's identity capture reads the token owner's verified primary
+	// email after the whoami. Only the door-guard tests reach it, by binding a
+	// PAT against the deployment's GitHub.
+	case path == "/api/v3/user/emails":
+		fmt.Fprintf(w, `[{"email":"%s@example.test","primary":true,"verified":true}]`, f.actorLogin)
+
 	case path == "/api/v3/user/installations":
 		ids := make([]string, 0, len(f.userInstallations))
 		for _, id := range f.userInstallations {

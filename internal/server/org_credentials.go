@@ -88,12 +88,11 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	// can't see would silently acquire a PAT and be recorded as a PAT org.
 	//
 	// A byo_app org is caught by the App-row gate below with its own, more
-	// useful message, and a pat org is exactly who this endpoint is for.
-	//
-	// TODO(TFAC-937): a managed_app org passes both gates — known class, no App
-	// row — and so acquires a PAT and flips to pat while its bound installation
-	// rows stay live. Refuse it here, naming the disconnect as the way out, once
-	// that verb exists.
+	// useful message, and a pat org is exactly who this endpoint is for. A
+	// managed_app org passes both of those — known class, no App row — which is
+	// why the managed guard follows: binding a PAT would flip the class while
+	// its bound installation rows stayed live, and the deployment App's
+	// deliveries would keep routing to a workspace that says it has no App.
 	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)
@@ -101,6 +100,9 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		internalError(w, "github-access", err)
+		return
+	}
+	if s.refuseManagedInTheWay(w, ctx, orgID) {
 		return
 	}
 
@@ -154,10 +156,10 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	// The authoritative gates: BOTH re-read inside the critical section, because
+	// The authoritative gates: ALL re-read inside the critical section, because
 	// the advisory checks above raced everything that happened during validation.
 	// The class first — it decides whether the App-row question is even the right
-	// one to be asking — then the XOR gate itself.
+	// one to be asking — then the managed guard, then the XOR gate itself.
 	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)
@@ -165,6 +167,9 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		internalError(w, "github-access", err)
+		return
+	}
+	if s.refuseManagedInTheWay(w, ctx, orgID) {
 		return
 	}
 	if app, err := s.githubApps.GetForOrgSystem(ctx, orgID); err != nil {

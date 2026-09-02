@@ -303,9 +303,13 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "org already has a GitHub App registered; remove it first"})
 		return
 	}
-	// TODO(TFAC-937): a managed_app org has no App row and passes this gate,
-	// importing its own App beside live deployment-App installation rows.
-	// Refuse it, naming the disconnect as the way out, once that verb exists.
+	// A managed_app org has no App row and passes the gate above; the managed
+	// guard is what stops it importing its own App beside live deployment-App
+	// installation rows. Advisory here, like the slot check; authoritative
+	// under the lock below.
+	if s.refuseManagedInTheWay(w, ctx, orgID) {
+		return
+	}
 
 	// Resolve the org's GitHub base URL through the resolver so the validation
 	// calls below hit the right host. BaseURLFor applies the same precedence the
@@ -453,6 +457,14 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+
+	// The managed guard's authoritative evaluation, now that nothing can bind a
+	// managed installation between it and the write. The App-row half of the
+	// one-slot rule needs no re-read: CreateForOrg's primary key refuses a
+	// second registration by itself (db.ErrGitHubAppExists below).
+	if s.refuseManagedInTheWay(w, ctx, orgID) {
+		return
+	}
 
 	// Persist exactly as the manifest callback does, including the staging rule:
 	// an org PAT still live ⇒ active=false (staged, the PAT stays live until a
