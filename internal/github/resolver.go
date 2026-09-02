@@ -446,7 +446,7 @@ func (r *resolver) ClientForRepoWithIdentity(ctx context.Context, orgID, owner, 
 // default — pairing a real (possibly GHES) PAT with the deployment default
 // would route a tenant credential to the wrong server. Only when both
 // sources are definitively readable AND empty do we treat the org as on the
-// github.com.
+// deployment default.
 func (r *resolver) githubBaseFor(ctx context.Context, orgID string) (string, error) {
 	set, setErr := r.orgs.GetSettingsSystem(ctx, orgID)
 	return r.baseFrom(ctx, orgID, set, setErr)
