@@ -101,7 +101,8 @@ func TestGitHubWebhook_InstallationCreated_StampsHost(t *testing.T) {
 }
 
 // TestGitHubWebhook_InstallationCreated_DefaultsToPublicHost is the same path
-// for the common org: no base URL configured means github.com, so the row says
+// for the common org: no base URL configured means the deployment's default
+// GitHub — github.com with the variable unset, as here — so the row says
 // github.com rather than nothing at all.
 func TestGitHubWebhook_InstallationCreated_DefaultsToPublicHost(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)

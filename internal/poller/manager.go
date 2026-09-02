@@ -214,14 +214,19 @@ func (m *Manager) reviewerResolver(ctx context.Context, orgID, username string, 
 	if username != "" {
 		return tracker.NewLocalReviewerResolver(username, userTeams)
 	}
-	host := ""
+	// The deployment's default GitHub is the floor, not "": an empty host is
+	// not a key any identity row was ever written under, so a reverse lookup
+	// on it matches nothing and every review request routes to nobody. The
+	// settings read only narrows it to the org's own host.
+	host := db.EffectiveGitHubHost("")
 	if m.orgs != nil {
 		if orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID); err != nil {
-			githubLog.Warn("read settings for reviewer resolver failed; falling back to github.com host", "org", orgID, "error", err)
+			githubLog.Warn("read settings for reviewer resolver failed; falling back to the deployment's default GitHub host",
+				"org", orgID, "host", host, "error", err)
 		} else {
-			// Resolve to the effective host (empty → the deployment default) so the
-			// reverse identity lookup matches rows captured under the
-			// canonical host (e.g. the OAuth login-claim's literal github.com).
+			// Resolve to the effective host (empty → the deployment default) so
+			// the reverse identity lookup matches rows captured under the
+			// canonical host.
 			host = db.EffectiveGitHubHost(orgSet.GitHubBaseURL)
 		}
 	}

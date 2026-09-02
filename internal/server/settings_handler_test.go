@@ -478,9 +478,9 @@ func patchTeamSettingsOK(t *testing.T, s *Server, teamID string, body any) map[s
 
 // TestOrgSettingsPatch_BlankGitHubURLWithApp_409 closes the settings-route half
 // of the hazard TestGitHubPATDelete_StagedApp_KeepsHost covers for the PAT
-// unbind: githubBaseFor falls org_settings → github_url secret → github.com, so
-// blanking the column while an App is registered silently sends a GHES org's
-// App to github.com. The config route refuses instead of skipping, because here
+// unbind: githubBaseFor falls org_settings → github_url secret → the deployment
+// default, so blanking the column while an App is registered silently sends a
+// GHES org's App to a host it is not on. The config route refuses instead of skipping, because here
 // the clear is the request itself, not a side effect of one.
 func TestOrgSettingsPatch_BlankGitHubURLWithApp_409(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
