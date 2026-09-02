@@ -303,6 +303,9 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "org already has a GitHub App registered; remove it first"})
 		return
 	}
+	// TODO(TFAC-937): a managed_app org has no App row and passes this gate,
+	// importing its own App beside live deployment-App installation rows.
+	// Refuse it, naming the disconnect as the way out, once that verb exists.
 
 	// Resolve the org's GitHub base URL through the resolver so the validation
 	// calls below hit the right host. BaseURLFor applies the same precedence the

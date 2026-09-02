@@ -100,6 +100,12 @@ func (s *Server) handleDeploymentGitHubWebhook(w http.ResponseWriter, r *http.Re
 	// GitHub signed. Live rows only: a removed installation reaches nothing, so
 	// a delivery for one is as unbound as a delivery for an installation the
 	// mirror has never seen.
+	//
+	// TODO(TFAC-937): this routes on the row, not the org's credential class.
+	// Nothing removes a workspace's bound rows when it leaves managed_app, and
+	// the PAT / BYO doors do not refuse a managed workspace, so a workspace that
+	// bound a PAT keeps receiving the deployment App's deliveries here until the
+	// disconnect verb and the door guards exist.
 	orgID, err := s.githubApps.InstallationOwnerSystem(r.Context(), host, d.installationID)
 	if err != nil {
 		internalError(w, "github-webhook", err)
@@ -134,6 +140,11 @@ func (s *Server) handleDeploymentGitHubWebhook(w http.ResponseWriter, r *http.Re
 // treats that as unresolvable rather than defaulting to github.com — a
 // delivery that cannot say where it came from is not matched to a row on the
 // strength of an assumption.
+//
+// TODO(TFAC-936): the deployment has no declared GitHub host yet, which is the
+// only reason the host is read off the payload. Once TF_DEFAULT_GITHUB_HOST
+// exists the lookup keys on it, and this function and the caller's no-host arm
+// go away.
 func deliveryGitHubHost(body []byte) (string, bool) {
 	var envelope struct {
 		Sender struct {
