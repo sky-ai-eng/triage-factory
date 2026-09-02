@@ -554,7 +554,7 @@ func (s *Server) completeManagedBind(r *http.Request, orgID, userID string) (ref
 	}
 
 	installationID := callbackInstallationID(r)
-	if installationID <= 0 {
+	if installationID == 0 {
 		return &refuseNoInstallation, "", nil
 	}
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
@@ -631,11 +631,13 @@ func (s *Server) completeManagedBind(r *http.Request, orgID, userID string) (ref
 
 // callbackInstallationID reads the installation_id GitHub's redirect carries:
 // the caller's own unsigned claim, which every gate in the ceremony exists to
-// check rather than trust. 0 when absent or malformed, so a caller can log the
-// value without first deciding whether it was well-formed.
+// check rather than trust. It answers a positive id or 0 — absent, malformed,
+// zero and negative all collapse to 0, because none of them names an
+// installation — so a caller can log the value without first deciding whether
+// it was well-formed, and test it with one comparison.
 func callbackInstallationID(r *http.Request) int64 {
 	id, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("installation_id")), 10, 64)
-	if err != nil || id < 0 {
+	if err != nil || id <= 0 {
 		return 0
 	}
 	return id
