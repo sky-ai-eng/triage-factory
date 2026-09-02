@@ -91,7 +91,7 @@ func resolveGitHubHost(orgBase string) (string, bool) {
 // same canonical host, for callers that hold only an orgID. It is the fetching
 // sibling of resolveGitHubHost and lands on the identical string for any base
 // URL that resolveGitHubHost accepts — db.EffectiveGitHubHost applies the same
-// two rules (trim trailing slashes; an unset setting is the public host), and
+// two rules (trim trailing slashes; an unset setting is the deployment default), and
 // is what the poller and the routing subscribers already key on.
 //
 // It does NOT re-validate the base URL the way resolveGitHubHost does. That

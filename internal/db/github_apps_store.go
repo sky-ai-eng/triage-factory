@@ -138,6 +138,26 @@ type GitHubAppsStore interface {
 	// installation writes.
 	InstallationOwnerSystem(ctx context.Context, githubHost, installationID string) (string, error)
 
+	// ListManagedInstallationsOffHostSystem returns every LIVE installation
+	// row (removed_at IS NULL) held by an org in the managed_app class whose
+	// github_host is not githubHost (normalized as every host key is), ordered
+	// by org then installation id. Empty when every managed row is on that
+	// host, which is the only healthy state.
+	//
+	// It exists for one reader: the boot warning that names the rows the
+	// deployment App cannot reach. The App is registered on the deployment's
+	// default GitHub, and the static webhook route and the bind ceremony key
+	// on that host alone — so a managed row under any other spelling (a
+	// different GitHub, a case difference, a path segment, a bind from before
+	// the default was set) is bound on paper and unreachable in practice, and
+	// nothing migrates it. BYO rows are outside the question: a workspace with
+	// its own App keys its rows under its own configured host and is reached
+	// through its own webhook URL, so a BYO row off the default is ordinary.
+	//
+	// System (claims-free) by construction: the question spans orgs. Admin
+	// pool in Postgres.
+	ListManagedInstallationsOffHostSystem(ctx context.Context, githubHost string) ([]domain.OrgGitHubAppInstallation, error)
+
 	// UpsertInstallation mirrors one installation into
 	// org_github_app_installations. Idempotent on the (org_id,
 	// installation_id) composite key; ON CONFLICT it refreshes the
@@ -159,7 +179,7 @@ type GitHubAppsStore interface {
 	// (EffectiveGitHubHost): both writers resolve it from the org's
 	// github_base_url, which is the only thing it can be, so the value they
 	// carry is always current and an empty one means "the org configured no
-	// base URL" — the public host. That fold is what keeps the NOT NULL column
+	// base URL" — the deployment default. That fold is what keeps the NOT NULL column
 	// free of empty strings no matter which writer built the struct.
 	//
 	// The suspension fields are overwritten unconditionally, like the login
@@ -279,8 +299,8 @@ type GitHubAppsStore interface {
 
 	// RefreshAllManagedInstallations is the cadence pass for the managed class:
 	// the same refresh as RefreshManagedInstallations, for EVERY managed
-	// workspace at once, from one listing per GitHub host rather than one per
-	// org. Under a shared key the listing is the same whoever asks, so the
+	// workspace at once, from one listing of the deployment's GitHub rather
+	// than one per org. Under a shared key the listing is the same whoever asks, so the
 	// per-org shape spends one shared rate budget N times for N identical
 	// answers; this reads every managed workspace's bound set in one query,
 	// lists once, and fans the answer out to the orgs that bound each
@@ -290,7 +310,10 @@ type GitHubAppsStore interface {
 	// converge — account login and id, the suspension pair, repository_selection
 	// — and a bound installation GitHub no longer reports is soft-removed with
 	// its reachable-repo cascade; an installation no workspace bound is never
-	// written; a failed listing changes nothing. A workspace on any other class
+	// written; a failed listing changes nothing; a managed workspace whose
+	// base URL resolves to a GitHub other than the deployment's is skipped
+	// with its rows untouched and the mismatch carried to the returned error
+	// (db.ErrManagedWorkspaceOnOtherGitHub). A workspace on any other class
 	// is not in the read at all, so nothing here can touch a BYO org's rows.
 	//
 	// Two scopes, two methods, and the split is deliberate: the sibling's

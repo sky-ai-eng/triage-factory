@@ -352,7 +352,7 @@ func (s *Server) handleGitHubAppInstallURL(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Resolve the install deep-link host through the resolver (settings →
-	// github_url secret → github.com) so a GHES / local-mode org whose host lives
+	// github_url secret → the deployment default) so a GHES / local-mode org whose host lives
 	// only in the credential bundle links to the right host instead of github.com.
 	ghBase, err := s.ghResolver.BaseURLFor(r.Context(), orgID)
 	if err != nil {

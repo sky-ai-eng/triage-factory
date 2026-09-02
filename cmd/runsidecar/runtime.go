@@ -377,9 +377,9 @@ func ghChannelWanted(req sidecarproto.StartProxiesBody) bool {
 // githubUpstreams derives this run's two GitHub hosts from the sealed bundle:
 // the web base the git proxy forwards to, and the REST mount the API proxy and
 // the gh injector prepend. A bundle with no GitHub half (a Jira-only org) — or
-// one whose org never configured a base — answers github.com / api.github.com,
-// which is what an org on the public host has anyway. Neither is ever empty, so
-// no lane below carries a default of its own.
+// one whose org never configured a base — answers the deployment default's web
+// base and API mount, which is what an org with no base URL resolves to anyway.
+// Neither is ever empty, so no lane below carries a default of its own.
 func githubUpstreams(b *credbundle.Bundle) (git, api string) {
 	base := ""
 	if b.GitHub != nil {

@@ -334,8 +334,9 @@ func TestGitHubPATDelete_Idempotent(t *testing.T) {
 
 // TestGitHubPATDelete_StagedApp_KeepsHost: a staged App coexists with a live
 // PAT during a PAT→App switch, and it resolves against the SAME host. Clearing
-// the host here would send a GHES org's App to github.com without an error —
-// the resolver falls org_settings → github_url secret → github.com, and this
+// the host here would send a GHES org's App to the deployment default without
+// an error — the resolver falls org_settings → github_url secret → the
+// deployment default, and this
 // disconnect clears the first two. So with any App registration present the
 // unbind takes the token only.
 func TestGitHubPATDelete_StagedApp_KeepsHost(t *testing.T) {

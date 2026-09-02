@@ -64,7 +64,8 @@ type SubmitInput struct {
 	// host, a GHEC data-residency host) for the review's deep link. Called ONLY
 	// after the submit lands — the human path resolves it on a detached context
 	// so a client disconnect mid-submit can't silently downgrade the stamped
-	// link to github.com. Nil (or a "" return) yields the public host.
+	// link to the deployment default. Nil (or a "" return) yields the
+	// deployment default.
 	WebBase func() string
 }
 

@@ -18,7 +18,8 @@ import (
 // compared against anything and is dead weight.
 //
 // The three classes below are the ones that actually differ in shape: the
-// public host (where an unset setting has to land), a *.ghe.com data-residency
+// deployment default (where an unset setting has to land; github.com with the
+// variable unset), a *.ghe.com data-residency
 // tenant (a real host that is not github.com and is not a path mount), and a
 // GHES base carrying a path — the case a bare-origin derivation silently
 // truncates into a different host.
@@ -56,7 +57,7 @@ func TestGitHubHostNormalizationAgrees(t *testing.T) {
 
 // TestOrgGitHubHost_ResolvesFromSettings covers the fetching sibling: a caller
 // holding only an orgID lands on the same string, and an org that configured no
-// base URL resolves to the public host rather than to "".
+// base URL resolves to the deployment default rather than to "".
 func TestOrgGitHubHost_ResolvesFromSettings(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -101,7 +102,8 @@ func TestGitHubWebhook_InstallationCreated_StampsHost(t *testing.T) {
 }
 
 // TestGitHubWebhook_InstallationCreated_DefaultsToPublicHost is the same path
-// for the common org: no base URL configured means github.com, so the row says
+// for the common org: no base URL configured means the deployment's default
+// GitHub — github.com with the variable unset, as here — so the row says
 // github.com rather than nothing at all.
 func TestGitHubWebhook_InstallationCreated_DefaultsToPublicHost(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)

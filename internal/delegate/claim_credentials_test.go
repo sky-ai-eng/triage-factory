@@ -38,7 +38,8 @@ type fakeResolver struct {
 	// host-side clone injects. Defaults to the zero Token when unset.
 	token githubapp.Token
 	// baseURL is what BaseURLFor hands back — the org's git host base.
-	// Empty defaults to github.com so existing fixtures need no change.
+	// Empty defaults to the deployment's default GitHub so existing fixtures
+	// need no change.
 	baseURL string
 	// orgLogin is the name OrgIdentityFor hands back; empty → ok=false (the
 	// default, so credential-only fixtures keep getting a no-identity result).
@@ -99,7 +100,7 @@ func (f *fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, er
 	if f.baseURL != "" {
 		return f.baseURL, nil
 	}
-	return ghbase.DefaultBaseURL, nil
+	return ghbase.DefaultBaseURL(), nil
 }
 
 // OrgIdentityFor satisfies the ghclient.Resolver interface. Returns the

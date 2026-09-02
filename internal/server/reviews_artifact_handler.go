@@ -372,7 +372,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// the review URL's host resolution (WebBase, called only after the submit
 	// lands) — a client disconnect between the submit and the stamp would
 	// otherwise cancel the resolve and silently downgrade a GHES/GHEC org's link
-	// to github.com.
+	// to the deployment default.
 	cleanupCtx := context.WithoutCancel(r.Context())
 	res, err := review.SubmitStaged(r.Context(), gh, review.SubmitInput{
 		Owner:   owner,

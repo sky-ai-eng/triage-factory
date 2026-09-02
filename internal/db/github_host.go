@@ -1,6 +1,10 @@
 package db
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
+)
 
 // NormalizeGitHubHost trims a trailing slash so the (user_id,
 // github_base_url) key in user_github_identities matches regardless of
@@ -14,21 +18,22 @@ import "strings"
 // own scope-normalization rather than reusing this GitHub-specific one.
 func NormalizeGitHubHost(host string) string { return strings.TrimRight(host, "/") }
 
-// DefaultGitHubHost is the public github.com web base. An org that leaves
-// github_base_url unset resolves identities under this host — notably the
-// GoTrue GitHub OAuth login-claim binds the identity row to it literally.
-const DefaultGitHubHost = "https://github.com"
-
 // EffectiveGitHubHost resolves an org's configured github_base_url to the host
-// identities are actually keyed under: an empty setting (the common github.com
-// case) means DefaultGitHubHost, and the result is trailing-slash-trimmed to
-// match NormalizeGitHubHost (what the stores key on). Read-side callers
-// building a reverse identity lookup must use this rather than the raw setting
-// — an empty setting would otherwise look up host="" and miss rows captured
-// under "https://github.com".
+// identities are actually keyed under: an empty setting means the deployment's
+// default GitHub (ghbase.DefaultBaseURL — github.com unless the operator named
+// another), and the result is trailing-slash-trimmed to match
+// NormalizeGitHubHost (what the stores key on). Read-side callers building a
+// reverse identity lookup must use this rather than the raw setting — an empty
+// setting would otherwise look up host="" and miss rows captured under the
+// default.
+//
+// The GoTrue GitHub OAuth login identity is the one host-keyed row that does
+// NOT resolve through here: that provider is github.com whatever the
+// deployment default is, so the login claim binds under ghbase.GitHubCom
+// literally.
 func EffectiveGitHubHost(orgBase string) string {
 	if h := NormalizeGitHubHost(orgBase); h != "" {
 		return h
 	}
-	return DefaultGitHubHost
+	return ghbase.DefaultBaseURL()
 }

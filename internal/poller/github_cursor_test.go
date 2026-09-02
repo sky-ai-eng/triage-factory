@@ -88,7 +88,7 @@ func (r *freshClientPerCallResolver) TokenFor(ctx context.Context, orgID, target
 }
 
 func (r *freshClientPerCallResolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
-	return ghbase.DefaultBaseURL, nil
+	return ghbase.DefaultBaseURL(), nil
 }
 
 func (r *freshClientPerCallResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool) {
@@ -354,7 +354,7 @@ func (r *perAccountFailResolver) TokenFor(ctx context.Context, orgID, target str
 }
 
 func (r *perAccountFailResolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
-	return ghbase.DefaultBaseURL, nil
+	return ghbase.DefaultBaseURL(), nil
 }
 
 func (r *perAccountFailResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool) {

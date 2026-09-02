@@ -737,7 +737,7 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 	//    returned, and the id list narrows it further to the page in hand so
 	//    the enrichment costs the window rather than the whole roster. Host
 	//    resolution mirrors the org roster: an unset github_base_url resolves
-	//    to github.com (EffectiveGitHubHost), an unset jira_base_url
+	//    to the deployment default (EffectiveGitHubHost), an unset jira_base_url
 	//    normalizes to "" and matches nothing.
 	ghMap, err := queryIdentityMap(ctx, s.admin, `
 		SELECT gh.user_id::text, gh.login

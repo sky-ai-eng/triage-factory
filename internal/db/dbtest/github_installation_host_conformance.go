@@ -6,6 +6,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 )
 
 // GitHubInstallationHostSeeder stages the rows the host suite needs. User and
@@ -35,7 +36,7 @@ type GitHubInstallationHostFactory func(t *testing.T) (db.GitHubAppsStore, GitHu
 //     in the schema uses, so a trailing slash and an unset base URL cannot
 //     produce a second spelling of one host;
 //   - the column never reads back empty — an installation written without a
-//     host is one whose org configured none, which is the public host;
+//     host is one whose org configured none, which is the deployment default;
 //   - it follows the org when a later write reports a different one, like the
 //     login and unlike the account id;
 //   - the negative space this column exists FOR: two orgs on different GitHub
@@ -101,18 +102,26 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		}
 	})
 
-	t.Run("UnsetHostResolvesToThePublicHost", func(t *testing.T) {
+	t.Run("UnsetHostResolvesToTheDeploymentDefault", func(t *testing.T) {
 		// The NOT NULL column's floor: an org that configured no base URL is on
-		// github.com, so a struct built without a host is a github.com row —
-		// never a NULL and never the empty string, which is not a host anything
-		// can be compared against.
+		// the deployment's default GitHub, so a struct built without a host is
+		// a row under that host — never a NULL and never the empty string,
+		// which is not a host anything can be compared against. Pinned under a
+		// non-github.com default so the assertion cannot pass on the literal:
+		// the store must read the resolved default, not spell github.com.
+		ghbase.SetDefaultBaseURLForTest(t, "https://ghe.default.test")
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
 		if _, err := store.UpsertInstallation(ctx, install(org, "456", "", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation: %v", err)
 		}
-		if got := only(t, store, org).GitHubHost; got != db.DefaultGitHubHost {
-			t.Errorf("GitHubHost = %q for an installation written without one; want %q", got, db.DefaultGitHubHost)
+		if got := only(t, store, org).GitHubHost; got != "https://ghe.default.test" {
+			t.Errorf("GitHubHost = %q for an installation written without one; want the deployment default %q", got, "https://ghe.default.test")
+		}
+		// And the lookup normalizes an empty host the same way, so a caller
+		// asking about "the default" finds the row the writer keyed.
+		if got, err := store.InstallationOwnerSystem(ctx, "", "456"); err != nil || got != org {
+			t.Errorf("InstallationOwnerSystem(\"\", 456) = (%q, %v); want (%q, nil)", got, err, org)
 		}
 	})
 
@@ -124,7 +133,7 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		// installation but not which GitHub it came from.
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
-		if _, err := store.UpsertInstallation(ctx, install(org, "456", db.DefaultGitHubHost, "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghbase.DefaultBaseURL(), "acme")); err != nil {
 			t.Fatalf("UpsertInstallation: %v", err)
 		}
 		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghes, "acme")); err != nil {
@@ -145,16 +154,16 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		owner := seed.User(t)
 		orgA, orgB := seed.Org(t, owner), seed.Org(t, owner)
 
-		if _, err := store.UpsertInstallation(ctx, install(orgA, "456", db.DefaultGitHubHost, "acme")); err != nil {
-			t.Fatalf("UpsertInstallation (public host): %v", err)
+		if _, err := store.UpsertInstallation(ctx, install(orgA, "456", ghbase.DefaultBaseURL(), "acme")); err != nil {
+			t.Fatalf("UpsertInstallation (default host): %v", err)
 		}
 		if _, err := store.UpsertInstallation(ctx, install(orgB, "456", ghes, "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (GHES, same installation id): %v", err)
 		}
 
 		gotA, gotB := only(t, store, orgA), only(t, store, orgB)
-		if gotA.GitHubHost != db.DefaultGitHubHost {
-			t.Errorf("org A GitHubHost = %q; want %q", gotA.GitHubHost, db.DefaultGitHubHost)
+		if gotA.GitHubHost != ghbase.DefaultBaseURL() {
+			t.Errorf("org A GitHubHost = %q; want %q", gotA.GitHubHost, ghbase.DefaultBaseURL())
 		}
 		if gotB.GitHubHost != ghes {
 			t.Errorf("org B GitHubHost = %q; want %q", gotB.GitHubHost, ghes)
@@ -196,12 +205,12 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 
 		// The same number on another deployment is another installation, and
 		// nobody holds it.
-		if got, err = store.InstallationOwnerSystem(ctx, db.DefaultGitHubHost, "456"); err != nil {
+		if got, err = store.InstallationOwnerSystem(ctx, ghbase.DefaultBaseURL(), "456"); err != nil {
 			t.Fatalf("InstallationOwnerSystem (other host): %v", err)
 		}
 		if got != "" {
 			t.Errorf("owner of (%s, 456) = %q; want \"\" — that id is another deployment's",
-				db.DefaultGitHubHost, got)
+				ghbase.DefaultBaseURL(), got)
 		}
 	})
 

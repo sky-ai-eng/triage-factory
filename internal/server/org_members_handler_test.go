@@ -196,7 +196,7 @@ func TestOrgMembersList_AnyMemberReads(t *testing.T) {
 	// This exercises two things at once: (1) the roster must surface a
 	// *peer's* readiness, proving the admin-pool enrichment path works past
 	// the self-only identity RLS; and (2) the read must resolve the unset host
-	// to github.com (EffectiveGitHubHost) — a raw normalize would key host=""
+	// to the deployment default (EffectiveGitHubHost) — a raw normalize would key host=""
 	// and miss this binding, reading "Not connected" for every github.com org.
 	pgtest.MustExec(t, r.h.AdminDB,
 		`INSERT INTO user_github_identities (user_id, github_base_url, login, source, verified_at)

@@ -18,6 +18,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -111,6 +112,14 @@ func (f *fakeGitHub) start(t *testing.T) string {
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+// callCount is how many requests the fake has served, for a test whose claim
+// is that GitHub was never asked at all.
+func (f *fakeGitHub) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
 }
 
 func (f *fakeGitHub) served(path string) bool {
@@ -207,7 +216,12 @@ func newBindRig(t *testing.T, gh *fakeGitHub) *bindRig {
 	resp, _ := rig.driveCallback(user)
 	sid := rig.sidFromResp(resp)
 
+	// The fake GitHub is the deployment's GitHub: the deployment App is on it,
+	// and the workspace seeded below is pointed at it. A test that wants a
+	// workspace on some OTHER GitHub re-points the workspace, never the
+	// deployment.
 	ghBase := gh.start(t)
+	ghbase.SetDefaultBaseURLForTest(t, ghBase)
 	if _, err := rig.h.AdminDB.Exec(`
 		INSERT INTO org_event_sources (org_id, kind, base_url)
 		VALUES ($1, 'github', $2)
@@ -595,6 +609,38 @@ func TestManagedBind_Refusals(t *testing.T) {
 			rig.assertNothingBound(t)
 		})
 	}
+}
+
+// TestManagedBind_WorkspaceOnAnotherGitHubIsRefused: the deployment App is on
+// one GitHub, so a workspace whose github_base_url names another cannot bind
+// it. The refusal names both hosts and points at bringing your own App; it
+// fires at Connect, before any preflight, so the deployment's key is never
+// presented to a GitHub that has not seen it — the fake counts zero calls.
+// Nothing is written and the class does not move.
+func TestManagedBind_WorkspaceOnAnotherGitHubIsRefused(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+	if _, err := rig.h.AdminDB.Exec(`
+		UPDATE org_event_sources SET base_url = $2 WHERE org_id = $1 AND kind = 'github'
+	`, rig.orgID.String(), "https://ghe.example.com/"); err != nil {
+		t.Fatalf("re-point the workspace: %v", err)
+	}
+
+	rec := rig.connect(t)
+	assertOutcome(t, rec, "wrong_github_host")
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"https://ghe.example.com", rig.ghBase, "Bring your own App"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refusal page does not name %q:\n%s", want, body)
+		}
+	}
+	if n := gh.callCount(); n != 0 {
+		t.Errorf("GitHub served %d requests for a workspace on another host; want 0 — no preflight may be issued", n)
+	}
+	rig.assertNothingBound(t)
 }
 
 func TestManagedBind_NoCookieIsTheUnboundInstall(t *testing.T) {
@@ -1216,6 +1262,7 @@ func TestManagedBind_CookieAttributes(t *testing.T) {
 func TestManagedBind_RefusalSetIsClosedAndDistinct(t *testing.T) {
 	set := []bindRefusal{
 		refuseNoDeploymentApp,
+		refuseWrongGitHub.withHosts("https://ghe.example.com", "https://github.com"),
 		refuseNoOAuthSetting,
 		refuseStaleCeremony,
 		refuseNoInstallation,

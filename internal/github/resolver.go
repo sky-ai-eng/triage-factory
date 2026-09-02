@@ -207,14 +207,15 @@ type Resolver interface {
 
 	// BaseURLFor returns the org's user-facing GitHub host base — github.com
 	// or a GHES host — resolved from org_settings.github_base_url, then the
-	// legacy github_url secret, then the public default. It is the same
+	// legacy github_url secret, then the deployment default. It is the same
 	// resolution ClientFor/TokenFor use internally, exposed for callers that
 	// must route a subprocess at the org's git host rather than make API
 	// calls — the managed Git proxy uses it for its upstream and
 	// insteadOf rewrite, so the proxy forwards to (and the rewrite matches)
 	// the same host the worktree was cloned from. A backend read error
-	// propagates rather than silently defaulting to github.com: a GHES org
-	// whose base can't be read must not be paired with the public host.
+	// propagates rather than silently defaulting to the deployment default: a
+	// GHES org whose base can't be read must not be paired with a host it is
+	// not on.
 	BaseURLFor(ctx context.Context, orgID string) (string, error)
 
 	// OrgIdentityFor resolves the org's single GitHub commit identity — the
@@ -436,16 +437,16 @@ func (r *resolver) ClientForRepoWithIdentity(ctx context.Context, orgID, owner, 
 // githubBaseFor resolves the org's user-facing GitHub base URL (github.com
 // or a GHES host). Precedence mirrors the pre-resolver dashboard/repos code:
 // org_settings.github_base_url first, then the github_url secret, then the
-// public default. The secret fallback is load-bearing for GHES orgs whose
+// deployment default. The secret fallback is load-bearing for GHES orgs whose
 // base predates the org_settings mirror (common in local mode, where the
 // keychain holds the URL and the settings column can be empty).
 //
 // Backend read failures propagate rather than getting papered over: if a
 // source that might hold a GHES host can't be read, we must NOT silently
-// default to github.com — pairing a real (possibly GHES) PAT with the public
-// host would route a tenant credential to the wrong server. Only when both
-// sources are definitively readable AND empty do we treat the org as public
-// github.com.
+// default — pairing a real (possibly GHES) PAT with the deployment default
+// would route a tenant credential to the wrong server. Only when both
+// sources are definitively readable AND empty do we treat the org as on the
+// deployment default.
 func (r *resolver) githubBaseFor(ctx context.Context, orgID string) (string, error) {
 	set, setErr := r.orgs.GetSettingsSystem(ctx, orgID)
 	return r.baseFrom(ctx, orgID, set, setErr)
@@ -474,7 +475,7 @@ func (r *resolver) baseFrom(ctx context.Context, orgID string, set domain.OrgSet
 	if setErr != nil {
 		return "", fmt.Errorf("resolve github base for org %s: read settings: %w", orgID, setErr)
 	}
-	return ghbase.DefaultBaseURL, nil
+	return ghbase.DefaultBaseURL(), nil
 }
 
 // orgGitHubContext is the pair of facts a resolution needs from the org's

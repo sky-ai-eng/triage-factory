@@ -88,7 +88,7 @@ func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githu
 	// 2. Identity enrichment on the admin pool, scoped to this org's members.
 	//    Resolve to the host identities are actually keyed under — the same
 	//    reverse-lookup rule the poller + review routing use. GitHub: an unset
-	//    github_base_url resolves to github.com (EffectiveGitHubHost), where
+	//    github_base_url resolves to the deployment default (EffectiveGitHubHost), where
 	//    those identities live — a raw NormalizeGitHubHost would key host=""
 	//    and miss every github.com binding, so the whole roster would read
 	//    "Not connected". Jira has no public default host, so an unset

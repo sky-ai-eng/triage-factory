@@ -65,7 +65,7 @@ func (s *Server) handleTeamPRList(w http.ResponseWriter, r *http.Request) {
 		// Member identities are host-scoped, so the org's configured GitHub
 		// host rides into the read — raw, exactly as the roster passes it; the
 		// store resolves it, since an unset setting has to look under the
-		// public host rather than under "".
+		// deployment default rather than under "".
 		orgSet, e := tx.Orgs.GetSettings(r.Context(), orgID)
 		if e != nil {
 			return e

@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 )
 
 // runRecordPush upserts a `branch` artifact for one pushed ref. Invoked by
@@ -102,7 +103,7 @@ func orgGitHubHost(ctx context.Context, host agenthost.Client) string {
 	}
 	base, err := whr.GithubWebHostBase(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "hook record-push: resolve org github host: %v; falling back to github.com gate\n", err)
+		fmt.Fprintf(os.Stderr, "hook record-push: resolve org github host: %v; falling back to the deployment default host gate\n", err)
 		return ""
 	}
 	u, err := url.Parse(base)
@@ -180,8 +181,9 @@ func stripUserInfo(host string) string {
 //     (which fronts the org upstream). The sandbox hook stands down in favor of
 //     the proxy's own capture, so this is a belt-and-suspenders accept;
 //   - when baseHost is empty (the org base couldn't be resolved), it falls back
-//     to the historical github.com-only accept so a transient resolver miss
-//     doesn't silently stop recording public-github pushes.
+//     to the deployment's default GitHub — the host an org with no base URL is
+//     on — so a transient resolver miss doesn't silently stop recording pushes
+//     there.
 //
 // Anything else (gitlab.com, a github.com push from a GHES org) is rejected so
 // its pushes aren't recorded — and, post-anchoring, mis-linked — under the org's
@@ -190,13 +192,20 @@ func isTrustedHost(host, baseHost string) bool {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
+	if baseHost == "" {
+		// No org host resolved: the gate is the deployment's default GitHub,
+		// the host an org with no base URL is on.
+		if u, err := url.Parse(ghbase.DefaultBaseURL()); err == nil {
+			baseHost = u.Hostname()
+		}
+	}
 	if baseHost != "" && strings.EqualFold(host, baseHost) {
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		return ip.IsLoopback() || ip.IsPrivate()
 	}
-	return baseHost == "" && strings.EqualFold(host, "github.com")
+	return false
 }
 
 // splitOwnerRepoPath takes the path portion after the host and resolves it

@@ -117,8 +117,9 @@ func TestConnectErrCode(t *testing.T) {
 // factory/me/settings readers use, so a base URL with a path component keys
 // identically across all of them. A bare-origin derivation (gitHubWebOrigin)
 // would strip the path, splitting Connect's writes from the other sites'
-// reads. Empty resolves to github.com (matching login_claim); malformed
-// bases are rejected.
+// reads. Empty resolves to the deployment's default GitHub — github.com with
+// the variable unset, as here, which is also the host the login_claim row keys
+// under; malformed bases are rejected.
 func TestResolveGitHubHost(t *testing.T) {
 	cases := []struct {
 		in     string
@@ -126,7 +127,7 @@ func TestResolveGitHubHost(t *testing.T) {
 		wantOK bool
 	}{
 		{"https://github.com", "https://github.com", true},
-		{"", "https://github.com", true},                    // empty → github.com
+		{"", "https://github.com", true},                    // empty → the deployment default (github.com here)
 		{"https://github.com/", "https://github.com", true}, // trailing slash trimmed
 		{"https://git.corp.example.com", "https://git.corp.example.com", true},
 		{"https://git.corp.example.com/enterprise", "https://git.corp.example.com/enterprise", true}, // path PRESERVED

@@ -1,10 +1,9 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
-	"net/url"
 
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -84,17 +83,16 @@ func (s *Server) handleDeploymentGitHubWebhook(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	host, ok := deliveryGitHubHost(body)
-	if !ok {
-		// Without a host there is no key to look the installation up under, and
-		// assuming github.com is the assumption github_host exists to make
-		// checkable. Same answer as an unbound installation: acknowledged, no
-		// side effect.
-		githubAppLog.Debug("acknowledging deployment webhook delivery naming no github host",
-			"event", eventName, "delivery", d.deliveryID, "installation", d.installationID)
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
+	// The host half of the key is the deployment's default GitHub — the one
+	// GitHub the deployment App is registered on, so the one GitHub any
+	// delivery it signed can have come from. Nothing is read off the payload
+	// for it: a sender URL would only ever restate this fact, and a payload
+	// that could steer the lookup to another host would be a second
+	// assumption stacked on the signature. The host stays in the key all the
+	// same, because it is what makes the assumption checkable from the row —
+	// an installation bound under any other spelling is one this route does
+	// not reach, and boot warns about exactly those rows.
+	host := ghbase.DefaultBaseURL()
 
 	// The first store read on this route, and it happens only for a delivery
 	// GitHub signed. Live rows only: a removed installation reaches nothing, so
@@ -119,55 +117,4 @@ func (s *Server) handleDeploymentGitHubWebhook(w http.ResponseWriter, r *http.Re
 	}
 
 	s.applyWebhookDelivery(w, r, orgID, eventName, d)
-}
-
-// deliveryGitHubHost reads which GitHub a verified delivery came from, as
-// "scheme://host" built from the payload's sender.html_url — "https://github.com",
-// "https://ghe.example.com", a port kept if the URL carried one. Nothing else is
-// derived: no normalization runs here beyond parsing, and the store's lookup
-// applies db.EffectiveGitHubHost to whatever this returns, as it does to every
-// caller's key.
-//
-// That is a narrower shape than the binding table can hold. The table keys on
-// the web base the org configured, which EffectiveGitHubHost only trims a
-// trailing slash from, so an org whose base URL carries a path segment keys its
-// rows under a string this function never produces, and its deliveries read as
-// unbound here. Not corrected in this function on purpose: the whole derivation
-// is interim (see the marker below), and guessing at a path prefix would be a
-// second assumption stacked on the first.
-//
-// The source is sender.html_url because GitHub includes sender on every
-// webhook payload whatever the event, and its html_url is a URL on the GitHub
-// that generated the delivery, so one field answers for every event the App
-// subscribes to — where installation.html_url appears only on installation
-// events and repository.html_url only on repository-scoped ones. It is
-// payload-derived by design and to the same standard as the installation id
-// beside it: both are read only after the signature has proved the deployment
-// secret signed the body, and the host does not choose an org, it only narrows
-// which row the installation id may match. Two GHES deployments can issue the
-// same installation id, which is why the key has two parts.
-//
-// ok=false for a payload that carries no parseable sender URL. The caller
-// treats that as unresolvable rather than defaulting to github.com — a
-// delivery that cannot say where it came from is not matched to a row on the
-// strength of an assumption.
-//
-// TODO(TFAC-936): the deployment has no declared GitHub host yet, which is the
-// only reason the host is read off the payload. Once TF_DEFAULT_GITHUB_HOST
-// exists the lookup keys on it, and this function and the caller's no-host arm
-// go away.
-func deliveryGitHubHost(body []byte) (string, bool) {
-	var envelope struct {
-		Sender struct {
-			HTMLURL string `json:"html_url"`
-		} `json:"sender"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Sender.HTMLURL == "" {
-		return "", false
-	}
-	u, err := url.Parse(envelope.Sender.HTMLURL)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return "", false
-	}
-	return u.Scheme + "://" + u.Host, true
 }

@@ -126,7 +126,7 @@ func TestTeamRosterList_AnyMemberReads(t *testing.T) {
 	// Give the admin a GitHub login under the default github.com host, leaving
 	// the org's github_base_url UNSET — the roster must surface a peer's
 	// readiness (admin-pool enrichment past the self-only identity RLS) and
-	// resolve the unset host to github.com (EffectiveGitHubHost).
+	// resolve the unset host to the deployment default (EffectiveGitHubHost).
 	pgtest.MustExec(t, r.h.AdminDB,
 		`INSERT INTO user_github_identities (user_id, github_base_url, login, source, verified_at)
 		 VALUES ($1, 'https://github.com', 'founder-gh', 'pat', now())`, r.admin)

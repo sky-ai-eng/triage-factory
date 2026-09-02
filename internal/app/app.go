@@ -311,6 +311,7 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	if err = a.registerInstance(ctx); err != nil { // fleet registry boot-registration upsert
 		return nil, err
 	}
+	a.warnManagedInstallationsOffDefaultHost(ctx) // rows the deployment App can no longer reach; never fatal
 	// HTTP server + websocket hub — control/all only. An executor serves no
 	// user routes; it exposes a localhost-only healthz (see Run) and owns a
 	// standalone hub so the spawner's broadcasts are safe no-ops.

@@ -14,6 +14,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -309,10 +310,11 @@ func TestDeploymentWebhook_Redelivery_AppliesOnce(t *testing.T) {
 }
 
 // TestDeploymentWebhook_HostDisambiguates: the binding key is (host,
-// installation id), because two GitHub deployments can issue the same id. A
-// delivery whose sender is on a different GitHub than the binding's finds
-// nothing; one from the binding's GitHub applies. A delivery that cannot say
-// where it came from is not matched on an assumption.
+// installation id), because two GitHub deployments can issue the same id, and
+// the host half is the deployment's default GitHub — never anything the
+// payload says. An installation bound under another host is unreachable from
+// this route whatever the delivery's sender claims; the same id bound under
+// the default applies.
 func TestDeploymentWebhook_HostDisambiguates(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	s := newTestServer(t)
@@ -320,9 +322,13 @@ func TestDeploymentWebhook_HostDisambiguates(t *testing.T) {
 	bindInstallation(t, s, "4242", "https://ghe.example.com")
 	got := captureWebhookBus(s)
 
+	// Every spelling of the sender — the default host, the binding's own host,
+	// none at all — is ignored: the row is under a host that is not the
+	// deployment's, so nothing routes to it.
 	for name, body := range map[string]string{
-		"same id on github.com": boundPRBody,
-		"no sender":             `{"action":"synchronize","number":7,"installation":{"id":4242}}`,
+		"sender on github.com":     boundPRBody,
+		"sender on the bound host": `{"action":"synchronize","number":7,"installation":{"id":4242},"sender":{"login":"octocat","html_url":"https://ghe.example.com/octocat"}}`,
+		"no sender":                `{"action":"synchronize","number":7,"installation":{"id":4242}}`,
 	} {
 		b := []byte(body)
 		if rec := postDeploymentWebhook(s, "pull_request", signDeployment(b), b); rec.Code != http.StatusNoContent {
@@ -331,9 +337,39 @@ func TestDeploymentWebhook_HostDisambiguates(t *testing.T) {
 		expectNoPublish(t, got)
 	}
 
-	ghes := []byte(`{"action":"synchronize","number":7,"installation":{"id":4242},"sender":{"login":"octocat","html_url":"https://ghe.example.com/octocat"}}`)
-	if rec := postDeploymentWebhook(s, "pull_request", signDeployment(ghes), ghes); rec.Code != http.StatusNoContent {
-		t.Fatalf("GHES delivery status = %d, want 204", rec.Code)
+	// Re-bound under the deployment default, the same delivery applies.
+	bindInstallation(t, s, "4242", ghbase.DefaultBaseURL())
+	body := []byte(boundPRBody)
+	if rec := postDeploymentWebhook(s, "pull_request", signDeployment(body), body); rec.Code != http.StatusNoContent {
+		t.Fatalf("default-host delivery status = %d, want 204", rec.Code)
+	}
+	if e := expectPublish(t, got, "webhook:github:pull_request"); e.OrgID != runmode.LocalDefaultOrgID {
+		t.Errorf("published event org = %q, want %q", e.OrgID, runmode.LocalDefaultOrgID)
+	}
+}
+
+// TestDeploymentWebhook_KeysOnTheDeploymentDefault is the GHES self-hoster's
+// shape: with TF_DEFAULT_GITHUB_HOST naming their GitHub, an installation
+// bound under it applies — including for a delivery whose sender URL says
+// github.com, which proves the payload plays no part in the host — and the
+// same id bound under github.com does not.
+func TestDeploymentWebhook_KeysOnTheDeploymentDefault(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	ghbase.SetDefaultBaseURLForTest(t, "https://ghe.example.com")
+	s := newTestServer(t)
+	seedDeploymentWebhook(t, s)
+	got := captureWebhookBus(s)
+	body := []byte(boundPRBody) // sender.html_url is on github.com
+
+	bindInstallation(t, s, "4242", "https://github.com")
+	if rec := postDeploymentWebhook(s, "pull_request", signDeployment(body), body); rec.Code != http.StatusNoContent {
+		t.Fatalf("github.com-bound delivery status = %d, want 204", rec.Code)
+	}
+	expectNoPublish(t, got)
+
+	bindInstallation(t, s, "4242", "https://ghe.example.com")
+	if rec := postDeploymentWebhook(s, "pull_request", signDeployment(body), body); rec.Code != http.StatusNoContent {
+		t.Fatalf("default-bound delivery status = %d, want 204", rec.Code)
 	}
 	if e := expectPublish(t, got, "webhook:github:pull_request"); e.OrgID != runmode.LocalDefaultOrgID {
 		t.Errorf("published event org = %q, want %q", e.OrgID, runmode.LocalDefaultOrgID)

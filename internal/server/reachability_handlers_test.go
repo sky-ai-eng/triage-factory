@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/reachability"
 )
 
@@ -124,8 +125,8 @@ func TestNormalizeReachabilityURL(t *testing.T) {
 		{"https://jira.acme.com/jira/", "https://jira.acme.com/jira"}, // ...slash still trimmed
 	}
 	for _, tt := range good {
-		if got, ok := normalizeBaseURL(tt.in); !ok || got != tt.want {
-			t.Errorf("normalizeBaseURL(%q) = (%q, %v), want (%q, true)", tt.in, got, ok, tt.want)
+		if got, ok := ghbase.NormalizeBaseURL(tt.in); !ok || got != tt.want {
+			t.Errorf("ghbase.NormalizeBaseURL(%q) = (%q, %v), want (%q, true)", tt.in, got, ok, tt.want)
 		}
 	}
 
@@ -140,8 +141,8 @@ func TestNormalizeReachabilityURL(t *testing.T) {
 		"https://user:pass@host.example", // userinfo
 	}
 	for _, in := range bad {
-		if got, ok := normalizeBaseURL(in); ok {
-			t.Errorf("normalizeBaseURL(%q) = (%q, true), want rejected", in, got)
+		if got, ok := ghbase.NormalizeBaseURL(in); ok {
+			t.Errorf("ghbase.NormalizeBaseURL(%q) = (%q, true), want rejected", in, got)
 		}
 	}
 }
