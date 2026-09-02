@@ -121,11 +121,22 @@ func (s *Server) handleDeploymentGitHubWebhook(w http.ResponseWriter, r *http.Re
 	s.applyWebhookDelivery(w, r, orgID, eventName, d)
 }
 
-// deliveryGitHubHost reads which GitHub a verified delivery came from, in the
-// form the binding table keys on (the web base the org configured, normalized
-// by db.EffectiveGitHubHost — "https://github.com", "https://ghe.example.com").
+// deliveryGitHubHost reads which GitHub a verified delivery came from, as
+// "scheme://host" built from the payload's sender.html_url — "https://github.com",
+// "https://ghe.example.com", a port kept if the URL carried one. Nothing else is
+// derived: no normalization runs here beyond parsing, and the store's lookup
+// applies db.EffectiveGitHubHost to whatever this returns, as it does to every
+// caller's key.
 //
-// The source is the payload's sender.html_url. GitHub includes sender on every
+// That is a narrower shape than the binding table can hold. The table keys on
+// the web base the org configured, which EffectiveGitHubHost only trims a
+// trailing slash from, so an org whose base URL carries a path segment keys its
+// rows under a string this function never produces, and its deliveries read as
+// unbound here. Not corrected in this function on purpose: the whole derivation
+// is interim (see the marker below), and guessing at a path prefix would be a
+// second assumption stacked on the first.
+//
+// The source is sender.html_url because GitHub includes sender on every
 // webhook payload whatever the event, and its html_url is a URL on the GitHub
 // that generated the delivery, so one field answers for every event the App
 // subscribes to — where installation.html_url appears only on installation
