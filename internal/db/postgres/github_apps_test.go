@@ -323,9 +323,12 @@ func TestGitHubAppsStore_Postgres_InstallationCrossOrg(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Same numeric installation_id under both orgs — legal across distinct
-	// GitHub hosts. The composite (org_id, installation_id) PK must keep
-	// these as two independent rows, not let one overwrite the other.
+	// Same numeric installation_id under both orgs, on two GitHub deployments —
+	// the case that is legal, because GitHub numbers installations per
+	// deployment and not universally. (One host is not: the uniqueness index
+	// refuses it, and the shared host suite pins that.) The composite
+	// (org_id, installation_id) PK must keep these as two independent rows, not
+	// let one overwrite the other.
 	if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 		InstallationID: "900", OrgID: orgA, AccountType: "User", AccountLogin: "only-in-a",
 	}); err != nil {
@@ -333,8 +336,9 @@ func TestGitHubAppsStore_Postgres_InstallationCrossOrg(t *testing.T) {
 	}
 	if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 		InstallationID: "900", OrgID: orgB, AccountType: "Organization", AccountLogin: "only-in-b",
+		GitHubHost: "https://git.example.com",
 	}); err != nil {
-		t.Fatalf("UpsertInstallation orgB (same id): %v", err)
+		t.Fatalf("UpsertInstallation orgB (same id, other deployment): %v", err)
 	}
 
 	gotA, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgA)

@@ -17,11 +17,15 @@ import (
 )
 
 // fakeGitHubAppsStore stands in for the real store so the refresh handler's
-// branches can be driven directly: GetForOrgSystem decides the 404,
-// BackfillInstallationsFromAPI decides the 502, and ListInstallationsForOrgSystem
-// supplies the post-reconcile installations. The embedded interface is nil, so
-// any method the handler doesn't call panics — which keeps the fake honest
-// about the surface the handler actually depends on.
+// branches can be driven directly: GetForOrgSystem decides the 404, the two
+// reconciles decide the 502, and ListInstallationsForOrgSystem supplies the
+// post-reconcile installations. The embedded interface is nil, so any method
+// the handler doesn't call panics — which keeps the fake honest about the
+// surface the handler actually depends on.
+//
+// The two reconciles count separately on purpose: which one a class reaches is
+// the whole substance of the handler's class branch, and a single counter would
+// pass whichever one it ran.
 type fakeGitHubAppsStore struct {
 	db.GitHubAppsStore
 	app           *domain.OrgGitHubApp
@@ -29,6 +33,9 @@ type fakeGitHubAppsStore struct {
 	listErr       error
 	backfillErr   error
 	backfillCalls int
+	managedErr    error
+	managedCalls  int
+	managedApp    githubapp.DeploymentApp
 }
 
 func (f *fakeGitHubAppsStore) GetForOrgSystem(context.Context, string) (*domain.OrgGitHubApp, error) {
@@ -38,6 +45,12 @@ func (f *fakeGitHubAppsStore) GetForOrgSystem(context.Context, string) (*domain.
 func (f *fakeGitHubAppsStore) BackfillInstallationsFromAPI(context.Context, string) error {
 	f.backfillCalls++
 	return f.backfillErr
+}
+
+func (f *fakeGitHubAppsStore) RefreshManagedInstallations(_ context.Context, _ string, deployment githubapp.DeploymentApp) error {
+	f.managedCalls++
+	f.managedApp = deployment
+	return f.managedErr
 }
 
 func (f *fakeGitHubAppsStore) ListInstallationsForOrgSystem(context.Context, string) ([]domain.OrgGitHubAppInstallation, error) {
@@ -351,13 +364,16 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 	})
 }
 
-// TestGitHubAppInstallationsRefresh_NoApp 404s when the org has no registered
-// App (nothing to reconcile) and never reaches the backfill.
+// TestGitHubAppInstallationsRefresh_NoApp 404s when a workspace whose class
+// says it brought its own App has no registration row to reconcile with, and
+// never reaches the backfill. The class promises the row; a missing one is a
+// 404 rather than a reconcile against nothing.
 func TestGitHubAppInstallationsRefresh_NoApp(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	fake := &fakeGitHubAppsStore{app: nil}
 	s.githubApps = fake
+	seedBYOAppCredentialClass(t, s, runmode.LocalDefaultOrgID)
 
 	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
 	if rec.Code != http.StatusNotFound {
@@ -368,15 +384,15 @@ func TestGitHubAppInstallationsRefresh_NoApp(t *testing.T) {
 	}
 }
 
-// TestGitHubAppInstallationsRefresh_ManagedClass_Refuses pins a refusal that is
-// deliberate rather than incidental. A managed workspace HAS installations to
-// reconcile, and this button would be useful for it — and it is refused anyway,
-// because the reconcile behind it stamps the requesting org's id on every
-// installation GET /app/installations reports. Under one App key serving many
-// workspaces that listing is every tenant's, so the button would claim them all
-// for whoever pressed it, permanently: the removal diff runs against the
-// requester's own set and would never undo it.
-func TestGitHubAppInstallationsRefresh_ManagedClass_Refuses(t *testing.T) {
+// TestGitHubAppInstallationsRefresh_ManagedClass admits a workspace riding the
+// deployment App — and reconciles it through the scoped refresh, never the
+// discovering backfill. That is the whole substance of the class branch: the
+// backfill stamps the requesting org's id on every installation
+// GET /app/installations reports, which under one App key serving many
+// workspaces is every tenant's listing. A managed org holds no org_github_apps
+// row and can hold none, so the registration read the BYO arm makes is skipped
+// too — requiring it would 404 exactly the orgs this handler was opened to.
+func TestGitHubAppInstallationsRefresh_ManagedClass(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	fake := &fakeGitHubAppsStore{
@@ -385,16 +401,74 @@ func TestGitHubAppInstallationsRefresh_ManagedClass_Refuses(t *testing.T) {
 		},
 	}
 	s.githubApps = fake
+	s.deploymentApp = githubapp.DeploymentApp{AppID: 42, WebhookSecret: "wh", ClientSecret: "cs"}
 	if _, err := s.orgs.SetGitHubCredentialClass(context.Background(), runmode.LocalDefaultOrgID, domain.GitHubCredentialClassManagedApp); err != nil {
 		t.Fatalf("set credential class: %v", err)
 	}
 
 	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if fake.managedCalls != 1 {
+		t.Errorf("managed refresh called %d times, want exactly 1", fake.managedCalls)
+	}
+	if fake.backfillCalls != 0 {
+		t.Errorf("discovering backfill called %d times for a managed workspace; want 0 — under a shared key that listing is every tenant's", fake.backfillCalls)
+	}
+	if fake.managedApp.AppID != 42 {
+		t.Errorf("managed refresh got app id %d; want the server's deployment App (42)", fake.managedApp.AppID)
+	}
+	var out githubAppStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !out.UsingDeploymentDefault || out.App != nil {
+		t.Errorf("payload = {using_deployment_default:%v, app:%+v}; want the shared-App shape (true, null)",
+			out.UsingDeploymentDefault, out.App)
+	}
+	if len(out.Installations) != 1 || out.Installations[0].AccountLogin != "acme-eng" {
+		t.Errorf("installations=%+v, want one acme-eng row", out.Installations)
+	}
+}
+
+// TestGitHubAppInstallationsRefresh_ManagedClass_Error surfaces a scoped-refresh
+// failure the same way a backfill failure surfaces: 502, since the fault is
+// GitHub or the deployment credential rather than the request.
+func TestGitHubAppInstallationsRefresh_ManagedClass_Error(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	fake := &fakeGitHubAppsStore{managedErr: errors.New("no deployment App configured")}
+	s.githubApps = fake
+	if _, err := s.orgs.SetGitHubCredentialClass(context.Background(), runmode.LocalDefaultOrgID, domain.GitHubCredentialClassManagedApp); err != nil {
+		t.Fatalf("set credential class: %v", err)
+	}
+
+	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s, want 502", rec.Code, rec.Body.String())
+	}
+	if fake.managedCalls != 1 {
+		t.Errorf("managed refresh called %d times, want exactly 1", fake.managedCalls)
+	}
+}
+
+// TestGitHubAppInstallationsRefresh_PATClass_NotFound keeps the one class the
+// handler still refuses: a workspace on a PAT has no App-installation mirror,
+// so there is nothing to reconcile in any credential system.
+func TestGitHubAppInstallationsRefresh_PATClass_NotFound(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	fake := &fakeGitHubAppsStore{}
+	s.githubApps = fake
+
+	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s, want 404", rec.Code, rec.Body.String())
 	}
-	if fake.backfillCalls != 0 {
-		t.Errorf("backfill called %d times for a managed workspace; an unscoped reconcile under a shared key is the hazard this refusal exists for", fake.backfillCalls)
+	if fake.backfillCalls != 0 || fake.managedCalls != 0 {
+		t.Errorf("reconciles called (backfill=%d, managed=%d) for a PAT workspace; want none",
+			fake.backfillCalls, fake.managedCalls)
 	}
 }
 

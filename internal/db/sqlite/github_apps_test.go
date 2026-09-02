@@ -289,9 +289,12 @@ func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 }
 
 // TestGitHubAppsStore_SQLite_InstallationCrossOrg pins the composite
-// (org_id, installation_id) key: the same numeric installation_id under
-// two orgs (legal across distinct GitHub hosts) stays two independent
-// rows, and a delete for one org never touches the other's same-id row.
+// (org_id, installation_id) key: the same numeric installation_id under two
+// orgs on two GitHub deployments — the case that is legal, since GitHub numbers
+// installations per deployment and not universally — stays two independent
+// rows, and a delete for one org never touches the other's same-id row. The
+// same id on ONE deployment is a different question, refused by the uniqueness
+// index and pinned in the shared host suite.
 func TestGitHubAppsStore_SQLite_InstallationCrossOrg(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -301,12 +304,13 @@ func TestGitHubAppsStore_SQLite_InstallationCrossOrg(t *testing.T) {
 	seedSQLiteOrgForApps(t, conn, orgA)
 	seedSQLiteOrgForApps(t, conn, orgB)
 
-	for _, tc := range []struct{ org, login, typ string }{
-		{orgA, "only-in-a", "User"},
-		{orgB, "only-in-b", "Organization"},
+	for _, tc := range []struct{ org, login, typ, host string }{
+		{orgA, "only-in-a", "User", ""},
+		{orgB, "only-in-b", "Organization", "https://git.example.com"},
 	} {
 		if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 			InstallationID: "900", OrgID: tc.org, AccountType: tc.typ, AccountLogin: tc.login,
+			GitHubHost: tc.host,
 		}); err != nil {
 			t.Fatalf("UpsertInstallation %s: %v", tc.org, err)
 		}

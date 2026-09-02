@@ -3253,14 +3253,6 @@ CREATE TABLE public.org_github_app_installations (
                 OR repository_selection = ANY (ARRAY['all'::text, 'selected'::text])))
 );
 
--- There is no UNIQUE (github_host, installation_id) index. Every workspace owns
--- its own App key, so a reconcile sees only that org's installations and an
--- upsert runs only for a delivery HMAC-verified against that org's webhook
--- secret. A deployment-level App changes that — one PEM lists every tenant's
--- installations — and the index must then land paired with a reconcile scoped to
--- installations the org actually bound.
--- TODO(TFAC-802): ship the uniqueness index together with a scoped reconcile.
-
 ALTER TABLE ONLY public.org_github_app_installations
     ADD CONSTRAINT org_github_app_installations_pkey PRIMARY KEY (org_id, installation_id);
 
@@ -3271,6 +3263,28 @@ ALTER TABLE ONLY public.org_github_app_installations
 -- uninstall stamps removed_at, a reinstall inserts a fresh installation_id.
 CREATE UNIQUE INDEX org_github_app_installations_active_account_key
     ON public.org_github_app_installations (org_id, account_login)
+    WHERE (removed_at IS NULL);
+
+-- An installation belongs to exactly one workspace per GitHub deployment. The
+-- grant is not divisible, `installation.deleted` fires once, the rate budget is
+-- shared, and the account owner cannot enumerate who rides their installation.
+--
+-- With a deployment-level App — one key serving many workspaces — a single
+-- listing reports every tenant's installations, so nothing about the credential
+-- keeps one workspace from claiming another's. This index is the backstop under
+-- the reconcile scoping that keeps a managed workspace's refresh to what it has
+-- already bound: the filter is the correctness, this is what holds when a claim
+-- path forgets the bind's per-installation lock. An advisory lock is not a
+-- substitute for either — it orders writes, it does not validate them.
+--
+-- github_host is in the key because GitHub numbers installations per deployment
+-- and not universally: a self-host aggregating orgs across two GHES instances
+-- legitimately holds id 456 twice, meaning two unrelated installations. Partial
+-- on removed_at IS NULL like the index above — an uninstalled installation
+-- reaches nothing and holds nothing, so re-binding that id elsewhere is an
+-- ordinary bind rather than a collision.
+CREATE UNIQUE INDEX org_github_app_installations_active_host_installation_key
+    ON public.org_github_app_installations (github_host, installation_id)
     WHERE (removed_at IS NULL);
 
 CREATE INDEX org_github_app_installations_org_idx

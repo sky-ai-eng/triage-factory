@@ -249,26 +249,23 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 	}
 	ctx := r.Context()
 
-	// A reconcile only makes sense for an org that brought its own App; there is
-	// nothing of the org's to reconcile in any other credential system. Gate on
+	// A reconcile only makes sense for an org whose GitHub access is an App at
+	// all; there is nothing of the org's to reconcile on the PAT tier. Gate on
 	// the class first — a PAT org's missing registration is a 404 by decision,
-	// not by the accident of a nil row — then require the row the class
+	// not by the accident of a nil row — then require whatever the class
 	// promises. 404 with the same shape handleGitHubAppInstallURL uses. The App
 	// mirror is read through the System (claims-free) door here — the admin gate
-	// already authorized orgID, and the backfill below is itself a System
+	// already authorized orgID, and the reconcile below is itself a System
 	// operation.
 	//
-	// The managed class is refused here DELIBERATELY, and not because there is
-	// nothing to reconcile — there is, and the button would be useful. Refresh
-	// means reconcile, and the reconcile below stamps this org's id on every
-	// installation GET /app/installations reports. Under one App key serving many
-	// workspaces that listing is every tenant's installations, so an unscoped
-	// reconcile would claim them all for whoever pressed the button — and because
-	// the removal diff runs against this org's own set, nothing would ever undo
-	// it. The refusal lifts when the reconcile is scoped to what a workspace
-	// actually bound, not before.
-	// TODO(TFAC-924): open this to the managed class once the reconcile refreshes
-	// bound installations only and never discovers.
+	// Both App classes are admitted, and they reconcile through different store
+	// methods rather than one method that branches, because they are different
+	// operations. A workspace with its own App key reconciles by DISCOVERY: that
+	// key lists its own installations and nobody else's, so the listing is
+	// authoritative about whose they are. A workspace on the deployment App
+	// reconciles by REFRESH: one key serves many workspaces, the listing is every
+	// tenant's, and which of them belong here is a fact only the bind asserts —
+	// so that path updates rows the org has already bound and creates none.
 	class, err := s.githubCredentialClass(ctx, orgID)
 	if err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
@@ -277,29 +274,44 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 		internalError(w, "github-app", err)
 		return
 	}
-	if class != domain.GitHubCredentialClassBYOApp {
+	if !class.AppTier() {
 		notFound(w, "github app")
 		return
 	}
 
-	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
-	if err != nil {
-		internalError(w, "github-app", err)
-		return
-	}
-	if app == nil {
-		notFound(w, "github app")
-		return
+	// The registration row is the BYO class's promise and the managed class's
+	// impossibility: a workspace riding the shared App holds none and can hold
+	// none, so requiring one would 404 exactly the orgs this handler was just
+	// opened to.
+	var app *domain.OrgGitHubApp
+	if class == domain.GitHubCredentialClassBYOApp {
+		app, err = s.githubApps.GetForOrgSystem(ctx, orgID)
+		if err != nil {
+			internalError(w, "github-app", err)
+			return
+		}
+		if app == nil {
+			notFound(w, "github app")
+			return
+		}
 	}
 
-	// The reconcile: mint an App JWT, GET /app/installations, upsert every live
-	// installation and soft-remove any GitHub no longer reports — the same call
-	// the poller cycle makes. A failure here is GitHub or the App credential,
-	// not the request, so it's a 502 (and logged: the silent failure path is
-	// what made the original picker dead-end untraceable).
-	if err := s.githubApps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
-		githubAppLog.Error("refresh installations failed", "org", orgID, "error", err)
-		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "failed to refresh GitHub App installations" + localDetail(err)})
+	// The reconcile: mint an App JWT, GET /app/installations, apply the answer —
+	// the same call the poller cycle makes for a BYO org. A failure here is
+	// GitHub or the App credential, not the request, so it's a 502 (and logged:
+	// the silent failure path is what made the original picker dead-end
+	// untraceable). The managed arm is handed the deployment App the server read
+	// once at boot; an unconfigured one fails here rather than resolving to
+	// nothing, which is the same 502 an unusable BYO PEM produces.
+	var rerr error
+	if class == domain.GitHubCredentialClassManagedApp {
+		rerr = s.githubApps.RefreshManagedInstallations(ctx, orgID, s.deploymentApp)
+	} else {
+		rerr = s.githubApps.BackfillInstallationsFromAPI(ctx, orgID)
+	}
+	if rerr != nil {
+		githubAppLog.Error("refresh installations failed", "org", orgID, "class", class, "error", rerr)
+		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "failed to refresh GitHub App installations" + localDetail(rerr)})
 		return
 	}
 
