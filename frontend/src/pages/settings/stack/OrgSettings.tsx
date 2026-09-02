@@ -275,9 +275,15 @@ export default function OrgSettings({
     ? `GitHub App — installed on ${draft.githubAppInstallCount} account${
         draft.githubAppInstallCount === 1 ? '' : 's'
       }`
-    : draft.hasGitHubPat
-      ? 'Personal access token — connected'
-      : 'Not configured'
+    : draft.githubAppManaged
+      ? draft.githubAppInstallCount === 0
+        ? "Deployment's GitHub App — no account connected yet"
+        : `Deployment's GitHub App — connected to ${draft.githubAppInstallCount} account${
+            draft.githubAppInstallCount === 1 ? '' : 's'
+          }`
+      : draft.hasGitHubPat
+        ? 'Personal access token — connected'
+        : 'Not configured'
   // "Not set" is not a gap to paper over — it is the state in which the three
   // background jobs do not run, so the collapsed section says so.
   const backgroundJobsSummary = baseline.org.background_jobs_model

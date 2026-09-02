@@ -9,6 +9,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 const ghMocks = vi.hoisted(() => ({
   patPreflight: vi.fn(),
   replayGitHubWebhookDeliveries: vi.fn(),
+  startManagedGitHubConnect: vi.fn(),
 }))
 vi.mock('../../../lib/githubApp', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../lib/githubApp')>()
@@ -16,6 +17,7 @@ vi.mock('../../../lib/githubApp', async (importOriginal) => {
     ...actual,
     patPreflight: ghMocks.patPreflight,
     replayGitHubWebhookDeliveries: ghMocks.replayGitHubWebhookDeliveries,
+    startManagedGitHubConnect: ghMocks.startManagedGitHubConnect,
   }
 })
 
@@ -63,6 +65,7 @@ function renderControl(over: Partial<WizardState> = {}) {
 beforeEach(() => {
   ghMocks.patPreflight.mockReset()
   ghMocks.replayGitHubWebhookDeliveries.mockReset()
+  ghMocks.startManagedGitHubConnect.mockReset()
   credMocks.connectGitHubPAT.mockReset()
   installMocks.status = null
 })
@@ -257,5 +260,73 @@ describe('GitHubAccessControl · App webhook health', () => {
     renderControl(liveApp)
 
     expect(screen.queryByText(/Webhooks/i)).not.toBeInTheDocument()
+  })
+})
+
+// A workspace on the deployment's GitHub App (the managed class). It has no App
+// of its own and never will, so the register/import affordances are wrong for
+// it; what it has is bound installations, and zero of them is an ordinary
+// state the section has to render as one — with the same Connect button that
+// binds a first account, and never as an error or a blank.
+describe('GitHubAccessControl · deployment App', () => {
+  const managedStatus = (installations: GitHubAppStatus['installations']): GitHubAppStatus => ({
+    app: null,
+    installations,
+    using_deployment_default: true,
+    webhook_health: null,
+    connect_callback_url: '',
+  })
+  const FAULT_WORDS = /\b(error|fail|failed|failure|wrong|problem)\b/i
+
+  it('renders the empty state with a Connect button when nothing is bound', () => {
+    installMocks.status = managedStatus([])
+    renderControl({ hasGitHubPat: false, githubPatLogin: '', githubAppManaged: true })
+
+    expect(
+      screen.getByText(/no GitHub account is connected to this workspace yet/i),
+    ).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub…' }))
+    expect(ghMocks.startManagedGitHubConnect).toHaveBeenCalledWith('org-1')
+
+    // Not the PAT/none idle screen, and not a fault.
+    expect(screen.queryByRole('button', { name: /set up a GitHub App/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /switch to GitHub App/i })).not.toBeInTheDocument()
+    expect(screen.queryByText(/isn.t configured/i)).not.toBeInTheDocument()
+    expect(document.body.textContent).not.toMatch(FAULT_WORDS)
+  })
+
+  // The loader's seed alone is enough — the live status read has not answered
+  // yet — so the first paint is already the managed view rather than a PAT
+  // screen that flips.
+  it('renders the empty state from the seeded flag before the status read lands', () => {
+    installMocks.status = null
+    renderControl({
+      hasGitHubPat: false,
+      githubPatLogin: '',
+      githubAppManaged: true,
+      githubAppInstallCount: 0,
+    })
+    expect(screen.getByRole('button', { name: 'Connect GitHub…' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /set up a GitHub App/i })).not.toBeInTheDocument()
+  })
+
+  it('names only the accounts this workspace has bound, and offers to add another', () => {
+    installMocks.status = managedStatus([
+      {
+        installation_id: '4242',
+        account_type: 'Organization',
+        account_login: 'acme',
+        installed_at: '2026-01-02T03:04:05Z',
+        suspended_at: '',
+        suspended_by: '',
+      },
+    ])
+    renderControl({ hasGitHubPat: false, githubPatLogin: '', githubAppManaged: true })
+    expect(
+      screen.getByText(/installed on 1 account connected to this workspace/i),
+    ).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect another account…' }))
+    expect(ghMocks.startManagedGitHubConnect).toHaveBeenCalledWith('org-1')
+    expect(screen.queryByRole('button', { name: /personal access token/i })).not.toBeInTheDocument()
   })
 })

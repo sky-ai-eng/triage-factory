@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -233,6 +235,66 @@ func TestDeploymentWebhook_UnboundInstallation_AcknowledgedWithoutSideEffect(t *
 	}
 	if e := expectPublish(t, got, "webhook:github:pull_request"); e.OrgID != runmode.LocalDefaultOrgID {
 		t.Errorf("published event org = %q, want %q", e.OrgID, runmode.LocalDefaultOrgID)
+	}
+}
+
+// TestDeploymentWebhook_UnboundInstallation_OneOperatorLine is the trace an
+// unbound delivery is allowed to leave: exactly one log line, at a level a
+// self-hoster reads by default, naming the installation and the account it
+// targets — and nothing the payload's author wrote. The operator is the only
+// person placed to notice an install that landed nowhere (no tenant surface
+// may list it), so the line has to be findable; and the payload is text from
+// GitHub's side of the fence, so none of it rides along.
+func TestDeploymentWebhook_UnboundInstallation_OneOperatorLine(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	s := newTestServer(t)
+	seedDeploymentWebhook(t, s)
+
+	created := []byte(`{"action":"created","installation":{"id":4242,"account":{"login":"acme","type":"Organization"},"created_at":"2026-01-01T00:00:00Z"},"sender":{"login":"octocat","html_url":"https://github.com/octocat"}}`)
+
+	var logbuf bytes.Buffer
+	restore := logging.SetOutput(&logbuf)
+	rec := postDeploymentWebhookDelivery(s, "installation", signDeployment(created), created, "gh-delivery-unbound-1")
+	restore()
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("unbound installation.created status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(logbuf.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("an unbound delivery logged %d lines, want exactly 1:\n%s", len(lines), logbuf.String())
+	}
+	line := lines[0]
+	for _, want := range []string{"level=INFO", "unbound installation", "installation=4242", "account=acme", "delivery=gh-delivery-unbound-1"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the operator line lacks %q: %s", want, line)
+		}
+	}
+	for _, leak := range []string{"octocat", "html_url", `"action"`} {
+		if strings.Contains(line, leak) {
+			t.Errorf("the operator line carries payload content %q: %s", leak, line)
+		}
+	}
+	if strings.Contains(line, "level=WARN") || strings.Contains(line, "level=ERROR") {
+		t.Errorf("an ordinary state logged as a fault: %s", line)
+	}
+
+	// A delivery that is not an installation event names no account, and the
+	// line says so by omission rather than by inventing one.
+	logbuf.Reset()
+	restore = logging.SetOutput(&logbuf)
+	pr := []byte(boundPRBody)
+	rec = postDeploymentWebhookDelivery(s, "pull_request", signDeployment(pr), pr, "gh-delivery-unbound-2")
+	restore()
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("unbound pull_request status = %d, want 204", rec.Code)
+	}
+	lines = strings.Split(strings.TrimSpace(logbuf.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("an unbound pull_request delivery logged %d lines, want exactly 1:\n%s", len(lines), logbuf.String())
+	}
+	if !strings.Contains(lines[0], "installation=4242") || strings.Contains(lines[0], "account=") {
+		t.Errorf("pull_request line = %s; want the installation named and no account claimed", lines[0])
 	}
 }
 

@@ -430,3 +430,21 @@ export async function discardStagedApp(orgId: string): Promise<void> {
     throw asError(e, 'Could not discard the staged GitHub App.')
   }
 }
+
+// ── The deployment App (managed class, multi mode only) ───────────────────
+
+// startManagedGitHubConnect starts the bind ceremony for the deployment's
+// GitHub App with a top-level navigation: the backend mints the pending-bind
+// record and cookie and sends the admin to the App's install page on GitHub,
+// which returns them to the callback where the bind completes. Control never
+// comes back here.
+//
+// This is ALSO the recovery for an installation that exists but is bound to no
+// workspace (installed from the App's public page, approved by an owner after
+// a request, reinstalled): the same button, the same ceremony. GitHub hands the
+// existing installation back with the same id and the bind lands. There is no
+// "adopt an existing installation" call, on purpose — one way to create a
+// binding is enough.
+export function startManagedGitHubConnect(orgId: string): void {
+  window.location.assign(`/api/orgs/${encodeURIComponent(orgId)}/github/managed/connect`)
+}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -21,6 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -646,20 +648,41 @@ func TestManagedBind_WorkspaceOnAnotherGitHubIsRefused(t *testing.T) {
 func TestManagedBind_NoCookieIsTheUnboundInstall(t *testing.T) {
 	// Somebody installed the deployment App from its public page, so GitHub
 	// returned them here with no ceremony behind it. That is an ordinary state,
-	// not an error: the installation exists and belongs to no workspace.
+	// not an error: the installation exists and belongs to no workspace, and
+	// the answer is the recovery page — a redirect into the SPA, which is where
+	// the Connect button that finishes the job lives.
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
 
-	assertUnbound := func(t *testing.T, out *httptest.ResponseRecorder) {
+	assertUnbound := func(t *testing.T, out *httptest.ResponseRecorder, wantLocation string) {
 		t.Helper()
-		if out.Code != http.StatusOK {
-			t.Errorf("status = %d body=%s, want 200 — a recordless callback is not an error",
+		if out.Code != http.StatusFound {
+			t.Errorf("status = %d body=%s, want 302 — a recordless callback is not an error",
 				out.Code, out.Body.String())
 		}
+		if got := out.Header().Get("Location"); got != wantLocation {
+			t.Errorf("Location = %q, want %q", got, wantLocation)
+		}
 		assertOutcome(t, out, "unbound")
+		if cc := out.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("Cache-Control = %q, want no-store", cc)
+		}
 		rig.assertNothingBound(t)
-		if gh.served("/login/oauth/access_token") {
-			t.Error("the code was exchanged for a callback with no ceremony behind it")
+		// The branch reads nothing and asks GitHub nothing: no exchange of the
+		// code, no read of the installation. Whatever the query claims, it is
+		// not acted on until a ceremony this deployment started comes back.
+		if n := gh.callCount(); n != 0 {
+			t.Errorf("GitHub served %d requests for a callback with no ceremony behind it; want 0", n)
+		}
+		// Nothing about the installation reaches the response — not the id GitHub
+		// sent, and not the account it targets, which this branch never learns.
+		// The only place an unbound installation's login may appear is the
+		// operator log.
+		rendered := out.Body.String() + fmt.Sprint(out.Header())
+		for _, leak := range []string{"4242", gh.accountLogin, "gh_code"} {
+			if strings.Contains(rendered, leak) {
+				t.Errorf("recovery outcome carries %q; an unbound installation is described to no tenant surface: %s", leak, rendered)
+			}
 		}
 	}
 
@@ -667,15 +690,95 @@ func TestManagedBind_NoCookieIsTheUnboundInstall(t *testing.T) {
 	// test helper hides: the installer has NO Triage Factory session. Nothing
 	// on this path resolves an identity, so a blanket 401 in front of it would
 	// answer the one person it is for with a JSON error and a dead-ended tab.
+	// The SPA route they are sent to handles sign-in with a return target.
 	t.Run("signed_out", func(t *testing.T) {
-		assertUnbound(t, rig.callbackSignedOut(t, nil, defaultCallbackQuery(4242)))
+		assertUnbound(t, rig.callbackSignedOut(t, nil, defaultCallbackQuery(4242)), ManagedInstallRecoveryPath)
 	})
 
 	// The same answer for a TF admin who happens to be signed in — the outcome
 	// is about the missing ceremony, not about who is looking.
 	t.Run("signed_in", func(t *testing.T) {
-		assertUnbound(t, rig.callback(t, nil, defaultCallbackQuery(4242)))
+		assertUnbound(t, rig.callback(t, nil, defaultCallbackQuery(4242)), ManagedInstallRecoveryPath)
 	})
+
+	// An install REQUEST from the public page: GitHub parked it with an owner
+	// and sent the requester here with no installation. The page it lands on
+	// has to say "requested", because "installed, now connect it" would send
+	// them to press a button that cannot find anything yet.
+	t.Run("requested", func(t *testing.T) {
+		assertUnbound(t, rig.callbackSignedOut(t, nil, "setup_action=request"),
+			ManagedInstallRecoveryPath+managedInstallRecoveryRequested)
+	})
+
+	// The operator's signal, and the one place the branch leaves a trace: a
+	// single line naming the installation GitHub sent back. It names it as the
+	// unsigned claim it is, and carries neither the code nor a login.
+	t.Run("operator_log", func(t *testing.T) {
+		var logbuf bytes.Buffer
+		restore := logging.SetOutput(&logbuf)
+		defer restore()
+
+		rig.callbackSignedOut(t, nil, defaultCallbackQuery(4242))
+
+		lines := strings.Split(strings.TrimSpace(logbuf.String()), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("recordless callback logged %d lines, want exactly 1:\n%s", len(lines), logbuf.String())
+		}
+		line := lines[0]
+		if !strings.Contains(line, "level=INFO") {
+			t.Errorf("the unbound-install line is not at INFO, the level a self-hoster reads by default: %s", line)
+		}
+		if !strings.Contains(line, "installation=4242") {
+			t.Errorf("the line does not name the installation: %s", line)
+		}
+		if strings.Contains(line, "gh_code") {
+			t.Errorf("the line carries the OAuth code: %s", line)
+		}
+		if strings.Contains(line, "level=ERROR") || strings.Contains(line, "level=WARN") {
+			t.Errorf("an ordinary state logged as a fault: %s", line)
+		}
+	})
+}
+
+// TestManagedBind_RefusedBindIsLoggedForTheOperator pins the other operator
+// signal: a ceremony that came back and did not land leaves one WARN line
+// naming the installation and, once the App has read it, the account it
+// targets — so a self-hoster can tell "went to the wrong workspace" from
+// "never connected" without a payload, a code, or a token ever being logged.
+func TestManagedBind_RefusedBindIsLoggedForTheOperator(t *testing.T) {
+	gh := newFakeGitHub()
+	gh.membershipRole = "member" // association passes; authority does not
+	rig := newBindRig(t, gh)
+	cookie := rig.ceremony(t)
+
+	var logbuf bytes.Buffer
+	restore := logging.SetOutput(&logbuf)
+	out := rig.callback(t, cookie, defaultCallbackQuery(4242))
+	restore()
+	assertOutcome(t, out, "not_account_admin")
+
+	var refusedLine string
+	for _, line := range strings.Split(logbuf.String(), "\n") {
+		if strings.Contains(line, "managed bind refused") {
+			if refusedLine != "" {
+				t.Fatalf("a refused bind logged twice:\n%s", logbuf.String())
+			}
+			refusedLine = line
+		}
+	}
+	if refusedLine == "" {
+		t.Fatalf("no refused-bind line in the log:\n%s", logbuf.String())
+	}
+	for _, want := range []string{"level=WARN", "reason=not_account_admin", "installation=4242", "account=" + gh.accountLogin} {
+		if !strings.Contains(refusedLine, want) {
+			t.Errorf("refused-bind line lacks %q: %s", want, refusedLine)
+		}
+	}
+	for _, leak := range []string{"gh_code", "ghu_proof", "deployment_client_secret"} {
+		if strings.Contains(logbuf.String(), leak) {
+			t.Errorf("the log carries %q, which is a secret or a proof: %s", leak, logbuf.String())
+		}
+	}
 }
 
 // TestManagedBind_CompletingWithoutASessionIsRefused pins the other half of the

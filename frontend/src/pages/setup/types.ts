@@ -137,6 +137,13 @@ export interface WizardState {
   // animation clips. Null until loaded, or if the fetch failed — the panel just
   // loads it itself in that case, as it does in Settings.
   githubAppStatus: GitHubAppStatus | null
+  // Whether the org's GitHub access is the DEPLOYMENT's App — one App key the
+  // operator registered for every workspace, which the org binds installations
+  // to rather than registering an App of its own (multi mode only). It has no
+  // App row (githubAppRegistered stays false) and never will; what it has is
+  // bound installations, counted in githubAppInstallCount, of which zero is an
+  // ordinary state that Settings has to render as one. Default false.
+  githubAppManaged: boolean
   // Whether the org's registered App is installed on ≥1 GitHub account — the
   // gate for the "Install the App" step, distinct from githubReady (which
   // registration alone satisfies). Seeded from the installation mirror on load
