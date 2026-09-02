@@ -47,8 +47,9 @@ const managedInTheWayMessage = "This workspace is connected through the deployme
 
 // errOrgManagedInTheWay is the door guard's refusal as an error, for the one
 // door (the registration launch) whose refusals travel as sentinel errors from
-// the manifest builder to the page renderer.
-var errOrgManagedInTheWay = errors.New(managedInTheWayMessage)
+// the manifest builder to the page renderer, which puts the sentence above on
+// the page.
+var errOrgManagedInTheWay = errors.New("org rides the deployment app with a live installation")
 
 // managedInstallationsInTheWay is the door guard's predicate: does this
 // workspace ride the deployment App with at least one live installation row?
