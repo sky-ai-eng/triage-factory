@@ -27,7 +27,7 @@ func TestTeamPRStore_SQLite(t *testing.T) {
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 		// The org's github_base_url is unset here, the common case: the store
-		// resolves it to the public host, which is where a login-claim
+		// resolves it to the deployment default (github.com here), which is where a login-claim
 		// binding actually lands.
 		return stores.TeamPRs, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, "",
 			newSQLiteTeamPRSeeder(conn, runmode.LocalDefaultTeamID)

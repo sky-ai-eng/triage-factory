@@ -162,7 +162,7 @@ func TestReviewRequested_UserRoutesToRequestedUsersTeams(t *testing.T) {
 // TestReviewRequested_EmptyOrgHost_DefaultsToGitHubCom guards the common
 // github.com case where org_settings.github_base_url is unset: the OAuth
 // login-claim binds identities to "https://github.com" literally, so the
-// resolver must default an empty host to github.com or the reverse lookup
+// resolver must default an empty host to the deployment default or the reverse lookup
 // misses and the task is dropped.
 func TestReviewRequested_EmptyOrgHost_DefaultsToGitHubCom(t *testing.T) {
 	database := newTestDB(t)

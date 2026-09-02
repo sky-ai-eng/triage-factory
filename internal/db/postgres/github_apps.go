@@ -529,7 +529,7 @@ func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgI
 // The class and the org's GitHub base URL come off one read, as the sibling's
 // registration + base URL do — same admin pool, same LEFT JOIN onto
 // org_event_sources, so a settings row with no per-source override resolves to
-// the public host rather than dropping the org.
+// the deployment default rather than dropping the org.
 func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID string, deployment githubapp.DeploymentApp) error {
 	// An id that is not a uuid names no org, and an org this method cannot
 	// identify is one it must not reconcile. Refused rather than skipped —

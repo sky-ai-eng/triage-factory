@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 )
 
@@ -130,6 +132,9 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 			fmt.Fprint(w, *body)
 		})
 		srv := httptest.NewServer(mux)
+		// The fake is the deployment's GitHub: the deployment App is on it, so it
+		// is the one host the refresh lists against.
+		ghbase.SetDefaultBaseURLForTest(t, srv.URL)
 		t.Cleanup(srv.Close)
 		return srv.URL, calls
 	}
@@ -345,6 +350,32 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 			t.Errorf("live installations = %v; want [111] untouched", got)
 		}
 	})
+	t.Run("AWorkspaceOnAnotherGitHubIsRefusedWithoutAsking", func(t *testing.T) {
+		// The per-org refresh lists the deployment's GitHub, the one the App
+		// is on. A managed workspace whose base URL resolves elsewhere is
+		// refused before any request — the fake counts none — with an error
+		// naming both hosts, and its rows are exactly as they were.
+		store, seed := mk(t)
+		body := listing(acct{111, "acme"})
+		_, calls := fakeGitHub(t, http.StatusOK, &body)
+		const other = "https://ghe.other.test"
+		org := seed.Org(t, seed.User(t))
+		seed.Class(t, org, domain.GitHubCredentialClassManagedApp, other)
+		bind(t, store, org, "111", other, "acme")
+
+		err := store.RefreshManagedInstallations(ctx, org, deployment)
+		if !errors.Is(err, db.ErrManagedWorkspaceOnOtherGitHub) {
+			t.Fatalf("RefreshManagedInstallations err = %v; want ErrManagedWorkspaceOnOtherGitHub", err)
+		}
+		if got := calls.Load(); got != 0 {
+			t.Errorf("GitHub served %d requests for a workspace on another host; want 0", got)
+		}
+		insts, lerr := store.ListInstallationsForOrgSystem(ctx, org)
+		if lerr != nil || len(insts) != 1 || insts[0].AccountLogin != "acme" || insts[0].GitHubHost != other {
+			t.Errorf("rows after the refusal = %+v (%v); want the one bound row untouched", insts, lerr)
+		}
+	})
+
 	t.Run("OffHostListsOnlyLiveManagedRowsElsewhere", func(t *testing.T) {
 		// The boot warning's read. The deployment App is on one GitHub — the
 		// deployment default — and a managed row keyed under any other string

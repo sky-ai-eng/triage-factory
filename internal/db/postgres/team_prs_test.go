@@ -31,7 +31,7 @@ func TestTeamPRStore_Postgres(t *testing.T) {
 		orgID, _ := seedPgOrgAndUserForDashboard(t, h)
 		teamID := firstTeamForOrg(t, h, orgID)
 		// github_base_url unset, the common case: the store resolves it to
-		// the public host, which is where a login-claim binding lands.
+		// the deployment default — github.com here, which is where a login-claim binding lands.
 		return stores.TeamPRs, orgID, teamID, "", newPgTeamPRSeeder(h, orgID, teamID)
 	})
 

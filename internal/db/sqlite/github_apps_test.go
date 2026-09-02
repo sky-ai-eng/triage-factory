@@ -394,7 +394,7 @@ func TestGitHubAppsStore_SQLite_Backfill(t *testing.T) {
 	}
 	// The reconcile is the second installation writer, so every row it mints
 	// records the deployment it was listed from — the org's own base URL, not
-	// the public host it would fall back to if nobody stamped one.
+	// the deployment default it would fall back to if nobody stamped one.
 	for _, inst := range got {
 		if inst.GitHubHost != srv.URL {
 			t.Errorf("installation %s GitHubHost = %q; want the base URL it was listed from, %q",

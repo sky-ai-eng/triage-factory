@@ -213,8 +213,9 @@ type Resolver interface {
 	// calls — the managed Git proxy uses it for its upstream and
 	// insteadOf rewrite, so the proxy forwards to (and the rewrite matches)
 	// the same host the worktree was cloned from. A backend read error
-	// propagates rather than silently defaulting to github.com: a GHES org
-	// whose base can't be read must not be paired with the public host.
+	// propagates rather than silently defaulting to the deployment default: a
+	// GHES org whose base can't be read must not be paired with a host it is
+	// not on.
 	BaseURLFor(ctx context.Context, orgID string) (string, error)
 
 	// OrgIdentityFor resolves the org's single GitHub commit identity — the
@@ -442,9 +443,9 @@ func (r *resolver) ClientForRepoWithIdentity(ctx context.Context, orgID, owner, 
 //
 // Backend read failures propagate rather than getting papered over: if a
 // source that might hold a GHES host can't be read, we must NOT silently
-// default to github.com — pairing a real (possibly GHES) PAT with the public
-// host would route a tenant credential to the wrong server. Only when both
-// sources are definitively readable AND empty do we treat the org as public
+// default — pairing a real (possibly GHES) PAT with the deployment default
+// would route a tenant credential to the wrong server. Only when both
+// sources are definitively readable AND empty do we treat the org as on the
 // github.com.
 func (r *resolver) githubBaseFor(ctx context.Context, orgID string) (string, error) {
 	set, setErr := r.orgs.GetSettingsSystem(ctx, orgID)

@@ -3,8 +3,8 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -74,6 +74,13 @@ func DiscoverAppInstallations(ctx context.Context, secrets SecretStore, orgID, a
 // happened to reconcile, and because the removal diff runs against this org's
 // own active set, nothing downstream would ever correct it.
 //
+// The listing is taken from the deployment's default GitHub, the one GitHub the
+// deployment App is on. baseURL is the org's own and is checked, not used: an
+// org whose effective host is another GitHub is refused before any request,
+// because the deployment's key presented to a server that has never seen it
+// earns a 401 that reads like a bad key. The bind refuses such a workspace, so
+// this is reached only by one whose base URL moved after it bound.
+//
 // bound is the org's own active installation ids. Filtering on the ACTIVE set
 // rather than every row the org has ever held is deliberate: a soft-removed row
 // is an uninstall, and GitHub mints a fresh installation id on re-install, so
@@ -84,20 +91,42 @@ func DiscoverAppInstallations(ctx context.Context, secrets SecretStore, orgID, a
 // managed to read, so "GitHub no longer reports this installation" can never be
 // confused with "we could not finish asking".
 func RefreshBoundInstallations(ctx context.Context, deployment githubapp.DeploymentApp, orgID, baseURL string, bound []string) ([]domain.OrgGitHubAppInstallation, error) {
-	minter, err := deployment.Minter(ghbase.APIBase(baseURL))
+	if err := managedHostMismatch(orgID, baseURL); err != nil {
+		return nil, err
+	}
+	deploymentHost := ghbase.DefaultBaseURL()
+	minter, err := deployment.Minter(ghbase.APIBase(deploymentHost))
 	if err != nil {
 		return nil, err
 	}
-	listed, err := listInstallations(ctx, minter, orgID, baseURL)
+	listed, err := listInstallations(ctx, minter, orgID, deploymentHost)
 	if err != nil {
 		return nil, err
 	}
 	return keepBound(listed, orgID, bound), nil
 }
 
+// ErrManagedWorkspaceOnOtherGitHub is the cause carried when a managed
+// workspace's effective GitHub host is not the deployment's default. Its rows
+// are left exactly as they are: the deployment App cannot list them, and "we
+// could not ask" must never be actioned as "GitHub no longer reports this".
+var ErrManagedWorkspaceOnOtherGitHub = errors.New("managed workspace is on a GitHub the deployment app is not on")
+
+// managedHostMismatch answers whether orgID, on baseURL, is on the deployment's
+// GitHub — nil when it is, and an error naming both hosts when it is not.
+func managedHostMismatch(orgID, baseURL string) error {
+	host, deploymentHost := EffectiveGitHubHost(baseURL), ghbase.DefaultBaseURL()
+	if host == deploymentHost {
+		return nil
+	}
+	return fmt.Errorf("%w: org=%s workspace on %s, deployment app on %s",
+		ErrManagedWorkspaceOnOtherGitHub, orgID, host, deploymentHost)
+}
+
 // ManagedInstallationSet is one managed workspace's bound installation set: the
-// org, the GitHub it lists against (the org's configured base URL, "" for
-// the deployment default), and the installation ids the bind ceremony wrote for it.
+// org, its configured base URL ("" for the deployment default — checked against
+// it, never listed against), and the installation ids the bind ceremony wrote
+// for it.
 type ManagedInstallationSet struct {
 	OrgID   string
 	BaseURL string
@@ -106,9 +135,8 @@ type ManagedInstallationSet struct {
 
 // RefreshManagedInstallationSets is the deployment-scoped sibling of
 // RefreshBoundInstallations: it refreshes EVERY managed workspace's bound
-// installations from as few listings as the sets allow — one per GitHub host
-// they name, which for a deployment App is one — and fans each answer out to
-// the orgs that bound the installations in it.
+// installations from ONE listing of the deployment's GitHub, and fans that
+// answer out to the orgs that bound the installations in it.
 //
 // The scope is the whole reason it exists beside its per-org sibling rather
 // than being a loop over it. Under a shared key GET /app/installations returns
@@ -119,20 +147,21 @@ type ManagedInstallationSet struct {
 // refresh-never-discovers structural: an installation nobody bound has no row to
 // write to, so there is no filter here that a later change could relax.
 //
+// One listing because there is one GitHub to list: the deployment App is on
+// the deployment's default host and nowhere else. A set whose base URL resolves
+// to another host is not listed against that host — the deployment's key would
+// only earn a 401 there — it is skipped with ErrManagedWorkspaceOnOtherGitHub
+// carried to the return, naming the org and both hosts, and its rows are left
+// exactly as they were. The other sets still refresh.
+//
 // It holds the same invariants as the sibling, with the same mechanics. Every
 // row it writes is one of a set's Bound ids, stamped with that set's org, so a
 // listed installation no set names is skipped and never written. A failed or
-// partial listing for a host changes nothing on that host — the error is
-// carried to the return and the other hosts still refresh — because "we could
+// partial listing changes nothing — the error is returned — because "we could
 // not ask" must never be actioned as "GitHub no longer reports this". A
-// per-org write failure is likewise carried rather than aborting the fan-out:
-// one workspace's write failing is no reason to leave every other workspace
-// stale until the next cycle.
-//
-// Sets are grouped by the host their base URL resolves to (EffectiveGitHubHost),
-// which is the host every row is keyed under, so two spellings of github.com
-// share one listing. Hosts are walked in sorted order for a deterministic
-// request sequence.
+// per-org write failure is carried rather than aborting the fan-out: one
+// workspace's write failing is no reason to leave every other workspace stale
+// until the next cycle.
 //
 // upsert writes one row (its OrgID already stamped); markRemoved soft-removes
 // one of orgID's installations. Both are the store's own pool-bound writers,
@@ -144,53 +173,49 @@ func RefreshManagedInstallationSets(
 	upsert func(domain.OrgGitHubAppInstallation) error,
 	markRemoved func(orgID, installationID string) error,
 ) error {
-	byHost := make(map[string][]ManagedInstallationSet)
-	for _, set := range sets {
-		host := EffectiveGitHubHost(set.BaseURL)
-		byHost[host] = append(byHost[host], set)
-	}
-	hosts := make([]string, 0, len(byHost))
-	for host := range byHost {
-		hosts = append(hosts, host)
-	}
-	sort.Strings(hosts)
-
 	var firstErr error
 	fail := func(err error) {
 		if firstErr == nil {
 			firstErr = err
 		}
 	}
-	for _, host := range hosts {
+	listable := make([]ManagedInstallationSet, 0, len(sets))
+	for _, set := range sets {
+		if err := managedHostMismatch(set.OrgID, set.BaseURL); err != nil {
+			fail(err)
+			continue
+		}
+		listable = append(listable, set)
+	}
+	if len(listable) == 0 {
+		return firstErr
+	}
+
+	deploymentHost := ghbase.DefaultBaseURL()
+	minter, err := deployment.Minter(ghbase.APIBase(deploymentHost))
+	if err != nil {
+		// No deployment App is no listing at all, so it is the one failure that
+		// ends the pass rather than being carried.
+		return err
+	}
+	// Listed once with no org stamped: the org is a property of each set,
+	// applied as its rows are kept below.
+	listed, err := listInstallations(ctx, minter, "", deploymentHost)
+	if err != nil {
+		return fmt.Errorf("list installations on %s: %w", deploymentHost, err)
+	}
+	for _, set := range listable {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		group := byHost[host]
-		baseURL := group[0].BaseURL
-		minter, err := deployment.Minter(ghbase.APIBase(baseURL))
+		kept := keepBound(listed, set.OrgID, set.Bound)
+		orgID := set.OrgID
+		err := ReconcileInstallations(kept, set.Bound,
+			upsert,
+			func(installationID string) error { return markRemoved(orgID, installationID) },
+		)
 		if err != nil {
-			// No deployment App is no listing for ANY host, and nothing else
-			// this loop could learn on a later iteration — so it is the one
-			// failure that ends the pass rather than being carried past.
-			return err
-		}
-		// Listed once per host with no org stamped: the org is a property of
-		// each set, applied as its rows are kept below.
-		listed, err := listInstallations(ctx, minter, "", baseURL)
-		if err != nil {
-			fail(fmt.Errorf("list installations on %s: %w", host, err))
-			continue
-		}
-		for _, set := range group {
-			kept := keepBound(listed, set.OrgID, set.Bound)
-			orgID := set.OrgID
-			err := ReconcileInstallations(kept, set.Bound,
-				upsert,
-				func(installationID string) error { return markRemoved(orgID, installationID) },
-			)
-			if err != nil {
-				fail(fmt.Errorf("reconcile managed installations for org %s: %w", orgID, err))
-			}
+			fail(fmt.Errorf("reconcile managed installations for org %s: %w", orgID, err))
 		}
 	}
 	return firstErr

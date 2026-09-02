@@ -5,15 +5,18 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 )
 
@@ -82,6 +85,9 @@ func managedFakeGitHub(t *testing.T, status int, body *string) (baseURL string, 
 		_, _ = w.Write([]byte(*body))
 	})
 	srv := httptest.NewServer(mux)
+	// The fake is the deployment's GitHub: the deployment App is on it, so it
+	// is the one host the refresh lists against.
+	ghbase.SetDefaultBaseURLForTest(t, srv.URL)
 	t.Cleanup(srv.Close)
 	return srv.URL, calls
 }
@@ -389,6 +395,46 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		}
 		if rows := seed.AllInstallationIDs(t, unbound); len(rows) != 0 {
 			t.Errorf("unbound workspace holds rows %v; want none — a refresh creates nothing", rows)
+		}
+	})
+
+	t.Run("AWorkspaceOnAnotherGitHubIsSkipped", func(t *testing.T) {
+		// The deployment App is on one GitHub, so there is one listing. A
+		// managed workspace whose base URL resolves elsewhere — one that moved
+		// its host after binding, since the bind refuses the shape outright —
+		// is not listed against that host with a key it has never seen. It is
+		// skipped: its rows are left exactly as they were, the mismatch is
+		// carried to the returned error naming the org and both hosts, and the
+		// workspaces on the deployment's GitHub still converge from the one
+		// listing.
+		store, seed := mk(t)
+		body := managedListing(t, managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme-renamed"})
+		base, calls := managedFakeGitHub(t, http.StatusOK, &body)
+		onDefault := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme"})
+
+		const other = "https://ghe.other.test"
+		elsewhere := seed.Org(t, seed.User(t))
+		seed.Class(t, elsewhere, domain.GitHubCredentialClassManagedApp, other)
+		bind(t, store, domain.OrgGitHubAppInstallation{InstallationID: "999", OrgID: elsewhere, AccountLogin: "moved", GitHubHost: other})
+
+		err := store.RefreshAllManagedInstallations(ctx, deployment)
+		if !errors.Is(err, db.ErrManagedWorkspaceOnOtherGitHub) {
+			t.Fatalf("RefreshAllManagedInstallations err = %v; want ErrManagedWorkspaceOnOtherGitHub carried", err)
+		}
+		for _, want := range []string{elsewhere, other, base} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("err = %v; want it to name %q", err, want)
+			}
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("listing walked %d times; want exactly 1 — the deployment's GitHub, never the other host", got)
+		}
+		if got := live(t, store, onDefault)["111"]; got.AccountLogin != "acme-renamed" {
+			t.Errorf("on-default workspace AccountLogin = %q; want %q — the skip must not cost the others their refresh", got.AccountLogin, "acme-renamed")
+		}
+		got, ok := live(t, store, elsewhere)["999"]
+		if !ok || got.AccountLogin != "moved" || got.GitHubHost != other {
+			t.Errorf("skipped workspace row = %+v (live=%v); want [999 moved %s] untouched", got, ok, other)
 		}
 	})
 

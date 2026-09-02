@@ -724,7 +724,7 @@ func TestResolver_PATReadError_Propagates(t *testing.T) {
 }
 
 // When org_settings has no base and the github_url secret read fails, the
-// resolver must NOT default to github.com (which would send a possibly-GHES
+// resolver must NOT default to the deployment default (which would send a possibly-GHES
 // PAT to the wrong host) — it must propagate the error.
 func TestResolver_BaseReadError_Propagates(t *testing.T) {
 	r := newTestResolver(
@@ -776,7 +776,7 @@ func TestResolver_BaseURLFallbackToSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}
-	// If the base wrongly defaulted to github.com, this request would never
+	// If the base wrongly defaulted to the deployment default, this request would never
 	// reach the test server and lastProbe would stay empty.
 	if _, err := client.Get(context.Background(), "/probe"); err != nil {
 		t.Fatalf("probe: %v", err)

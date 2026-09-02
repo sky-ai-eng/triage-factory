@@ -179,7 +179,7 @@ type GitHubAppsStore interface {
 	// (EffectiveGitHubHost): both writers resolve it from the org's
 	// github_base_url, which is the only thing it can be, so the value they
 	// carry is always current and an empty one means "the org configured no
-	// base URL" — the public host. That fold is what keeps the NOT NULL column
+	// base URL" — the deployment default. That fold is what keeps the NOT NULL column
 	// free of empty strings no matter which writer built the struct.
 	//
 	// The suspension fields are overwritten unconditionally, like the login
@@ -299,8 +299,8 @@ type GitHubAppsStore interface {
 
 	// RefreshAllManagedInstallations is the cadence pass for the managed class:
 	// the same refresh as RefreshManagedInstallations, for EVERY managed
-	// workspace at once, from one listing per GitHub host rather than one per
-	// org. Under a shared key the listing is the same whoever asks, so the
+	// workspace at once, from one listing of the deployment's GitHub rather
+	// than one per org. Under a shared key the listing is the same whoever asks, so the
 	// per-org shape spends one shared rate budget N times for N identical
 	// answers; this reads every managed workspace's bound set in one query,
 	// lists once, and fans the answer out to the orgs that bound each
@@ -310,7 +310,10 @@ type GitHubAppsStore interface {
 	// converge — account login and id, the suspension pair, repository_selection
 	// — and a bound installation GitHub no longer reports is soft-removed with
 	// its reachable-repo cascade; an installation no workspace bound is never
-	// written; a failed listing changes nothing. A workspace on any other class
+	// written; a failed listing changes nothing; a managed workspace whose
+	// base URL resolves to a GitHub other than the deployment's is skipped
+	// with its rows untouched and the mismatch carried to the returned error
+	// (db.ErrManagedWorkspaceOnOtherGitHub). A workspace on any other class
 	// is not in the read at all, so nothing here can touch a BYO org's rows.
 	//
 	// Two scopes, two methods, and the split is deliberate: the sibling's

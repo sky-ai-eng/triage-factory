@@ -206,9 +206,9 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 			t.Fatalf("UpsertJiraIdentity: %v", err)
 		}
 
-		// githubBaseURL is passed UNSET, as an org on public github.com has
-		// it: the impl must resolve that to github.com, which is where the
-		// binding above landed.
+		// githubBaseURL is passed UNSET, as an org on the deployment's default
+		// GitHub has it: the impl must resolve that to the default, which is
+		// where the binding above landed.
 		members, _, err := stores.Teams.ListMembers(ctx, teamID, "", jiraHost, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)

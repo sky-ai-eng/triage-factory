@@ -125,8 +125,9 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	// The org's own GitHub host, resolved the same way the switch flow beside
 	// this one resolves it. It fails closed rather than guessing: a settings or
 	// secret read it cannot complete is an error here, never a silent
-	// fall-through to github.com, because pairing a GHES token with the public
-	// host would send a tenant credential to the wrong server.
+	// fall-through to the deployment default, because pairing a GHES token
+	// with a host it is not on would send a tenant credential to the wrong
+	// server.
 	baseURL, err := s.ghResolver.BaseURLFor(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-access", err)
@@ -220,8 +221,9 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 // connected-looking, credential-less GitHub card. But an App registration keeps
 // using that host: a staged App coexists with a live PAT during a PAT→App
 // switch, and the resolver's base lookup falls through org_settings → the
-// github_url secret → the deployment default, so clearing both while an App row survives
-// would silently re-point a GHES org's App at github.com. Wrong host, no error.
+// github_url secret → the deployment default, so clearing both while an App row
+// survives would silently re-point a GHES org's App at the deployment default —
+// a GitHub it is not on. Wrong host, no error.
 // With an App present the disconnect touches the credential only, and the App's
 // own teardown (discard / switch-to-pat) owns the host from there.
 //

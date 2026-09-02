@@ -36,7 +36,7 @@ type GitHubInstallationHostFactory func(t *testing.T) (db.GitHubAppsStore, GitHu
 //     in the schema uses, so a trailing slash and an unset base URL cannot
 //     produce a second spelling of one host;
 //   - the column never reads back empty — an installation written without a
-//     host is one whose org configured none, which is the public host;
+//     host is one whose org configured none, which is the deployment default;
 //   - it follows the org when a later write reports a different one, like the
 //     login and unlike the account id;
 //   - the negative space this column exists FOR: two orgs on different GitHub
@@ -155,7 +155,7 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		orgA, orgB := seed.Org(t, owner), seed.Org(t, owner)
 
 		if _, err := store.UpsertInstallation(ctx, install(orgA, "456", ghbase.DefaultBaseURL(), "acme")); err != nil {
-			t.Fatalf("UpsertInstallation (public host): %v", err)
+			t.Fatalf("UpsertInstallation (default host): %v", err)
 		}
 		if _, err := store.UpsertInstallation(ctx, install(orgB, "456", ghes, "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (GHES, same installation id): %v", err)
