@@ -455,3 +455,47 @@ func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID
 		func(id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, id); return err },
 	)
 }
+
+// RefreshAllManagedInstallations is the deployment-wide managed refresh. See
+// the GitHubAppsStore interface doc. Local mode never reaches it either — the
+// pass is a no-op with no deployment App, which a local process never has —
+// and the impl is real for the same reason the sibling's is: the conformance
+// suite pins it on both dialects.
+func (s *gitHubAppsStore) RefreshAllManagedInstallations(ctx context.Context, deployment githubapp.DeploymentApp) error {
+	sets, err := s.managedInstallationSets(ctx)
+	if err != nil {
+		return err
+	}
+	// No managed workspace holds a bound installation: no row to refresh, and
+	// nothing a listing could add without discovering. Answered before the
+	// deployment App is even consulted, so a deployment whose orgs all bring
+	// their own App never minds that it has none.
+	if len(sets) == 0 {
+		return nil
+	}
+	return db.RefreshManagedInstallationSets(ctx, deployment, sets,
+		func(i domain.OrgGitHubAppInstallation) error { _, err := s.UpsertInstallation(ctx, i); return err },
+		func(orgID, id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, id); return err },
+	)
+}
+
+// managedInstallationSets reads every managed workspace's live bound
+// installation ids alongside the GitHub base URL the org lists against — the
+// rows the cadence pass may refresh, grouped by org. An org with nothing bound
+// contributes no set: there is no row for the pass to write to, which is the
+// invariant stated as a query.
+func (s *gitHubAppsStore) managedInstallationSets(ctx context.Context) ([]db.ManagedInstallationSet, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT st.org_id, COALESCE(es.base_url, ''), i.installation_id
+		  FROM org_settings st
+		  JOIN org_github_app_installations i ON i.org_id = st.org_id AND i.removed_at IS NULL
+		  LEFT JOIN org_event_sources es ON es.org_id = st.org_id AND es.kind = 'github'
+		 WHERE st.github_credential_class = ?
+		 ORDER BY st.org_id, i.installation_id
+	`, string(domain.GitHubCredentialClassManagedApp))
+	if err != nil {
+		return nil, fmt.Errorf("read managed installation sets: %w", err)
+	}
+	defer rows.Close()
+	return db.ScanManagedInstallationSets(rows)
+}

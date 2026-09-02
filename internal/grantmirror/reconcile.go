@@ -45,6 +45,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 )
 
 // grantLister is the half of a resolved GitHub client this package uses. Named
@@ -112,15 +113,58 @@ type Reconciler struct {
 	mirror  db.ReachableReposStore
 	clients clientSource
 	classes classResolver
+	// deployment is the shared App the managed class rides. The zero App —
+	// every local process, and a multi deployment whose orgs all bring their
+	// own key — makes RunDeployment a no-op.
+	deployment githubapp.DeploymentApp
 }
 
 // NewReconciler builds a Reconciler over the App-installation store, the grant
 // mirror, the per-(org, account) GitHub client resolver — App installation token
 // in multi, keychain PAT in local, exactly as every other GitHub-facing
-// background pass resolves — and the class resolver that says which credential
-// system an org's entries are keyed under.
-func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resolver github.Resolver, classes classResolver) *Reconciler {
-	return &Reconciler{apps: apps, mirror: mirror, clients: resolverSource{resolver: resolver}, classes: classes}
+// background pass resolves — the class resolver that says which credential
+// system an org's entries are keyed under, and the deployment App, which is the
+// one credential the managed installation set can be refreshed with. It is a
+// parameter rather than an ambient read for the same reason the store method
+// takes it: operator environment config is read once at boot and handed down,
+// so two consumers cannot hold two answers.
+func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resolver github.Resolver, classes classResolver, deployment githubapp.DeploymentApp) *Reconciler {
+	return &Reconciler{apps: apps, mirror: mirror, clients: resolverSource{resolver: resolver}, classes: classes, deployment: deployment}
+}
+
+// RunDeployment refreshes every managed workspace's installation set from one
+// listing of the deployment App's installations. It is the managed class's
+// half of the existence reconcile RunOrg performs for a workspace that owns its
+// App key — split out because it is a DEPLOYMENT singleton, not a per-org pass:
+// under a shared key GET /app/installations is the same answer whoever asks, so
+// listing it once per org per cycle would spend one shared rate budget N times
+// for N identical responses. One listing per cycle, fanned out to the orgs that
+// bound each installation, is both cheaper and more correct (one consistent
+// snapshot to diff uninstalls against).
+//
+// It restores, for the managed class, the doctrine at the head of this package:
+// pull is the contract and webhooks are a latency optimization on it. Some of
+// what this converges has no push signal at all — an account rename fires no
+// event this deployment subscribes to, and account_login is what the resolver
+// matches on, so without it a renamed account stops minting tokens forever.
+// A lost unsuspend delivery is the other trap: RunOrg skips a suspended
+// installation's grant, correctly, so a suspended_at nothing clears is a grant
+// nothing refreshes.
+//
+// A no-op with no deployment App configured — nothing could be listed — and,
+// inside the store, for a deployment with no managed workspace holding a bound
+// installation. It never discovers: an installation no workspace bound has no
+// row to write to. It runs once per GitHub poll cycle, on the brain-lease
+// holder only, which is the poller's own gate (the same one RunOrg inherits)
+// and not a second mechanism here.
+func (r *Reconciler) RunDeployment(ctx context.Context) error {
+	if !r.deployment.Configured() {
+		return nil
+	}
+	if err := r.apps.RefreshAllManagedInstallations(ctx, r.deployment); err != nil {
+		return fmt.Errorf("refresh managed installations: %w", err)
+	}
+	return nil
 }
 
 // RunOrg reconciles one org: first that the set of installations TF believes in
@@ -192,16 +236,12 @@ func (r *Reconciler) RunOrg(ctx context.Context, orgID string) error {
 	// one row per org with a UNIQUE app_id, so N orgs cannot each name the one
 	// shared App.)
 	//
-	// Skipping the REFRESH is not the point, and it leaves a managed workspace's
-	// installation set converging on webhook deliveries alone — which GitHub
-	// never retries, and which for an account rename do not exist at all. A
-	// scoped refresh that may safely run now exists
-	// (GitHubAppsStore.RefreshManagedInstallations); what it still needs is a
-	// caller shaped for one shared key, since a listing per org per cycle would
-	// spend one rate budget N times over.
-	// TODO(TFAC-935): refresh the managed installation set from one
-	// deployment-wide listing per cycle, fanned out to the orgs that bound each
-	// installation.
+	// Skipping the REFRESH here is not the point; it is only the wrong scope.
+	// The managed installation set still converges by pull, in RunDeployment,
+	// which lists the shared App once per cycle for every managed workspace at
+	// once and runs ahead of this per-org loop — so by the time this pass reads
+	// the workspace's installations below, a suspension GitHub has lifted is
+	// already cleared and a renamed account already carries its new login.
 
 	// An org on the PAT tier has no grant to mirror at all: its reach is the
 	// account enumeration the reachable cache owns, keyed under its own class.

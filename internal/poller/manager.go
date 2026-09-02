@@ -66,6 +66,22 @@ type Manager struct {
 	// behind, so no second mechanism is introduced for this one pass.
 	ReconcileGrant func(ctx context.Context, orgID string) error
 
+	// RefreshManagedInstallations refreshes the installation set of every
+	// workspace on the deployment's shared GitHub App, from one listing. nil
+	// disables the pass (tests, and any embedder that hasn't wired it).
+	//
+	// It is a deployment singleton rather than a per-org call like
+	// ReconcileGrant, because under a shared key the listing is the same answer
+	// whoever asks — so it runs at most ONCE per cycle, ahead of the first due
+	// org's poll, and not at all on a wake where no org is due. That keeps the
+	// shared rate budget's spend independent of the tenant count and puts the
+	// refresh before ReconcileGrant reads each org's installations, so a lifted
+	// suspension or a renamed account is already on the row that read sees.
+	//
+	// Same leader gating as ReconcileGrant: the scheduler that calls it runs
+	// only on the brain-lease holder in multi mode, so a standby never lists.
+	RefreshManagedInstallations func(ctx context.Context) error
+
 	// EventSources reads the org's declared per-source policy — today, whether
 	// an org admin has paused a source. nil disables the skip (tests, and any
 	// embedder that hasn't wired it), which costs API calls and nothing else:
@@ -479,6 +495,21 @@ func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 	polled := 0
 	defer func() { span.SetAttributes(telemetry.Count(polled)) }()
 
+	// Once per cycle, lazily: a wake where nothing is due spends nothing. Best
+	// effort like the per-org grant pass — a listing that fails leaves every
+	// managed row exactly as it was, so a stale set is the worst outcome and
+	// never a reason to skip the polls the cycle came for.
+	managedRefreshed := false
+	refreshManaged := func() {
+		if managedRefreshed || m.RefreshManagedInstallations == nil {
+			return
+		}
+		managedRefreshed = true
+		if err := m.RefreshManagedInstallations(ctx); err != nil {
+			githubLog.WarnContext(ctx, "managed installation set refresh failed", "error", err)
+		}
+	}
+
 	for _, orgID := range orgIDs {
 		// Stop starting NEW per-org batches the moment this loop is torn down
 		// (a lease demotion or RestartAll closes stop) — otherwise a demoted
@@ -499,6 +530,7 @@ func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 		interval := clampPollInterval(m.loadOrgSettings(ctx, orgID).GitHubPollInterval)
 		m.schedulePoll("github", orgID, now.Add(interval))
 		polled++
+		refreshManaged()
 		m.runGitHubCycleForOrg(ctx, orgID)
 	}
 	m.prunePoll("github", orgIDs)
