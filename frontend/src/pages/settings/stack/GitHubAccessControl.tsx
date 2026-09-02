@@ -46,6 +46,7 @@ import {
   discardStagedApp,
   patPreflight,
   refreshGitHubAppInstallations,
+  startManagedGitHubConnect,
   switchToPat,
   type AccessDiff,
 } from '../../../lib/githubApp'
@@ -118,6 +119,10 @@ export default function GitHubAccessControl({
   // focus, so returning from the GitHub install tab updates the list.
   const { status: installStatus, installUrl } = useGitHubAppInstall(orgId)
   const installCount = installStatus?.installations.length ?? s.githubAppInstallCount
+  // The deployment's App is the credential: no App row of the org's own, only
+  // the installations it has bound. Seeded by the loader; the live status read
+  // refines it so a bind completed in another tab is reflected on focus.
+  const managed = installStatus?.using_deployment_default ?? s.githubAppManaged
 
   const reset = () => {
     setPhase({ kind: 'idle' })
@@ -556,6 +561,41 @@ export default function GitHubAccessControl({
           >
             Switch to a personal access token…
           </button>
+        </>
+      ) : managed ? (
+        // The deployment's App. Nothing here registers or imports an App —
+        // this workspace rides the operator's — and nothing lists what the
+        // shared App can see: the only installations named are the ones this
+        // workspace has bound. Zero of them is an ordinary state (a request an
+        // owner has yet to approve, an install made from GitHub's side that
+        // nobody has connected, an uninstall) rather than a fault, and the way
+        // out of it is the same Connect button that binds a first account.
+        <>
+          <p className="text-body leading-relaxed text-ink-3">
+            {installCount === 0 ? (
+              <>
+                Triage Factory connects to GitHub through this deployment&rsquo;s GitHub App, but no
+                GitHub account is connected to this workspace yet. Connect GitHub to install the App
+                on an account &mdash; or, if the App is already installed there, to attach that
+                installation to this workspace.
+              </>
+            ) : (
+              <>
+                Triage Factory connects to GitHub through this deployment&rsquo;s GitHub App,
+                installed on {installCount} account{installCount === 1 ? '' : 's'} connected to this
+                workspace.
+              </>
+            )}
+          </p>
+          {orgId && (
+            <button
+              type="button"
+              onClick={() => startManagedGitHubConnect(orgId)}
+              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
+            >
+              {installCount === 0 ? 'Connect GitHub…' : 'Connect another account…'}
+            </button>
+          )}
         </>
       ) : envPat ? (
         // Env-supplied token: reported, not managed. TRIAGE_FACTORY_* wins on

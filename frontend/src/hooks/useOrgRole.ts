@@ -5,6 +5,14 @@ import { useActiveOrgId } from '../contexts/OrgContext'
 // tf.user_is_org_admin (and requireOrgAdminRole). Member is not admin.
 const ORG_ADMIN_ROLES = new Set(['owner', 'admin'])
 
+// isOrgAdminRole is the same test as useOrgRole's isAdmin, for a caller that
+// holds a role string for an org other than the active one — a page offering a
+// choice of workspaces reads each membership's role rather than the hook's
+// single answer.
+export function isOrgAdminRole(role: string | null | undefined): boolean {
+  return !!role && ORG_ADMIN_ROLES.has(role)
+}
+
 export interface OrgRoleState {
   // The viewer's role in the active org ("owner" | "admin" | "member"), or
   // null when unknown (still loading, no active org, or local mode).

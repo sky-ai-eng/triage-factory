@@ -83,6 +83,22 @@ const (
 	// Exported because an operator has to type this path into the App's
 	// registration for the ceremony to work at all.
 	ManagedBindCallbackPath = "/api/github/managed/callback"
+
+	// ManagedInstallRecoveryPath is the SPA page a callback with no ceremony
+	// behind it lands on: the installation is real and belongs to no
+	// workspace, and the page says so and offers the Connect button that
+	// finishes the job. It is an SPA route rather than a page rendered here
+	// because finishing needs a signed-in admin and a workspace to connect
+	// FROM, and the SPA is what holds both — an unauthenticated visitor gets
+	// the login page with this path as the return target, and a signed-in one
+	// gets their workspaces to choose from. This handler cannot know either.
+	ManagedInstallRecoveryPath = "/github/installed"
+
+	// managedInstallRecoveryRequested is the query the recovery page reads to
+	// tell "installed, not connected" from "requested, not installed": GitHub
+	// sent the install to an owner for approval, so there is nothing to
+	// connect yet and the copy must not claim there is.
+	managedInstallRecoveryRequested = "?outcome=requested"
 )
 
 // managedBindNonceBytes is the nonce's entropy. 32 bytes is the same order as
@@ -397,12 +413,7 @@ func (s *Server) managedBindCallback() http.Handler {
 			// No cookie is not an error. It is the GitHub-initiated install:
 			// the installation exists and belongs to no workspace, which is an
 			// ordinary state rather than an anomaly.
-			//
-			// TODO(TFAC-931): make the unbound installation recoverable from
-			// here rather than only explaining itself — this page can say what
-			// happened but cannot yet offer the workspace picker that finishes
-			// the job, which is the half that needs a session anyway.
-			s.renderBindUnbound(w)
+			s.redirectUnboundInstall(w, r)
 			return
 		}
 
@@ -495,13 +506,23 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	refusal, err := s.completeManagedBind(r, orgID, userID)
+	refusal, account, err := s.completeManagedBind(r, orgID, userID)
 	if err != nil {
 		internalError(w, "github-managed-bind", err)
 		return
 	}
 	if refusal != nil {
-		githubAppLog.Warn("managed bind refused", "org", orgID, "user", userID, "reason", refusal.code)
+		// The operator's view of a bind that did not land. On a self-hosted
+		// deployment the operator is the one person who can work out that an
+		// install went to the wrong workspace, so the line names the
+		// installation GitHub sent back and, once the App has read it, the
+		// account it targets — and nothing else: no code, no token, no page.
+		// The installation id is the caller's own claim (an unsigned query
+		// parameter), which is exactly what the operator wants to see when the
+		// refusal is about a spoofed one.
+		githubAppLog.Warn("managed bind refused",
+			"org", orgID, "user", userID, "reason", refusal.code,
+			"installation", callbackInstallationID(r), "account", account)
 		s.renderBindOutcome(w, orgID, *refusal)
 		return
 	}
@@ -512,25 +533,29 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 // completeManagedBind runs the ceremony's proofs and, if every one of them
 // holds, writes the binding.
 //
-// Its two returns are exclusive and neither is a completed bind: a refusal is
-// the ceremony's own verdict, an error is TF's fault. Nothing here writes to the
-// response, so a fault cannot leave a half-written answer behind a redirect.
+// Its refusal and error returns are exclusive and neither is a completed bind:
+// a refusal is the ceremony's own verdict, an error is TF's fault. Nothing here
+// writes to the response, so a fault cannot leave a half-written answer behind
+// a redirect. account is the login of the GitHub account the installation
+// targets, once the App has read the installation and "" before — it exists
+// for the operator log alone, which is the one surface an unbound
+// installation's login may reach.
 //
 // No secret, token or code is logged on any path through here, including the
 // refusals.
-func (s *Server) completeManagedBind(r *http.Request, orgID, userID string) (*bindRefusal, error) {
+func (s *Server) completeManagedBind(r *http.Request, orgID, userID string) (refusal *bindRefusal, account string, err error) {
 	ctx := r.Context()
 
 	// GitHub reports setup_action=request when the installer lacked the right
 	// to install and GitHub asked an owner instead. There is no installation
 	// yet, so there is nothing to bind and nothing has gone wrong.
 	if r.URL.Query().Get("setup_action") == "request" {
-		return &refuseInstallPending, nil
+		return &refuseInstallPending, "", nil
 	}
 
-	installationID, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("installation_id")), 10, 64)
-	if err != nil || installationID <= 0 {
-		return &refuseNoInstallation, nil
+	installationID := callbackInstallationID(r)
+	if installationID == 0 {
+		return &refuseNoInstallation, "", nil
 	}
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
 	if code == "" {
@@ -539,15 +564,15 @@ func (s *Server) completeManagedBind(r *http.Request, orgID, userID string) (*bi
 		// code and installation_id arrive together at this one callback; with
 		// it off, GitHub sends the installation_id alone and the ceremony has
 		// no way to prove anything about the person.
-		return &refuseNoOAuthSetting, nil
+		return &refuseNoOAuthSetting, "", nil
 	}
 
 	ghWeb, identity, refusal, err := s.deploymentAppIdentity(ctx, orgID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if refusal != nil {
-		return refusal, nil
+		return refusal, "", nil
 	}
 
 	// The user access token is PROOF, not a credential: it authenticates the
@@ -557,12 +582,12 @@ func (s *Server) completeManagedBind(r *http.Request, orgID, userID string) (*bi
 	token, err := auth.ExchangeGitHubOAuthCode(ctx, ghWeb, identity.ClientID, s.deploymentApp.ClientSecret, code, s.deployCfg.publicURL+ManagedBindCallbackPath)
 	if err != nil {
 		githubAppLog.Warn("managed bind: user token exchange failed", "org", orgID, "error", err)
-		return &refuseIdentityUnproven, nil
+		return &refuseIdentityUnproven, "", nil
 	}
 	ghUser, err := auth.ValidateGitHub(ctx, ghWeb, token)
 	if err != nil || ghUser == nil || ghUser.Login == "" {
 		githubAppLog.Warn("managed bind: whoami failed", "org", orgID, "error", err)
-		return &refuseIdentityUnproven, nil
+		return &refuseIdentityUnproven, "", nil
 	}
 
 	// The installation as the APP reports it. The association read below could
@@ -570,25 +595,25 @@ func (s *Server) completeManagedBind(r *http.Request, orgID, userID string) (*bi
 	// never a source, so the facts that get persisted come from here.
 	minter, err := s.deploymentApp.Minter(ghbase.APIBase(ghWeb))
 	if err != nil {
-		return &refuseNoDeploymentApp, nil
+		return &refuseNoDeploymentApp, "", nil
 	}
 	inst, err := minter.GetInstallation(ctx, installationID)
 	if err != nil {
 		// Includes the 404 a spoofed installation_id produces.
 		githubAppLog.Warn("managed bind: installation read failed", "org", orgID, "error", err)
-		return &refuseInstallationUnreadable, nil
+		return &refuseInstallationUnreadable, "", nil
 	}
 	if inst.ID != installationID {
 		// GitHub answered about a different installation than the one the gates
 		// are about to be asked about. Nothing downstream may proceed on two
 		// ids, and there is no arm here that picks one.
 		githubAppLog.Warn("managed bind: installation read answered for another installation", "org", orgID)
-		return &refuseInstallationUnreadable, nil
+		return &refuseInstallationUnreadable, "", nil
 	}
 
 	// Gate 1 — association. GitHub's own prescribed check.
 	if err := githubbind.Associated(ctx, ghWeb, token, installationID); err != nil {
-		return bindGateRefusal(err, refuseNotAssociated, inst.AccountLogin), nil
+		return bindGateRefusal(err, refuseNotAssociated, inst.AccountLogin), inst.AccountLogin, nil
 	}
 	// Gate 2 — authority. The half GitHub does not prescribe, and the one a
 	// read-only contractor inside somebody else's installation would otherwise
@@ -597,10 +622,25 @@ func (s *Server) completeManagedBind(r *http.Request, orgID, userID string) (*bi
 		githubbind.Account{Type: inst.AccountType, Login: inst.AccountLogin, ID: inst.AccountID},
 		githubbind.Actor{Login: ghUser.Login, ID: ghUser.ID},
 	); err != nil {
-		return bindGateRefusal(err, refuseNotAccountAdmin, inst.AccountLogin), nil
+		return bindGateRefusal(err, refuseNotAccountAdmin, inst.AccountLogin), inst.AccountLogin, nil
 	}
 
-	return s.writeManagedBinding(ctx, orgID, userID, ghWeb, inst)
+	refusal, err = s.writeManagedBinding(ctx, orgID, userID, ghWeb, inst)
+	return refusal, inst.AccountLogin, err
+}
+
+// callbackInstallationID reads the installation_id GitHub's redirect carries:
+// the caller's own unsigned claim, which every gate in the ceremony exists to
+// check rather than trust. It answers a positive id or 0 — absent, malformed,
+// zero and negative all collapse to 0, because none of them names an
+// installation — so a caller can log the value without first deciding whether
+// it was well-formed, and test it with one comparison.
+func callbackInstallationID(r *http.Request) int64 {
+	id, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("installation_id")), 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
 }
 
 // bindGateRefusal maps a gate's error onto the closed refusal set. A definitive
@@ -917,15 +957,42 @@ func (s *Server) renderBindOutcome(w http.ResponseWriter, orgID string, refusal 
 	s.renderBindPage(w, refusal.status, orgID, heading, refusal.message)
 }
 
-// renderBindUnbound is the callback with no ceremony behind it: somebody
-// installed the deployment App from its public page. Not a refusal — the
-// installation is real and simply belongs to no workspace yet — so it answers
-// 200 and says what to do next.
-func (s *Server) renderBindUnbound(w http.ResponseWriter) {
+// redirectUnboundInstall is the callback with no ceremony behind it: somebody
+// installed the deployment App from its public page, or an owner approved a
+// request GitHub had parked, or a reinstall came back without the cookie the
+// original Connect click set. Not a refusal — the installation is real and
+// simply belongs to no workspace yet — so it answers with a redirect into the
+// SPA page that says so and offers the Connect button.
+//
+// Recovery IS the ordinary ceremony, on purpose: pressing Connect mints a fresh
+// record and sends the admin to GitHub, and because the installation already
+// exists GitHub returns them here with the same installation_id, where both
+// gates run and the bind completes. A dedicated "adopt this installation"
+// path would be a second way to create a binding, and the installation_id in
+// hand is exactly the unsigned claim the ceremony refuses to trust — so it is
+// not forwarded to the page, and the page has no use for it.
+//
+// This branch reads nothing, writes nothing and resolves no identity. The one
+// side effect is a log line naming the installation, which is the operator's
+// only signal that an install arrived with nowhere to land: on a self-hosted
+// deployment that operator is the one person placed to work out that it went
+// to the wrong workspace. The id is the caller's own claim and is logged as
+// such; the code is never logged, and no account login is known here to log.
+func (s *Server) redirectUnboundInstall(w http.ResponseWriter, r *http.Request) {
+	setupAction := r.URL.Query().Get("setup_action")
+	target := ManagedInstallRecoveryPath
+	if setupAction == "request" {
+		target += managedInstallRecoveryRequested
+	}
+	githubAppLog.Info("deployment app callback with no ceremony behind it; the installation is unbound",
+		"installation", callbackInstallationID(r), "setup_action", setupAction)
+
+	// The code rides a header for the same reason the refusal pages carry one:
+	// a machine caller keys on the closed set without parsing a page. Here the
+	// page is the SPA's, so the header is the only thing this response says.
 	w.Header().Set("X-TF-Bind-Outcome", "unbound")
-	s.renderBindPage(w, http.StatusOK, "", "GitHub App installed",
-		"This installation isn't connected to a workspace yet. "+
-			"Open Workspace Settings in Triage Factory and use Connect GitHub to finish.")
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 func (s *Server) renderBindPage(w http.ResponseWriter, status int, orgID, heading, message string) {

@@ -117,6 +117,7 @@ export const initialWizardState = (): WizardState => ({
   githubAppStaged: false,
   githubAppSlug: '',
   githubAppStatus: null,
+  githubAppManaged: false,
   githubAppInstalled: false,
   githubAppInstallCount: 0,
   isLocal: false,
@@ -611,6 +612,7 @@ export async function loadGitHubAppInstall(ctx: LoadContext): Promise<Partial<Wi
       githubAppRegistered: !!app,
       githubAppStaged: !!app && !app.active,
       githubAppSlug: app?.slug ?? '',
+      githubAppManaged: status.using_deployment_default,
       githubAppInstalled: n > 0,
       githubAppInstallCount: n,
     }

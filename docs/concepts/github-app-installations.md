@@ -90,6 +90,37 @@ break minting for that account permanently. Every installation field the
 listing reports converges on the cadence for both classes; a webhook, where one
 exists, only makes it converge sooner.
 
+## Installed but not bound
+
+An installation of the deployment App can exist with no workspace bound to it,
+through paths that are entirely ordinary: a member without install rights
+selected the account, GitHub sent the install to an owner instead, and the
+owner approved it later; someone installed from the App's public page on
+GitHub without ever pressing Connect; a reinstall came back without the
+cookie the original Connect set. It is an expected state, not a fault, and TF
+treats it as one:
+
+- The install callback with no ceremony behind it redirects to
+  `/github/installed`, a page that says the install went through and is not yet
+  connected, and offers the Connect button. **Recovery is the ordinary bind
+  ceremony**: Connect mints a fresh record, GitHub hands the existing
+  installation back with the same id, both gates run, and the bind lands. There
+  is no "adopt an existing installation" path — one way to create a binding is
+  enough.
+- A managed workspace with no bound installation shows the same button as its
+  Settings empty state.
+- The deployment webhook receiver acknowledges a delivery for an unbound
+  installation with 2xx, writes nothing, and logs **one line at INFO** naming
+  the installation id and (for installation events) the account login; the
+  callback and a refused bind log the same facts. That log is the operator's
+  signal, and the only place an unbound installation's account is ever named.
+
+What TF deliberately does **not** do is list unbound installations anywhere.
+On a shared App that list is every other prospective tenant's GitHub account,
+and no filtering makes it safe — narrowing it to what the viewer can reach
+would mean rendering a shared config surface from their personal GitHub
+permissions. The recovery needs a button, not a list.
+
 ## Current limitations, deployment-App workspaces only
 
 - **Webhooks do not reach them yet.** The webhook receiver is addressed per

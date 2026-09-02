@@ -33,6 +33,7 @@ import Onboarding from './pages/Onboarding'
 import InviteAccept from './pages/InviteAccept'
 import Wizard from './pages/setup/Wizard'
 import ConnectGitHub from './pages/ConnectGitHub'
+import GitHubInstalled from './pages/GitHubInstalled'
 import ConnectJira from './pages/ConnectJira'
 import Shell from './Shell'
 import AuthGate, {
@@ -226,6 +227,22 @@ function MultiRoutes() {
             element={
               <AuthGate mode="multi">
                 <ConnectJira />
+              </AuthGate>
+            }
+          />
+          {/* Where the deployment GitHub App's install callback lands when no
+              bind ceremony started it — installed from the App's public page,
+              approved by an owner after a request, reinstalled. Not under
+              /orgs/:org_id because the callback has no org to name: the page
+              resolves the workspace from the session (AuthGate signs a
+              visitor in with this path as the return target) and offers the
+              ordinary Connect button. Multi-mode only — the deployment App is
+              a multi-mode credential, so LocalRoutes has no such page. */}
+          <Route
+            path="/github/installed"
+            element={
+              <AuthGate mode="multi">
+                <GitHubInstalled />
               </AuthGate>
             }
           />

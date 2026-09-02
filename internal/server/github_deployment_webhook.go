@@ -33,9 +33,10 @@ import (
 // spoofing the ceremony exists to prevent. An unbound installation is an
 // ordinary state (a request an owner approves later, an install from the
 // App's public page), not a fault: the delivery is acknowledged with 2xx and
-// nothing is published, written or logged beyond a debug line naming the
-// installation. A 4xx would paint the operator's delivery log red for a normal
-// condition and teach them to ignore it. Because nothing is recorded, a
+// nothing is published or written; the one trace it leaves is a log line
+// naming the installation, for the operator who is the only person placed to
+// notice an install that landed nowhere. A 4xx would paint the operator's
+// delivery log red for a normal condition and teach them to ignore it. Because nothing is recorded, a
 // redelivery after the workspace binds the installation applies normally.
 //
 // Multi-mode only: the deployment App is a multi-mode credential, so in local
@@ -110,8 +111,20 @@ func (s *Server) handleDeploymentGitHubWebhook(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if orgID == "" {
-		githubAppLog.Debug("acknowledging deployment webhook delivery for an unbound installation",
-			"event", eventName, "delivery", d.deliveryID, "installation", d.installationID, "host", host)
+		// One line at a level an operator reads by default, because they are
+		// the only person who can act on it: a workspace admin never sees this
+		// installation (it is bound nowhere, so no tenant surface may list it)
+		// and the installer sees only the recovery page. The line names what
+		// the operator needs to tell "nobody has connected this yet" from "it
+		// was connected to the wrong workspace" — the installation, and the
+		// account it targets when the payload is the one that carries it — and
+		// no payload beyond that: an installation event's sender, and every
+		// other event's body, is text somebody on GitHub wrote.
+		attrs := []any{"event", eventName, "delivery", d.deliveryID, "installation", d.installationID, "host", host}
+		if d.install != nil {
+			attrs = append(attrs, "account", d.install.Installation.Account.Login)
+		}
+		githubAppLog.Info("acknowledging deployment webhook delivery for an unbound installation", attrs...)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
