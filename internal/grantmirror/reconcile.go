@@ -113,9 +113,10 @@ type Reconciler struct {
 	mirror  db.ReachableReposStore
 	clients clientSource
 	classes classResolver
-	// deployment is the shared App the managed class rides. The zero App —
-	// every local process, and a multi deployment whose orgs all bring their
-	// own key — makes RunDeployment a no-op.
+	// deployment is the shared App the managed class rides: the zero App on
+	// every local process and on a multi deployment whose orgs all bring their
+	// own key. Handed to the store as given, never gated on here — see
+	// RunDeployment for why.
 	deployment githubapp.DeploymentApp
 }
 
@@ -124,10 +125,10 @@ type Reconciler struct {
 // in multi, keychain PAT in local, exactly as every other GitHub-facing
 // background pass resolves — the class resolver that says which credential
 // system an org's entries are keyed under, and the deployment App, which is the
-// one credential the managed installation set can be refreshed with. It is a
-// parameter rather than an ambient read for the same reason the store method
-// takes it: operator environment config is read once at boot and handed down,
-// so two consumers cannot hold two answers.
+// one credential the managed installation set can be refreshed with (the zero
+// App where none is configured). It is a parameter rather than an ambient read
+// for the same reason the store method takes it: operator environment config is
+// read once at boot and handed down, so two consumers cannot hold two answers.
 func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resolver github.Resolver, classes classResolver, deployment githubapp.DeploymentApp) *Reconciler {
 	return &Reconciler{apps: apps, mirror: mirror, clients: resolverSource{resolver: resolver}, classes: classes, deployment: deployment}
 }
@@ -151,16 +152,22 @@ func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resol
 // installation's grant, correctly, so a suspended_at nothing clears is a grant
 // nothing refreshes.
 //
-// A no-op with no deployment App configured — nothing could be listed — and,
-// inside the store, for a deployment with no managed workspace holding a bound
-// installation. It never discovers: an installation no workspace bound has no
-// row to write to. It runs once per GitHub poll cycle, on the brain-lease
-// holder only, which is the poller's own gate (the same one RunOrg inherits)
-// and not a second mechanism here.
+// The deployment App is handed to the store as given, unconfigured or not,
+// because the store is where the two states it distinguishes are visible and
+// this method cannot tell them apart: a deployment with no managed workspace
+// holding a bound installation is answered as a no-op before the App is ever
+// consulted, which is every local process and every deployment whose orgs all
+// bring their own key; a deployment that HAS bound managed installations and
+// no App to list them with is an outage, and the store's error is what makes
+// it one somebody can see (the poller warns on it every cycle). A guard here
+// on the App would silently turn the second case into the first — exactly the
+// silent staleness this pass exists to end.
+//
+// It never discovers: an installation no workspace bound has no row to write
+// to. It runs once per GitHub poll cycle, on the brain-lease holder only,
+// which is the poller's own gate (the same one RunOrg inherits) and not a
+// second mechanism here.
 func (r *Reconciler) RunDeployment(ctx context.Context) error {
-	if !r.deployment.Configured() {
-		return nil
-	}
 	if err := r.apps.RefreshAllManagedInstallations(ctx, r.deployment); err != nil {
 		return fmt.Errorf("refresh managed installations: %w", err)
 	}

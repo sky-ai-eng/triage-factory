@@ -31,31 +31,64 @@ import (
 // grant that refreshes again — so they run the real store and, where the
 // property is minting, the real resolver.
 
-// countingApps counts the deployment-wide refresh and answers it with a fixed
-// error. Every other method panics: RunDeployment must reach the store through
-// exactly this door.
+// countingApps counts the deployment-wide refresh, records the App it was
+// handed, and answers with a fixed error. Every other method panics:
+// RunDeployment must reach the store through exactly this door.
 type countingApps struct {
 	db.GitHubAppsStore
 	refreshes atomic.Int64
+	given     githubapp.DeploymentApp
 	err       error
 }
 
-func (c *countingApps) RefreshAllManagedInstallations(context.Context, githubapp.DeploymentApp) error {
+func (c *countingApps) RefreshAllManagedInstallations(_ context.Context, app githubapp.DeploymentApp) error {
 	c.refreshes.Add(1)
+	c.given = app
 	return c.err
 }
 
-func TestRunDeployment_NoDeploymentAppIsANoOp(t *testing.T) {
-	// Every local process and every multi deployment whose orgs all bring their
-	// own key: nothing could be listed, so nothing is asked of the store either.
+func TestRunDeployment_HandsTheStoreTheAppAsGiven(t *testing.T) {
+	// Unconfigured included. The store is the only place that can tell "no
+	// managed workspace has bound anything" (a no-op, the App never consulted)
+	// from "managed installations are bound and there is no App to list them
+	// with" (an outage); a guard here on the App would fold the second into
+	// the first and hide it.
 	apps := &countingApps{}
 	r := &Reconciler{apps: apps}
 
 	if err := r.RunDeployment(context.Background()); err != nil {
-		t.Fatalf("RunDeployment with no deployment App: %v; want nil", err)
+		t.Fatalf("RunDeployment: %v; want the store's nil", err)
 	}
-	if got := apps.refreshes.Load(); got != 0 {
-		t.Errorf("store refreshed %d times with no deployment App; want 0", got)
+	if got := apps.refreshes.Load(); got != 1 {
+		t.Errorf("store refreshed %d times; want 1 — the store decides, not this pass", got)
+	}
+	if apps.given.Configured() {
+		t.Error("store was handed a configured App; want the zero App passed through as given")
+	}
+}
+
+func TestRunDeployment_BoundManagedInstallationsWithNoAppIsAnOutage(t *testing.T) {
+	// End to end against the real store: a managed workspace with a bound
+	// installation on a deployment whose shared key has gone missing fails
+	// where someone can see it, and a deployment with nothing bound does not
+	// mind that it has no key.
+	ctx := context.Background()
+	gh := newDeploymentGH(t)
+	stores, org := newManagedWorkspace(t, gh.srv.URL)
+	classes := fakeClasses{class: domain.GitHubCredentialClassManagedApp}
+	resolver := github.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil)
+	r := NewReconciler(stores.GitHubApps, stores.ReachableRepos, resolver, classes, githubapp.DeploymentApp{})
+
+	if err := r.RunDeployment(ctx); err != nil {
+		t.Fatalf("RunDeployment with nothing bound and no App: %v; want a no-op", err)
+	}
+
+	bindInstallation(t, stores, org, gh.srv.URL, "456", "1000", "acme")
+	if err := r.RunDeployment(ctx); !errors.Is(err, githubapp.ErrNoDeploymentApp) {
+		t.Fatalf("RunDeployment with a bound managed installation and no App: err = %v; want ErrNoDeploymentApp", err)
+	}
+	if got := gh.listCalls.Load(); got != 0 {
+		t.Errorf("listing walked %d times with no App; want 0", got)
 	}
 }
 

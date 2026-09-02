@@ -444,8 +444,9 @@ func (a *App) buildRouting() {
 	// deployment App's installations per GitHub cycle, fanned out to the
 	// workspaces that bound each. A deployment singleton — it does not fit the
 	// per-org Manager.Trigger(orgID) shape the other passes take — hung off the
-	// same cycle and the same brain lease as the grant pass above, and a no-op
-	// wherever no deployment App is configured.
+	// same cycle and the same brain lease as the grant pass above. A no-op
+	// wherever no managed workspace has bound an installation; where one has and
+	// no deployment App is configured, an error the poller warns on every cycle.
 	a.pollerMgr.RefreshManagedInstallations = a.grantReconciler.RunDeployment
 	// Skip a cycle for a source an org admin turned off. This is what makes
 	// "a turned-off source makes zero API calls" true, which is a promise
