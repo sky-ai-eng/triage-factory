@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -249,7 +250,7 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	// The run's git proxy, mounted behind the injector exactly as the sidecar
 	// mounts it — same handler, same gate.
 	gp, err := gitproxy.New(gitproxy.Config{
-		Upstream:         defaultGitUpstream,
+		Upstream:         ghbase.DefaultBaseURL(),
 		AllowNonLoopback: true,
 		TokenSource: func(context.Context, string, string) (gitproxy.Token, error) {
 			return gitproxy.Token{Value: token}, nil

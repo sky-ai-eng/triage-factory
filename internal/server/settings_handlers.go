@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -1256,7 +1257,7 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 			// derivation reads the column, not the probe's answer. A blank string
 			// is not the clear — null is — so it fails here like any other
 			// unusable URL.
-			base, valid := normalizeBaseURL(v)
+			base, valid := ghbase.NormalizeBaseURL(v)
 			if !valid {
 				shape.Invalid(f.field, f.field+" must be a valid http(s) URL, or null to clear it")
 			} else {

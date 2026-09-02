@@ -2,8 +2,6 @@ package server
 
 import (
 	"net/http"
-	"net/url"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -37,7 +35,7 @@ func handleGitHubReachability(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	base, ok := normalizeBaseURL(req.URL)
+	base, ok := ghbase.NormalizeBaseURL(req.URL)
 	if !ok {
 		invalidBaseURLField(w, "url")
 		return
@@ -56,7 +54,7 @@ func handleJiraReachability(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	base, ok := normalizeBaseURL(req.URL)
+	base, ok := ghbase.NormalizeBaseURL(req.URL)
 	if !ok {
 		invalidBaseURLField(w, "url")
 		return
@@ -72,36 +70,4 @@ func invalidBaseURLField(w http.ResponseWriter, field string) {
 		Message: field + " must be a valid http(s) URL with no credentials, query, or fragment",
 		Field:   field,
 	})
-}
-
-// normalizeBaseURL validates a user-entered GitHub/Jira base URL and returns
-// its canonical form (scheme://host[/path], trailing slash trimmed). One
-// function for the probe and for the settings write that persists the same
-// value, so a URL the probe accepts is exactly the one the column can hold. A
-// base URL must parse, use http or https, and carry a host — and must NOT
-// carry credentials (userinfo), a query, or a fragment. Those forms are
-// rejected as bad input (a 400 at the handler) rather than flowing into a
-// malformed derived probe URL — e.g. without this, "https://host?x=1" would
-// become "https://host?x=1/api/v3" and surface a confusing 200 + unreachable
-// instead of "fix your URL". A path is preserved because Jira Data Center can
-// live under a context path. For a GitHub base a path is unusual — GHES mounts
-// the API at the host root, so it flows into APIBase's /api/v3 suffix — but the
-// reachability verdict is host-level (the probe only asks whether that host
-// answers), so an odd path can't produce a wrong reachable/unreachable result.
-func normalizeBaseURL(raw string) (string, bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", false
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		return "", false
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", false
-	}
-	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return "", false
-	}
-	return strings.TrimRight(u.Scheme+"://"+u.Host+u.Path, "/"), true
 }

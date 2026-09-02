@@ -60,6 +60,15 @@ primary_region = "iad"
 
 [env]
   TF_MODE = "multi"
+  # The deployment's default GitHub: the web base a workspace with no
+  # github_base_url resolves to, and the GitHub the deployment App above is
+  # registered on — one variable because they are one fact. Unset means
+  # https://github.com, which is right for this deployment; a self-hoster
+  # whose GitHub is a GHES sets it before the first workspace is created,
+  # since installation, reachability and identity rows are keyed under the
+  # host they were written with and nothing migrates them. Plain config,
+  # not a secret.
+  # TF_DEFAULT_GITHUB_HOST = "https://github.com"
 
 # State paths on Fly: the Agent SDK is baked into the image at
 # /opt/triagefactory/sdk and pinned there via TF_TOOLCHAIN_ROOT (set in

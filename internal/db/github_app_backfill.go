@@ -97,7 +97,7 @@ func RefreshBoundInstallations(ctx context.Context, deployment githubapp.Deploym
 
 // ManagedInstallationSet is one managed workspace's bound installation set: the
 // org, the GitHub it lists against (the org's configured base URL, "" for
-// github.com), and the installation ids the bind ceremony wrote for it.
+// the deployment default), and the installation ids the bind ceremony wrote for it.
 type ManagedInstallationSet struct {
 	OrgID   string
 	BaseURL string

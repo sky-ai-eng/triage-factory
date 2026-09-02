@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync/atomic"
 	"testing"
 
@@ -342,6 +343,77 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 		}
 		if got := liveIDs(t, store, org); len(got) != 1 {
 			t.Errorf("live installations = %v; want [111] untouched", got)
+		}
+	})
+	t.Run("OffHostListsOnlyLiveManagedRowsElsewhere", func(t *testing.T) {
+		// The boot warning's read. The deployment App is on one GitHub — the
+		// deployment default — and a managed row keyed under any other string
+		// is one the static webhook route cannot reach. What the read must
+		// return is exactly that set: managed, live, off-host. Three rows that
+		// look similar and are not in it pin the three predicates.
+		const deploymentHost = "https://ghe.default.test"
+		store, seed := mk(t)
+		owner := seed.User(t)
+		managed, byo := seed.Org(t, owner), seed.Org(t, owner)
+		seed.Class(t, managed, domain.GitHubCredentialClassManagedApp, deploymentHost)
+		seed.Class(t, byo, domain.GitHubCredentialClassBYOApp, "https://ghe.byo.test")
+
+		row := func(orgID, installationID, host string) domain.OrgGitHubAppInstallation {
+			return domain.OrgGitHubAppInstallation{
+				InstallationID: installationID, OrgID: orgID,
+				AccountType: "Organization", AccountLogin: "acct-" + installationID, GitHubHost: host,
+			}
+		}
+		// In the set: a managed row on another GitHub, and one whose host is
+		// the deployment's but spelled with a path segment — a different key.
+		for _, r := range []domain.OrgGitHubAppInstallation{
+			row(managed, "201", "https://ghe.other.test"),
+			row(managed, "202", deploymentHost+"/enterprise"),
+			// Not in the set: on the deployment host (however spelled).
+			row(managed, "203", deploymentHost+"/"),
+			// Not in the set: a BYO row keys under its own host and is reached
+			// through its own webhook URL.
+			row(byo, "204", "https://ghe.byo.test"),
+		} {
+			if _, err := store.UpsertInstallation(ctx, r); err != nil {
+				t.Fatalf("UpsertInstallation(%s): %v", r.InstallationID, err)
+			}
+		}
+		// Not in the set: an off-host managed row that has been removed reaches
+		// nothing and so is nothing to warn about.
+		if _, err := store.UpsertInstallation(ctx, row(managed, "205", "https://ghe.other.test")); err != nil {
+			t.Fatalf("UpsertInstallation(205): %v", err)
+		}
+		if _, err := store.MarkInstallationRemoved(ctx, managed, "205"); err != nil {
+			t.Fatalf("MarkInstallationRemoved(205): %v", err)
+		}
+
+		// The host argument normalizes like every other host key, so a
+		// trailing slash finds the same set.
+		got, err := store.ListManagedInstallationsOffHostSystem(ctx, deploymentHost+"/")
+		if err != nil {
+			t.Fatalf("ListManagedInstallationsOffHostSystem: %v", err)
+		}
+		var ids []string
+		for _, inst := range got {
+			ids = append(ids, inst.InstallationID)
+			if inst.OrgID != managed {
+				t.Errorf("row %s belongs to org %q; want the managed org %q", inst.InstallationID, inst.OrgID, managed)
+			}
+		}
+		if want := []string{"201", "202"}; !reflect.DeepEqual(ids, want) {
+			t.Errorf("off-host managed installations = %v; want %v", ids, want)
+		}
+
+		// Re-pointed under the deployment host, nothing is left to warn about.
+		if _, err := store.UpsertInstallation(ctx, row(managed, "201", deploymentHost)); err != nil {
+			t.Fatalf("UpsertInstallation(201 moved): %v", err)
+		}
+		if _, err := store.UpsertInstallation(ctx, row(managed, "202", deploymentHost)); err != nil {
+			t.Fatalf("UpsertInstallation(202 moved): %v", err)
+		}
+		if got, err := store.ListManagedInstallationsOffHostSystem(ctx, deploymentHost); err != nil || len(got) != 0 {
+			t.Errorf("ListManagedInstallationsOffHostSystem after re-keying = (%d rows, %v); want (0, nil)", len(got), err)
 		}
 	})
 }

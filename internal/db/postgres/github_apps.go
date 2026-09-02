@@ -211,6 +211,34 @@ func (s *gitHubAppsStore) InstallationOwnerSystem(ctx context.Context, githubHos
 	return orgID, nil
 }
 
+// ListManagedInstallationsOffHostSystem lists the managed-class rows the boot
+// warning names. Admin pool: the question spans orgs. The class comes from
+// org_settings through a subquery rather than a join so the row projection
+// stays the one every other installation read uses, unqualified.
+func (s *gitHubAppsStore) ListManagedInstallationsOffHostSystem(ctx context.Context, githubHost string) ([]domain.OrgGitHubAppInstallation, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+pgGitHubAppInstallationColumns+`
+		  FROM org_github_app_installations
+		 WHERE removed_at IS NULL
+		   AND github_host <> $1
+		   AND org_id IN (SELECT org_id FROM org_settings WHERE github_credential_class = $2)
+		 ORDER BY org_id, installation_id
+	`, db.EffectiveGitHubHost(githubHost), string(domain.GitHubCredentialClassManagedApp))
+	if err != nil {
+		return nil, fmt.Errorf("list managed installations off host: %w", err)
+	}
+	defer rows.Close()
+	out := []domain.OrgGitHubAppInstallation{}
+	for rows.Next() {
+		inst, err := scanGitHubAppInstallation(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan managed installation off host: %w", err)
+		}
+		out = append(out, inst)
+	}
+	return out, rows.Err()
+}
+
 // pgGitHubAppInstallationColumns is the canonical projection of an
 // org_github_app_installations row, in the order scanGitHubAppInstallation
 // reads them — everything but removed_at, which the domain type omits (see

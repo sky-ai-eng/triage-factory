@@ -62,7 +62,7 @@ type OrgMembershipsStore interface {
 	// jiraBaseURL are the org's configured hosts (raw, read from
 	// org_settings by the caller) —
 	// the impl resolves them to the host identities are actually keyed under
-	// (EffectiveGitHubHost: an unset github_base_url resolves to github.com,
+	// (EffectiveGitHubHost: an unset github_base_url resolves to the deployment default,
 	// where most identities live; Jira has no default host, so an unset one
 	// matches nothing, which is correct). A member's GitHubUsername /
 	// JiraAccountID is nil when they hold no binding on that host. The roster

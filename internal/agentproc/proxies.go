@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
 )
@@ -161,12 +162,6 @@ var ErrUnsupportedSandboxCredentials = errors.New("agentproc: resolved credentia
 // surfaces it before clone or push rather than falling back to ambient auth.
 var ErrNoGitCredentials = errors.New("agentproc: no GitHub credential resolved for managed git egress")
 
-// defaultGitUpstream is the git-over-HTTPS host the git proxy forwards
-// to, and the URL prefix the in-sandbox git is rewritten away from. GHES
-// orgs override via GitProxyConfig.Upstream (the customer's responsibility
-// per the single-installation scope).
-const defaultGitUpstream = "https://github.com"
-
 // sigV4LiveSource re-reads the run's newest sealed LLM material for the
 // SigV4 proxy — the executor's live-refresh channel (StartRunProxies'
 // llmSource). Returns the newest bundle.LLM env map plus its
@@ -187,7 +182,7 @@ type GitProxyConfig struct {
 	TokenSource gitproxy.TokenSource
 
 	// Upstream is the real git host base — empty defaults to
-	// defaultGitUpstream. Both the proxy's upstream and the insteadOf
+	// the deployment default. Both the proxy's upstream and the insteadOf
 	// rewrite prefix derive from it.
 	Upstream string
 
@@ -267,9 +262,12 @@ func StartGitProxy(ctx context.Context, bindIP string, allowNonLoopback bool, gi
 	if err != nil {
 		return nil, err
 	}
+	// An unset upstream is the deployment's default GitHub — the same answer
+	// an org with no base URL resolves to everywhere else, so the git proxy
+	// and the API client cannot land on different hosts for one org.
 	upstream := git.Upstream
 	if upstream == "" {
-		upstream = defaultGitUpstream
+		upstream = ghbase.DefaultBaseURL()
 	}
 	srv, err := gitproxy.New(gitproxy.Config{
 		TokenSource:      git.TokenSource,

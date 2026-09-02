@@ -207,7 +207,7 @@ type Resolver interface {
 
 	// BaseURLFor returns the org's user-facing GitHub host base — github.com
 	// or a GHES host — resolved from org_settings.github_base_url, then the
-	// legacy github_url secret, then the public default. It is the same
+	// legacy github_url secret, then the deployment default. It is the same
 	// resolution ClientFor/TokenFor use internally, exposed for callers that
 	// must route a subprocess at the org's git host rather than make API
 	// calls — the managed Git proxy uses it for its upstream and
@@ -436,7 +436,7 @@ func (r *resolver) ClientForRepoWithIdentity(ctx context.Context, orgID, owner, 
 // githubBaseFor resolves the org's user-facing GitHub base URL (github.com
 // or a GHES host). Precedence mirrors the pre-resolver dashboard/repos code:
 // org_settings.github_base_url first, then the github_url secret, then the
-// public default. The secret fallback is load-bearing for GHES orgs whose
+// deployment default. The secret fallback is load-bearing for GHES orgs whose
 // base predates the org_settings mirror (common in local mode, where the
 // keychain holds the URL and the settings column can be empty).
 //
@@ -474,7 +474,7 @@ func (r *resolver) baseFrom(ctx context.Context, orgID string, set domain.OrgSet
 	if setErr != nil {
 		return "", fmt.Errorf("resolve github base for org %s: read settings: %w", orgID, setErr)
 	}
-	return ghbase.DefaultBaseURL, nil
+	return ghbase.DefaultBaseURL(), nil
 }
 
 // orgGitHubContext is the pair of facts a resolution needs from the org's

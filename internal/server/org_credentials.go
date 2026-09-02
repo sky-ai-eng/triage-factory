@@ -220,7 +220,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 // connected-looking, credential-less GitHub card. But an App registration keeps
 // using that host: a staged App coexists with a live PAT during a PAT→App
 // switch, and the resolver's base lookup falls through org_settings → the
-// github_url secret → github.com, so clearing both while an App row survives
+// github_url secret → the deployment default, so clearing both while an App row survives
 // would silently re-point a GHES org's App at github.com. Wrong host, no error.
 // With an App present the disconnect touches the credential only, and the App's
 // own teardown (discard / switch-to-pat) owns the host from there.

@@ -75,7 +75,7 @@ type OrgGitHubAppInstallation struct {
 	// unrelated installations, and telling them apart through a join to the
 	// owning org's settings is a join too many for any comparison that spans
 	// orgs. "" on a struct handed to a writer means "resolve it" — the store
-	// folds it to the public host, which is what an org with no configured base
+	// folds it to the deployment default, which is what an org with no configured base
 	// URL is on — so reads never see one.
 	GitHubHost  string
 	InstalledAt time.Time

@@ -129,7 +129,7 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 
 	// Resolve the GitHub web host through the resolver, not the org_settings
 	// column alone: BaseURLFor applies the canonical precedence (settings →
-	// github_url secret → github.com), so a GHES / local-mode org whose host
+	// github_url secret → the deployment default), so a GHES / local-mode org whose host
 	// lives only in the credential bundle still targets the right host. A read
 	// failure propagates rather than silently defaulting to github.com.
 	ghBase, err := s.ghResolver.BaseURLFor(ctx, orgID)
@@ -545,7 +545,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	// Refuse it, naming the disconnect as the way out, once that verb exists.
 
 	// Resolve the conversion host through the resolver (settings → github_url
-	// secret → github.com), not the org_settings column alone, so a GHES /
+	// secret → the deployment default), not the org_settings column alone, so a GHES /
 	// local-mode org whose host lives only in the credential bundle exchanges the
 	// manifest against the right host.
 	ghBase, err := s.ghResolver.BaseURLFor(r.Context(), orgID)

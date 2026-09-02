@@ -225,6 +225,34 @@ func (s *gitHubAppsStore) InstallationOwnerSystem(ctx context.Context, githubHos
 	return orgID, nil
 }
 
+// ListManagedInstallationsOffHostSystem lists the managed-class rows the boot
+// warning names. The class comes from org_settings through a subquery rather
+// than a join so the row projection stays the one every other installation
+// read uses, unqualified.
+func (s *gitHubAppsStore) ListManagedInstallationsOffHostSystem(ctx context.Context, githubHost string) ([]domain.OrgGitHubAppInstallation, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+sqliteGitHubAppInstallationColumns+`
+		  FROM org_github_app_installations
+		 WHERE removed_at IS NULL
+		   AND github_host <> ?
+		   AND org_id IN (SELECT org_id FROM org_settings WHERE github_credential_class = ?)
+		 ORDER BY org_id, installation_id
+	`, db.EffectiveGitHubHost(githubHost), string(domain.GitHubCredentialClassManagedApp))
+	if err != nil {
+		return nil, fmt.Errorf("list managed installations off host: %w", err)
+	}
+	defer rows.Close()
+	out := []domain.OrgGitHubAppInstallation{}
+	for rows.Next() {
+		inst, err := scanSQLiteGitHubAppInstallation(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("scan managed installation off host: %w", err)
+		}
+		out = append(out, inst)
+	}
+	return out, rows.Err()
+}
+
 // UpsertInstallation mirrors one installation, idempotent on installation_id.
 // installed_at is set only on insert (defaulting to CURRENT_TIMESTAMP for a
 // zero InstalledAt) and preserved on conflict; removed_at is cleared so a

@@ -21,6 +21,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 )
 
@@ -289,6 +290,9 @@ func testDeploymentApp(t *testing.T) githubapp.DeploymentApp {
 // on the managed class, pointed at the fake GitHub.
 func newManagedWorkspace(t *testing.T, baseURL string) (db.Stores, string) {
 	t.Helper()
+	// The fake GitHub is the deployment's GitHub: the deployment App is on it,
+	// which is the only GitHub a managed workspace can be on.
+	ghbase.SetDefaultBaseURLForTest(t, baseURL)
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)

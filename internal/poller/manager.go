@@ -219,7 +219,7 @@ func (m *Manager) reviewerResolver(ctx context.Context, orgID, username string, 
 		if orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID); err != nil {
 			githubLog.Warn("read settings for reviewer resolver failed; falling back to github.com host", "org", orgID, "error", err)
 		} else {
-			// Resolve to the effective host (empty → github.com) so the
+			// Resolve to the effective host (empty → the deployment default) so the
 			// reverse identity lookup matches rows captured under the
 			// canonical host (e.g. the OAuth login-claim's literal github.com).
 			host = db.EffectiveGitHubHost(orgSet.GitHubBaseURL)

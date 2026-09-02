@@ -124,6 +124,21 @@ var (
 			"Ask your operator to configure the deployment's GitHub App.",
 	}
 
+	// The workspace is pointed at a GitHub the deployment App is not on. The
+	// App is registered on exactly one GitHub — the deployment's default — so a
+	// workspace whose github_base_url names another cannot ride it, and saying
+	// so here is what keeps that workspace from being preflighted against the
+	// wrong GitHub and refused with a message about the App instead of about
+	// the host. Names both hosts, which the admin can already read off their
+	// own settings and the operator's; what it points them at is the one thing
+	// that works for that GitHub: bringing their own App.
+	refuseWrongGitHub = bindRefusal{
+		code:   "wrong_github_host",
+		status: http.StatusConflict,
+		message: "This workspace is pointed at %s; the deployment's GitHub App is on %s. " +
+			"Bring your own App for this GitHub.",
+	}
+
 	// The operator's App is missing "Request user authorization (OAuth) during
 	// installation". GET /app does not report that checkbox, so it cannot be
 	// asserted in the preflight; the callback arriving with an installation_id
@@ -254,6 +269,13 @@ func (b bindRefusal) withAccount(login string) bindRefusal {
 	if strings.Contains(b.message, "%s") {
 		b.message = fmt.Sprintf(b.message, login)
 	}
+	return b
+}
+
+// withHosts fills the one refusal whose message names two GitHub hosts: the
+// workspace's and the deployment's.
+func (b bindRefusal) withHosts(workspaceHost, deploymentHost string) bindRefusal {
+	b.message = fmt.Sprintf(b.message, workspaceHost, deploymentHost)
 	return b
 }
 
@@ -781,11 +803,15 @@ func (s *Server) deploymentAppIdentity(ctx context.Context, orgID string) (ghWeb
 	if err != nil {
 		return "", identity, nil, fmt.Errorf("resolve github base for org %s: %w", orgID, err)
 	}
-	// TODO(TFAC-936): the deployment App lives on one GitHub and nothing here
-	// knows which, so a workspace pointed elsewhere is preflighted against the
-	// wrong GitHub and refused with a message about the App rather than about
-	// the host. Once TF_DEFAULT_GITHUB_HOST exists, refuse a mismatched
-	// workspace before any preflight, naming both hosts.
+	// The deployment App lives on the deployment's default GitHub and nowhere
+	// else, so a workspace whose effective host is another GitHub is refused
+	// here, before anything is asked of GitHub: a preflight against the
+	// workspace's host would be the deployment's key presented to a server
+	// that has never seen it, and the 401 that earns reads like a bad key.
+	if deploymentHost := ghbase.DefaultBaseURL(); ghbase.ResolveBaseURL(ghWeb) != deploymentHost {
+		refusal := refuseWrongGitHub.withHosts(ghbase.ResolveBaseURL(ghWeb), deploymentHost)
+		return "", identity, &refusal, nil
+	}
 	minter, merr := s.deploymentApp.Minter(ghbase.APIBase(ghWeb))
 	if merr != nil {
 		githubAppLog.Warn("managed bind: deployment app minter unavailable", "org", orgID, "error", merr)

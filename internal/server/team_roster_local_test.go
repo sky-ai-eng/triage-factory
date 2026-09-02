@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -24,7 +24,7 @@ func TestTeamRosterList_LocalSingleMember(t *testing.T) {
 	// (db.EffectiveGitHubHost) — the same host ghbase.ResolveBaseURL hands the
 	// PAT and Connect writers for an unconfigured org.
 	if err := s.users.UpsertGitHubIdentity(t.Context(), runmode.LocalDefaultUserID,
-		db.DefaultGitHubHost, "AidanAllchin", "", "", "pat"); err != nil {
+		ghbase.DefaultBaseURL(), "AidanAllchin", "", "", "pat"); err != nil {
 		t.Fatalf("seed github identity: %v", err)
 	}
 

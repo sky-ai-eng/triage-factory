@@ -138,6 +138,26 @@ type GitHubAppsStore interface {
 	// installation writes.
 	InstallationOwnerSystem(ctx context.Context, githubHost, installationID string) (string, error)
 
+	// ListManagedInstallationsOffHostSystem returns every LIVE installation
+	// row (removed_at IS NULL) held by an org in the managed_app class whose
+	// github_host is not githubHost (normalized as every host key is), ordered
+	// by org then installation id. Empty when every managed row is on that
+	// host, which is the only healthy state.
+	//
+	// It exists for one reader: the boot warning that names the rows the
+	// deployment App cannot reach. The App is registered on the deployment's
+	// default GitHub, and the static webhook route and the bind ceremony key
+	// on that host alone — so a managed row under any other spelling (a
+	// different GitHub, a case difference, a path segment, a bind from before
+	// the default was set) is bound on paper and unreachable in practice, and
+	// nothing migrates it. BYO rows are outside the question: a workspace with
+	// its own App keys its rows under its own configured host and is reached
+	// through its own webhook URL, so a BYO row off the default is ordinary.
+	//
+	// System (claims-free) by construction: the question spans orgs. Admin
+	// pool in Postgres.
+	ListManagedInstallationsOffHostSystem(ctx context.Context, githubHost string) ([]domain.OrgGitHubAppInstallation, error)
+
 	// UpsertInstallation mirrors one installation into
 	// org_github_app_installations. Idempotent on the (org_id,
 	// installation_id) composite key; ON CONFLICT it refreshes the

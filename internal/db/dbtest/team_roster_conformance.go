@@ -55,7 +55,7 @@ type TeamRosterFactory func(t *testing.T) (TeamRosterStores, TeamRosterSeeder)
 //     repeat rows, and with it the walk is exact.
 //   - paging: (items, total, err), where total is the unpaged count on every
 //     page and an offset past the end is an empty page rather than an error.
-//   - host scoping: an unset github_base_url resolves to github.com (that is
+//   - host scoping: an unset github_base_url resolves to the deployment default (that is
 //     where the capture paths bind), an unset jira_base_url matches nothing,
 //     and a binding on another host never leaks into this roster.
 //   - the N=1 shape local mode runs on: one member, role admin, identities

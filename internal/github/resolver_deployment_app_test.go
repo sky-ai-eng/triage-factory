@@ -15,6 +15,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
@@ -105,6 +106,9 @@ func newDeploymentGH(t *testing.T) *deploymentGH {
 	})
 
 	g.srv = httptest.NewServer(mux)
+	// This fake is the deployment's GitHub: the deployment App is registered
+	// on it, and every managed org in these tests is on it.
+	ghbase.SetDefaultBaseURLForTest(t, g.srv.URL)
 	t.Cleanup(g.srv.Close)
 	return g
 }
@@ -131,6 +135,9 @@ func testDeploymentApp(t *testing.T) githubapp.DeploymentApp {
 // secret store that nothing may reach, and the deployment App.
 func newManagedResolver(t *testing.T, base string, app githubapp.DeploymentApp) Resolver {
 	t.Helper()
+	// The org's GitHub is the deployment's GitHub — the one the deployment App
+	// is on — which is the only shape a managed org can have.
+	ghbase.SetDefaultBaseURLForTest(t, base)
 	return NewResolver(
 		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_never_borrow_me"}},
 		&fakeApps{app: nil, insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},

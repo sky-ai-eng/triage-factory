@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 )
@@ -1660,5 +1661,43 @@ func TestAuthFlow_Me_NoActiveOrg_StillCarriesTeams(t *testing.T) {
 	}
 	if teams[0].OrgID != orgID.String() || teams[0].Role != "admin" {
 		t.Errorf("teams[0] = %+v, want org %s role admin", teams[0], orgID)
+	}
+}
+
+// TestAuthFlow_LoginClaim_KeysUnderGitHubComWhateverTheDefault pins the one
+// host-keyed row that does NOT follow the deployment's default GitHub. The
+// GoTrue GitHub OAuth login provider is github.com whatever
+// TF_DEFAULT_GITHUB_HOST names, so the identity row the login claim mirrors
+// binds under https://github.com by construction — never under the default a
+// GHES self-hoster set for their workspaces.
+func TestAuthFlow_LoginClaim_KeysUnderGitHubComWhateverTheDefault(t *testing.T) {
+	ghbase.SetDefaultBaseURLForTest(t, "https://ghe.example.com")
+	r := newAuthRig(t)
+
+	userID := r.seedUser()
+	resp, _ := r.driveCallback(userID)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
+	}
+
+	login := "test-user-" + userID.String()[:8]
+	var hosts []string
+	rows, err := r.h.AdminDB.Query(`
+		SELECT github_base_url FROM user_github_identities
+		 WHERE login = $1 AND source = 'login_claim'
+	`, login)
+	if err != nil {
+		t.Fatalf("query user_github_identities: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		hosts = append(hosts, h)
+	}
+	if len(hosts) != 1 || hosts[0] != ghbase.GitHubCom {
+		t.Errorf("login-claim identity hosts = %v; want exactly [%q] — the GoTrue GitHub provider is github.com whatever the deployment default is", hosts, ghbase.GitHubCom)
 	}
 }

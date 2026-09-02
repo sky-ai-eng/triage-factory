@@ -3,12 +3,14 @@ package github
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -19,6 +21,9 @@ import (
 func stubbedSource(t *testing.T, app githubapp.DeploymentApp) (*deploymentAppSource, *int32, *int32) {
 	t.Helper()
 	var preflights, botLookups int32
+	// The deployment's GitHub, for the whole test: every resolve below asks
+	// about an org on it.
+	ghbase.SetDefaultBaseURLForTest(t, deploymentTestHost)
 	src := newDeploymentAppSource(app)
 	src.preflight = func(context.Context, *githubapp.Minter) (githubapp.DeploymentAppIdentity, error) {
 		atomic.AddInt32(&preflights, 1)
@@ -31,22 +36,30 @@ func stubbedSource(t *testing.T, app githubapp.DeploymentApp) (*deploymentAppSou
 	return src, &preflights, &botLookups
 }
 
-// TestDeploymentAppSource_CachesPerHostUntilTTL pins the shape of the cache:
-// one preflight per host per TTL, and a re-ask once it lapses.
+// deploymentTestHost is the deployment's GitHub in these tests — a GHES rather
+// than github.com, so nothing below can pass on the literal.
+const deploymentTestHost = "https://ghe.acme.test"
+
+// TestDeploymentAppSource_CachesUntilTTL pins the shape of the cache: one
+// preflight per TTL, whatever spelling of the deployment's host the orgs
+// arrive with, and a re-ask once it lapses.
 //
 // The cost this buys is real — resolution happens per org per poll cycle, per
 // token mint, per run start — and the thing it must not become is a preflight
 // that never re-runs, because losing the members permission on GitHub has to
 // stop the tier within minutes rather than at the next deploy.
-func TestDeploymentAppSource_CachesPerHostUntilTTL(t *testing.T) {
+func TestDeploymentAppSource_CachesUntilTTL(t *testing.T) {
 	src, preflights, botLookups := stubbedSource(t, testDeploymentApp(t))
 	now := time.Now()
 	src.now = func() time.Time { return now }
 	ctx := context.Background()
 
-	for range 3 {
-		if _, err := src.resolve(ctx, "https://ghe.acme.test"); err != nil {
-			t.Fatalf("resolve: %v", err)
+	// Three orgs on the deployment's GitHub: one with the host spelled out,
+	// one with a trailing slash, one that configured nothing and resolves to
+	// the default. One question, one preflight.
+	for _, base := range []string{deploymentTestHost, deploymentTestHost + "/", ""} {
+		if _, err := src.resolve(ctx, base); err != nil {
+			t.Fatalf("resolve(%q): %v", base, err)
 		}
 	}
 	if got := atomic.LoadInt32(preflights); got != 1 {
@@ -56,22 +69,46 @@ func TestDeploymentAppSource_CachesPerHostUntilTTL(t *testing.T) {
 		t.Errorf("bot lookup ran %d times inside one TTL; want 1 — it is established with the identity, not per resolution", got)
 	}
 
-	// A second host is a second question: the App's identity is established BY a
-	// call to a particular GitHub, so a verdict reached against one host cannot
-	// answer for another.
-	if _, err := src.resolve(ctx, "https://ghe.other.test"); err != nil {
-		t.Fatalf("resolve on a second host: %v", err)
-	}
-	if got := atomic.LoadInt32(preflights); got != 2 {
-		t.Errorf("preflight ran %d times across two hosts; want 2", got)
-	}
-
 	now = now.Add(deploymentAppTTL + time.Second)
-	if _, err := src.resolve(ctx, "https://ghe.acme.test"); err != nil {
+	if _, err := src.resolve(ctx, deploymentTestHost); err != nil {
 		t.Fatalf("resolve after the TTL: %v", err)
 	}
-	if got := atomic.LoadInt32(preflights); got != 3 {
-		t.Errorf("preflight ran %d times after the TTL lapsed; want 3 — a cached verdict must expire", got)
+	if got := atomic.LoadInt32(preflights); got != 2 {
+		t.Errorf("preflight ran %d times after the TTL lapsed; want 2 — a cached verdict must expire", got)
+	}
+}
+
+// TestDeploymentAppSource_AnotherGitHubRefusesWithoutAsking: the deployment App
+// is on one GitHub, so an org whose host is another is refused before any
+// flight — naming both hosts — rather than preflighted against a server that
+// has never seen the key. The refusal is per call and leaves the cache alone:
+// it is a fact about that org, not about the App, so the next org on the
+// deployment's GitHub still gets its one preflight.
+func TestDeploymentAppSource_AnotherGitHubRefusesWithoutAsking(t *testing.T) {
+	src, preflights, _ := stubbedSource(t, testDeploymentApp(t))
+	ctx := context.Background()
+
+	state, err := src.resolve(ctx, "https://ghe.other.test")
+	if state != nil {
+		t.Error("an org on another GitHub resolved a state")
+	}
+	if !errors.Is(err, ErrDeploymentAppUnavailable) || !errors.Is(err, ErrDeploymentAppOtherGitHub) {
+		t.Errorf("err = %v; want ErrDeploymentAppUnavailable naming the other GitHub", err)
+	}
+	for _, want := range []string{"https://ghe.other.test", deploymentTestHost} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v; want it to name %q", err, want)
+		}
+	}
+	if got := atomic.LoadInt32(preflights); got != 0 {
+		t.Errorf("preflight ran %d times for an org on another GitHub; want 0", got)
+	}
+
+	if _, err := src.resolve(ctx, deploymentTestHost); err != nil {
+		t.Fatalf("resolve on the deployment's GitHub after a refusal: %v", err)
+	}
+	if got := atomic.LoadInt32(preflights); got != 1 {
+		t.Errorf("preflight ran %d times for the deployment's GitHub; want 1 — the refusal must not have cached anything", got)
 	}
 }
 
@@ -93,7 +130,7 @@ func TestDeploymentAppSource_ConcurrentMissesCoalesce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := src.resolve(context.Background(), "https://ghe.acme.test"); err != nil {
+			if _, err := src.resolve(context.Background(), deploymentTestHost); err != nil {
 				t.Errorf("resolve: %v", err)
 			}
 		}()
@@ -135,7 +172,7 @@ func TestDeploymentAppSource_LeaderCancellationDoesNotPoisonTheFlight(t *testing
 	leaderCtx, cancel := context.WithCancel(context.Background())
 	leaderErr := make(chan error, 1)
 	go func() {
-		_, err := src.resolve(leaderCtx, "https://ghe.acme.test")
+		_, err := src.resolve(leaderCtx, deploymentTestHost)
 		leaderErr <- err
 	}()
 
@@ -159,7 +196,7 @@ func TestDeploymentAppSource_LeaderCancellationDoesNotPoisonTheFlight(t *testing
 	close(release) // GitHub answers the flight nobody is waiting on
 
 	// The answer is there for whoever comes next, off the same single preflight.
-	state, err := src.resolve(context.Background(), "https://ghe.acme.test")
+	state, err := src.resolve(context.Background(), deploymentTestHost)
 	if err != nil {
 		t.Fatalf("resolve after the leader left: %v", err)
 	}
@@ -187,7 +224,7 @@ func TestDeploymentAppSource_WaiterKeepsItsOwnDeadline(t *testing.T) {
 
 	leaderErr := make(chan error, 1)
 	go func() {
-		_, err := src.resolve(context.Background(), "https://ghe.acme.test")
+		_, err := src.resolve(context.Background(), deploymentTestHost)
 		leaderErr <- err
 	}()
 	<-entered
@@ -195,7 +232,7 @@ func TestDeploymentAppSource_WaiterKeepsItsOwnDeadline(t *testing.T) {
 	// A second caller joins the flight with almost no time left.
 	waiterCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := src.resolve(waiterCtx, "https://ghe.acme.test"); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := src.resolve(waiterCtx, deploymentTestHost); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("waiter err = %v; want its own deadline", err)
 	}
 
@@ -215,7 +252,7 @@ func TestDeploymentAppSource_WaiterKeepsItsOwnDeadline(t *testing.T) {
 func TestDeploymentAppSource_UnconfiguredRefusesWithoutAsking(t *testing.T) {
 	src, preflights, _ := stubbedSource(t, githubapp.DeploymentApp{})
 
-	state, err := src.resolve(context.Background(), "https://github.com")
+	state, err := src.resolve(context.Background(), deploymentTestHost)
 	if state != nil {
 		t.Error("an unconfigured deployment App resolved a state")
 	}

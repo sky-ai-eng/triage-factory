@@ -99,7 +99,7 @@ func (f *fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, er
 	if f.baseURL != "" {
 		return f.baseURL, nil
 	}
-	return ghbase.DefaultBaseURL, nil
+	return ghbase.DefaultBaseURL(), nil
 }
 
 // OrgIdentityFor satisfies the ghclient.Resolver interface. Returns the

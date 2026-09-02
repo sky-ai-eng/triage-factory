@@ -49,6 +49,16 @@ import (
 // workspace did not choose.
 var ErrDeploymentAppUnavailable = errors.New("github: the deployment app is unavailable")
 
+// ErrDeploymentAppOtherGitHub is the cause wrapped when a managed-class org's
+// effective GitHub host is not the deployment's default — the one GitHub the
+// deployment App is registered on. Such an org is refused before any network
+// call: preflighting the deployment's key against a GitHub that has never seen
+// it would fail with a 401 that reads like a bad key, and cache that failure
+// against the deployment App itself. The bind ceremony refuses the same
+// workspace with the same fact, so this arm is reached only by an org whose
+// base URL moved after it bound.
+var ErrDeploymentAppOtherGitHub = errors.New("github: the workspace is pointed at a GitHub the deployment app is not on")
+
 // deploymentAppTTL is how long a clean preflight answer serves. The answer
 // moves when the operator rotates the App's key or its granted permissions
 // change on GitHub — the first restarts the process anyway, and the second is
@@ -85,7 +95,7 @@ type deploymentAppState struct {
 	botUserID int64
 }
 
-// deploymentAppEntry is one host's cached preflight outcome. err and state are
+// deploymentAppEntry is the cached preflight outcome. err and state are
 // alternatives: a cached failure serves the same error to every caller inside
 // its window, which is the whole point of caching one.
 type deploymentAppEntry struct {
@@ -94,15 +104,16 @@ type deploymentAppEntry struct {
 	expiresAt time.Time
 }
 
-// deploymentAppSource resolves the deployment App for a GitHub host, running
-// the preflight at most once per host per TTL.
+// deploymentAppSource resolves the deployment App, running the preflight at
+// most once per TTL.
 //
-// Keyed by API base rather than held as a single answer because the App's
-// identity is established BY a call to a particular GitHub, and TF resolves a
-// host per org. A deployment App is registered on one GitHub, so in practice
-// one key answers for every org; an org pointed at a different host gets its
-// own entry and its own (failing) verdict rather than inheriting a verdict
-// established somewhere else.
+// One answer, not one per host. The App's identity is established BY a call to
+// a particular GitHub, and the deployment App is registered on exactly one —
+// the deployment's default (ghbase.DefaultBaseURL), which is also the GitHub
+// every managed org is on, since the bind refuses a workspace pointed anywhere
+// else. So there is one GitHub to ask and one verdict to hold; an org whose
+// host is not that GitHub is refused by resolve without a flight rather than
+// given a per-host entry that could only ever cache a failure.
 type deploymentAppSource struct {
 	app githubapp.DeploymentApp
 
@@ -119,14 +130,18 @@ type deploymentAppSource struct {
 	failureTTL       time.Duration
 	establishTimeout time.Duration
 
-	// group coalesces concurrent misses on one host into a single preflight.
-	// Without it a cold cache under a poll cycle's fan-out would spend one
-	// GET /app per org, all establishing the same fact.
+	// group coalesces concurrent misses into a single preflight. Without it a
+	// cold cache under a poll cycle's fan-out would spend one GET /app per
+	// org, all establishing the same fact.
 	group singleflight.Group
 
-	mu      sync.Mutex
-	entries map[string]deploymentAppEntry
+	mu    sync.Mutex
+	entry *deploymentAppEntry
 }
+
+// deploymentAppFlightKey is the singleflight key: there is one question, so
+// there is one key.
+const deploymentAppFlightKey = "deployment-app"
 
 func newDeploymentAppSource(app githubapp.DeploymentApp) *deploymentAppSource {
 	return &deploymentAppSource{
@@ -136,7 +151,6 @@ func newDeploymentAppSource(app githubapp.DeploymentApp) *deploymentAppSource {
 		ttl:              deploymentAppTTL,
 		failureTTL:       deploymentAppFailureTTL,
 		establishTimeout: deploymentAppEstablishTimeout,
-		entries:          make(map[string]deploymentAppEntry),
 	}
 }
 
@@ -152,12 +166,16 @@ func (s *deploymentAppSource) timeNow() time.Time {
 // org's resolution immediately rather than after a round trip.
 func (s *deploymentAppSource) configured() bool { return s.app.Configured() }
 
-// resolve returns the deployment App's established state for the org's GitHub
-// host, or an error — never (nil, nil). Every failure arm that says something
-// about the App is ErrDeploymentAppUnavailable with the cause wrapped, so the
-// one thing a caller can do with such a failure is refuse, which is the one
-// thing it may do. The single arm that is NOT is this caller's own context
-// ending, which is a fact about the call rather than about the App.
+// resolve returns the deployment App's established state for an org on the
+// deployment's GitHub, or an error — never (nil, nil). base is the org's
+// resolved web base, and it is checked rather than used: an org whose host is
+// not the deployment default is refused here with ErrDeploymentAppOtherGitHub,
+// before any flight, because the deployment App is on one GitHub and that org
+// is on another. Every failure arm that says something about the App is
+// ErrDeploymentAppUnavailable with the cause wrapped, so the one thing a caller
+// can do with such a failure is refuse, which is the one thing it may do. The
+// single arm that is NOT is this caller's own context ending, which is a fact
+// about the call rather than about the App.
 //
 // Either way there is no third answer: a resolution that does not establish the
 // App fails, and no path here reaches a PAT.
@@ -165,22 +183,27 @@ func (s *deploymentAppSource) resolve(ctx context.Context, base string) (*deploy
 	if !s.configured() {
 		return nil, fmt.Errorf("%w: %w", ErrDeploymentAppUnavailable, githubapp.ErrNoDeploymentApp)
 	}
-	apiBase := ghbase.APIBase(base)
-	if state, err, ok := s.cached(apiBase); ok {
+	deploymentHost := ghbase.DefaultBaseURL()
+	if host := ghbase.ResolveBaseURL(base); host != deploymentHost {
+		return nil, fmt.Errorf("%w: %w: workspace on %s, deployment app on %s",
+			ErrDeploymentAppUnavailable, ErrDeploymentAppOtherGitHub, host, deploymentHost)
+	}
+	apiBase := ghbase.APIBase(deploymentHost)
+	if state, err, ok := s.cached(); ok {
 		return state, err
 	}
 
-	// One flight per host, and its outcome is shared by everyone waiting on it —
-	// correct here, because they are all asking the same question of the same
-	// GitHub and there is one answer.
+	// One flight, and its outcome is shared by everyone waiting on it — correct
+	// here, because they are all asking the same question of the same GitHub
+	// and there is one answer.
 	type result struct {
 		state *deploymentAppState
 		err   error
 	}
-	ch := s.group.DoChan(apiBase, func() (any, error) {
+	ch := s.group.DoChan(deploymentAppFlightKey, func() (any, error) {
 		// A second look under the flight: the caller this one coalesced behind
 		// may already have stored an answer.
-		if state, err, ok := s.cached(apiBase); ok {
+		if state, err, ok := s.cached(); ok {
 			return result{state: state, err: err}, nil
 		}
 		// The flight runs on a context of its OWN — detached from whichever
@@ -205,8 +228,8 @@ func (s *deploymentAppSource) resolve(ctx context.Context, base string) (*deploy
 		// span nobody goes looking for.
 		workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.establishTimeout)
 		defer cancel()
-		state, err := s.establish(workCtx, base, apiBase)
-		s.store(apiBase, state, err)
+		state, err := s.establish(workCtx, deploymentHost, apiBase)
+		s.store(state, err)
 		return result{state: state, err: err}, nil
 	})
 
@@ -258,29 +281,27 @@ func (s *deploymentAppSource) establish(ctx context.Context, base, apiBase strin
 	return state, nil
 }
 
-// cached returns the stored outcome for apiBase when it has not expired. The
-// third value distinguishes a miss from a cached failure, which is an answer.
-func (s *deploymentAppSource) cached(apiBase string) (*deploymentAppState, error, bool) {
+// cached returns the stored outcome when it has not expired. The third value
+// distinguishes a miss from a cached failure, which is an answer.
+func (s *deploymentAppSource) cached() (*deploymentAppState, error, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, ok := s.entries[apiBase]
-	if !ok || s.timeNow().After(e.expiresAt) {
+	e := s.entry
+	if e == nil || s.timeNow().After(e.expiresAt) {
 		return nil, nil, false
 	}
 	return e.state, e.err, true
 }
 
-// store writes an outcome with the TTL its kind earns. The map is keyed by API
-// base, which is derived from org settings rather than supplied by a caller, so
-// it is bounded by the hosts this deployment's orgs actually point at.
-func (s *deploymentAppSource) store(apiBase string, state *deploymentAppState, err error) {
+// store writes the outcome with the TTL its kind earns.
+func (s *deploymentAppSource) store(state *deploymentAppState, err error) {
 	ttl := s.ttl
 	if err != nil {
 		ttl = s.failureTTL
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries[apiBase] = deploymentAppEntry{state: state, err: err, expiresAt: s.timeNow().Add(ttl)}
+	s.entry = &deploymentAppEntry{state: state, err: err, expiresAt: s.timeNow().Add(ttl)}
 }
 
 // fetchBotUserID reads the numeric account id of an App's bot ("<slug>[bot]")

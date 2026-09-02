@@ -57,7 +57,7 @@ func (f *fakeResolver) TokenFor(ctx context.Context, orgID, target string) (gith
 // BaseURLFor satisfies the ghclient.Resolver interface. The poller never
 // calls it; github.com is enough to keep the fake compiling.
 func (f *fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
-	return ghbase.DefaultBaseURL, nil
+	return ghbase.DefaultBaseURL(), nil
 }
 
 // OrgIdentityFor satisfies the ghclient.Resolver interface. The poller never
