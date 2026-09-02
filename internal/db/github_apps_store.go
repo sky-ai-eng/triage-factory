@@ -34,10 +34,10 @@ import (
 // SetInstallationSuspension and MarkInstallationRemoved each keep their
 // documented no-op-on-absent-row contract: a miss is (nil, nil), not an
 // error, matching GetForOrg's own nil-on-absent shape rather than an
-// ErrNoSuchX sentinel. DeleteForOrg (a delete) and the two reconciles
-// (BackfillInstallationsFromAPI / RefreshManagedInstallations — set
-// reconciliation from a provider enumeration) stay exempt, each stated at the
-// method.
+// ErrNoSuchX sentinel. DeleteForOrg (a delete) and the three reconciles
+// (BackfillInstallationsFromAPI / RefreshManagedInstallations /
+// RefreshAllManagedInstallations — set reconciliation from a provider
+// enumeration) stay exempt, each stated at the method.
 type GitHubAppsStore interface {
 	// GetForOrg returns the org's registered GitHub App, or nil if
 	// the org has no App registration (uses the deployment default
@@ -276,6 +276,39 @@ type GitHubAppsStore interface {
 	// Exempt from the returned-row rule for the same reason as the method
 	// above: a whole set reconciled from a provider enumeration names no row.
 	RefreshManagedInstallations(ctx context.Context, orgID string, deployment githubapp.DeploymentApp) error
+
+	// RefreshAllManagedInstallations is the cadence pass for the managed class:
+	// the same refresh as RefreshManagedInstallations, for EVERY managed
+	// workspace at once, from one listing per GitHub host rather than one per
+	// org. Under a shared key the listing is the same whoever asks, so the
+	// per-org shape spends one shared rate budget N times for N identical
+	// answers; this reads every managed workspace's bound set in one query,
+	// lists once, and fans the answer out to the orgs that bound each
+	// installation (db.RefreshManagedInstallationSets holds the mechanics).
+	//
+	// Same invariants as the sibling, held by the same filter: bound rows
+	// converge — account login and id, the suspension pair, repository_selection
+	// — and a bound installation GitHub no longer reports is soft-removed with
+	// its reachable-repo cascade; an installation no workspace bound is never
+	// written; a failed listing changes nothing. A workspace on any other class
+	// is not in the read at all, so nothing here can touch a BYO org's rows.
+	//
+	// Two scopes, two methods, and the split is deliberate: the sibling's
+	// (ctx, orgID, deployment) signature is right for the Settings button — an
+	// admin refreshing their own workspace — and is not a lever any tenant can
+	// pull to make the deployment enumerate everything. This one has no org
+	// parameter because it has no tenant caller: it runs on the poll cadence, on
+	// the brain-lease holder, and nowhere a request can reach.
+	//
+	// A deployment with no managed workspace holding a bound installation is
+	// answered without a request. One that has some and no configured deployment
+	// App is an error, as for the sibling: a managed workspace whose shared key
+	// has gone missing must fail where someone can see it. Claims-free by
+	// construction (the read spans orgs); admin pool in Postgres.
+	//
+	// Exempt from the returned-row rule for the same reason as the two above: a
+	// whole set reconciled from a provider enumeration names no row.
+	RefreshAllManagedInstallations(ctx context.Context, deployment githubapp.DeploymentApp) error
 }
 
 // ErrGitHubAppExists is returned by CreateForOrg when the org already

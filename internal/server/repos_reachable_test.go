@@ -48,7 +48,7 @@ func wireReachRefresh(t *testing.T, s *Server) *reachHarness {
 	// it: the two keying an org differently is a mirror that reads as empty for
 	// an org that has one.
 	classes := reachcache.NewClassResolver(s.orgs, s.githubApps)
-	grant := grantmirror.NewReconciler(s.githubApps, s.reachableRepos, s.ghResolver, classes)
+	grant := grantmirror.NewReconciler(s.githubApps, s.reachableRepos, s.ghResolver, classes, s.deploymentApp)
 	h.refresher = reachcache.NewRefresher(classes, s.reachableRepos, s.ghResolver, grant.RunOrg, nil)
 	s.SetReachTrigger(func(orgID string, force bool) {
 		h.triggers.Add(1)

@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -69,7 +70,24 @@ func (a *App) buildRunCredentials() error {
 	a.modelFor = func(ctx context.Context, orgID, teamID string) (domain.TeamModels, error) {
 		return resolveAIModelForTeam(ctx, a.stores, orgID, teamID)
 	}
-	a.ghResolver = ghclient.NewResolver(a.stores.Secrets, a.stores.GitHubApps, a.stores.Orgs, a.stores.Agents, nil)
+	// The deployment App — the one shared key a managed workspace rides — is
+	// operator environment config, read here once for this process's background
+	// consumers: the resolver (so the grant pass, the pollers and the profiler
+	// mint tier-2 installation tokens for a managed org exactly as the server's
+	// request path does) and the managed installation-set refresh, which lists
+	// the App's installations under it. The zero App in local mode and on a
+	// deployment whose orgs all bring their own key; a malformed configuration
+	// is logged and treated as none, the same failing-closed handling the
+	// server applies, so both readers hold the same answer.
+	deployment, err := githubapp.DeploymentAppFromEnv()
+	if err != nil {
+		appLog.Error("read deployment github app from the environment failed; managed-class orgs will resolve nothing in background passes",
+			"error", err)
+		deployment = githubapp.DeploymentApp{}
+	}
+	a.deploymentApp = deployment
+	a.ghResolver = ghclient.NewResolver(a.stores.Secrets, a.stores.GitHubApps, a.stores.Orgs, a.stores.Agents, nil,
+		ghclient.WithDeploymentApp(deployment))
 	return nil
 }
 

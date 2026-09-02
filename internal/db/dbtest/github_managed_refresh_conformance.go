@@ -39,6 +39,17 @@ type GitHubManagedRefreshSeeder struct {
 	// store read can distinguish those two — every one of them filters
 	// removed_at IS NULL.
 	AllInstallationIDs func(t *testing.T, orgID string) []string
+
+	// Reach records that installationID reaches one repository under the
+	// managed class — a reachable_repositories entry plus its reachable_scopes
+	// marker — written at the table so the suite can stage reach for any org
+	// (the SQLite store's own writer admits only the local sentinel org).
+	Reach func(t *testing.T, orgID, installationID string)
+
+	// ReachRows counts what Reach wrote that is still there: the installation's
+	// reachable_repositories entries and its reachable_scopes markers. Both
+	// must go with the installation on an uninstall.
+	ReachRows func(t *testing.T, orgID, installationID string) (entries, scopes int)
 }
 
 // GitHubManagedRefreshFactory is what a per-backend test file hands to

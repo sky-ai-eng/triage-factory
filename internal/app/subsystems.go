@@ -193,7 +193,7 @@ func (a *App) buildAI() {
 	// has one. Stateless — two store pointers — so sharing it costs nothing and
 	// buys the guarantee.
 	reachClasses := reachcache.NewClassResolver(a.stores.Orgs, a.stores.GitHubApps)
-	a.grantReconciler = grantmirror.NewReconciler(a.stores.GitHubApps, a.stores.ReachableRepos, a.ghResolver, reachClasses)
+	a.grantReconciler = grantmirror.NewReconciler(a.stores.GitHubApps, a.stores.ReachableRepos, a.ghResolver, reachClasses, a.deploymentApp)
 
 	// Reachable-repo cache: per-org Runners refreshing the mirror the repository
 	// picker and the team-repos write gate both read. Sibling to the profiler in
@@ -440,6 +440,14 @@ func (a *App) buildRouting() {
 	// leader gating is the poller's own, which is the same brain lease every
 	// other timer-driven pass sits behind.
 	a.pollerMgr.ReconcileGrant = a.grantReconciler.RunOrg
+	// The managed installation set's pull-side convergence: one listing of the
+	// deployment App's installations per GitHub cycle, fanned out to the
+	// workspaces that bound each. A deployment singleton — it does not fit the
+	// per-org Manager.Trigger(orgID) shape the other passes take — hung off the
+	// same cycle and the same brain lease as the grant pass above. A no-op
+	// wherever no managed workspace has bound an installation; where one has and
+	// no deployment App is configured, an error the poller warns on every cycle.
+	a.pollerMgr.RefreshManagedInstallations = a.grantReconciler.RunDeployment
 	// Skip a cycle for a source an org admin turned off. This is what makes
 	// "a turned-off source makes zero API calls" true, which is a promise
 	// measurable from the other end; the router's drop beside it is what makes

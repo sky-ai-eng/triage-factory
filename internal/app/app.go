@@ -32,6 +32,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
@@ -114,8 +115,11 @@ type App struct {
 
 	// Per-org run-credential seam shared by every AI feature.
 	ghResolver ghclient.Resolver
-	runSecrets agentproc.SecretsReader
-	modelFor   func(ctx context.Context, orgID, teamID string) (domain.TeamModels, error)
+	// deploymentApp is the deployment's shared GitHub App, read once from the
+	// environment in buildRunCredentials; the zero App when none is configured.
+	deploymentApp githubapp.DeploymentApp
+	runSecrets    agentproc.SecretsReader
+	modelFor      func(ctx context.Context, orgID, teamID string) (domain.TeamModels, error)
 
 	// llmResolver is the shared LLM-credential resolver (internal/llmcred,
 	// TFAC-616): every Bedrock/Anthropic resolution the brain does flows

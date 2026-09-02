@@ -45,11 +45,17 @@ exactly one source of truth:
 
 The bind ceremony (the Connect button) proves the link — the person completing
 the install can see the installation and administers the account it targets —
-and writes the row. The scoped reconcile (`RefreshManagedInstallations`) then
-keeps bound rows current from the shared listing and touches nothing else.
-Two mechanisms hold the boundary: the reconcile filters to bound installation
-ids before writing, and a unique index over live `(github_host,
-installation_id)` pairs refuses a second workspace's claim outright.
+and writes the row. The scoped reconcile then keeps bound rows current from the
+shared listing and touches nothing else. It has two doors with two scopes: the
+Settings refresh button runs it for one workspace
+(`RefreshManagedInstallations`), and the poll cadence runs it for every managed
+workspace at once from a single listing (`RefreshAllManagedInstallations`,
+driven by `grantmirror.RunDeployment`) — one `GET /app/installations` per
+GitHub cycle whatever the tenant count, since under a shared key the answer is
+the same whoever asks. Two mechanisms hold the boundary on both doors: the
+reconcile filters to bound installation ids before writing, and a unique index
+over live `(github_host, installation_id)` pairs refuses a second workspace's
+claim outright.
 An installation belongs to exactly one workspace per GitHub host; after an
 uninstall the id is freed, and connecting it elsewhere is an ordinary new bind.
 
@@ -62,11 +68,11 @@ it. Everything after the proof updates freely, as the next section enumerates.
 | Change on GitHub | What it is | Own App key | Deployment App |
 |---|---|---|---|
 | Add/remove repositories on a connected account | Grant change, same installation | Grant pass, every poll cycle; `installation_repositories` webhook | Grant pass, every poll cycle |
-| Switch `all` ↔ `selected` repositories | Installation field | Reconcile, every poll cycle; webhook | Settings → refresh |
-| Suspend / unsuspend the installation | Installation field | Reconcile, every poll cycle; webhook | Settings → refresh |
-| Rename the account | Installation field (`account_login`) | Reconcile, every poll cycle | Settings → refresh |
+| Switch `all` ↔ `selected` repositories | Installation field | Reconcile, every poll cycle; webhook | Reconcile, every poll cycle; Settings → refresh |
+| Suspend / unsuspend the installation | Installation field | Reconcile, every poll cycle; webhook | Reconcile, every poll cycle; Settings → refresh |
+| Rename the account | Installation field (`account_login`) | Reconcile, every poll cycle | Reconcile, every poll cycle; Settings → refresh |
 | Install the App on a **new** account | New installation | Reconcile discovers it, every poll cycle | Connect button — one bind ceremony per account, additive |
-| Uninstall from an account | Installation removed | Reconcile soft-removes; webhook | Settings → refresh soft-removes |
+| Uninstall from an account | Installation removed | Reconcile soft-removes; webhook | Reconcile soft-removes, every poll cycle; Settings → refresh |
 
 The **grant pass** is `grantmirror.RunOrg`'s per-installation half, and it runs
 every GitHub poll cycle for *both* classes: it reads each bound installation's
@@ -76,17 +82,19 @@ repositories reach the repository picker on the next cycle. A soft-removed
 installation's `reachable_repositories` rows are deleted with it, so the picker
 never offers reach TF no longer has.
 
+Pull is the contract for both classes. GitHub never retries a webhook delivery
+it failed to make, and some changes have no delivery at all — an account rename
+fires no event TF subscribes to, and `account_login` is what token minting
+matches an installation on, so a rename that only a webhook could report would
+break minting for that account permanently. Every installation field the
+listing reports converges on the cadence for both classes; a webhook, where one
+exists, only makes it converge sooner.
+
 ## Current limitations, deployment-App workspaces only
 
 - **Webhooks do not reach them yet.** The webhook receiver is addressed per
   workspace and verifies against that workspace's own secret, which a
   deployment-App workspace does not have — deliveries for the shared App are
   refused. Until a deployment-level receiver exists, webhook rows in the table
-  above apply only to workspaces with their own key.
-- **The installation-set refresh runs only from the Settings button.** The
-  per-poll-cycle reconcile row in the table is the own-key path;
-  `grantmirror.RunOrg` deliberately skips it for deployment-App workspaces (see
-  the marker at its managed branch). Until a deployment-scoped refresh runs on
-  the poll cadence, a lost suspend/unsuspend, an account rename — which has no
-  webhook in any case — or a missed uninstall converges only when an admin
-  presses refresh.
+  above apply only to workspaces with their own key, and a deployment-App
+  workspace converges on the poll cadence alone.
