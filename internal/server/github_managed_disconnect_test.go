@@ -383,7 +383,10 @@ func TestManagedDisconnect_RefusesABYOWorkspace(t *testing.T) {
 	// down by its own switch flow. The managed verb refuses rather than
 	// no-ops: a 204 would say the workspace left a class it was never in.
 	rig := newBindRig(t, newFakeGitHub())
-	if _, err := rig.srv.orgs.SetGitHubCredentialClass(context.Background(), rig.orgID.String(), domain.GitHubCredentialClassBYOApp); err != nil {
+	if _, err := rig.h.AdminDB.Exec(`
+		INSERT INTO org_settings (org_id, github_credential_class) VALUES ($1, 'byo_app')
+		ON CONFLICT (org_id) DO UPDATE SET github_credential_class = 'byo_app'
+	`, rig.orgID.String()); err != nil {
 		t.Fatalf("seed byo class: %v", err)
 	}
 	rec := rig.disconnect(t, "")
