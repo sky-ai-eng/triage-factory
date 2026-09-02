@@ -25,6 +25,7 @@ var preAuthAllowlist = []string{
 	"GET /api/config",                    // AuthGate reads deployment_mode pre-login
 	"GET /api/health",                    // liveness probe for platform healthchecks (Fly, compose, k8s)
 	"POST /api/webhooks/github/{org_id}", // GitHub App webhook receiver; pre-auth, verified by HMAC signature in-handler, IP-rate-limited at the signed-webhook tier
+	"POST /api/webhooks/github",          // deployment-App webhook receiver; pre-auth, verified against the deployment secret in-handler before any store read, routed by installation binding, same limiter tier
 	"GET /api/invites/preview",           // invite-token preview; recipient not yet authenticated, admin-pool, token is the bearer secret
 	"GET /api/github/managed/callback",   // deployment-App bind callback; applies withSession itself to the cookie-bearing (writing) branch only — the no-cookie branch is someone who installed from GitHub's public page and has no session
 	// POST /api/sso/discover is now an ee/sso route (mounted via the extension

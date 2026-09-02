@@ -655,6 +655,10 @@ func (s *Server) routes() {
 	//   POST /api/webhooks/github/{org_id} — GitHub App webhook receiver;
 	//        GitHub has no session, and the handler verifies the HMAC
 	//        signature against the org's stored webhook secret itself.
+	//   POST /api/webhooks/github          — the deployment App's webhook
+	//        receiver; verifies against the one deployment secret from the
+	//        environment before any org is known, then routes the delivery
+	//        by the installation's binding. Multi mode only (404 in local).
 	//   GET  /api/invites/preview          — invite-token preview; the
 	//        recipient hasn't authenticated yet, so this can't gate on a
 	//        session. Runs on the admin pool; the token is the bearer secret.
@@ -1497,6 +1501,16 @@ func (s *Server) routes() {
 	// per org; this bounds how fast an anonymous caller can miss that
 	// cache). No-op in local mode.
 	s.mux.Handle("POST /api/webhooks/github/{org_id}", s.signedWebhookRateLimit(http.HandlerFunc(s.handleGitHubWebhook)))
+
+	// The deployment App's receiver: one App, one webhook URL, no tenant in the
+	// path. Pre-auth for the same reason as its sibling, and on the same
+	// limiter tier — but the cost it defends is smaller, because this handler
+	// reads no store until the signature has passed against the one secret it
+	// already holds. The two mounts are siblings, not one route: Go's mux
+	// resolves the exact path and the {org_id} segment independently, and the
+	// handlers stay separate on purpose (see handleDeploymentGitHubWebhook).
+	// Spelled literally: routes_coverage_test audits string-literal patterns.
+	s.mux.Handle("POST /api/webhooks/github", s.signedWebhookRateLimit(http.HandlerFunc(s.handleDeploymentGitHubWebhook)))
 
 	// Registered server extensions (Enterprise Edition, ee/) mount their
 	// routes here, each gated on its license feature. No-op in a community
