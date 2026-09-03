@@ -24,10 +24,11 @@ import type { GrantFindings } from '../../../hooks/useGrantFindings'
 import { isHttpUrl } from '../../../lib/reachability'
 import type { GitHubAppInstallation, ScopeDriftItem } from '../../../lib/githubApp'
 
-// driftCountByInstallation folds the loaded drift page into a per-installation
+// driftCountByInstallation folds the loaded drift rows into a per-installation
 // count, for the card's "N tracked repositories outside this grant" line. It
-// counts the loaded rows, which is exact while the finding fits one page and a
-// floor after that; the heading beside it carries the server's total.
+// counts the loaded rows, which is exact once the whole finding is loaded and a
+// floor before that — GrantWidth is told which, so it never claims "nothing
+// outside" off a partial page.
 function driftCountByInstallation(items: ScopeDriftItem[]): Map<string, number> {
   const counts = new Map<string, number>()
   for (const item of items) {
@@ -65,12 +66,20 @@ function GitHubLink({ href, children }: { href: string; children: React.ReactNod
 // repository_selection. The three are different claims and get different
 // words: "cannot drift" (all), "N outside" or "none outside" (selected), and
 // "not known yet" (null) — never one of the other two dressed up.
+//
+// driftComplete says whether driftCount was taken from the whole finding or
+// from the pages loaded so far. "Nothing outside the grant" is a claim about
+// the whole set, so a partial count never earns it: until the finding is
+// loaded in full, a selective grant reads as a floor ("at least N") or defers
+// to the list below.
 function GrantWidth({
   selection,
   driftCount,
+  driftComplete,
 }: {
   selection: GitHubAppInstallation['repository_selection']
   driftCount: number
+  driftComplete: boolean
 }) {
   if (selection === 'all') {
     return (
@@ -81,16 +90,25 @@ function GrantWidth({
     )
   }
   if (selection === 'selected') {
-    return driftCount > 0 ? (
-      <p className="text-reported text-warm">
-        Grants selected repositories — {driftCount} tracked{' '}
-        {driftCount === 1 ? 'repository is' : 'repositories are'} outside the grant. Add{' '}
-        {driftCount === 1 ? 'it' : 'them'} on GitHub, or untrack {driftCount === 1 ? 'it' : 'them'}.
-      </p>
-    ) : (
+    if (driftCount > 0) {
+      return (
+        <p className="text-reported text-warm">
+          Grants selected repositories — {driftComplete ? '' : 'at least '}
+          {driftCount} tracked {driftCount === 1 ? 'repository is' : 'repositories are'} outside the
+          grant. Add {driftCount === 1 ? 'it' : 'them'} on GitHub, or untrack{' '}
+          {driftCount === 1 ? 'it' : 'them'}.
+        </p>
+      )
+    }
+    return driftComplete ? (
       <p className="text-reported text-ink-3">
         Grants selected repositories — nothing tracked is outside the grant. A repository created
         later stays outside it until it is added on GitHub.
+      </p>
+    ) : (
+      <p className="text-reported text-ink-3">
+        Grants selected repositories. A repository created later stays outside the grant until it is
+        added on GitHub — the tracked-but-outside list below names any that are.
       </p>
     )
   }
@@ -115,12 +133,15 @@ export function GitHubInstallationList({
   onDisconnect,
 }: {
   installations: GitHubAppInstallation[]
-  drift: ScopeDriftItem[]
+  // The drift finding as loaded so far: its rows give each card its count,
+  // and whether more pages remain decides how strongly the card may speak.
+  drift: PagedList<ScopeDriftItem>
   busy?: boolean
   onDisconnect?: (inst: GitHubAppInstallation) => void
 }) {
   if (installations.length === 0) return null
-  const driftCounts = driftCountByInstallation(drift)
+  const driftCounts = driftCountByInstallation(drift.items)
+  const driftComplete = !drift.hasMore && !drift.loading && drift.error === ''
   return (
     <ul className="space-y-2" aria-label="Installed on">
       {installations.map((inst) => {
@@ -169,6 +190,7 @@ export function GitHubInstallationList({
               <GrantWidth
                 selection={inst.repository_selection}
                 driftCount={driftCounts.get(inst.installation_id) ?? 0}
+                driftComplete={driftComplete}
               />
             )}
           </li>

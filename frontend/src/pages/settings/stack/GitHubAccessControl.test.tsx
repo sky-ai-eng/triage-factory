@@ -36,7 +36,7 @@ vi.mock('../orgCredentials', () => ({ connectGitHubPAT: credMocks.connectGitHubP
 // mock answers by path so a test can seed each finding, and records every
 // call so a test can assert which reads opening the panel issued.
 const listMocks = vi.hoisted(() => ({
-  pages: {} as Record<string, { items: unknown[]; total_count: number }>,
+  pages: {} as Record<string, { items: unknown[]; total_count: number; next_page_token?: string }>,
   calls: [] as string[],
 }))
 vi.mock('../../../lib/apiClient', async (importOriginal) => {
@@ -46,7 +46,11 @@ vi.mock('../../../lib/apiClient', async (importOriginal) => {
     apiList: async (path: string) => {
       listMocks.calls.push(path)
       const page = listMocks.pages[path] ?? { items: [], total_count: 0 }
-      return { items: page.items, next_page_token: '', total_count: page.total_count }
+      return {
+        items: page.items,
+        next_page_token: page.next_page_token ?? '',
+        total_count: page.total_count,
+      }
     },
   }
 })
@@ -717,6 +721,50 @@ describe('GitHubAccessControl · grant findings', () => {
     expect(some?.textContent).toMatch(/1 tracked repository is outside the grant/)
     expect(unknown?.textContent).toMatch(/isn’t known yet/)
     expect(unknown?.textContent).not.toMatch(/outside the grant|never fall/)
+  })
+
+  // "Nothing tracked is outside the grant" is a claim about the whole finding.
+  // With a further page unloaded, a card whose account has no drift on the
+  // loaded page defers to the list, and one that has some reads as a floor.
+  it('never claims nothing is outside a grant off a partial drift page', async () => {
+    listMocks.pages[DRIFT] = {
+      total_count: 60,
+      next_page_token: 'more',
+      items: [
+        {
+          owner: 'some',
+          repo: 'legacy',
+          slug: 'some/legacy',
+          installation_id: '2',
+          account_login: 'some',
+          settings_url: 'https://github.com/organizations/some/settings/installations/2',
+        },
+      ],
+    }
+    installMocks.status = statusOf({
+      installations: [
+        installation({
+          installation_id: '1',
+          account_login: 'quiet',
+          repository_selection: 'selected',
+        }),
+        installation({
+          installation_id: '2',
+          account_login: 'some',
+          repository_selection: 'selected',
+        }),
+      ],
+    })
+    renderControl(liveApp)
+    await screen.findByText('some/legacy')
+
+    const cards = screen.getAllByRole('listitem').filter((li) => li.textContent?.startsWith('@'))
+    const quiet = cards.find((li) => li.textContent?.includes('@quiet'))
+    const some = cards.find((li) => li.textContent?.includes('@some'))
+    expect(quiet?.textContent).not.toMatch(/nothing tracked is outside/)
+    expect(quiet?.textContent).toMatch(/list below names any that are/)
+    expect(some?.textContent).toMatch(/at least 1 tracked repository is outside the grant/)
+    expect(screen.getByRole('button', { name: 'Show more' })).toBeInTheDocument()
   })
 
   it('renders a suspended installation in its own state', () => {

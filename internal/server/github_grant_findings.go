@@ -148,12 +148,18 @@ func (s *Server) handleGitHubGrantReachWithoutPurposeList(w http.ResponseWriter,
 		internalError(w, "github-grant", err)
 		return
 	}
+	// The installations decorate rows; a count-only read has none, so it
+	// skips the lookup rather than paying for a decoration nothing wears.
+	items := make([]reachWithoutPurposeItem, 0, len(rows))
+	if page.CountOnly {
+		httpx.WriteList(w, page, items, total)
+		return
+	}
 	byID, err := s.liveInstallationsByID(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-grant", err)
 		return
 	}
-	items := make([]reachWithoutPurposeItem, 0, len(rows))
 	for _, row := range rows {
 		inst := byID[row.InstallationID]
 		items = append(items, reachWithoutPurposeItem{
@@ -196,12 +202,17 @@ func (s *Server) handleGitHubGrantScopeDriftList(w http.ResponseWriter, r *http.
 		internalError(w, "github-grant", err)
 		return
 	}
+	// Same as the reach list: no rows, no decoration, no installation read.
+	items := make([]scopeDriftItem, 0, len(rows))
+	if page.CountOnly {
+		httpx.WriteList(w, page, items, total)
+		return
+	}
 	byID, err := s.liveInstallationsByID(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-grant", err)
 		return
 	}
-	items := make([]scopeDriftItem, 0, len(rows))
 	for _, row := range rows {
 		item := scopeDriftItem{Owner: row.Owner, Repo: row.Repo, Slug: row.Slug(), InstallationID: row.InstallationID}
 		// An account no live installation covers names none: the row's id is

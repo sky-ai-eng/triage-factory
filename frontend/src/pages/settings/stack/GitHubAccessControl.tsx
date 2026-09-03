@@ -651,7 +651,7 @@ export default function GitHubAccessControl({
               isLocal={ctx.isLocal}
             />
           )}
-          <GitHubInstallationList installations={installations} drift={findings.drift.items} />
+          <GitHubInstallationList installations={installations} drift={findings.drift} />
           <GitHubGrantFindings findings={findings} />
           <button
             type="button"
@@ -689,7 +689,7 @@ export default function GitHubAccessControl({
           </p>
           <GitHubInstallationList
             installations={installations}
-            drift={findings.drift.items}
+            drift={findings.drift}
             busy={busy}
             onDisconnect={(inst) => void disconnectManaged(inst)}
           />

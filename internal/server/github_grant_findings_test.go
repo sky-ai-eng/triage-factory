@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -238,6 +239,26 @@ func TestGitHubGrantFindings_OpeningThePanelAsksGitHubNothing(t *testing.T) {
 	}
 	if fake.backfillCalls != 0 || fake.managedCalls != 0 {
 		t.Errorf("opening the panel reconciled the mirror: backfill=%d managed=%d, want 0 and 0", fake.backfillCalls, fake.managedCalls)
+	}
+}
+
+// A count-only read decorates no rows, so it reads no installations: the
+// fake's installation listing fails loudly, and the count still answers.
+func TestGitHubGrantFindings_CountOnlyReadsNoInstallations(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedGrantFixture(t, s, domain.RepositorySelectionSelected)
+	s.githubApps = &fakeGitHubAppsStore{GitHubAppsStore: s.githubApps, listErr: errors.New("installations must not be read on a count-only request")}
+
+	for _, path := range []string{reachWithoutPurposePath, scopeDriftPath} {
+		rec := doJSON(t, s, "POST", path, map[string]any{"page_size": 0})
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: status=%d body=%s, want 200 without an installation read", path, rec.Code, rec.Body.String())
+			continue
+		}
+		if got := decodeFindingList[scopeDriftItem](t, rec.Body.String()); got.TotalCount != 1 || len(got.Items) != 0 {
+			t.Errorf("%s: items=%d total=%d, want no rows and 1", path, len(got.Items), got.TotalCount)
+		}
 	}
 }
 
