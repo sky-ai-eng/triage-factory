@@ -30,9 +30,19 @@ export interface GitHubAppInstallation {
   // RFC3339 when the account owner has suspended the installation, '' when it
   // is live: the grant survives a suspension, but GitHub refuses every token
   // minted from it. suspended_by is the login that suspended it ('' when
-  // unsuspended, or when GitHub named no one). Nothing renders these yet.
+  // unsuspended, or when GitHub named no one). A suspended installation gets
+  // its own visual state: one that merely looked connected would explain
+  // nothing about the 403s every run under it earns.
   suspended_at: string
   suspended_by: string
+  // Whether the grant is every repository on the account ('all') or an
+  // enumerated set ('selected'), or null when the mirror has not learned it
+  // yet. Three values, three sentences: an 'all' grant cannot be drifted out
+  // of, a 'selected' one can, and null is "not known yet" — never either.
+  repository_selection: 'all' | 'selected' | null
+  // The installation's settings page on GitHub, where the grant is chosen. TF
+  // links out and never edits the grant itself — GitHub enforces who may.
+  settings_url: string
 }
 
 export interface GitHubAppInfo {
@@ -98,6 +108,11 @@ export interface GitHubAppStatus {
   app: GitHubAppInfo | null
   installations: GitHubAppInstallation[]
   using_deployment_default: boolean
+  // Whether this deployment offers a deployment App for a workspace to bind —
+  // a fact about the deployment, not the org. It decides whether the
+  // no-credential empty state offers Connect beside register, import and a
+  // token; always false in local mode, where the managed class does not exist.
+  deployment_app_available: boolean
   // null when there's no App, no deployment identity to compare a hook URL
   // against, or no probe answer yet. Absent means NOT KNOWN — never "fine".
   webhook_health: GitHubAppWebhookHealth | null
@@ -447,4 +462,84 @@ export async function discardStagedApp(orgId: string): Promise<void> {
 // binding is enough.
 export function startManagedGitHubConnect(orgId: string): void {
   window.location.assign(`/api/orgs/${encodeURIComponent(orgId)}/github/managed/connect`)
+}
+
+// disconnectManagedGitHub moves the workspace off the deployment App: every
+// bound installation is released and the credential class resets, so the
+// workspace is back in its no-credential state and free to register its own
+// App or bind a token. Nothing is uninstalled on GitHub — the installation
+// persists there unbound, and Connect re-binds it.
+//
+// POST /api/orgs/{org_id}/github/managed/disconnect
+export async function disconnectManagedGitHub(orgId: string): Promise<void> {
+  try {
+    await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/github/managed/disconnect`, {
+      method: 'POST',
+    })
+  } catch (e) {
+    throw asError(e, 'Could not disconnect the deployment GitHub App.')
+  }
+}
+
+// disconnectManagedInstallation releases one bound account and keeps the
+// class — unless it was the last one, in which case it is the full disconnect.
+// The same verb narrowed, so the panel's per-account button and its Disconnect
+// button can never leave the bindings and the class disagreeing.
+//
+// POST /api/orgs/{org_id}/github/managed/installations/{installation_id}/disconnect
+export async function disconnectManagedInstallation(
+  orgId: string,
+  installationId: string,
+): Promise<void> {
+  try {
+    await apiFetch(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/managed/installations/${encodeURIComponent(installationId)}/disconnect`,
+      { method: 'POST' },
+    )
+  } catch (e) {
+    throw asError(e, 'Could not disconnect that GitHub account.')
+  }
+}
+
+// ── The two grant findings ────────────────────────────────────────────────
+// Computed server-side from the reachable-repo mirror, never by asking GitHub
+// on page load, and served as ordinary paginated lists (usePagedList over the
+// paths below). Both exist only for an App-class workspace — a PAT's reach is
+// not a grant TF holds, and the routes 404 for one.
+
+// A repository the App can reach that no team tracks: TF holds write access to
+// code nobody asked it to touch. The verb is on GitHub — narrow the grant on
+// the installation's settings page (settings_url), or uninstall.
+export interface ReachWithoutPurposeItem {
+  installation_id: string
+  account_login: string
+  settings_url: string
+  owner: string
+  repo: string
+  slug: string
+  private: boolean
+  html_url: string
+  observed_at: string
+}
+
+// A repository some team tracks that the grant does not contain, so it is
+// silently unpolled. installation_id names the installation on the owner
+// account when there is one (by construction a 'selected' grant, since an
+// 'all' grant cannot drift and an unknown one is not reported), '' when no
+// bound installation covers that account at all.
+export interface ScopeDriftItem {
+  owner: string
+  repo: string
+  slug: string
+  installation_id: string
+  account_login: string
+  settings_url: string
+}
+
+export function reachWithoutPurposeListPath(orgId: string): string {
+  return `/api/orgs/${encodeURIComponent(orgId)}/github/grant/reach-without-purpose/list`
+}
+
+export function scopeDriftListPath(orgId: string): string {
+  return `/api/orgs/${encodeURIComponent(orgId)}/github/grant/scope-drift/list`
 }

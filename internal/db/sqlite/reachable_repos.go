@@ -148,8 +148,23 @@ func (s *reachableReposStore) ClearForInstallationSystem(ctx context.Context, or
 	})
 }
 
-func (s *reachableReposStore) ListForOrgSystem(ctx context.Context, orgID string) ([]domain.ReachableRepository, error) {
+// grantClass is the guard every App-tier read runs first: the class must be one
+// that holds a grant at all. A PAT entry is a fact about a person's token, not
+// a grant TF is answerable for, and a caller asking for a PAT org's grant has
+// already gone wrong — so it is an error, not an empty answer that would read
+// as "nothing to address".
+func grantClass(op string, class domain.GitHubCredentialClass) error {
+	if !class.AppTier() {
+		return fmt.Errorf("%s: class %q holds no grant", op, class)
+	}
+	return nil
+}
+
+func (s *reachableReposStore) ListForOrgSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass) ([]domain.ReachableRepository, error) {
 	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if err := grantClass("list grant entries", class); err != nil {
 		return nil, err
 	}
 	return scanReachableRepos(s.q.QueryContext(ctx, `
@@ -159,7 +174,7 @@ func (s *reachableReposStore) ListForOrgSystem(ctx context.Context, orgID string
 		    ON i.org_id = r.org_id AND i.installation_id = r.installation_id
 		 WHERE r.org_id = ? AND r.credential_class = ? AND i.removed_at IS NULL
 		 ORDER BY r.installation_id, LOWER(r.owner), LOWER(r.repo)
-	`, orgID, string(domain.GitHubCredentialClassBYOApp)))
+	`, orgID, string(class)))
 }
 
 // ListReachWithoutPurposeSystem: granted, tracked by nobody. The NOT EXISTS is
@@ -167,12 +182,14 @@ func (s *reachableReposStore) ListForOrgSystem(ctx context.Context, orgID string
 // a case-sensitive comparison here would report a tracked repository as
 // untracked purely because someone capitalized the slug differently — a
 // fabricated security finding, which is worse than a missed one.
-func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context, orgID string) ([]domain.ReachableRepository, error) {
+func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, opts db.ListOpts) ([]domain.ReachableRepository, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanReachableRepos(s.q.QueryContext(ctx, `
-		SELECT `+reachableColumns+`
+	if err := grantClass("list reach without purpose", class); err != nil {
+		return nil, 0, err
+	}
+	from := `
 		  FROM reachable_repositories r
 		  JOIN org_github_app_installations i
 		    ON i.org_id = r.org_id AND i.installation_id = r.installation_id
@@ -183,9 +200,30 @@ func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context,
 		       SELECT 1 FROM team_github_repos g
 		        JOIN repositories reg ON reg.id = g.repository_id
 		        WHERE LOWER(reg.owner) = LOWER(r.owner)
-		          AND LOWER(reg.repo) = LOWER(r.repo))
-		 ORDER BY r.installation_id, LOWER(r.owner), LOWER(r.repo)
-	`, orgID, string(domain.GitHubCredentialClassBYOApp)))
+		          AND LOWER(reg.repo) = LOWER(r.repo))`
+	args := []any{orgID, string(class)}
+
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*)`+from, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count reach without purpose: %w", err)
+	}
+	if opts.CountOnly {
+		return []domain.ReachableRepository{}, total, nil
+	}
+	query := `SELECT ` + reachableColumns + from + ` ORDER BY r.installation_id, LOWER(r.owner), LOWER(r.repo)`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+		if opts.Offset > 0 {
+			query += ` OFFSET ?`
+			args = append(args, opts.Offset)
+		}
+	}
+	rows, err := scanReachableRepos(s.q.QueryContext(ctx, query, args...))
+	if err != nil {
+		return nil, 0, err
+	}
+	return rows, total, nil
 }
 
 // ListScopeDriftSystem: tracked, granted by nobody.
@@ -194,26 +232,40 @@ func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context,
 // An org with no App, or one whose first refresh has not landed, has an empty
 // mirror — and "not in the mirror" then describes every repository it tracks.
 // Reporting those as drift would turn "we have not looked yet" into "your
-// tracking is broken", so with no mirror at all the answer is empty.
-func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID string) ([]domain.TeamGitHubRepo, error) {
+// tracking is broken", so until a scope has been refreshed the answer is empty.
+// It reads the scope markers rather than the entry rows so a selective grant
+// that contains nothing — refreshed, and found empty — still reports what is
+// tracked against it.
+//
+// The second NOT EXISTS is the three-way rule on the owner account's
+// installation: a grant of every repository cannot be drifted out of, and a
+// grant of unknown width cannot be said to have been. Only a selective grant, or
+// no live installation on the account at all, leaves a tracked repository
+// reportable.
+func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, opts db.ListOpts) ([]domain.ScopeDriftRepository, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	if err := grantClass("list scope drift", class); err != nil {
+		return nil, 0, err
 	}
 	// Grouped on the folded slug rather than DISTINCT on the raw pair: two teams
 	// tracking one repository under different casings are tracking one
 	// repository, and listing it twice would double-count the finding. MIN picks
 	// a stable spelling from the group, whose members differ only in case.
-	app := string(domain.GitHubCredentialClassBYOApp)
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT MIN(reg.owner), MIN(reg.repo)
+	//
+	// The LEFT JOIN resolves the live installation on the owner account. After
+	// the rule below it can only be a selective one, and GitHub allows one
+	// installation of an App per account, so MIN over the group is the one id.
+	from := `
 		  FROM team_github_repos g
 		  JOIN repositories reg ON reg.id = g.repository_id
+		  LEFT JOIN org_github_app_installations cov
+		    ON cov.org_id = ? AND cov.removed_at IS NULL
+		   AND LOWER(cov.account_login) = LOWER(reg.owner)
 		 WHERE EXISTS (
-		       SELECT 1
-		         FROM reachable_repositories m
-		         JOIN org_github_app_installations i
-		           ON i.org_id = m.org_id AND i.installation_id = m.installation_id
-		        WHERE m.org_id = ? AND m.credential_class = ? AND i.removed_at IS NULL)
+		       SELECT 1 FROM reachable_scopes sc
+		        WHERE sc.org_id = ? AND sc.credential_class = ?)
 		   AND NOT EXISTS (
 		       SELECT 1
 		         FROM reachable_repositories m
@@ -224,22 +276,45 @@ func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID st
 		          AND i.removed_at IS NULL
 		          AND LOWER(m.owner) = LOWER(reg.owner)
 		          AND LOWER(m.repo) = LOWER(reg.repo))
-		 GROUP BY LOWER(reg.owner), LOWER(reg.repo)
-		 ORDER BY LOWER(reg.owner), LOWER(reg.repo)
-	`, orgID, app, orgID, app)
+		   AND NOT EXISTS (
+		       SELECT 1 FROM org_github_app_installations w
+		        WHERE w.org_id = ? AND w.removed_at IS NULL
+		          AND LOWER(w.account_login) = LOWER(reg.owner)
+		          AND (w.repository_selection IS NULL OR w.repository_selection = ?))
+		 GROUP BY LOWER(reg.owner), LOWER(reg.repo)`
+	args := []any{orgID, orgID, string(class), orgID, string(class), orgID, domain.RepositorySelectionAll}
+
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1`+from+`)`, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count scope drift: %w", err)
+	}
+	if opts.CountOnly {
+		return []domain.ScopeDriftRepository{}, total, nil
+	}
+	query := `SELECT MIN(reg.owner), MIN(reg.repo), COALESCE(MIN(cov.installation_id), '')` + from +
+		` ORDER BY LOWER(reg.owner), LOWER(reg.repo)`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+		if opts.Offset > 0 {
+			query += ` OFFSET ?`
+			args = append(args, opts.Offset)
+		}
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("read scope drift: %w", err)
+		return nil, 0, fmt.Errorf("read scope drift: %w", err)
 	}
 	defer rows.Close()
-	out := []domain.TeamGitHubRepo{}
+	out := []domain.ScopeDriftRepository{}
 	for rows.Next() {
-		var r domain.TeamGitHubRepo
-		if err := rows.Scan(&r.Owner, &r.Repo); err != nil {
-			return nil, fmt.Errorf("scan scope drift: %w", err)
+		var r domain.ScopeDriftRepository
+		if err := rows.Scan(&r.Owner, &r.Repo, &r.InstallationID); err != nil {
+			return nil, 0, fmt.Errorf("scan scope drift: %w", err)
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 func (s *reachableReposStore) ListReachableSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, q string, opts db.ListOpts) ([]domain.ReachableRepository, int, error) {

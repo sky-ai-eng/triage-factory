@@ -144,39 +144,60 @@ type ReachableReposStore interface {
 	// single row a return value could name.
 	ClearForInstallationSystem(ctx context.Context, orgID, installationID string) error
 
-	// ListForOrgSystem returns every App-tier entry across the org's LIVE
-	// installations, ordered by (installation, owner, repo). Removed
-	// installations contribute nothing — their rows are cleared on removal, and
-	// the join re-states that so a row surviving some future write path cannot
-	// leak back into a display. PAT-tier rows are not grant entries and are not
-	// returned.
+	// ListForOrgSystem returns every entry across the org's LIVE installations
+	// under class, ordered by (installation, owner, repo). Removed installations
+	// contribute nothing — their rows are cleared on removal, and the join
+	// re-states that so a row surviving some future write path cannot leak back
+	// into a display.
 	//
-	// TODO(TFAC-932): this read and the two findings below match the 'byo_app'
-	// class alone, so a managed workspace's grant is invisible to all three.
-	// Widening them is the panel's work, since nothing outside internal/db calls
-	// either finding today and the copy that renders them is what decides which
-	// classes hold a grant TF is answerable for.
-	ListForOrgSystem(ctx context.Context, orgID string) ([]domain.ReachableRepository, error)
+	// class is the org's current App-tier class — its own registration or the
+	// deployment's shared App — and a read takes it rather than matching every
+	// App class at once for the reason every read here takes one: an org that
+	// left one class for the other must never be served the reach it used to
+	// have. The PAT class is refused: a PAT entry is not a grant entry, and a
+	// caller asking for "the grant" of a PAT org has already gone wrong.
+	ListForOrgSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass) ([]domain.ReachableRepository, error)
 
-	// ListReachWithoutPurposeSystem returns the App-tier entries no team in the
-	// org tracks — repositories the App can reach for no reason TF can name.
+	// ListReachWithoutPurposeSystem returns one page of the entries no team in
+	// the org tracks — repositories the App can reach for no reason TF can name —
+	// with the total across every page. Same class rule as ListForOrgSystem.
 	//
 	// Tracking is read from team_github_repos (the union across every team),
 	// never from repositories: that table is a superset, since get-or-create
 	// mints a row for any repository an agent adds to a workspace, and counting
 	// those as "tracked" would under-report the finding.
-	ListReachWithoutPurposeSystem(ctx context.Context, orgID string) ([]domain.ReachableRepository, error)
-
-	// ListScopeDriftSystem returns the repositories some team tracks that no live
-	// installation's grant contains — tracked, unreachable, and therefore
-	// silently unpolled.
 	//
-	// Gated on the org having a non-empty App-tier mirror: an org with no App, or
-	// one whose first refresh has not landed, knows nothing about its grant, and
-	// answering "everything you track is drifting" there would be a fabricated
-	// finding rather than an unknown one. With no mirror at all the answer is
-	// empty.
-	ListScopeDriftSystem(ctx context.Context, orgID string) ([]domain.TeamGitHubRepo, error)
+	// Ordered by (installation, folded owner, folded repo), which the per-class
+	// unique index makes a total order, so offset paging cannot drop or repeat a
+	// row.
+	ListReachWithoutPurposeSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, opts ListOpts) ([]domain.ReachableRepository, int, error)
+
+	// ListScopeDriftSystem returns one page of the repositories some team tracks
+	// that no live installation's grant contains — tracked, unreachable, and
+	// therefore silently unpolled — with the total across every page. Same
+	// class rule as ListForOrgSystem.
+	//
+	// Three things keep it a finding rather than a fabrication:
+	//
+	//   - It is gated on the org having refreshed at least one scope under
+	//     class. An org with no App, or one whose first refresh has not landed,
+	//     knows nothing about its grant, and "not in the mirror" then describes
+	//     everything it tracks. The gate reads the scope markers, not the entry
+	//     rows, so a selective grant that genuinely contains nothing still
+	//     reports the repositories tracked against it.
+	//   - A repository whose owner account holds a live installation granting
+	//     EVERY repository is never reported: that grant reaches everything the
+	//     account owns, so a tracked repository there cannot sit outside it,
+	//     and its absence from the mirror is staleness, not drift.
+	//   - A repository whose owner account holds a live installation of unknown
+	//     width is not reported either. Unknown is not "no"; it is "not learned
+	//     yet", and the caller reads that off the installation.
+	//
+	// What remains is a tracked repository under a selective grant that does not
+	// contain it, or on an account no live installation covers at all — each
+	// naming the covering installation when there is one, so the finding can
+	// point at the page where the grant is widened. Ordered by folded slug.
+	ListScopeDriftSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, opts ListOpts) ([]domain.ScopeDriftRepository, int, error)
 
 	// ListReachableSystem is the picker's read: one page of the org's reachable
 	// set for class, ordered by folded slug, with the filtered total.

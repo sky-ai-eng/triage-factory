@@ -4,23 +4,33 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // githubAppStatusResponse is the read-only shape the Workspace Settings
 // "GitHub access" panel polls to render its state machine. `app` is null
-// when the org has no registered App (the panel offers registration);
-// `using_deployment_default` is true only when a deployment-level App covers
-// the org — always false in this build, whose credential classes are all the
-// org's own.
+// when the org has no registered App of its own — a PAT workspace, which the
+// panel offers registration, or one riding the deployment's App, which
+// `using_deployment_default` marks so the panel never offers it a second
+// credential it cannot hold.
 type githubAppStatusResponse struct {
 	App                    *githubAppInfo          `json:"app"`
 	Installations          []githubAppInstallation `json:"installations"`
 	UsingDeploymentDefault bool                    `json:"using_deployment_default"`
+	// DeploymentAppAvailable is whether this deployment offers a deployment
+	// App for a workspace to bind — a fact about the deployment, not the org,
+	// carried here because the panel's empty state is where it matters: a
+	// workspace with no credential is offered Connect beside registering,
+	// importing and a token, and only when there is something to connect to.
+	// Always false in local mode, where the managed class does not exist.
+	DeploymentAppAvailable bool `json:"deployment_app_available"`
 	// ConnectCallbackURL is the absolute redirect_uri the App owner must register
 	// on the App for per-user "Connect GitHub" OAuth to work. It's the
 	// same URL buildManifestAndState bakes into a manifest-created App's
@@ -62,10 +72,36 @@ type githubAppInstallation struct {
 	// installation, "" when it is live — the installation still holds its
 	// grant, but GitHub refuses every token minted from it. SuspendedBy is the
 	// login that suspended it, "" when unsuspended or when the source named no
-	// one. Carried so the panel can render the state; nothing in the UI reads
-	// them yet, and no other behaviour turns on them.
+	// one. The panel renders a suspended installation in its own state, since
+	// one that merely looked connected would explain nothing about the 403s
+	// every run under it earns.
 	SuspendedAt string `json:"suspended_at"`
 	SuspendedBy string `json:"suspended_by"`
+	// RepositorySelection is "all" or "selected" — whether the grant is every
+	// repository on the account or an enumerated set — and null when the
+	// mirror has not learned it yet. Three values on purpose: it decides
+	// whether scope drift is even possible on this installation, and "not
+	// known yet" is neither answer.
+	RepositorySelection *string `json:"repository_selection"`
+	// SettingsURL is the installation's settings page on GitHub — where the
+	// grant is chosen, and the only place it can be changed. TF links out to
+	// it and never edits the grant itself; GitHub enforces who may.
+	SettingsURL string `json:"settings_url"`
+}
+
+// installationSettingsURL is GitHub's settings page for an installation,
+// which lives under the organization for an org account and under the user's
+// own settings for a personal one. The host is the installation's own, so a
+// self-host aggregating orgs across two GitHubs links each to the right one.
+func installationSettingsURL(inst domain.OrgGitHubAppInstallation) string {
+	base := strings.TrimRight(inst.GitHubHost, "/")
+	if base == "" {
+		return ""
+	}
+	if strings.EqualFold(inst.AccountType, "Organization") {
+		return base + "/organizations/" + url.PathEscape(inst.AccountLogin) + "/settings/installations/" + url.PathEscape(inst.InstallationID)
+	}
+	return base + "/settings/installations/" + url.PathEscape(inst.InstallationID)
 }
 
 // newGitHubAppStatusResponse assembles the read-only status payload from the
@@ -86,12 +122,12 @@ type githubAppInstallation struct {
 // deployment's own App — and those two want opposite answers here. The two
 // own-credential classes report false; the managed class is the arm that
 // reports true, and it says so from the class rather than from the absence of a
-// row, which is the same absence the PAT arm has.
+// row, which is the same absence the PAT arm has. A managed workspace's panel
+// is its installations: the accounts it bound, each with its suspension, the
+// width of its grant, and the GitHub page where that grant is edited.
 //
-// This one boolean is the whole of the managed rendering for now: the panel
-// still shows a managed workspace no App block, because it has no App of its
-// own to show. What that workspace's panel should show instead — the bound
-// installations and their accounts — is its own ticket.
+// deployment_app_available is not set here — it is the server's to answer, not
+// the org's, and githubAppStatus stamps it.
 func newGitHubAppStatusResponse(class domain.GitHubCredentialClass, app *domain.OrgGitHubApp, insts []domain.OrgGitHubAppInstallation, registeredByName, connectCallbackURL string, health *githubAppWebhookHealth) githubAppStatusResponse {
 	resp := githubAppStatusResponse{
 		Installations:      make([]githubAppInstallation, 0, len(insts)),
@@ -145,8 +181,35 @@ func newGitHubAppStatusResponse(class domain.GitHubCredentialClass, app *domain.
 			dto.SuspendedAt = inst.SuspendedAt.UTC().Format(time.RFC3339)
 			dto.SuspendedBy = inst.SuspendedBy
 		}
+		// null, not "", for a width nobody has reported: "" would decode as a
+		// third selection value a client has to special-case, and null is the
+		// same absence the column stores.
+		if sel := inst.RepositorySelection; sel != "" {
+			dto.RepositorySelection = &sel
+		}
+		dto.SettingsURL = installationSettingsURL(inst)
 		resp.Installations = append(resp.Installations, dto)
 	}
+	return resp
+}
+
+// deploymentAppAvailable is whether a workspace here could bind the
+// deployment App: the same three conditions the Connect route exists under.
+// A deployment App read from the environment in local mode is inert, so the
+// mode is part of the answer rather than the configuration alone.
+func (s *Server) deploymentAppAvailable() bool {
+	return s.deployCfg != nil && runmode.Current() == runmode.ModeMulti && s.deploymentApp.Configured()
+}
+
+// githubAppStatus is the status payload as every handler serves it: the
+// mapped registration and installations, plus the three facts the server
+// resolves around them — the registrant's name, the Connect callback URL, and
+// whether the deployment offers an App to bind. health is passed through
+// because only some callers have probed (an import has not), and an unprobed
+// App is rendered as unknown rather than fine.
+func (s *Server) githubAppStatus(ctx context.Context, orgID, userID string, class domain.GitHubCredentialClass, app *domain.OrgGitHubApp, insts []domain.OrgGitHubAppInstallation, health *githubAppWebhookHealth) githubAppStatusResponse {
+	resp := newGitHubAppStatusResponse(class, app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID), health)
+	resp.DeploymentAppAvailable = s.deploymentAppAvailable()
 	return resp
 }
 
@@ -172,7 +235,10 @@ func (s *Server) registrantDisplayName(ctx context.Context, orgID, userID string
 }
 
 // handleGitHubAppStatus returns the org's GitHub App registration +
-// installation state. Read-only; any org member (or local-mode user).
+// installation state. Read-only; any org member (or local-mode user). It
+// reads the mirror and nothing else: opening the panel must never ask GitHub
+// anything or kick a refresh — the refresh POST beside it is the deliberate
+// gesture for that.
 //
 // GET /api/orgs/{org_id}/github/app
 func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
@@ -210,7 +276,7 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(class, app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID), s.webhookHealthDTO(ctx, orgID, app)))
+	writeJSON(w, http.StatusOK, s.githubAppStatus(ctx, orgID, userID, class, app, insts, s.webhookHealthDTO(ctx, orgID, app)))
 }
 
 // connectCallbackURLSafe returns the org's Connect OAuth callback URL, or ""
@@ -323,7 +389,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 		internalError(w, "github-app", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(class, app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID), s.webhookHealthDTO(ctx, orgID, app)))
+	writeJSON(w, http.StatusOK, s.githubAppStatus(ctx, orgID, userID, class, app, insts, s.webhookHealthDTO(ctx, orgID, app)))
 }
 
 // handleGitHubAppInstallURL returns the GitHub deep-link the panel's

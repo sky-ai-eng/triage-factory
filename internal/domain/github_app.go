@@ -193,6 +193,26 @@ type ReachableRepository struct {
 // store method uses.
 func (r ReachableRepository) Slug() string { return r.Owner + "/" + r.Repo }
 
+// ScopeDriftRepository is one tracked repository outside the org's App grant —
+// tracked by some team, in no live installation's reach, and therefore
+// silently unpolled. The finding the panel renders under "scope drift".
+//
+// InstallationID names the live installation on the repository's owner account
+// when there is one, so the finding can point at the installation settings page
+// where the grant is widened; "" when no live installation covers that account
+// at all, in which case the way out is connecting the account or untracking the
+// repository. By construction it is never an installation whose grant is every
+// repository, or one whose width is not yet known — those cannot report drift
+// (see ReachableReposStore.ListScopeDriftSystem).
+type ScopeDriftRepository struct {
+	Owner          string
+	Repo           string
+	InstallationID string
+}
+
+// Slug renders the entry as the "owner/repo" string.
+func (r ScopeDriftRepository) Slug() string { return r.Owner + "/" + r.Repo }
+
 // ReachableCacheState is what a consumer needs to know about an org's cache
 // without reading a single row of it: whether it has ever been refreshed, how
 // much is in it, and how old the stalest part is.
