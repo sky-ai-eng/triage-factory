@@ -84,12 +84,12 @@ it. Everything after the proof updates freely, as the next section enumerates.
 
 | Change on GitHub | What it is | Own App key | Deployment App |
 |---|---|---|---|
-| Add/remove repositories on a connected account | Grant change, same installation | Grant pass, every poll cycle; `installation_repositories` webhook | Grant pass, every poll cycle |
-| Switch `all` ↔ `selected` repositories | Installation field | Reconcile, every poll cycle; webhook | Reconcile, every poll cycle; Settings → refresh |
-| Suspend / unsuspend the installation | Installation field | Reconcile, every poll cycle; webhook | Reconcile, every poll cycle; Settings → refresh |
+| Add/remove repositories on a connected account | Grant change, same installation | Grant pass, every poll cycle; `installation_repositories` webhook | Grant pass, every poll cycle; `installation_repositories` webhook |
+| Switch `all` ↔ `selected` repositories | Installation field | Reconcile, every poll cycle; webhook | Reconcile, every poll cycle; webhook; Settings → refresh |
+| Suspend / unsuspend the installation | Installation field | Reconcile, every poll cycle; webhook | Reconcile, every poll cycle; webhook; Settings → refresh |
 | Rename the account | Installation field (`account_login`) | Reconcile, every poll cycle | Reconcile, every poll cycle; Settings → refresh |
 | Install the App on a **new** account | New installation | Reconcile discovers it, every poll cycle | Connect button — one bind ceremony per account, additive |
-| Uninstall from an account | Installation removed | Reconcile soft-removes; webhook | Reconcile soft-removes, every poll cycle; Settings → refresh |
+| Uninstall from an account | Installation removed | Reconcile soft-removes; webhook | Reconcile soft-removes, every poll cycle; webhook; Settings → refresh |
 
 The **grant pass** is `grantmirror.RunOrg`'s per-installation half, and it runs
 every GitHub poll cycle for *both* classes: it reads each bound installation's
@@ -209,11 +209,17 @@ GitHub call and triggers no refresh; the refresh POST beside the status read is
 the deliberate gesture for a fresh answer. An empty finding renders as "nothing
 to address", never as a blank region that reads like a load that failed.
 
-## Current limitations, deployment-App workspaces only
+## Webhooks for deployment-App workspaces
 
-- **Webhooks do not reach them yet.** The webhook receiver is addressed per
-  workspace and verifies against that workspace's own secret, which a
-  deployment-App workspace does not have — deliveries for the shared App are
-  refused. Until a deployment-level receiver exists, webhook rows in the table
-  above apply only to workspaces with their own key, and a deployment-App
-  workspace converges on the poll cadence alone.
+The shared App has one webhook URL, so its deliveries cannot carry a workspace
+id in the path the way an own-App workspace's do. They arrive at the static
+receiver, `POST /api/webhooks/github`, which verifies the signature against the
+deployment's webhook secret first and only then looks up the installation the
+verified payload names in the binding table — the same `(host, installation id)`
+key the bind ceremony writes — to learn whose delivery it is. A bound
+installation's delivery is applied exactly as a per-workspace delivery would be;
+an unbound one is acknowledged and logged, as described above, and never creates
+a binding. The two receivers are deliberately separate: a managed workspace's
+delivery to the per-workspace URL is refused there, and an own-App workspace's
+delivery to the static one fails its signature check. Pull remains the contract
+for both classes; the webhook only makes convergence sooner.

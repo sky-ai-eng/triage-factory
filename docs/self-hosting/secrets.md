@@ -1,6 +1,6 @@
 # Deployment secrets
 
-The multi-mode stack reads several secrets at boot: the at-rest encryption keys (`TF_SECRET_ENCRYPTION_KEY`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`), the database DSN and role passwords, the object-store keys (`TF_BLOB_*`), the GoTrue admin bearer (`TF_GOTRUE_SERVICE_ROLE_TOKEN`), and — optionally — the Enterprise license token (`TF_LICENSE`). Every one is documented inline in [`.env.example`](../../.env.example). This page is about how to *supply* them and how TF handles them.
+The multi-mode stack reads several secrets at boot: the at-rest encryption keys (`TF_SECRET_ENCRYPTION_KEY`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`), the database DSN and role passwords, the object-store keys (`TF_BLOB_*`), the GoTrue admin bearer (`TF_GOTRUE_SERVICE_ROLE_TOKEN`), and — optionally — the Enterprise license token (`TF_LICENSE`), the deployment Atlassian app secret (`TF_ATLASSIAN_CLIENT_SECRET`), and the deployment GitHub App's private key, webhook secret, and client secret (`TF_GITHUB_APP_PRIVATE_KEY`, `TF_GITHUB_APP_WEBHOOK_SECRET`, `TF_GITHUB_APP_CLIENT_SECRET`). Every one is documented inline in [`.env.example`](../../.env.example). This page is about how to *supply* them and how TF handles them.
 
 For **rotating** a secret, see [key rotation](key-rotation.md) (the JWT signing key) and the per-variable notes in `.env.example` (each key's rotation impact). For the deployment's overall threat model, see [docs/security/](../security/).
 
@@ -27,9 +27,9 @@ So `NAME_FILE` is strictly better for the sensitive keys — above all `TF_SECRE
 
 ## Which secrets support `NAME_FILE` in the bundled compose
 
-The **binary** honors `NAME_FILE` for `TF_SECRET_ENCRYPTION_KEY`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_ATLASSIAN_CLIENT_SECRET`, `TF_DATABASE_URL`, `TF_DATABASE_DIRECT_URL`, `TF_AUTHENTICATOR_PASSWORD`, `TF_BLOB_ACCESS_KEY`, and `TF_BLOB_SECRET_KEY` — but only if the container's environment actually carries the `NAME_FILE` variable.
+The **binary** honors `NAME_FILE` for `TF_SECRET_ENCRYPTION_KEY`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_ATLASSIAN_CLIENT_SECRET`, `TF_GITHUB_APP_PRIVATE_KEY`, `TF_GITHUB_APP_WEBHOOK_SECRET`, `TF_GITHUB_APP_CLIENT_SECRET`, `TF_DATABASE_URL`, `TF_DATABASE_DIRECT_URL`, `TF_AUTHENTICATOR_PASSWORD`, `TF_BLOB_ACCESS_KEY`, and `TF_BLOB_SECRET_KEY` — but only if the container's environment actually carries the `NAME_FILE` variable.
 
-The bundled `docker-compose.yml` **forwards `NAME_FILE` for the TF-only secrets**: `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_SECRET_ENCRYPTION_KEY` (all pods), and `TF_ATLASSIAN_CLIENT_SECRET` (the control pod only — it serves the Jira connect flow). For those, set `NAME_FILE` in `.env`, leave the plain `NAME` blank, and mount the file.
+The bundled `docker-compose.yml` **forwards `NAME_FILE` for the TF-only secrets**: `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_SECRET_ENCRYPTION_KEY` (all pods), and — the control pod only — `TF_ATLASSIAN_CLIENT_SECRET` (control serves the Jira connect flow) plus `TF_GITHUB_APP_PRIVATE_KEY`, `TF_GITHUB_APP_WEBHOOK_SECRET`, and `TF_GITHUB_APP_CLIENT_SECRET` (control serves the deployment App's connect ceremony and webhook receiver, and its background brain mints the installation tokens that reach executors already sealed into per-run bundles, so an executor never holds the key). For those, set `NAME_FILE` in `.env`, leave the plain `NAME` blank, and mount the file. The private key is the one to reach for first: a PEM is multi-line, which a `.env` carries badly and a mounted file carries natively.
 
 The rest are **not** `_FILE`-wired in the bundled stack, because the compose file either **constructs** them (`TF_DATABASE_URL` is built from `POSTGRES_PASSWORD`) or **shares** them with a sidecar that needs the plain value (`TF_BLOB_*` are templated into SeaweedFS's S3 identity; `TF_AUTHENTICATOR_PASSWORD` is applied to the DB role by `postgres-postinit`). Use `NAME_FILE` for those only in a custom deployment (Kubernetes, your own compose) where you set the container environment yourself.
 
@@ -42,9 +42,10 @@ Docker Compose secrets mount under `/run/secrets/<name>`. Because the bundled co
 secrets:
   tf_enc_key: { file: ./secrets/enc_key }
   tf_license: { file: ./secrets/license }
+  tf_gh_app_key: { file: ./secrets/github-app.private-key.pem }
 services:
   triagefactory:
-    secrets: [tf_enc_key, tf_license]
+    secrets: [tf_enc_key, tf_license, tf_gh_app_key]
   executor:
     secrets: [tf_license]
 ```
@@ -53,6 +54,8 @@ services:
 # .env — leave the plain TF_SECRET_ENCRYPTION_KEY blank; point _FILE at the mount
 TF_SECRET_ENCRYPTION_KEY_FILE=/run/secrets/tf_enc_key
 TF_LICENSE_FILE=/run/secrets/tf_license
+# the deployment GitHub App's PEM, mounted whole (BEGIN/END lines included)
+TF_GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/tf_gh_app_key
 ```
 
 > The three crypto keys are optional (`:-`) in the bundled compose specifically so the file form can leave the plain var blank — if you supply *neither* the plain value nor a readable file, the binary fails fast at boot with a clear `"<NAME> is empty"`. The other required secrets keep compose's parse-time `${VAR:?}` check, so an unfilled `.env` still fails at `docker compose up`.
