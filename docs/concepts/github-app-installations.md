@@ -47,8 +47,8 @@ The bind ceremony (the Connect button) proves the link — the person completing
 the install can see the installation and administers the account it targets —
 and writes the row. The scoped reconcile then keeps bound rows current from the
 shared listing and touches nothing else. It has two doors with two scopes: the
-Settings refresh button runs it for one workspace
-(`RefreshManagedInstallations`), and the poll cadence runs it for every managed
+on-demand refresh route (`POST /api/orgs/{org_id}/github/app/installations/refresh`)
+runs it for one workspace (`RefreshManagedInstallations`), and the poll cadence runs it for every managed
 workspace at once from a single listing (`RefreshAllManagedInstallations`,
 driven by `grantmirror.RunDeployment`) — one `GET /app/installations` per
 GitHub cycle whatever the tenant count, since under a shared key the answer is
@@ -84,12 +84,23 @@ it. Everything after the proof updates freely, as the next section enumerates.
 
 | Change on GitHub | What it is | Own App key | Deployment App |
 |---|---|---|---|
-| Add/remove repositories on a connected account | Grant change, same installation | Grant pass, every poll cycle; `installation_repositories` webhook | Grant pass, every poll cycle; `installation_repositories` webhook |
-| Switch `all` ↔ `selected` repositories | Installation field | Reconcile, every poll cycle; webhook | Reconcile, every poll cycle; webhook; Settings → refresh |
-| Suspend / unsuspend the installation | Installation field | Reconcile, every poll cycle; webhook | Reconcile, every poll cycle; webhook; Settings → refresh |
-| Rename the account | Installation field (`account_login`) | Reconcile, every poll cycle | Reconcile, every poll cycle; Settings → refresh |
-| Install the App on a **new** account | New installation | Reconcile discovers it, every poll cycle | Connect button — one bind ceremony per account, additive |
-| Uninstall from an account | Installation removed | Reconcile soft-removes; webhook | Reconcile soft-removes, every poll cycle; webhook; Settings → refresh |
+| Add/remove repositories on a connected account | Grant change, same installation | Grant pass, every poll cycle; `installation_repositories` webhook; picker refresh | Grant pass, every poll cycle; `installation_repositories` webhook; picker refresh |
+| Switch `all` ↔ `selected` repositories | Installation field | Reconcile, every poll cycle; webhook; on-demand refresh | Reconcile, every poll cycle; webhook; on-demand refresh |
+| Suspend / unsuspend the installation | Installation field | Reconcile, every poll cycle; webhook; on-demand refresh | Reconcile, every poll cycle; webhook; on-demand refresh |
+| Rename the account | Installation field (`account_login`) | Reconcile, every poll cycle; on-demand refresh | Reconcile, every poll cycle; on-demand refresh |
+| Install the App on a **new** account | New installation | Reconcile discovers it, every poll cycle; on-demand refresh | Connect button — one bind ceremony per account, additive |
+| Uninstall from an account | Installation removed | Reconcile soft-removes; webhook; on-demand refresh | Reconcile soft-removes, every poll cycle; webhook; on-demand refresh |
+
+Two things in that table are on demand rather than on a timer, and both work
+for both classes. **On-demand refresh** is
+`POST /api/orgs/{org_id}/github/app/installations/refresh`: for a workspace with
+its own App it re-lists the App's installations from GitHub; for a workspace on
+the deployment App it re-reads only the installations that workspace has
+already bound, and never adds one. The Settings panel has no standalone button
+for it today — the UI calls it during the PAT → App switch and in the setup
+wizard. **Picker refresh** is the Refresh button in the repository picker
+(`POST /api/github/repos/refresh`); it runs the grant pass for every bound
+installation but does not touch the installation rows themselves.
 
 The **grant pass** is `grantmirror.RunOrg`'s per-installation half, and it runs
 every GitHub poll cycle for *both* classes: it reads each bound installation's
