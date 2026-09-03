@@ -7,7 +7,7 @@ reviewer evaluates, see [docs/security/](../security/).
 
 ## Setup
 
-- [Self-host setup](install.md) — GitHub OAuth app, `.env`, `jwk-init`, `docker compose up`, verify the OAuth flow
+- [Self-host setup](install.md) — GitHub OAuth app, `.env`, `jwk-init`, `docker compose up`, verify the OAuth flow, register a deployment GitHub App
 - [Slack app setup](slack.md) — connect a workspace via the copy-paste manifest; migrating an app to pick up engaged-thread events
 - [SSO with Microsoft Entra (SAML)](sso-entra.md) — enable GoTrue SAML + register an org's connection
 - [Bedrock role mode](bedrock-role-mode.md) — short-lived STS LLM credentials via a customer IAM role (no stored Bedrock secret)

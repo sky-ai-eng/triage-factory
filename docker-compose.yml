@@ -544,6 +544,30 @@ services:
       TF_ATLASSIAN_CLIENT_ID: ${TF_ATLASSIAN_CLIENT_ID:-}
       TF_ATLASSIAN_CLIENT_SECRET: ${TF_ATLASSIAN_CLIENT_SECRET:-}
       TF_ATLASSIAN_CLIENT_SECRET_FILE: ${TF_ATLASSIAN_CLIENT_SECRET_FILE:-}
+      # Deployment GitHub App — one App key serving every workspace that has
+      # no credential of its own (optional; set all four or none). Control-
+      # only, like the Atlassian pair: control serves the bind ceremony and the
+      # App's webhook receiver, and the leader-elected brain on control is what
+      # mints a managed workspace's installation tokens and seals them into
+      # the per-claim bundle an executor receives — an executor never holds
+      # the key. Read from the process env at boot — forwarded here or a .env
+      # value is silently ignored. Each secret can also be a mounted file via
+      # <NAME>_FILE (both forms forwarded, set one); the private key wants the
+      # file form, a PEM being multi-line. See docs/self-hosting/install.md
+      # ("Register a deployment GitHub App") and docs/self-hosting/secrets.md.
+      TF_GITHUB_APP_ID: ${TF_GITHUB_APP_ID:-}
+      TF_GITHUB_APP_PRIVATE_KEY: ${TF_GITHUB_APP_PRIVATE_KEY:-}
+      TF_GITHUB_APP_PRIVATE_KEY_FILE: ${TF_GITHUB_APP_PRIVATE_KEY_FILE:-}
+      TF_GITHUB_APP_WEBHOOK_SECRET: ${TF_GITHUB_APP_WEBHOOK_SECRET:-}
+      TF_GITHUB_APP_WEBHOOK_SECRET_FILE: ${TF_GITHUB_APP_WEBHOOK_SECRET_FILE:-}
+      TF_GITHUB_APP_CLIENT_SECRET: ${TF_GITHUB_APP_CLIENT_SECRET:-}
+      TF_GITHUB_APP_CLIENT_SECRET_FILE: ${TF_GITHUB_APP_CLIENT_SECRET_FILE:-}
+      # The deployment's default GitHub — the web base a workspace with no
+      # base URL of its own resolves to, and the GitHub the deployment App is
+      # registered on. Empty means https://github.com. Plain config, not a
+      # secret; the executor carries it too (below), because its per-run
+      # sidecar proxies resolve an unset workspace against the same default.
+      TF_DEFAULT_GITHUB_HOST: ${TF_DEFAULT_GITHUB_HOST:-}
       # Privilege separation (docker/entrypoint.sh, see .env.example): the
       # entrypoint's exec-time drop runs on every role — control simply
       # skips the cap-broker spawn (it never launches a sandbox, and this
@@ -681,6 +705,11 @@ services:
       # every broker/sidecar IPC call. The sandbox and the credential sidecar
       # export nothing, ever.
       TF_TRACES_ENDPOINT: ${TF_TRACES_ENDPOINT:-http://tempo:4318}
+      # The deployment's default GitHub (see the control pod's line). The
+      # executor's per-run sidecar proxies resolve a workspace with no base
+      # URL of its own against it, so both pods must agree on the answer.
+      # Empty means https://github.com.
+      TF_DEFAULT_GITHUB_HOST: ${TF_DEFAULT_GITHUB_HOST:-}
     # Sandbox caps + seccomp + private cgroup (the x-tf-hardening anchor) —
     # an executor's whole job is launching sandboxes, and it is the ONLY
     # service that carries these.
