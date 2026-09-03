@@ -29,6 +29,23 @@
 // flow can't span it: after registering, the App is STAGED and the user lands
 // back here on the staged banner, whose "Finish" resumes the stepper at the
 // install/diff step. That's by design, not a gap.
+//
+// Three credential classes render here, and the affordances are per class:
+//
+//   - A workspace with its OWN App: its slug, its installations (with
+//     suspension and grant width), both grant findings, and the switch to a
+//     token.
+//   - A workspace on the DEPLOYMENT's App (multi mode): no App of its own to
+//     show and none to register or import — the same treatment the Atlassian
+//     card gives "using the deployment app". What it has is the accounts it
+//     bound, each with its own Disconnect, the findings, Connect for another
+//     account, and Disconnect for the whole workspace: the way out for one that
+//     wants its own App or a token instead. The grant stays on GitHub either
+//     way; the copy says so and links there.
+//   - A workspace with a TOKEN, or nothing: neither finding — a token's reach
+//     is not a grant TF holds — and, with nothing bound, every way in at once:
+//     Connect (only when the deployment offers an App; a default, never the
+//     only option), register, import, or a token.
 
 import { useState } from 'react'
 import { ExternalLink } from 'lucide-react'
@@ -40,15 +57,21 @@ import { appImportedPatch } from '../../setup/githubAppImported'
 import { GitHubAppInstallView } from '../GitHubAppInstallView'
 import GitHubWebhookHealthNotice from '../GitHubWebhookHealthNotice'
 import { useGitHubAppInstall } from '../../../hooks/useGitHubAppInstall'
+import { useGrantFindings } from '../../../hooks/useGrantFindings'
+import { GitHubGrantFindings, GitHubInstallationList } from './GitHubGrantPanel'
 import {
   cutoverPreflight,
   cutoverToApp,
   discardStagedApp,
+  disconnectManagedGitHub,
+  disconnectManagedInstallation,
+  getGitHubAppStatus,
   patPreflight,
   refreshGitHubAppInstallations,
   startManagedGitHubConnect,
   switchToPat,
   type AccessDiff,
+  type GitHubAppInstallation,
 } from '../../../lib/githubApp'
 import { connectGitHubPAT } from '../orgCredentials'
 import type { StepContext } from '../../setup/types'
@@ -56,8 +79,11 @@ import type { StepContext } from '../../setup/types'
 // The guided-switch state machine. `idle` shows the live mode + the switch
 // affordance (or the staged banner); the rest are the stepper screens, split by
 // direction, with the two `rotate-*` screens serving the same-mode PAT
-// replacement. The register screen is transient — clicking Register redirects
-// away, and the user returns to `idle` on the staged banner.
+// replacement — and, for a workspace with nothing bound, the first token bind,
+// which is the same two screens (validate, show the reach, commit through the
+// credential's PUT) under different words. The register screen is transient —
+// clicking Register redirects away, and the user returns to `idle` on the
+// staged banner.
 type Phase =
   | { kind: 'idle' }
   | { kind: 'rotate-token' }
@@ -117,12 +143,29 @@ export default function GitHubAccessControl({
   // Install state for the to-app-install screen (and to read the live
   // installation count for the staged banner's resume target). Refetches on
   // focus, so returning from the GitHub install tab updates the list.
-  const { status: installStatus, installUrl } = useGitHubAppInstall(orgId)
+  const {
+    status: installStatus,
+    setStatus: setInstallStatus,
+    installUrl,
+  } = useGitHubAppInstall(orgId)
+  const installations = installStatus?.installations ?? []
   const installCount = installStatus?.installations.length ?? s.githubAppInstallCount
   // The deployment's App is the credential: no App row of the org's own, only
   // the installations it has bound. Seeded by the loader; the live status read
   // refines it so a bind completed in another tab is reflected on focus.
   const managed = installStatus?.using_deployment_default ?? s.githubAppManaged
+  // Whether there is a deployment App to bind at all — the one input that
+  // decides whether the empty state offers Connect. Never seeded: it is a
+  // fact about the deployment, and until the status read answers, the empty
+  // state offers the three paths every deployment has.
+  const deploymentAppAvailable = installStatus?.deployment_app_available ?? false
+  // The grant findings, for the two App classes only. Keyed on the bound set
+  // so a disconnect reloads them against the grant that remains.
+  const findings = useGrantFindings(
+    orgId,
+    liveApp || managed,
+    installations.map((i) => i.installation_id).join(','),
+  )
 
   const reset = () => {
     setPhase({ kind: 'idle' })
@@ -250,9 +293,8 @@ export default function GitHubAccessControl({
       return
     }
     const bound = res.login || login
-    toast.success(
-      bound ? `GitHub token replaced — connected as @${bound}` : 'GitHub token replaced',
-    )
+    const verb = s.hasGitHubPat ? 'GitHub token replaced' : 'Connected with a personal access token'
+    toast.success(bound ? `${verb} — as @${bound}` : verb)
     // Optimistic so the idle view names the new account immediately; reload
     // confirms it from the server.
     ctx.patch({ hasGitHubPat: true, githubPatLogin: bound })
@@ -281,6 +323,48 @@ export default function GitHubAccessControl({
     }
   }
 
+  // ── Deployment App: disconnect one account, or the whole workspace ──
+  // The two verbs behind the managed panel's only destructive affordances.
+  // Nothing is uninstalled on GitHub — the installation persists there
+  // unbound — so the confirm says so. Afterwards the live status is re-read
+  // and folded into the install hook, so the panel re-renders off the server's
+  // answer: after the last account goes, that is the no-credential empty
+  // state, with Connect still offered beside the other three paths.
+  const disconnectManaged = async (only?: GitHubAppInstallation) => {
+    if (!orgId || busy) return
+    const question = only
+      ? `Disconnect @${only.account_login} from this workspace? The App stays installed on GitHub; Triage Factory just stops using it here.`
+      : 'Disconnect this workspace from the deployment’s GitHub App? Every connected account is released. The App stays installed on GitHub.'
+    if (!confirm(question)) return
+    setBusy(true)
+    setError(null)
+    try {
+      if (only) {
+        await disconnectManagedInstallation(orgId, only.installation_id)
+      } else {
+        await disconnectManagedGitHub(orgId)
+      }
+      const fresh = await getGitHubAppStatus(orgId)
+      setInstallStatus(fresh)
+      const n = fresh.installations.length
+      ctx.patch({
+        githubAppManaged: fresh.using_deployment_default,
+        githubAppInstalled: n > 0,
+        githubAppInstallCount: n,
+      })
+      toast.success(
+        only
+          ? `Disconnected @${only.account_login}`
+          : 'Disconnected from the deployment’s GitHub App',
+      )
+      setBusy(false)
+      reload()
+    } catch (e) {
+      setError((e as Error).message)
+      setBusy(false)
+    }
+  }
+
   // ─────────────────────────────── render ───────────────────────────────
 
   // rotate-token — enter the replacement token; Continue validates it and
@@ -289,14 +373,27 @@ export default function GitHubAccessControl({
     return (
       <Frame onCancel={reset} busy={busy} cancelLabel="Cancel">
         <TokenScreen
-          title="Replace your personal access token"
+          title={
+            s.hasGitHubPat
+              ? 'Replace your personal access token'
+              : 'Connect with a personal access token'
+          }
           detail={
-            <>
-              Enter the new token, with <code className="text-ink-2">repo</code>,{' '}
-              <code className="text-ink-2">read:org</code>, and{' '}
-              <code className="text-ink-2">user:email</code> scopes. We&rsquo;ll validate it and
-              show what it can reach before your current token is replaced.
-            </>
+            s.hasGitHubPat ? (
+              <>
+                Enter the new token, with <code className="text-ink-2">repo</code>,{' '}
+                <code className="text-ink-2">read:org</code>, and{' '}
+                <code className="text-ink-2">user:email</code> scopes. We&rsquo;ll validate it and
+                show what it can reach before your current token is replaced.
+              </>
+            ) : (
+              <>
+                Enter a token with <code className="text-ink-2">repo</code>,{' '}
+                <code className="text-ink-2">read:org</code>, and{' '}
+                <code className="text-ink-2">user:email</code> scopes. We&rsquo;ll validate it and
+                show what it can reach before anything is stored.
+              </>
+            )
           }
           busy={busy}
           error={error}
@@ -315,8 +412,8 @@ export default function GitHubAccessControl({
         <AccessDiffScreen
           diff={phase.diff}
           login={phase.login}
-          action="replacement"
-          confirmLabel="Replace token"
+          action={s.hasGitHubPat ? 'replacement' : 'connection'}
+          confirmLabel={s.hasGitHubPat ? 'Replace token' : 'Connect'}
           busy={busy}
           error={error}
           onConfirm={() => void commitRotate(phase.pat, phase.login)}
@@ -554,6 +651,8 @@ export default function GitHubAccessControl({
               isLocal={ctx.isLocal}
             />
           )}
+          <GitHubInstallationList installations={installations} drift={findings.drift} />
+          <GitHubGrantFindings findings={findings} />
           <button
             type="button"
             onClick={() => setPhase({ kind: 'to-pat-token' })}
@@ -583,18 +682,40 @@ export default function GitHubAccessControl({
               <>
                 Triage Factory connects to GitHub through this deployment&rsquo;s GitHub App,
                 installed on {installCount} account{installCount === 1 ? '' : 's'} connected to this
-                workspace.
+                workspace. Which repositories each account grants is chosen on GitHub&rsquo;s
+                installation page, never here.
               </>
             )}
           </p>
+          <GitHubInstallationList
+            installations={installations}
+            drift={findings.drift}
+            busy={busy}
+            onDisconnect={(inst) => void disconnectManaged(inst)}
+          />
+          {installCount > 0 && <GitHubGrantFindings findings={findings} />}
+          {error && <p className="text-ui text-alarm">{error}</p>}
           {orgId && (
-            <button
-              type="button"
-              onClick={() => startManagedGitHubConnect(orgId)}
-              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
-            >
-              {installCount === 0 ? 'Connect GitHub…' : 'Connect another account…'}
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => startManagedGitHubConnect(orgId)}
+                className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
+              >
+                {installCount === 0 ? 'Connect GitHub…' : 'Connect another account…'}
+              </button>
+              {/* The way out of the class, for a workspace that wants its own
+                  App or a token instead. It releases every bound account; the
+                  installations stay on GitHub. */}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void disconnectManaged()}
+                className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-3 transition-colors hover:border-alarm/40 hover:text-alarm disabled:opacity-40"
+              >
+                Disconnect from the deployment&rsquo;s App…
+              </button>
+            </div>
           )}
         </>
       ) : envPat ? (
@@ -614,47 +735,95 @@ export default function GitHubAccessControl({
             started — unset that variable to manage GitHub access from Settings.
           </p>
         </>
-      ) : (
+      ) : s.hasGitHubPat ? (
         <>
           <p className="text-body leading-relaxed text-ink-3">
-            {s.hasGitHubPat ? (
+            Triage Factory connects to GitHub with a personal access token
+            {s.githubPatLogin ? (
               <>
-                Triage Factory connects to GitHub with a personal access token
-                {s.githubPatLogin ? (
-                  <>
-                    , authenticating as{' '}
-                    <span className="font-medium text-ink-2">@{s.githubPatLogin}</span>
-                  </>
-                ) : null}
-                . Switch to a GitHub App to {appPitch}.
+                , authenticating as{' '}
+                <span className="font-medium text-ink-2">@{s.githubPatLogin}</span>
               </>
-            ) : (
-              <>
-                GitHub access isn&rsquo;t configured for this workspace yet. Register a GitHub App
-                to {appPitch}.
-              </>
-            )}
+            ) : null}
+            . Switch to a GitHub App to {appPitch}.
           </p>
           <div className="flex flex-wrap items-center gap-2">
             {/* Rotation lives beside the switch, not inside it: replacing an
                 expired or revoked token is routine hygiene, and routing it
                 through a mode change (App and back) would be a teardown to swap
                 a string. */}
-            {s.hasGitHubPat && (
-              <button
-                type="button"
-                onClick={() => setPhase({ kind: 'rotate-token' })}
-                className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
-              >
-                Replace token…
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => setPhase({ kind: 'rotate-token' })}
+              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
+            >
+              Replace token…
+            </button>
             <button
               type="button"
               onClick={() => setPhase({ kind: 'to-app-source' })}
               className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
             >
-              {s.hasGitHubPat ? 'Switch to GitHub App…' : 'Set up a GitHub App…'}
+              Switch to GitHub App…
+            </button>
+          </div>
+        </>
+      ) : (
+        // Nothing bound. Every way in is offered at once, none hidden behind
+        // another: the deployment's App when the deployment has one (the fast
+        // path — a default, never a mandate), an App of the workspace's own,
+        // an existing App, or a token.
+        <>
+          <p className="text-body leading-relaxed text-ink-3">
+            GitHub access isn&rsquo;t configured for this workspace yet.{' '}
+            {deploymentAppAvailable ? (
+              <>
+                Connect GitHub to use this deployment&rsquo;s App, or set up a GitHub App of your
+                own to {appPitch}. A personal access token works too.
+              </>
+            ) : (
+              <>
+                Register a GitHub App to {appPitch}, connect an App that already exists, or use a
+                personal access token.
+              </>
+            )}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            {deploymentAppAvailable && orgId && (
+              <button
+                type="button"
+                onClick={() => startManagedGitHubConnect(orgId)}
+                className="rounded-full bg-warm px-5 py-2 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90"
+              >
+                Connect GitHub…
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                ctx.patch({ githubAppSource: 'create' })
+                setPhase({ kind: 'to-app-account' })
+              }}
+              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
+            >
+              Register a GitHub App…
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                ctx.patch({ githubAppSource: 'existing' })
+                setPhase({ kind: 'to-app-import' })
+              }}
+              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
+            >
+              Connect an existing App…
+            </button>
+            <button
+              type="button"
+              onClick={() => setPhase({ kind: 'rotate-token' })}
+              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
+            >
+              Use a personal access token…
             </button>
           </div>
         </>

@@ -138,6 +138,77 @@ and no filtering makes it safe — narrowing it to what the viewer can reach
 would mean rendering a shared config surface from their personal GitHub
 permissions. The recovery needs a button, not a list.
 
+## The Settings surface, and the two grant findings
+
+Workspace Settings' "GitHub access" panel renders one of three shapes, decided
+by the credential class the status read (`GET /api/orgs/{org_id}/github/app`)
+reports, and the affordances are per class:
+
+- **A workspace with its own App** shows the App's slug, its installations, both
+  findings below, and the switch to a token.
+- **A workspace on the deployment's App** (`using_deployment_default: true`)
+  shows no App of its own — there is no row, and there never will be — and is
+  never offered registration or import. What it shows is the accounts it has
+  bound, each with its own per-installation disconnect, the findings, Connect
+  for another account, and Disconnect for the whole workspace: the way out for
+  a workspace that wants its own App or a token instead. Both call the verbs
+  above and nothing else creates or destroys a binding from the panel.
+- **A workspace with a token, or nothing.** A token workspace sees neither
+  finding and no copy implying it holds a grant: a token's reach is a fact
+  about a person's account, not a grant TF is answerable for. With nothing
+  bound, every way in is offered together — Connect (only when the deployment
+  has a deployment App, `deployment_app_available`), register, import, or a
+  token — none hidden behind another. The deployment App is a default, never a
+  mandate.
+
+Every installation on the panel carries three facts from the mirror, and each
+changes what an admin should do. A **suspension** (`suspended_at` /
+`suspended_by`) renders in its own state, since a suspended installation still
+holds its grant and merely looks connected while GitHub refuses every token
+minted from it. The **width of the grant** (`repository_selection`) is
+three-valued on purpose: `all` means a tracked repository on that account can
+never fall outside the grant, `selected` means it can, and `null` means the
+mirror has not learned it yet — which is neither answer, and the panel says so
+rather than picking one. And the installation's **settings page on GitHub**
+(`settings_url`) is the only place the grant changes: TF links out and never
+renders the grant as a form, because GitHub enforces who may edit it.
+
+Nothing on the panel is derived from the viewer's own GitHub permissions. Two
+admins with different GitHub access receive byte-identical payloads for the
+same workspace. Delegation mints from the grant and never consults anyone's
+personal access, so a list narrowed to the viewer would describe nothing about
+capability and only mislead; it is the rule a well-meaning filter is most
+likely to break, and a test asserts it directly.
+
+The two findings are what the reachable-repo mirror exists to make computable,
+and they are served as ordinary paginated lists — `page_size` / `page_token`
+in, `{items, next_page_token, total_count}` out, org admin, App-class
+workspaces only (a token workspace is a 404: it holds no grant to have findings
+about):
+
+- **Reach without purpose** — `POST
+  /api/orgs/{org_id}/github/grant/reach-without-purpose/list`. Repositories
+  the App can reach that no team tracks: TF holds write access to code nobody
+  asked it to touch. Each row names the installation whose grant carries it and
+  that installation's settings page, where the grant is narrowed.
+- **Scope drift** — `POST /api/orgs/{org_id}/github/grant/scope-drift/list`.
+  Repositories some team tracks that no bound installation's grant contains, so
+  they are silently unpolled. This is the finding that fails invisibly: under a
+  selective grant, a repository created after the grant was chosen is outside it
+  forever, with no signal until a call fails. It is gated on a refresh having
+  landed (an org that has never looked reports nothing rather than "everything
+  you track is drifting"), it never reports a repository whose owner account
+  holds an `all` installation (that is a stale mirror, not drift) or one of
+  unknown width (unknown is not an answer), and each remaining row names the
+  selective installation on its owner account when there is one — or none, when
+  no bound installation covers the account at all, where the way out is
+  connecting the account or untracking the repository.
+
+Both are computed server-side from the mirror. Opening the panel issues no
+GitHub call and triggers no refresh; the refresh POST beside the status read is
+the deliberate gesture for a fresh answer. An empty finding renders as "nothing
+to address", never as a blank region that reads like a load that failed.
+
 ## Current limitations, deployment-App workspaces only
 
 - **Webhooks do not reach them yet.** The webhook receiver is addressed per

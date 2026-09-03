@@ -1297,6 +1297,16 @@ func (s *Server) routes() {
 	// mutating in the sense that matters: it asks GitHub to deliver again, so
 	// it rides apiMutating (CSRF).
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/webhook/replay", s.handleGitHubAppWebhookReplay)
+	// The two grant findings, computed from the reachable-repo mirror: what
+	// the App can reach that nobody tracks, and what is tracked that the App
+	// cannot reach. Paginated list reads (POST because the paging pair is a
+	// body), org-admin, side-effect-free — opening the panel never asks
+	// GitHub anything. Under github/grant rather than github/app because the
+	// grant is what they are about, whichever App holds it: a workspace on
+	// the deployment's App has no App resource of its own and the same two
+	// findings. See github_grant_findings.go.
+	s.apiMutating("POST /api/orgs/{org_id}/github/grant/reach-without-purpose/list", s.handleGitHubGrantReachWithoutPurposeList)
+	s.apiMutating("POST /api/orgs/{org_id}/github/grant/scope-drift/list", s.handleGitHubGrantScopeDriftList)
 
 	// The bind ceremony — how a workspace claims an installation of the
 	// DEPLOYMENT App, the one key that serves many workspaces. Multi-mode only

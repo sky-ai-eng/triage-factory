@@ -318,10 +318,8 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 	// asserting the value the request sent — the SPA's cutoverToApp() discards
 	// the body today (it re-fetches status separately), so this is a pure
 	// improvement, not a wire break.
-	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(
+	writeJSON(w, http.StatusOK, s.githubAppStatus(ctx, orgID, userID,
 		domain.GitHubCredentialClassBYOApp, activated, insts,
-		s.registrantDisplayName(ctx, orgID, userID, activated),
-		s.connectCallbackURLSafe(orgID),
 		s.webhookHealthDTO(ctx, orgID, activated),
 	))
 }

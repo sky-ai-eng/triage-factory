@@ -583,8 +583,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		// The class the transaction above just committed for this org — passed
 		// as the literal rather than re-read, since the import IS what put the
 		// org in the BYO-App system.
-		githubAppStatusResponse: newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, &created, insts,
-			s.registrantDisplayName(ctx, orgID, userID, &created), s.connectCallbackURLSafe(orgID),
+		githubAppStatusResponse: s.githubAppStatus(ctx, orgID, userID, domain.GitHubCredentialClassBYOApp, &created, insts,
 			// No webhook health: nothing has probed this App yet, and the block
 			// is deliberately absent rather than optimistic. The panel's next
 			// status read runs the first probe — the import form's own copy is

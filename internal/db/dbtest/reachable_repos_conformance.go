@@ -48,8 +48,10 @@ type ReachableReposFactory func(t *testing.T) ReachableReposBackend
 //   - 'all' and 'selected' are distinguishable, and a writer that did not look
 //     does not erase a width already established.
 //   - Both derived states — reach without purpose and scope drift — including
-//     the case-folding both comparisons need and the gate that keeps an
-//     un-mirrored org from reporting its entire tracked set as drift.
+//     the case-folding both comparisons need, the gate that keeps an
+//     un-mirrored org from reporting its entire tracked set as drift, the
+//     three-way rule on a grant's width, and the paging both are served
+//     through.
 func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -93,10 +95,10 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		return out
 	}
 
-	trackedSlugs := func(rows []domain.TeamGitHubRepo) []string {
+	trackedSlugs := func(rows []domain.ScopeDriftRepository) []string {
 		out := make([]string, 0, len(rows))
 		for _, r := range rows {
-			out = append(out, r.Owner+"/"+r.Repo)
+			out = append(out, r.Slug())
 		}
 		return out
 	}
@@ -133,7 +135,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem (narrowed): %v", err)
 		}
 
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID)
+		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
 		if err != nil {
 			t.Fatalf("ListForOrgSystem: %v", err)
 		}
@@ -152,7 +154,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID)
+		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
 		if err != nil {
 			t.Fatalf("ListForOrgSystem: %v", err)
 		}
@@ -185,7 +187,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID)
+		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
 		if err != nil {
 			t.Fatalf("ListForOrgSystem: %v", err)
 		}
@@ -218,7 +220,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatal("ReplaceForInstallationSystem accepted an unknown source; want an error")
 		}
 
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID)
+		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
 		if err != nil {
 			t.Fatalf("ListForOrgSystem: %v", err)
 		}
@@ -247,7 +249,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID)
+		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
 		if err != nil {
 			t.Fatalf("ListForOrgSystem: %v", err)
 		}
@@ -275,7 +277,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Error("ReplaceForInstallationSystem accepted an empty installation id; want an error")
 		}
 
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID)
+		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
 		if err != nil {
 			t.Fatalf("ListForOrgSystem: %v", err)
 		}
@@ -303,7 +305,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ClearForInstallationSystem: %v", err)
 		}
 
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID)
+		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
 		if err != nil {
 			t.Fatalf("ListForOrgSystem: %v", err)
 		}
@@ -383,7 +385,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
 
-		got, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID)
+		got, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListReachWithoutPurposeSystem: %v", err)
 		}
@@ -402,7 +404,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		got, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID)
+		got, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListReachWithoutPurposeSystem: %v", err)
 		}
@@ -426,7 +428,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
-		got, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID)
+		got, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListReachWithoutPurposeSystem: %v", err)
 		}
@@ -450,7 +452,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
 
-		got, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID)
+		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
@@ -471,7 +473,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
 
-		got, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID)
+		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
@@ -490,7 +492,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b.TrackRepo(t, "acme", "api")
 		b.TrackRepo(t, "acme", "web")
 
-		got, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID)
+		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
@@ -512,7 +514,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		if drift, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID); err != nil {
+		if drift, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed); err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		} else if len(drift) != 1 {
 			t.Fatalf("scope drift = %v before removal; want [acme/legacy]", trackedSlugs(drift))
@@ -521,12 +523,215 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
-		got, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID)
+		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
 		if len(got) != 0 {
 			t.Errorf("scope drift = %v after the installation was removed; want none", trackedSlugs(got))
+		}
+	})
+
+	t.Run("ScopeDriftIsThreeWayOnTheGrantsWidth", func(t *testing.T) {
+		// The rule the panel's copy rests on. A grant of every repository
+		// cannot be drifted out of: a tracked repository missing from that
+		// account's mirror is staleness, not a finding. A grant of unknown
+		// width cannot be said to have been drifted out of either — unknown is
+		// "not learned yet", never "no". Only a selective grant reports.
+		//
+		// Same shape on all three accounts: one granted repository in the
+		// mirror, one tracked repository outside it.
+		b := mk(t)
+		install(t, b, "1", "every", domain.RepositorySelectionAll)
+		install(t, b, "2", "some", domain.RepositorySelectionSelected)
+		install(t, b, "3", "unknown", "")
+		for id, login := range map[string]string{"1": "every", "2": "some", "3": "unknown"} {
+			b.TrackRepo(t, login, "api")
+			b.TrackRepo(t, login, "legacy")
+			if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, id, []domain.ReachableRepository{
+				entry(b, id, login, "api", "1"+id),
+			}); err != nil {
+				t.Fatalf("ReplaceForInstallationSystem(%s): %v", id, err)
+			}
+		}
+
+		got, total, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListScopeDriftSystem: %v", err)
+		}
+		equal(t, "scope drift", trackedSlugs(got), []string{"some/legacy"})
+		if total != 1 {
+			t.Errorf("total = %d; want 1", total)
+		}
+		// The finding names the installation whose grant excludes it, so the
+		// panel can point at the page where the grant is widened.
+		if got[0].InstallationID != "2" {
+			t.Errorf("InstallationID = %q; want the selective installation \"2\"", got[0].InstallationID)
+		}
+	})
+
+	t.Run("ScopeDriftNamesNoInstallationForAnUncoveredAccount", func(t *testing.T) {
+		// A team tracks a repository on an account the App is not installed on
+		// at all. That is drift — nothing grants it — and there is no
+		// installation to point at, which the finding says by naming none.
+		b := mk(t)
+		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
+		b.TrackRepo(t, "stranger", "tool")
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+			entry(b, "1", "acme", "api", "10"),
+		}); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem: %v", err)
+		}
+		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListScopeDriftSystem: %v", err)
+		}
+		equal(t, "scope drift", trackedSlugs(got), []string{"stranger/tool"})
+		if got[0].InstallationID != "" {
+			t.Errorf("InstallationID = %q for an account with no installation; want \"\"", got[0].InstallationID)
+		}
+	})
+
+	t.Run("ScopeDriftReportsAgainstASelectiveGrantOfNothing", func(t *testing.T) {
+		// The gate is "has a refresh landed", not "does the mirror hold rows":
+		// an installation narrowed to no repositories at all writes zero
+		// entries and one scope marker, and the repositories tracked against it
+		// are as unpolled as any other drift. Read off the row count, this
+		// org would report a false all-clear forever.
+		b := mk(t)
+		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
+		b.TrackRepo(t, "acme", "api")
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", nil); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem: %v", err)
+		}
+		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListScopeDriftSystem: %v", err)
+		}
+		equal(t, "scope drift", trackedSlugs(got), []string{"acme/api"})
+	})
+
+	t.Run("FindingsPageOnATotalOrderWithARealTotal", func(t *testing.T) {
+		// Both findings are served by list routes, so both page — and the
+		// total is the finding's size across every page, which is the number
+		// the panel renders beside the heading. A page of zero is the
+		// count-only read: the total, no rows.
+		b := mk(t)
+		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
+		b.TrackRepo(t, "acme", "api")
+		for _, r := range []string{"d1", "d2", "d3"} {
+			b.TrackRepo(t, "acme", r)
+		}
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+			entry(b, "1", "acme", "api", "10"),
+			entry(b, "1", "acme", "r1", "11"),
+			entry(b, "1", "acme", "r2", "12"),
+			entry(b, "1", "acme", "r3", "13"),
+		}); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem: %v", err)
+		}
+
+		reach, total, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.ListOpts{Limit: 2})
+		if err != nil {
+			t.Fatalf("ListReachWithoutPurposeSystem: %v", err)
+		}
+		equal(t, "reach without purpose, page 1", slugs(t, reach), []string{"acme/r1", "acme/r2"})
+		if total != 3 {
+			t.Errorf("reach without purpose total = %d; want 3", total)
+		}
+		reach, _, err = b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.ListOpts{Limit: 2, Offset: 2})
+		if err != nil {
+			t.Fatalf("ListReachWithoutPurposeSystem (page 2): %v", err)
+		}
+		equal(t, "reach without purpose, page 2", slugs(t, reach), []string{"acme/r3"})
+		reach, total, err = b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.ListOpts{CountOnly: true})
+		if err != nil {
+			t.Fatalf("ListReachWithoutPurposeSystem (count only): %v", err)
+		}
+		if len(reach) != 0 || total != 3 {
+			t.Errorf("count-only reach = %v total %d; want no rows and 3", slugs(t, reach), total)
+		}
+
+		drift, total, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.ListOpts{Limit: 2})
+		if err != nil {
+			t.Fatalf("ListScopeDriftSystem: %v", err)
+		}
+		equal(t, "scope drift, page 1", trackedSlugs(drift), []string{"acme/d1", "acme/d2"})
+		if total != 3 {
+			t.Errorf("scope drift total = %d; want 3", total)
+		}
+		drift, _, err = b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.ListOpts{Limit: 2, Offset: 2})
+		if err != nil {
+			t.Fatalf("ListScopeDriftSystem (page 2): %v", err)
+		}
+		equal(t, "scope drift, page 2", trackedSlugs(drift), []string{"acme/d3"})
+		drift, total, err = b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.ListOpts{CountOnly: true})
+		if err != nil {
+			t.Fatalf("ListScopeDriftSystem (count only): %v", err)
+		}
+		if len(drift) != 0 || total != 3 {
+			t.Errorf("count-only drift = %v total %d; want no rows and 3", trackedSlugs(drift), total)
+		}
+	})
+
+	t.Run("FindingsReadTheClassTheyAreAskedFor", func(t *testing.T) {
+		// A managed workspace's grant is keyed under its own class, and the
+		// findings are computed from whichever class the caller names — never
+		// from the other one, and never from the PAT class, which holds no
+		// grant to have findings about.
+		b := mk(t)
+		const managed = domain.GitHubCredentialClassManagedApp
+		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
+		b.TrackRepo(t, "acme", "api")
+		b.TrackRepo(t, "acme", "legacy")
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, managed, "1", []domain.ReachableRepository{
+			entry(b, "1", "acme", "api", "10"),
+			entry(b, "1", "acme", "secrets", "11"),
+		}); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem: %v", err)
+		}
+
+		reach, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, managed, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListReachWithoutPurposeSystem(managed): %v", err)
+		}
+		equal(t, "managed reach without purpose", slugs(t, reach), []string{"acme/secrets"})
+		drift, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, managed, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListScopeDriftSystem(managed): %v", err)
+		}
+		equal(t, "managed scope drift", trackedSlugs(drift), []string{"acme/legacy"})
+		all, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, managed)
+		if err != nil {
+			t.Fatalf("ListForOrgSystem(managed): %v", err)
+		}
+		equal(t, "managed grant", slugs(t, all), []string{"acme/api", "acme/secrets"})
+
+		// The other App class sees none of it: no reach, and no refreshed
+		// scope, so no drift either.
+		if reach, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.Unwindowed); err != nil {
+			t.Fatalf("ListReachWithoutPurposeSystem(byo): %v", err)
+		} else if len(reach) != 0 {
+			t.Errorf("byo_app reach without purpose = %v for a managed workspace; want none", slugs(t, reach))
+		}
+		if drift, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed); err != nil {
+			t.Fatalf("ListScopeDriftSystem(byo): %v", err)
+		} else if len(drift) != 0 {
+			t.Errorf("byo_app scope drift = %v for a managed workspace; want none", trackedSlugs(drift))
+		}
+
+		// The PAT class is refused outright rather than answered with an empty
+		// finding, which would read as an all-clear about a grant that does
+		// not exist.
+		const pat = domain.GitHubCredentialClassPAT
+		if _, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, pat, db.Unwindowed); err == nil {
+			t.Error("ListReachWithoutPurposeSystem(pat) = nil error; want a refusal")
+		}
+		if _, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, pat, db.Unwindowed); err == nil {
+			t.Error("ListScopeDriftSystem(pat) = nil error; want a refusal")
+		}
+		if _, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, pat); err == nil {
+			t.Error("ListForOrgSystem(pat) = nil error; want a refusal")
 		}
 	})
 

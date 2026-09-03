@@ -89,16 +89,16 @@ func (f *fakeMirror) ClearForInstallationSystem(_ context.Context, _, installati
 	return nil
 }
 
-func (f *fakeMirror) ListForOrgSystem(context.Context, string) ([]domain.ReachableRepository, error) {
+func (f *fakeMirror) ListForOrgSystem(context.Context, string, domain.GitHubCredentialClass) ([]domain.ReachableRepository, error) {
 	return nil, nil
 }
 
-func (f *fakeMirror) ListReachWithoutPurposeSystem(context.Context, string) ([]domain.ReachableRepository, error) {
-	return nil, nil
+func (f *fakeMirror) ListReachWithoutPurposeSystem(context.Context, string, domain.GitHubCredentialClass, db.ListOpts) ([]domain.ReachableRepository, int, error) {
+	return nil, 0, nil
 }
 
-func (f *fakeMirror) ListScopeDriftSystem(context.Context, string) ([]domain.TeamGitHubRepo, error) {
-	return nil, nil
+func (f *fakeMirror) ListScopeDriftSystem(context.Context, string, domain.GitHubCredentialClass, db.ListOpts) ([]domain.ScopeDriftRepository, int, error) {
+	return nil, 0, nil
 }
 
 // The PAT-tier half of the store. The reconcile is the App tier's writer and
