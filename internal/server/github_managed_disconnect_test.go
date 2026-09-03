@@ -504,6 +504,32 @@ func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
 		assertUntouched(t, rig)
 	})
 
+	t.Run("byo_register_start_unknown_class", func(t *testing.T) {
+		// A class this build cannot name is a 409 on this door as on every
+		// other, not a 500: the launch page renders the same refusal the JSON
+		// doors send.
+		rig := newBindRig(t, newFakeGitHub())
+		if _, err := rig.h.AdminDB.Exec(`
+			INSERT INTO org_settings (org_id, github_credential_class) VALUES ($1, 'from_the_future')
+			ON CONFLICT (org_id) DO UPDATE SET github_credential_class = 'from_the_future'
+		`, rig.orgID.String()); err != nil {
+			t.Fatalf("seed unknown class: %v", err)
+		}
+		req := httptest.NewRequest("GET", "/api/orgs/"+rig.orgID.String()+"/github/app/register/launch?owner_type=org&owner_login=acme", nil)
+		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: rig.sid})
+		rec := httptest.NewRecorder()
+		rig.srv.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("register launch under an unknown class status=%d, want 409", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "doesn&#39;t recognize") && !strings.Contains(rec.Body.String(), "doesn't recognize") {
+			t.Errorf("launch refusal page does not carry the unknown-class refusal: %s", rec.Body.String())
+		}
+		if rig.hasAppRow(t) {
+			t.Error("a refused launch wrote an App row")
+		}
+	})
+
 	t.Run("byo_register_callback", func(t *testing.T) {
 		rig := newBindRig(t, newFakeGitHub())
 		rig.bindManaged(t, 4242)

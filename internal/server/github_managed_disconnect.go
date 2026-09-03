@@ -45,6 +45,11 @@ import (
 const managedInTheWayMessage = "This workspace is connected through the deployment's GitHub App. " +
 	"Disconnect it in Workspace Settings first."
 
+// unknownGitHubClassMessage is what every door says to a workspace whose class
+// this build cannot name. Spelled once for the same reason as the sentence
+// above: the launch page and the JSON doors owe the caller the same answer.
+const unknownGitHubClassMessage = "This workspace's GitHub credential is managed in a way this version doesn't recognize."
+
 // errOrgManagedInTheWay is the door guard's refusal as an error, for the one
 // door (the registration launch) whose refusals travel as sentinel errors from
 // the manifest builder to the page renderer, which puts the sentence above on
@@ -94,8 +99,7 @@ func (s *Server) refuseManagedInTheWay(w http.ResponseWriter, ctx context.Contex
 	if err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			githubAppLog.Error("unknown github credential class; refusing to bind another credential", "org", orgID)
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict,
-				Message: "this workspace's GitHub credential is managed in a way this version doesn't recognize"})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: unknownGitHubClassMessage})
 			return true
 		}
 		internalError(w, "github-access", err)
@@ -110,8 +114,10 @@ func (s *Server) refuseManagedInTheWay(w http.ResponseWriter, ctx context.Contex
 
 // handleGitHubManagedDisconnect moves the workspace off the deployment App:
 // every live installation row is soft-removed and the class returns to the
-// rowless default. Org admin. A verb route because it is a multi-row atomic
-// transition, not a field write.
+// rowless default. Org admin. A verb route because it is a multi-row
+// transition serialized under the App-registration lock, not a field write —
+// disconnectManagedInstallations says exactly what "one motion" means on each
+// dialect.
 //
 // Idempotent: a workspace with nothing bound is a 204 with nothing written —
 // the workspace-addressed verb always finds its workspace, so there is no
@@ -181,8 +187,7 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			githubAppLog.Error("unknown github credential class; refusing managed disconnect", "org", orgID)
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict,
-				Message: "this workspace's GitHub credential is managed in a way this version doesn't recognize"})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: unknownGitHubClassMessage})
 			return
 		}
 		internalError(w, "github-access", err)

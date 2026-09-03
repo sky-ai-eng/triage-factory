@@ -392,6 +392,12 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 				"This workspace already has a GitHub App registered. Remove it before registering another.")
 		case errors.Is(err, errOrgManagedInTheWay):
 			s.renderLaunchError(w, http.StatusConflict, orgID, returnTo, managedInTheWayMessage)
+		case errors.Is(err, ErrUnknownGitHubCredentialClass):
+			// The same 409 the JSON doors give: this door cannot write under
+			// a class it cannot name, and that is the caller's state to sort
+			// out, not a fault of the server's.
+			githubAppLog.Error("unknown github credential class; refusing to launch app registration", "org", orgID)
+			s.renderLaunchError(w, http.StatusConflict, orgID, returnTo, unknownGitHubClassMessage)
 		case errors.Is(err, errOrgNotFound):
 			s.renderLaunchError(w, http.StatusNotFound, orgID, returnTo, "Workspace not found.")
 		case errors.Is(err, errInvalidGitHubBase):
