@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -237,4 +238,17 @@ type ReachableReposStore interface {
 	// the slugs it holds instead of enumerating the org to intersect afterwards.
 	// An empty slugs argument returns an empty set without a query.
 	ReachableSlugsSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, slugs []string) (map[string]struct{}, error)
+}
+
+// RequireGrantClass is the guard every App-tier read of the mirror runs first:
+// the class must be one that holds a grant at all. A PAT entry is a fact about
+// a person's token, not a grant TF is answerable for, and a caller asking for a
+// PAT org's grant has already gone wrong — so it is an error, not an empty
+// answer that would read as "nothing to address". Shared by both dialects,
+// since nothing about it is SQL.
+func RequireGrantClass(op string, class domain.GitHubCredentialClass) error {
+	if !class.AppTier() {
+		return fmt.Errorf("%s: class %q holds no grant", op, class)
+	}
+	return nil
 }

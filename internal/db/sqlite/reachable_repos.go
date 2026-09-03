@@ -148,23 +148,11 @@ func (s *reachableReposStore) ClearForInstallationSystem(ctx context.Context, or
 	})
 }
 
-// grantClass is the guard every App-tier read runs first: the class must be one
-// that holds a grant at all. A PAT entry is a fact about a person's token, not
-// a grant TF is answerable for, and a caller asking for a PAT org's grant has
-// already gone wrong — so it is an error, not an empty answer that would read
-// as "nothing to address".
-func grantClass(op string, class domain.GitHubCredentialClass) error {
-	if !class.AppTier() {
-		return fmt.Errorf("%s: class %q holds no grant", op, class)
-	}
-	return nil
-}
-
 func (s *reachableReposStore) ListForOrgSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass) ([]domain.ReachableRepository, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	if err := grantClass("list grant entries", class); err != nil {
+	if err := db.RequireGrantClass("list grant entries", class); err != nil {
 		return nil, err
 	}
 	return scanReachableRepos(s.q.QueryContext(ctx, `
@@ -186,7 +174,7 @@ func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context,
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
 	}
-	if err := grantClass("list reach without purpose", class); err != nil {
+	if err := db.RequireGrantClass("list reach without purpose", class); err != nil {
 		return nil, 0, err
 	}
 	from := `
@@ -246,7 +234,7 @@ func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID st
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
 	}
-	if err := grantClass("list scope drift", class); err != nil {
+	if err := db.RequireGrantClass("list scope drift", class); err != nil {
 		return nil, 0, err
 	}
 	// Grouped on the folded slug rather than DISTINCT on the raw pair: two teams
