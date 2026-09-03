@@ -1318,6 +1318,17 @@ func (s *Server) routes() {
 	// GitHub, who has no session at all and must not be answered with a JSON
 	// 401. The bind cookie decides which, before any session lookup.
 	s.api("GET /api/orgs/{org_id}/github/managed/connect", s.handleGitHubManagedConnect)
+	// Leaving the class — the bind's mirror. Verb routes because each is a
+	// multi-row transition (soft-remove the rows, reset the class, record the
+	// change) serialized under the App-registration lock, rather than a field
+	// write; on Postgres the row removals commit on the admin pool ahead of the
+	// class reset, in an order a retry converges — see
+	// disconnectManagedInstallations. The narrowed one drops a single account
+	// and is the full disconnect when that account was the last. JSON fetches
+	// from the Settings panel, so both ride apiMutating (CSRF). Org-admin,
+	// gated inside the handler.
+	s.apiMutating("POST /api/orgs/{org_id}/github/managed/disconnect", s.handleGitHubManagedDisconnect)
+	s.apiMutating("POST /api/orgs/{org_id}/github/managed/installations/{installation_id}/disconnect", s.handleGitHubManagedInstallationDisconnect)
 	// Spelled literally rather than built from ManagedBindCallbackPath: the
 	// pre-auth allowlist is audited by parsing this file, so a mount it cannot
 	// read as a constant string is a mount it cannot check. The two cannot

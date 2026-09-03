@@ -104,8 +104,10 @@ func isPubliclyReachable(rawURL string) bool {
 // Org-admin gating is the caller's responsibility.
 //
 // Returns errOrgAppExists if the org already has an App registered,
-// errOrgNotFound if the org row is missing, or errInvalidGitHubBase if
-// the org's configured GitHub base URL isn't a valid http(s) origin.
+// errOrgManagedInTheWay if it rides the deployment App with a live
+// installation, errOrgNotFound if the org row is missing, or
+// errInvalidGitHubBase if the org's configured GitHub base URL isn't a valid
+// http(s) origin.
 func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, ownerType, ownerLogin, returnTo string) (manifestPostURL, manifestJSON, ghWebOrigin string, err error) {
 	var existing *domain.OrgGitHubApp
 	var org *domain.Org
@@ -125,6 +127,15 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 	}
 	if org == nil {
 		return "", "", "", errOrgNotFound
+	}
+	// The managed guard's advisory evaluation: the launch is the bounce page
+	// that sends the admin to GitHub, and a workspace that cannot register an
+	// App should hear so before it creates one there. The callback re-evaluates
+	// under the lock.
+	if inTheWay, err := s.managedInstallationsInTheWay(ctx, orgID); err != nil {
+		return "", "", "", err
+	} else if inTheWay {
+		return "", "", "", errOrgManagedInTheWay
 	}
 
 	// Resolve the GitHub web host through the resolver, not the org_settings
@@ -379,6 +390,14 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 		case errors.Is(err, errOrgAppExists):
 			s.renderLaunchError(w, http.StatusConflict, orgID, returnTo,
 				"This workspace already has a GitHub App registered. Remove it before registering another.")
+		case errors.Is(err, errOrgManagedInTheWay):
+			s.renderLaunchError(w, http.StatusConflict, orgID, returnTo, managedInTheWayMessage)
+		case errors.Is(err, ErrUnknownGitHubCredentialClass):
+			// The same 409 the JSON doors give: this door cannot write under
+			// a class it cannot name, and that is the caller's state to sort
+			// out, not a fault of the server's.
+			githubAppLog.Error("unknown github credential class; refusing to launch app registration", "org", orgID)
+			s.renderLaunchError(w, http.StatusConflict, orgID, returnTo, unknownGitHubClassMessage)
 		case errors.Is(err, errOrgNotFound):
 			s.renderLaunchError(w, http.StatusNotFound, orgID, returnTo, "Workspace not found.")
 		case errors.Is(err, errInvalidGitHubBase):
@@ -540,9 +559,12 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "org already has a GitHub App registered; remove it first"})
 		return
 	}
-	// TODO(TFAC-937): a managed_app org has no App row and passes this gate,
-	// registering its own App beside live deployment-App installation rows.
-	// Refuse it, naming the disconnect as the way out, once that verb exists.
+	// A managed_app org has no App row and passes the gate above; this is the
+	// one that stops it registering its own App beside live deployment-App
+	// installation rows. Authoritative: the lock is held.
+	if s.refuseManagedInTheWay(w, r.Context(), orgID) {
+		return
+	}
 
 	// Resolve the conversion host through the resolver (settings → github_url
 	// secret → the deployment default), not the org_settings column alone, so a GHES /

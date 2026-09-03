@@ -59,6 +59,23 @@ claim outright.
 An installation belongs to exactly one workspace per GitHub host; after an
 uninstall the id is freed, and connecting it elsewhere is an ordinary new bind.
 
+Leaving the class is as deliberate as entering it. The deployment App is
+something a workspace *chooses*, so the bind is the only way in and the
+disconnect verb is the only way out: `POST
+/api/orgs/{org_id}/github/managed/disconnect` soft-removes every installation
+the workspace holds (the same removal an `installation.deleted` delivery
+performs, reach-cache cascade and token invalidation included), resets the
+class to the rowless default, and records one access change per account
+disconnected. Its per-installation form
+(`…/github/managed/installations/{installation_id}/disconnect`) drops one
+account and keeps the class — until it drops the last one, which is the full
+disconnect. Nothing is uninstalled on GitHub: the installation persists there
+unbound, and Connect re-binds it. The other credential doors — the PAT bind,
+BYO registration, BYO import — refuse a managed workspace that still holds a
+live installation row and name the disconnect as the way out, so a workspace's
+live rows and its class can never disagree. That is what lets the receiver
+above route on the row alone.
+
 What the rule forbids is exactly one thing: TF *guessing* — attributing an
 installation from the shared listing to a workspace whose admin never proved
 it. Everything after the proof updates freely, as the next section enumerates.
