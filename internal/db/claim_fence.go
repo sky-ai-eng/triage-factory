@@ -26,12 +26,19 @@ import "errors"
 //
 // A caller that gets this back has one correct reaction: stop. It is not the
 // owner, so it must not write a terminal status, record a result, or release
-// anything — the successor owns the conversation's disposition now. Killing
-// its own sandbox and returning silently is the whole obligation. It is also
-// worth logging at error level wherever it surfaces: in production a fence
-// trip means the cooperative fence failed, which is an incident, not noise.
+// anything — whoever released the claim owns the conversation's disposition
+// now. Killing its own sandbox and returning silently is the whole
+// obligation. A refusal with no deliberate stop behind it is worth logging at
+// error level wherever it surfaces: in production it means the cooperative
+// fence failed, which is an incident, not noise.
 //
-// Postgres only. SQLite/local is a single process with no reaper and no
-// second executor, so the race the fence guards cannot occur there and the
-// SQLite store performs the same writes unfenced.
+// Both dialects fence. The successor executor is the multi-mode rival, but
+// there is a second one every mode has: the stop verb. A person stopping a
+// conversation parks the row and releases its claim without consulting the
+// engagement — deliberately, since the whole point of a stop is to override
+// whichever executor holds the run — and an engagement still bringing its
+// runtime up when that lands reaches its next write as exactly the zombie
+// described above. Local mode has no reaper and no second executor, so the
+// stop verb is the only thing that can trip its fence, and the refusal it
+// gets is the ordinary shape of every stop that catches a run mid-setup.
 var ErrClaimReleased = errors.New("db: claim released — this engagement no longer owns the conversation")

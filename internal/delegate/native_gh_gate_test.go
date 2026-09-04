@@ -420,6 +420,7 @@ type gateHarness struct {
 	t              *testing.T
 	spawner        *Spawner
 	conversationID string
+	claimID        string
 	host           *recordingToolHost
 	turns          []gateTurn
 }
@@ -428,12 +429,12 @@ func newGateHarness(t *testing.T, conversationID, mission string, turns []gateTu
 	t.Helper()
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, conversationID, "", "/tmp/wt-"+conversationID)
-	markEngaged(t, database, conversationID)
+	claimID := markEngaged(t, database, conversationID)
 	markNative(t, database, conversationID)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-5")
 
-	h := &gateHarness{t: t, spawner: s, conversationID: conversationID, host: &recordingToolHost{}, turns: turns}
-	if _, err := newNativeTranscript(s, runmode.LocalDefaultOrgID, conversationID, "").
+	h := &gateHarness{t: t, spawner: s, conversationID: conversationID, claimID: claimID, host: &recordingToolHost{}, turns: turns}
+	if _, err := newNativeTranscript(s, runmode.LocalDefaultOrgID, conversationID, claimID).
 		Insert(context.Background(), runmode.LocalDefaultOrgID, pendingUserInput(conversationID, runmode.LocalDefaultUserID, mission)); err != nil {
 		t.Fatalf("seed the mission: %v", err)
 	}
@@ -453,7 +454,7 @@ func (h *gateHarness) seed(row domain.Message) {
 func (h *gateHarness) run() agentloop.Result {
 	h.t.Helper()
 	engine := &agentloop.Engine{
-		Transcript:  newNativeTranscript(h.spawner, runmode.LocalDefaultOrgID, h.conversationID, ""),
+		Transcript:  newNativeTranscript(h.spawner, runmode.LocalDefaultOrgID, h.conversationID, h.claimID),
 		Credentials: staticGateCredentials{provider: &scriptedGateProvider{turns: h.turns}},
 		Tools:       h.host,
 		Hooks: agentloop.Hooks{

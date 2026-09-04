@@ -433,9 +433,17 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	runURL := s.runURLFor(orgID, conversationID)
 	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, mission, cfg.scope, cfg.toolsRef, agentBin, agentRunRoot, branchTemplate, runURL, knowledge)
 
-	s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting)
+	// The stop is read before the phase write, so a run stopped during
+	// bring-up parks here without ever asking the fence — the refusal below is
+	// then reserved for a claim that went away with no cancel behind it.
 	if ctx.Err() != nil {
 		return cancelled("")
+	}
+	if s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting) {
+		// Fenced out before the runtime came up: nothing to write, no process
+		// to kill. The workspace stays for whoever owns the conversation now.
+		parked = true
+		return true
 	}
 
 	extraEnv := []string{

@@ -127,9 +127,14 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	}
 	systemPrompt := nativeSystemPrompt(cfg.appendSysPrompt != "")
 
-	s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting)
+	// The stop is read before the phase write, so a run stopped during
+	// bring-up parks here without ever asking the fence — the refusal below is
+	// then reserved for a claim that went away with no cancel behind it.
 	if ctx.Err() != nil {
 		return stopped()
+	}
+	if s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting) {
+		return engagementDisposition{fenced: true}
 	}
 
 	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{

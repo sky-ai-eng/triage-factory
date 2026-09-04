@@ -382,11 +382,12 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	//
 	// The other half is the killed engagement's own teardown, arriving after:
 	// it records that a persist is owed and writes the snapshot (see
-	// parkConversationOpen). What its status flip then does depends on who
-	// fences. Where the claim fence is real, the release above has already
-	// tripped it, so the flip is refused and says so at INFO — the ordinary
-	// shape of every cross-pod stop. At N=1 nothing fences, and the flip is a
-	// deliberate re-park of the row this verb already parked: a content no-op
+	// parkConversationOpen). Its status flip is then refused by the claim
+	// fence — the release above has already tripped it — and says so at INFO,
+	// the ordinary shape of every stop on both dialects. The two can also land
+	// in the other order, when the kill outruns this verb's park: the
+	// engagement's fenced park succeeds and releases the claim, and the write
+	// below is a deliberate re-park of an already-parked row — a content no-op
 	// the park write permits on purpose, costing one repeated `open` on the
 	// wire, which consumers of that event merge idempotently by contract.
 	//

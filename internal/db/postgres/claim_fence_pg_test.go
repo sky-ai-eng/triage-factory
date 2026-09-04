@@ -15,8 +15,11 @@ import (
 )
 
 // The claim fence: the DB-layer backstop that refuses an executor's writes
-// once its claim has been released. Postgres-only — the race it guards needs
-// two executors and a reaper, neither of which exists in local mode.
+// once its claim has been released. The refusal itself is a both-dialect
+// contract and lives in the conformance suite; what is Postgres-specific, and
+// what this file covers, is the shape of the rival — a reaper releasing the
+// claim from another connection while the writer is mid-transaction — and the
+// row locking that keeps that release and the fenced write from interleaving.
 //
 // Everything here is driven through the public store methods. The reaper's
 // side is a raw UPDATE on a separate connection, which is what it genuinely

@@ -155,18 +155,22 @@ func storedStatus(t *testing.T, database *sql.DB, convID string) string {
 
 // markEngaged puts a seeded conversation into the state a claimed one is
 // really in: no stored outcome, one unreleased claim. "Running" is an
-// engagement now, not a column value.
-func markEngaged(t *testing.T, database *sql.DB, convID string) {
+// engagement now, not a column value. Returns the claim id, which is what an
+// engagement's fenced writes have to name — the store refuses a claim it
+// cannot find, on this dialect as on Postgres.
+func markEngaged(t *testing.T, database *sql.DB, convID string) string {
 	t.Helper()
 	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, convID); err != nil {
 		t.Fatalf("clear stored status for %s: %v", convID, err)
 	}
+	claimID := uuid.New().String()
 	if _, err := database.Exec(`
 		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
 		VALUES (?, ?, ?, 'test-engagement', 1, CURRENT_TIMESTAMP)
-	`, uuid.New().String(), runmode.LocalDefaultOrgID, convID); err != nil {
+	`, claimID, runmode.LocalDefaultOrgID, convID); err != nil {
 		t.Fatalf("mint claim for %s: %v", convID, err)
 	}
+	return claimID
 }
 
 // hasActiveClaim reports whether the conversation currently holds an
