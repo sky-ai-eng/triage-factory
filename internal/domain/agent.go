@@ -118,10 +118,10 @@ const (
 // InjectionSubtype values discriminate a `role=user` row the system wrote
 // on the agent's behalf from one a human typed. Assembly reads them (a
 // steer row renders inside a keep-working envelope); display reads them to
-// label the row; the native loop's turn budget reads them to tell genuine
-// user input apart from its own insertions — only a human row renews the
-// budget, so every loop-authored row must carry a subtype outside the
-// human set (blank, the steer stamp).
+// label the row; the native loop reads them to tell genuine user input
+// apart from its own insertions — its notices dedupe against the window
+// since the last human message, so every loop-authored row must carry a
+// subtype outside the human set (blank, the steer stamp).
 const (
 	// MessageSubtypeInjectionSteer marks input that was drained between
 	// turns — the model was mid-work when it arrived.
@@ -136,10 +136,6 @@ const (
 	// MessageSubtypeInjectionNudge marks a would-stop nudge the loop
 	// inserted on a hook's behalf (the artifact contract, today).
 	MessageSubtypeInjectionNudge = "injection:nudge"
-	// MessageSubtypeInjectionWrapUp marks the one-call-left notice asking
-	// the model to write a wrap-up summary before the turn budget pauses
-	// the conversation.
-	MessageSubtypeInjectionWrapUp = "injection:wrap-up"
 	// MessageSubtypeInjectionOutputLimit marks the notice written when a
 	// model turn hit the output-token limit before producing any text or
 	// tool call — the whole budget went to reasoning, so the turn recorded

@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -203,7 +202,6 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		Model:          model,
 		SystemPrompt:   systemPrompt,
 		HasBlueprint:   true,
-		MaxIterations:  nativeMaxIterations(),
 		// Derived from the very ceiling this jail was launched under, not from
 		// a constant that could drift from it.
 		BashMemBudgetMB: nativeBashMemBudgetMB(agentproc.ClaimMemoryLimitMB()),
@@ -505,9 +503,9 @@ func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domai
 // happened to change it; genuine human input means a person spoke
 // afterwards, so the run is working on something the question was never
 // asked about. Everything else the system wrote on the agent's behalf — a
-// park's stop-note, a staged event note, the wrap-up ask, the crash notice —
-// speaks for no one and is skipped, using the same closed human set the
-// engine's drain and turn budget key on. The nudge check comes first because
+// park's stop-note, a staged event note, the crash notice — speaks for no
+// one and is skipped, using the same closed human set the engine's drain
+// keys on. The nudge check comes first because
 // the nudge row itself is system-authored: the human filter would skip it.
 func askedAboutArtifactAlready(rows []domain.Message) bool {
 	for i := len(rows) - 1; i >= 0; i-- {
@@ -522,23 +520,6 @@ func askedAboutArtifactAlready(rows []domain.Message) bool {
 		}
 	}
 	return false
-}
-
-// nativeMaxIterations reads the per-engagement provider-call backstop from
-// the environment, falling back to the loop's generous default. It is a
-// backstop against a cheap-call loop, not a work budget — spend is the real
-// brake — so it is deliberately not a per-org setting.
-func nativeMaxIterations() int {
-	raw := strings.TrimSpace(os.Getenv("TF_AGENT_MAX_ITERATIONS"))
-	if raw == "" {
-		return 0 // the engine's default
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n <= 0 {
-		delegateLog.Warn("invalid TF_AGENT_MAX_ITERATIONS; using the default", "value", raw)
-		return 0
-	}
-	return n
 }
 
 // The per-command bash memory budget, as a policy rather than a knob: a cap,

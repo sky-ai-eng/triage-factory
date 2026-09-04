@@ -247,7 +247,7 @@ function buildRows(messages: Message[], worktree: string | undefined): React.Rea
   const rows: React.ReactNode[] = []
   for (const msg of messages) {
     // A system-authored user row — a stop note, an executor-changed notice,
-    // the loop's wrap-up ask — is the machine explaining itself, and gets a
+    // a compaction result — is the machine explaining itself, and gets a
     // marker line rather than a YOU line. Checked before the operator arm
     // below, which would otherwise attribute every one of them to the person
     // reading the screen.

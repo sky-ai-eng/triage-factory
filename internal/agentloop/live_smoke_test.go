@@ -98,7 +98,6 @@ func TestNativeLoop_LiveSmoke(t *testing.T) {
 			Family:  agentprompt.FamilyClaude,
 			Mode:    agentprompt.ModeMulti,
 		}),
-		MaxIterations: 10,
 	})
 
 	if got.Kind != ResultConcluded {

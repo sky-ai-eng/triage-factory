@@ -813,7 +813,7 @@ CREATE TABLE public.messages (
     -- deviating from normal role behavior carry a subtype. System-minted 'user'
     -- subtypes: 'injection:compaction-request', 'injection:compaction-result',
     -- 'injection:steer', 'injection:system-note', 'injection:context',
-    -- 'injection:nudge', 'injection:wrap-up', 'stop-note'.
+    -- 'injection:nudge', 'stop-note'.
     role text NOT NULL,
     content text,
     subtype text DEFAULT ''::text,

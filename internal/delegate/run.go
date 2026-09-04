@@ -575,7 +575,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			Extras:  cfg.extraAllowedTools,
 			GH:      ghChannel != nil,
 		}),
-		MaxTurns:        100,
 		ExtraEnv:        extraEnv,
 		TraceID:         conversationID,
 		MemoryNamespace: namespace,
