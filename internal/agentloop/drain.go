@@ -116,10 +116,10 @@ func idsOf(rows []domain.Message) []int {
 
 // insertPending queues a row for the next drain. Used for the loop's own
 // injected input (the executor-changed notice, the turn-end nudge): it goes
-// through the same queue as user input rather than
-// being spliced into an assembly, so there is exactly one injection point
-// and it is durable. Every caller passes an explicit injection subtype —
-// the loop never mints a row that could read as human input.
+// through the same queue as user input rather than being spliced into an
+// assembly, so there is exactly one injection point and it is durable. Every
+// caller passes an explicit injection subtype — the loop never mints a row
+// that could read as human input.
 func (e *Engine) insertPending(ctx context.Context, params Params, content, subtype string) error {
 	pending := false
 	_, err := e.Transcript.Insert(ctx, params.OrgID, &domain.Message{

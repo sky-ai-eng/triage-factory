@@ -505,8 +505,8 @@ func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domai
 // asked about. Everything else the system wrote on the agent's behalf — a
 // park's stop-note, a staged event note, the crash notice — speaks for no
 // one and is skipped, using the same closed human set the engine's drain
-// keys on. The nudge check comes first because
-// the nudge row itself is system-authored: the human filter would skip it.
+// keys on. The nudge check comes first because the nudge row itself is
+// system-authored: the human filter would skip it.
 func askedAboutArtifactAlready(rows []domain.Message) bool {
 	for i := len(rows) - 1; i >= 0; i-- {
 		if rows[i].Role != "user" {

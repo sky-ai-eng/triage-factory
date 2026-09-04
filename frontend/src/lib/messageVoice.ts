@@ -7,9 +7,9 @@ import type { Message } from '../types'
 // engagement ended (a spend-cap park, a provider error that could not be
 // retried, a user pressing stop), a notice that the executor changed, the
 // machine-composed row that replaces a compacted span. The subtype is what
-// tells them apart, and the human set is closed:
-// blank (the normal spelling — a mission prompt, an API follow-up) and the
-// mid-work steer stamp. Every other subtype on a user row is the system.
+// tells them apart, and the human set is closed: blank (the normal spelling —
+// a mission prompt, an API follow-up) and the mid-work steer stamp. Every
+// other subtype on a user row is the system.
 //
 // Blank is the whole of "normal" — the vocabulary reserves a subtype for rows
 // that deviate from ordinary role behavior, and the conversations refactor
