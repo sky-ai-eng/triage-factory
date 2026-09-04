@@ -435,18 +435,81 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// on an unwired fixture. A bring-up failure (brain not provisioning) is a
 	// transient setup failure — requeue like any other. Torn down after the run.
 	closeGate("passed", nil)
-	sidecar, err := s.bringUpRunSidecar(ctx, orgID, conv, *task)
+
+	// The per-conversation cancel handle, registered HERE — before the
+	// sidecar, the git channel, the fetch and the clone — rather than at the
+	// runtime call. A stop arriving during bring-up resolves this handle and
+	// cancels stepCtx, which every setup call below runs under, so the clone
+	// it interrupts returns and the exits below read the stop. Registered
+	// after bring-up, a stop during it found no handle and took the DB-only
+	// path: the row parked and the claim released while the setup goroutine,
+	// never told, finished the clone and launched an agent into a conversation
+	// its user had already stopped. The window that remains — the claim gate,
+	// the model resolve and the queue peek above — is the same narrow one the
+	// resume path accepts.
+	//
+	// The deferred deregister is the backstop for the exits between here and
+	// the runtime call; the explicit one after the runtime keeps the handle's
+	// lifetime around the agent exactly as it was.
+	stepCtx, stepCancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.cancels[conv.ID] = stepCancel
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.cancels, conv.ID)
+		s.mu.Unlock()
+		stepCancel()
+	}()
+
+	// stoppedDuringBringUp is the first question every bring-up exit asks of
+	// its error: a setup call that returned because stepCtx was cancelled did
+	// not fail, it was stopped, and the stop already decided the disposition.
+	// The park here is the engagement's own half of it, through the fence — on
+	// a user stop the verb has usually parked and released first, and the
+	// refusal is the design working (see markConversationOpen). Without this
+	// the exit would read the cancelled clone as a transient setup failure and
+	// requeue (a no-op against a released claim, but the wrong story in the
+	// trace) or, out of attempts, fail the blueprint behind a conversation the
+	// user merely stopped. No snapshot: nothing this engagement built is a
+	// workspace worth capturing yet, and a cold resume rebuilds from scratch.
+	//
+	// The dispatcher's own shutdown is not a stop and is read first by the
+	// arms that distinguish it; here a cancelled parent means "not ours to
+	// dispose of", so the answer is no.
+	stoppedDuringBringUp := func() bool {
+		if ctx.Err() != nil || stepCtx.Err() == nil {
+			return false
+		}
+		s.endEngagement(conv.ID, engagementCancelled)
+		s.markConversationOpen(stepCtx, liveParkContext{
+			orgID:          orgID,
+			conversationID: conv.ID,
+			taskID:         task.ID,
+			triggerType:    conv.TriggerType,
+			creatorUserID:  conv.CreatorUserID,
+			claimID:        conv.ClaimID,
+			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+			runtime:        conv.Runtime,
+		})
+		return true
+	}
+
+	sidecar, err := s.bringUpRunSidecar(stepCtx, orgID, conv, *task)
 	if err != nil {
 		if ctx.Err() != nil {
 			s.endEngagement(conv.ID, engagementShutdown)
 			return // dispatcher shutting down — leave the claimed run for boot reconcile
+		}
+		if stoppedDuringBringUp() {
+			return
 		}
 		s.failEngagement(conv.ID, err)
 		s.handlePreAgentFailure(orgID, br, *conv, err)
 		return
 	}
 	defer sidecar.Close()
-	localGit, err := s.startLocalGitChannel(ctx, orgID, *task, agenthost.ConversationInfo{
+	localGit, err := s.startLocalGitChannel(stepCtx, orgID, *task, agenthost.ConversationInfo{
 		OrgID:            orgID,
 		UserID:           conv.CreatorUserID,
 		ConversationID:   conv.ID,
@@ -454,6 +517,9 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		IsEventTriggered: conv.TriggerType == domain.TriggerTypeEvent,
 	})
 	if err != nil {
+		if stoppedDuringBringUp() {
+			return
+		}
 		s.failEngagement(conv.ID, err)
 		s.handlePreAgentFailure(orgID, br, *conv, err)
 		return
@@ -504,8 +570,11 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// Build (step 0, first claim) or rehydrate (later steps / crash re-claim) the
 	// shared workspace. A transient setup failure requeues; a persistent one
 	// fails the blueprint.
-	cfg, err := s.buildStepConfig(ctx, orgID, br, *task, *conv, gh, sidecar, localGit)
+	cfg, err := s.buildStepConfig(stepCtx, orgID, br, *task, *conv, gh, sidecar, localGit)
 	if err != nil {
+		if stoppedDuringBringUp() {
+			return
+		}
 		s.failEngagement(conv.ID, err)
 		s.handlePreAgentFailure(orgID, br, *conv, err)
 		return
@@ -590,12 +659,6 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 
 	toast.Info(s.wsHub, orgID, fmt.Sprintf("Blueprint step %d/%d: %s (%s)",
 		stepIdx+1, len(plan), truncateToastMsg(stepPrompt.Name, 60), shortConversationID(conv.ID)))
-
-	// Per-step cancel handle so CancelBlueprintRun can SIGKILL the active subprocess.
-	stepCtx, stepCancel := context.WithCancel(ctx)
-	s.mu.Lock()
-	s.cancels[conv.ID] = stepCancel
-	s.mu.Unlock()
 
 	// conv.SessionID is empty on a first claim and non-empty when this run was
 	// re-claimed mid-flight by a crash — runAgent resumes it when the warm

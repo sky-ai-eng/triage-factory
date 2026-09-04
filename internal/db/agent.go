@@ -161,9 +161,9 @@ type PRCoherenceTargetQuery struct {
 //     named claim if it's still active", "this claim id if it exists" — a
 //     miss is the guard declining, (nil, nil), the same shape
 //     EntityStore.Close uses, not an error. SetExecutorForClaimSystem and
-//     SetClaimPhaseSystem are additionally fenced on Postgres
-//     (ErrClaimReleased); SQLite has no fence to trip, so a miss there is
-//     the same (nil, nil) decline.
+//     SetClaimPhaseSystem are additionally fenced (ErrClaimReleased) on both
+//     dialects, so for them the "named claim no longer active" miss is the
+//     refusal rather than the decline.
 //   - messages writes: SettleCompactionRequestForClaimSystem targets exactly
 //     one row (the compaction request, keyed by its own message id) and
 //     returns (*domain.Message, error), sharing Messages' column list and
@@ -986,9 +986,11 @@ type ConversationStore interface {
 	// must not be able to land on an engagement driving a different one.
 	//
 	// Returns the claim row this call wrote, sharing the projection
-	// SetExecutorSystem returns. Fenced on Postgres (ErrClaimReleased); SQLite
-	// has no fence, so a call naming a claim that is gone or released answers
-	// (nil, nil) — the guard declining, matching the existing no-op contract.
+	// SetExecutorSystem returns. Fenced on both dialects: a call naming a
+	// claim that is gone or released is refused with ErrClaimReleased, and
+	// the engagement reporting it has lost the conversation — the pre-spawn
+	// phase write reads the refusal as its last chance to not launch a
+	// runtime into a conversation somebody else now owns.
 	SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) (*domain.ExecutorClaim, error)
 
 	// LastAgentActivityAtSystem returns the created_at of the conversation's most

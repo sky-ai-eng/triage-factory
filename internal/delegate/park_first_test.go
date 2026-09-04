@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -103,8 +104,9 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 		t.Fatal("the teardown never finished")
 	}
 	// The teardown's contribution lands either way: the blob, and the record
-	// that says so. (Its own status flip is a no-op here — N=1 does not fence,
-	// so it re-parks a row this stop already parked.)
+	// that says so. (Its own status flip is refused by the fence — the stop
+	// released the claim first — which is the ordinary shape and changes
+	// nothing about the persist.)
 	assertSnapshotPresent(t, s, namespace, true)
 	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, "claim-killed")
 }
@@ -135,6 +137,7 @@ func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "work in progress")
+	claimID := dbtest.SeedActiveClaim(t, database, conversationID, "exec-idle", 1)
 
 	if fenced := s.parkConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
@@ -143,10 +146,10 @@ func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 		namespace:      namespace,
 		claudeCwd:      wt,
 		triggerType:    "event",
-		claimID:        "claim-idle",
+		claimID:        claimID,
 		reason:         db.ParkIdle(),
 	}, ""); fenced {
-		t.Fatal("parkConversationOpen reported a fence trip on an unfenced store")
+		t.Fatal("parkConversationOpen reported a fence trip on a live claim")
 	}
 
 	if statusAtUpload != "open" {
@@ -155,7 +158,7 @@ func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 	if stateAtUpload == nil || stateAtUpload.State != domain.WorkspaceSnapshotPending {
 		t.Errorf("state during the upload = %+v, want pending under this engagement — the record has to precede the flip, or a watcher sees a resumable row with nothing behind it", stateAtUpload)
 	}
-	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, "claim-idle")
+	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, claimID)
 	assertSnapshotPresent(t, s, namespace, true)
 }
 
@@ -176,6 +179,7 @@ func TestParkConversationOpen_RetriesALostLifecycleOpen(t *testing.T) {
 
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "work the record almost lost track of")
+	claimID := dbtest.SeedActiveClaim(t, database, conversationID, "exec-flaky", 1)
 
 	if fenced := s.parkConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
@@ -184,16 +188,16 @@ func TestParkConversationOpen_RetriesALostLifecycleOpen(t *testing.T) {
 		namespace:      namespace,
 		claudeCwd:      wt,
 		triggerType:    "event",
-		claimID:        "claim-flaky",
+		claimID:        claimID,
 		reason:         db.ParkIdle(),
 	}, ""); fenced {
-		t.Fatal("parkConversationOpen reported a fence trip on an unfenced store")
+		t.Fatal("parkConversationOpen reported a fence trip on a live claim")
 	}
 
 	if flaky.begins < 2 {
 		t.Errorf("BeginSnapshotSystem called %d time(s); the persist must retry an open the park lost", flaky.begins)
 	}
-	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, "claim-flaky")
+	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, claimID)
 	assertSnapshotPresent(t, s, namespace, true)
 }
 

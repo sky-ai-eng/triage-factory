@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"slices"
 	"strconv"
@@ -1697,9 +1698,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	// The claim-fenced engagement writes, driven with a LIVE claim. What
 	// every backend must agree on is that naming your own claim changes
 	// nothing about the write itself: same row, same attribution, same
-	// terminal, same phase. The refusal half of the contract is Postgres-only
-	// (local is single-process and has no zombie to refuse) and is asserted
-	// in the Postgres backend test file.
+	// terminal, same phase. The refusal half is the subtest after this one;
+	// the Postgres backend test file additionally covers the locking the
+	// refusal needs against a concurrent release, which SQLite's single
+	// connection makes moot.
 	t.Run("ClaimFencedWrites_ActiveClaimWritesExactlyLikeTheUnfencedPath", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -1767,6 +1769,93 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		after := seed.ClaimRows(t, conversationID)
 		if len(after) != 1 || !after[0].Released || after[0].Outcome != "completed" {
 			t.Fatalf("claims after complete = %+v, want the engagement released as completed", after)
+		}
+	})
+
+	// The refusal half, on both dialects, staged the way local mode actually
+	// produces it: the stop verb's own park releases the claim out from under
+	// the engagement. Every fenced write must then refuse rather than land —
+	// the write succeeding is the harm, so each is asserted individually, and
+	// the row is checked afterwards to be exactly what the stop left.
+	t.Run("ClaimFencedWrites_ReleasedClaimRefusesEveryWrite", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-stopped", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, conversationID)[0].ID
+		// One row the engagement wrote while it still owned the conversation,
+		// so the settle/deliver refusals below have a real target to miss.
+		pending := false
+		ownedID, err := store.InsertMessageForClaimSystem(ctx, orgID, claimID, &domain.Message{
+			ConversationID: conversationID, Role: "assistant", Content: "owned", Delivered: &pending,
+		})
+		if err != nil {
+			t.Fatalf("InsertMessageForClaimSystem (live): %v", err)
+		}
+
+		// The stop verb's write: unfenced, parks the row, releases the claim.
+		if flipped, err := store.ParkOpenSystem(ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !flipped {
+			t.Fatalf("ParkOpenSystem (the stop) = (%v, %v), want (true, nil)", flipped, err)
+		}
+		stopped := seed.ClaimRows(t, conversationID)
+		if len(stopped) != 1 || !stopped[0].Released || stopped[0].Outcome != "cancelled" {
+			t.Fatalf("claims after the stop = %+v, want the one claim released as cancelled", stopped)
+		}
+
+		refuse := func(name string, err error) {
+			t.Helper()
+			if !errors.Is(err, db.ErrClaimReleased) {
+				t.Errorf("%s after the stop = %v, want ErrClaimReleased", name, err)
+			}
+		}
+		_, err = store.SetSessionForClaimSystem(ctx, orgID, conversationID, claimID, "sess-zombie")
+		refuse("SetSessionForClaimSystem", err)
+		_, err = store.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, "/tmp/zombie")
+		refuse("SetWorktreePathForClaimSystem", err)
+		_, err = store.InsertMessageForClaimSystem(ctx, orgID, claimID, &domain.Message{
+			ConversationID: conversationID, Role: "assistant", Content: "zombie", Delivered: &pending,
+		})
+		refuse("InsertMessageForClaimSystem", err)
+		refuse("MarkDeliveredForClaimSystem", store.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, claimID, []int{int(ownedID)}, ""))
+		_, err = store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, "completed", 0, 0, 0, "", "finish", "", "")
+		refuse("CompleteForClaimSystem", err)
+		_, err = store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureCrash))
+		refuse("MarkFailedIfActiveForClaimSystem", err)
+		_, err = store.ParkOpenForClaimSystem(ctx, orgID, conversationID, claimID, db.ParkIdle())
+		refuse("ParkOpenForClaimSystem", err)
+		_, err = store.SetExecutorForClaimSystem(ctx, orgID, conversationID, claimID, "exec-zombie", 2)
+		refuse("SetExecutorForClaimSystem", err)
+		_, err = store.SetClaimPhaseSystem(ctx, orgID, conversationID, claimID, "agent_starting")
+		refuse("SetClaimPhaseSystem", err)
+		refuse("CompactForClaimSystem", store.CompactForClaimSystem(ctx, orgID, conversationID, claimID, nil,
+			&domain.Message{Role: "user", Content: "summary"}, []int{int(ownedID)}))
+		_, err = store.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, claimID, int(ownedID), 1, 1, 0, 0, nil, "zombie")
+		refuse("SettleCompactionRequestForClaimSystem", err)
+
+		// Nothing landed: the transcript is the one owned row, undelivered and
+		// unsettled, and the conversation is the stop's `open` with its claim
+		// exactly as the stop released it.
+		msgs, err := store.Messages(ctx, orgID, conversationID)
+		if err != nil || len(msgs) != 1 {
+			t.Fatalf("Messages = %v (err %v), want only the row written while the claim was live", msgs, err)
+		}
+		if msgs[0].Delivered == nil || *msgs[0].Delivered {
+			t.Errorf("owned row delivered = %v, want still pending (the refused flush wrote nothing)", msgs[0].Delivered)
+		}
+		if _, ok := msgs[0].Metadata["compaction_failure"]; ok {
+			t.Error("owned row carries compaction_failure; the refused settle wrote its metadata")
+		}
+		if got, _ := store.Get(ctx, orgID, conversationID); got == nil || got.Status != "open" {
+			t.Errorf("status after the refusals = %v, want open (the stop's own state, untouched)", got)
+		}
+		after := seed.ClaimRows(t, conversationID)
+		if len(after) != 1 || after[0].ID != stopped[0].ID || !after[0].Released ||
+			after[0].Outcome != stopped[0].Outcome || after[0].Phase != stopped[0].Phase ||
+			after[0].ExecutorID != stopped[0].ExecutorID || after[0].BootEpoch != stopped[0].BootEpoch {
+			t.Errorf("claims after the refusals = %+v, want unchanged from the stop's %+v", after, stopped)
 		}
 	})
 

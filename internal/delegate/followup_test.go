@@ -464,12 +464,16 @@ func TestDisposeOfModelRefusal_ParksOnceWithTheRefusal(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed transcript: %v", err)
 	}
+	claimID := markEngaged(t, database, "r-refused")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
 	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-refused")
 	if err != nil || conv == nil {
 		t.Fatalf("load conversation: %v", err)
 	}
+	// The claim path hands dispatch the conversation with its claim named;
+	// the park below is fenced on it.
+	conv.ClaimID = claimID
 	cause := fmt.Errorf("%w: %s is not one of %s", domain.ErrModelNotEnabled, domain.ModelOpus, domain.ModelHaiku)
 	s.disposeOfModelRefusal(runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: domain.BlueprintRunStatusCompleted}, *conv, cause)
 

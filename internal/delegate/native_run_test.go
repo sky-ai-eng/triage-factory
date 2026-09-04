@@ -167,9 +167,9 @@ func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
 func TestMintOpeningTurn_QueuesThePendingInputShape(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-open-turn", "", "/tmp/wt-open-turn")
-	markEngaged(t, database, "r-open-turn")
+	claimID := markEngaged(t, database, "r-open-turn")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	transcript := newNativeTranscript(s, runmode.LocalDefaultOrgID, "r-open-turn", "")
+	transcript := newNativeTranscript(s, runmode.LocalDefaultOrgID, "r-open-turn", claimID)
 
 	ctx := context.Background()
 	opening := "<task_context>\nPull request owner/repo#7\n</task_context>\n\nfix the failing check"

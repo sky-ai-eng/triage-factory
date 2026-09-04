@@ -30,6 +30,21 @@ type launchFixture struct {
 
 func newLaunchFixture(t *testing.T, suffix string) *launchFixture {
 	t.Helper()
+	// A real directory, so "the worktree survives" is an assertion about the
+	// filesystem rather than about a string.
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	return newLaunchFixtureWithWorktree(t, suffix, wt)
+}
+
+// newLaunchFixtureWithWorktree is newLaunchFixture with the run tree chosen by
+// the caller. Empty means the blueprint has no worktree recorded yet, so the
+// claim's bring-up takes the source setup's build-from-nothing arm — the fetch
+// and the clone — rather than the rehydrate.
+func newLaunchFixtureWithWorktree(t *testing.T, suffix, wt string) *launchFixture {
+	t.Helper()
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 	database := newDelegateTestDB(t)
@@ -62,12 +77,6 @@ func newLaunchFixture(t *testing.T, suffix string) *launchFixture {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 
-	// A real directory, so "the worktree survives" is an assertion about the
-	// filesystem rather than about a string.
-	wt := filepath.Join(t.TempDir(), "wt")
-	if err := os.MkdirAll(wt, 0o755); err != nil {
-		t.Fatalf("mkdir worktree: %v", err)
-	}
 	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "lfbr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,

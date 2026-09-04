@@ -1118,13 +1118,20 @@ func (s *Spawner) getRunSecrets() agentproc.SecretsReader {
 //
 // claimID names the engagement reporting the progress; empty falls back to
 // whichever claim is active on the conversation, for the paths with no
-// claimed run in scope. A fence trip here is loud but not fatal: the write is
-// refused, so nothing lands on the successor's claim, and the engagement
-// carries on into the launch it was setting up — where its first transcript
-// write meets the same fence and abandons the run properly. Aborting from
-// here instead would mean a terminal write on a conversation this executor no
-// longer owns, which is the one thing a fenced-out engagement must not do.
-func (s *Spawner) updatePhase(ctx context.Context, orgID, conversationID, claimID, phase string) {
+// claimed run in scope.
+//
+// Returns fenced: true when the claim-keyed write was refused because the
+// claim is released — this executor no longer owns the conversation. Nothing
+// landed, so the caller has nothing to undo; what it decides is whether to go
+// on. The mid-setup phases carry on, because the next fenced write asks the
+// same question and there is no runtime to spare yet. The pre-spawn phase is
+// different: it is the last write before a sandbox or a node process comes
+// up, and an engagement that launches one anyway spends it on a transcript
+// whose first row will be refused. Those callers return the fenced
+// disposition instead — which writes nothing, exactly as a fenced-out
+// engagement must not — rather than spawning into a conversation somebody
+// else owns.
+func (s *Spawner) updatePhase(ctx context.Context, orgID, conversationID, claimID, phase string) (fenced bool) {
 	// Clearing the phase IS agent-live — the one signal both runtimes share —
 	// so it is where the engagement's trace root ends (standing decision 5).
 	// Ahead of the write, because the span should measure bring-up rather than
@@ -1145,8 +1152,12 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, conversationID, claimI
 		_, err = s.conversations.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, phase)
 	}
 	if errors.Is(err, db.ErrClaimReleased) {
+		// Not broadcast: the display status is the row's, and the row belongs
+		// to whoever released the claim — announcing this engagement's phase
+		// over theirs would show a stopped conversation as setting up.
 		delegateLog.Error("claim fence refused a phase write — this executor no longer owns the conversation",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "phase", phase, "error", err)
+		return true
 	} else if err != nil {
 		delegateLog.Warn("update phase for conversation failed", "conversation", conversationID, "error", err)
 	}
@@ -1159,6 +1170,7 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, conversationID, claimI
 	// the blueprint orchestrator drives the aggregate column via
 	// recomputeTaskBoardColumn at its transition points (blueprint start, step
 	// start, park, resume). updatePhase stays a pure claim-phase + WS helper.
+	return false
 }
 
 // setWorktreePath records where a run's workspace resolved, routed exactly the

@@ -1250,58 +1250,138 @@ func (s *conversationStore) InsertMessageSystem(ctx context.Context, orgID strin
 
 // --- Claim-fenced engagement writes ---
 //
-// Unfenced here, and deliberately so. The fence guards one race: a zombie
-// executor writing into a conversation a successor has been handed. Local
-// mode is a single process that claims its own work, with no fleet reaper to
-// hand anything over and no second executor to hand it to — the losing side
-// of that race has no way to exist. These wrappers therefore do exactly what
-// their unfenced counterparts do.
+// Fenced here exactly as on Postgres: every write below validates the named
+// claim inside its own transaction (assertClaimActive, claim_fence.go) and
+// refuses with db.ErrClaimReleased when the claim is gone or released. The
+// write set, the attribution and the resulting rows are the unfenced
+// counterparts' — what the fence adds is only the refusal, and the refusal is
+// not optional at N=1. Local mode has no reaper and no successor executor,
+// but it has the stop verb: a person stopping a conversation parks the row
+// and releases its claim without consulting the engagement, so an engagement
+// that was still bringing its runtime up when the stop landed reaches its next
+// write as the zombie the fence exists to catch. Refusing that write is what
+// keeps the agent from spawning into a conversation its user has stopped.
 //
-// The claim id carries whichever of its two jobs the write actually has.
-// Where it is attribution — the claim stamped onto a transcript row — it is
-// written here exactly as Postgres writes it. Where it is only the assertion
-// of ownership the fence would have tested — the session id, the worktree
-// path, the terminal, the park — it is unused, because there is no rival
-// owner for it to be measured against.
+// Each method wraps its unfenced twin in inTx so the check and the write share
+// one transaction; a twin that opens its own transaction (ParkOpen, Complete,
+// MarkFailedIfActive) nests harmlessly, since inTx passes an existing *sql.Tx
+// straight through.
 //
-// This is not a dialect fork of shared semantics: the write set, the
-// attribution, and the resulting rows are identical. What differs is a
-// refusal that has nothing to refuse. Postgres carries the enforcement and
-// the conformance suite asserts it there.
-//
-// Two are written out below rather than delegated — SetExecutorForClaimSystem
-// and SetClaimPhaseSystem. Their unfenced twins resolve the conversation's
+// Two are written out rather than delegated — SetExecutorForClaimSystem and
+// SetClaimPhaseSystem. Their unfenced twins resolve the conversation's
 // ACTIVE claim instead of the named one, and one of them mints a claim when
 // there is none. Neither of those is the fence; both are contract, and
 // delegating would have quietly dropped the caller's claim id on the floor.
 
 func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID, conversationID, claimID, sessionID string) (*domain.Conversation, error) {
-	return s.SetSession(ctx, orgID, conversationID, sessionID)
+	var result *domain.Conversation
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		r, err := (&conversationStore{q: q}).SetSession(ctx, orgID, conversationID, sessionID)
+		result = r
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *conversationStore) SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) (*domain.Conversation, error) {
-	return s.SetWorktreePath(ctx, orgID, conversationID, path)
+	var result *domain.Conversation
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		r, err := (&conversationStore{q: q}).SetWorktreePath(ctx, orgID, conversationID, path)
+		result = r
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
+// InsertMessageForClaimSystem fences on the row's own conversation, so the
+// claim the fence validates and the conversation the row lands on cannot
+// name different things. The explicit claim id overwrites msg.ClaimID for the
+// same reason the Postgres twin does: the row that persists must be
+// attributed to the claim that was checked.
 func (s *conversationStore) InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error) {
-	msg.ClaimID = claimID
-	return s.InsertMessage(ctx, orgID, msg)
+	var id int64
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, msg.ConversationID, claimID); err != nil {
+			return err
+		}
+		msg.ClaimID = claimID
+		i, err := (&conversationStore{q: q}).InsertMessage(ctx, orgID, msg)
+		id = i
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (s *conversationStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int, subtype string) error {
-	return s.markDelivered(ctx, orgID, conversationID, ids, subtype)
+	return inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		return (&conversationStore{q: q}).markDelivered(ctx, orgID, conversationID, ids, subtype)
+	})
 }
 
 func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
-	return s.Complete(ctx, orgID, conversationID, status, costUSD, durationMs, numTurns, resultSummary, outcome, outcomeReason, failureKind)
+	var result *domain.Conversation
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		r, err := (&conversationStore{q: q}).Complete(ctx, orgID, conversationID, status, costUSD, durationMs, numTurns, resultSummary, outcome, outcomeReason, failureKind)
+		result = r
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error) {
-	return s.MarkFailedIfActive(ctx, orgID, conversationID, failureKind)
+	var flipped bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		f, err := (&conversationStore{q: q}).MarkFailedIfActive(ctx, orgID, conversationID, failureKind)
+		flipped = f
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return flipped, nil
 }
 
 func (s *conversationStore) ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park db.Park) (bool, error) {
-	return s.ParkOpen(ctx, orgID, conversationID, park)
+	var flipped bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		f, err := (&conversationStore{q: q}).ParkOpen(ctx, orgID, conversationID, park)
+		flipped = f
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return flipped, nil
 }
 
 // SetExecutorForClaimSystem is written out rather than delegated, for the
@@ -1312,37 +1392,58 @@ func (s *conversationStore) ParkOpenForClaimSystem(ctx context.Context, orgID, c
 // would have ignored the caller's claimID and could mint a claim in exactly
 // the edge case (no active claim) where the interface says to write nothing.
 //
-// What local mode drops is only the refusal. A row naming a released claim is
-// a no-op here rather than an ErrClaimReleased, which is the standing N=1
-// exemption: there is no second executor for the refusal to protect the row
-// from. The released_at filter is the twin's own, kept for the same reason
-// SetClaimPhaseSystem keeps it — a released claim's identity is settled
-// history, and rewriting it would be a change neither dialect makes.
+// The released_at filter on the UPDATE is redundant with the fence — the
+// fence has already refused a released claim by the time it runs — and is
+// kept because it is the twin's own predicate: a released claim's identity is
+// settled history, and the statement should say so on its own.
 func (s *conversationStore) SetExecutorForClaimSystem(ctx context.Context, orgID, conversationID, claimID, executorID string, bootEpoch int64) (*domain.ExecutorClaim, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	row := s.q.QueryRowContext(ctx, `
-		UPDATE claims SET executor_id = ?, boot_epoch = ?
-		WHERE id = ? AND conversation_id = ? AND released_at IS NULL
-		RETURNING `+sqliteClaimReturningColumns, executorID, bootEpoch, claimID, conversationID)
-	return scanSqliteExecutorClaimRow(row)
+	var result *domain.ExecutorClaim
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		row := q.QueryRowContext(ctx, `
+			UPDATE claims SET executor_id = ?, boot_epoch = ?
+			WHERE id = ? AND conversation_id = ? AND released_at IS NULL
+			RETURNING `+sqliteClaimReturningColumns, executorID, bootEpoch, claimID, conversationID)
+		r, err := scanSqliteExecutorClaimRow(row)
+		result = r
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // SetClaimPhaseSystem keeps the released_at filter its active-claim sibling
-// has always had: a released claim's phase is inert history either way, so a
-// call naming one stays the no-op it is today rather than rewriting it. The
+// has always had, for the reason SetExecutorForClaimSystem gives. The
 // conversation binds too — it costs nothing and keeps the row this writes
 // from drifting away from the one the caller named.
 func (s *conversationStore) SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) (*domain.ExecutorClaim, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	row := s.q.QueryRowContext(ctx, `
-		UPDATE claims SET phase = NULLIF(?, '')
-		WHERE id = ? AND conversation_id = ? AND released_at IS NULL
-		RETURNING `+sqliteClaimReturningColumns, phase, claimID, conversationID)
-	return scanSqliteExecutorClaimRow(row)
+	var result *domain.ExecutorClaim
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		row := q.QueryRowContext(ctx, `
+			UPDATE claims SET phase = NULLIF(?, '')
+			WHERE id = ? AND conversation_id = ? AND released_at IS NULL
+			RETURNING `+sqliteClaimReturningColumns, phase, claimID, conversationID)
+		r, err := scanSqliteExecutorClaimRow(row)
+		result = r
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // LastAgentActivityAtSystem returns the created_at of the run's newest non-user
@@ -1862,8 +1963,8 @@ func (s *conversationStore) ListForAssemblySystem(ctx context.Context, orgID, co
 // markDelivered flips delivered=true on the given message ids, scoped to
 // conversationID, stamping subtype in the same statement when non-empty. ids outside
 // the run or already delivered are silently unaffected. Reached through
-// MarkDeliveredForClaimSystem — the flush is an engagement write, unfenced
-// on this dialect (see the claim-fence block above).
+// MarkDeliveredForClaimSystem, which fences it (see the claim-fence block
+// above).
 func (s *conversationStore) markDelivered(ctx context.Context, orgID, conversationID string, ids []int, subtype string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -1897,8 +1998,9 @@ func (s *conversationStore) markDelivered(ctx context.Context, orgID, conversati
 }
 
 // CompactForClaimSystem commits one compaction atomically — see the interface
-// doc for the full contract. Unfenced on this dialect like every ForClaim
-// write (see the claim-fence block above); the claim id is attribution.
+// doc for the full contract. Fenced like every ForClaim write (see the
+// claim-fence block above); the claim id is also the attribution on the rows
+// it inserts.
 //
 // Exempt from the returned-row rule (bare error stays the return type): this
 // writes up to two inserted rows, a batch flip, and a re-seq of every queued
@@ -1910,6 +2012,9 @@ func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, co
 		return err
 	}
 	return inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
 		txStore := &conversationStore{q: q}
 		if replyRow != nil {
 			replyRow.ConversationID = conversationID
@@ -1991,21 +2096,33 @@ func scanIntIDs(rows *sql.Rows) ([]int, error) {
 }
 
 // SettleCompactionRequestForClaimSystem records a discarded warm attempt on
-// the request row — see the interface doc. Unfenced on this dialect.
+// the request row — see the interface doc. Fenced like every ForClaim write.
 func (s *conversationStore) SettleCompactionRequestForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) (*domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	row := s.q.QueryRowContext(ctx, `
-		UPDATE messages
-		SET input_tokens = ?, output_tokens = ?,
-		    cache_read_tokens = ?, cache_creation_tokens = ?,
-		    cost_usd = ?,
-		    metadata = json_set(COALESCE(metadata, '{}'), '$.compaction_failure', ?)
-		WHERE conversation_id = ? AND id = ?
-		RETURNING `+sqliteMessageColumns, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens,
-		sqliteNullFloat(costUSD), reason, conversationID, requestID)
-	return scanMessageRow(row)
+	var result *domain.Message
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		row := q.QueryRowContext(ctx, `
+			UPDATE messages
+			SET input_tokens = ?, output_tokens = ?,
+			    cache_read_tokens = ?, cache_creation_tokens = ?,
+			    cost_usd = ?,
+			    metadata = json_set(COALESCE(metadata, '{}'), '$.compaction_failure', ?)
+			WHERE conversation_id = ? AND id = ?
+			RETURNING `+sqliteMessageColumns, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens,
+			sqliteNullFloat(costUSD), reason, conversationID, requestID)
+		r, err := scanMessageRow(row)
+		result = r
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // SetWindowStateSystem is the elision/compaction primitive: a batched range flip of

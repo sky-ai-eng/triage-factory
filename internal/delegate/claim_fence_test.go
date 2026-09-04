@@ -12,15 +12,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// The SDK path's reaction to a claim fence trip. The fence itself is a
-// Postgres property (see internal/db/postgres); what these pin is the half
-// that lives here — that a refused write makes the engagement stop rather
-// than carry on writing into a conversation a successor is driving.
+// The SDK path's reaction to a claim fence trip. The fence itself is a store
+// property (internal/db, both dialects); what these pin is the half that lives
+// here — that a refused write makes the engagement stop rather than carry on
+// writing into a conversation somebody else now owns.
 //
 // A released claim is staged by making the store refuse, not by releasing a
-// real one: the local-mode store the delegate tests run against does not
-// fence (single process, no reaper, nothing to refuse), which is exactly why
-// the refusal has to be injected to exercise the reaction.
+// real one: the injected refusal counts which fenced door each write came
+// through, which a real release cannot, and it fires on exactly the call
+// under test rather than on every claim-keyed write a fixture happens to make.
 
 // fencedConversationStore refuses the claim-fenced writes, passing everything
 // else through to the real store.
@@ -392,21 +392,25 @@ func TestFailConversation_FenceTripRecordsNothing(t *testing.T) {
 
 // TestUpdatePhase_RoutesByClaimAndSurvivesAFenceTrip: with a claim in scope
 // the phase write is claim-keyed (so the store can refuse it); without one it
-// falls back to the conversation's active claim. A refusal is an incident
-// signal, not a control-flow event — the store has already kept the write off
-// the successor's claim, and aborting the run from here would mean the
-// terminal write a fenced-out engagement must never make.
-func TestUpdatePhase_RoutesByClaimAndSurvivesAFenceTrip(t *testing.T) {
+// falls back to the conversation's active claim. A refusal is reported to the
+// caller and nothing else happens — the store has already kept the write off
+// the owner's claim, so there is nothing to undo, and it is the caller that
+// knows whether a runtime is about to be launched on the strength of it.
+func TestUpdatePhase_RoutesByClaimAndReportsAFenceTrip(t *testing.T) {
 	s, _, conversationID, _ := setupAdvanceFixture(t, "fence-phase")
 	stub := &phaseFencedStore{ConversationStore: s.conversations}
 	s.conversations = stub
 
-	s.updatePhase(context.Background(), runmode.LocalDefaultOrgID, conversationID, "claim-1", "cloning")
+	if fenced := s.updatePhase(context.Background(), runmode.LocalDefaultOrgID, conversationID, "claim-1", "cloning"); !fenced {
+		t.Error("with a claim: the refused write was not reported as fenced")
+	}
 	if stub.byClaim != 1 || stub.byConversation != 0 {
 		t.Errorf("with a claim: byClaim=%d byConversation=%d, want 1/0", stub.byClaim, stub.byConversation)
 	}
 
-	s.updatePhase(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "cloning")
+	if fenced := s.updatePhase(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "cloning"); fenced {
+		t.Error("without a claim: the unfenced door reported a fence trip")
+	}
 	if stub.byConversation != 1 {
 		t.Errorf("without a claim: byConversation=%d, want the active-claim fallback", stub.byConversation)
 	}

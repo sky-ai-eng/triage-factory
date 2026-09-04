@@ -558,9 +558,9 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 
 	// 2. The executor's half. Its engine reports the kill as a cancellation
 	// however it observed it, and its teardown writes into a conversation
-	// whose claim step 1 released. SQLite does not fence (single process,
-	// nothing to refuse), so the refusal is injected — as everywhere else in
-	// this package.
+	// whose claim step 1 released. The refusal is injected rather than left
+	// to the store's own fence so the park attempt can be counted — as
+	// everywhere else in this package.
 	fenced := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = fenced
 	gotFenced := s.recordNativeResult(context.Background(), runmode.LocalDefaultOrgID, conversationID,
