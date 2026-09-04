@@ -877,33 +877,6 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 	})
 }
 
-func TestRun_TurnBackstopParksWithNotice(t *testing.T) {
-	tr := newMemTranscript(pendingUser("go"))
-	host := newScriptedToolHost()
-	p := &scriptedProvider{turns: []scriptedTurn{
-		{calls: []domain.ToolCall{{ID: "c1", Name: "ls"}}},
-		{calls: []domain.ToolCall{{ID: "c2", Name: "ls"}}},
-		{calls: []domain.ToolCall{{ID: "c3", Name: "ls"}}},
-	}}
-	e := newTestEngine(tr, p, host)
-	params := testParams()
-	params.MaxIterations = 2
-
-	got := e.Run(context.Background(), params)
-	if got.Kind != ResultParked {
-		t.Fatalf("the backstop must park, not fail: %v (err: %v)", got.Kind, got.Err)
-	}
-	if !strings.Contains(got.ParkNotice, "2 model calls") {
-		t.Errorf("the notice must name the bound: %q", got.ParkNotice)
-	}
-	if n := tr.find(func(m domain.Message) bool { return strings.Contains(m.Content, "2 model calls") }); n == nil {
-		t.Error("the park notice must be recorded in the transcript")
-	}
-	if p.calls != 2 {
-		t.Errorf("the guard runs before the call, so exactly 2 calls should have been made, got %d", p.calls)
-	}
-}
-
 func TestRun_SpendGuardParksBeforeTheCall(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
 	p := &scriptedProvider{turns: []scriptedTurn{{text: "should never run"}}}
@@ -969,20 +942,6 @@ func TestRun_WouldStopHookOwnsWhetherItRepeats(t *testing.T) {
 		}
 		if n.Delivered == nil || !*n.Delivered {
 			t.Error("the nudge must be drained on the next iteration like any other input")
-		}
-	})
-
-	t.Run("a hook that keeps asking is bounded by the turn backstop, not by the engine", func(t *testing.T) {
-		tr := newMemTranscript(pendingUser("go"))
-		p := &scriptedProvider{repeat: &scriptedTurn{text: "still nothing to add"}}
-		e := newTestEngine(tr, p, newScriptedToolHost())
-		e.Hooks.ShouldStopAfterTurn = func(context.Context, int, string) string { return "answer me" }
-		params := testParams()
-		params.MaxIterations = 3
-
-		got := e.Run(context.Background(), params)
-		if got.Kind != ResultParked {
-			t.Fatalf("disposition = %v, want parked — the backstop is what stops a hook that never yields", got.Kind)
 		}
 	})
 }
@@ -1311,164 +1270,9 @@ func (f guardFunc) Check(ctx context.Context, turn int) (string, error) { return
 
 func boolPtr(b bool) *bool { return &b }
 
-// TestRun_TurnBudgetDerivesFromTranscriptAcrossClaims pins the budget's
-// durability: assistant turns from an earlier engagement count against the
-// bound, so a crash or re-claim cannot buy a fresh block of calls. With the
-// budget one short of the bound at claim time, the engagement's single call
-// is the wrap-up turn.
-func TestRun_TurnBudgetDerivesFromTranscriptAcrossClaims(t *testing.T) {
-	tr := newMemTranscript(
-		domain.Message{Role: "user", Content: "mission"},
-		domain.Message{Role: "assistant", Content: "turn one"},
-		domain.Message{Role: "assistant", Content: "turn two"},
-	)
-	p := &scriptedProvider{turns: []scriptedTurn{{text: "wrap-up: did X, branch is clean"}}}
-	e := newTestEngine(tr, p, newScriptedToolHost())
-	params := testParams()
-	params.MaxIterations = 3
-
-	got := e.Run(context.Background(), params)
-	if got.Kind != ResultParked {
-		t.Fatalf("a budget-exhausted wrap-up must park, not conclude: %v (err: %v)", got.Kind, got.Err)
-	}
-	if got.ResultSummary != "wrap-up: did X, branch is clean" {
-		t.Errorf("the wrap-up text must ride out as the summary: %q", got.ResultSummary)
-	}
-	if p.calls != 1 {
-		t.Errorf("2 prior turns + 1 wrap-up call = the bound of 3; provider was called %d times", p.calls)
-	}
-	if got.NumTurns != 1 {
-		t.Errorf("claim telemetry stays per-engagement: NumTurns = %d, want 1", got.NumTurns)
-	}
-	wrap := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionWrapUp })
-	if wrap == nil {
-		t.Fatal("the wrap-up ask must be a durable transcript row")
-	}
-	if wrap.Delivered != nil && !*wrap.Delivered {
-		t.Error("the wrap-up ask must have been drained before the final call")
-	}
-}
-
-// TestRun_HumanInputResetsTheTurnBudget pins the renewal rule: a human
-// message grants a fresh budget, so a transcript already past the bound
-// runs normally once the user speaks.
-func TestRun_HumanInputResetsTheTurnBudget(t *testing.T) {
-	pending := false
-	tr := newMemTranscript(
-		domain.Message{Role: "user", Content: "mission"},
-		domain.Message{Role: "assistant", Content: "t1"},
-		domain.Message{Role: "assistant", Content: "t2"},
-		domain.Message{Role: "assistant", Content: "t3"},
-		// The legacy "text" spelling of a normal user row must still read
-		// as human — rows written before the blank-subtype vocabulary.
-		domain.Message{Role: "user", Content: "keep going please", Delivered: &pending},
-	)
-	p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
-	e := newTestEngine(tr, p, newScriptedToolHost())
-	params := testParams()
-	params.MaxIterations = 3
-
-	got := e.Run(context.Background(), params)
-	if got.Kind != ResultConcluded {
-		t.Fatalf("a fresh human message renews the budget; got %v (err: %v)", got.Kind, got.Err)
-	}
-	if p.calls != 1 {
-		t.Errorf("provider calls = %d, want 1", p.calls)
-	}
-}
-
-// TestRun_SystemInjectionsDoNotRenewTheBudget pins the other half of the
-// renewal rule: a staged system note landing on an exhausted conversation
-// re-parks it without a model call — only a human buys more work.
-func TestRun_SystemInjectionsDoNotRenewTheBudget(t *testing.T) {
-	pending := false
-	tr := newMemTranscript(
-		domain.Message{Role: "user", Content: "mission"},
-		domain.Message{Role: "assistant", Content: "t1"},
-		domain.Message{Role: "assistant", Content: "t2"},
-		domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionWrapUp, Content: wrapUpNotice},
-		domain.Message{Role: "assistant", Content: "the wrap-up"},
-		domain.Message{Role: "user", Subtype: "injection:system-note", Content: "<system-note>new CI failure</system-note>", Delivered: &pending},
-	)
-	p := &scriptedProvider{}
-	e := newTestEngine(tr, p, newScriptedToolHost())
-	params := testParams()
-	params.MaxIterations = 3
-
-	got := e.Run(context.Background(), params)
-	if got.Kind != ResultParked {
-		t.Fatalf("a system note must not renew the budget: %v (err: %v)", got.Kind, got.Err)
-	}
-	if p.calls != 0 {
-		t.Errorf("no model call may happen on an exhausted budget; provider was called %d times", p.calls)
-	}
-}
-
-// TestRun_WrapUpIsRequestedOncePerBudget pins the ask's idempotence across
-// claims: the durable row is the memory, so a re-claim at the same budget
-// position does not ask twice.
-func TestRun_WrapUpIsRequestedOncePerBudget(t *testing.T) {
-	tr := newMemTranscript(
-		domain.Message{Role: "user", Content: "mission"},
-		domain.Message{Role: "assistant", Content: "t1"},
-		domain.Message{Role: "assistant", Content: "t2"},
-		domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionWrapUp, Content: wrapUpNotice},
-	)
-	p := &scriptedProvider{turns: []scriptedTurn{{text: "the wrap-up"}}}
-	e := newTestEngine(tr, p, newScriptedToolHost())
-	params := testParams()
-	params.MaxIterations = 3
-
-	if got := e.Run(context.Background(), params); got.Kind != ResultParked {
-		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
-	}
-	count := 0
-	for _, r := range tr.snapshot() {
-		if r.Subtype == domain.MessageSubtypeInjectionWrapUp {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Errorf("wrap-up rows = %d, want exactly 1", count)
-	}
-}
-
-// TestRun_WrapUpTurnSkipsTheWouldStopHook pins that an exhausted budget is
-// not a would-stop: nudging more work out of it would contradict the
-// wrap-up ask one turn earlier.
-func TestRun_WrapUpTurnSkipsTheWouldStopHook(t *testing.T) {
-	tr := newMemTranscript(pendingUser("go"))
-	p := &scriptedProvider{turns: []scriptedTurn{
-		{calls: []domain.ToolCall{{ID: "c1", Name: "ls"}}},
-		{text: "the wrap-up"},
-	}}
-	e := newTestEngine(tr, p, newScriptedToolHost())
-	hookAsked := 0
-	e.Hooks.ShouldStopAfterTurn = func(context.Context, int, string) string {
-		hookAsked++
-		return "produce an artifact"
-	}
-	params := testParams()
-	params.MaxIterations = 2
-
-	got := e.Run(context.Background(), params)
-	if got.Kind != ResultParked {
-		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
-	}
-	if hookAsked != 0 {
-		t.Errorf("the hook must not be consulted on a wrap-up turn; consulted %d times", hookAsked)
-	}
-	if got.ResultSummary != "the wrap-up" {
-		t.Errorf("summary = %q", got.ResultSummary)
-	}
-	if n := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeStopNote }); n == nil {
-		t.Error("the park must leave a stop-note recording why")
-	}
-}
-
 // TestRun_MidWorkDrainStampsOnlyHumanRows pins the flush partition: a steer
 // stamp on a system injection would both mislabel it and make it read as
-// human input to the budget derivation.
+// human input to everything that keys on the human set.
 func TestRun_MidWorkDrainStampsOnlyHumanRows(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
 	pendingFlag := false
@@ -1501,22 +1305,22 @@ func TestRun_MidWorkDrainStampsOnlyHumanRows(t *testing.T) {
 	}
 }
 
-// TestRun_ParkNoticeWrittenOncePerBudgetWindow pins the stop-note dedupe: a
-// re-claim of a still-exhausted conversation re-parks silently instead of
-// stacking identical notices.
-func TestRun_ParkNoticeWrittenOncePerBudgetWindow(t *testing.T) {
-	notice := limitParkNotice(2)
+// TestRun_ParkNoticeWrittenOncePerWindow pins the stop-note dedupe: a
+// re-claim of a conversation whose guard still says stop re-parks silently
+// instead of stacking identical notices.
+func TestRun_ParkNoticeWrittenOncePerWindow(t *testing.T) {
+	notice := "org at $50.00 of $50.00 today"
 	tr := newMemTranscript(
 		domain.Message{Role: "user", Content: "mission"},
 		domain.Message{Role: "assistant", Content: "t1"},
-		domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionWrapUp, Content: wrapUpNotice},
-		domain.Message{Role: "assistant", Content: "the wrap-up"},
 		domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: notice},
 	)
 	p := &scriptedProvider{}
 	e := newTestEngine(tr, p, newScriptedToolHost())
+	e.Guards = []Guard{guardFunc(func(context.Context, int) (string, error) {
+		return notice, nil
+	})}
 	params := testParams()
-	params.MaxIterations = 2
 
 	got := e.Run(context.Background(), params)
 	if got.Kind != ResultParked || got.ParkNotice != notice {

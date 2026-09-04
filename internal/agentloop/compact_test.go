@@ -559,65 +559,20 @@ func TestCompactionReentry_RequestWithNoReply(t *testing.T) {
 	})
 }
 
-// TestWrapUpPrecedence_CompactionFirst: when both the window and the turn
-// budget are exhausted, compaction wins — a wrap-up ask needs window room,
-// and the compacted window derives a fresh budget.
-func TestWrapUpPrecedence_CompactionFirst(t *testing.T) {
-	tr := newMemTranscript(
-		domain.Message{Role: "user", Content: "the mission"},
-		usedAssistant("turn 1", overThreshold, time.Now().UTC()),
-	)
-	provider := &scriptedProvider{turns: []scriptedTurn{
-		summaryReply("compacted at the bound"),
-		{text: "done"},
-	}}
-	engine := newTestEngine(tr, provider, newScriptedToolHost())
-	params := testParams()
-	params.MaxIterations = 2 // one prior turn puts the budget at maxIter-1
-
-	if result := engine.Run(context.Background(), params); result.Kind != ResultConcluded {
-		t.Fatalf("result = %+v, want concluded", result)
-	}
-	if m := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionWrapUp }); m != nil {
-		t.Fatalf("wrap-up asked despite compaction: %+v", m)
-	}
-	if tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionResult }) == nil {
-		t.Fatal("no compaction result row")
-	}
-}
-
-// TestDeriveBudget_StopNoteDoesNotRenew pins the same invariant for the
-// stop-note row, which now has two producers: the loop's own park decisions
-// and a user pressing stop. Both write a role=user row, and neither is
-// somebody asking for more work — a note that renewed the budget would hand a
-// resumed engagement a full allowance it was never granted, and a re-stopped
-// conversation an unbounded one.
-func TestDeriveBudget_StopNoteDoesNotRenew(t *testing.T) {
-	rows := []domain.Message{
-		{Role: "user", Content: "do the thing"},
-		{Role: "assistant"},
-		{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "Run stopped by the user. It may be resumed later."},
-	}
-	if b := deriveBudget(rows); b.turns != 1 {
-		t.Fatalf("turns = %d, want 1 (the stop note renewed the budget)", b.turns)
-	}
+// TestIsHumanInput_StopNoteIsNotHuman pins the vocabulary invariant for the
+// stop-note row, which has two producers: the loop's own park decisions and
+// a user pressing stop. Both write a role=user row, and neither is somebody
+// asking for more work — a note that read as human input would let a re-park
+// restate itself on every claim.
+func TestIsHumanInput_StopNoteIsNotHuman(t *testing.T) {
 	if IsHumanInput(domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote}) {
 		t.Error("IsHumanInput(stop-note) = true, want false")
 	}
 }
 
-// TestDeriveBudget_CompactionRowsDoNotRenew pins the vocabulary invariant:
-// neither the request nor the result row is human input, so neither resets
-// the derived turn budget.
-func TestDeriveBudget_CompactionRowsDoNotRenew(t *testing.T) {
-	rows := []domain.Message{
-		{Role: "assistant"},
-		{Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionRequest},
-		{Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionResult},
-	}
-	if b := deriveBudget(rows); b.turns != 1 {
-		t.Fatalf("turns = %d, want 1 (compaction rows renewed the budget)", b.turns)
-	}
+// TestIsHumanInput_CompactionRowsAreNotHuman pins the same invariant for
+// compaction: neither the request nor the result row is human input.
+func TestIsHumanInput_CompactionRowsAreNotHuman(t *testing.T) {
 	for _, sub := range []string{
 		domain.MessageSubtypeInjectionCompactionRequest,
 		domain.MessageSubtypeInjectionCompactionResult,

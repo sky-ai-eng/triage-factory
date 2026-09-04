@@ -22,9 +22,9 @@ import (
 // turns, while the model is working, and stamps `injection:steer` — the
 // column assembly reads to wrap the row in the keep-working envelope — onto
 // the human rows only. A row already carrying a system subtype (a staged
-// system note, the loop's own wrap-up) keeps it: overwriting would both
-// mislabel the row for display and make it read as fresh user input to the
-// turn-budget derivation.
+// system note, a loop-injected nudge) keeps it: overwriting would both
+// mislabel the row for display and make it read as fresh user input to
+// everything that keys on the human set.
 //
 // Each flush is one statement that marks delivered and stamps the subtype
 // together. Doing it in two steps would leave a window in which a delivered
@@ -115,11 +115,11 @@ func idsOf(rows []domain.Message) []int {
 }
 
 // insertPending queues a row for the next drain. Used for the loop's own
-// injected input (the executor-changed notice, the turn-end nudge, the
-// wrap-up ask): it goes through the same queue as user input rather than
-// being spliced into an assembly, so there is exactly one injection point
-// and it is durable. Every caller passes an explicit injection subtype —
-// the loop never mints a row that could read as human input.
+// injected input (the executor-changed notice, the turn-end nudge): it goes
+// through the same queue as user input rather than being spliced into an
+// assembly, so there is exactly one injection point and it is durable. Every
+// caller passes an explicit injection subtype — the loop never mints a row
+// that could read as human input.
 func (e *Engine) insertPending(ctx context.Context, params Params, content, subtype string) error {
 	pending := false
 	_, err := e.Transcript.Insert(ctx, params.OrgID, &domain.Message{

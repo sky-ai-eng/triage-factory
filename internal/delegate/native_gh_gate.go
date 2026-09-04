@@ -159,7 +159,7 @@ func (s *Spawner) mergeAlreadyQuestioned(ctx context.Context, orgID, conversatio
 // note means a person spoke since — the premise changed, and the same question
 // about that new work has not been put. Everything else the system wrote on
 // the agent's behalf speaks for no one and is skipped, using the same closed
-// human set the engine's drain and turn budget key on.
+// human set the engine's drain keys on.
 //
 // The note check comes first, because the row it looks for is system-authored
 // and the human filter below would skip it.

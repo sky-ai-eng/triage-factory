@@ -446,7 +446,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 // row carrying the stop-note subtype, the same shape the engine's own park
 // notices take. Delivered rather than pending because it states what
 // happened; a resumed conversation reads it in place instead of consuming it
-// as input, and the turn budget doesn't renew on it.
+// as input.
 //
 // userID routes the write the same way every other user-attributed write in
 // this file does — synthetic claims for a person, the admin pool for the

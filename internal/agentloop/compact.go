@@ -369,8 +369,8 @@ func compactionSpan(rows []domain.Message, anchored bool) []int {
 
 // unansweredCompactionRequest finds a delivered compaction request with no
 // assistant reply after it — the derived "compaction in flight" state a
-// crash between the ask and the commit leaves behind. Same discipline as
-// wrapUpRequested: the transcript is the state.
+// crash between the ask and the commit leaves behind. The transcript is
+// the state; nothing remembers it.
 func unansweredCompactionRequest(rows []domain.Message) *domain.Message {
 	for i := len(rows) - 1; i >= 0; i-- {
 		r := rows[i]
@@ -563,10 +563,9 @@ func parseForcedCompaction(completion *inference.Completion) (analysis, summary 
 
 // --- Prompt text ---
 //
-// These live with the compactor (the system-job rule: next to the consumer,
-// like wrapUpNotice) and are deliberately surface-neutral: no branches, no
-// pull requests, no blueprints — any conversation type can adopt this
-// compactor unchanged.
+// These live with the compactor (the system-job rule: next to the consumer)
+// and are deliberately surface-neutral: no branches, no pull requests, no
+// blueprints — any conversation type can adopt this compactor unchanged.
 
 // compactionSections is the summary's section contract, shared verbatim by
 // both prompts so the two paths produce the same document.

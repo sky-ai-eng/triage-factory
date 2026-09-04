@@ -91,8 +91,7 @@ type Hooks struct {
 	// engine deliberately keeps no "already nudged" flag: that would be
 	// process state governing behavior, and the transcript already records
 	// what was asked and what has happened since. A hook that never returns
-	// "" is bounded by the turn backstop and the spend guard like any other
-	// work.
+	// "" is bounded by the spend guard like any other work.
 	ShouldStopAfterTurn func(ctx context.Context, turn int, finalText string) (nudge string)
 }
 
@@ -115,10 +114,6 @@ type Params struct {
 	// must never hold a tool its instructions omit, nor be told about one it
 	// was not given.
 	HasBlueprint bool
-
-	// MaxIterations bounds provider calls since the conversation's last
-	// human input. Zero uses DefaultMaxIterations.
-	MaxIterations int
 
 	// BashMemBudgetMB bounds the resident memory of any single `bash`
 	// command the jail runs for this engagement. A command over it is killed
@@ -225,67 +220,6 @@ type Result struct {
 	Err error
 }
 
-// DefaultMaxIterations bounds provider calls since the last human input. It
-// is a backstop against a cheap-call loop, not a work budget: spend is the
-// real brake, so this is set generously enough that a legitimately long task
-// never trips it. The count is derived from the transcript, not kept as
-// engagement state — a crash or re-claim cannot reset it, and only a human
-// message renews it, so a cheap model cannot buy unbounded calls by cycling
-// claims.
-const DefaultMaxIterations = 400
-
-// wrapUpNotice is injected one call before the turn budget parks the run,
-// so the final call produces an account of the work instead of stopping
-// mid-loop. Deliberately free of numbers: the text is constant across
-// configurations, which is what lets a prior wrap-up be recognized by its
-// subtype alone.
-const wrapUpNotice = "<system-note>\n" +
-	"The next reply is the last model call before this run pauses to wait for user input. " +
-	"Do not start new work and do not call tools. Reply with a wrap-up of the run so far: " +
-	"what was accomplished, the exact state of the workspace (branch, commits, uncommitted or untracked changes), " +
-	"what remains to be done, and the next steps a resumed run should take.\n" +
-	"</system-note>"
-
-// limitParkNotice is the user-facing record of a turn-budget park, written
-// once per park (deduped against a re-claim re-parking without new input).
-func limitParkNotice(maxIter int) string {
-	return fmt.Sprintf("This run reached its limit of %d model calls since the last user message and has been paused. "+
-		"Nothing is lost — send a message to pick it back up.", maxIter)
-}
-
-// turnBudget is the transcript-derived state of the call bound: how many
-// assistant turns have happened since the last human input, and whether the
-// wrap-up notice has already been requested within this budget window.
-type turnBudget struct {
-	turns           int
-	wrapUpRequested bool
-}
-
-// deriveBudget walks the assembly window. Human input resets the budget —
-// a user message is renewed license to work — and everything the system
-// authored (injections, notices) deliberately does not: an additive event
-// landing on a parked conversation gets the park answered again, not a
-// fresh block of calls nobody asked for.
-func deriveBudget(rows []domain.Message) turnBudget {
-	var b turnBudget
-	for _, r := range rows {
-		// Case order matters: a wrap-up row is a user row that is never
-		// human input (IsHumanInput excludes it by construction), so the
-		// wrapUpRequested case only reaches rows the IsHumanInput case above
-		// it already declined to reset the budget on.
-		switch {
-		case r.Role == "assistant":
-			b.turns++
-		case r.Role != "user":
-		case IsHumanInput(r):
-			b = turnBudget{}
-		case r.Subtype == domain.MessageSubtypeInjectionWrapUp:
-			b.wrapUpRequested = true
-		}
-	}
-	return b
-}
-
 // Engine drives native conversations. One Engine is shared across
 // engagements; per-engagement state lives entirely in Run's frame and in
 // the messages table.
@@ -316,15 +250,10 @@ type Logger interface {
 // The order inside the loop is load-bearing and matches the engine's
 // contract: compaction trip (before the drain, so queued input survives a
 // compaction as live input) → drain (the only door input enters through) →
-// budget (wrap-up one call before the bound) → guards (before every call,
-// not every turn) → assemble → credentials → stream → persist → stop-reason
-// handling → tool dispatch → would-stop.
+// guards (before every call, not every turn) → assemble → credentials →
+// stream → persist → stop-reason handling → tool dispatch → would-stop.
 func (e *Engine) Run(ctx context.Context, params Params) Result {
 	started := time.Now()
-	maxIter := params.MaxIterations
-	if maxIter <= 0 {
-		maxIter = DefaultMaxIterations
-	}
 
 	// Policy into the jail, before anything can dispatch a tool. One frame,
 	// once per engagement — the host holds it for the life of the connection.
@@ -415,37 +344,17 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			return e.failed(ctx, started, turn, fmt.Errorf("drain pending input: %w", err))
 		}
 
-		// 2b. Rows — one post-flush read serves the budget derivation and the
-		// assembly below; no write lands between them on any path that
+		// 2b. Rows — one post-flush read serves the park-notice dedupe and
+		// the assembly below; no write lands between them on any path that
 		// reaches the call.
 		rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 		if err != nil {
 			return e.failed(ctx, started, turn, fmt.Errorf("list rows for assembly: %w", err))
 		}
 
-		// 3. The turn budget, derived from rows. One call before the bound,
-		// ask for a wrap-up so the transcript ends with an account of the
-		// work rather than a mid-loop stop; the row's presence since the
-		// last human input is what makes the ask once-per-budget, durable
-		// across claims.
-		//
-		// A compaction restarts this derivation as a side effect: the
-		// flipped span leaves the assembly read, so its assistant turns no
-		// longer count. Deliberate — filling 80% of a model window is
-		// substantial real work, spend is the actual brake, and deriving
-		// through inactive rows would re-read the very history compaction
-		// paid to shed.
-		budget := deriveBudget(rows)
-		if budget.turns == maxIter-1 && !budget.wrapUpRequested {
-			if err := e.insertPending(ctx, params, wrapUpNotice, domain.MessageSubtypeInjectionWrapUp); err != nil {
-				return e.failed(ctx, started, turn, fmt.Errorf("insert wrap-up notice: %w", err))
-			}
-			continue
-		}
-
-		// 4. Guards, before every call. The turn backstop reads the derived
-		// budget; configured guards see the engagement's own call count.
-		if notice := e.checkGuards(ctx, params, budget.turns, turn, maxIter); notice != "" {
+		// 3. Guards, before every call. Each sees the engagement's own call
+		// count.
+		if notice := e.checkGuards(ctx, params, turn); notice != "" {
 			if !HasNoticeSince(rows, notice) {
 				e.insertNotice(ctx, params, notice)
 			}
@@ -457,13 +366,13 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			}
 		}
 
-		// 5. Credentials, per call.
+		// 4. Credentials, per call.
 		provider, client, release, err := e.Credentials.ForCall(ctx)
 		if err != nil {
 			return e.failed(ctx, started, turn, fmt.Errorf("resolve provider credentials: %w", err))
 		}
 
-		// 6. Stream. The cap is this engagement's resolved per-provider
+		// 5. Stream. The cap is this engagement's resolved per-provider
 		// budget, unless the previous turn hit the limit having produced
 		// nothing — then it is the one-shot escalation, consumed here so it
 		// applies to exactly the call that follows the stop.
@@ -506,11 +415,11 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		turn++
 		reactiveCompacted = false
 
-		// 7. Persist — one row, priced, display columns populated. A message
+		// 6. Persist — one row, priced, display columns populated. A message
 		// the provider ended rather than the model finishing usually lands
 		// mid-arguments, leaving the final tool call's JSON unparseable; stub
 		// those arguments empty — under those stop reasons only — so the row
-		// persists and step 8 can answer the batch. Everywhere else malformed
+		// persists and step 7 can answer the batch. Everywhere else malformed
 		// arguments stay a loud persist failure: with nothing to blame for
 		// the damage they are a provider bug, not something to paper over.
 		class := classifyStop(completion.FinishReason)
@@ -531,8 +440,8 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		lastText = assistantRow.Content
 		calls := assistantRow.ToolCalls
 
-		// 8. Stop-reason handling, as an allowlist: only an end-of-turn stop
-		// reaches the would-stop path at step 10, and every other reason
+		// 7. Stop-reason handling, as an allowlist: only an end-of-turn stop
+		// reaches the would-stop path at step 9, and every other reason
 		// takes a named arm right here. See stopreason.go for why the default
 		// has to be "park", never "conclude".
 		//
@@ -660,12 +569,12 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			}
 
 		case stopEndTurn:
-			// The one class that may conclude — at step 10, and only after
+			// The one class that may conclude — at step 9, and only after
 			// dispatch, since a message carrying tool calls has work to
 			// answer whatever the provider called the stop.
 		}
 
-		// 9. Dispatch. Flow-control calls resolve loop-side; everything
+		// 8. Dispatch. Flow-control calls resolve loop-side; everything
 		// else goes into the jail, serially, in call order.
 		if len(calls) > 0 {
 			outcome, terminated, err := e.dispatchBatch(ctx, params, assistantRow.ID, calls)
@@ -687,7 +596,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			continue
 		}
 
-		// 10. Would-stop. A no-tool-call message concludes the run — but
+		// 9. Would-stop. A no-tool-call message concludes the run — but
 		// only after two rechecks, both of which can legitimately keep it
 		// going.
 		bareDrain = true
@@ -701,27 +610,6 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		}
 		if pending {
 			continue
-		}
-
-		// A wrap-up turn stopping is not a conclusion. The budget asked for
-		// this reply; treating it as the step being done would advance the
-		// blueprint on work the bound cut short. Park instead — the summary
-		// just persisted is the account the transcript ends on, and a user
-		// message resumes with a fresh budget. The hook is deliberately not
-		// consulted: nudging more work out of an exhausted budget would
-		// contradict the wrap-up ask one turn earlier.
-		if budget.wrapUpRequested {
-			notice := limitParkNotice(maxIter)
-			if !HasNoticeSince(rows, notice) {
-				e.insertNotice(ctx, params, notice)
-			}
-			return Result{
-				Kind:          ResultParked,
-				ParkNotice:    notice,
-				ResultSummary: lastText,
-				NumTurns:      turn,
-				DurationMs:    msSince(started),
-			}
 		}
 
 		// The would-stop hook (the artifact contract, today). Its answer is
@@ -865,15 +753,9 @@ func (e *Engine) toolSchemas(params Params) []schemas.ChatTool {
 	return out
 }
 
-// checkGuards runs the turn backstop and every configured guard, returning
-// the first notice that says stop. The backstop is checked here rather than
-// as a Guard so its bound travels with the params; it reads the
-// transcript-derived budget, while configured guards see the engagement's
-// own call count.
-func (e *Engine) checkGuards(ctx context.Context, params Params, budgetTurns, turn, maxIter int) string {
-	if budgetTurns >= maxIter {
-		return limitParkNotice(maxIter)
-	}
+// checkGuards runs every configured guard against the engagement's own call
+// count, returning the first notice that says stop.
+func (e *Engine) checkGuards(ctx context.Context, params Params, turn int) string {
 	for _, g := range e.Guards {
 		notice, err := g.Check(ctx, turn)
 		if err != nil {
