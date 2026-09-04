@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -560,4 +561,60 @@ func TestConversationStore_SQLite_PRCoherenceTargets(t *testing.T) {
 		}
 		return stores.Conversations, runmode.LocalDefaultOrgID, newSQLiteConversationSeeder(conn), extra
 	})
+}
+
+// TestConversationStore_SQLite_FenceRefusesAClaimFromAnotherOrg pins the org
+// binding on this dialect's claim fence. Postgres gets it from a composite FK
+// tying (conversation_id, org_id) on claims to the conversation; this schema
+// has no such FK, so a claims row can name a conversation while carrying a
+// different org_id. The fence must treat that row as no claim at all — a
+// refusal — rather than let its conversation_id alone vouch for it.
+func TestConversationStore_SQLite_FenceRefusesAClaimFromAnotherOrg(t *testing.T) {
+	conn := newSQLiteForConversationTest(t)
+	seed := newSQLiteConversationSeeder(conn)
+	store := sqlitestore.New(conn).Conversations
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	mintConversation := func(suffix string) string {
+		ent := seed.Entity(t, suffix)
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		return seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: "p_conversation_test", Status: "running", Model: "m", BlueprintRunID: seed.BlueprintRun(t, taskID),
+		})
+	}
+	mintClaim := func(conversationID, claimOrg string) string {
+		id := uuid.New().String()
+		if _, err := conn.Exec(`
+			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch)
+			VALUES (?, ?, ?, 'exec', 1)
+		`, id, claimOrg, conversationID); err != nil {
+			t.Fatalf("seed claim under org %s: %v", claimOrg, err)
+		}
+		return id
+	}
+
+	// Control: a claim whose org matches its conversation's and the caller's
+	// passes the fence, so the refusal below is the org binding and nothing else.
+	ownConv := mintConversation("own-org")
+	ownClaim := mintClaim(ownConv, org)
+	if _, err := store.SetClaimPhaseSystem(ctx, org, ownConv, ownClaim, "cloning"); err != nil {
+		t.Fatalf("phase write on a claim of the conversation's own org: %v", err)
+	}
+
+	otherConv := mintConversation("other-org")
+	otherClaim := mintClaim(otherConv, uuid.New().String())
+	if _, err := store.SetClaimPhaseSystem(ctx, org, otherConv, otherClaim, "cloning"); !errors.Is(err, db.ErrClaimReleased) {
+		t.Fatalf("phase write on a claim carrying another org = %v, want ErrClaimReleased", err)
+	}
+	pending := false
+	if _, err := store.InsertMessageForClaimSystem(ctx, org, otherClaim, &domain.Message{
+		ConversationID: otherConv, Role: "assistant", Content: "zombie", Delivered: &pending,
+	}); !errors.Is(err, db.ErrClaimReleased) {
+		t.Fatalf("transcript write on a claim carrying another org = %v, want ErrClaimReleased", err)
+	}
+	if msgs, err := store.Messages(ctx, org, otherConv); err != nil || len(msgs) != 0 {
+		t.Errorf("Messages = %v (err %v), want nothing written behind the refusal", msgs, err)
+	}
 }

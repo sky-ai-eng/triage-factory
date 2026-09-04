@@ -1276,7 +1276,7 @@ func (s *conversationStore) InsertMessageSystem(ctx context.Context, orgID strin
 func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID, conversationID, claimID, sessionID string) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.q, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, conversationID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		r, err := (&conversationStore{q: q}).SetSession(ctx, orgID, conversationID, sessionID)
@@ -1292,7 +1292,7 @@ func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID,
 func (s *conversationStore) SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.q, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, conversationID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		r, err := (&conversationStore{q: q}).SetWorktreePath(ctx, orgID, conversationID, path)
@@ -1313,7 +1313,7 @@ func (s *conversationStore) SetWorktreePathForClaimSystem(ctx context.Context, o
 func (s *conversationStore) InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error) {
 	var id int64
 	err := inTx(ctx, s.q, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, msg.ConversationID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, msg.ConversationID, claimID); err != nil {
 			return err
 		}
 		msg.ClaimID = claimID
@@ -1329,7 +1329,7 @@ func (s *conversationStore) InsertMessageForClaimSystem(ctx context.Context, org
 
 func (s *conversationStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int, subtype string) error {
 	return inTx(ctx, s.q, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, conversationID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		return (&conversationStore{q: q}).markDelivered(ctx, orgID, conversationID, ids, subtype)
@@ -1339,7 +1339,7 @@ func (s *conversationStore) MarkDeliveredForClaimSystem(ctx context.Context, org
 func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.q, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, conversationID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		r, err := (&conversationStore{q: q}).Complete(ctx, orgID, conversationID, status, costUSD, durationMs, numTurns, resultSummary, outcome, outcomeReason, failureKind)
@@ -1355,7 +1355,7 @@ func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, c
 func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.q, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, conversationID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		f, err := (&conversationStore{q: q}).MarkFailedIfActive(ctx, orgID, conversationID, failureKind)
@@ -1371,7 +1371,7 @@ func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context
 func (s *conversationStore) ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park db.Park) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.q, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, conversationID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		f, err := (&conversationStore{q: q}).ParkOpen(ctx, orgID, conversationID, park)
@@ -1402,7 +1402,7 @@ func (s *conversationStore) SetExecutorForClaimSystem(ctx context.Context, orgID
 	}
 	var result *domain.ExecutorClaim
 	err := inTx(ctx, s.q, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, conversationID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		row := q.QueryRowContext(ctx, `
@@ -1429,7 +1429,7 @@ func (s *conversationStore) SetClaimPhaseSystem(ctx context.Context, orgID, conv
 	}
 	var result *domain.ExecutorClaim
 	err := inTx(ctx, s.q, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, conversationID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		row := q.QueryRowContext(ctx, `
@@ -2012,7 +2012,7 @@ func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, co
 		return err
 	}
 	return inTx(ctx, s.q, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, conversationID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		txStore := &conversationStore{q: q}
@@ -2103,7 +2103,7 @@ func (s *conversationStore) SettleCompactionRequestForClaimSystem(ctx context.Co
 	}
 	var result *domain.Message
 	err := inTx(ctx, s.q, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, conversationID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		row := q.QueryRowContext(ctx, `
