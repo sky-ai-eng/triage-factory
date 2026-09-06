@@ -302,3 +302,64 @@ func TestPlaceAfterAnswers(t *testing.T) {
 		}
 	})
 }
+
+// TestRepair_InterruptedResultSaysOnlyWhatHappenedToTheTree holds the
+// synthetic result to the rebuilt-workspace notice's rule: it may claim a
+// restore, a rebuild, or a move only when one happened. The common case — a
+// stop, resumed onto the warm tree by the executor that parked it — is a
+// call that was killed and a workspace exactly as it left it, and the result
+// must not send the agent to distrust that tree.
+func TestRepair_InterruptedResultSaysOnlyWhatHappenedToTheTree(t *testing.T) {
+	cases := []struct {
+		name            string
+		prov            domain.WorkspaceProvenance
+		executorChanged bool
+		want, wantNot   []string
+	}{
+		{
+			name:    "warm resume on the same executor",
+			prov:    domain.WorkspaceProvenanceWarm,
+			want:    []string{"ended before its result was recorded", "effects may be partially present or absent"},
+			wantNot: []string{"restored", "rebuilt", "different executor"},
+		},
+		{
+			name:            "rehydrated on another executor",
+			prov:            domain.WorkspaceProvenanceRehydrated,
+			executorChanged: true,
+			want:            []string{"different executor", "restored to its last snapshot point"},
+			wantNot:         []string{"rebuilt"},
+		},
+		{
+			name:    "rebuilt from nothing on the same executor",
+			prov:    domain.WorkspaceProvenanceFresh,
+			want:    []string{"rebuilt from scratch"},
+			wantNot: []string{"restored", "different executor"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newMemTranscript(
+				domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
+				domain.Message{ConversationID: "conv", Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "c1", Name: "bash"}}},
+			)
+			p := &scriptedProvider{turns: []scriptedTurn{{text: "recovered"}}}
+			if got := newTestEngine(tr, p, newScriptedToolHost()).Run(context.Background(), workspaceParams(tc.prov, tc.executorChanged)); got.Kind != ResultConcluded {
+				t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+			}
+			repaired := syntheticResultFor(tr, "c1")
+			if repaired == nil {
+				t.Fatal("the interrupted call must get a synthetic result")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(repaired.Content, w) {
+					t.Errorf("synthetic result lacks %q: %q", w, repaired.Content)
+				}
+			}
+			for _, w := range tc.wantNot {
+				if strings.Contains(repaired.Content, w) {
+					t.Errorf("synthetic result claims %q, which did not happen: %q", w, repaired.Content)
+				}
+			}
+		})
+	}
+}

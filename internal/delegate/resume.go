@@ -190,9 +190,14 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 //
 //   - the warm worktree survives on disk;
 //   - the durable snapshot blob is present to cold-rehydrate from;
-//   - neither, but the record says a persist is in flight. That is the gap a
-//     park deliberately opens — the status flips before the capture runs — and
-//     the claim path's own wait resolves it (see ensureWorkspace);
+//   - neither, but the record says a persist is in flight and the engagement
+//     that owes it is still there to finish it. That is the gap a park
+//     deliberately opens — the status flips before the capture runs — and the
+//     claim path's own wait resolves it (see ensureWorkspace). "In flight" is
+//     read the way the wait reads it: a pending record whose writer has
+//     stopped heartbeating names a blob nobody is producing, and admitting a
+//     follow-up on its strength would only move the refusal to the claim,
+//     after the user's message was accepted;
 //   - neither, and no persist is coming (the record says failed, names a write
 //     that never finished, or does not exist). The answer splits on the
 //     runtime here, because the engines keep their continuity in different
@@ -235,7 +240,16 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *
 		return true
 	}
 	if state != nil && state.State == domain.WorkspaceSnapshotPending {
-		return true
+		if s.snapshotWriterAlive(ctx, orgID, state.WriterClaimID) {
+			return true
+		}
+		// The upload lands before the record's completing CAS and before a
+		// dying writer stops answering, so a dead writer is a moment the blob
+		// may just have arrived — look once more before ruling on the runtime,
+		// exactly as the wait does on its way out.
+		if s.snapshotBlobExists(ctx, orgID, keyID) {
+			return true
+		}
 	}
 	return conv.Runtime == domain.ConversationRuntimeNative
 }

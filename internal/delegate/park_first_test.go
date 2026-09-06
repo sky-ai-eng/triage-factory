@@ -39,7 +39,11 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	}
 	held := &heldPutStorage{Storage: blobs, entered: make(chan struct{}, 1), release: make(chan struct{})}
 	s.SetStorage(held)
-	markEngaged(t, database, conversationID)
+	// The engagement the stop kills is a real one: the record its teardown
+	// opens names this claim, and the wake gate follows that claim to a live
+	// executor before it treats the persist as coming.
+	killedClaim := markEngaged(t, database, conversationID)
+	stageInstance(t, database, "test-engagement", time.Now())
 	namespace := blueprintRunIDForConversation(t, database, conversationID)
 
 	// The engagement: a real worktree with uncommitted work, and a cancel
@@ -61,7 +65,7 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 			namespace:      namespace,
 			claudeCwd:      wt,
 			triggerType:    "event",
-			claimID:        "claim-killed",
+			claimID:        killedClaim,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 		}, "")
 	}()
@@ -88,7 +92,7 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	if ok, err := blobs.Exists(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, namespace)); err != nil || ok {
 		t.Fatalf("blob present (%v, %v) before the upload was released; the window under test does not exist", ok, err)
 	}
-	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotPending, "claim-killed")
+	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotPending, killedClaim)
 
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "actually, try the other approach"); err != nil {
 		t.Fatalf("follow-up during the persist: %v (a 409/410 here is the bug this ticket exists for)", err)
@@ -108,7 +112,7 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	// released the claim first — which is the ordinary shape and changes
 	// nothing about the persist.)
 	assertSnapshotPresent(t, s, namespace, true)
-	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, "claim-killed")
+	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, killedClaim)
 }
 
 // TestParkConversationOpen_FlipsBeforeTheSnapshot pins the same ordering for
@@ -226,14 +230,19 @@ func TestAwaitSnapshotBlob_TakesABlobThatAlreadyLanded(t *testing.T) {
 	}
 }
 
-// TestWorkspaceRecoverable_LadderBelowTheBlob covers the three answers the wake
-// gate gives when neither a warm tree nor a blob exists — the situation
-// park-first makes ordinary rather than exceptional.
+// TestWorkspaceRecoverable_LadderBelowTheBlob covers the answers the wake gate
+// gives when neither a warm tree nor a blob exists — the situation park-first
+// makes ordinary rather than exceptional. A pending record is two of them: the
+// gate follows its writer to an executor, the way the claim-time wait does,
+// so a persist whose engagement died is not one anybody is waiting for.
 func TestWorkspaceRecoverable_LadderBelowTheBlob(t *testing.T) {
 	cases := []struct {
 		name string
 		// state is the lifecycle record to stage, or "" for none at all.
-		state      string
+		state string
+		// writerBeat is the pending writer's last heartbeat; zero stages no
+		// executor behind the record at all.
+		writerBeat time.Time
 		wantSDK    bool
 		wantNative bool
 		wantReason string
@@ -241,8 +250,17 @@ func TestWorkspaceRecoverable_LadderBelowTheBlob(t *testing.T) {
 		{
 			name:       "persist in flight",
 			state:      domain.WorkspaceSnapshotPending,
+			writerBeat: time.Now(),
 			wantSDK:    true,
 			wantNative: true,
+		},
+		{
+			name:       "persist owed by a dead writer",
+			state:      domain.WorkspaceSnapshotPending,
+			writerBeat: time.Now().Add(-time.Hour),
+			wantSDK:    false,
+			wantNative: true,
+			wantReason: ResumeBlockedWorkspaceExpired,
 		},
 		{
 			name:       "persist failed",
@@ -279,7 +297,12 @@ func TestWorkspaceRecoverable_LadderBelowTheBlob(t *testing.T) {
 				s.SetStorage(blobs)
 				namespace := blueprintRunIDForConversation(t, database, conversationID)
 				if tc.state != "" {
-					seedSnapshotState(t, s, namespace, "claim-writer", tc.state)
+					const writerClaim = "b1b2c3d4-0000-4000-8000-000000000001"
+					seedSnapshotState(t, s, namespace, writerClaim, tc.state)
+					if !tc.writerBeat.IsZero() {
+						stageClaim(t, database, conversationID, writerClaim, "exec-writer")
+						stageInstance(t, database, "exec-writer", tc.writerBeat)
+					}
 				}
 
 				conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
@@ -514,6 +537,8 @@ func (f *flakyBeginSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID
 
 // heldPutStorage blocks inside Put until released, so a test can hold a
 // persist open and assert what the rest of the system reads while it runs.
+// The hold yields to the upload's own context, so a cancelled persist fails
+// rather than pinning the suite.
 type heldPutStorage struct {
 	storage.Storage
 	entered chan struct{}
@@ -525,7 +550,11 @@ func (h *heldPutStorage) Put(ctx context.Context, key string, r io.Reader) error
 	case h.entered <- struct{}{}:
 	default:
 	}
-	<-h.release
+	select {
+	case <-h.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	return h.Storage.Put(ctx, key, r)
 }
 
