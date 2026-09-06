@@ -103,6 +103,39 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 		}
 	})
 
+	t.Run("ConsumeReturnsTheAccountTheCeremonyWasStartedFor", func(t *testing.T) {
+		// The named-account leg learns which account it is about from this
+		// row alone — the name never rides a URL — so the consume has to hand
+		// it back exactly, and a ceremony started without one has to read
+		// back as empty rather than as some default the callback could
+		// mistake for a name.
+		be := mk(t)
+		now := time.Now().UTC()
+		if _, err := be.Store.CreateSystem(ctx, domain.GitHubPendingBind{
+			NonceHash: "hash-named", OrgID: be.OrgID, UserID: be.UserID,
+			AccountLogin: "Acme-Corp",
+			CreatedAt:    now, ExpiresAt: now.Add(db.GitHubPendingBindTTL),
+		}); err != nil {
+			t.Fatalf("CreateSystem(named): %v", err)
+		}
+		create(t, be, "hash-unnamed", db.GitHubPendingBindTTL)
+
+		named, err := be.Store.ConsumeSystem(ctx, "hash-named", now)
+		if err != nil || named == nil {
+			t.Fatalf("ConsumeSystem(named) = %v, %v", named, err)
+		}
+		if named.AccountLogin != "Acme-Corp" {
+			t.Errorf("AccountLogin = %q, want it back verbatim (%q)", named.AccountLogin, "Acme-Corp")
+		}
+		unnamed, err := be.Store.ConsumeSystem(ctx, "hash-unnamed", now)
+		if err != nil || unnamed == nil {
+			t.Fatalf("ConsumeSystem(unnamed) = %v, %v", unnamed, err)
+		}
+		if unnamed.AccountLogin != "" {
+			t.Errorf("AccountLogin = %q on an install-page ceremony, want empty", unnamed.AccountLogin)
+		}
+	})
+
 	t.Run("SecondConsumeFindsNothing", func(t *testing.T) {
 		be := mk(t)
 		create(t, be, "hash-once", db.GitHubPendingBindTTL)

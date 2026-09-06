@@ -3544,10 +3544,14 @@ REVOKE ALL ON public.github_webhook_deliveries FROM anon, authenticated, service
 -- RLS enabled with no policy (deny-by-default) plus REVOKE ALL from PUBLIC and
 -- the app roles.
 CREATE TABLE public.github_pending_binds (
-    nonce_hash  text PRIMARY KEY,
-    org_id      uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
-    user_id     uuid NOT NULL,
-    created_at  timestamptz NOT NULL,
+    nonce_hash    text PRIMARY KEY,
+    org_id        uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
+    user_id       uuid NOT NULL,
+    -- The GitHub login the admin named when connecting an account that already
+    -- has the App installed; '' for a ceremony that goes through GitHub's
+    -- install page. Carried here and nowhere else, so it never rides a URL.
+    account_login text NOT NULL DEFAULT '',
+    created_at    timestamptz NOT NULL,
     expires_at  timestamptz NOT NULL,
     consumed_at timestamptz
 );

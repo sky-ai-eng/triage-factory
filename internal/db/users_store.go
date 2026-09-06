@@ -36,6 +36,13 @@ type UsersStore interface {
 	// the host the binding was captured against. An absent row degrades
 	// exactly as the old NULL github_username column did.
 	GetGitHubLogin(ctx context.Context, userID, githubBaseURL string) (string, error)
+	// GetGitHubIdentity returns the user's whole GitHub identity row for a
+	// host — login, numeric account id, source, verification time — or nil
+	// when there is none. It exists for the one reader that must compare
+	// identities rather than display a login: the deployment-App bind
+	// ceremony, which requires the GitHub account that authorized to be the
+	// account linked to the TF user completing it, by id.
+	GetGitHubIdentity(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error)
 
 	// UpsertGitHubIdentity writes (or refreshes) the user's GitHub login
 	// for a host. The host is an explicit parameter so callers bind to

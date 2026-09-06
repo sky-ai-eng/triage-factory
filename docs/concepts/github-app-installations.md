@@ -44,8 +44,15 @@ exactly one source of truth:
 > a workspace and an installation is the bind ceremony's job alone.
 
 The bind ceremony (the Connect button) proves the link — the person completing
-the install can see the installation and administers the account it targets —
-and writes the row. The scoped reconcile then keeps bound rows current from the
+the install can see the installation, administers the account it targets, and
+is, on GitHub, the account linked to the TF admin completing it — and writes
+the row. That last proof is what joins the others: the cookie proves a browser,
+the session proves a TF person, and the OAuth code proves *some* GitHub account;
+requiring that account to be the one captured under the admin's own credential
+(`user_github_identities`, compared by numeric id) is what stops a code minted
+by an attacker installing on their own account from being completed inside a
+victim's ceremony. An admin with no GitHub account linked on the deployment's
+GitHub cannot connect one until they link it. The scoped reconcile then keeps bound rows current from the
 shared listing and touches nothing else. It has two doors with two scopes: the
 on-demand refresh route (`POST /api/orgs/{org_id}/github/app/installations/refresh`)
 runs it for one workspace (`RefreshManagedInstallations`), and the poll cadence runs it for every managed
@@ -70,8 +77,8 @@ disconnected. Its per-installation form
 (`…/github/managed/installations/{installation_id}/disconnect`) drops one
 account and keeps the class — until it drops the last one, which is the full
 disconnect. Nothing is uninstalled on GitHub: the installation persists there
-unbound, in the "installed but not bound" state described below, and is
-reconnected the way that section says. The other credential doors — the PAT bind,
+unbound, in the "installed but not bound" state described below, and the
+named-account leg reconnects it. The other credential doors — the PAT bind,
 BYO registration, BYO import — refuse a managed workspace that still holds a
 live installation row and name the disconnect as the way out, so a workspace's
 live rows and its class can never disagree. That is what lets the receiver
@@ -148,17 +155,27 @@ treats it as one:
 
 - The install callback with no ceremony behind it redirects to
   `/github/installed`, a page that says the install went through and is not yet
-  connected, and offers the Connect button. Recovery is the ordinary bind
-  ceremony, and the ceremony completes only for an account that does **not**
-  have the App installed: GitHub's install page offers an installed account
-  nothing but Configure, its in-place settings page, and never returns to the
-  callback — "Redirect on update" is ignored without a Setup URL, and the
-  OAuth-during-install setting the ceremony needs for its `code` blanks the
-  Setup URL. So connecting an account that already has the App means
-  uninstalling it from that account on GitHub and installing it again from
-  Connect; the page says so. There is no path that creates a binding from an
-  installation id the browser carried in.
-- A managed workspace with no bound installation shows the same button as its
+  connected, and asks the admin to **name the account**. GitHub's install page
+  is no use for an account that already has the App: it offers nothing but
+  Configure, its in-place settings page, and never returns to the callback —
+  "Redirect on update" is ignored without a Setup URL, and the
+  OAuth-during-install setting the install leg needs for its `code` blanks
+  the Setup URL. So the ceremony has a second leg for exactly that account
+  (`POST /api/orgs/{org_id}/github/managed/connect-account`; both starts are
+  CSRF-guarded POSTs that answer with the GitHub URL for the page to navigate
+  to, so a ceremony is only ever minted by the admin's own page): the same
+  record and cookie, GitHub's plain OAuth authorize carrying the ceremony's `state`, and
+  a callback that refuses a response without it, proves the person's identity
+  as above, and then finds the named account's installation **among the
+  installations that person can see** — never under the App's own key, which
+  would name installations on accounts they have no relation to. The App's own
+  read of that installation is still the source of every persisted fact, the
+  authority and uniqueness gates run unchanged, and a name that resolves to
+  nothing is one answer whether the account has no installation or the person
+  cannot see it, so the route cannot be used to learn which accounts have the
+  App. There is still no path that creates a binding from an installation id
+  the browser carried in: a named ceremony ignores one on its query string.
+- A managed workspace with no bound installation shows the same buttons as its
   Settings empty state.
 - The deployment webhook receiver acknowledges a delivery for an unbound
   installation with 2xx, writes nothing, and logs **one line at INFO** naming
@@ -170,7 +187,9 @@ What TF deliberately does **not** do is list unbound installations anywhere.
 On a shared App that list is every other prospective tenant's GitHub account,
 and no filtering makes it safe — narrowing it to what the viewer can reach
 would mean rendering a shared config surface from their personal GitHub
-permissions. The recovery needs a button, not a list.
+permissions. The recovery needs a name typed in and a proof, not a list: the
+named leg walks the person's own listing to answer one question about one
+account and hands back one id, and nothing renders or retains the listing.
 
 ## The Settings surface, and the two grant findings
 

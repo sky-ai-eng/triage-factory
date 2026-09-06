@@ -37,6 +37,31 @@ func (s *usersStore) GetGitHubLogin(ctx context.Context, userID, githubBaseURL s
 	return getGitHubLogin(ctx, s.q, userID, githubBaseURL)
 }
 
+func (s *usersStore) GetGitHubIdentity(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
+	var (
+		id       domain.UserGitHubIdentity
+		ghUserID sql.NullString
+		verified sql.NullTime
+	)
+	err := s.q.QueryRowContext(ctx,
+		`SELECT login, github_user_id, source, verified_at
+		   FROM user_github_identities
+		  WHERE user_id = $1 AND github_base_url = $2`,
+		userID, db.NormalizeGitHubHost(githubBaseURL),
+	).Scan(&id.Login, &ghUserID, &id.Source, &verified)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read user_github_identities: %w", err)
+	}
+	id.GitHubUserID = ghUserID.String
+	if verified.Valid {
+		id.VerifiedAt = verified.Time.UTC()
+	}
+	return &id, nil
+}
+
 func (s *usersStore) GetGitHubLoginSystem(ctx context.Context, userID, githubBaseURL string) (string, error) {
 	return getGitHubLogin(ctx, s.admin, userID, githubBaseURL)
 }

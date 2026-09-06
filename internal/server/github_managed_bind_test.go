@@ -6,10 +6,12 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -77,7 +79,12 @@ type fakeGitHub struct {
 	actorID             int64
 
 	// The association gate's answer: the ids GET /user/installations reports.
-	userInstallations []int64
+	// Each rides with its account's login — the named-account leg looks the
+	// account up in this listing — which is the fake's own installation's
+	// login for that id and "acct-<id>" for any other unless
+	// userInstallationAccounts says otherwise.
+	userInstallations        []int64
+	userInstallationAccounts map[int64]string
 
 	// The authority gate's answer for an organization target.
 	membershipStatus int
@@ -177,7 +184,15 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	case path == "/api/v3/user/installations":
 		ids := make([]string, 0, len(f.userInstallations))
 		for _, id := range f.userInstallations {
-			ids = append(ids, fmt.Sprintf(`{"id":%d}`, id))
+			login, ok := f.userInstallationAccounts[id]
+			switch {
+			case ok:
+			case id == f.installationID:
+				login = f.accountLogin
+			default:
+				login = fmt.Sprintf("acct-%d", id)
+			}
+			ids = append(ids, fmt.Sprintf(`{"id":%d,"account":{"login":%q}}`, id, login))
 		}
 		fmt.Fprintf(w, `{"total_count":%d,"installations":[%s]}`, len(ids), strings.Join(ids, ","))
 
@@ -248,7 +263,40 @@ func newBindRig(t *testing.T, gh *fakeGitHub) *bindRig {
 		ClientSecret:  "deployment_client_secret",
 	}
 
-	return &bindRig{authRig: rig, gh: gh, ghBase: ghBase, orgID: org, userID: user, sid: sid}
+	out := &bindRig{authRig: rig, gh: gh, ghBase: ghBase, orgID: org, userID: user, sid: sid}
+	// The admin's GitHub identity, as a whoami under their own credential
+	// captured it: the account the fake's OAuth exchange will say authorized.
+	// The ceremony's identity proof compares the two by id.
+	out.linkIdentity(t, user, gh.actorLogin, gh.actorID)
+	return out
+}
+
+// linkIdentity records a user's GitHub identity on the deployment's GitHub,
+// the way the per-user Connect capture does.
+func (r *bindRig) linkIdentity(t *testing.T, user uuid.UUID, login string, id int64) {
+	t.Helper()
+	ghUserID := any(fmt.Sprint(id))
+	if id == 0 {
+		ghUserID = nil
+	}
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO user_github_identities (user_id, github_base_url, login, github_user_id, source, verified_at)
+		VALUES ($1, $2, $3, $4, 'connect_oauth', now())
+		ON CONFLICT (user_id, github_base_url) DO UPDATE
+		   SET login = EXCLUDED.login, github_user_id = EXCLUDED.github_user_id
+	`, user.String(), db.NormalizeGitHubHost(r.ghBase), login, ghUserID); err != nil {
+		t.Fatalf("link github identity: %v", err)
+	}
+}
+
+// unlinkIdentity removes a user's GitHub identity on the deployment's GitHub.
+func (r *bindRig) unlinkIdentity(t *testing.T, user uuid.UUID) {
+	t.Helper()
+	if _, err := r.h.AdminDB.Exec(`
+		DELETE FROM user_github_identities WHERE user_id = $1 AND github_base_url = $2
+	`, user.String(), db.NormalizeGitHubHost(r.ghBase)); err != nil {
+		t.Fatalf("unlink github identity: %v", err)
+	}
 }
 
 // sibling returns a second workspace on the SAME server, with its own admin
@@ -267,20 +315,82 @@ func (r *bindRig) sibling(t *testing.T, slug string) *bindRig {
 	`, org.String(), r.ghBase); err != nil {
 		t.Fatalf("seed org_event_sources: %v", err)
 	}
-	return &bindRig{
+	out := &bindRig{
 		authRig: r.authRig, gh: r.gh, ghBase: r.ghBase,
 		orgID: org, userID: user, sid: r.sidFromResp(resp),
 	}
+	out.linkIdentity(t, user, r.gh.actorLogin, r.gh.actorID)
+	return out
 }
 
-// connect drives the Connect click and returns the response.
-func (r *bindRig) connect(t *testing.T) *httptest.ResponseRecorder {
+// connectAccount drives the named-account start and returns the response.
+func (r *bindRig) connectAccount(t *testing.T, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest("GET", "/api/orgs/"+r.orgID.String()+"/github/managed/connect", nil)
+	req := httptest.NewRequest("POST", "/api/orgs/"+r.orgID.String()+"/github/managed/connect-account", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
 	req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: r.sid})
 	rec := httptest.NewRecorder()
 	r.srv.mux.ServeHTTP(rec, req)
 	return rec
+}
+
+// namedCeremony starts the named-account leg for login and returns the cookie
+// it minted and the state its authorize URL carries.
+func (r *bindRig) namedCeremony(t *testing.T, login string) (*http.Cookie, string) {
+	t.Helper()
+	rec := r.connectAccount(t, fmt.Sprintf(`{"account":%q}`, login))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("connect-account status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		AuthorizeURL string `json:"authorize_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode connect-account body: %v", err)
+	}
+	u, err := url.Parse(body.AuthorizeURL)
+	if err != nil {
+		t.Fatalf("authorize_url %q: %v", body.AuthorizeURL, err)
+	}
+	return r.bindCookie(t, rec), u.Query().Get("state")
+}
+
+// namedCallbackQuery is what GitHub sends back from the OAuth authorize leg:
+// a code and the state the authorize request carried, and no installation.
+func namedCallbackQuery(state string) string {
+	return "code=gh_code&state=" + url.QueryEscape(state)
+}
+
+// connect drives the Connect click — the POST the admin's own page makes — and
+// returns the response.
+func (r *bindRig) connect(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	return r.connectFrom(t, r.srv.deployCfg.publicURL, r.sid)
+}
+
+// connectFrom is connect with the request's Origin and session chosen, for
+// the cases about who may start a ceremony.
+func (r *bindRig) connectFrom(t *testing.T, origin, sid string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/api/orgs/"+r.orgID.String()+"/github/managed/connect", nil)
+	req.Header.Set("Origin", origin)
+	req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
+	rec := httptest.NewRecorder()
+	r.srv.mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// installURL reads the install page a Connect response answered with.
+func installURL(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		InstallURL string `json:"install_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode connect body %q: %v", rec.Body.String(), err)
+	}
+	return body.InstallURL
 }
 
 // bindCookie returns the ceremony cookie a Connect response set, failing when
@@ -333,8 +443,8 @@ func (r *bindRig) serveCallback(t *testing.T, cookie *http.Cookie, query, sid st
 func (r *bindRig) ceremony(t *testing.T) *http.Cookie {
 	t.Helper()
 	rec := r.connect(t)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("connect status=%d body=%s, want 302", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
 	return r.bindCookie(t, rec)
 }
@@ -405,12 +515,11 @@ func TestManagedBind_OrganizationTarget(t *testing.T) {
 	rig := newBindRig(t, gh)
 
 	rec := rig.connect(t)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("connect status=%d body=%s, want 302", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
-	if want := rig.ghBase + "/apps/tf-deployment/installations/new"; rec.Header().Get("Location") != want {
-		t.Errorf("connect redirect = %q, want the deployment App's install page %q",
-			rec.Header().Get("Location"), want)
+	if want := rig.ghBase + "/apps/tf-deployment/installations/new"; installURL(t, rec) != want {
+		t.Errorf("install_url = %q, want the deployment App's install page %q", installURL(t, rec), want)
 	}
 	cookie := rig.bindCookie(t, rec)
 
@@ -603,7 +712,7 @@ func TestManagedBind_Refusals(t *testing.T) {
 			// permission never reaches a callback — the refusal is asserted
 			// wherever the ceremony actually stops.
 			rec := rig.connect(t)
-			if rec.Code != http.StatusFound {
+			if rec.Code != http.StatusOK {
 				assertOutcome(t, rec, tc.outcome)
 				rig.assertNothingBound(t)
 				return
@@ -955,6 +1064,27 @@ func TestManagedBind_RoleRevokedMidCeremony(t *testing.T) {
 	out := rig.callback(t, cookie, defaultCallbackQuery(4242))
 	assertOutcome(t, out, "not_workspace_admin")
 	rig.assertNothingBound(t)
+}
+
+// TestManagedBind_ConnectRequiresTheAdminsOwnOrigin: a ceremony is minted only
+// by a request the admin's own page made. A page elsewhere that navigates or
+// posts to the start gets nothing — not a record, not a cookie — so there is
+// never a live ceremony in a browser whose owner did not click Connect.
+func TestManagedBind_ConnectRequiresTheAdminsOwnOrigin(t *testing.T) {
+	rig := newBindRig(t, newFakeGitHub())
+	rec := rig.connectFrom(t, "https://attacker.test", rig.sid)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("cross-origin connect = %d, want 403", rec.Code)
+	}
+	for _, c := range (&http.Response{Header: rec.Header()}).Cookies() {
+		if c.Name == managedBindCookieName && c.Value != "" {
+			t.Error("a refused start set the ceremony cookie")
+		}
+	}
+	var n int
+	if err := rig.h.AdminDB.QueryRow(`SELECT count(*) FROM github_pending_binds WHERE org_id = $1`, rig.orgID.String()).Scan(&n); err != nil || n != 0 {
+		t.Errorf("%d pending binds minted by a refused start (%v), want 0", n, err)
+	}
 }
 
 func TestManagedBind_ConnectRequiresWorkspaceAdmin(t *testing.T) {
@@ -1378,6 +1508,10 @@ func TestManagedBind_RefusalSetIsClosedAndDistinct(t *testing.T) {
 		refuseSessionRequired,
 		refuseNotWorkspaceAdmin,
 		refuseIdentityUnproven,
+		refuseIdentityNotLinked,
+		refuseIdentityMismatch.withAccount("octocat"),
+		refuseStateMismatch,
+		refuseAccountNotConnectable.withAccount("acme"),
 		refuseInstallationUnreadable,
 		refuseNotAssociated,
 		refuseNotAccountAdmin.withAccount("acme"),
@@ -1407,6 +1541,433 @@ func TestManagedBind_RefusalSetIsClosedAndDistinct(t *testing.T) {
 	}
 }
 
+// --- The identity proof ------------------------------------------------------
+
+// TestManagedBind_PlantedCodeIsRefused is the confused deputy the ceremony
+// exists to stop, in the one shape the other four proofs do not cover on their
+// own: the victim admin has a live ceremony (they clicked Connect and have not
+// finished), and an attacker who installed the App on THEIR OWN account has a
+// code and an installation_id they never exchanged. The victim's browser loads
+// that URL. Cookie, record, session and role all hold — they are the victim's —
+// and both GitHub gates pass, because they are asked about the attacker's
+// token against the attacker's installation. Only the identity proof says no:
+// the account that authorized is not the one linked to the admin.
+func TestManagedBind_PlantedCodeIsRefused(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+	cookie := rig.ceremony(t)
+
+	// The attacker's world: the code exchanges for THEIR token, the
+	// installation is on THEIR org, they can see it and they own it.
+	gh.actorLogin, gh.actorID = "mallory", 666
+	gh.installationID, gh.accountLogin, gh.accountID = 9999, "mallory-corp", 800
+	gh.userInstallations = []int64{9999}
+
+	out := rig.callback(t, cookie, defaultCallbackQuery(9999))
+	assertOutcome(t, out, "identity_mismatch")
+	if out.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", out.Code)
+	}
+	rig.assertNothingBound(t)
+	// The proof runs before either GitHub gate, so the attacker's
+	// installation is never even read.
+	if gh.served("/api/v3/app/installations/9999") {
+		t.Error("the attacker's installation was read; the identity proof must come first")
+	}
+	if !strings.Contains(out.Body.String(), "@octocat") {
+		t.Errorf("the refusal must name the admin's own linked login; body=%s", out.Body.String())
+	}
+}
+
+// TestManagedBind_IdentityMustBeLinked: with nothing linked the proof cannot
+// run, and a proof that cannot run refuses. The copy points at the cure.
+func TestManagedBind_IdentityMustBeLinked(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+	rig.unlinkIdentity(t, rig.userID)
+	cookie := rig.ceremony(t)
+
+	out := rig.callback(t, cookie, defaultCallbackQuery(4242))
+	assertOutcome(t, out, "identity_not_linked")
+	rig.assertNothingBound(t)
+}
+
+// TestManagedBind_IdentityWithoutIDIsNotComparable: a linked row captured
+// before numeric ids were recorded carries a renameable login and nothing
+// else. Comparing logins is a comparison that can be arranged, so the row is
+// as good as absent until it is recaptured.
+func TestManagedBind_IdentityWithoutIDIsNotComparable(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+	rig.linkIdentity(t, rig.userID, gh.actorLogin, 0)
+	cookie := rig.ceremony(t)
+
+	out := rig.callback(t, cookie, defaultCallbackQuery(4242))
+	assertOutcome(t, out, "identity_not_linked")
+	rig.assertNothingBound(t)
+}
+
+// TestManagedBind_IdentityComparesByIDNotLogin: the linked login is stale — the
+// admin renamed on GitHub — but the id is theirs, and that is what counts.
+func TestManagedBind_IdentityComparesByIDNotLogin(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+	rig.linkIdentity(t, rig.userID, "octocat-old-name", gh.actorID)
+	cookie := rig.ceremony(t)
+
+	out := rig.callback(t, cookie, defaultCallbackQuery(4242))
+	if out.Code != http.StatusFound {
+		t.Fatalf("callback status=%d outcome=%q, want 302 — a renamed login must not refuse an id that matches",
+			out.Code, out.Header().Get("X-TF-Bind-Outcome"))
+	}
+	if n := rig.installationCount(t); n != 1 {
+		t.Errorf("%d installation rows, want 1", n)
+	}
+}
+
+// --- The named-account leg ----------------------------------------------------
+
+// TestManagedBind_NamedAccount_Organization is the leg for an account that
+// already has the App: no install page, no installation_id on the query — the
+// admin names the account, GitHub's OAuth authorize proves who they are, and
+// the installation is found among the ones that person can see.
+func TestManagedBind_NamedAccount_Organization(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+
+	rec := rig.connectAccount(t, `{"account":"Acme"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("connect-account status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		AuthorizeURL string `json:"authorize_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	u, err := url.Parse(body.AuthorizeURL)
+	if err != nil || !strings.HasPrefix(body.AuthorizeURL, rig.ghBase+"/login/oauth/authorize?") {
+		t.Fatalf("authorize_url = %q, want GitHub's OAuth authorize on the deployment's GitHub", body.AuthorizeURL)
+	}
+	q := u.Query()
+	if q.Get("client_id") != gh.clientID {
+		t.Errorf("client_id = %q, want the deployment App's %q", q.Get("client_id"), gh.clientID)
+	}
+	if q.Get("redirect_uri") != "https://tf.test"+ManagedBindCallbackPath {
+		t.Errorf("redirect_uri = %q, want the callback", q.Get("redirect_uri"))
+	}
+	if q.Get("scope") != "" {
+		t.Errorf("scope = %q, want none — a GitHub App's user token carries the App's permissions", q.Get("scope"))
+	}
+	// The name rides the record, never the URL GitHub sees.
+	if strings.Contains(strings.ToLower(body.AuthorizeURL), "acme") {
+		t.Errorf("the account login leaked into the authorize URL: %s", body.AuthorizeURL)
+	}
+	cookie := rig.bindCookie(t, rec)
+	state := q.Get("state")
+	if state == "" {
+		t.Fatal("authorize URL carries no state")
+	}
+	if state == cookie.Value {
+		t.Error("state is the raw nonce; it must be the hash, so the URL bar never holds the bearer capability")
+	}
+
+	out := rig.callback(t, cookie, namedCallbackQuery(state))
+	if out.Code != http.StatusFound {
+		t.Fatalf("callback status=%d outcome=%q body=%s, want 302",
+			out.Code, out.Header().Get("X-TF-Bind-Outcome"), out.Body.String())
+	}
+	if !gh.served("/api/v3/user/installations") {
+		t.Error("the installation was not looked up among the user's own")
+	}
+	if !gh.served("/api/v3/app/installations/4242") {
+		t.Error("the App did not read the installation it is about to persist")
+	}
+	if !gh.served("/api/v3/orgs/acme/memberships/octocat") {
+		t.Error("the authority gate did not run")
+	}
+	var accountLogin, accountID string
+	if err := rig.h.AdminDB.QueryRow(`
+		SELECT account_login, account_id FROM org_github_app_installations
+		 WHERE org_id = $1 AND installation_id = '4242'
+	`, rig.orgID.String()).Scan(&accountLogin, &accountID); err != nil {
+		t.Fatalf("read installation row: %v", err)
+	}
+	if accountLogin != "acme" || accountID != "700" {
+		t.Errorf("installation row = (%q, %q), want the App's own read (acme, 700), not the admin's spelling", accountLogin, accountID)
+	}
+	if class := rig.credentialClass(t); class != string(domain.GitHubCredentialClassManagedApp) {
+		t.Errorf("credential class = %q, want managed_app", class)
+	}
+}
+
+func TestManagedBind_NamedAccount_UserTarget(t *testing.T) {
+	gh := newFakeGitHub()
+	gh.accountType, gh.accountLogin, gh.accountID = "User", "octocat", 99
+	rig := newBindRig(t, gh)
+	cookie, state := rig.namedCeremony(t, "octocat")
+
+	out := rig.callback(t, cookie, namedCallbackQuery(state))
+	if out.Code != http.StatusFound {
+		t.Fatalf("callback status=%d outcome=%q, want 302", out.Code, out.Header().Get("X-TF-Bind-Outcome"))
+	}
+	if gh.served("/api/v3/orgs/octocat/memberships/octocat") {
+		t.Error("a user target asks GitHub nothing; the account administers itself")
+	}
+}
+
+// TestManagedBind_NamedAccount_NotInTheListingIsOneAnswer: an account with no
+// installation and an account whose installation this person cannot see look
+// identical in the listing the answer comes from, and the answer is identical
+// too — so the route cannot be used to learn which accounts have the App.
+func TestManagedBind_NamedAccount_NotInTheListingIsOneAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bend func(gh *fakeGitHub)
+	}{
+		{"the account has no installation", func(gh *fakeGitHub) {
+			gh.installationGone = true
+			gh.userInstallations = nil
+		}},
+		{"the account has one this person cannot see", func(gh *fakeGitHub) {
+			gh.userInstallations = []int64{11}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gh := newFakeGitHub()
+			tc.bend(gh)
+			rig := newBindRig(t, gh)
+			cookie, state := rig.namedCeremony(t, "acme")
+
+			out := rig.callback(t, cookie, namedCallbackQuery(state))
+			assertOutcome(t, out, "account_not_connectable")
+			if out.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403", out.Code)
+			}
+			rig.assertNothingBound(t)
+			// Nothing was read under the App's key: TF learned nothing about
+			// the account that the person could not already see.
+			if gh.served("/api/v3/app/installations/4242") {
+				t.Error("the App read an installation the person is not associated with")
+			}
+		})
+	}
+}
+
+func TestManagedBind_NamedAccount_Refusals(t *testing.T) {
+	cases := []struct {
+		name string
+		// bend shapes the fake before the rig links the admin's identity to
+		// its actor; afterRig shapes it after, for a case about the actor
+		// being somebody else.
+		bend     func(gh *fakeGitHub)
+		afterRig func(gh *fakeGitHub)
+		query    func(state string) string
+		outcome  string
+	}{
+		{
+			name:    "state is not this ceremony's — a code from somebody else's authorize",
+			query:   func(string) string { return namedCallbackQuery("not-our-state") },
+			outcome: "state_mismatch",
+		},
+		{
+			name:    "state absent",
+			query:   func(string) string { return "code=gh_code" },
+			outcome: "state_mismatch",
+		},
+		{
+			name:    "the person declined on GitHub's authorize page — no code",
+			query:   func(state string) string { return "state=" + url.QueryEscape(state) + "&error=access_denied" },
+			outcome: "identity_unproven",
+		},
+		{
+			name:    "token exchange fails",
+			bend:    func(gh *fakeGitHub) { gh.tokenExchangeStatus = http.StatusBadRequest },
+			outcome: "identity_unproven",
+		},
+		{
+			name:     "the authorizing account is not the admin's linked one",
+			afterRig: func(gh *fakeGitHub) { gh.actorLogin, gh.actorID = "mallory", 666 },
+			outcome:  "identity_mismatch",
+		},
+		{
+			name:    "the person sees the installation but is only a member",
+			bend:    func(gh *fakeGitHub) { gh.membershipRole = "member" },
+			outcome: "not_account_admin",
+		},
+		{
+			name:    "billing manager is not an admin",
+			bend:    func(gh *fakeGitHub) { gh.membershipRole = "billing_manager" },
+			outcome: "not_account_admin",
+		},
+		{
+			name:    "the membership read is refused — the App lost members:read",
+			bend:    func(gh *fakeGitHub) { gh.membershipStatus = http.StatusForbidden },
+			outcome: "verification_failed",
+		},
+		{
+			name: "the App's read names a different account than the lookup found",
+			bend: func(gh *fakeGitHub) {
+				gh.userInstallationAccounts = map[int64]string{4242: "acme"}
+				gh.accountLogin = "someone-else"
+			},
+			outcome: "installation_unreadable",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gh := newFakeGitHub()
+			if tc.bend != nil {
+				tc.bend(gh)
+			}
+			rig := newBindRig(t, gh)
+			if tc.afterRig != nil {
+				tc.afterRig(gh)
+			}
+			cookie, state := rig.namedCeremony(t, "acme")
+			query := namedCallbackQuery(state)
+			if tc.query != nil {
+				query = tc.query(state)
+			}
+			out := rig.callback(t, cookie, query)
+			assertOutcome(t, out, tc.outcome)
+			rig.assertNothingBound(t)
+		})
+	}
+}
+
+// TestManagedBind_NamedAccount_QueryInstallationIsIgnored: the record decides
+// the leg. A callback into a named ceremony that also carries an
+// installation_id — the shape a planted install-leg URL has — binds the named
+// account the person can see, never the id on the query string.
+func TestManagedBind_NamedAccount_QueryInstallationIsIgnored(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+	cookie, state := rig.namedCeremony(t, "acme")
+
+	out := rig.callback(t, cookie, namedCallbackQuery(state)+"&installation_id=9999&setup_action=install")
+	if out.Code != http.StatusFound {
+		t.Fatalf("callback status=%d outcome=%q, want 302", out.Code, out.Header().Get("X-TF-Bind-Outcome"))
+	}
+	if gh.served("/api/v3/app/installations/9999") {
+		t.Error("the query string's installation_id was read; the named leg must ignore it")
+	}
+	var n int
+	if err := rig.h.AdminDB.QueryRow(`
+		SELECT count(*) FROM org_github_app_installations WHERE org_id = $1 AND installation_id = '4242'
+	`, rig.orgID.String()).Scan(&n); err != nil || n != 1 {
+		t.Errorf("named account's installation rows = %d (%v), want 1", n, err)
+	}
+}
+
+func TestManagedBind_NamedAccount_BoundElsewhere(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+	other := rig.sibling(t, "other")
+	if out := other.callback(t, other.ceremony(t), defaultCallbackQuery(4242)); out.Code != http.StatusFound {
+		t.Fatalf("seed the other workspace's bind: %d", out.Code)
+	}
+
+	cookie, state := rig.namedCeremony(t, "acme")
+	out := rig.callback(t, cookie, namedCallbackQuery(state))
+	assertOutcome(t, out, "bound_elsewhere")
+	rig.assertNothingBound(t)
+	if strings.Contains(out.Body.String(), other.orgID.String()) {
+		t.Error("the refusal named the other workspace")
+	}
+}
+
+// TestManagedBind_NamedAccount_Start pins the start's own contract: the
+// account is validated as a login before it goes anywhere, the request must
+// come from the admin's own page, and a workspace that already holds a
+// credential is refused here before anyone is sent to GitHub.
+func TestManagedBind_NamedAccount_Start(t *testing.T) {
+	t.Run("MalformedLoginIsABadField", func(t *testing.T) {
+		rig := newBindRig(t, newFakeGitHub())
+		for _, bad := range []string{`{"account":""}`, `{"account":"-acme"}`, `{"account":"acme-"}`,
+			`{"account":"a--b"}`, `{"account":"acme/../x"}`, `{"account":"` + strings.Repeat("a", 40) + `"}`,
+			`{"account":"a b"}`, `{}`} {
+			rec := rig.connectAccount(t, bad)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("%s → %d, want 400", bad, rec.Code)
+			}
+			if !strings.Contains(rec.Body.String(), `"field":"account"`) {
+				t.Errorf("%s → body lacks the field name: %s", bad, rec.Body.String())
+			}
+		}
+		if rec := rig.connectAccount(t, `{"account":"acme","extra":1}`); rec.Code != http.StatusBadRequest {
+			t.Errorf("unknown field → %d, want 400", rec.Code)
+		}
+		// The longest login GitHub allows, with single hyphens inside it, is
+		// a login: the cap is 39 and the hyphen rule is about runs.
+		if rec := rig.connectAccount(t, `{"account":"`+strings.Repeat("ab-", 12)+`abc"}`); rec.Code != http.StatusOK {
+			t.Errorf("a 39-character login with single hyphens → %d body=%s, want 200", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("RequiresTheAdminsOwnOrigin", func(t *testing.T) {
+		rig := newBindRig(t, newFakeGitHub())
+		req := httptest.NewRequest("POST", "/api/orgs/"+rig.orgID.String()+"/github/managed/connect-account",
+			strings.NewReader(`{"account":"acme"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "https://attacker.test")
+		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: rig.sid})
+		rec := httptest.NewRecorder()
+		rig.srv.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("cross-origin start = %d, want 403; a page the admin did not load must not choose the account", rec.Code)
+		}
+		var n int
+		if err := rig.h.AdminDB.QueryRow(`SELECT count(*) FROM github_pending_binds WHERE org_id = $1`, rig.orgID.String()).Scan(&n); err != nil || n != 0 {
+			t.Errorf("%d pending binds minted by a refused start (%v), want 0", n, err)
+		}
+	})
+
+	t.Run("RequiresWorkspaceAdmin", func(t *testing.T) {
+		rig := newBindRig(t, newFakeGitHub())
+		member := rig.seedUser()
+		if _, err := rig.h.AdminDB.Exec(
+			`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`,
+			member, rig.orgID.String()); err != nil {
+			t.Fatalf("insert org_membership: %v", err)
+		}
+		resp, _ := rig.driveCallback(member)
+		req := httptest.NewRequest("POST", "/api/orgs/"+rig.orgID.String()+"/github/managed/connect-account",
+			strings.NewReader(`{"account":"acme"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", rig.srv.deployCfg.publicURL)
+		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: rig.sidFromResp(resp)})
+		rec := httptest.NewRecorder()
+		rig.srv.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("member start = %d, want 403", rec.Code)
+		}
+	})
+
+	t.Run("RefusesAWorkspaceThatHoldsAPAT", func(t *testing.T) {
+		gh := newFakeGitHub()
+		rig := newBindRig(t, gh)
+		if err := rig.srv.tx.WithTx(context.Background(), rig.orgID.String(), rig.userID.String(),
+			func(tx db.TxStores) error {
+				return tx.Secrets.Put(context.Background(), rig.orgID.String(), integrations.KeyGitHubPAT, "ghp_live", "test PAT")
+			}); err != nil {
+			t.Fatalf("seed org PAT: %v", err)
+		}
+		rec := rig.connectAccount(t, `{"account":"acme"}`)
+		if rec.Code != http.StatusConflict {
+			t.Errorf("start with a PAT bound = %d body=%s, want 409", rec.Code, rec.Body.String())
+		}
+		assertOutcome(t, rec, "credential_pat_in_use")
+		if !strings.Contains(rec.Body.String(), `"reason":"CREDENTIAL_PAT_IN_USE"`) {
+			t.Errorf("JSON refusal lacks the upper-cased reason: %s", rec.Body.String())
+		}
+		var n int
+		if err := rig.h.AdminDB.QueryRow(`SELECT count(*) FROM github_pending_binds WHERE org_id = $1`, rig.orgID.String()).Scan(&n); err != nil || n != 0 {
+			t.Errorf("%d pending binds minted by a refused start (%v), want 0", n, err)
+		}
+	})
+}
+
 // --- Mode gate -------------------------------------------------------------
 
 func TestManagedBind_LocalModeIs404(t *testing.T) {
@@ -1421,13 +1982,14 @@ func TestManagedBind_LocalModeIs404(t *testing.T) {
 	}
 	s.SetDeployConfig("http://localhost:3000", key)
 
-	for _, path := range []string{
-		"/api/orgs/" + runmode.LocalDefaultOrgID + "/github/managed/connect",
-		ManagedBindCallbackPath + "?code=x&installation_id=1",
+	for _, rt := range []struct{ method, path string }{
+		{"POST", "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/managed/connect"},
+		{"POST", "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/managed/connect-account"},
+		{"GET", ManagedBindCallbackPath + "?code=x&installation_id=1"},
 	} {
-		rec := doJSON(t, s, "GET", path, nil)
+		rec := doJSON(t, s, rt.method, rt.path, nil)
 		if rec.Code != http.StatusNotFound {
-			t.Errorf("GET %s in local mode = %d, want 404", path, rec.Code)
+			t.Errorf("%s %s in local mode = %d, want 404", rt.method, rt.path, rec.Code)
 		}
 	}
 }

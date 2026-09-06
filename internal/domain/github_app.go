@@ -251,6 +251,19 @@ func (s ReachableCacheState) StaleAt(now time.Time, ttl time.Duration) bool {
 	return now.Sub(s.ObservedAt) >= ttl
 }
 
+// UserGitHubIdentity is a person's GitHub account on one host, as TF captured
+// it under that person's own credential: the login as it was then, and the
+// numeric account id, which is the half a rename does not touch and the half a
+// comparison should use. Source says how it was captured; every writer is a
+// GitHub-verified whoami, so the row is GitHub's word for who this person is
+// there.
+type UserGitHubIdentity struct {
+	Login        string
+	GitHubUserID string
+	Source       string
+	VerifiedAt   time.Time
+}
+
 // GitHubPendingBind is one initiated bind ceremony: an admin clicked Connect,
 // TF minted a nonce, and the browser left for GitHub carrying it in a cookie.
 // The row is what the callback consumes to learn WHICH workspace the returning
@@ -272,9 +285,17 @@ type GitHubPendingBind struct {
 	// UserID is the admin who started the ceremony. The callback requires the
 	// returning session to be that same person, so a cookie replayed into
 	// somebody else's browser consumes nothing.
-	UserID    string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	UserID string
+	// AccountLogin is set when the ceremony was started for an account that
+	// already has the App installed: the login the admin named, and the only
+	// place it is carried — never a URL. It decides which return leg the
+	// callback expects: empty is GitHub's install redirect (code and
+	// installation_id together), non-empty is the OAuth authorize leg (code
+	// and state), where the installation is found among the ones the
+	// authorizing user can see rather than read off the query string.
+	AccountLogin string
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
 	// ConsumedAt is when the callback spent this record, zero while it is
 	// unspent. Consumption is a conditional update rather than a read then a
 	// write, so two concurrent callbacks cannot both find it unspent.

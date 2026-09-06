@@ -196,6 +196,31 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		assertSameSet(t, "UserIDsForGitHubLoginSystem", got, []string{u})
 	})
 
+	t.Run("IdentityReadReturnsTheRowByIdAndNilForNone", func(t *testing.T) {
+		// The bind ceremony compares identities by numeric id, so the read has
+		// to hand the id back beside the login — and answer nil, not a zero
+		// row, for a user with nothing linked on that host, since "nothing
+		// linked" is a refusal of its own there.
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if got, err := stores.Users.GetGitHubIdentity(ctx, u, host); err != nil || got != nil {
+			t.Fatalf("GetGitHubIdentity(unlinked) = %+v, %v; want nil, nil", got, err)
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "", "connect_oauth"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		got, err := stores.Users.GetGitHubIdentity(ctx, u, host)
+		if err != nil || got == nil {
+			t.Fatalf("GetGitHubIdentity = %+v, %v", got, err)
+		}
+		if got.Login != "octocat" || got.GitHubUserID != "583231" || got.Source != "connect_oauth" || got.VerifiedAt.IsZero() {
+			t.Errorf("GetGitHubIdentity = %+v; want octocat/583231/connect_oauth with a verification time", *got)
+		}
+		if got, err := stores.Users.GetGitHubIdentity(ctx, u, "https://elsewhere.example"); err != nil || got != nil {
+			t.Errorf("GetGitHubIdentity(other host) = %+v, %v; want nil — identity is host-scoped", got, err)
+		}
+	})
+
 	t.Run("IdentityEmailRoundTripsAndSurvivesAnOmission", func(t *testing.T) {
 		stores, seed := mk(t)
 		u := seed.User(t)

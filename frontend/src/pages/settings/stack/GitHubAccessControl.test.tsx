@@ -11,6 +11,7 @@ const ghMocks = vi.hoisted(() => ({
   replayGitHubWebhookDeliveries: vi.fn(),
   refreshGitHubAppInstallations: vi.fn(),
   startManagedGitHubConnect: vi.fn(),
+  startManagedGitHubConnectAccount: vi.fn(),
   disconnectManagedGitHub: vi.fn(),
   disconnectManagedInstallation: vi.fn(),
   disconnectOwnApp: vi.fn(),
@@ -24,6 +25,7 @@ vi.mock('../../../lib/githubApp', async (importOriginal) => {
     replayGitHubWebhookDeliveries: ghMocks.replayGitHubWebhookDeliveries,
     refreshGitHubAppInstallations: ghMocks.refreshGitHubAppInstallations,
     startManagedGitHubConnect: ghMocks.startManagedGitHubConnect,
+    startManagedGitHubConnectAccount: ghMocks.startManagedGitHubConnectAccount,
     disconnectManagedGitHub: ghMocks.disconnectManagedGitHub,
     disconnectManagedInstallation: ghMocks.disconnectManagedInstallation,
     disconnectOwnApp: ghMocks.disconnectOwnApp,
@@ -137,6 +139,8 @@ beforeEach(() => {
   ghMocks.replayGitHubWebhookDeliveries.mockReset()
   ghMocks.refreshGitHubAppInstallations.mockReset()
   ghMocks.startManagedGitHubConnect.mockReset()
+  ghMocks.startManagedGitHubConnectAccount.mockReset()
+  ghMocks.startManagedGitHubConnectAccount.mockResolvedValue(undefined)
   ghMocks.disconnectManagedGitHub.mockReset()
   ghMocks.disconnectManagedInstallation.mockReset()
   ghMocks.disconnectOwnApp.mockReset()
@@ -672,6 +676,80 @@ describe('GitHubAccessControl · switching the own App to the deployment App', (
     fireEvent.click(screen.getByRole('button', { name: 'Switch to the deployment’s App…' }))
     expect(ghMocks.disconnectOwnApp).not.toHaveBeenCalled()
     expect(ghMocks.startManagedGitHubConnect).not.toHaveBeenCalled()
+  })
+})
+
+// The named-account way in: for an account that already has the deployment
+// App, which GitHub's install page would offer nothing but Configure. Offered
+// wherever Connect is, as a reveal; it names an account and never lists one.
+describe('GitHubAccessControl · connecting an account that already has the App', () => {
+  const reveal = () =>
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Connect an account that already has the App…' }),
+    )
+
+  it('is offered beside Connect in the empty state where the deployment has an App', () => {
+    installMocks.status = statusOf({ deployment_app_available: true })
+    renderControl({ hasGitHubPat: false, githubPatLogin: '' })
+    expect(
+      screen.getByRole('button', { name: 'Connect an account that already has the App…' }),
+    ).toBeInTheDocument()
+  })
+
+  it('is not offered where the deployment has no App', () => {
+    installMocks.status = statusOf({})
+    renderControl({ hasGitHubPat: false, githubPatLogin: '' })
+    expect(
+      screen.queryByRole('button', { name: 'Connect an account that already has the App…' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('is offered on the managed panel beside Connect another account', () => {
+    installMocks.status = statusOf({
+      installations: [installation({})],
+      using_deployment_default: true,
+      deployment_app_available: true,
+    })
+    renderControl({ hasGitHubPat: false, githubPatLogin: '', githubAppManaged: true })
+    expect(screen.getByRole('button', { name: 'Connect another account…' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Connect an account that already has the App…' }),
+    ).toBeInTheDocument()
+  })
+
+  it('names the account and starts the OAuth leg for it, listing nothing', async () => {
+    installMocks.status = statusOf({ deployment_app_available: true })
+    renderControl({ hasGitHubPat: false, githubPatLogin: '' })
+    reveal()
+    expect(screen.queryByRole('list')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'acme-corp' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    await waitFor(() => {
+      expect(ghMocks.startManagedGitHubConnectAccount).toHaveBeenCalledWith('org-1', 'acme-corp')
+    })
+    expect(ghMocks.startManagedGitHubConnect).not.toHaveBeenCalled()
+  })
+
+  it('does not submit an empty name', () => {
+    installMocks.status = statusOf({ deployment_app_available: true })
+    renderControl({ hasGitHubPat: false, githubPatLogin: '' })
+    reveal()
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    expect(ghMocks.startManagedGitHubConnectAccount).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a refused start inline and keeps the form', async () => {
+    installMocks.status = statusOf({ deployment_app_available: true })
+    ghMocks.startManagedGitHubConnectAccount.mockRejectedValue(
+      new Error("Couldn't connect acme-corp."),
+    )
+    renderControl({ hasGitHubPat: false, githubPatLogin: '' })
+    reveal()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'acme-corp' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    expect(await screen.findByText("Couldn't connect acme-corp.")).toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toBeInTheDocument()
   })
 })
 
