@@ -63,6 +63,13 @@ func seedParkFleet(t *testing.T) *parkFleet {
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.md"), "half-finished work")
 	pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET worktree_path = $2 WHERE id = $1`, fx.brID, wtPath)
 	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET worktree_path = $2 WHERE id = $1`, fx.conversationID, wtPath)
+	// A real resume is of a conversation minted long before the aging window:
+	// every scenario here runs on that shape, so the affinity a wake stamps has
+	// to open its exclusive window from the wake, not from a mint the fixture
+	// happens to have made milliseconds ago.
+	pgtest.MustExec(t, h.AdminDB,
+		`UPDATE conversations SET started_at = now() - interval '10 minutes', queued_at = now() - interval '10 minutes' WHERE id = $1`,
+		fx.conversationID)
 
 	blobs, err := storage.New()
 	if err != nil {
@@ -538,8 +545,7 @@ func TestFleet_WarmResume_SameExecutorNeverWaitsOnItsOwnPersist(t *testing.T) {
 		t.Fatalf("preferred executor = %q, want X (%s)", got, xID)
 	}
 	// Inside its affinity window the conversation is X's alone. The window
-	// ages from the conversation's mint time, so it is pinned fresh here.
-	pgtest.MustExec(t, f.h.AdminDB, `UPDATE conversations SET started_at = now() WHERE id = $1`, f.conversationID)
+	// opened at the wake, so the conversation's age is irrelevant.
 	if got := f.claim(t, f.y); got != nil {
 		t.Fatal("Y claimed the resumed conversation inside the aging window while X is live")
 	}
@@ -873,11 +879,8 @@ func TestFleet_Eviction_RoundTripsTheUncommittedDelta(t *testing.T) {
 // TestFleet_Affinity_ResumeChasesTheLastExecutor pins the tier behavior a
 // resume relies on, driven through the follow-up rather than the store: X
 // claims its own resumed conversation at once, Y cannot inside the aging
-// window, and Y can the moment X's heartbeat is stale past liveness.
-//
-// The window ages from the conversation's mint time, so the row is pinned
-// fresh before each resume: what is being asserted is the tier logic, not
-// the anchor.
+// window, and Y can the moment X's heartbeat is stale past liveness. The
+// conversation is minutes old throughout: each wake opens a fresh window.
 func TestFleet_Affinity_ResumeChasesTheLastExecutor(t *testing.T) {
 	f := seedParkFleet(t)
 	xID, _ := f.x.executorIdentity()
@@ -894,7 +897,6 @@ func TestFleet_Affinity_ResumeChasesTheLastExecutor(t *testing.T) {
 	if got := f.preferredExecutor(t); got != xID {
 		t.Fatalf("preferred executor after the resume = %q, want X (%s)", got, xID)
 	}
-	pgtest.MustExec(t, f.h.AdminDB, `UPDATE conversations SET started_at = now() WHERE id = $1`, f.conversationID)
 	if got := f.claim(t, f.y); got != nil {
 		t.Fatal("Y claimed inside the aging window while X is live")
 	}
@@ -910,7 +912,6 @@ func TestFleet_Affinity_ResumeChasesTheLastExecutor(t *testing.T) {
 	if err := f.followUp("and again"); err != nil {
 		t.Fatalf("follow-up: %v", err)
 	}
-	pgtest.MustExec(t, f.h.AdminDB, `UPDATE conversations SET started_at = now() WHERE id = $1`, f.conversationID)
 	backdateFleetHeartbeat(t, f.h, xID, 30*time.Second)
 	onY := f.claim(t, f.y)
 	if onY == nil {
@@ -928,12 +929,12 @@ func TestFleet_Affinity_ResumeChasesTheLastExecutor(t *testing.T) {
 		t.Errorf("preferred executor after Y's engagement = %q, want Y (%s)", got, yID)
 	}
 	backdateFleetHeartbeat(t, f.h, xID, 0)
-	pgtest.MustExec(t, f.h.AdminDB, `UPDATE conversations SET started_at = now() WHERE id = $1`, f.conversationID)
 	if got := f.claim(t, f.x); got != nil {
 		t.Fatal("X claimed a conversation Y drove last, inside the aging window")
 	}
-	// Past the window, anyone may take it.
-	pgtest.MustExec(t, f.h.AdminDB, `UPDATE conversations SET started_at = now() - interval '21 seconds' WHERE id = $1`, f.conversationID)
+	// Past the window, anyone may take it. The window is the wake's stamp, so
+	// that is what ages — the mint stamp has been minutes old all along.
+	pgtest.MustExec(t, f.h.AdminDB, `UPDATE conversations SET queued_at = now() - interval '21 seconds' WHERE id = $1`, f.conversationID)
 	aged := f.claim(t, f.x)
 	if aged == nil {
 		t.Fatal("X could not claim once the aging window elapsed")

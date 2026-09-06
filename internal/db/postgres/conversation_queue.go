@@ -379,16 +379,21 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		// first, so a fresh conversation with a live owner is exclusively that owner's
 		// until it ages (warm cache), while a saturated/dead owner never
 		// head-of-line-blocks its shard.
-		// TODO(TFAC-944): the aging arm anchors on started_at, which is stamped
-		// once at mint, so a resumed conversation older than the window has
-		// no exclusive tier-1 period at all and the re-stamped affinity only
-		// orders X's own scan. Age from the moment the conversation became
-		// claimable in this queue episode instead.
+		//
+		// The aging arm anchors on queued_at — the moment the row entered the
+		// queue in THIS episode (the enqueue for a fresh conversation, the
+		// wake for a resume) — never on started_at, which is stamped once at
+		// mint. The window bounds how long a claimable conversation waits for
+		// its preferred executor, so it has to open when the wait begins:
+		// anchored on the mint stamp, a resume older than the window would
+		// have no exclusive period at all and the re-stamped affinity would
+		// only order its owner's own scan. started_at is the fallback for
+		// rows that predate the queue column.
 		candidatePredicate = `
 			  AND (
 			    (r.preferred_executor_id IS NOT NULL AND r.preferred_executor_id = $1)
 			    OR r.preferred_executor_id IS NULL
-			    OR r.started_at < now() - make_interval(secs => $3)
+			    OR COALESCE(r.queued_at, r.started_at) < now() - make_interval(secs => $3)
 			    OR NOT EXISTS (
 			        SELECT 1 FROM instances i
 			        WHERE i.id = r.preferred_executor_id

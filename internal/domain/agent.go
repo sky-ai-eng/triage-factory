@@ -197,9 +197,11 @@ type Conversation struct {
 	Status    string
 	Model     string
 	StartedAt time.Time
-	// QueuedAt is when the conversation last entered the queue; ClaimedAt is when the
-	// dispatcher last claimed it (work actually began). Together they carry
-	// the latest queue episode's dwell — the UI's queue timer — while
+	// QueuedAt is when the conversation entered the queue this episode — the
+	// enqueue for a fresh conversation, re-stamped by the wake on a resume;
+	// ClaimedAt is when the dispatcher last claimed it (work actually began).
+	// Together they carry the latest queue episode's dwell — the UI's queue
+	// timer, and the anchor of the placement claim's aging window — while
 	// StartedAt stays the mint stamp and DurationMs stays pure working time
 	// (the SDK-reported per-turn duration, never wall clock across the
 	// queue). Both nil on legacy rows that predate the queue columns.
