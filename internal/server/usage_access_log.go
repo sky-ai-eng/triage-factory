@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -226,6 +227,17 @@ type accessDetail struct {
 	// are captured for the raw passthrough but not read here — no label needs
 	// them, and an opaque uuid would only make the line harder to scan.
 	Domain string `json:"domain"`
+	// The api_token_* rows: Name is shared with the credential rows above;
+	// Prefix is the visible head of the secret, which is how its owner tells
+	// two tokens apart and the only part of it the log ever holds. The three
+	// bounds are what the token was minted under — the cap as it stood then,
+	// which is the point of recording it, since the cap applies at use
+	// against whatever the setting says later. token_id is left to the raw
+	// passthrough for the same reason as the other uuids.
+	Prefix       string     `json:"prefix"`
+	ExpiresAt    *time.Time `json:"expires_at"`
+	MaxAgeDays   *int       `json:"max_age_days"`
+	AllowedCIDRs []string   `json:"allowed_cidrs"`
 }
 
 // accessChangeLabel renders one row's action + detail_json into the human
@@ -306,6 +318,16 @@ func accessChangeLabel(e domain.AccessChange, targetName, teamName string) strin
 		return "added " + target + " as an SSO break-glass principal"
 	case domain.AccessActionSSOBreakGlassRemoved:
 		return "removed " + target + " from the SSO break-glass principals"
+	case domain.AccessActionAPITokenCreated:
+		return apiTokenCreatedLabel(d)
+	case domain.AccessActionAPITokenRevoked:
+		if d.Source == domain.AccessSourceMembershipRemoved {
+			// The deprovisioning hook wrote this: the actor removed the target
+			// from the org, and the token went with the membership. Read as
+			// the consequence it is, not as a revoke somebody chose.
+			return "revoked " + target + "'s API token " + apiTokenPhrase(d) + " with their org membership"
+		}
+		return "revoked API token " + apiTokenPhrase(d)
 	default:
 		// An unrecognized discriminator (forward-compat: the column has no CHECK)
 		// shows raw so the row still renders meaningfully.
@@ -344,6 +366,41 @@ func eventSourcePhrase(d accessDetail) string {
 		return "an event source"
 	}
 	return d.Kind + " events"
+}
+
+// apiTokenPhrase names a token the way its owner recognises it: the name they
+// gave it, and the visible head of the secret in case two share a name (names
+// are deliberately not unique — a replacement may share one). Either may be
+// missing from an older or malformed row; the phrase degrades rather than
+// failing.
+func apiTokenPhrase(d accessDetail) string {
+	name := orFallback(d.Name, "(unnamed)")
+	if d.Prefix == "" {
+		return name
+	}
+	return name + " (" + d.Prefix + "…)"
+}
+
+// apiTokenCreatedLabel renders the mint row with the whole of what bounded the
+// token at that moment — the expiry asked for, the org cap in force, and the
+// allowlist — each omitted when absent, since absent means unbounded.
+func apiTokenCreatedLabel(d accessDetail) string {
+	s := "created API token " + apiTokenPhrase(d)
+	if d.ExpiresAt != nil {
+		s += " expiring " + d.ExpiresAt.UTC().Format("2 Jan 2006")
+	} else {
+		s += " with no expiry"
+	}
+	if d.MaxAgeDays != nil && *d.MaxAgeDays > 0 {
+		s += fmt.Sprintf(", under the org's %d-day cap", *d.MaxAgeDays)
+	}
+	switch n := len(d.AllowedCIDRs); {
+	case n == 1:
+		s += ", accepted from 1 IP range"
+	case n > 1:
+		s += fmt.Sprintf(", accepted from %d IP ranges", n)
+	}
+	return s
 }
 
 // credentialActionLabel renders a credential_set / credential_removed predicate
