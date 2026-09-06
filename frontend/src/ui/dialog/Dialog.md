@@ -69,7 +69,7 @@ It builds, in Acquire's vocabulary and at a dialog's pace — 1.05s end to end:
    glow, and a glow is ambience.
 3. **Wireframe.** A cross corner to corner: the mark a wireframe puts in a box
    whose contents are not there yet.
-   3b. **Measure.** A caliper draws across the empty frame in the same window as the
+3b. **Measure.** A caliper draws across the empty frame in the same window as the
    cross, so it costs no time: the frame is sized before anything is put in it.
    Revealed by a clip, never a scale — a scaled tick is a distorted tick.
 4. **Empty.** The cross clears and the frame is briefly nothing but a frame. This
@@ -98,7 +98,7 @@ often, not how serious: a flash you see forty times is wallpaper.
 
 The reason it earns a build at all: a dialog is a region of the screen that did
 not exist a moment ago, holding facts you have to read before acting. The
-sequence says _this is new, and here is what is in it_ — the same claim Acquire
+sequence says *this is new, and here is what is in it* — the same claim Acquire
 makes about a value. It runs once per open, never on close, and never repeats.
 
 ## Keyboard and focus
