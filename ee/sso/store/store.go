@@ -72,8 +72,29 @@ type SSOConnection struct {
 	// LastTestedAt is stamped when a verify-before-enforce Test passes
 	// end-to-end. nil = never passed a Test. Enforcement gates on non-nil.
 	LastTestedAt *time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// IdP names the identity-provider product behind the connection — one of
+	// IdPValues, or "" when not known (a NULL column). Derived from the
+	// metadata URL at registration and overridable by an org admin; it is
+	// what lets a login through this connection wear the vendor's mark.
+	IdP       string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// IdPValues is the closed vocabulary sso_connections.idp accepts, mirrored
+// from the column's CHECK. 'other' is a real answer — an IdP the deployment
+// recognises as none of the named ones — distinct from "" (not known).
+var IdPValues = []string{"entra", "okta", "google", "onelogin", "ping", "other"}
+
+// ValidIdP reports whether v is one of IdPValues. "" is not: an absent value
+// is spelled by omitting the field, never by sending an empty one.
+func ValidIdP(v string) bool {
+	for _, k := range IdPValues {
+		if v == k {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateSSOConnectionParams is the input to SSOConnectionStore.Create.
@@ -85,15 +106,19 @@ type CreateSSOConnectionParams struct {
 	Kind        string // "" → 'saml'
 	ProviderID  string
 	DefaultRole string // "" → 'member'
+	IdP         string // "" → NULL (not known); otherwise one of IdPValues
 }
 
 // UpdateSSOConnectionParams is the input to SSOConnectionStore.Update —
 // the mutable management fields. An empty DefaultRole leaves the stored
-// role unchanged (a disable-only update passes just Enabled). ProviderID
-// and Kind are not updatable here.
+// role unchanged (a disable-only update passes just Enabled). IdP is
+// three-valued because "not known" is a value the column holds: nil leaves
+// it unchanged, a pointer to "" clears it to NULL, a pointer to one of
+// IdPValues sets it. ProviderID and Kind are not updatable here.
 type UpdateSSOConnectionParams struct {
 	DefaultRole string
 	Enabled     bool
+	IdP         *string
 }
 
 // SSOProviderBinding is the projection SSOConnectionStore.GetByProviderID
@@ -172,6 +197,13 @@ type SSOConnectionStore interface {
 	GetByProviderID(ctx context.Context, providerID string) (*SSOProviderBinding, error)
 	SetEnforced(ctx context.Context, orgID, id string, enforced bool) error
 	MarkTestedByProviderID(ctx context.Context, providerID string) error
+	// IdPsByProviderIDs answers, for each provider id that names a connection
+	// with a known IdP, which IdP it is. Ids that match no connection or a
+	// connection whose IdP is not known are absent from the map rather than
+	// present with "". Admin pool: the caller is a principal reading their own
+	// login identities, which no org membership scopes — the provider ids
+	// come from rows the principal owns, and that is the authorization.
+	IdPsByProviderIDs(ctx context.Context, providerIDs []string) (map[string]string, error)
 }
 
 // SSOBreakGlassStore owns the sso_break_glass table — the principals that

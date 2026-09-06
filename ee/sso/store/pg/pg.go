@@ -65,11 +65,13 @@ func (s *ssoConnectionStore) Create(ctx context.Context, p ssostore.CreateSSOCon
 		role = "member"
 	}
 	var id string
+	// An unknown IdP is NULL, not '': the CHECK admits only the named values,
+	// and "" is the Go spelling of the column being absent.
 	err := s.app.QueryRowContext(ctx, `
-		INSERT INTO sso_connections (org_id, kind, provider_id, default_role)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO sso_connections (org_id, kind, provider_id, default_role, idp)
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''))
 		RETURNING id::text
-	`, p.OrgID, kind, p.ProviderID, role).Scan(&id)
+	`, p.OrgID, kind, p.ProviderID, role, p.IdP).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("insert sso_connection: %w", err)
 	}
@@ -79,7 +81,7 @@ func (s *ssoConnectionStore) Create(ctx context.Context, p ssostore.CreateSSOCon
 func (s *ssoConnectionStore) GetByID(ctx context.Context, orgID, id string) (*ssostore.SSOConnection, error) {
 	c, err := scanSSOConnection(s.app.QueryRowContext(ctx, `
 		SELECT id::text, org_id::text, kind, provider_id, default_role::text,
-		       enabled, enforced, last_tested_at, created_at, updated_at
+		       enabled, enforced, last_tested_at, COALESCE(idp, ''), created_at, updated_at
 		FROM sso_connections
 		WHERE id = $1 AND org_id = $2
 	`, id, orgID))
@@ -95,7 +97,7 @@ func (s *ssoConnectionStore) GetByID(ctx context.Context, orgID, id string) (*ss
 func (s *ssoConnectionStore) ListByOrg(ctx context.Context, orgID string) ([]ssostore.SSOConnection, error) {
 	rows, err := s.app.QueryContext(ctx, `
 		SELECT id::text, org_id::text, kind, provider_id, default_role::text,
-		       enabled, enforced, last_tested_at, created_at, updated_at
+		       enabled, enforced, last_tested_at, COALESCE(idp, ''), created_at, updated_at
 		FROM sso_connections
 		WHERE org_id = $1
 		ORDER BY created_at DESC, id ASC
@@ -118,7 +120,9 @@ func (s *ssoConnectionStore) ListByOrg(ctx context.Context, orgID string) ([]sso
 
 // scanSSOConnection reads the full connection column list (shared by
 // GetByID's single-row read and ListByOrg's iteration) into a
-// ssostore.SSOConnection, unwrapping the nullable last_tested_at.
+// ssostore.SSOConnection, unwrapping the nullable last_tested_at. idp
+// arrives COALESCEd to ” by the SELECT, which is the type's own spelling of
+// "not known".
 func scanSSOConnection(sc rowScanner) (ssostore.SSOConnection, error) {
 	var (
 		c          ssostore.SSOConnection
@@ -126,7 +130,7 @@ func scanSSOConnection(sc rowScanner) (ssostore.SSOConnection, error) {
 	)
 	if err := sc.Scan(
 		&c.ID, &c.OrgID, &c.Kind, &c.ProviderID, &c.DefaultRole,
-		&c.Enabled, &c.Enforced, &lastTested, &c.CreatedAt, &c.UpdatedAt,
+		&c.Enabled, &c.Enforced, &lastTested, &c.IdP, &c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		return ssostore.SSOConnection{}, err
 	}
@@ -140,12 +144,25 @@ func (s *ssoConnectionStore) Update(ctx context.Context, orgID, id string, p sso
 	// An empty DefaultRole means "leave the role unchanged" — COALESCE
 	// preserves the stored value. A non-empty 'owner' still trips the
 	// sso_connections_role_not_owner CHECK.
+	//
+	// IdP is three-valued, and the two nils are told apart by a separate
+	// flag: a nil pointer keeps the column, a pointer to "" writes NULL, and
+	// anything else is written as-is (the CHECK refuses a value outside the
+	// vocabulary, which the handler has already validated).
+	var (
+		setIdP bool
+		idp    string
+	)
+	if p.IdP != nil {
+		setIdP, idp = true, *p.IdP
+	}
 	if _, err := s.app.ExecContext(ctx, `
 		UPDATE sso_connections
 		SET default_role = COALESCE(NULLIF($1, '')::public.org_role, default_role),
-		    enabled = $2
-		WHERE id = $3 AND org_id = $4
-	`, p.DefaultRole, p.Enabled, id, orgID); err != nil {
+		    enabled = $2,
+		    idp = CASE WHEN $3 THEN NULLIF($4, '') ELSE idp END
+		WHERE id = $5 AND org_id = $6
+	`, p.DefaultRole, p.Enabled, setIdP, idp, id, orgID); err != nil {
 		return fmt.Errorf("update sso_connection: %w", err)
 	}
 	return nil
@@ -174,6 +191,34 @@ func (s *ssoConnectionStore) GetByProviderID(ctx context.Context, providerID str
 		return nil, fmt.Errorf("get sso_connection by provider_id: %w", err)
 	}
 	return &b, nil
+}
+
+func (s *ssoConnectionStore) IdPsByProviderIDs(ctx context.Context, providerIDs []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(providerIDs) == 0 {
+		return out, nil
+	}
+	// Admin pool, like GetByProviderID: the ids come from identity rows the
+	// principal owns, and a connection's IdP is not an org secret. Rows with
+	// no idp are filtered here rather than mapped to "", so the map answers
+	// only what is known.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT provider_id, idp
+		FROM sso_connections
+		WHERE provider_id = ANY($1) AND idp IS NOT NULL
+	`, providerIDs)
+	if err != nil {
+		return nil, fmt.Errorf("idps by provider_id: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid, idp string
+		if err := rows.Scan(&pid, &idp); err != nil {
+			return nil, fmt.Errorf("scan idp by provider_id: %w", err)
+		}
+		out[pid] = idp
+	}
+	return out, rows.Err()
 }
 
 func (s *ssoConnectionStore) SetEnforced(ctx context.Context, orgID, id string, enforced bool) error {

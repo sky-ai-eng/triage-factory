@@ -614,21 +614,35 @@ func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
 		t.Fatalf("seed saml identity: %v", err)
 	}
 
-	// Re-login under that non-GitHub provider (Entra SAML): isSSO=true resolves to
-	// alice's principal but must never touch the github identity row —
-	// preserving the connect_oauth binding captured above.
+	// Re-login under that non-GitHub provider (Entra SAML): a provider id
+	// resolves to alice's principal but must never touch the github identity
+	// row — preserving the connect_oauth binding captured above.
 	claims := &verify.Claims{
 		Subject:       samlID.String(),
 		Email:         "alice@corp.example",
 		EmailVerified: true,                                         // SAML assertion emails are verified by definition
 		UserMetadata:  map[string]any{"full_name": "Alice Example"}, // no user_name
 	}
-	got, err := resolveOrCreatePrincipal(context.Background(), rig.h.AdminDB, samlID, claims, true)
+	const providerID = "11111111-2222-3333-4444-555555555555"
+	got, err := resolveOrCreatePrincipal(context.Background(), rig.h.AdminDB, samlID, claims, providerID)
 	if err != nil {
 		t.Fatalf("resolveOrCreatePrincipal: %v", err)
 	}
 	if got != alice {
 		t.Fatalf("SAML re-login resolved to principal %v, want alice %v", got, alice)
+	}
+
+	// The saml row was seeded without a provider id (a row from before the
+	// stamp existed); the login refresh heals it, so the identities read can
+	// name the IdP behind it from now on.
+	var stamped string
+	if err := rig.h.AdminDB.QueryRow(`
+		SELECT COALESCE(sso_provider_id, '') FROM user_identities WHERE auth_user_id = $1
+	`, samlID).Scan(&stamped); err != nil {
+		t.Fatalf("read saml identity after re-login: %v", err)
+	}
+	if stamped != providerID {
+		t.Errorf("sso_provider_id after re-login = %q, want %q", stamped, providerID)
 	}
 
 	var login, source string

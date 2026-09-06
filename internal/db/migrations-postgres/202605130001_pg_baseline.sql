@@ -3820,10 +3820,16 @@ CREATE TABLE public.sso_connections (
     enforced     boolean NOT NULL DEFAULT false,
     -- Stamped when a Test passes end-to-end (NULL = never); enforcement gates on it.
     last_tested_at timestamptz NULL,
+    -- Which identity-provider product sits behind the connection, so a login
+    -- through it can wear the vendor's mark and the admin surface can name it.
+    -- Derived from the metadata URL's host at registration and overridable by
+    -- an org admin; NULL is "not known", which renders as plain SSO.
+    idp          text NULL,
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT sso_connections_kind_chk       CHECK (kind IN ('saml','oidc')),
-    CONSTRAINT sso_connections_role_not_owner CHECK (default_role <> 'owner')
+    CONSTRAINT sso_connections_role_not_owner CHECK (default_role <> 'owner'),
+    CONSTRAINT sso_connections_idp_chk        CHECK (idp IN ('entra','okta','google','onelogin','ping','other'))
 );
 
 -- One org per GoTrue provider, deployment-wide: provider_id → org is a function.
@@ -3975,6 +3981,11 @@ CREATE TABLE public.user_identities (
     user_id uuid NOT NULL,
     provider text NOT NULL,
     provider_subject text,
+    -- The GoTrue SSO provider that minted a 'saml' identity (sso_providers.id,
+    -- opaque text — the same value sso_connections.provider_id binds to an
+    -- org). NULL for github rows, and for saml rows written before the login
+    -- path stamped it; every login refreshes it, so those rows heal.
+    sso_provider_id text,
     email text,
     email_verified boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
