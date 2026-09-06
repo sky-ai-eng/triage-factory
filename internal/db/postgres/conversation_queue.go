@@ -379,6 +379,11 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		// first, so a fresh conversation with a live owner is exclusively that owner's
 		// until it ages (warm cache), while a saturated/dead owner never
 		// head-of-line-blocks its shard.
+		// TODO(TFAC-944): the aging arm anchors on started_at, which is stamped
+		// once at mint, so a resumed conversation older than the window has
+		// no exclusive tier-1 period at all and the re-stamped affinity only
+		// orders X's own scan. Age from the moment the conversation became
+		// claimable in this queue episode instead.
 		candidatePredicate = `
 			  AND (
 			    (r.preferred_executor_id IS NOT NULL AND r.preferred_executor_id = $1)
