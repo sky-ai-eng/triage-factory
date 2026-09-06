@@ -1,22 +1,26 @@
-// Settings — the non-progressive sibling of the setup wizard. Same liquid-glass
-// material (GlassBackdrop + the section dividers), but every section the
-// viewer is allowed to see renders at once, collapsed by default; expanding one
-// leaves its neighbours — before AND after — collapsed and visible, and each
-// section saves independently. No linear flow, no "road ahead" hiding.
+// Settings — two pages behind one route, by mode.
 //
-// Sections are role-gated, mirroring the wizard's Org → Team → User order:
-//   • Org   — LOCAL MODE ONLY. Multi mode relocates the org-scoped sections
-//             (GitHub/Jira connection, polling, model cap, Claude credentials,
-//             danger zone) + the org template to the dedicated /org page
-//             (TFAC-419); but /org has no local route, so N=1 keeps them here —
-//             Settings is local mode's only post-setup org-config surface.
-//   • Team  — LOCAL MODE ONLY. Multi mode relocates the team-scoped sections
-//             (repos, GitHub teams, Jira projects, team defaults) to the /team
-//             page's Settings tab (TFAC-445); /team has no local route, so N=1
-//             keeps them here (admin of its sole team, addressed as "default").
-//   • User  — always (personal identity + device prefs).
-// Both relocated groups render here only in local mode — N=1 is admin of
-// everything, so its groups render with no selector and no role probes.
+// In MULTI mode this is the personal settings page on the design system: who
+// you are here, the accounts the factory acts through as you, appearance, and
+// your API tokens (pages/usersettings). The org- and team-scoped sections
+// live on /org and the /team page's Settings tab.
+//
+// In LOCAL mode it is the non-progressive sibling of the setup wizard. Same
+// liquid-glass material (GlassBackdrop + the section dividers), but every
+// section renders at once, collapsed by default; expanding one leaves its
+// neighbours collapsed and visible, and each section saves independently.
+// Sections mirror the wizard's Org → Team → User order:
+//   • Org   — the org-scoped sections (GitHub/Jira connection, polling, model
+//             cap, Claude credentials, danger zone) + the org template; /org
+//             has no local route, so N=1 keeps them here — Settings is local
+//             mode's only post-setup org-config surface.
+//   • Team  — the team-scoped sections (repos, GitHub teams, Jira projects,
+//             team defaults); /team has no local route, so N=1 keeps them here
+//             (admin of its sole team, addressed as "default").
+//   • User  — personal identity + device prefs.
+// N=1 is admin of everything, so its groups render with no selector and no
+// team probes. The token surface is absent here, not empty: its routes 404 in
+// local mode, where the synthetic identity is already headless.
 
 import { GlassBackdrop } from './setup/glass'
 import { SectionDivider } from './setup/parts'
@@ -26,6 +30,7 @@ import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
 import OrgSettings from './settings/stack/OrgSettings'
 import TeamSettings from './settings/stack/TeamSettings'
 import UserSettings from './settings/stack/UserSettings'
+import UserSettingsPage from './usersettings/UserSettingsPage'
 
 export default function Settings() {
   // useOptionalAuth is null in local mode (no AuthProvider) — the degenerate
@@ -50,6 +55,8 @@ export default function Settings() {
     )
   }
 
+  if (!isLocal) return <UserSettingsPage />
+
   return (
     <div className="relative min-h-full px-4 py-10">
       <GlassBackdrop />
@@ -57,23 +64,15 @@ export default function Settings() {
         <h1 className="mb-8 text-[22px] font-semibold tracking-tight text-ink-1">Settings</h1>
 
         <div className="space-y-8">
-          {/* Org + Team groups — local mode only. Multi mode relocates Org to
-              the /org page and Team to the /team page's Settings tab; neither
-              has a local route, so N=1 (always admin of its sole org + team)
-              edits both here. */}
-          {isLocal && (
-            <>
-              <section aria-labelledby="settings-section-org">
-                <SectionDivider id="settings-section-org" title="Organization" />
-                <OrgSettings orgId={orgId} isLocal={isLocal} />
-              </section>
+          <section aria-labelledby="settings-section-org">
+            <SectionDivider id="settings-section-org" title="Organization" />
+            <OrgSettings orgId={orgId} isLocal={isLocal} />
+          </section>
 
-              <section aria-labelledby="settings-section-team">
-                <SectionDivider id="settings-section-team" title="Team" />
-                <TeamSettings isLocal={isLocal} teamId="default" />
-              </section>
-            </>
-          )}
+          <section aria-labelledby="settings-section-team">
+            <SectionDivider id="settings-section-team" title="Team" />
+            <TeamSettings isLocal={isLocal} teamId="default" />
+          </section>
 
           <section aria-labelledby="settings-section-user">
             <SectionDivider id="settings-section-user" title="User" />

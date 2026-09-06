@@ -20,6 +20,7 @@
 // reads the resolved value disagrees, and disagreeing is the whole job.
 
 import { useCallback, useEffect, useState } from 'react'
+import AccountsCard from './AccountsCard'
 import AcquireCard from './AcquireCard'
 import ConvergeCard from './ConvergeCard'
 import CratePileCard from './CratePileCard'
@@ -27,6 +28,7 @@ import FlapCountCard from './FlapCountCard'
 import PrimitivesCard from './PrimitivesCard'
 import RunRowsCard from './RunRowsCard'
 import ScanCard from './ScanCard'
+import SegmentedCard from './SegmentedCard'
 import SelectionBarCard from './SelectionBarCard'
 import ShellCard from './ShellCard'
 import SourcePartsCard from './SourcePartsCard'
@@ -331,6 +333,8 @@ export default function UiGallery() {
             <TableCard />
             <TeamPartsCard />
             <SourcePartsCard />
+            <SegmentedCard />
+            <AccountsCard />
             <ShellCard />
           </>
         )}

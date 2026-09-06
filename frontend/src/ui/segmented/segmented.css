@@ -1,0 +1,187 @@
+/* Segmented — one choice from a few, the mark travelling between them. The
+   mark's place is measured by the component (--seg-x, --seg-w); everything
+   else is here, keyed on the variant. */
+
+.seg {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  align-self: flex-start;
+  width: max-content;
+  gap: var(--seg-gap, 0);
+  isolation: isolate;
+  user-select: none;
+  border-radius: 4px;
+}
+.seg[aria-disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* The ring is for a keyboard user finding the control, not for a click that
+   already knows where it is: :focus-visible on the option excludes a press.
+   The ring belongs on the GROUP — one control, one ring — which takes :has;
+   where the browser lacks it, the option wears the ring itself rather than
+   the keyboard user getting none. */
+.seg-opt:focus-visible {
+  outline: 1.5px solid var(--color-warm);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+.seg-opt:focus:not(:focus-visible) {
+  outline: none;
+}
+@supports selector(:has(a)) {
+  .seg-opt:focus-visible {
+    outline: none;
+  }
+  .seg:has(.seg-opt:focus-visible) {
+    outline: 1.5px solid var(--color-warm);
+    outline-offset: 3px;
+  }
+}
+
+/* Size sets the face; mono is the default because the options are values the
+   system reports back, and a person's own words go sans, half a step larger. */
+.seg-opt {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: var(--seg-pad-y, 2px) var(--seg-pad-x, 0);
+  font: 400 var(--seg-fs, 12px) / 1 var(--font-sans);
+  color: var(--color-ink-3);
+  cursor: pointer;
+  transition: color 0.2s;
+  white-space: nowrap;
+}
+.seg[data-mono] .seg-opt {
+  font-family: var(--font-mono);
+  font-size: var(--seg-fs-mono, 10.5px);
+  letter-spacing: 0.04em;
+}
+.seg[data-size='sm'] {
+  --seg-fs-mono: 9.5px;
+  --seg-fs: 11px;
+}
+.seg[data-size='md'] {
+  --seg-fs-mono: 10.5px;
+  --seg-fs: 12px;
+}
+.seg[data-size='lg'] {
+  --seg-fs-mono: 11.5px;
+  --seg-fs: 13px;
+}
+.seg-opt:hover {
+  color: var(--color-ink-2);
+}
+.seg-opt[data-on] {
+  color: var(--color-ink-1);
+}
+.seg-opt[data-off] {
+  color: var(--color-ink-4);
+  cursor: default;
+}
+.seg-opt[data-off]:not([data-on]):hover {
+  color: var(--color-ink-4);
+}
+/* A struck option stays in place: a preset the policy rules out is
+   information, and absent is for verbs a viewer may never use. */
+.seg-opt[data-struck] {
+  text-decoration: line-through;
+}
+
+/* The mark: one element, absolutely placed, that follows the chosen segment.
+   It slides only once the control has settled — the first placement is a
+   jump, so a control never arrives with its mark travelling in from zero. */
+.seg-mark {
+  position: absolute;
+  left: 0;
+  width: var(--seg-w);
+  transform: translateX(var(--seg-x));
+  pointer-events: none;
+}
+.seg[data-settled] .seg-mark {
+  transition:
+    transform 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    width 0.34s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* spine — the scope switcher's spine, laid on its side. Every option carries
+   a marker; the chosen one is lit. The default. */
+.seg[data-variant='spine'] {
+  --seg-gap: 16px;
+  --seg-pad-y: 2px;
+}
+.seg[data-variant='spine'] .seg-opt {
+  padding-left: 8px;
+  box-shadow: inset 2px 0 0 var(--color-line-1);
+}
+.seg[data-variant='spine'] .seg-opt[data-on] {
+  box-shadow: none;
+}
+.seg[data-variant='spine'] .seg-mark {
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-warm);
+}
+
+/* tick — a warm hairline under the word. Bare, no housing. */
+.seg[data-variant='tick'] {
+  --seg-gap: 14px;
+  --seg-pad-y: 0;
+  padding-bottom: 4px;
+}
+.seg[data-variant='tick'][data-size='sm'] {
+  --seg-gap: 12px;
+}
+.seg[data-variant='tick'] .seg-mark {
+  bottom: 0;
+  height: 1px;
+  background: var(--color-warm);
+}
+
+/* housed — an inset-hairline box; the chosen segment is a tint fill. Fill
+   before hue, so no warm at all. */
+.seg[data-variant='housed'] {
+  --seg-pad-y: 6px;
+  --seg-pad-x: 11px;
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+  overflow: hidden;
+}
+.seg[data-variant='housed'][data-size='sm'] {
+  --seg-pad-y: 5px;
+  --seg-pad-x: 9px;
+}
+.seg[data-variant='housed'] .seg-opt + .seg-opt {
+  box-shadow: inset 1px 0 0 var(--color-line-1);
+}
+.seg[data-variant='housed'] .seg-mark {
+  top: 0;
+  bottom: 0;
+  background: var(--color-tint-3);
+  z-index: -1;
+}
+
+/* plate — a sunk track with a raised plate under the chosen word: the
+   Toggle's knob, for N positions. */
+.seg[data-variant='plate'] {
+  --seg-pad-y: 6px;
+  --seg-pad-x: 11px;
+  background: var(--color-sunk);
+  box-shadow: inset 0 0 0 1px var(--color-line-1);
+  padding: 2px;
+}
+.seg[data-variant='plate'][data-size='sm'] {
+  --seg-pad-y: 5px;
+  --seg-pad-x: 9px;
+}
+.seg[data-variant='plate'] .seg-mark {
+  top: 2px;
+  bottom: 2px;
+  background: var(--color-raised);
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+  border-radius: 3px;
+  z-index: -1;
+}

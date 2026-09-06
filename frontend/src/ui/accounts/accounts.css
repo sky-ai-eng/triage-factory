@@ -1,0 +1,313 @@
+/* Accounts — one line per integration identity, a band under the line when
+   its verb is pressed. The band is the table's draft row — warm wash, 2px
+   spine, warm rule on its foot, one sweep as it opens — because it is the same
+   act: a line being rewritten, and the eye should learn one flash for it. */
+
+.ac {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ac-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.ac-label {
+  font: 500 9.5px/1 var(--font-mono);
+  letter-spacing: 0.14em;
+  color: var(--color-ink-3);
+  white-space: nowrap;
+}
+.ac-note {
+  margin-left: auto;
+  font: 400 9.5px/1.4 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+.ac-list {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--color-line-1);
+}
+.ac-row {
+  border-top: 1px solid var(--color-line-1);
+}
+
+/* The entry: mark and name, the value, the verb. One line; the name sits on
+   the first baseline if a second ever comes back. */
+.ac-line {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr) 96px;
+  gap: 0 18px;
+  align-items: center;
+  padding: 15px 0;
+}
+.ac-name {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font: 400 12.5px/1.3 var(--font-sans);
+  color: var(--color-ink-1);
+}
+.ac-mark {
+  flex: none;
+}
+.ac-value {
+  font: 400 11px/1.3 var(--font-mono);
+  color: var(--color-ink-2);
+}
+.ac-value[data-absent] {
+  color: var(--color-ink-4);
+}
+
+/* The verb. Connect is the only warm one — absence is the ask. Hover belongs
+   to the pointer. */
+.ac-verb {
+  justify-self: end;
+  font: 400 12px/1.3 var(--font-sans);
+  color: var(--color-ink-3);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.2s;
+  white-space: nowrap;
+}
+.ac-verb[data-tone='warm'] {
+  color: var(--color-warm);
+}
+.ac-verb:hover {
+  color: var(--color-warm);
+}
+
+/* The band. Bleeds 12px past the list on either side so the wash reads as a
+   region rather than a highlighted line. */
+.ac-band {
+  position: relative;
+  overflow: hidden;
+  margin: 0 -12px;
+  padding: 0 12px;
+  background: var(--color-warm-1);
+  border-bottom: 1px solid var(--color-warm-3);
+}
+.ac-spine {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-warm);
+}
+.ac-sweep {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 38%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--color-warm-3), transparent);
+  animation: ac-sweep 0.5s ease-out 1 both;
+}
+@keyframes ac-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+/* The body sits in the value column, under the line. */
+.ac-body {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 0 18px;
+  padding: 2px 0 14px;
+}
+.ac-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 560px;
+}
+.ac-connect {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ac-or {
+  font: 400 10.5px/1.3 var(--font-mono);
+  color: var(--color-ink-4);
+}
+.ac-link {
+  font: 400 12px/1.3 var(--font-sans);
+  color: var(--color-ink-3);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+/* Buttons: the page's quiet block — inset hairline, no fill, tint on hover;
+   the primary carries warm ink and a warm hairline. */
+.ac-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font: 400 12px/1 var(--font-sans);
+  color: var(--color-ink-2);
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 0;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+.ac-btn:hover {
+  background: var(--color-tint-2);
+}
+.ac-btn[data-primary] {
+  color: var(--color-warm);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warm) 34%, var(--color-ground));
+}
+.ac-btn:disabled {
+  color: var(--color-ink-3);
+  cursor: default;
+}
+.ac-btn:disabled:hover {
+  background: transparent;
+}
+
+.ac-fields {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ac-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+  min-width: 180px;
+}
+.ac-field[data-fixed] {
+  flex: none;
+  width: var(--ac-field-w);
+}
+.ac-field-label {
+  font: 400 9px/1 var(--font-mono);
+  letter-spacing: 0.14em;
+  color: var(--color-ink-4);
+}
+.ac-input {
+  appearance: none;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border-radius: 4px;
+  border: 0;
+  outline: none;
+  background: var(--color-ground);
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+  font: 400 11px/1.3 var(--font-mono);
+  color: var(--color-ink-1);
+}
+.ac-input[aria-invalid] {
+  box-shadow: inset 0 0 0 1px var(--color-alarm);
+}
+.ac-err {
+  font: 400 10.5px/1.5 var(--font-mono);
+  color: var(--color-alarm);
+}
+.ac-hint {
+  font: 400 10px/1.5 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+/* A value that just changed is marked once, then it is over — the rail's
+   count-tick, on a line of text. Keyed by the value, so remounting replays it
+   and nothing is left switched on. */
+.ac-tick {
+  animation: ac-tick 0.9s var(--ease-default) 1 both;
+}
+@keyframes ac-tick {
+  0% {
+    color: var(--color-warm);
+  }
+  60% {
+    color: var(--color-warm);
+  }
+  100% {
+    color: var(--color-ink-2);
+  }
+}
+
+/* The skeleton: a hairline disc and three outlined bars at the row's real
+   proportions, drawing themselves in turn. */
+.ac-skel {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr) 96px;
+  gap: 0 18px;
+  align-items: center;
+  padding: 19px 0;
+  border-top: 1px solid var(--color-line-1);
+}
+.ac-skel-disc {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+}
+.ac-skel-bar {
+  display: block;
+  width: var(--ac-bar-w);
+  height: 8px;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+  animation: ac-draw 1.9s var(--ease-default) infinite;
+  animation-delay: var(--ac-bar-d);
+}
+.ac-skel-end {
+  justify-self: end;
+}
+@keyframes ac-draw {
+  0% {
+    opacity: 0.35;
+  }
+  40% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.35;
+  }
+}
+
+/* Focus is the measurement layer marking the thing being read — keyboard
+   only. :focus-visible already excludes a mouse press; the rule states the
+   system's ring rather than leaving the browser's. */
+.ac-btn:focus-visible,
+.ac-verb:focus-visible,
+.ac-link:focus-visible {
+  outline: 1.5px solid var(--color-warm);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+.ac-btn:focus:not(:focus-visible),
+.ac-verb:focus:not(:focus-visible),
+.ac-link:focus:not(:focus-visible) {
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-sweep {
+    animation: none;
+    opacity: 0;
+  }
+  .ac-tick {
+    animation: none;
+  }
+}
