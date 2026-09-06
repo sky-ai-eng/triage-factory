@@ -141,6 +141,9 @@
 .dlg.instant.built > *:nth-child(6) {
   transition-delay: 0.1s;
 }
+.dlg.instant.built > *:nth-child(7) {
+  transition-delay: 0.125s;
+}
 .dlg.instant.built .dlg-list li:nth-child(1) {
   transition-delay: 0.05s;
 }
@@ -179,6 +182,11 @@
 }
 .dlg.built > *:nth-child(6) {
   transition-delay: 0.2s;
+}
+/* A seventh child exists only when the reading slot is filled; the foot then
+   sits here and keeps arriving after the note. */
+.dlg.built > *:nth-child(7) {
+  transition-delay: 0.25s;
 }
 .dlg-list li {
   transition: opacity 0.24s linear;
@@ -250,6 +258,12 @@
   color: var(--color-ink-4);
 }
 
+/* The reading slot: free markup between the prose and the note. It is a direct
+   child of .dlg, so the entrance stagger above reaches it like any other line. */
+.dlg-slot {
+  margin: 0 0 12px;
+}
+
 .dlg-acts {
   display: flex;
   align-items: center;
@@ -289,7 +303,23 @@
   opacity: 1;
   color: var(--color-alarm);
 }
-.dlg-btn:focus-visible {
+/* A held confirm is the trigger inside a surface-mode Hold: the wrapper draws
+   the rings, and the verb keeps its ink above them. */
+.dlg-hold {
+  display: inline-flex;
+}
+.dlg-hold .dlg-btn.go {
+  position: relative;
+  z-index: 1;
+}
+/* Focus shows for the keyboard only. Script focus — the trap's initial focus —
+   and a click both match :focus-visible in Chromium, so a reading opened by a
+   click arrived with a ring on Close; data-kb is set on the first Tab or arrow
+   press, and until then the ring stays off. */
+.dlg:not([data-kb]) .dlg-btn:focus-visible {
+  outline: none;
+}
+.dlg[data-kb] .dlg-btn:focus-visible {
   outline: 1.5px solid var(--color-ink-3);
   outline-offset: 2px;
 }

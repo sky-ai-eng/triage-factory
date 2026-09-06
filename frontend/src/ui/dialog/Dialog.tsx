@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useId } from 'react'
 import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
 import { prefersReducedMotion } from '../shared/useReducedMotion'
 import { useFocusTrap } from '../shared/useFocusTrap'
+import { Hold } from '../hold/Hold'
 import './dialog.css'
 
 export type DialogConsequence = string | { text: string; tone?: 'loss' | 'keep' }
@@ -27,6 +28,22 @@ export type DialogProps = {
   onConfirm?: () => void
   onCancel?: () => void
   width?: number
+  /**
+   * A reading, laid between `body` and `note`: free markup for what the prose
+   * slots cannot hold — a figure band, a grid of address ranges. It takes the
+   * same entrance stagger as the slots around it.
+   */
+  children?: ReactNode
+  /**
+   * Milliseconds the confirm control must be held. The verb becomes a Hold —
+   * the gesture every other irreversible verb in this system takes — and the
+   * destructive keyboard rules follow: Enter does not confirm, focus lands on
+   * Cancel. Alarm ink, whatever `kind` says, because a held verb is one that
+   * cannot be taken back.
+   */
+  confirmHold?: number
+  /** No confirm control at all: the dialog is only a reading, and Cancel is Close. */
+  noConfirm?: boolean
 }
 
 // Dialog — a decision the product cannot make for you.
@@ -58,6 +75,9 @@ export function Dialog({
   onConfirm,
   onCancel,
   width = 420,
+  children = null,
+  confirmHold = 0,
+  noConfirm = false,
 }: DialogProps) {
   const panelRef = useRef<HTMLDivElement | null>(null)
   const goRef = useRef<HTMLButtonElement | null>(null)
@@ -66,7 +86,10 @@ export function Dialog({
   const headId = uid + '-head'
   const bodyId = uid + '-body'
 
-  const bad = kind === 'destructive'
+  // A held confirm is a destructive one by definition — the hold exists for
+  // verbs that cannot be taken back — so it takes the same keyboard rules.
+  const held = confirmHold > 0
+  const bad = kind === 'destructive' || held
 
   // Tab containment, initial focus and focus return all come from the house
   // primitive rather than being hand-rolled here — the design bundle recommends
@@ -81,8 +104,24 @@ export function Dialog({
   // button is the exact hazard Hold exists to remove.
   useFocusTrap(panelRef, {
     active: open,
-    initialFocus: bad ? cancelRef : goRef,
+    initialFocus: bad || noConfirm ? cancelRef : goRef,
   })
+
+  // The trap moves focus onto a button the moment the dialog opens, and a
+  // browser treats script focus as keyboard focus — so a reading opened by a
+  // click arrived wearing a ring on Close. The ring is held back until a key
+  // that moves focus is actually pressed; a mouse user never sees it.
+  const [kb, setKb] = useState(false)
+  useEffect(() => {
+    if (!open) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset per open, before any key can arrive
+    setKb(false)
+    const on = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Tab' || e.key.startsWith('Arrow')) setKb(true)
+    }
+    window.addEventListener('keydown', on, true)
+    return () => window.removeEventListener('keydown', on, true)
+  }, [open])
 
   // The build is a STATE MACHINE on timers, not one long keyframe track. Percent
   // based keyframes drift: they depend on the animation actually starting when
@@ -142,8 +181,8 @@ export function Dialog({
       // Enter confirms — except on a destructive dialog, where it does not
       // exist. Same reasoning as the focus target above: the one verb in this
       // system that cannot be taken back is never a single keystroke away. Tab
-      // to it and press it deliberately.
-      if (e.key === 'Enter' && !bad) {
+      // to it and press it deliberately. A reading has nothing to confirm.
+      if (e.key === 'Enter' && !bad && !noConfirm) {
         e.preventDefault()
         onConfirm?.()
       }
@@ -152,9 +191,23 @@ export function Dialog({
     // to close something else while this is the topmost layer.
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [open, bad, onConfirm, onCancel])
+  }, [open, bad, noConfirm, onConfirm, onCancel])
 
   if (!open) return null
+
+  // The confirm control. Held, it is the trigger inside a surface-mode Hold —
+  // the Hold owns the gesture and fires onConfirm when it completes, so the
+  // button itself carries no click.
+  const go = (
+    <button
+      type="button"
+      className={'dlg-btn go' + (held ? ' held' : '')}
+      ref={goRef}
+      onClick={held ? undefined : onConfirm}
+    >
+      {confirmLabel}
+    </button>
+  )
 
   return (
     <div
@@ -173,6 +226,7 @@ export function Dialog({
           (built ? ' built' : '')
         }
         data-phase={phase}
+        data-kb={kb || undefined}
         style={{ width: width + 'px' }}
         role="dialog"
         aria-modal="true"
@@ -202,14 +256,26 @@ export function Dialog({
             ))}
           </ul>
         ) : null}
+        {children ? <div className="dlg-slot">{children}</div> : null}
         {note ? <p className="dlg-note">{note}</p> : null}
         <div className="dlg-acts">
           <button type="button" className="dlg-btn" ref={cancelRef} onClick={onCancel}>
             {cancelLabel}
           </button>
-          <button type="button" className="dlg-btn go" ref={goRef} onClick={onConfirm}>
-            {confirmLabel}
-          </button>
+          {noConfirm ? null : held ? (
+            <Hold
+              variant="surface"
+              trigger=".dlg-btn.go"
+              tone="alarm"
+              ms={confirmHold}
+              onConfirm={() => onConfirm?.()}
+              className="dlg-hold"
+            >
+              {go}
+            </Hold>
+          ) : (
+            go
+          )}
         </div>
         {/* The measure beat: a hollow donut drawn over the empty frame, in the
             same window as the cross. Last child, so the content stagger's

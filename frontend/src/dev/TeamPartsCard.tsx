@@ -8,6 +8,7 @@ import Dialog from '../ui/dialog/Dialog'
 
 export function TeamPartsCard() {
   const [dialog, setDialog] = useState<'flash' | 'quiet' | 'none' | null>(null)
+  const [reading, setReading] = useState(false)
   const [kind, setKind] = useState<'normal' | 'destructive'>('destructive')
   const [interactive, setInteractive] = useState(true)
   const [answered, setAnswered] = useState<string | null>(null)
@@ -121,6 +122,9 @@ export function TeamPartsCard() {
             build: {b}
           </button>
         ))}
+        <button type="button" className="gal-chip" onClick={() => setReading(true)}>
+          a reading, held confirm
+        </button>
       </div>
       <p className="gal-note">
         On a <strong>destructive</strong> dialog focus lands on <em>Cancel</em> and Enter does not
@@ -129,6 +133,63 @@ export function TeamPartsCard() {
         fire it, and a focused Enter-bound Confirm would be that hazard restored. Tab to it and
         press it deliberately.
       </p>
+      <p className="gal-note">
+        The last chip is the same object with a <strong>reading</strong> in it — free markup between
+        the body and the note, via <code>children</code> — and a confirm that must be{' '}
+        <strong>held</strong> (<code>confirmHold</code>), so the destructive verb takes the gesture
+        every other irreversible verb takes. <code>noConfirm</code> is the other half: a reading
+        with nothing to decide, and Close as its one control.
+      </p>
+
+      <Dialog
+        open={reading}
+        build="none"
+        width={460}
+        title="deploy"
+        body="tf_M2rTq8Wd… · sky-ai-eng"
+        note="Expires by the org's 90-day cap, not the date you set. A request from any other address fails as an invalid token would."
+        confirmLabel="Hold to revoke"
+        confirmHold={900}
+        cancelLabel="Close"
+        onCancel={() => {
+          setAnswered('closed the reading')
+          setReading(false)
+        }}
+        onConfirm={() => {
+          setAnswered('held to revoke')
+          setReading(false)
+        }}
+      >
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(3, 1fr)',
+            gap: 'var(--space-3)',
+            font: '500 17px var(--font-mono)',
+            fontVariantNumeric: 'tabular-nums',
+            color: 'var(--color-ink-1)',
+          }}
+        >
+          <div>
+            88d
+            <div style={{ font: '400 9.5px var(--font-mono)', color: 'var(--color-ink-3)' }}>
+              old · since 9 Jun
+            </div>
+          </div>
+          <div>
+            1d
+            <div style={{ font: '400 9.5px var(--font-mono)', color: 'var(--color-ink-3)' }}>
+              since last use
+            </div>
+          </div>
+          <div style={{ color: 'var(--color-warm)' }}>
+            2d
+            <div style={{ font: '400 9.5px var(--font-mono)', color: 'var(--color-ink-3)' }}>
+              left · expires 7 Sep
+            </div>
+          </div>
+        </div>
+      </Dialog>
 
       <Dialog
         open={dialog !== null}

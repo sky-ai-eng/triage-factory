@@ -27,6 +27,22 @@ lost. An ordinary confirmation uses warm.
 **One decision per dialog.** No tabs, no forms, no second question. If the
 dialog needs a text field, it is a settings surface wearing a dialog's clothes.
 
+## A reading in a dialog
+
+The slots above are prose-shaped, and some decisions need a **reading** first —
+a token's figure band and its grid of address ranges, say — before the one verb
+at the foot. `children` is that slot: free markup laid between `body` and
+`note`, taking the same entrance stagger as the lines around it. Two props go
+with it. `confirmHold` (milliseconds) makes the confirm control a `Hold`, so a
+destructive verb reached from a reading takes the gesture every other
+irreversible verb in this system takes rather than being the one place a click
+suffices; it implies the destructive keyboard rules below whatever `kind` says.
+`noConfirm` is a reading with nothing to decide — Cancel, labelled `Close`, is
+the one control.
+
+A reading is still one decision. A dialog that needs a text field, or a second
+question, is still a settings surface wearing a dialog's clothes.
+
 ## Behavior
 
 Escape cancels, Enter confirms, and the backdrop cancels. Focus lands on the
@@ -53,7 +69,7 @@ It builds, in Acquire's vocabulary and at a dialog's pace — 1.05s end to end:
    glow, and a glow is ambience.
 3. **Wireframe.** A cross corner to corner: the mark a wireframe puts in a box
    whose contents are not there yet.
-3b. **Measure.** A caliper draws across the empty frame in the same window as the
+   3b. **Measure.** A caliper draws across the empty frame in the same window as the
    cross, so it costs no time: the frame is sized before anything is put in it.
    Revealed by a clip, never a scale — a scaled tick is a distorted tick.
 4. **Empty.** The cross clears and the frame is briefly nothing but a frame. This
@@ -82,7 +98,7 @@ often, not how serious: a flash you see forty times is wallpaper.
 
 The reason it earns a build at all: a dialog is a region of the screen that did
 not exist a moment ago, holding facts you have to read before acting. The
-sequence says *this is new, and here is what is in it* — the same claim Acquire
+sequence says _this is new, and here is what is in it_ — the same claim Acquire
 makes about a value. It runs once per open, never on close, and never repeats.
 
 ## Keyboard and focus
@@ -100,6 +116,11 @@ The full contract, because `aria-modal="true"` is a promise about all of it:
 - **Focus returns** to whatever opened the dialog when it closes — but only if
   that element is still on the page, since a dialog that removed the row its
   trigger lived on has nothing to go back to.
+- **The ring waits for the keyboard.** The trap's initial focus is script focus,
+  which Chromium paints as `:focus-visible`, so a reading opened by a click
+  arrived wearing a ring on Close. The panel carries `data-kb` from the first
+  Tab or arrow press, and the ring shows only under it; a mouse user never sees
+  one they did not ask for.
 - **The backdrop cancels.** A dialog you cannot dismiss by looking away is a
   trap, and every confirmation here is reversible by not confirming.
 - The panel is labelled by its own head (`aria-labelledby`) and described by its
