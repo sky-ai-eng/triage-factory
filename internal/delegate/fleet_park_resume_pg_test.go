@@ -371,7 +371,9 @@ func (f *parkFleet) assertInvariants(t *testing.T) {
 // gatedPutStorage holds the next upload open until released, so a scenario
 // can assert what the rest of the fleet reads while a persist is provably in
 // flight. One-shot: uploads after the held one pass straight through, so a
-// successor's own park is never caught in the gate.
+// successor's own park is never caught in the gate. The hold yields to the
+// upload's own context, so a persist that is cancelled while held fails the
+// way a real store would rather than pinning the suite.
 type gatedPutStorage struct {
 	storage.Storage
 	mu      sync.Mutex
@@ -419,7 +421,11 @@ func (g *gatedPutStorage) Put(ctx context.Context, key string, r io.Reader) erro
 	case g.entered <- struct{}{}:
 	default:
 	}
-	<-release
+	select {
+	case <-release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	g.mu.Lock()
 	fail := g.fail
 	g.mu.Unlock()

@@ -537,6 +537,8 @@ func (f *flakyBeginSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID
 
 // heldPutStorage blocks inside Put until released, so a test can hold a
 // persist open and assert what the rest of the system reads while it runs.
+// The hold yields to the upload's own context, so a cancelled persist fails
+// rather than pinning the suite.
 type heldPutStorage struct {
 	storage.Storage
 	entered chan struct{}
@@ -548,7 +550,11 @@ func (h *heldPutStorage) Put(ctx context.Context, key string, r io.Reader) error
 	case h.entered <- struct{}{}:
 	default:
 	}
-	<-h.release
+	select {
+	case <-h.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	return h.Storage.Put(ctx, key, r)
 }
 
