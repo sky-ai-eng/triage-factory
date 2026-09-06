@@ -779,6 +779,7 @@ func (s *Server) routes() {
 	// token, and a token rotates itself within its own org.
 	s.apiMutating("POST /api/me/tokens", s.handleAPITokenCreate)
 	s.apiMutating("POST /api/me/tokens/list", s.handleAPITokenList)
+	s.apiMutating("PATCH /api/me/tokens/{id}", s.handleAPITokenRename)
 	s.apiMutating("DELETE /api/me/tokens/{id}", s.handleAPITokenRevoke)
 	// The policy those tokens live under is the org's, so it is addressed at
 	// the org and readable by any member — the cap binds everyone's tokens,
