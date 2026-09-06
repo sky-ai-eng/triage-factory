@@ -136,7 +136,7 @@ func idpFromMetadataURL(metadataURL string) string {
 		return "google"
 	case suffix("onelogin.com"):
 		return "onelogin"
-	case strings.Contains(host, "pingone."), strings.Contains(host, "pingidentity."):
+	case suffix("pingone.com"), suffix("pingidentity.com"):
 		return "ping"
 	default:
 		return "other"

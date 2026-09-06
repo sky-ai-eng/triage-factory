@@ -168,6 +168,7 @@ func TestIdPFromMetadataURL(t *testing.T) {
 		{"https://idp.corp.example/metadata.xml", "other"},
 		{"https://notokta.com/metadata", "other"}, // suffix match wants a dot boundary
 		{"https://okta.com.evil.example/metadata", "other"},
+		{"https://pingone.com.evil.example/metadata", "other"}, // substring-in-host trick, same as okta above
 		{"", ""},
 		{"://nope", ""},
 	}
