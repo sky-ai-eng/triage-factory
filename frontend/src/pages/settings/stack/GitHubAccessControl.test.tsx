@@ -13,6 +13,7 @@ const ghMocks = vi.hoisted(() => ({
   startManagedGitHubConnect: vi.fn(),
   disconnectManagedGitHub: vi.fn(),
   disconnectManagedInstallation: vi.fn(),
+  disconnectOwnApp: vi.fn(),
   getGitHubAppStatus: vi.fn(),
 }))
 vi.mock('../../../lib/githubApp', async (importOriginal) => {
@@ -25,6 +26,7 @@ vi.mock('../../../lib/githubApp', async (importOriginal) => {
     startManagedGitHubConnect: ghMocks.startManagedGitHubConnect,
     disconnectManagedGitHub: ghMocks.disconnectManagedGitHub,
     disconnectManagedInstallation: ghMocks.disconnectManagedInstallation,
+    disconnectOwnApp: ghMocks.disconnectOwnApp,
     getGitHubAppStatus: ghMocks.getGitHubAppStatus,
   }
 })
@@ -137,6 +139,7 @@ beforeEach(() => {
   ghMocks.startManagedGitHubConnect.mockReset()
   ghMocks.disconnectManagedGitHub.mockReset()
   ghMocks.disconnectManagedInstallation.mockReset()
+  ghMocks.disconnectOwnApp.mockReset()
   ghMocks.getGitHubAppStatus.mockReset()
   credMocks.connectGitHubPAT.mockReset()
   installMocks.status = null
@@ -568,6 +571,110 @@ describe('GitHubAccessControl · nothing bound', () => {
 // token workspace sees neither and no copy implying it holds a grant, an empty
 // finding says so, opening the panel issues no refresh, and the three grant
 // widths get three different sentences.
+// Leaving the workspace's own App for the deployment's. One affordance: the
+// teardown verb followed straight away by Connect, offered only where Connect
+// is. Deliberately no bare disconnect — a teardown with no replacement lands
+// an admin in the setup wizard, and the only reason to want one is to connect
+// something else.
+describe('GitHubAccessControl · switching the own App to the deployment App', () => {
+  const liveApp = {
+    githubAppRegistered: true,
+    githubAppStaged: false,
+    githubAppSlug: 'acme-bot',
+    hasGitHubPat: false,
+    githubPatLogin: '',
+  }
+  const torndown = {
+    status: 'disconnected',
+    github_app_deleted_locally: true,
+    github_app_settings_url: 'https://github.com/settings/apps',
+  }
+
+  it('offers the switch beside the token switch, and no bare disconnect', () => {
+    installMocks.status = statusOf({
+      installations: [installation({})],
+      deployment_app_available: true,
+    })
+    renderControl(liveApp)
+
+    expect(
+      screen.getByRole('button', { name: 'Switch to the deployment’s App…' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Switch to a personal access token…' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Disconnect/ })).not.toBeInTheDocument()
+  })
+
+  it('offers no switch where the deployment has no App', () => {
+    installMocks.status = statusOf({ installations: [installation({})] })
+    renderControl(liveApp)
+
+    expect(
+      screen.queryByRole('button', { name: 'Switch to the deployment’s App…' }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Switch to a personal access token…' }),
+    ).toBeInTheDocument()
+  })
+
+  it('tears the own App down and then goes straight into Connect', async () => {
+    installMocks.status = statusOf({
+      installations: [installation({})],
+      deployment_app_available: true,
+    })
+    ghMocks.disconnectOwnApp.mockResolvedValue(torndown)
+    const { patch } = renderControl(liveApp)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Switch to the deployment’s App…' }))
+    await waitFor(() => {
+      expect(ghMocks.startManagedGitHubConnect).toHaveBeenCalledWith('org-1')
+    })
+    expect(ghMocks.disconnectOwnApp).toHaveBeenCalledWith('org-1')
+    // The draft no longer claims an App, so a return from GitHub's page
+    // without a bind renders the empty state.
+    expect(patch).toHaveBeenCalledWith({
+      githubAppRegistered: false,
+      githubAppStaged: false,
+      githubAppInstalled: false,
+      githubAppInstallCount: 0,
+      githubAppSlug: '',
+      hasGitHubPat: false,
+      githubPatLogin: '',
+    })
+  })
+
+  it('surfaces a refused teardown inline and never navigates', async () => {
+    installMocks.status = statusOf({
+      installations: [installation({})],
+      deployment_app_available: true,
+    })
+    ghMocks.disconnectOwnApp.mockRejectedValue(new Error('this GitHub App is staged, not live'))
+    const { patch } = renderControl(liveApp)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Switch to the deployment’s App…' }))
+    expect(await screen.findByText('this GitHub App is staged, not live')).toBeInTheDocument()
+    expect(ghMocks.startManagedGitHubConnect).not.toHaveBeenCalled()
+    expect(patch).not.toHaveBeenCalled()
+    expect(
+      screen.getByRole('button', { name: 'Switch to the deployment’s App…' }),
+    ).toBeInTheDocument()
+  })
+
+  it('tears nothing down when the confirm is declined', () => {
+    installMocks.status = statusOf({
+      installations: [installation({})],
+      deployment_app_available: true,
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    renderControl(liveApp)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Switch to the deployment’s App…' }))
+    expect(ghMocks.disconnectOwnApp).not.toHaveBeenCalled()
+    expect(ghMocks.startManagedGitHubConnect).not.toHaveBeenCalled()
+  })
+})
+
 describe('GitHubAccessControl · grant findings', () => {
   const liveApp = {
     githubAppRegistered: true,
@@ -636,7 +743,10 @@ describe('GitHubAccessControl · grant findings', () => {
     expect(screen.getByText('stranger/tool')).toBeInTheDocument()
     expect(screen.getByText(/no connected account owns @stranger/)).toBeInTheDocument()
     // Its own App: no managed verbs.
-    expect(screen.queryByRole('button', { name: /Disconnect/ })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: /Disconnect from the deployment’s App/ }),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Disconnect @/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Connect GitHub…' })).not.toBeInTheDocument()
   })
 

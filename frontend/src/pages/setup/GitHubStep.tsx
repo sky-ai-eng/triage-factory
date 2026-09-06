@@ -158,6 +158,13 @@ const SOURCE_CARDS: { kind: GitHubAppSource; title: string; detail: string }[] =
 // plus heading — reused by the wizard's source step and the Settings switch flow.
 // onChoose receives the kind directly so callers route on the argument (not a
 // not-yet-flushed state read).
+//
+// TODO(TFAC-948): the wizard never offers the deployment App's Connect. Only
+// the Settings empty state does, and that surface sits behind the setup-complete
+// gate, so a workspace with no GitHub credential — every fresh one on a
+// deployment with a deployment App — cannot reach it. The step needs Connect
+// beside these two cards and the token, offered when the status read reports
+// deployment_app_available.
 export function GitHubAppSourcePicker({
   selected,
   onChoose,

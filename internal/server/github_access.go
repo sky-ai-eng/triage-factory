@@ -53,6 +53,7 @@ const (
 	msgAppAlreadyLive  = "the GitHub App is already the live credential"
 	msgAppNotInstalled = "install the App before switching"
 	msgAppIsLiveCred   = "this GitHub App is the live credential; switch the org to a PAT to remove it"
+	msgAppIsStaged     = "this GitHub App is staged, not live; discard the staged registration instead"
 )
 
 // switchPATRequest carries a user-supplied org PAT for both PAT routes — the
@@ -596,6 +597,145 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 		"status":                     "discarded",
 		"github_app_deleted_locally": true,
 		"github_app_settings_url":    settingsURL,
+	})
+}
+
+// handleGitHubAppDisconnect tears down the org's LIVE App with nothing bound in
+// its place: registration row, installations, secrets, class and host all go
+// in one transaction, leaving the org in the state a fresh workspace is in —
+// the one state from which every way in, the deployment's App included, is
+// open. It is the door a workspace with an App of its own takes to reach the
+// deployment App, which refuses a workspace that still holds a credential.
+//
+// Deliberately not the discard: the two are different intents. Discarding a
+// staged registration abandons a switch and leaves the org running on its
+// token; disconnecting the live App takes the org's GitHub access away until
+// something else is bound. So this verb refuses a staged App (409) exactly as
+// the discard refuses a live one — a request that meant one can never do the
+// other, whichever way a concurrent cutover moves the row between the two.
+//
+// The host is cleared because nothing remains that uses it: an App or a PAT
+// carries the host it was bound on, and a workspace with neither resolves the
+// deployment default, as a fresh one does. Leaving a GHES host behind here
+// would have the deployment App refuse the workspace for being on the wrong
+// GitHub, with nothing on that GitHub to show for it. Org-admin only.
+//
+// POST /api/orgs/{org_id}/github/app/disconnect
+func (s *Server) handleGitHubAppDisconnect(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+
+	// Advisory, for a fast rejection that never waits on the lock; the
+	// authoritative read is below.
+	if app, err := s.githubApps.GetForOrgSystem(ctx, orgID); err != nil {
+		internalError(w, "github-app", err)
+		return
+	} else if app == nil {
+		notFound(w, "github app")
+		return
+	} else if !app.Active {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: msgAppIsStaged})
+		return
+	}
+
+	// Serialize against every other credential transition for this org. See the
+	// file header for the shape.
+	release, err := s.acquireKeyedLock(ctx, &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	defer release()
+
+	// The authoritative read carries the secret refs the teardown deletes, so
+	// it has to be the row the teardown removes — the same reason switch-to-pat
+	// re-reads inside the section.
+	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	if app == nil {
+		notFound(w, "github app")
+		return
+	}
+	if !app.Active {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: msgAppIsStaged})
+		return
+	}
+
+	// The host, read before it is cleared: the audit row and the link out
+	// both name the GitHub the App lived on.
+	base, err := s.ghResolver.BaseURLFor(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+
+	// Captured before teardown so their cached tokens can be invalidated after
+	// the commit.
+	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+
+	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		if err := tx.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
+			return fmt.Errorf("delete app: %w", err)
+		}
+		// No registration remains and no token is bound, so the org is in the
+		// rowless default: a PAT class with nothing stored, the state a fresh
+		// workspace is in. In this transaction so the row and the class go
+		// together.
+		if _, err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
+			return fmt.Errorf("set github credential class: %w", err)
+		}
+		if err := teardownAppSecrets(ctx, tx, orgID, app); err != nil {
+			return err
+		}
+		// Nothing is left that uses the host — the same branch the PAT
+		// unbind takes once no registration remains.
+		if err := integrations.ClearGitHub(ctx, tx.Secrets, orgID); err != nil {
+			return fmt.Errorf("clear github host: %w", err)
+		}
+		orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
+		if err != nil {
+			return fmt.Errorf("load org settings: %w", err)
+		}
+		orgSet.GitHubBaseURL = ""
+		if _, err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
+			return fmt.Errorf("save org settings: %w", err)
+		}
+		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialRemoved,
+			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindGitHubApp, base, app.Slug),
+		})
+	}); err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	release() // idempotent; the defer stays as the early-return safety net
+
+	githubAppLog.Info("disconnected live app, torn down locally", "org", orgID, "app_id", app.AppID)
+
+	// The webhook secret went with the App; a cached positive would keep
+	// accepting deliveries signed with the destroyed secret until its TTL ran
+	// out. Per-installation tokens die with the teardown too. The change kick
+	// re-dues polling under whatever remains — nothing, until something is
+	// bound — and evicts the reachable-repo cache.
+	s.invalidateWebhookSecret(orgID)
+	s.invalidateInstallationTokens(orgID, insts)
+	s.kickGitHubChanged(r, orgID)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":                     "disconnected",
+		"github_app_deleted_locally": true,
+		"github_app_settings_url":    base + "/settings/apps",
 	})
 }
 

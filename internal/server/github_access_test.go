@@ -15,6 +15,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -448,6 +449,188 @@ func TestGitHubAppDiscard_AppGoesLiveUnderTheGuard(t *testing.T) {
 	}
 	if v := getSecret(t, s, "github_app_1_pem"); v == "" {
 		t.Error("the live App's private key was destroyed by the discard")
+	}
+}
+
+// --- disconnect the live App ---------------------------------------------
+
+// TestGitHubAppDisconnect_Success is the whole teardown with nothing bound
+// after it: registration, installations, secrets and host gone, the class back
+// at the rowless default, the removal recorded, and the same post-commit
+// invalidations switch-to-pat owes — so the org is the fresh state every way
+// in (the deployment App included) is open from.
+func TestGitHubAppDisconnect_Success(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	setOrgGitHubBase(t, s, "https://ghe.example.com")
+	seedLocalApp(t, s, true)
+	seedInstallation(t, s, 1, "acme")
+	seedInstallation(t, s, 2, "acme-labs")
+
+	var invalidated []string
+	s.onInstallationTokensInvalid = func(orgID, installationID string) {
+		invalidated = append(invalidated, installationID)
+	}
+	kicked := make(chan string, 1)
+	s.onGitHubChanged = func(orgID string) { kicked <- orgID }
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/disconnect", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST github/app/disconnect = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Status      string `json:"status"`
+		Deleted     bool   `json:"github_app_deleted_locally"`
+		SettingsURL string `json:"github_app_settings_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.Status != "disconnected" || !body.Deleted {
+		t.Errorf("body = %+v, want status=disconnected deleted=true", body)
+	}
+	// The link out names the GitHub the App lived on, read before the host
+	// was cleared.
+	if body.SettingsURL != "https://ghe.example.com/settings/apps" {
+		t.Errorf("github_app_settings_url = %q, want the App's own host", body.SettingsURL)
+	}
+
+	ctx := context.Background()
+	if app, _ := s.githubApps.GetForOrgSystem(ctx, runmode.LocalDefaultOrgID); app != nil {
+		t.Errorf("app survived disconnect: %+v", app)
+	}
+	if insts, _ := s.githubApps.ListInstallationsForOrgSystem(ctx, runmode.LocalDefaultOrgID); len(insts) != 0 {
+		t.Errorf("installations survived disconnect: %+v", insts)
+	}
+	if v := getSecret(t, s, "github_app_1_pem"); v != "" {
+		t.Errorf("app pem secret survived teardown: %q", v)
+	}
+	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "" {
+		t.Errorf("a PAT appeared from nowhere: %q", v)
+	}
+	set, err := s.orgs.GetSettings(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("get settings: %v", err)
+	}
+	if set.GitHubCredentialClass != domain.GitHubCredentialClassPAT {
+		t.Errorf("class = %q, want %q (the rowless default)", set.GitHubCredentialClass, domain.GitHubCredentialClassPAT)
+	}
+	if set.GitHubBaseURL != "" {
+		t.Errorf("host = %q after disconnect, want cleared — nothing remains that uses it", set.GitHubBaseURL)
+	}
+
+	if got := strings.Join(invalidated, ","); got != "1,2" {
+		t.Errorf("token invalidations = %q, want both installations", got)
+	}
+	select {
+	case org := <-kicked:
+		if org != runmode.LocalDefaultOrgID {
+			t.Errorf("change kick for org %q, want %q", org, runmode.LocalDefaultOrgID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("the GitHub-changed kick never fired — polling stays due under a credential that is gone")
+	}
+
+	rows, _, err := sqlitestore.New(s.db).AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Limit: 10})
+	if err != nil {
+		t.Fatalf("list access changes: %v", err)
+	}
+	var removals []string
+	for _, row := range rows {
+		if row.Action == domain.AccessActionCredentialRemoved {
+			removals = append(removals, row.DetailJSON)
+		}
+	}
+	if len(removals) != 1 {
+		t.Fatalf("%d credential_removed rows, want 1: %v", len(removals), removals)
+	}
+	for _, want := range []string{`"kind":"github_app"`, `"name":"tf-bot"`, `ghe.example.com`} {
+		if !strings.Contains(removals[0], want) {
+			t.Errorf("access change %s lacks %s — the removal is named by host and slug", removals[0], want)
+		}
+	}
+}
+
+// TestGitHubAppDisconnect_NoApp404: the App row is the resource.
+func TestGitHubAppDisconnect_NoApp404(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/disconnect", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("disconnect with no app = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestGitHubAppDisconnect_Staged409 is the intent boundary from this side: a
+// staged App is the discard's to remove, and refusing it here leaves the
+// staged registration, its key and the live PAT exactly as they were.
+func TestGitHubAppDisconnect_Staged409(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedLocalApp(t, s, false) // staged, behind a live PAT
+	seedInstallation(t, s, 1, "acme")
+	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT, "ghp_live", ""); err != nil {
+		t.Fatalf("seed pat: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/disconnect", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("disconnect of a staged app = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID); app == nil {
+		t.Error("staged app was torn down on a 409 disconnect")
+	}
+	if v := getSecret(t, s, "github_app_1_pem"); v == "" {
+		t.Error("the staged App's private key was destroyed on a 409 disconnect")
+	}
+	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "ghp_live" {
+		t.Errorf("PAT = %q after a 409 disconnect, want it untouched (ghp_live)", v)
+	}
+}
+
+// TestGitHubAppDisconnect_AppReplacedUnderTheGuard is this verb's half of the
+// serialization the transitions share: between the advisory read and the
+// lock, a switch-to-pat tears the live App down and a new registration lands
+// staged behind the token. The row this request first saw as live is gone; the
+// one under the lock is staged, and it is the discard's to remove, not this
+// verb's — so the teardown must not run on the stale answer.
+func TestGitHubAppDisconnect_AppReplacedUnderTheGuard(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedLocalApp(t, s, true)
+	seedInstallation(t, s, 1, "acme")
+
+	var apps db.GitHubAppsStore
+	hook := &ghAppsRaceHook{afterGet: func() {
+		ctx := context.Background()
+		if err := apps.DeleteForOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
+			t.Errorf("concurrent switch-to-pat: delete app: %v", err)
+		}
+		if err := s.secrets.Put(ctx, runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT, "ghp_live", ""); err != nil {
+			t.Errorf("concurrent switch-to-pat: save pat: %v", err)
+		}
+		seedLocalApp(t, s, false) // a fresh registration, staged behind the token
+	}}
+	apps = hookGitHubApps(s, hook)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/disconnect", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("disconnect of an App replaced under the guard = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
+	if app == nil {
+		t.Fatal("the staged replacement was torn down by a disconnect that read the previous App as live")
+	}
+	if app.Active {
+		t.Errorf("app.Active = true, want the fixture's staged replacement")
+	}
+	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "ghp_live" {
+		t.Errorf("PAT = %q, want the fixture's token untouched", v)
 	}
 }
 

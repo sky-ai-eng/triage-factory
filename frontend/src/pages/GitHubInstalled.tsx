@@ -15,11 +15,13 @@ import { startManagedGitHubConnect } from '../lib/githubApp'
  *
  * The page does exactly two things: says what happened, and offers the same
  * Connect button Workspace Settings has. Pressing it runs the ordinary bind
- * ceremony; because the installation already exists, GitHub hands it straight
- * back with the same id and the bind completes. There is no "adopt" path and
- * no list of unbound installations to pick from — on a shared App such a list
+ * ceremony, which completes only for an account that does not have the App
+ * installed: for one that does, GitHub's install page offers Configure and
+ * never returns, so the copy says to uninstall and reinstall. There is no
+ * list of unbound installations to pick from — on a shared App such a list
  * is every other prospective tenant's GitHub account, and the page is handed
  * nothing about the installation that sent the visitor here, not even its id.
+ * TODO(TFAC-947): the named-account re-bind replaces the uninstall.
  *
  * Mounted at /github/installed in multi mode only, behind AuthGate: a visitor
  * with no session is sent to sign in with this page as the return target, and
@@ -61,8 +63,8 @@ export default function GitHubInstalled() {
               <>
                 The installation went through on GitHub, but it isn&rsquo;t connected to a workspace
                 yet &mdash; Triage Factory can&rsquo;t tell which one it belongs to when the App is
-                installed from GitHub rather than from here. Press Connect to finish: GitHub will
-                hand the installation back and it will be attached to this workspace.
+                installed from GitHub rather than from here. To connect it, uninstall the App from
+                that account on GitHub, then press Connect and install it again from here.
               </>
             )}
           </p>

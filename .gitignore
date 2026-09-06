@@ -32,3 +32,11 @@ docs/oauth-smoke.html
 .multi-dev-state/
 triage-factory
 bench-results/
+
+# Deployment-local compose additions and mounted secret files (see
+# docs/self-hosting/secrets.md). The install guide has an operator create
+# both in the checkout, so they are ignored here rather than left to a
+# careful `git add`.
+compose.override.yml
+docker-compose.override.yml
+secrets/

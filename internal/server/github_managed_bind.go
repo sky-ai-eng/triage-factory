@@ -964,13 +964,20 @@ func (s *Server) renderBindOutcome(w http.ResponseWriter, orgID string, refusal 
 // simply belongs to no workspace yet — so it answers with a redirect into the
 // SPA page that says so and offers the Connect button.
 //
-// Recovery IS the ordinary ceremony, on purpose: pressing Connect mints a fresh
-// record and sends the admin to GitHub, and because the installation already
-// exists GitHub returns them here with the same installation_id, where both
-// gates run and the bind completes. A dedicated "adopt this installation"
-// path would be a second way to create a binding, and the installation_id in
-// hand is exactly the unsigned claim the ceremony refuses to trust — so it is
-// not forwarded to the page, and the page has no use for it.
+// Recovery is the ordinary ceremony: pressing Connect mints a fresh record and
+// sends the admin to GitHub. That completes only for an account that does not
+// have the App installed. For one that does, GitHub's install page offers
+// Configure — its in-place settings page — and never returns here, because
+// "Redirect on update" is ignored without a Setup URL and the OAuth-during-
+// install setting the ceremony depends on blanks the Setup URL. So today an
+// installation that arrived here is connected by uninstalling and reinstalling.
+// TODO(TFAC-947): the named-account re-bind — identity leg first, then the
+// installation resolved under the App key and the same two gates — is what
+// makes an already-installed account connectable without that.
+//
+// The installation_id in hand is exactly the unsigned claim the ceremony
+// refuses to trust, so it is not forwarded to the page, and the page has no
+// use for it.
 //
 // This branch reads nothing, writes nothing and resolves no identity. The one
 // side effect is a log line naming the installation, which is the operator's

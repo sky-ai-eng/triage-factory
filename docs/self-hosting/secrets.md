@@ -58,4 +58,10 @@ TF_LICENSE_FILE=/run/secrets/tf_license
 TF_GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/tf_gh_app_key
 ```
 
+### File ownership
+
+Keep the host file private to you (`chmod 600`); nothing else needs to read it. Compose bind-mounts a `file:` secret with the host file's owner and mode, and ignores a secret's `uid`/`gid`/`mode` (it warns that they are unsupported), so inside the container the file still belongs to your host uid. The TF process runs as uid `10001` once the entrypoint drops privileges, so the entrypoint, while still root, copies every `NAME_FILE` it finds into `/run/tf-secrets/`, owned by that uid and mode `0400`, and points the variable at the copy before the drop. The mount itself is never chmod'd or chown'd. A `NAME_FILE` naming a path root cannot read is left alone, so boot fails with the binary's own error naming it.
+
+When deploying from a source checkout, `secrets/` and `compose.override.yml` are gitignored: the files in the example above cannot land in a commit through a careless `git add`.
+
 > The three crypto keys are optional (`:-`) in the bundled compose specifically so the file form can leave the plain var blank — if you supply *neither* the plain value nor a readable file, the binary fails fast at boot with a clear `"<NAME> is empty"`. The other required secrets keep compose's parse-time `${VAR:?}` check, so an unfilled `.env` still fails at `docker compose up`.

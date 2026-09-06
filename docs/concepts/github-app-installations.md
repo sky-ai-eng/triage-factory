@@ -70,11 +70,29 @@ disconnected. Its per-installation form
 (`…/github/managed/installations/{installation_id}/disconnect`) drops one
 account and keeps the class — until it drops the last one, which is the full
 disconnect. Nothing is uninstalled on GitHub: the installation persists there
-unbound, and Connect re-binds it. The other credential doors — the PAT bind,
+unbound, in the "installed but not bound" state described below, and is
+reconnected the way that section says. The other credential doors — the PAT bind,
 BYO registration, BYO import — refuse a managed workspace that still holds a
 live installation row and name the disconnect as the way out, so a workspace's
 live rows and its class can never disagree. That is what lets the receiver
 above route on the row alone.
+
+The door runs the other way too. The bind refuses a workspace that still holds
+a credential of its own, so a workspace with its own App leaves it first:
+`POST /api/orgs/{org_id}/github/app/disconnect` tears down the live App —
+registration row, installations, secrets and stored host, in one transaction —
+and resets the class to the rowless default, leaving the workspace exactly as
+a fresh one. It is a separate verb from the discard (`DELETE …/github/app`,
+which removes a *staged* registration and leaves the token live) because the
+two are different intents with different consequences, and each refuses the
+other's case with a 409: a request that meant one can never do the other,
+whichever way a concurrent cutover moves the row. As with every teardown here,
+nothing is uninstalled on GitHub — the App stays registered there, and the
+response carries the link to its settings. The Settings panel never offers the
+verb bare: a workspace with no GitHub credential is one whose setup is
+unfinished, and the app shell routes its admins to the setup wizard, so the
+panel's only use of it is the switch to the deployment App, which follows the
+teardown with Connect in the same gesture.
 
 What the rule forbids is exactly one thing: TF *guessing* — attributing an
 installation from the shared listing to a workspace whose admin never proved
@@ -130,11 +148,16 @@ treats it as one:
 
 - The install callback with no ceremony behind it redirects to
   `/github/installed`, a page that says the install went through and is not yet
-  connected, and offers the Connect button. **Recovery is the ordinary bind
-  ceremony**: Connect mints a fresh record, GitHub hands the existing
-  installation back with the same id, both gates run, and the bind lands. There
-  is no "adopt an existing installation" path — one way to create a binding is
-  enough.
+  connected, and offers the Connect button. Recovery is the ordinary bind
+  ceremony, and the ceremony completes only for an account that does **not**
+  have the App installed: GitHub's install page offers an installed account
+  nothing but Configure, its in-place settings page, and never returns to the
+  callback — "Redirect on update" is ignored without a Setup URL, and the
+  OAuth-during-install setting the ceremony needs for its `code` blanks the
+  Setup URL. So connecting an account that already has the App means
+  uninstalling it from that account on GitHub and installing it again from
+  Connect; the page says so. There is no path that creates a binding from an
+  installation id the browser carried in.
 - A managed workspace with no bound installation shows the same button as its
   Settings empty state.
 - The deployment webhook receiver acknowledges a delivery for an unbound
@@ -156,7 +179,12 @@ by the credential class the status read (`GET /api/orgs/{org_id}/github/app`)
 reports, and the affordances are per class:
 
 - **A workspace with its own App** shows the App's slug, its installations, both
-  findings below, and the switch to a token.
+  findings below, and the ways off it: the switch to the deployment's App
+  (only where the deployment has one — it is the disconnect verb above
+  followed straight away by Connect, so the workspace holds no credential for
+  the length of the trip to GitHub's install page, and an admin who leaves
+  that page without connecting an account is routed to the setup wizard) and
+  the switch to a token. Never a bare disconnect.
 - **A workspace on the deployment's App** (`using_deployment_default: true`)
   shows no App of its own — there is no row, and there never will be — and is
   never offered registration or import. What it shows is the accounts it has

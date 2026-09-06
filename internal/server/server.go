@@ -1358,6 +1358,11 @@ func (s *Server) routes() {
 	//     delete the PAT).
 	//   - pat/switch-to: full App teardown, validate + store the new PAT.
 	//   - DELETE github/app: discard a staged (not-yet-live) registration.
+	//   - app/disconnect: full teardown of the LIVE App with nothing bound
+	//     after it — the way out for a workspace moving to the deployment's
+	//     App. Its own route rather than a widening of the discard, because
+	//     the two are different intents: one leaves the workspace running on
+	//     its token, the other takes it dark until something else is bound.
 	//   - app/cutover-preflight, pat/preflight: inform-only reachability
 	//     diffs, each under the flavor it is a preflight for.
 	// The two commits + the discard mutate state (apiMutating, CSRF); the
@@ -1367,6 +1372,7 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/cutover", s.handleGitHubAppCutover)
 	s.apiMutating("POST /api/orgs/{org_id}/github/pat/switch-to", s.handleGitHubAccessSwitchToPAT)
 	s.apiMutating("DELETE /api/orgs/{org_id}/github/app", s.handleGitHubAppDiscard)
+	s.apiMutating("POST /api/orgs/{org_id}/github/app/disconnect", s.handleGitHubAppDisconnect)
 	s.api("GET /api/orgs/{org_id}/github/app/cutover-preflight", s.handleGitHubAppCutoverPreflight)
 	s.apiMutating("POST /api/orgs/{org_id}/github/pat/preflight", s.handleGitHubAccessPATPreflight)
 
