@@ -37,12 +37,10 @@ import (
 //
 // Nothing here uninstalls anything on GitHub. The grant is edited on GitHub's
 // installation page, so after a disconnect the installation persists there
-// unbound — the same ordinary state a GitHub-initiated install is in. Connect
-// does not re-bind it today: GitHub's install page never returns for an
-// account that already has the App, so reconnecting means uninstalling and
-// reinstalling there.
-// TODO(TFAC-947): the named-account re-bind is what reconnects an installed
-// account without an uninstall.
+// unbound — the same ordinary state a GitHub-initiated install is in — and
+// the ceremony's named-account leg reconnects it: GitHub's install page never
+// returns for an account that already has the App, so the admin names the
+// account instead of picking it there.
 
 // managedInTheWayMessage is the one sentence every door says to a managed
 // workspace. Same rule on four routes is the same rule, so it is spelled once.

@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { isOrgAdminRole } from '../hooks/useOrgRole'
 import { startManagedGitHubConnect } from '../lib/githubApp'
+import ConnectInstalledAccount from './settings/ConnectInstalledAccount'
 
 /**
  * GitHubInstalled is where the deployment App's install callback lands when
@@ -13,15 +14,13 @@ import { startManagedGitHubConnect } from '../lib/githubApp'
  * installation is real and belongs to no workspace — an ordinary outcome of a
  * supported install path, not a failure, and the copy here never calls it one.
  *
- * The page does exactly two things: says what happened, and offers the same
- * Connect button Workspace Settings has. Pressing it runs the ordinary bind
- * ceremony, which completes only for an account that does not have the App
- * installed: for one that does, GitHub's install page offers Configure and
- * never returns, so the copy says to uninstall and reinstall. There is no
- * list of unbound installations to pick from — on a shared App such a list
- * is every other prospective tenant's GitHub account, and the page is handed
+ * The page does exactly two things: says what happened, and offers the way to
+ * connect it — the named-account form, because the account now has the App
+ * and GitHub's install page would offer it nothing but Configure. There is no
+ * list of unbound installations to pick from — on a shared App such a list is
+ * every other prospective tenant's GitHub account, and the page is handed
  * nothing about the installation that sent the visitor here, not even its id.
- * TODO(TFAC-947): the named-account re-bind replaces the uninstall.
+ * The admin names the account; the proof is GitHub's.
  *
  * Mounted at /github/installed in multi mode only, behind AuthGate: a visitor
  * with no session is sent to sign in with this page as the return target, and
@@ -63,8 +62,8 @@ export default function GitHubInstalled() {
               <>
                 The installation went through on GitHub, but it isn&rsquo;t connected to a workspace
                 yet &mdash; Triage Factory can&rsquo;t tell which one it belongs to when the App is
-                installed from GitHub rather than from here. To connect it, uninstall the App from
-                that account on GitHub, then press Connect and install it again from here.
+                installed from GitHub rather than from here. Name the account it was installed on to
+                connect it; you&rsquo;ll confirm on GitHub as yourself.
               </>
             )}
           </p>
@@ -88,13 +87,18 @@ export default function GitHubInstalled() {
         )}
 
         {org && !requested && canConnect && (
-          <button
-            type="button"
-            onClick={() => startManagedGitHubConnect(org.id)}
-            className="w-full bg-warm hover:bg-warm/90 text-warm-ink font-medium rounded-xl px-4 py-2.5 text-body transition-colors"
-          >
-            Connect GitHub to {org.name}
-          </button>
+          <div className="space-y-3">
+            <ConnectInstalledAccount orgId={org.id} />
+            {/* For a visitor who landed here some other way and wants a
+                fresh install instead: the ordinary ceremony. */}
+            <button
+              type="button"
+              onClick={() => startManagedGitHubConnect(org.id)}
+              className="w-full rounded-xl border border-line-1 px-4 py-2.5 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
+            >
+              Install on another account and connect it to {org.name}
+            </button>
+          </div>
         )}
 
         {org && !requested && !canConnect && (

@@ -147,6 +147,59 @@ func Associated(ctx context.Context, baseURL, token string, installationID int64
 	return ErrNotAssociated
 }
 
+// AssociatedByAccount is the association gate asked the other way round: not
+// "is this installation one the user can see" but "which installation on the
+// account called login can the user see". It exists for the leg where GitHub
+// never says which installation to connect — an account that already has the
+// App installed is offered nothing but Configure on GitHub's install page, so
+// the admin names the account and the installation has to be found — and it
+// finds it among the ones the AUTHORIZING USER can see, never under the App's
+// own key. Under the App's key the answer would name installations on accounts
+// the user has no relation to, which is a fact about another tenant; here the
+// walk can only ever return something GitHub already shows this person.
+//
+// Same discipline as Associated: the listing is not a source. The walk
+// short-circuits on the first account match, returns one id, and the caller
+// reads the installation itself under the App to learn anything about it. A
+// listing that ends without a match is ErrNotAssociated — the same answer
+// whether the account has no installation or the user cannot see it, and the
+// caller must keep them indistinguishable. Logins compare case-insensitively
+// because GitHub's do.
+func AssociatedByAccount(ctx context.Context, baseURL, token, login string) (int64, error) {
+	apiBase := ghbase.APIBase(baseURL)
+	next := apiBase + "/user/installations?per_page=100"
+	for pages := 0; next != ""; pages++ {
+		if pages >= maxInstallationPages {
+			return 0, fmt.Errorf("%w: the installations listing did not end within %d pages",
+				ErrUndetermined, maxInstallationPages)
+		}
+		body, link, err := get(ctx, next, token)
+		if err != nil {
+			return 0, err
+		}
+		var page struct {
+			Installations []struct {
+				ID      int64 `json:"id"`
+				Account struct {
+					Login string `json:"login"`
+				} `json:"account"`
+			} `json:"installations"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return 0, fmt.Errorf("%w: parse user installations: %w", ErrUndetermined, err)
+		}
+		for _, inst := range page.Installations {
+			if inst.ID > 0 && strings.EqualFold(inst.Account.Login, login) {
+				return inst.ID, nil
+			}
+		}
+		if next, err = nextPage(apiBase, link); err != nil {
+			return 0, err
+		}
+	}
+	return 0, ErrNotAssociated
+}
+
 // Authority answers whether actor administers the account target, right now.
 //
 // Organization targets ask GitHub: GET /orgs/{org}/memberships/{username} must

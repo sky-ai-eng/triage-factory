@@ -144,6 +144,82 @@ func TestAssociated(t *testing.T) {
 	})
 }
 
+func TestAssociatedByAccount(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("NamedAccountResolvesToItsInstallation", func(t *testing.T) {
+		base := fakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+			if got := r.Header.Get("Authorization"); got != "Bearer ghu_test" {
+				t.Errorf("Authorization = %q, want the user access token", got)
+			}
+			fmt.Fprint(w, `{"total_count":2,"installations":[{"id":11,"account":{"login":"other"}},{"id":42,"account":{"login":"Acme"}}]}`)
+		})
+		id, err := AssociatedByAccount(ctx, base, "ghu_test", "acme")
+		if err != nil || id != 42 {
+			t.Errorf("AssociatedByAccount = (%d, %v), want (42, nil) — logins compare case-insensitively", id, err)
+		}
+	})
+
+	t.Run("AccountNotInTheListingIsTheDefinitiveNo", func(t *testing.T) {
+		// Whether the account has no installation or the user cannot see it,
+		// the listing looks the same, and so must the answer.
+		base := fakeGitHub(t, func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"total_count":1,"installations":[{"id":11,"account":{"login":"other"}}]}`)
+		})
+		id, err := AssociatedByAccount(ctx, base, "ghu_test", "acme")
+		if !errors.Is(err, ErrNotAssociated) || id != 0 {
+			t.Errorf("AssociatedByAccount = (%d, %v), want (0, ErrNotAssociated)", id, err)
+		}
+	})
+
+	t.Run("AnEntryWithNoIdIsNotAMatch", func(t *testing.T) {
+		// An id of zero would be handed to the App as "read installation 0"
+		// and refused there; refusing here keeps the definitive no where the
+		// listing is the evidence.
+		base := fakeGitHub(t, func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"total_count":1,"installations":[{"account":{"login":"acme"}}]}`)
+		})
+		if _, err := AssociatedByAccount(ctx, base, "ghu_test", "acme"); !errors.Is(err, ErrNotAssociated) {
+			t.Errorf("AssociatedByAccount = %v, want ErrNotAssociated", err)
+		}
+	})
+
+	t.Run("SecondPageIsFollowed", func(t *testing.T) {
+		var base string
+		base = fakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("page") == "2" {
+				fmt.Fprint(w, `{"installations":[{"id":42,"account":{"login":"acme"}}]}`)
+				return
+			}
+			w.Header().Set("Link", `<`+base+`/user/installations?per_page=100&page=2>; rel="next"`)
+			fmt.Fprint(w, `{"installations":[{"id":11,"account":{"login":"other"}}]}`)
+		})
+		id, err := AssociatedByAccount(ctx, base, "ghu_test", "acme")
+		if err != nil || id != 42 {
+			t.Errorf("AssociatedByAccount = (%d, %v), want (42, nil)", id, err)
+		}
+	})
+
+	t.Run("TransportFailureIsUndetermined", func(t *testing.T) {
+		_, err := AssociatedByAccount(ctx, "http://127.0.0.1:1", "ghu_test", "acme")
+		if !errors.Is(err, ErrUndetermined) {
+			t.Errorf("AssociatedByAccount = %v, want ErrUndetermined", err)
+		}
+		if errors.Is(err, ErrNotAssociated) {
+			t.Error("a transport failure must not read as a definitive no")
+		}
+	})
+
+	t.Run("MalformedBodyIsUndetermined", func(t *testing.T) {
+		base := fakeGitHub(t, func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `not json`)
+		})
+		if _, err := AssociatedByAccount(ctx, base, "ghu_test", "acme"); !errors.Is(err, ErrUndetermined) {
+			t.Errorf("AssociatedByAccount = %v, want ErrUndetermined", err)
+		}
+	})
+}
+
 func TestAuthority_OrganizationTarget(t *testing.T) {
 	ctx := context.Background()
 	target := Account{Type: "Organization", Login: "acme", ID: 7}

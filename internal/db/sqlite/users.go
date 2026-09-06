@@ -36,6 +36,31 @@ func (s *usersStore) GetGitHubLogin(ctx context.Context, userID, githubBaseURL s
 	return login, nil
 }
 
+func (s *usersStore) GetGitHubIdentity(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
+	var (
+		id       domain.UserGitHubIdentity
+		ghUserID sql.NullString
+		verified sql.NullTime
+	)
+	err := s.q.QueryRowContext(ctx,
+		`SELECT login, github_user_id, source, verified_at
+		   FROM user_github_identities
+		  WHERE user_id = ? AND github_base_url = ?`,
+		userID, db.NormalizeGitHubHost(githubBaseURL),
+	).Scan(&id.Login, &ghUserID, &id.Source, &verified)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read user_github_identities: %w", err)
+	}
+	id.GitHubUserID = ghUserID.String
+	if verified.Valid {
+		id.VerifiedAt = verified.Time.UTC()
+	}
+	return &id, nil
+}
+
 // UserIDsForVerifiedEmailSystem always returns (nil, nil): user_identities is
 // a multi-mode-only auth table (the GoTrue login-identity bridge) and is
 // deliberately absent from the SQLite schema — local mode has no login

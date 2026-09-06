@@ -5,7 +5,7 @@
 // nothing about the installation that sent the visitor here, because on a
 // shared App that is somebody else's GitHub account.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import GitHubInstalled from './GitHubInstalled'
 import type { AuthOrg } from '../types'
@@ -21,10 +21,17 @@ vi.mock('../contexts/OrgContext', () => ({
   useActiveOrgId: () => authState.activeOrgId,
 }))
 
-const connect = vi.hoisted(() => ({ startManagedGitHubConnect: vi.fn() }))
+const connect = vi.hoisted(() => ({
+  startManagedGitHubConnect: vi.fn(),
+  startManagedGitHubConnectAccount: vi.fn(),
+}))
 vi.mock('../lib/githubApp', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/githubApp')>()
-  return { ...actual, startManagedGitHubConnect: connect.startManagedGitHubConnect }
+  return {
+    ...actual,
+    startManagedGitHubConnect: connect.startManagedGitHubConnect,
+    startManagedGitHubConnectAccount: connect.startManagedGitHubConnectAccount,
+  }
 })
 
 function renderAt(search = '') {
@@ -41,6 +48,8 @@ const FAULT_WORDS = /\b(error|fail|failed|failure|wrong|problem)\b/i
 
 beforeEach(() => {
   connect.startManagedGitHubConnect.mockReset()
+  connect.startManagedGitHubConnectAccount.mockReset()
+  connect.startManagedGitHubConnectAccount.mockResolvedValue(undefined)
   authState.orgs = [{ id: 'org-1', name: 'Acme', role: 'admin' }]
   authState.activeOrgId = 'org-1'
 })
@@ -53,14 +62,47 @@ describe('GitHubInstalled', () => {
     expect(document.body.textContent).not.toMatch(FAULT_WORDS)
   })
 
-  it('offers the ordinary Connect ceremony for the active workspace, and nothing else', () => {
+  it('connects the named account through the OAuth leg, and lists nothing to pick from', async () => {
     renderAt()
-    fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub to Acme' }))
-    expect(connect.startManagedGitHubConnect).toHaveBeenCalledWith('org-1')
-    // One button. No adopt affordance, no installation to pick.
-    expect(screen.getAllByRole('button')).toHaveLength(1)
+    // Two buttons and no list: the named-account reveal, and the ordinary
+    // ceremony for a fresh install. Nothing enumerates installations.
+    expect(screen.getAllByRole('button')).toHaveLength(2)
     expect(screen.queryByRole('list')).not.toBeInTheDocument()
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Connect an account that already has the App…' }),
+    )
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: ' acme-corp ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    await waitFor(() => {
+      expect(connect.startManagedGitHubConnectAccount).toHaveBeenCalledWith('org-1', 'acme-corp')
+    })
+    expect(connect.startManagedGitHubConnect).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a refused start inline and stays put', async () => {
+    connect.startManagedGitHubConnectAccount.mockRejectedValue(
+      new Error('This workspace already has a GitHub personal access token.'),
+    )
+    renderAt()
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Connect an account that already has the App…' }),
+    )
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'acme-corp' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    expect(
+      await screen.findByText('This workspace already has a GitHub personal access token.'),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toBeInTheDocument()
+  })
+
+  it('still offers the ordinary ceremony for a fresh install on another account', () => {
+    renderAt()
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Install on another account and connect it to Acme' }),
+    )
+    expect(connect.startManagedGitHubConnect).toHaveBeenCalledWith('org-1')
   })
 
   it('links back to the workspace settings surface that carries the same button', () => {
@@ -95,10 +137,16 @@ describe('GitHubInstalled', () => {
       { id: 'org-2', name: 'Globex', role: 'admin' },
     ]
     renderAt()
-    expect(screen.getByRole('button', { name: 'Connect GitHub to Acme' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Install on another account and connect it to Acme' }),
+    ).toBeInTheDocument()
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'org-2' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub to Globex' }))
-    expect(connect.startManagedGitHubConnect).toHaveBeenCalledWith('org-2')
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Connect an account that already has the App…' }),
+    )
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'globex' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    expect(connect.startManagedGitHubConnectAccount).toHaveBeenCalledWith('org-2', 'globex')
   })
 
   // GitHub parked the install with an owner: nothing exists to connect yet,

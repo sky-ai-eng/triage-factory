@@ -474,21 +474,50 @@ export async function disconnectOwnApp(orgId: string): Promise<SwitchToPatResult
 // which returns them to the callback where the bind completes. Control never
 // comes back here.
 //
-// This is ALSO the recovery for an installation that exists but is bound to no
-// workspace (installed from the App's public page, approved by an owner after
-// a request, reinstalled): the same button, the same ceremony. GitHub hands the
-// existing installation back with the same id and the bind lands. There is no
-// "adopt an existing installation" call, on purpose — one way to create a
-// binding is enough.
+// It completes only for an account that does not have the App yet: GitHub's
+// install page offers an installed account nothing but Configure and never
+// returns. That account is connected by startManagedGitHubConnectAccount.
 export function startManagedGitHubConnect(orgId: string): void {
   window.location.assign(`/api/orgs/${encodeURIComponent(orgId)}/github/managed/connect`)
+}
+
+// startManagedGitHubConnectAccount is the ceremony for an account that already
+// has the deployment App installed — installed from GitHub's public page,
+// approved by an owner after a request, or released by a disconnect. The admin
+// names the account; the backend mints the same record and cookie and answers
+// with GitHub's OAuth authorize URL, which this navigates to. GitHub proves who
+// the admin is and returns them to the callback, where the installation is
+// found among the ones that person can see and the bind completes. Nothing is
+// listed and nothing is picked from: the name is the admin's, the proof is
+// GitHub's.
+//
+// POST /api/orgs/{org_id}/github/managed/connect-account
+export async function startManagedGitHubConnectAccount(
+  orgId: string,
+  account: string,
+): Promise<void> {
+  let authorizeUrl: string
+  try {
+    const out = await apiJSON<{ authorize_url: string }>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/managed/connect-account`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account: account.trim() }),
+      },
+    )
+    authorizeUrl = out.authorize_url
+  } catch (e) {
+    throw asError(e, 'Could not start connecting that account.')
+  }
+  window.location.assign(authorizeUrl)
 }
 
 // disconnectManagedGitHub moves the workspace off the deployment App: every
 // bound installation is released and the credential class resets, so the
 // workspace is back in its no-credential state and free to register its own
 // App or bind a token. Nothing is uninstalled on GitHub — the installation
-// persists there unbound, and Connect re-binds it.
+// persists there unbound, and startManagedGitHubConnectAccount re-binds it.
 //
 // POST /api/orgs/{org_id}/github/managed/disconnect
 export async function disconnectManagedGitHub(orgId: string): Promise<void> {

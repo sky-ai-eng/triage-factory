@@ -53,6 +53,7 @@ import { toast } from '../../../components/Toast/toastStore'
 import { isHttpUrl } from '../../../lib/reachability'
 import { GitHubAccountTypeStep, GitHubAppSourcePicker, GitHubAppStep } from '../../setup/GitHubStep'
 import GitHubAppImportForm from '../GitHubAppImportForm'
+import ConnectInstalledAccount from '../ConnectInstalledAccount'
 import { appImportedPatch } from '../../setup/githubAppImported'
 import { GitHubAppInstallView } from '../GitHubAppInstallView'
 import GitHubWebhookHealthNotice from '../GitHubWebhookHealthNotice'
@@ -763,6 +764,7 @@ export default function GitHubAccessControl({
               >
                 {installCount === 0 ? 'Connect GitHub…' : 'Connect another account…'}
               </button>
+              <ConnectInstalledAccount orgId={orgId} disabled={busy} />
               {/* The way out of the class, for a workspace that wants its own
                   App or a token instead. It releases every bound account; the
                   installations stay on GitHub. */}
@@ -849,13 +851,16 @@ export default function GitHubAccessControl({
           </p>
           <div className="flex flex-wrap items-center gap-2">
             {deploymentAppAvailable && orgId && (
-              <button
-                type="button"
-                onClick={() => startManagedGitHubConnect(orgId)}
-                className="rounded-full bg-warm px-5 py-2 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90"
-              >
-                Connect GitHub…
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => startManagedGitHubConnect(orgId)}
+                  className="rounded-full bg-warm px-5 py-2 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90"
+                >
+                  Connect GitHub…
+                </button>
+                <ConnectInstalledAccount orgId={orgId} />
+              </>
             )}
             <button
               type="button"
