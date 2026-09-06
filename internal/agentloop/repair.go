@@ -8,14 +8,32 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// interruptedToolResult is the synthetic result written for a tool call
+// interruptedToolResult composes the synthetic result written for a tool call
 // whose real result never reached the transcript. Its exact claim matters:
-// the crash window sits between executing a tool and persisting its result,
-// so the call may have completed and had effects — and the restored
-// workspace may not reflect them either way.
-const interruptedToolResult = "interrupted: the executor changed and the workspace was restored to its last snapshot point; " +
-	"this call's result is unknown and its effects may be partially present or absent — " +
-	"verify state before repeating any side-effectful action."
+// the window sits between executing a tool and persisting its result, so the
+// call may have completed and had effects — and the tree the agent now reads
+// may not reflect them either way.
+//
+// Built from the same two facts as the rebuilt-workspace notice, and held to
+// the same rule: it says what happened to the tree and nothing more. The
+// common shape is a stop on the executor that parked, resumed onto the warm
+// tree — no restore, no move — and a result that asserted either would be
+// telling the agent to distrust a workspace that is exactly as its last call
+// left it.
+func interruptedToolResult(prov domain.WorkspaceProvenance, executorChanged bool) string {
+	s := "interrupted: the engagement running this call ended before its result was recorded"
+	if executorChanged {
+		s += " and this one runs on a different executor"
+	}
+	switch prov {
+	case domain.WorkspaceProvenanceRehydrated:
+		s += "; the workspace was restored to its last snapshot point"
+	case domain.WorkspaceProvenanceFresh:
+		s += "; the workspace was rebuilt from scratch"
+	}
+	return s + "; this call's result is unknown and its effects may be partially present or absent — " +
+		"verify state before repeating any side-effectful action."
+}
 
 // snapshotRestoredBody describes a workspace rebuilt from its snapshot
 // exactly: snapshots are taken at graceful dormancy points, so everything up
@@ -148,7 +166,7 @@ func (e *Engine) repairDanglingToolCalls(ctx context.Context, params Params, row
 	e.info("repairing interrupted tool calls on claim",
 		"conversation", params.ConversationID, "count", len(repairs))
 	for _, rep := range repairs {
-		if err := e.insertToolResult(ctx, params, rep.call, interruptedToolResult, true, rep.seq); err != nil {
+		if err := e.insertToolResult(ctx, params, rep.call, interruptedToolResult(params.Workspace, params.ExecutorChanged), true, rep.seq); err != nil {
 			return fmt.Errorf("insert synthetic result for %s: %w", rep.call.ID, err)
 		}
 	}
