@@ -1,6 +1,7 @@
 package sso
 
 import (
+	"context"
 	"encoding/json"
 	"html/template"
 	"net/http"
@@ -28,6 +29,13 @@ type loginExt struct {
 }
 
 func (le *loginExt) stores() *ssostore.Bundle { return ssostore.FromStores(le.api.Stores()) }
+
+// IdPForProviders answers core's read-side seam from the connection store:
+// the admin-pool lookup, since the caller is a principal reading their own
+// login identities and no org membership scopes that.
+func (le *loginExt) IdPForProviders(ctx context.Context, providerIDs []string) (map[string]string, error) {
+	return le.stores().Connections.IdPsByProviderIDs(ctx, providerIDs)
+}
 
 // StartSSO handles GET /api/auth/oauth/saml — the SP-initiated SAML start.
 // Given a TF-registered provider_id it POSTs GoTrue's /sso and forwards the

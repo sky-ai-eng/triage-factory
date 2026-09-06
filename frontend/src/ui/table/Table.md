@@ -334,7 +334,15 @@ header and on every row, `role="columnheader"` with `aria-sort` on each heading,
 - **Selection is the checkbox's job.** Every row's checkbox is a real, reachable
   `Checkbox` (see its own `.md`), and clicking the row is the convenience on top.
   The header checkbox goes to `aria-checked="mixed"` on a partial selection.
-  Shift-click still extends from the anchor, from the row or the box.
+  Shift-click still extends from the anchor, from the row or the box — except
+  under `onRowOpen` (below), where the row click is always the open and
+  shift-extend is the checkbox's alone.
+- **A row that opens.** A table whose rows lead somewhere — a token's sheet —
+  passes `onRowOpen(row)`, and the row click — shift held or not — is then
+  always the open rather than the convenience toggle; the checkbox alone
+  selects and extends, so the bulk verbs keep their selection without two
+  gestures fighting over one click. Such rows take the pointer cursor and the
+  hover tint whether or not they are selectable. Absent, nothing changes.
 - **The pager is buttons.** `aria-current="page"` on the page you are on, real
   `disabled` on prev/next at the ends, and names on the glyphs — "Previous page",
   not "‹".

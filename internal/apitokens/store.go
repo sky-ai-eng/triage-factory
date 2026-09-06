@@ -445,6 +445,41 @@ func (s *Store) GetForUserSystem(ctx context.Context, userID, tokenID string) (*
 	return &tok, nil
 }
 
+// RenameSystem changes the display name of one of the user's own live tokens
+// and returns the row as it now stands. The name is the only editable field on
+// a token by design — its org, expiry and allowlist are the credential, and a
+// different credential is a new token — so this is the whole of "update".
+//
+// Not audited: the access-change log records credential events, and a label
+// changing is not one. userID is in the predicate, as in RevokeSystem, so the
+// statement itself refuses another user's token; a miss is ErrNoSuchToken for
+// every reason the caller may not act on it. The row rides the UPDATE's own
+// RETURNING through the same projection every read uses, joined to the org's
+// cap so the effective expiry is the one a list would show.
+func (s *Store) RenameSystem(ctx context.Context, userID, tokenID, name string) (Token, error) {
+	if !isValidUUID(tokenID) || !isValidUUID(userID) {
+		return Token{}, ErrNoSuchToken
+	}
+	tok, err := scanToken(s.db.QueryRowContext(ctx, `
+		WITH upd AS (
+			UPDATE public.user_api_tokens
+			   SET name = $3
+			 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+			RETURNING *
+		)
+		SELECT `+tokenColumns+`
+		  FROM upd t
+		  LEFT JOIN public.org_settings os ON os.org_id = t.org_id
+	`, tokenID, userID, name).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Token{}, ErrNoSuchToken
+	}
+	if err != nil {
+		return Token{}, fmt.Errorf("rename api token: %w", err)
+	}
+	return tok, nil
+}
+
 // RevokeSystem kills one of the user's own tokens. userID is part of the
 // predicate rather than a check before it: one statement, and no way for a
 // caller to revoke a token it does not own even by racing.

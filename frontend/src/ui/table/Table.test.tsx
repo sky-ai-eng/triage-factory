@@ -182,6 +182,31 @@ describe('Table — the floating bar', () => {
   })
 })
 
+describe('Table — a row that opens', () => {
+  it('gives the row click to onRowOpen and leaves selection to the checkbox', () => {
+    const onRowOpen = vi.fn()
+    render(<Table columns={COLS} rows={ROWS} onRowOpen={onRowOpen} />)
+
+    const rows = screen.getAllByRole('row').slice(1)
+    fireEvent.click(within(rows[0]).getAllByRole('cell')[0])
+    expect(onRowOpen).toHaveBeenCalledWith(expect.objectContaining({ id: '1', name: 'ana' }))
+    // Opening is not selecting.
+    expect(rows[0]).toHaveAttribute('aria-selected', 'false')
+
+    // The checkbox still selects, and selecting is not opening.
+    fireEvent.click(within(rows[1]).getByRole('checkbox'))
+    expect(rows[1]).toHaveAttribute('aria-selected', 'true')
+    expect(onRowOpen).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves the row click as a selection toggle when nothing opens', () => {
+    render(<Table columns={COLS} rows={ROWS} />)
+    const row = screen.getAllByRole('row')[1]
+    fireEvent.click(within(row).getAllByRole('cell')[0])
+    expect(row).toHaveAttribute('aria-selected', 'true')
+  })
+})
+
 describe('Table — the draft page', () => {
   it('is a page in the pager, and only while it is open', async () => {
     const user = userEvent.setup()

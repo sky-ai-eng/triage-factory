@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -44,6 +45,15 @@ type LoginExtension interface {
 	// return err!=nil and write NOTHING — core renders the 500 (the JIT-failure
 	// path). Never both. (activeOrg is only honored when done=false, err=nil.)
 	OnLoginResolved(w http.ResponseWriter, r *http.Request, in LoginResolved) (activeOrg uuid.NullUUID, done bool, err error)
+
+	// IdPForProviders is the read-side seam: for each SSO provider id that
+	// backs one of a principal's login identities, which identity-provider
+	// product it is (the closed vocabulary the extension's connection store
+	// holds). Ids the extension does not recognise, or whose connection has
+	// no known IdP, are absent from the map. Core uses it to let a login
+	// identity wear its vendor's mark without core naming any SSO type; the
+	// no-op returns nil, which reads as "nothing known".
+	IdPForProviders(ctx context.Context, providerIDs []string) (map[string]string, error)
 }
 
 // LoginState is the neutral subset of the OAuth state cookie a login hook
@@ -82,6 +92,10 @@ func (noopLoginExtension) OnTestCallback(http.ResponseWriter, *http.Request, Log
 
 func (noopLoginExtension) OnLoginResolved(http.ResponseWriter, *http.Request, LoginResolved) (uuid.NullUUID, bool, error) {
 	return uuid.NullUUID{}, false, nil
+}
+
+func (noopLoginExtension) IdPForProviders(context.Context, []string) (map[string]string, error) {
+	return nil, nil
 }
 
 // loginExtension returns the registered login extension, or the no-op

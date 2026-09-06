@@ -586,6 +586,71 @@ func TestGitHubIdentityStatus(t *testing.T) {
 	}
 }
 
+// TestGitHubConnect_LoginMirrorYieldsToUserBinding pins the mirror's place in
+// the order of authority: a github.com binding the user made themselves (by
+// Connect or a pasted PAT) survives their next GitHub sign-in with a different
+// handle, while a binding the mirror wrote is still refreshed by it. Without
+// the first half, "Change" on the settings page is a verb the next login
+// silently undoes.
+func TestGitHubConnect_LoginMirrorYieldsToUserBinding(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "mirror-org")
+	seedOrgGitHubHost(t, rig, orgA.String(), "https://github.com")
+
+	readBinding := func() (login, source string) {
+		t.Helper()
+		if err := rig.h.AdminDB.QueryRow(`
+			SELECT login, source FROM user_github_identities
+			 WHERE user_id = $1 AND github_base_url = 'https://github.com'
+		`, alice.String()).Scan(&login, &source); err != nil {
+			t.Fatalf("read binding: %v", err)
+		}
+		return login, source
+	}
+	signInAs := func(handle string) {
+		t.Helper()
+		claims := validClaimsFor(alice)
+		claims["user_metadata"].(map[string]any)["user_name"] = handle
+		if resp, _ := rig.driveCallbackClaims(claims); resp.StatusCode != http.StatusFound {
+			t.Fatalf("callback status=%d, want 302", resp.StatusCode)
+		}
+	}
+
+	// A mirror-written row follows the login: the handle it mirrors changes,
+	// the row changes.
+	signInAs("alice-personal")
+	if login, source := readBinding(); login != "alice-personal" || source != "login_claim" {
+		t.Fatalf("after first login: %s/%s, want alice-personal/login_claim", login, source)
+	}
+	signInAs("alice-renamed")
+	if login, source := readBinding(); login != "alice-renamed" || source != "login_claim" {
+		t.Errorf("after handle change: %s/%s, want the mirror refreshed to alice-renamed/login_claim", login, source)
+	}
+
+	// The user then binds a different account for this host. That row is
+	// theirs, and the next sign-in leaves it exactly as they set it.
+	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
+		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), "https://github.com", "alice-corp", "", "", "connect_oauth")
+	}); err != nil {
+		t.Fatalf("bind by connect: %v", err)
+	}
+	signInAs("alice-renamed")
+	if login, source := readBinding(); login != "alice-corp" || source != "connect_oauth" {
+		t.Errorf("after login over a connect_oauth binding: %s/%s, want alice-corp/connect_oauth untouched", login, source)
+	}
+	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
+		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), "https://github.com", "alice-pat", "", "", "pat")
+	}); err != nil {
+		t.Fatalf("bind by pat: %v", err)
+	}
+	signInAs("alice-renamed")
+	if login, source := readBinding(); login != "alice-pat" || source != "pat" {
+		t.Errorf("after login over a pat binding: %s/%s, want alice-pat/pat untouched", login, source)
+	}
+}
+
 // TestGitHubConnect_IdentityPersistsAcrossLoginProvider closes a
 // regression by construction: a connect_oauth binding must survive a
 // subsequent login under a non-GitHub provider (no user_name claim), where
@@ -614,21 +679,35 @@ func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
 		t.Fatalf("seed saml identity: %v", err)
 	}
 
-	// Re-login under that non-GitHub provider (Entra SAML): isSSO=true resolves to
-	// alice's principal but must never touch the github identity row —
-	// preserving the connect_oauth binding captured above.
+	// Re-login under that non-GitHub provider (Entra SAML): a provider id
+	// resolves to alice's principal but must never touch the github identity
+	// row — preserving the connect_oauth binding captured above.
 	claims := &verify.Claims{
 		Subject:       samlID.String(),
 		Email:         "alice@corp.example",
 		EmailVerified: true,                                         // SAML assertion emails are verified by definition
 		UserMetadata:  map[string]any{"full_name": "Alice Example"}, // no user_name
 	}
-	got, err := resolveOrCreatePrincipal(context.Background(), rig.h.AdminDB, samlID, claims, true)
+	const providerID = "11111111-2222-3333-4444-555555555555"
+	got, err := resolveOrCreatePrincipal(context.Background(), rig.h.AdminDB, samlID, claims, providerID)
 	if err != nil {
 		t.Fatalf("resolveOrCreatePrincipal: %v", err)
 	}
 	if got != alice {
 		t.Fatalf("SAML re-login resolved to principal %v, want alice %v", got, alice)
+	}
+
+	// The saml row was seeded without a provider id (a row from before the
+	// stamp existed); the login refresh heals it, so the identities read can
+	// name the IdP behind it from now on.
+	var stamped string
+	if err := rig.h.AdminDB.QueryRow(`
+		SELECT COALESCE(sso_provider_id, '') FROM user_identities WHERE auth_user_id = $1
+	`, samlID).Scan(&stamped); err != nil {
+		t.Fatalf("read saml identity after re-login: %v", err)
+	}
+	if stamped != providerID {
+		t.Errorf("sso_provider_id after re-login = %q, want %q", stamped, providerID)
 	}
 
 	var login, source string

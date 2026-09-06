@@ -209,6 +209,55 @@ func TestMintReturnsTheStoredRow(t *testing.T) {
 	}
 }
 
+// TestRenameReturnsTheStoredRow pins the rename's write shape against the list
+// read the same way Mint's is, and the two refusals: another user's token and a
+// revoked one are both ErrNoSuchToken, since the statement's predicate is what
+// keeps a caller to their own live rows.
+func TestRenameReturnsTheStoredRow(t *testing.T) {
+	store, _, userID, orgID := newStoreForTest(t)
+	ctx := context.Background()
+
+	tok, _, err := store.MintSystem(ctx, userID, orgID, "before", nil, nil, userID)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	renamed, err := store.RenameSystem(ctx, userID, tok.ID, "after")
+	if err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if renamed.Name != "after" || renamed.ID != tok.ID || renamed.Prefix != tok.Prefix {
+		t.Errorf("renamed = %+v, want name=after on the same row", renamed)
+	}
+	read := func() (*Token, error) {
+		got, total, err := store.ListForUserSystem(ctx, userID, &orgID, db.Unwindowed)
+		if err != nil {
+			return nil, err
+		}
+		if total != 1 || len(got) != 1 {
+			return nil, nil
+		}
+		return &got[0], nil
+	}
+	dbtest.AssertWriteReturnedStoredRow(t, "RenameSystem", renamed, read)
+
+	// Someone else's user id names nothing, and leaves the row alone.
+	other := "00000000-0000-4000-8000-00000000beef"
+	if _, err := store.RenameSystem(ctx, other, tok.ID, "stolen"); !errors.Is(err, ErrNoSuchToken) {
+		t.Errorf("rename as another user: err = %v, want ErrNoSuchToken", err)
+	}
+	if got, _ := read(); got == nil || got.Name != "after" {
+		t.Errorf("row after a refused rename = %+v, want name=after untouched", got)
+	}
+
+	// A revoked token is not renameable — it is not a token any more.
+	if err := store.RevokeSystem(ctx, userID, tok.ID, userID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if _, err := store.RenameSystem(ctx, userID, tok.ID, "zombie"); !errors.Is(err, ErrNoSuchToken) {
+		t.Errorf("rename after revoke: err = %v, want ErrNoSuchToken", err)
+	}
+}
+
 func TestMintRejectsUnusableCIDRs(t *testing.T) {
 	store, _, userID, orgID := newStoreForTest(t)
 	ctx := context.Background()

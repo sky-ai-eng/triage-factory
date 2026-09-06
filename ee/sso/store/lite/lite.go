@@ -67,6 +67,10 @@ func (s *ssoConnectionStore) MarkTestedByProviderID(context.Context, string) err
 	return db.ErrNotApplicableInLocal
 }
 
+func (s *ssoConnectionStore) IdPsByProviderIDs(context.Context, []string) (map[string]string, error) {
+	return nil, db.ErrNotApplicableInLocal
+}
+
 type ssoDomainStore struct{ q db.Execer }
 
 func newSSODomainStore(q, _ db.Execer) ssostore.SSODomainStore {

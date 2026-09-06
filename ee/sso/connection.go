@@ -75,15 +75,19 @@ func (h *ssoConnectionHandler) regMutex(orgID string) *sync.Mutex {
 }
 
 type ssoConnectionView struct {
-	ID          string    `json:"id"`
-	Kind        string    `json:"kind"`
-	ProviderID  string    `json:"provider_id"`
-	DefaultRole string    `json:"default_role"`
-	Enabled     bool      `json:"enabled"`
-	Enforced    bool      `json:"enforced"`
-	Tested      bool      `json:"tested"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	ProviderID  string `json:"provider_id"`
+	DefaultRole string `json:"default_role"`
+	Enabled     bool   `json:"enabled"`
+	Enforced    bool   `json:"enforced"`
+	Tested      bool   `json:"tested"`
+	// IdP is the identity-provider product behind the connection, one of
+	// ssostore.IdPValues; omitted when not known. Derived at registration,
+	// correctable through the PATCH.
+	IdP       string    `json:"idp,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type ssoConnectionResponse struct {
@@ -104,8 +108,38 @@ func toSSOConnectionView(c *ssostore.SSOConnection) *ssoConnectionView {
 		Enabled:     c.Enabled,
 		Enforced:    c.Enforced,
 		Tested:      c.LastTestedAt != nil,
+		IdP:         c.IdP,
 		CreatedAt:   c.CreatedAt,
 		UpdatedAt:   c.UpdatedAt,
+	}
+}
+
+// idpFromMetadataURL guesses which identity-provider product a SAML metadata
+// URL belongs to, from its host alone. TF never fetches the metadata document
+// (GoTrue does), so the host is the only signal available at registration;
+// the guess is a default the admin can correct, never a gate. Anything the
+// table does not name is "other", which is a real answer — "" is reserved for
+// a URL that cannot be parsed at all.
+func idpFromMetadataURL(metadataURL string) string {
+	u, err := url.Parse(metadataURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	suffix := func(dom string) bool { return host == dom || strings.HasSuffix(host, "."+dom) }
+	switch {
+	case suffix("microsoftonline.com"), suffix("microsoftonline.us"), suffix("windows.net"):
+		return "entra"
+	case suffix("okta.com"), suffix("oktapreview.com"), suffix("okta-emea.com"):
+		return "okta"
+	case suffix("google.com"):
+		return "google"
+	case suffix("onelogin.com"):
+		return "onelogin"
+	case suffix("pingone.com"), suffix("pingidentity.com"):
+		return "ping"
+	default:
+		return "other"
 	}
 }
 
@@ -267,6 +301,7 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 		id, e := ssostore.FromTx(tx).Connections.Create(r.Context(), ssostore.CreateSSOConnectionParams{
 			OrgID:      orgID,
 			ProviderID: providerID,
+			IdP:        idpFromMetadataURL(metadataURL),
 		})
 		if e != nil {
 			return e
@@ -298,22 +333,52 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 	})
 }
 
-// PATCH /api/sso/connection  body: { "enabled": <bool> }
+// PATCH /api/sso/connection  body: { "enabled": <bool>, "idp": <string|null> }
+//
+// Field-by-field: absent keeps, and idp additionally takes an explicit null
+// to clear (back to "not known"). A body naming neither field is refused —
+// a PATCH that wrote nothing must not answer as if it had.
 func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.adminGate(w, r)
 	if !ok {
 		return
 	}
 
+	// json.RawMessage for idp so null (clear) and omitted (keep) stay
+	// distinguishable — a *string decodes both to nil.
 	var body struct {
-		Enabled *bool `json:"enabled"`
+		Enabled *bool           `json:"enabled"`
+		IdP     json.RawMessage `json:"idp"`
 	}
 	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
-	if body.Enabled == nil {
-		httpx.BadRequest(w, "enabled is required")
+	if body.Enabled == nil && body.IdP == nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "no fields to update: provide enabled and/or idp (null clears idp)",
+		})
 		return
+	}
+	var idp *string
+	if body.IdP != nil {
+		v := ""
+		if string(body.IdP) != "null" {
+			if err := json.Unmarshal(body.IdP, &v); err != nil {
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+					Reason: httpx.ReasonInvalidField, Message: "idp must be a string or null", Field: "idp",
+				})
+				return
+			}
+			if !ssostore.ValidIdP(v) {
+				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+					Reason: httpx.ReasonInvalidField, Field: "idp",
+					Message: "idp must be one of " + strings.Join(ssostore.IdPValues, ", "),
+				})
+				return
+			}
+		}
+		idp = &v
 	}
 
 	entityID, acsURL, ok := h.spValuesOr500(w)
@@ -346,14 +411,25 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		if before == nil {
 			return errNoConnection
 		}
+		// Enabled keeps its stored value when the body omits it: the store's
+		// Update writes the whole mutable set, so "absent" is spelled by
+		// passing what is already there.
+		enabled := before.Enabled
+		if body.Enabled != nil {
+			enabled = *body.Enabled
+		}
 		if e := sso.Connections.Update(r.Context(), orgID, existing.ID, ssostore.UpdateSSOConnectionParams{
-			Enabled: *body.Enabled,
+			Enabled: enabled,
+			IdP:     idp,
 		}); e != nil {
 			return e
 		}
-		if before.Enabled != *body.Enabled {
+		// Only the enabled flip is audited: which product the IdP is names
+		// nothing about who can get in, so correcting it is not an access
+		// change.
+		if before.Enabled != enabled {
 			action := domain.AccessActionSSOConnectionDisabled
-			if *body.Enabled {
+			if enabled {
 				action = domain.AccessActionSSOConnectionEnabled
 			}
 			if e := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{

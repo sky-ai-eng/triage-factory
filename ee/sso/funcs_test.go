@@ -147,3 +147,34 @@ func TestHandleDiscover_BadBody_400(t *testing.T) {
 		t.Fatalf("status = %d, want 400 for a malformed body (body=%q)", rec.Code, rec.Body.String())
 	}
 }
+
+// TestIdPFromMetadataURL covers the registration-time guess: the vendor hosts
+// map to their product (any depth of subdomain, any case), everything else is
+// "other" — a real answer — and only an unparseable URL is "" (not known).
+func TestIdPFromMetadataURL(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"https://login.microsoftonline.com/9f1a/federationmetadata/2007-06/federationmetadata.xml?appid=1", "entra"},
+		{"https://LOGIN.MICROSOFTONLINE.COM/x/y", "entra"},
+		{"https://login.microsoftonline.us/x/y", "entra"},
+		{"https://sts.windows.net/9f1a/", "entra"},
+		{"https://dev-123.okta.com/app/abc/sso/saml/metadata", "okta"},
+		{"https://corp.oktapreview.com/app/abc/sso/saml/metadata", "okta"},
+		{"https://corp.okta-emea.com/app/abc/sso/saml/metadata", "okta"},
+		{"https://accounts.google.com/o/saml2/idp?idpid=C0abc", "google"},
+		{"https://app.onelogin.com/saml/metadata/abc", "onelogin"},
+		{"https://corp.onelogin.com/saml/metadata/abc", "onelogin"},
+		{"https://auth.pingone.com/abc/saml20/metadata", "ping"},
+		{"https://sso.pingidentity.com/idp/metadata", "ping"},
+		{"https://idp.corp.example/metadata.xml", "other"},
+		{"https://notokta.com/metadata", "other"}, // suffix match wants a dot boundary
+		{"https://okta.com.evil.example/metadata", "other"},
+		{"https://pingone.com.evil.example/metadata", "other"}, // substring-in-host trick, same as okta above
+		{"", ""},
+		{"://nope", ""},
+	}
+	for _, tc := range cases {
+		if got := idpFromMetadataURL(tc.in); got != tc.want {
+			t.Errorf("idpFromMetadataURL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

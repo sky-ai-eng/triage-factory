@@ -139,6 +139,13 @@ export type TableProps = {
   rowBg?: ((row: TableRow) => string | null) | null
   /** The table arriving as a scan: a beam runs down the rows and each resolves in its wake. */
   build?: boolean
+  /**
+   * A row that OPENS. When present, a click on the row is this rather than a
+   * selection toggle, and the checkbox alone selects — for a table whose rows
+   * lead somewhere (a token's sheet) while the bulk verbs still want a
+   * selection. Absent, the row click toggles as it always has.
+   */
+  onRowOpen?: ((row: TableRow) => void) | null
 }
 
 // Table — a selectable, sortable table with an undo window on bulk actions.
@@ -232,6 +239,7 @@ export function Table({
   showHeader = true,
   rowBg = null,
   build = false,
+  onRowOpen = null,
 }: TableProps) {
   const cols = useMemo(() => columns.map(columnDef), [columns])
   const [working, setWorking] = useState(rows)
@@ -1144,6 +1152,7 @@ export function Table({
               aria-selected={selectable ? on : undefined}
               data-on={on || undefined}
               data-selectable={selectable ? '' : undefined}
+              data-opens={onRowOpen ? '' : undefined}
               // --tb-d is read by the build's row and hatch animations;
               // --tb-row-bg is the caller's own tint for the one row that is
               // the one. Both are runtime values, so both are properties.
@@ -1153,7 +1162,9 @@ export function Table({
                   '--tb-row-bg': (rowBg && rowBg(r)) || 'transparent',
                 } as CSSProperties
               }
-              onClick={(e) => selectable && toggle(r.id, e.shiftKey)}
+              // A row that opens takes the click; selection is then the
+              // checkbox's alone, which stops its own click below.
+              onClick={(e) => (onRowOpen ? onRowOpen(r) : selectable && toggle(r.id, e.shiftKey))}
             >
               {selectable ? (
                 <Checkbox

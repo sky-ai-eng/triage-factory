@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
@@ -231,6 +232,39 @@ func TestAccessChangeLabel(t *testing.T) {
 			change: domain.AccessChange{Action: domain.AccessActionSSOBreakGlassRemoved, TargetUserID: "u2"},
 			target: "Alice",
 			want:   "removed Alice from the SSO break-glass principals",
+		},
+		{
+			name: "api_token_created carries every bound the mint recorded",
+			change: domain.AccessChange{Action: domain.AccessActionAPITokenCreated, DetailJSON: domain.AccessDetailAPITokenCreated(
+				"tok-1", "deploy", "tf_M2rTq8Wd", ptrTime(time.Date(2027, 6, 9, 12, 0, 0, 0, time.UTC)), ptrInt(90),
+				[]string{"10.4.0.0/16", "52.14.9.20/32", "2600:1f18::/32"})},
+			want: "created API token deploy (tf_M2rTq8Wd…) expiring 9 Jun 2027, under the org's 90-day cap, accepted from 3 IP ranges",
+		},
+		{
+			name:   "api_token_created unbounded says so rather than trailing off",
+			change: domain.AccessChange{Action: domain.AccessActionAPITokenCreated, DetailJSON: domain.AccessDetailAPITokenCreated("tok-1", "laptop", "tf_AbCdEfGh", nil, nil, nil)},
+			want:   "created API token laptop (tf_AbCdEfGh…) with no expiry",
+		},
+		{
+			name:   "api_token_created with one range is singular",
+			change: domain.AccessChange{Action: domain.AccessActionAPITokenCreated, DetailJSON: domain.AccessDetailAPITokenCreated("tok-1", "hook", "tf_AbCdEfGh", nil, nil, []string{"10.0.0.0/8"})},
+			want:   "created API token hook (tf_AbCdEfGh…) with no expiry, accepted from 1 IP range",
+		},
+		{
+			name:   "api_token_revoked by its owner",
+			change: domain.AccessChange{Action: domain.AccessActionAPITokenRevoked, ActorUserID: "u1", DetailJSON: domain.AccessDetailAPITokenRevoked("tok-1", "deploy", "tf_M2rTq8Wd", "")},
+			want:   "revoked API token deploy (tf_M2rTq8Wd…)",
+		},
+		{
+			name:   "api_token_revoked with the membership reads as the consequence",
+			change: domain.AccessChange{Action: domain.AccessActionAPITokenRevoked, ActorUserID: "u1", TargetUserID: "u2", DetailJSON: domain.AccessDetailAPITokenRevoked("tok-1", "deploy", "tf_M2rTq8Wd", domain.AccessSourceMembershipRemoved)},
+			target: "Bob",
+			want:   "revoked Bob's API token deploy (tf_M2rTq8Wd…) with their org membership",
+		},
+		{
+			name:   "api_token rows with no detail still read as English",
+			change: domain.AccessChange{Action: domain.AccessActionAPITokenRevoked},
+			want:   "revoked API token (unnamed)",
 		},
 	}
 	for _, tc := range tests {
@@ -558,3 +592,6 @@ func nullable(s string) any {
 	}
 	return s
 }
+
+func ptrTime(t time.Time) *time.Time { return &t }
+func ptrInt(n int) *int              { return &n }

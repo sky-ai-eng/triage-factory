@@ -42,6 +42,7 @@ export function TableCard() {
   const [rows, setRows] = useState(MEMBERS)
   const [log, setLog] = useState<string | null>(null)
   const [build, setBuild] = useState(0)
+  const [opens, setOpens] = useState(false)
 
   return (
     <div className="gal-card">
@@ -71,6 +72,14 @@ export function TableCard() {
         >
           reset rows
         </button>
+        <button
+          type="button"
+          className="gal-chip"
+          data-on={opens ? '' : undefined}
+          onClick={() => setOpens((o) => !o)}
+        >
+          rows open
+        </button>
       </div>
 
       <p className="gal-note">
@@ -99,6 +108,10 @@ export function TableCard() {
           sortKey="tasks"
           sortDir={-1}
           barPosition="absolute"
+          // With the chip on, a row click opens (logged here) and only the
+          // checkbox selects — the shape a table of tokens needs, where every
+          // row leads to its own sheet.
+          onRowOpen={opens ? (row) => setLog('opened ' + String(row.name)) : null}
           add={{
             label: 'add teammate',
             placeholder: 'name or email — three characters',

@@ -3,6 +3,7 @@ package sso_test
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ type ssoConnectionView struct {
 	Enabled     bool      `json:"enabled"`
 	Enforced    bool      `json:"enforced"`
 	Tested      bool      `json:"tested"`
+	IdP         string    `json:"idp"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -226,6 +228,96 @@ func TestSSOConnectionUpdate_EnableDisable(t *testing.T) {
 	_ = json.Unmarshal([]byte(readBody(en)), &enBody)
 	if enBody.Connection == nil || !enBody.Connection.Enabled {
 		t.Errorf("after re-enable enabled = %v; want true", enBody.Connection)
+	}
+}
+
+// TestSSOConnectionIdP_DerivedThenOverridable pins the idp lifecycle on the
+// wire: registration stamps the guess from the metadata host and the GET
+// carries it; an admin can correct it through the same PATCH the enabled flag
+// uses, without touching enabled; an explicit null clears it back to "not
+// known" (the field then leaves the wire rather than reading ""); a value
+// outside the vocabulary is a 422 naming the field; and a body naming no
+// field is refused rather than answered as a write.
+func TestSSOConnectionIdP_DerivedThenOverridable(t *testing.T) {
+	r, _ := newSSORig(t)
+	owner := r.seedUser()
+	r.seedOrg(owner, "sso-idp")
+	sid := r.signInAs(owner)
+
+	create := doReq(r, http.MethodPost, "/api/sso/connection", sid,
+		map[string]string{"metadata_url": "https://dev-1234.okta.com/app/abc/sso/saml/metadata"})
+	if create.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d (body=%s)", create.StatusCode, readBody(create))
+	}
+	var created ssoConnectionResponse
+	_ = json.Unmarshal([]byte(readBody(create)), &created)
+	if created.Connection == nil || created.Connection.IdP != "okta" {
+		t.Fatalf("create idp = %+v; want okta derived from the metadata host", created.Connection)
+	}
+
+	get := doReq(r, http.MethodGet, "/api/sso/connection", sid, nil)
+	var got ssoConnectionResponse
+	_ = json.Unmarshal([]byte(readBody(get)), &got)
+	if got.Connection == nil || got.Connection.IdP != "okta" {
+		t.Errorf("GET idp = %+v; want okta", got.Connection)
+	}
+
+	// Override: only idp in the body, enabled stays as it was.
+	over := doReq(r, http.MethodPatch, "/api/sso/connection", sid,
+		map[string]string{"idp": "entra"})
+	raw := readBody(over)
+	if over.StatusCode != http.StatusOK {
+		t.Fatalf("override status = %d; want 200 (body=%s)", over.StatusCode, raw)
+	}
+	var overBody ssoConnectionResponse
+	_ = json.Unmarshal([]byte(raw), &overBody)
+	if overBody.Connection == nil || overBody.Connection.IdP != "entra" || !overBody.Connection.Enabled {
+		t.Errorf("after override = %+v; want idp=entra with enabled untouched (true)", overBody.Connection)
+	}
+
+	// Clear: explicit null → NULL, and the field is absent on the wire.
+	clear := doReq(r, http.MethodPatch, "/api/sso/connection", sid,
+		map[string]any{"idp": nil})
+	raw = readBody(clear)
+	if clear.StatusCode != http.StatusOK {
+		t.Fatalf("clear status = %d; want 200 (body=%s)", clear.StatusCode, raw)
+	}
+	var asMap struct {
+		Connection map[string]any `json:"connection"`
+	}
+	_ = json.Unmarshal([]byte(raw), &asMap)
+	if v, has := asMap.Connection["idp"]; has {
+		t.Errorf("after clear idp present as %v; want the field absent", v)
+	}
+
+	// Outside the vocabulary: 422 naming the field, nothing written.
+	bad := doReq(r, http.MethodPatch, "/api/sso/connection", sid,
+		map[string]string{"idp": "keycloak"})
+	raw = readBody(bad)
+	if bad.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("bad idp status = %d; want 422 (body=%s)", bad.StatusCode, raw)
+	}
+	if !strings.Contains(raw, `"field":"idp"`) {
+		t.Errorf("bad idp error does not name the field: %s", raw)
+	}
+
+	// Nothing to write is not a write.
+	empty := doReq(r, http.MethodPatch, "/api/sso/connection", sid, map[string]any{})
+	if empty.StatusCode != http.StatusBadRequest {
+		t.Errorf("empty PATCH status = %d; want 400 (body=%s)", empty.StatusCode, readBody(empty))
+	}
+
+	// The store answers the read seam for the provider the connection binds,
+	// and only when an IdP is known — cleared above, so nothing now; set
+	// again, and it answers.
+	if _, err := r.h.AdminDB.Exec(`UPDATE sso_connections SET idp = 'google' WHERE provider_id = $1`,
+		created.Connection.ProviderID); err != nil {
+		t.Fatalf("reset idp: %v", err)
+	}
+	get = doReq(r, http.MethodGet, "/api/sso/connection", sid, nil)
+	_ = json.Unmarshal([]byte(readBody(get)), &got)
+	if got.Connection == nil || got.Connection.IdP != "google" {
+		t.Errorf("GET after direct set = %+v; want google", got.Connection)
 	}
 }
 

@@ -149,6 +149,65 @@ func (r *authRig) setTokenAgeCap(orgID uuid.UUID, days int) {
 	}
 }
 
+// ---------- policy ----------
+
+// TestAPITokenPolicy_MemberReadsTheCap pins the one read a member has of the
+// policy that binds their tokens: null while the org sets no cap, the number
+// once it does, and the same 404 for an org the caller is not in as every
+// other org-addressed read. A plain member (not an admin) is the caller, since
+// admins could already read it off the settings row.
+func TestAPITokenPolicy_MemberReadsTheCap(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, _ := r.seedOrg(owner, "policy-org")
+	member := r.seedUser()
+	if _, err := r.h.AdminDB.Exec(
+		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`,
+		member, orgID); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	sid := r.signIn(member)
+	path := "/api/orgs/" + orgID.String() + "/api-token-policy"
+
+	read := func() map[string]any {
+		t.Helper()
+		rec := r.tokensJSON("GET", path, nil, sid, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET policy = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+		}
+		return out
+	}
+
+	// Uncapped: the key is present and null — "no cap" is an answer.
+	if v, has := read()["max_age_days"]; !has || v != nil {
+		t.Errorf("uncapped max_age_days = %v (present=%v), want null", v, has)
+	}
+	r.setTokenAgeCap(orgID, 90)
+	if v := read()["max_age_days"]; v != float64(90) {
+		t.Errorf("capped max_age_days = %v, want 90", v)
+	}
+
+	// A token sealed to this org reads it too — the surface it is about is
+	// reachable under both credentials.
+	_, plaintext := r.mintToken(member, orgID, "reader")
+	rec := r.tokensJSON("GET", path, nil, "", plaintext)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"max_age_days":90`) {
+		t.Errorf("GET policy under bearer = %d %s, want 200 with the cap", rec.Code, rec.Body.String())
+	}
+
+	// Not a member: 404, indistinguishable from an org that does not exist.
+	stranger := r.seedUser()
+	rec = r.tokensJSON("GET", path, nil, r.signIn(stranger), "")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET policy as non-member = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // ---------- create ----------
 
 // TestAPITokenCreate_ReturnsPlaintextExactlyOnce is the shape of the whole
@@ -522,6 +581,97 @@ func TestAPITokenList_HidesOtherUsersAndRevoked(t *testing.T) {
 	if *got.TotalCount != 1 {
 		t.Errorf("total = %d, want 1 — the count must match the same filters", *got.TotalCount)
 	}
+}
+
+// ---------- rename ----------
+
+// TestAPITokenRename_ChangesTheNameAndNothingElse: the one editable field
+// changes, the row comes back as the list would show it, and the credential is
+// untouched — the same plaintext keeps working.
+func TestAPITokenRename_ChangesTheNameAndNothingElse(t *testing.T) {
+	r := newAuthRig(t)
+	userID := r.seedUser()
+	orgID, _ := r.seedOrg(userID, "rename-org")
+	sid := r.signIn(userID)
+
+	tok := r.createToken(sid, map[string]any{"name": "ci-job", "org_id": orgID.String()})
+	rec := r.tokensJSON("PATCH", "/api/me/tokens/"+tok.ID, map[string]any{"name": "  laptop  "}, sid, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var got tokenCreated
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Name != "laptop" || got.ID != tok.ID || got.TokenPrefix != tok.TokenPrefix || got.OrgID != tok.OrgID {
+		t.Errorf("renamed row = %+v, want name=laptop (trimmed) on the same token", got)
+	}
+	if got.Token != "" {
+		t.Errorf("rename response carried a plaintext token; the secret is returned exactly once, at create")
+	}
+	if list := r.listTokens(sid, "", map[string]any{}); len(list.Items) != 1 || list.Items[0].Name != "laptop" {
+		t.Errorf("list after rename = %+v, want the one token named laptop", list.Items)
+	}
+	if rec := r.serve(r.bearerReq("GET", "/api/me", tok.Token)); rec.Code != http.StatusOK {
+		t.Errorf("token after rename = %d, want 200 — a rename must not touch the credential", rec.Code)
+	}
+}
+
+// TestAPITokenRename_Faults pins each refusal to its status: the body faults
+// name the field, and the 404/403 split is revoke's.
+func TestAPITokenRename_Faults(t *testing.T) {
+	r := newAuthRig(t)
+	userID := r.seedUser()
+	orgID, _ := r.seedOrg(userID, "rename-faults-org")
+	sid := r.signIn(userID)
+	tok := r.createToken(sid, map[string]any{"name": "keep", "org_id": orgID.String()})
+	path := "/api/me/tokens/" + tok.ID
+
+	t.Run("malformed id", func(t *testing.T) {
+		rec := r.tokensJSON("PATCH", "/api/me/tokens/not-a-uuid", map[string]any{"name": "x"}, sid, "")
+		assertFault(t, rec, http.StatusBadRequest, "INVALID_ID")
+	})
+	t.Run("no fields", func(t *testing.T) {
+		rec := r.tokensJSON("PATCH", path, map[string]any{}, sid, "")
+		assertFault(t, rec, http.StatusBadRequest, "MISSING_FIELD")
+	})
+	t.Run("unknown field", func(t *testing.T) {
+		rec := r.tokensJSON("PATCH", path, map[string]any{"name": "x", "expires_at": nil}, sid, "")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("unknown field = %d, want 400: %s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("blank name", func(t *testing.T) {
+		rec := r.tokensJSON("PATCH", path, map[string]any{"name": "   "}, sid, "")
+		assertFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD")
+		if items := errorItems(t, rec); items[0].Field != "name" {
+			t.Errorf("fault field = %q, want name", items[0].Field)
+		}
+	})
+	t.Run("name too long", func(t *testing.T) {
+		rec := r.tokensJSON("PATCH", path, map[string]any{"name": strings.Repeat("n", apitokens.MaxNameLen+1)}, sid, "")
+		assertFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD")
+	})
+	t.Run("another user's token is invisible", func(t *testing.T) {
+		other := r.seedUser()
+		otherOrg, _ := r.seedOrg(other, "rename-other-org")
+		theirs, _ := r.mintToken(other, otherOrg, "theirs")
+		rec := r.tokensJSON("PATCH", "/api/me/tokens/"+theirs.ID, map[string]any{"name": "mine now"}, sid, "")
+		assertFault(t, rec, http.StatusNotFound, "NOT_FOUND")
+	})
+	t.Run("own token in another org, under a token, is forbidden", func(t *testing.T) {
+		orgB, _ := r.seedOrg(userID, "rename-org-b")
+		_, bearer := r.mintToken(userID, orgB, "b-cred")
+		rec := r.tokensJSON("PATCH", path, map[string]any{"name": "cross"}, "", bearer)
+		assertFault(t, rec, http.StatusForbidden, "FORBIDDEN")
+	})
+	t.Run("revoked token", func(t *testing.T) {
+		if rec := r.tokensJSON("DELETE", path, nil, sid, ""); rec.Code != http.StatusNoContent {
+			t.Fatalf("revoke = %d, want 204", rec.Code)
+		}
+		rec := r.tokensJSON("PATCH", path, map[string]any{"name": "zombie"}, sid, "")
+		assertFault(t, rec, http.StatusNotFound, "NOT_FOUND")
+	})
 }
 
 // ---------- revoke ----------
@@ -918,7 +1068,9 @@ func TestAPITokens_LocalMode404(t *testing.T) {
 	}{
 		{"POST", "/api/me/tokens", map[string]any{"name": "n", "org_id": uuid.NewString()}},
 		{"POST", "/api/me/tokens/list", map[string]any{}},
+		{"PATCH", "/api/me/tokens/" + uuid.NewString(), map[string]any{"name": "n"}},
 		{"DELETE", "/api/me/tokens/" + uuid.NewString(), nil},
+		{"GET", "/api/orgs/" + uuid.NewString() + "/api-token-policy", nil},
 	} {
 		rec := doJSON(t, s, tc.method, tc.path, tc.body)
 		if rec.Code != http.StatusNotFound {

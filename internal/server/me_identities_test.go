@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -19,6 +20,8 @@ type loginMethodWire struct {
 	EmailVerified bool   `json:"email_verified"`
 	LinkedAt      string `json:"linked_at"`
 	Current       bool   `json:"current"`
+	IdP           string `json:"idp"`
+	Login         string `json:"login"`
 }
 
 type identitiesWire struct {
@@ -112,6 +115,15 @@ func TestMeIdentities_MultiReturnsLinkedRows_MarksCurrent_NoLeak(t *testing.T) {
 		t.Error("saml identity must NOT be current (the session is the github login)")
 	}
 
+	// The github row is known by its handle at GitHub — the login claim's
+	// user_name, stamped at sign-in — and the saml row has none.
+	if want := "test-user-" + alice.String()[:8]; gh.Login != want {
+		t.Errorf("github identity login = %q, want %q", gh.Login, want)
+	}
+	if saml.Login != "" {
+		t.Errorf("saml identity login = %q, want none", saml.Login)
+	}
+
 	// Email + verified flag flow through faithfully.
 	for _, m := range out.Methods {
 		if m.Email != aliceEmail {
@@ -136,6 +148,119 @@ func TestMeIdentities_MultiReturnsLinkedRows_MarksCurrent_NoLeak(t *testing.T) {
 		if strings.Contains(body, banned) {
 			t.Errorf("response exposed %q; body=%s", banned, body)
 		}
+	}
+}
+
+// idpProbeExtension is the login extension the idp test installs: the no-op
+// everywhere except the read seam, which answers from a fixed map and records
+// what it was asked, so the test can pin both the wire result and the "asked
+// once, distinct ids only" shape of the call.
+type idpProbeExtension struct {
+	noopLoginExtension
+	idps  map[string]string
+	asked [][]string
+}
+
+func (e *idpProbeExtension) IdPForProviders(_ context.Context, ids []string) (map[string]string, error) {
+	e.asked = append(e.asked, append([]string(nil), ids...))
+	return e.idps, nil
+}
+
+// TestMeIdentities_SamlRowsCarryIdPFromExtension pins the vendor-mark contract:
+// a saml identity stamped with a provider id the extension recognises carries
+// `idp`; a github row never does; a saml row the extension cannot place (an
+// unstamped one, or a provider with no recorded IdP) omits the field rather
+// than sending "" — absent is the wire spelling of "plain SSO".
+func TestMeIdentities_SamlRowsCarryIdPFromExtension(t *testing.T) {
+	r := newAuthRig(t)
+	const knownProvider = "aaaaaaaa-0000-0000-0000-000000000001"
+	const unplacedProvider = "aaaaaaaa-0000-0000-0000-000000000002"
+	probe := &idpProbeExtension{idps: map[string]string{knownProvider: "okta"}}
+	r.srv.loginExt = probe
+
+	alice := r.seedUser()
+	aliceEmail := alice.String() + "@test"
+	seedSAML := func(providerID string) string {
+		id := uuid.NewString()
+		r.h.SeedAuthUser(t, id, id+"@test")
+		if _, err := r.h.AdminDB.Exec(`
+			INSERT INTO user_identities (auth_user_id, user_id, provider, sso_provider_id, email, email_verified)
+			VALUES ($1, $2, 'saml', NULLIF($3, ''), $4, true)`, id, alice, providerID, aliceEmail); err != nil {
+			t.Fatalf("seed saml identity: %v", err)
+		}
+		return id
+	}
+	known := seedSAML(knownProvider)
+	unplaced := seedSAML(unplacedProvider)
+	unstamped := seedSAML("")
+
+	claims := validClaimsFor(alice)
+	claims["email_verified"] = true
+	resp, _ := r.driveCallbackClaims(claims)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
+	}
+	sid := r.sidFromResp(resp)
+
+	got := r.requestWithSid("GET", "/api/me/identities", sid)
+	if got.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/me/identities status=%d, want 200", got.StatusCode)
+	}
+	bodyBytes, err := io.ReadAll(got.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	_ = got.Body.Close()
+
+	// Decode into raw maps as well as the wire struct: the struct cannot tell
+	// an absent idp from an empty one, and absent is the contract.
+	var raw struct {
+		Methods []map[string]any `json:"methods"`
+	}
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		t.Fatalf("decode body: %v (body=%s)", err, bodyBytes)
+	}
+	if len(raw.Methods) != 4 {
+		t.Fatalf("got %d methods, want 4 (github + 3 saml); body=%s", len(raw.Methods), bodyBytes)
+	}
+	// Rows are keyed by linked_at order, which the seeds share to the second;
+	// identify them by (provider, idp) instead, since that is the assertion.
+	var withIdP, samlWithout, github int
+	for _, m := range raw.Methods {
+		v, has := m["idp"]
+		switch m["provider"] {
+		case "github":
+			github++
+			if has {
+				t.Errorf("github row carries idp=%v; a github login has no IdP", v)
+			}
+		case "saml":
+			if has {
+				withIdP++
+				if v != "okta" {
+					t.Errorf("saml idp=%v, want okta", v)
+				}
+			} else {
+				samlWithout++
+			}
+		}
+	}
+	if github != 1 || withIdP != 1 || samlWithout != 2 {
+		t.Errorf("rows: github=%d saml-with-idp=%d saml-without=%d, want 1/1/2 (known=%s unplaced=%s unstamped=%s); body=%s",
+			github, withIdP, samlWithout, known, unplaced, unstamped, bodyBytes)
+	}
+
+	// One call, the distinct stamped ids only — the unstamped row contributes
+	// nothing to ask about.
+	if len(probe.asked) != 1 {
+		t.Fatalf("extension asked %d times, want 1: %v", len(probe.asked), probe.asked)
+	}
+	askedSet := map[string]bool{}
+	for _, id := range probe.asked[0] {
+		askedSet[id] = true
+	}
+	if len(probe.asked[0]) != 2 || !askedSet[knownProvider] || !askedSet[unplacedProvider] {
+		t.Errorf("extension asked %v, want exactly {%s, %s}", probe.asked[0], knownProvider, unplacedProvider)
 	}
 }
 

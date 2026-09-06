@@ -306,6 +306,57 @@ func (s *Server) checkTokenAgeCap(w http.ResponseWriter, r *http.Request, orgID 
 }
 
 // --------------------------------------------------------------------
+// policy
+// --------------------------------------------------------------------
+
+// apiTokenPolicyJSON is the org's API-token policy as any member reads it.
+// MaxAgeDays is null when the org sets no cap — null rather than 0, because
+// "no cap" is an answer and 0 is not a number of days a token may live.
+type apiTokenPolicyJSON struct {
+	MaxAgeDays *int `json:"max_age_days"`
+}
+
+// handleAPITokenPolicy answers the org's token policy to any of its members.
+//
+// GET /api/orgs/{org_id}/api-token-policy
+//
+// The cap is written through the org-settings surface, which only an admin
+// may read — but the cap binds every member's tokens, and a member choosing
+// an expiry needs to know it before the 422 tells them. It is its own node
+// rather than a field on /api/me because it is a fact about the ORG, not the
+// viewer: the org segment is what the answer depends on, so a member of three
+// orgs reads all three here without touching a session cursor, and a token
+// caller (sealed to one org) reads its own. Read-only, resource-pure, and
+// multi-only like the token surface it describes — in local mode there is no
+// token for a cap to bind, so the route is not there either.
+func (s *Server) handleAPITokenPolicy(w http.ResponseWriter, r *http.Request) {
+	if s.authDeps == nil {
+		notFound(w, "route")
+		return
+	}
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	var maxAge *int
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		set, err := tx.Orgs.GetSettings(r.Context(), orgID)
+		if err != nil {
+			return err
+		}
+		if set.APITokenMaxAgeDays > 0 {
+			v := set.APITokenMaxAgeDays
+			maxAge = &v
+		}
+		return nil
+	}); err != nil {
+		internalError(w, "api-token-policy", fmt.Errorf("org settings %s: %w", orgID, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, apiTokenPolicyJSON{MaxAgeDays: maxAge})
+}
+
+// --------------------------------------------------------------------
 // list
 // --------------------------------------------------------------------
 
@@ -393,6 +444,91 @@ func (s *Server) handleAPITokenList(w http.ResponseWriter, r *http.Request) {
 		items[i] = apiTokenToJSON(t)
 	}
 	httpx.WriteList(w, page, items, total)
+}
+
+// --------------------------------------------------------------------
+// rename
+// --------------------------------------------------------------------
+
+// apiTokenRenameRequest is the body of PATCH /api/me/tokens/{id}. Name is the
+// only field because it is the only thing on a token that is not the
+// credential: a different org, expiry or allowlist is a different token, and
+// rotation (mint, move, revoke) is how one gets it.
+type apiTokenRenameRequest struct {
+	Name *string `json:"name"`
+}
+
+// handleAPITokenRename changes a token's display name in place.
+//
+// PATCH /api/me/tokens/{id}
+//
+// PATCH on the resource rather than a verb: a name is a column, and this is
+// the column flip. The one field is required-when-present and cannot be
+// cleared — a token with no name is a token its owner cannot tell from the
+// next — so a body naming nothing is refused instead of answered as a write.
+// The 404/403 split is revoke's: another user's token is invisible, the
+// caller's own token in an org their credential may not reach is not.
+func (s *Server) handleAPITokenRename(w http.ResponseWriter, r *http.Request) {
+	store, userID, ok := s.meTokens(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidID, Message: "id must be a valid API token id", Field: "id",
+		})
+		return
+	}
+
+	var req apiTokenRenameRequest
+	if !httpx.DecodeJSONStrictLimit(w, r, &req, 4<<10) {
+		return
+	}
+	if req.Name == nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "no fields to update: provide name", Field: "name",
+		})
+		return
+	}
+	var v httpx.Validation
+	name := strings.TrimSpace(*req.Name)
+	switch {
+	case name == "":
+		v.Invalid("name", "name is required")
+	case len(name) > apitokens.MaxNameLen:
+		v.Invalid("name", fmt.Sprintf("name must be at most %d characters", apitokens.MaxNameLen))
+	}
+	if v.Flush(w, http.StatusUnprocessableEntity) {
+		return
+	}
+
+	row, err := store.GetForUserSystem(r.Context(), userID, id)
+	if err != nil {
+		internalError(w, "me/tokens", fmt.Errorf("get api token %s: %w", id, err))
+		return
+	}
+	if row == nil {
+		notFound(w, "api token")
+		return
+	}
+	if tok := httpx.TokenAuthFrom(r.Context()); tok != nil && tok.OrgID != row.OrgID {
+		forbidden(w, "an API token may only rename tokens in its own org")
+		return
+	}
+
+	renamed, err := store.RenameSystem(r.Context(), userID, id, name)
+	switch {
+	case errors.Is(err, apitokens.ErrNoSuchToken):
+		// Revoked between the read and the write — the answer the read would
+		// have given a moment later.
+		notFound(w, "api token")
+		return
+	case err != nil:
+		internalError(w, "me/tokens", fmt.Errorf("rename api token %s: %w", id, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, apiTokenToJSON(renamed))
 }
 
 // --------------------------------------------------------------------

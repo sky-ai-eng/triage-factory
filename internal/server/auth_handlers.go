@@ -423,7 +423,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// auth.users (it excludes SSO from account linking), so TF unifies a human's
 	// identities here. From this point userUUID is the principal: memberships,
 	// JIT, and the session all key on the human, not the per-provider identity.
-	userUUID, err := resolveOrCreatePrincipal(r.Context(), s.db, authUserID, claims, isSSO)
+	userUUID, err := resolveOrCreatePrincipal(r.Context(), s.db, authUserID, claims, state.ProviderID)
 	if err != nil {
 		s.recordLoginFailure(r, "principal_resolve_failed", authMethod(isSSO), claims.Email)
 		internalError(w, "auth", fmt.Errorf("resolve principal %s: %w", authUserID, err))
@@ -1155,6 +1155,16 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 		EmailVerified bool   `json:"email_verified"`
 		LinkedAt      string `json:"linked_at,omitempty"`
 		Current       bool   `json:"current"`
+		// IdP names the identity-provider product behind a saml row (entra,
+		// okta, google, onelogin, ping, other), resolved through the login
+		// extension from the provider id stamped at login. Omitted for github
+		// rows, for a saml row stamped before the connection recorded its IdP,
+		// and in a build with no SSO extension — absent reads as plain SSO.
+		IdP string `json:"idp,omitempty"`
+		// Login is the handle a github row is known by at GitHub — the door a
+		// person came in by, distinct from the account the factory acts as.
+		// Omitted for saml rows and for a github row from before the stamp.
+		Login string `json:"login,omitempty"`
 	}
 	type response struct {
 		Methods []loginMethod `json:"methods"`
@@ -1182,6 +1192,10 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 	activeOrg := OrgIDFrom(r.Context())
 
 	resp := response{Methods: []loginMethod{}}
+	// providerIDs is the sso_provider_id of each saml row, positionally
+	// aligned with resp.Methods ("" for a github row or an unstamped one), so
+	// the IdP lookup below can be one call and write back by index.
+	var providerIDs []string
 	err := tfdb.WithTx(r.Context(), s.db,
 		tfdb.Claims{Sub: claims.Subject, OrgID: activeOrg},
 		func(tx *sql.Tx) error {
@@ -1190,7 +1204,7 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 			// provider tiebreak keeps same-instant rows deterministic.
 			rows, err := tx.QueryContext(r.Context(), `
 				SELECT auth_user_id::text, provider, COALESCE(email, ''),
-				       email_verified, created_at
+				       email_verified, created_at, COALESCE(sso_provider_id, ''), COALESCE(login, '')
 				  FROM public.user_identities
 				 WHERE user_id = tf.current_user_id()
 				 ORDER BY created_at ASC, provider ASC
@@ -1200,10 +1214,10 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 			}
 			defer rows.Close()
 			for rows.Next() {
-				var authUserID, provider, email string
+				var authUserID, provider, email, providerID, login string
 				var verified bool
 				var createdAt time.Time
-				if err := rows.Scan(&authUserID, &provider, &email, &verified, &createdAt); err != nil {
+				if err := rows.Scan(&authUserID, &provider, &email, &verified, &createdAt, &providerID, &login); err != nil {
 					return fmt.Errorf("identity scan: %w", err)
 				}
 				resp.Methods = append(resp.Methods, loginMethod{
@@ -1211,12 +1225,14 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 					Email:         email,
 					EmailVerified: verified,
 					LinkedAt:      createdAt.UTC().Format(time.RFC3339),
+					Login:         login,
 					// Fold-insensitive: authUserID is Postgres ::text (lowercase
 					// canonical), currentIdentity is the raw JWT sub. Both are
 					// lowercase in practice, but comparing case-insensitively keeps
 					// the mark from silently missing on any UUID-format drift.
 					Current: strings.EqualFold(authUserID, currentIdentity),
 				})
+				providerIDs = append(providerIDs, providerID)
 			}
 			return rows.Err()
 		},
@@ -1226,7 +1242,35 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Which product each saml login came through is the SSO extension's to
+	// say (core holds no SSO type); it is asked once for the distinct ids.
+	// Advisory: a failed resolve logs and leaves the field absent, because a
+	// missing vendor mark is a poorer page and a failed read is no page.
+	if distinct := distinctNonEmpty(providerIDs); len(distinct) > 0 {
+		idps, err := s.loginExtension().IdPForProviders(r.Context(), distinct)
+		if err != nil {
+			authLog.Warn("identities: idp resolve failed; omitting", "user", claims.Subject, "error", err)
+		}
+		for i, pid := range providerIDs {
+			resp.Methods[i].IdP = idps[pid]
+		}
+	}
+
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// distinctNonEmpty is the set of non-empty strings in vs, in first-seen order.
+func distinctNonEmpty(vs []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, v := range vs {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 // resolveOrCreatePrincipal maps a GoTrue login identity (authUserID = the JWT
@@ -1252,14 +1296,19 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 // Runs on the admin pool (the actor has no membership/claims yet, so RLS can't
 // express these reads/writes — same rationale as org provisioning).
 //
-// isSSO marks a SAML login (TF-derived from its own signed state, never the
-// JWT). It controls only the GitHub-INTEGRATION write — a separate axis: which
-// GitHub account the agent acts as. A GitHub login mirrors that as a
-// convenience binding (source='login_claim'); a SAML login writes none (an SSO
-// user binds GitHub later via PAT/Connect). An Entra assertion can carry a
+// ssoProviderID is the GoTrue SSO provider behind a SAML login, carried in
+// TF's own signed state (never read from the JWT); "" is a GitHub login. It
+// marks the identity row as saml and is stamped on it — on the insert and on
+// every later login, so rows written before the stamp existed heal — which is
+// what lets the identities read say which identity-provider product a login
+// came through. It also controls the GitHub-INTEGRATION write — a separate
+// axis: which GitHub account the agent acts as. A GitHub login mirrors that as
+// a convenience binding (source='login_claim'); a SAML login writes none (an
+// SSO user binds GitHub later via PAT/Connect). An Entra assertion can carry a
 // preferred_username that is a UPN/email, not a github.com handle, so mirroring
-// it would mint a bogus identity — hence the !isSSO gate.
-func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.UUID, claims *verify.Claims, isSSO bool) (uuid.UUID, error) {
+// it would mint a bogus identity — hence the gate.
+func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.UUID, claims *verify.Claims, ssoProviderID string) (uuid.UUID, error) {
+	isSSO := ssoProviderID != ""
 	provider := "github"
 	if isSSO {
 		provider = "saml"
@@ -1293,6 +1342,14 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 		if providerSubject == "" {
 			providerSubject, _ = claims.UserMetadata["sub"].(string)
 		}
+	}
+
+	// The handle the login identity is known by at its provider. Only a GitHub
+	// login has one worth keeping: a SAML preferred_username can be a UPN or
+	// an email rather than a handle, the same reason the mirror below gates.
+	loginHandle := ""
+	if !isSSO {
+		loginHandle = ghUsername
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
@@ -1349,9 +1406,9 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO public.user_identities
-				(auth_user_id, user_id, provider, provider_subject, email, email_verified, created_at, updated_at)
-			VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6, now(), now())
-		`, authUserID, principalID, provider, providerSubject, email, claims.EmailVerified); err != nil {
+				(auth_user_id, user_id, provider, provider_subject, sso_provider_id, login, email, email_verified, created_at, updated_at)
+			VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), $8, now(), now())
+		`, authUserID, principalID, provider, providerSubject, ssoProviderID, loginHandle, email, claims.EmailVerified); err != nil {
 			return uuid.Nil, fmt.Errorf("link identity: %w", err)
 		}
 	default:
@@ -1377,19 +1434,31 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 	// truth for it — including a genuine un-verify — rather than forcing
 	// monotonicity, since a stale verified=true on a changed/unverified email
 	// would be the unsafe direction (it could let a later identity wrongly link).
+	// The provider id and the GitHub handle are refreshed the same way — only
+	// when this login carries one — so a row that predates either stamp gains
+	// it at the next sign-in, and a login that lacks one never blanks it.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE public.user_identities
-		   SET email          = COALESCE(NULLIF($2, ''), email),
-		       email_verified = CASE WHEN NULLIF($2, '') IS NOT NULL THEN $3 ELSE email_verified END,
-		       updated_at     = now()
+		   SET email           = COALESCE(NULLIF($2, ''), email),
+		       email_verified  = CASE WHEN NULLIF($2, '') IS NOT NULL THEN $3 ELSE email_verified END,
+		       sso_provider_id = COALESCE(NULLIF($4, ''), sso_provider_id),
+		       login           = COALESCE(NULLIF($5, ''), login),
+		       updated_at      = now()
 		 WHERE auth_user_id = $1
-	`, authUserID, email, claims.EmailVerified); err != nil {
+	`, authUserID, email, claims.EmailVerified, ssoProviderID, loginHandle); err != nil {
 		return uuid.Nil, fmt.Errorf("refresh identity: %w", err)
 	}
 
 	// GitHub-INTEGRATION binding (which github account the agent acts as) — a
 	// separate axis from the login identity. Only a real GitHub login mirrors it
 	// (source='login_claim'); a SAML login writes none. Keyed on the principal.
+	//
+	// The mirror is a convenience default, so it yields to a binding the user
+	// made themselves: the conflict arm refreshes only a row the mirror wrote.
+	// A row bound by Connect or a pasted PAT names the account the user CHOSE
+	// for this org's host — often a different one from the account they sign in
+	// with — and overwriting it at the next sign-in would silently undo that
+	// choice, and make "Change" on the settings page a verb that does not hold.
 	if !isSSO && ghUsername != "" {
 		githubEmail := ""
 		if claims.EmailVerified {
@@ -1408,6 +1477,7 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 			       source      = EXCLUDED.source,
 			       verified_at = EXCLUDED.verified_at,
 			       updated_at  = now()
+			 WHERE user_github_identities.source = 'login_claim'
 		`, principalID, ghUsername, providerSubject, githubEmail); err != nil {
 			return uuid.Nil, fmt.Errorf("upsert github login identity: %w", err)
 		}
