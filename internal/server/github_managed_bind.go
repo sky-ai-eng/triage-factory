@@ -77,19 +77,25 @@ import (
 // And one rule over all of them: EVERY NON-DEFINITIVE OUTCOME REFUSES. There is
 // no "couldn't determine, proceed" arm anywhere in this file.
 //
-// The ceremony has two return legs, and the pending-bind record says which one
-// a callback is. The INSTALL leg goes through GitHub's install page, which
-// returns a code and an installation_id together. It completes only for an
-// account that does not yet have the App: for one that does, GitHub's page
-// offers Configure — its in-place settings page — and never returns here,
-// because "Redirect on update" is ignored without a Setup URL and the
-// OAuth-during-install setting the code depends on blanks the Setup URL. The
-// NAMED-ACCOUNT leg is for exactly that account: the admin names it, the
-// browser goes through GitHub's plain OAuth authorize instead, and the
-// callback learns the installation not from the query string but by finding
-// the named account among the installations the authorizing user can see.
-// Same proofs, one more of them (the state GitHub echoes on that leg has to
-// be this ceremony's), and the same write.
+// The ceremony starts one way — the admin names the account — and has two
+// return legs, and the pending-bind record says which one a callback is. Every
+// ceremony begins on the AUTHORIZE leg: GitHub's plain OAuth authorize, which
+// returns a code and this ceremony's state, proves who the person is, and the
+// named account is then looked for among the installations that person can
+// see. Found, it binds. Not found, the ceremony continues onto the INSTALL
+// leg from inside the callback: a fresh record, the cookie replaced, and the
+// browser sent to GitHub's install page with the named account preselected,
+// which returns a code and an installation_id together; that leg runs every
+// proof again and binds only an installation on the account that was named.
+//
+// Two legs rather than one because GitHub's install page is no use for an
+// account that already has the App: it offers Configure — its in-place
+// settings page — and never returns here, since "Redirect on update" is
+// ignored without a Setup URL and the OAuth-during-install setting the code
+// depends on blanks the Setup URL. And the panel cannot know which case an
+// account is, because the answer is per-viewer and nothing on the panel may
+// derive from the viewer's own GitHub permissions. The callback, holding the
+// person's token, is the one place the two cases can be told apart.
 
 // Managed-bind cookie and route constants.
 const (
@@ -205,17 +211,25 @@ var (
 			"Start again from Workspace Settings.",
 	}
 
-	// The named-account leg's one answer for an account that cannot be
-	// connected by this person: it has no installation of the App, or it has
-	// one this person cannot see. The two are deliberately one message. They
-	// look the same in the listing the answer comes from, and telling them
-	// apart would let any workspace admin learn which GitHub accounts have the
-	// deployment's App installed — a fact about other tenants.
+	// The named account does not exist on GitHub. Account existence is public
+	// there, so saying so discloses nothing; what this refusal never says is
+	// whether an account that DOES exist has the App — an account the person
+	// cannot see an installation on is sent to GitHub's install page like one
+	// with no installation at all, and GitHub decides what to show them.
 	refuseAccountNotConnectable = bindRefusal{
-		code:   "account_not_connectable",
-		status: http.StatusForbidden,
-		message: "Couldn't connect %s. Either it doesn't have the deployment's GitHub App installed, " +
-			"or your GitHub account can't see that installation.",
+		code:    "account_not_connectable",
+		status:  http.StatusNotFound,
+		message: "Couldn't find a GitHub account called %s. Check the spelling and connect again.",
+	}
+
+	// The install leg came back with an installation on some other account
+	// than the one the admin named — GitHub's preselection was changed on
+	// the way through. Names both, which the admin typed and just saw.
+	refuseAccountMismatch = bindRefusal{
+		code:   "account_mismatch",
+		status: http.StatusConflict,
+		message: "GitHub connected %s, but you asked to connect %s. " +
+			"Start again from Workspace Settings and install on the account you named.",
 	}
 
 	// No record, expired, already consumed, or a session that isn't the one
@@ -359,74 +373,18 @@ func (b bindRefusal) withAccount(login string) bindRefusal {
 	return b
 }
 
+// withAccounts fills the one refusal whose message names two GitHub accounts:
+// the one GitHub connected and the one the admin named.
+func (b bindRefusal) withAccounts(connected, named string) bindRefusal {
+	b.message = fmt.Sprintf(b.message, connected, named)
+	return b
+}
+
 // withHosts fills the one refusal whose message names two GitHub hosts: the
 // workspace's and the deployment's.
 func (b bindRefusal) withHosts(workspaceHost, deploymentHost string) bindRefusal {
 	b.message = fmt.Sprintf(b.message, workspaceHost, deploymentHost)
 	return b
-}
-
-// handleGitHubManagedConnect starts the install leg: mint a nonce, write the
-// pending-bind record, set the cookie, and answer with the deployment App's
-// install page on GitHub for the page to navigate to.
-//
-// The install page is the App's PUBLIC one rather than anything carrying
-// state. GitHub's /installations/select_target does reportedly preserve a
-// state parameter, but that behaviour is undocumented, and the cookie is
-// needed regardless — one owned mechanism beats two where the cheaper one is
-// unowned.
-//
-// A POST behind the CSRF guard, like the named-account start beside it, and
-// answering with the URL rather than redirecting to it for the same reason: a
-// ceremony is minted only by a request the admin's own page made, never by a
-// navigation another page induced, and a fetch cannot follow a cross-site
-// redirect into a top-level navigation.
-//
-// POST /api/orgs/{org_id}/github/managed/connect
-func (s *Server) handleGitHubManagedConnect(w http.ResponseWriter, r *http.Request) {
-	if s.deployCfg == nil || runmode.Current() != runmode.ModeMulti {
-		// The deployment App is a multi-mode credential — a distributed local
-		// binary ships no shared key — so in local mode this route does not
-		// exist, and a route that doesn't exist answers 404.
-		notFound(w, "route")
-		return
-	}
-	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
-	if !ok {
-		return
-	}
-
-	ghWeb, identity, refusal, err := s.deploymentAppIdentity(r.Context(), orgID)
-	if err != nil {
-		internalError(w, "github-managed-bind", err)
-		return
-	}
-	if refusal != nil {
-		writeBindRefusalJSON(w, *refusal)
-		return
-	}
-	if identity.Slug == "" {
-		// An App GitHub reports with no slug has no install page to send
-		// anyone to.
-		writeBindRefusalJSON(w, refuseNoDeploymentApp)
-		return
-	}
-
-	refusal, _, err = s.startManagedCeremony(w, r, orgID, userID, "")
-	if err != nil {
-		internalError(w, "github-managed-bind", err)
-		return
-	}
-	if refusal != nil {
-		writeBindRefusalJSON(w, *refusal)
-		return
-	}
-
-	// The deployment App's install page. url.PathEscape on the slug because it
-	// is GitHub's answer to GET /app rather than a constant of ours.
-	writeJSON(w, http.StatusOK, map[string]any{
-		"install_url": ghWeb + "/apps/" + url.PathEscape(identity.Slug) + "/installations/new",
-	})
 }
 
 // connectAccountRequest names the GitHub account an admin wants to connect —
@@ -447,16 +405,16 @@ var githubLoginPattern = regexp.MustCompile(`^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$`)
 // githubLoginMaxLen is GitHub's cap on a login's length.
 const githubLoginMaxLen = 39
 
-// handleGitHubManagedConnectAccount starts the named-account leg: the same
-// record and cookie as Connect, with the account the admin named on the record,
-// and instead of GitHub's install page the browser is sent through GitHub's
-// OAuth authorize with this ceremony's state.
+// handleGitHubManagedConnectAccount starts the ceremony — the only start
+// there is: the record and cookie, with the account the admin named on the
+// record, and the browser sent through GitHub's OAuth authorize with this
+// ceremony's state.
 //
-// A POST behind the CSRF guard, like Connect, and here doubly so: the account
-// is chosen in the request, so the request has to be one the admin's own page
-// made. The response carries the authorize URL rather than redirecting to it,
-// because a fetch cannot follow a cross-site redirect into a top-level
-// navigation; the page navigates.
+// A POST behind the CSRF guard: the account is chosen in the request, so the
+// request has to be one the admin's own page made, never a navigation another
+// page induced. The response carries the authorize URL rather than
+// redirecting to it, because a fetch cannot follow a cross-site redirect into
+// a top-level navigation; the page navigates.
 //
 // POST /api/orgs/{org_id}/github/managed/connect-account
 func (s *Server) handleGitHubManagedConnectAccount(w http.ResponseWriter, r *http.Request) {
@@ -493,15 +451,25 @@ func (s *Server) handleGitHubManagedConnectAccount(w http.ResponseWriter, r *htt
 		writeBindRefusalJSON(w, *refusal)
 		return
 	}
-	refusal, nonceHash, err := s.startManagedCeremony(w, r, orgID, userID, account)
+	// One credential slot, stated twice — once here, once authoritatively
+	// inside the lock at write time. This evaluation is ADVISORY and its only
+	// job is to fail fast: without it an admin whose workspace already holds a
+	// PAT would be sent to GitHub, complete a real installation, and only then
+	// be told it cannot be connected. Both evaluations owe the caller the same
+	// sentence; which one they hit is a matter of when they arrived.
+	if refusal, err := s.credentialSlotRefusal(r.Context(), orgID, userID); err != nil {
+		internalError(w, "github-managed-bind", err)
+		return
+	} else if refusal != nil {
+		writeBindRefusalJSON(w, *refusal)
+		return
+	}
+	raw, nonceHash, err := s.mintPendingBind(r.Context(), orgID, userID, domain.GitHubBindLegAuthorize, account)
 	if err != nil {
 		internalError(w, "github-managed-bind", err)
 		return
 	}
-	if refusal != nil {
-		writeBindRefusalJSON(w, *refusal)
-		return
-	}
+	http.SetCookie(w, s.managedBindCookie(r, raw, int(db.GitHubPendingBindTTL.Seconds())))
 
 	// GitHub's user authorization for the App. No scopes: a GitHub App's user
 	// token carries the App's permissions. The state is the ceremony's, and
@@ -515,45 +483,31 @@ func (s *Server) handleGitHubManagedConnectAccount(w http.ResponseWriter, r *htt
 	})
 }
 
-// startManagedCeremony is the half both starts share: the advisory
-// credential-slot check, the record, and the cookie. accountLogin is empty for
-// the install leg. It returns the record's nonce hash, which the named leg
-// hands GitHub as the state.
-func (s *Server) startManagedCeremony(w http.ResponseWriter, r *http.Request, orgID, userID, accountLogin string) (*bindRefusal, string, error) {
-	// One credential slot, stated twice — once here, once authoritatively
-	// inside the lock at write time. This evaluation is ADVISORY and its only
-	// job is to fail fast: without it an admin whose workspace already holds a
-	// PAT would be sent to GitHub, complete a real installation, and only then
-	// be told it cannot be connected. Both evaluations owe the caller the same
-	// sentence; which one they hit is a matter of when they arrived.
-	if refusal, err := s.credentialSlotRefusal(r.Context(), orgID, userID); err != nil {
-		return nil, "", err
-	} else if refusal != nil {
-		return refusal, "", nil
-	}
-
-	// The nonce goes to the browser and its hash to the database, so a database
-	// read yields nothing that can complete a bind.
+// mintPendingBind writes one pending-bind record for leg and account and
+// returns the nonce for the browser and its hash for the record. The nonce
+// goes to the browser and its hash to the database, so a database read yields
+// nothing that can complete a bind. The caller decides how the nonce reaches
+// the browser: a fresh cookie at the start, a replaced one mid-ceremony.
+func (s *Server) mintPendingBind(ctx context.Context, orgID, userID, leg, accountLogin string) (raw, nonceHash string, err error) {
 	nonce := make([]byte, managedBindNonceBytes)
 	if _, err := rand.Read(nonce); err != nil {
-		return nil, "", err
+		return "", "", err
 	}
-	raw := hex.EncodeToString(nonce)
-	nonceHash := hashBindNonce(raw)
+	raw = hex.EncodeToString(nonce)
+	nonceHash = hashBindNonce(raw)
 	now := timeNow().UTC()
-	if _, err := s.githubPendingBinds.CreateSystem(r.Context(), domain.GitHubPendingBind{
+	if _, err := s.githubPendingBinds.CreateSystem(ctx, domain.GitHubPendingBind{
 		NonceHash:    nonceHash,
 		OrgID:        orgID,
 		UserID:       userID,
+		Leg:          leg,
 		AccountLogin: accountLogin,
 		CreatedAt:    now,
 		ExpiresAt:    now.Add(db.GitHubPendingBindTTL),
 	}); err != nil {
-		return nil, "", err
+		return "", "", err
 	}
-
-	http.SetCookie(w, s.managedBindCookie(r, raw, int(db.GitHubPendingBindTTL.Seconds())))
-	return nil, nonceHash, nil
+	return raw, nonceHash, nil
 }
 
 // writeBindRefusalJSON is a refusal for a caller that asked with a fetch rather
@@ -695,19 +649,39 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 	}
 
 	// The record decides which leg this is. Nothing on the query string does:
-	// a callback carrying an installation_id into a named-account ceremony is
+	// a callback carrying an installation_id into an authorize-leg ceremony is
 	// still that ceremony, and the id is ignored.
 	var (
 		refusal *bindRefusal
 		account string
+		hop     *installHop
 	)
-	if record.AccountLogin != "" {
-		refusal, account, err = s.completeNamedAccountBind(r, orgID, userID, nonce, record.AccountLogin)
-	} else {
-		refusal, account, err = s.completeManagedBind(r, orgID, userID)
+	switch {
+	case record.Leg == domain.GitHubBindLegInstall && record.AccountLogin != "":
+		refusal, account, err = s.completeManagedBind(r, orgID, userID, record.AccountLogin)
+	case record.Leg == domain.GitHubBindLegAuthorize && record.AccountLogin != "":
+		refusal, account, hop, err = s.completeNamedAccountBind(r, orgID, userID, nonce, record.AccountLogin)
+	default:
+		// A record this build cannot read — a leg it does not know, or one
+		// with no account — is not a ceremony it can complete.
+		refusal = &refuseStaleCeremony
 	}
 	if err != nil {
 		internalError(w, "github-managed-bind", err)
+		return
+	}
+	if hop != nil {
+		// The account has no installation this person can see: on to GitHub's
+		// install page, with the account preselected, under a fresh record.
+		// The identity proof has already held, so the person being sent is
+		// the linked account; the install leg proves everything again on the
+		// way back.
+		githubAppLog.Info("managed bind: named account has no installation this person can see; continuing to install",
+			"org", orgID, "user", userID, "account", hop.account)
+		s.replaceBindCookie(w, r, hop.nonce, int(db.GitHubPendingBindTTL.Seconds()))
+		w.Header().Set("X-TF-Bind-Outcome", "install_continues")
+		w.Header().Set("Cache-Control", "no-store")
+		http.Redirect(w, r, hop.installURL, http.StatusFound)
 		return
 	}
 	if refusal != nil {
@@ -744,7 +718,7 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 //
 // No secret, token or code is logged on any path through here, including the
 // refusals.
-func (s *Server) completeManagedBind(r *http.Request, orgID, userID string) (refusal *bindRefusal, account string, err error) {
+func (s *Server) completeManagedBind(r *http.Request, orgID, userID, namedLogin string) (refusal *bindRefusal, account string, err error) {
 	ctx := r.Context()
 
 	// GitHub reports setup_action=request when the installer lacked the right
@@ -814,6 +788,14 @@ func (s *Server) completeManagedBind(r *http.Request, orgID, userID string) (ref
 		githubAppLog.Warn("managed bind: installation read answered for another installation", "org", orgID)
 		return &refuseInstallationUnreadable, "", nil
 	}
+	if !strings.EqualFold(inst.AccountLogin, namedLogin) {
+		// The ceremony was started for one account and GitHub installed on
+		// another: the preselection was changed on the way through. The gates
+		// below might well pass for this account too — the person may own
+		// both — and it still is not the connection they asked for.
+		out := refuseAccountMismatch.withAccounts(inst.AccountLogin, namedLogin)
+		return &out, inst.AccountLogin, nil
+	}
 
 	// Gate 1 — association. GitHub's own prescribed check.
 	if err := githubbind.Associated(ctx, ghWeb, token, installationID); err != nil {
@@ -833,7 +815,17 @@ func (s *Server) completeManagedBind(r *http.Request, orgID, userID string) (ref
 	return refusal, inst.AccountLogin, err
 }
 
-// completeNamedAccountBind is the named-account leg's proofs. The order is the
+// installHop is the authorize leg's second outcome beside a refusal and a
+// bind: the named account has no installation this person can see, so the
+// ceremony continues onto the install leg. It carries the fresh record's nonce
+// for the browser and the page to send it to.
+type installHop struct {
+	account    string
+	nonce      string
+	installURL string
+}
+
+// completeNamedAccountBind is the authorize leg's proofs. The order is the
 // disclosure rule made concrete: identity is proven first, and every question
 // about the account is then asked of a listing GitHub already shows this
 // person, so a workspace admin cannot use the route to learn whether an
@@ -845,85 +837,120 @@ func (s *Server) completeManagedBind(r *http.Request, orgID, userID string) (ref
 //     that account has to be the one linked to the TF admin;
 //  3. association, as the lookup — the named account's installation is found
 //     among the installations that token can see (githubbind
-//     .AssociatedByAccount), and its absence is one answer whether the account
-//     has no installation or the person cannot see it;
+//     .AssociatedByAccount). Its absence is not a refusal: whether the account
+//     has no installation or the person cannot see one, they are sent to
+//     GitHub's install page for it under a fresh record, and GitHub decides
+//     what to show them — so nothing here says which it was;
 //  4. the App's own read of that installation is the source of every fact the
 //     write persists, and it has to name the account the admin named;
 //  5. authority — the same gate as the install leg;
 //  6. uniqueness and the credential slot, inside writeManagedBinding.
 //
-// account, as on the install leg, is for the operator log alone.
-func (s *Server) completeNamedAccountBind(r *http.Request, orgID, userID, nonce, login string) (refusal *bindRefusal, account string, err error) {
+// The four returns are exclusive: a refusal, a hop onto the install leg, an
+// error, or none of the three — a completed bind. account, as on the install
+// leg, is for the operator log alone.
+func (s *Server) completeNamedAccountBind(r *http.Request, orgID, userID, nonce, login string) (refusal *bindRefusal, account string, hop *installHop, err error) {
 	ctx := r.Context()
 
 	if r.URL.Query().Get("state") != hashBindNonce(nonce) {
-		return &refuseStateMismatch, "", nil
+		return &refuseStateMismatch, "", nil, nil
 	}
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
 	if code == "" {
 		// The person declined on GitHub's authorize page, or GitHub errored;
 		// either way nothing was proven.
-		return &refuseIdentityUnproven, "", nil
+		return &refuseIdentityUnproven, "", nil, nil
 	}
 
 	ghWeb, identity, refusal, err := s.deploymentAppIdentity(ctx, orgID)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if refusal != nil {
-		return refusal, "", nil
+		return refusal, "", nil, nil
 	}
 
 	token, err := auth.ExchangeGitHubOAuthCode(ctx, ghWeb, identity.ClientID, s.deploymentApp.ClientSecret, code, s.deployCfg.publicURL+ManagedBindCallbackPath)
 	if err != nil {
 		githubAppLog.Warn("managed bind: user token exchange failed", "org", orgID, "error", err)
-		return &refuseIdentityUnproven, "", nil
+		return &refuseIdentityUnproven, "", nil, nil
 	}
 	ghUser, err := auth.ValidateGitHub(ctx, ghWeb, token)
 	if err != nil || ghUser == nil || ghUser.Login == "" {
 		githubAppLog.Warn("managed bind: whoami failed", "org", orgID, "error", err)
-		return &refuseIdentityUnproven, "", nil
+		return &refuseIdentityUnproven, "", nil, nil
 	}
 	if refusal, err := s.linkedIdentityRefusal(ctx, orgID, userID, ghWeb, ghUser); err != nil || refusal != nil {
-		return refusal, "", err
+		return refusal, "", nil, err
 	}
 
 	installationID, err := githubbind.AssociatedByAccount(ctx, ghWeb, token, login)
-	if err != nil {
-		if errors.Is(err, githubbind.ErrNotAssociated) {
-			out := refuseAccountNotConnectable.withAccount(login)
-			return &out, "", nil
+	if errors.Is(err, githubbind.ErrNotAssociated) {
+		// On to GitHub's install page for the named account. The id GitHub's
+		// install URL takes is resolved under the person's own token from a
+		// public fact; a login that names nobody is the one definitive no
+		// left here. The record for the return leg is minted only once the
+		// identity proof above has held, so nobody is sent to install who is
+		// not the linked account.
+		target, lerr := githubbind.AccountByLogin(ctx, ghWeb, token, login)
+		if lerr != nil {
+			if errors.Is(lerr, githubbind.ErrNoSuchAccount) {
+				out := refuseAccountNotConnectable.withAccount(login)
+				return &out, "", nil, nil
+			}
+			githubAppLog.Warn("managed bind: account lookup undetermined", "org", orgID, "error", lerr)
+			return &refuseGatesUndetermined, "", nil, nil
 		}
+		if identity.Slug == "" {
+			// An App GitHub reports with no slug has no install page to send
+			// anyone to.
+			return &refuseNoDeploymentApp, "", nil, nil
+		}
+		raw, _, merr := s.mintPendingBind(ctx, orgID, userID, domain.GitHubBindLegInstall, target.Login)
+		if merr != nil {
+			return nil, "", nil, merr
+		}
+		q := url.Values{}
+		q.Set("target_id", strconv.FormatInt(target.ID, 10))
+		return nil, "", &installHop{
+			account: target.Login,
+			nonce:   raw,
+			// url.PathEscape on the slug because it is GitHub's answer to
+			// GET /app rather than a constant of ours.
+			installURL: ghWeb + "/apps/" + url.PathEscape(identity.Slug) + "/installations/new/permissions?" + q.Encode(),
+		}, nil
+	}
+	if err != nil {
 		githubAppLog.Warn("managed bind: account lookup undetermined", "org", orgID, "error", err)
-		return &refuseGatesUndetermined, "", nil
+		return &refuseGatesUndetermined, "", nil, nil
 	}
 
 	minter, err := s.deploymentApp.Minter(ghbase.APIBase(ghWeb))
 	if err != nil {
-		return &refuseNoDeploymentApp, "", nil
+		return &refuseNoDeploymentApp, "", nil, nil
 	}
 	inst, err := minter.GetInstallation(ctx, installationID)
 	if err != nil {
 		githubAppLog.Warn("managed bind: installation read failed", "org", orgID, "error", err)
-		return &refuseInstallationUnreadable, "", nil
+		return &refuseInstallationUnreadable, "", nil, nil
 	}
 	if inst.ID != installationID || !strings.EqualFold(inst.AccountLogin, login) {
 		// The App answered about some other installation, or about one that
 		// is not on the account the admin named. Nothing downstream may
 		// proceed on two answers.
 		githubAppLog.Warn("managed bind: installation read disagrees with the lookup", "org", orgID)
-		return &refuseInstallationUnreadable, "", nil
+		return &refuseInstallationUnreadable, "", nil, nil
 	}
 
 	if err := githubbind.Authority(ctx, ghWeb, token,
 		githubbind.Account{Type: inst.AccountType, Login: inst.AccountLogin, ID: inst.AccountID},
 		githubbind.Actor{Login: ghUser.Login, ID: ghUser.ID},
 	); err != nil {
-		return bindGateRefusal(err, refuseNotAccountAdmin, inst.AccountLogin), inst.AccountLogin, nil
+		return bindGateRefusal(err, refuseNotAccountAdmin, inst.AccountLogin), inst.AccountLogin, nil, nil
 	}
 
 	refusal, err = s.writeManagedBinding(ctx, orgID, userID, ghWeb, inst)
-	return refusal, inst.AccountLogin, err
+	return refusal, inst.AccountLogin, nil, err
 }
 
 // linkedIdentityRefusal is proof 5: the GitHub account that authorized must be
@@ -1219,6 +1246,21 @@ func (s *Server) managedBindCookie(r *http.Request, value string, maxAge int) *h
 	}
 }
 
+// replaceBindCookie sets the ceremony cookie on a response that already
+// cleared it — the callback clears first, before anything, so a stale cookie
+// can never be replayed — by dropping that clear and setting the new value.
+// Only this cookie's own Set-Cookie entries are touched.
+func (s *Server) replaceBindCookie(w http.ResponseWriter, r *http.Request, value string, maxAge int) {
+	kept := w.Header()["Set-Cookie"][:0:0]
+	for _, c := range w.Header()["Set-Cookie"] {
+		if !strings.HasPrefix(c, managedBindCookieName+"=") {
+			kept = append(kept, c)
+		}
+	}
+	w.Header()["Set-Cookie"] = kept
+	http.SetCookie(w, s.managedBindCookie(r, value, maxAge))
+}
+
 // hashBindNonce is the one place the nonce becomes a stored value. SHA-256 with
 // no salt or work factor is right here and a password hash would not be: the
 // input is 32 bytes of process entropy, so there is no dictionary to run and
@@ -1287,12 +1329,11 @@ func (s *Server) renderBindOutcome(w http.ResponseWriter, orgID string, refusal 
 // simply belongs to no workspace yet — so it answers with a redirect into the
 // SPA page that says so and offers the Connect button.
 //
-// Recovery is the ceremony's named-account leg: the account now has the App,
-// so GitHub's install page would offer nothing but Configure, and the page
-// asks the admin to name the account instead. The installation_id in hand is
-// exactly the unsigned claim the ceremony refuses to trust, so it is not
-// forwarded to the page, and the page has no use for it — the named leg finds
-// the installation for itself among the ones the admin can see.
+// Recovery is the ceremony, which is one thing: the page asks the admin to
+// name the account, and the callback finds the installation for itself among
+// the ones the admin can see. The installation_id in hand is exactly the
+// unsigned claim the ceremony refuses to trust, so it is not forwarded to the
+// page, and the page has no use for it.
 //
 // This branch reads nothing, writes nothing and resolves no identity. The one
 // side effect is a log line naming the installation, which is the operator's
