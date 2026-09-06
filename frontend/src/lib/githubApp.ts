@@ -468,45 +468,18 @@ export async function disconnectOwnApp(orgId: string): Promise<SwitchToPatResult
 
 // ── The deployment App (managed class, multi mode only) ───────────────────
 
-// startManagedGitHubConnect starts the bind ceremony's install leg: the
-// backend mints the pending-bind record and cookie and answers with the App's
-// install page on GitHub, which this navigates to; GitHub returns the admin to
-// the callback where the bind completes. On success control never comes back
-// here; a refusal (the deployment has no App, the workspace already holds a
-// credential) rejects with the backend's sentence.
-//
-// A POST rather than a navigation to the route, because a ceremony must be
-// minted only by the admin's own page — never by a link or a popup another
-// page pointed at the route.
-//
-// It completes only for an account that does not have the App yet: GitHub's
-// install page offers an installed account nothing but Configure and never
-// returns. That account is connected by startManagedGitHubConnectAccount.
-//
-// POST /api/orgs/{org_id}/github/managed/connect
-export async function startManagedGitHubConnect(orgId: string): Promise<void> {
-  let installUrl: string
-  try {
-    const out = await apiJSON<{ install_url: string }>(
-      `/api/orgs/${encodeURIComponent(orgId)}/github/managed/connect`,
-      { method: 'POST' },
-    )
-    installUrl = out.install_url
-  } catch (e) {
-    throw asError(e, 'Could not start connecting GitHub.')
-  }
-  window.location.assign(installUrl)
-}
-
-// startManagedGitHubConnectAccount is the ceremony for an account that already
-// has the deployment App installed — installed from GitHub's public page,
-// approved by an owner after a request, or released by a disconnect. The admin
-// names the account; the backend mints the same record and cookie and answers
-// with GitHub's OAuth authorize URL, which this navigates to. GitHub proves who
-// the admin is and returns them to the callback, where the installation is
-// found among the ones that person can see and the bind completes. Nothing is
-// listed and nothing is picked from: the name is the admin's, the proof is
-// GitHub's.
+// startManagedGitHubConnectAccount starts the bind ceremony — the one start
+// there is. The admin names the account; the backend mints the pending-bind
+// record and cookie and answers with GitHub's OAuth authorize URL, which this
+// navigates to. GitHub proves who the admin is and returns them to the
+// callback, where the installation is found among the ones that person can
+// see and the bind completes — or, for an account that has no installation
+// they can see, the callback sends them on to GitHub's install page with the
+// account preselected and completes when GitHub returns. Nothing is listed
+// and nothing is picked from: the name is the admin's, the proof is GitHub's.
+// Control never comes back here on success; a refusal (the deployment has no
+// App, the workspace already holds a credential) rejects with the backend's
+// sentence.
 //
 // POST /api/orgs/{org_id}/github/managed/connect-account
 export async function startManagedGitHubConnectAccount(

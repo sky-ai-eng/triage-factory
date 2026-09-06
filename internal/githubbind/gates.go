@@ -74,6 +74,9 @@ var (
 	// value of GitHub's role enum and is not an admin.
 	ErrNotAdmin = errors.New("githubbind: the user does not administer the installation's account")
 
+	// ErrNoSuchAccount is AccountByLogin's definitive no: GitHub answered,
+	// and there is no account by that login.
+	ErrNoSuchAccount = errors.New("githubbind: no GitHub account by that login")
 	// ErrUndetermined is every other outcome: GitHub did not answer, answered
 	// something this build cannot rank, or refused the question (a 403 from a
 	// missing organization members permission is the live example). It is
@@ -200,6 +203,37 @@ func AssociatedByAccount(ctx context.Context, baseURL, token, login string) (int
 	return 0, ErrNotAssociated
 }
 
+// AccountByLogin resolves a login to the account GitHub says it is — its type
+// and numeric id — under the user's own token, for the one moment the ceremony
+// needs an id it does not yet have: sending the person to GitHub's install
+// page with the named account preselected, when it has no installation they
+// can see. GET /users/{login} is public data, so nothing here depends on what
+// the person may see; it exists to turn a name into the id GitHub's install
+// URL takes, and a 404 is the definitive no. It is not a gate and proves
+// nothing: the install leg that follows runs every proof itself.
+func AccountByLogin(ctx context.Context, baseURL, token, login string) (Account, error) {
+	body, _, err := get(ctx, ghbase.APIBase(baseURL)+"/users/"+url.PathEscape(login), token)
+	if err != nil {
+		var status statusError
+		if errors.As(err, &status) && status.code == http.StatusNotFound {
+			return Account{}, ErrNoSuchAccount
+		}
+		return Account{}, err
+	}
+	var acct struct {
+		ID    int64  `json:"id"`
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	}
+	if err := json.Unmarshal(body, &acct); err != nil {
+		return Account{}, fmt.Errorf("%w: parse account: %w", ErrUndetermined, err)
+	}
+	if acct.ID <= 0 || acct.Login == "" {
+		return Account{}, fmt.Errorf("%w: account answered without an id or login", ErrUndetermined)
+	}
+	return Account{Type: acct.Type, Login: acct.Login, ID: acct.ID}, nil
+}
+
 // Authority answers whether actor administers the account target, right now.
 //
 // Organization targets ask GitHub: GET /orgs/{org}/memberships/{username} must
@@ -316,10 +350,20 @@ func get(ctx context.Context, endpoint, token string) (body []byte, link string,
 		return nil, "", fmt.Errorf("%w: read response: %w", ErrUndetermined, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("%w: GitHub answered %d", ErrUndetermined, resp.StatusCode)
+		return nil, "", statusError{code: resp.StatusCode}
 	}
 	return raw, resp.Header.Get("Link"), nil
 }
+
+// statusError is a non-200 answer from GitHub. It IS ErrUndetermined — every
+// gate treats it so, a 404 included, because a 404 is also what a revoked
+// token, a renamed account and a misrouted request produce — and it carries
+// the status for the one caller that is not a gate and may read a 404 as
+// GitHub's definitive answer about a public fact.
+type statusError struct{ code int }
+
+func (e statusError) Error() string { return fmt.Sprintf("GitHub answered %d", e.code) }
+func (statusError) Unwrap() error   { return ErrUndetermined }
 
 // nextPage returns the rel="next" URL from a Link header, after checking that
 // it addresses the same origin as the API base.

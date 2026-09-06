@@ -220,6 +220,57 @@ func TestAssociatedByAccount(t *testing.T) {
 	})
 }
 
+func TestAccountByLogin(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("ResolvesTheAccountGitHubReports", func(t *testing.T) {
+		base := fakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v3/users/Acme" {
+				t.Errorf("path = %q, want /api/v3/users/Acme", r.URL.Path)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer ghu_test" {
+				t.Errorf("Authorization = %q, want the user access token", got)
+			}
+			fmt.Fprint(w, `{"id":700,"login":"acme","type":"Organization"}`)
+		})
+		acct, err := AccountByLogin(ctx, base, "ghu_test", "Acme")
+		if err != nil || acct.ID != 700 || acct.Login != "acme" || acct.Type != "Organization" {
+			t.Errorf("AccountByLogin = (%+v, %v), want GitHub's own spelling and id", acct, err)
+		}
+	})
+
+	t.Run("NotFoundIsTheDefinitiveNo", func(t *testing.T) {
+		base := fakeGitHub(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		})
+		_, err := AccountByLogin(ctx, base, "ghu_test", "nobody")
+		if !errors.Is(err, ErrNoSuchAccount) {
+			t.Errorf("AccountByLogin = %v, want ErrNoSuchAccount", err)
+		}
+	})
+
+	t.Run("OtherStatusesAndTransportAreUndetermined", func(t *testing.T) {
+		base := fakeGitHub(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		if _, err := AccountByLogin(ctx, base, "ghu_test", "acme"); !errors.Is(err, ErrUndetermined) || errors.Is(err, ErrNoSuchAccount) {
+			t.Errorf("AccountByLogin(500) = %v, want ErrUndetermined and not ErrNoSuchAccount", err)
+		}
+		if _, err := AccountByLogin(ctx, "http://127.0.0.1:1", "ghu_test", "acme"); !errors.Is(err, ErrUndetermined) {
+			t.Errorf("AccountByLogin(unreachable) = %v, want ErrUndetermined", err)
+		}
+	})
+
+	t.Run("AnAnswerWithoutAnIdIsUndetermined", func(t *testing.T) {
+		base := fakeGitHub(t, func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"login":"acme"}`)
+		})
+		if _, err := AccountByLogin(ctx, base, "ghu_test", "acme"); !errors.Is(err, ErrUndetermined) {
+			t.Errorf("AccountByLogin = %v, want ErrUndetermined", err)
+		}
+	})
+}
+
 func TestAuthority_OrganizationTarget(t *testing.T) {
 	ctx := context.Background()
 	target := Account{Type: "Organization", Login: "acme", ID: 7}
