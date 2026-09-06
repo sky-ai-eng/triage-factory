@@ -53,6 +53,9 @@ func (r *authRig) signIn(userID uuid.UUID) string {
 }
 
 // errorItems decodes the one error envelope every /api/* fault answers with.
+// The contract says the list is never empty, so an empty one fails here by
+// name: callers index the result, and a panic on a contract violation would
+// hide which route broke it.
 func errorItems(t *testing.T, rec *httptest.ResponseRecorder) []struct {
 	Reason  string `json:"reason"`
 	Message string `json:"message"`
@@ -68,6 +71,9 @@ func errorItems(t *testing.T, rec *httptest.ResponseRecorder) []struct {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 		t.Fatalf("decode error envelope: %v (body=%s)", err, rec.Body.String())
+	}
+	if len(env.Errors) == 0 {
+		t.Fatalf("error envelope carries no items (status %d, body=%s)", rec.Code, rec.Body.String())
 	}
 	return env.Errors
 }
