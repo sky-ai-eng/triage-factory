@@ -200,13 +200,15 @@
   background: var(--tb-row-bg, transparent);
 }
 
-.tb-row[data-selectable] {
+.tb-row[data-selectable],
+.tb-row[data-opens] {
   cursor: pointer;
 }
 
 /* Hover belongs to the pointer. Selection outranks it, and the caller's own row
    tint sits underneath both. */
-.tb-row[data-selectable]:hover:not([data-on]) {
+.tb-row[data-selectable]:hover:not([data-on]),
+.tb-row[data-opens]:hover:not([data-on]) {
   background: var(--color-tint-2);
 }
 .tb-row[data-on] {
