@@ -21,6 +21,7 @@ type loginMethodWire struct {
 	LinkedAt      string `json:"linked_at"`
 	Current       bool   `json:"current"`
 	IdP           string `json:"idp"`
+	Login         string `json:"login"`
 }
 
 type identitiesWire struct {
@@ -112,6 +113,15 @@ func TestMeIdentities_MultiReturnsLinkedRows_MarksCurrent_NoLeak(t *testing.T) {
 	}
 	if saml.Current {
 		t.Error("saml identity must NOT be current (the session is the github login)")
+	}
+
+	// The github row is known by its handle at GitHub — the login claim's
+	// user_name, stamped at sign-in — and the saml row has none.
+	if want := "test-user-" + alice.String()[:8]; gh.Login != want {
+		t.Errorf("github identity login = %q, want %q", gh.Login, want)
+	}
+	if saml.Login != "" {
+		t.Errorf("saml identity login = %q, want none", saml.Login)
 	}
 
 	// Email + verified flag flow through faithfully.

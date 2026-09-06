@@ -1161,6 +1161,10 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 		// rows, for a saml row stamped before the connection recorded its IdP,
 		// and in a build with no SSO extension — absent reads as plain SSO.
 		IdP string `json:"idp,omitempty"`
+		// Login is the handle a github row is known by at GitHub — the door a
+		// person came in by, distinct from the account the factory acts as.
+		// Omitted for saml rows and for a github row from before the stamp.
+		Login string `json:"login,omitempty"`
 	}
 	type response struct {
 		Methods []loginMethod `json:"methods"`
@@ -1200,7 +1204,7 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 			// provider tiebreak keeps same-instant rows deterministic.
 			rows, err := tx.QueryContext(r.Context(), `
 				SELECT auth_user_id::text, provider, COALESCE(email, ''),
-				       email_verified, created_at, COALESCE(sso_provider_id, '')
+				       email_verified, created_at, COALESCE(sso_provider_id, ''), COALESCE(login, '')
 				  FROM public.user_identities
 				 WHERE user_id = tf.current_user_id()
 				 ORDER BY created_at ASC, provider ASC
@@ -1210,10 +1214,10 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 			}
 			defer rows.Close()
 			for rows.Next() {
-				var authUserID, provider, email, providerID string
+				var authUserID, provider, email, providerID, login string
 				var verified bool
 				var createdAt time.Time
-				if err := rows.Scan(&authUserID, &provider, &email, &verified, &createdAt, &providerID); err != nil {
+				if err := rows.Scan(&authUserID, &provider, &email, &verified, &createdAt, &providerID, &login); err != nil {
 					return fmt.Errorf("identity scan: %w", err)
 				}
 				resp.Methods = append(resp.Methods, loginMethod{
@@ -1221,6 +1225,7 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 					Email:         email,
 					EmailVerified: verified,
 					LinkedAt:      createdAt.UTC().Format(time.RFC3339),
+					Login:         login,
 					// Fold-insensitive: authUserID is Postgres ::text (lowercase
 					// canonical), currentIdentity is the raw JWT sub. Both are
 					// lowercase in practice, but comparing case-insensitively keeps
@@ -1339,6 +1344,14 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 		}
 	}
 
+	// The handle the login identity is known by at its provider. Only a GitHub
+	// login has one worth keeping: a SAML preferred_username can be a UPN or
+	// an email rather than a handle, the same reason the mirror below gates.
+	loginHandle := ""
+	if !isSSO {
+		loginHandle = ghUsername
+	}
+
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("begin principal tx: %w", err)
@@ -1393,9 +1406,9 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO public.user_identities
-				(auth_user_id, user_id, provider, provider_subject, sso_provider_id, email, email_verified, created_at, updated_at)
-			VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), $7, now(), now())
-		`, authUserID, principalID, provider, providerSubject, ssoProviderID, email, claims.EmailVerified); err != nil {
+				(auth_user_id, user_id, provider, provider_subject, sso_provider_id, login, email, email_verified, created_at, updated_at)
+			VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), $8, now(), now())
+		`, authUserID, principalID, provider, providerSubject, ssoProviderID, loginHandle, email, claims.EmailVerified); err != nil {
 			return uuid.Nil, fmt.Errorf("link identity: %w", err)
 		}
 	default:
@@ -1421,17 +1434,18 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 	// truth for it — including a genuine un-verify — rather than forcing
 	// monotonicity, since a stale verified=true on a changed/unverified email
 	// would be the unsafe direction (it could let a later identity wrongly link).
-	// The provider id is refreshed the same way — only when this login carries
-	// one — so a saml row that predates the stamp gains it at the next sign-in
-	// and a github login never blanks it.
+	// The provider id and the GitHub handle are refreshed the same way — only
+	// when this login carries one — so a row that predates either stamp gains
+	// it at the next sign-in, and a login that lacks one never blanks it.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE public.user_identities
 		   SET email           = COALESCE(NULLIF($2, ''), email),
 		       email_verified  = CASE WHEN NULLIF($2, '') IS NOT NULL THEN $3 ELSE email_verified END,
 		       sso_provider_id = COALESCE(NULLIF($4, ''), sso_provider_id),
+		       login           = COALESCE(NULLIF($5, ''), login),
 		       updated_at      = now()
 		 WHERE auth_user_id = $1
-	`, authUserID, email, claims.EmailVerified, ssoProviderID); err != nil {
+	`, authUserID, email, claims.EmailVerified, ssoProviderID, loginHandle); err != nil {
 		return uuid.Nil, fmt.Errorf("refresh identity: %w", err)
 	}
 

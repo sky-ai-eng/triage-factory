@@ -3986,6 +3986,12 @@ CREATE TABLE public.user_identities (
     -- org). NULL for github rows, and for saml rows written before the login
     -- path stamped it; every login refreshes it, so those rows heal.
     sso_provider_id text,
+    -- The provider's own handle for a 'github' identity (the login claim's
+    -- user_name) — how the account surface names the door a person came in
+    -- by. Distinct from user_github_identities.login, which is the account
+    -- the factory ACTS as and may be a different one. NULL for saml rows and
+    -- for github rows from before the stamp; refreshed at every login.
+    login text,
     email text,
     email_verified boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
