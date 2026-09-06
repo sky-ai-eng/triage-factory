@@ -113,7 +113,13 @@ export default function UserSettingsPage() {
   const { me, refresh: refreshMe } = useAuth()
   const orgId = useActiveOrgId()
   const orgs = useMemo(() => me?.orgs ?? [], [me])
-  const orgName = useCallback((id: string) => orgs.find((o) => o.id === id)?.name ?? '', [orgs])
+  // Names keyed on what they are, not on the memberships array's identity:
+  // /api/me is re-read after a verify, and rows derived from a fresh array
+  // of the same names would hand the Table new rows to reset on.
+  const orgsKey = orgs.map((o) => o.id + ':' + o.name).join('|')
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- orgsKey is the content of orgs
+  const orgNames = useMemo(() => new Map(orgs.map((o) => [o.id, o.name])), [orgsKey])
+  const orgName = useCallback((id: string) => orgNames.get(id) ?? '', [orgNames])
   const multiOrg = orgs.length > 1
 
   // ---- header: the login identities ----
@@ -214,6 +220,12 @@ export default function UserSettingsPage() {
   const [drafting, setDrafting] = useState(false)
   const [secret, setSecret] = useState<{ made: ApiTokenCreated; cap: number | null } | null>(null)
   const [copied, setCopied] = useState(false)
+  // A mutation the server refused, in its words: shown above the table (a
+  // bulk revoke) or in the sheet (its own revoke or rename). The table's
+  // optimistic drop is undone by a re-read, so a token the server kept is
+  // never a token the page has lost.
+  const [tableErr, setTableErr] = useState('')
+  const [sheetErr, setSheetErr] = useState('')
 
   const rows = useMemo<TokenRow[]>(
     () =>
@@ -362,21 +374,28 @@ export default function UserSettingsPage() {
 
   const renameDetail = async (name: string) => {
     if (!det) return
+    setSheetErr('')
     try {
       await tok.rename(det.id, name)
-    } catch {
-      /* the sheet keeps the stored name; the next read is the truth */
+    } catch (err) {
+      // The sheet keeps the stored name, and says why the new one did not take.
+      setSheetErr(httpErrorMessage(err, 'Could not rename the token.'))
     }
   }
   const revokeDetail = async () => {
     if (!det) return
-    const id = det.id
-    setDetail(null)
+    setSheetErr('')
     try {
-      await tok.revoke(id)
-    } catch {
-      tok.reload()
+      await tok.revoke(det.id)
+      setDetail(null)
+    } catch (err) {
+      // The sheet stays open on the token that is still alive.
+      setSheetErr(httpErrorMessage(err, 'Could not revoke the token.'))
     }
+  }
+  const openDetail = (id: string) => {
+    setSheetErr('')
+    setDetail(id)
   }
 
   // ---- the draft ----
@@ -432,7 +451,24 @@ export default function UserSettingsPage() {
     }
   }
 
-  const cap = org ? (tok.caps[org] ?? null) : null
+  // Three answers, not two: the org caps at N, sets no cap, or its policy
+  // could not be read. Unknown strikes nothing and pre-checks nothing — a
+  // struck preset is a promise about the 422, and the 422 is the enforcement.
+  const capKnown = !!org && org in tok.caps
+  const cap = org && capKnown ? tok.caps[org] : null
+  const pickOrg = (id: string) => {
+    setOrg(id)
+    setCreateError(null)
+    // The preset picked under the last org may be past this one's cap; it
+    // moves to the first preset that fits rather than sitting struck and
+    // chosen at once.
+    const nextCap = id in tok.caps ? tok.caps[id] : null
+    const chosen = PRESETS.find((p) => p.id === exp)
+    if (chosen && presetOff(chosen, nextCap)) {
+      const first = PRESETS.find((p) => !presetOff(p, nextCap))
+      if (first) setExp(first.id)
+    }
+  }
   const create = async () => {
     if (creating) return
     // A range half-typed is added, not dropped: the dialog's Enter is the
@@ -517,13 +553,15 @@ export default function UserSettingsPage() {
   const custBad = exp === 'custom' && !!cap && custDays != null && custDays > cap
   const expHint = !org
     ? 'presets are display math; the request carries an absolute date'
-    : cap
-      ? orgName(org) +
-        ' caps tokens at ' +
-        cap +
-        ' days' +
-        (custBad ? ' — that date is past it' : '')
-      : orgName(org) + ' sets no cap'
+    : !capKnown
+      ? orgName(org) + '’s cap could not be read — a date past it is refused when you create'
+      : cap
+        ? orgName(org) +
+          ' caps tokens at ' +
+          cap +
+          ' days' +
+          (custBad ? ' — that date is past it' : '')
+        : orgName(org) + ' sets no cap'
 
   const sec = secret
   const secretCons: string[] = sec
@@ -630,7 +668,7 @@ export default function UserSettingsPage() {
         {tokensOpen ? (
           <>
             <div className="us-table">
-              {tok.error ? <p className="us-err">{tok.error}</p> : null}
+              {tok.error || tableErr ? <p className="us-err">{tok.error || tableErr}</p> : null}
               <Table
                 showHeader
                 label=""
@@ -658,11 +696,17 @@ export default function UserSettingsPage() {
                 mutate={(row, id) => (id === 'revoke' ? null : row)}
                 onCommit={(id, ids, ctx) => {
                   if (id !== 'revoke') return
+                  setTableErr('')
                   for (const i of ids)
-                    void tok.revoke(String(i), { keepalive: ctx.reason === 'unload' })
+                    tok.revoke(String(i), { keepalive: ctx.reason === 'unload' }).catch((err) => {
+                      // The row already left the table; the re-read brings a
+                      // token the server kept back, with the refusal beside it.
+                      setTableErr(httpErrorMessage(err, 'Could not revoke a token.'))
+                      tok.reload()
+                    })
                 }}
                 emptyLabel="No tokens. Everything you do in the browser uses your session instead."
-                onRowOpen={(row) => setDetail(String(row.id))}
+                onRowOpen={(row) => openDetail(String(row.id))}
               />
             </div>
             <div className="us-tokfoot">
@@ -707,12 +751,7 @@ export default function UserSettingsPage() {
           <div className="us-fieldset" data-gap="8">
             <span className="us-flabel">ORGANIZATION</span>
             <div className="us-chips">
-              {orgs.map((o) =>
-                chip(org === o.id, false, o.name, () => {
-                  setOrg(o.id)
-                  setCreateError(null)
-                }),
-              )}
+              {orgs.map((o) => chip(org === o.id, false, o.name, () => pickOrg(o.id)))}
             </div>
             <span className="us-fhint">
               {!multiOrg
@@ -860,6 +899,11 @@ export default function UserSettingsPage() {
                 <span className="us-figl">{sheet.expL}</span>
               </div>
             </div>
+            {sheetErr ? (
+              <span className="us-err" role="alert">
+                {sheetErr}
+              </span>
+            ) : null}
             {sheet.t.allowed_cidrs.length ? (
               <div className="us-ranges">
                 <div className="us-rangeshead">

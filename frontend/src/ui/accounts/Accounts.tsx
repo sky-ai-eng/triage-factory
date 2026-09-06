@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
+import type { CSSProperties, KeyboardEvent, ReactNode, RefObject } from 'react'
 import './accounts.css'
 
 export type AccountKind = 'github' | 'jira'
@@ -121,13 +121,16 @@ function Verb({
   children,
   warm,
   onClick,
+  verbRef,
 }: {
   children: ReactNode
   warm?: boolean
   onClick: () => void
+  verbRef?: RefObject<HTMLSpanElement | null>
 }) {
   return (
     <span
+      ref={verbRef}
       role="button"
       tabIndex={0}
       className="ac-verb"
@@ -150,6 +153,7 @@ function Field({
   autoFocus,
   onEnter,
   invalid,
+  describedBy,
 }: {
   label: string
   value: string
@@ -160,6 +164,8 @@ function Field({
   autoFocus?: boolean
   onEnter?: () => void
   invalid?: boolean
+  /** The refusal's id, so the field names the reason it is invalid. */
+  describedBy?: string
 }) {
   return (
     <label
@@ -176,6 +182,7 @@ function Field({
         autoComplete="off"
         placeholder={placeholder}
         aria-invalid={invalid || undefined}
+        aria-describedby={invalid ? describedBy : undefined}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && onEnter) {
@@ -207,6 +214,17 @@ function Band({
   const [b, setB] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const errId = useId()
+  // A verify in flight when the band closes — Cancel, Escape, the section
+  // going offline — must not land: the reader withdrew the request, and a
+  // value they cancelled applying anyway would be the worse surprise.
+  const gone = useRef(false)
+  useEffect(
+    () => () => {
+      gone.current = true
+    },
+    [],
+  )
   const method = acct.method || (acct.kind === 'github' ? 'pat' : 'cloud')
   const hasConnect = method === 'app' || method === 'oauth'
   const showFields = !hasConnect || alt
@@ -221,12 +239,14 @@ function Band({
     try {
       const fields = twoFields ? { email: a.trim(), token: b.trim() } : { token: a.trim() }
       const account = onVerify ? await onVerify(acct.id, fields) : null
+      if (gone.current) return
       onDone(account)
     } catch (e) {
+      if (gone.current) return
       // The server's own words, under the field; the field keeps its contents.
       setErr(e instanceof Error && e.message ? e.message : 'the credential was refused')
     } finally {
-      setBusy(false)
+      if (!gone.current) setBusy(false)
     }
   }
 
@@ -286,6 +306,7 @@ function Band({
                 width={220}
                 autoFocus
                 invalid={!!err}
+                describedBy={errId}
               />
               <Field
                 label="API TOKEN"
@@ -298,6 +319,7 @@ function Band({
                 placeholder="Your Atlassian API token"
                 onEnter={verify}
                 invalid={!!err}
+                describedBy={errId}
               />
             </>
           ) : (
@@ -317,6 +339,7 @@ function Band({
               autoFocus
               onEnter={verify}
               invalid={!!err}
+              describedBy={errId}
             />
           )}
           <button type="button" className="ac-btn" onClick={verify} disabled={busy || !ready}>
@@ -324,7 +347,13 @@ function Band({
           </button>
         </div>
       )}
-      {err && <span className="ac-err">{err}</span>}
+      {err && (
+        // An alert, so a reader who cannot see the field turn alarm hears
+        // why; the field names it too, through aria-describedby.
+        <span className="ac-err" id={errId} role="alert">
+          {err}
+        </span>
+      )}
       <span className="ac-hint">{hint}</span>
     </div>
   )
@@ -352,6 +381,18 @@ function Row({
   const name = acct.name || NAMES[acct.kind] || acct.kind
   const connected = !!acct.account
   const verb = connected ? (acct.kind === 'github' ? 'Change' : 'Reconnect') : 'Connect'
+  // The verb is the same element open or closed (Change becomes Cancel in
+  // place), so a keyboard user's focus survives the toggle; when the band's
+  // own field held focus, closing hands it back to the verb rather than to
+  // the page. Its children carry keys for the same reason: the band adds
+  // a spine and a sweep ahead of the line, and unkeyed, the line — verb
+  // included — would be torn down and rebuilt on every toggle.
+  const verbRef = useRef<HTMLSpanElement | null>(null)
+  const close = () => {
+    onClose()
+    const v = verbRef.current
+    if (v && v.parentElement?.closest('.ac-band')?.contains(document.activeElement)) v.focus()
+  }
   const host = acct.host || (acct.kind === 'github' ? 'github.com' : '')
   const value = connected
     ? acct.account + (host ? ' · ' + host : '')
@@ -359,7 +400,7 @@ function Row({
       ? `not connected for ${host}`
       : 'not connected'
   const line = (
-    <div className="ac-line">
+    <div className="ac-line" key="line">
       <span className="ac-name">
         <AccountMark kind={acct.kind} />
         {name}
@@ -374,36 +415,33 @@ function Row({
         {value}
       </span>
       {interactive ? (
-        open ? (
-          <Verb onClick={onClose}>Cancel</Verb>
-        ) : (
-          <Verb warm={!connected} onClick={onOpen}>
-            {verb}
-          </Verb>
-        )
+        <Verb warm={!connected && !open} onClick={open ? close : onOpen} verbRef={verbRef}>
+          {open ? 'Cancel' : verb}
+        </Verb>
       ) : (
         <span />
       )}
     </div>
   )
-  if (!open) return <div className="ac-row">{line}</div>
   return (
-    <div className="ac-row ac-band">
-      <span aria-hidden="true" className="ac-spine" />
-      <span aria-hidden="true" className="ac-sweep" />
+    <div className={'ac-row' + (open ? ' ac-band' : '')}>
+      {open ? <span aria-hidden="true" className="ac-spine" key="spine" /> : null}
+      {open ? <span aria-hidden="true" className="ac-sweep" key="sweep" /> : null}
       {line}
-      <div className="ac-body">
-        <span />
-        <Band
-          acct={acct}
-          onConnect={onConnect}
-          onVerify={onVerify}
-          onDone={(account) => {
-            onChanged(acct.id, account)
-            onClose()
-          }}
-        />
-      </div>
+      {open ? (
+        <div className="ac-body" key="body">
+          <span />
+          <Band
+            acct={acct}
+            onConnect={onConnect}
+            onVerify={onVerify}
+            onDone={(account) => {
+              onChanged(acct.id, account)
+              close()
+            }}
+          />
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -447,6 +485,17 @@ export function Accounts({
   // A verify that landed: the value the row shows until the caller's own
   // read catches up, marked once as changed.
   const [local, setLocal] = useState<Record<string, { account: string }>>({})
+
+  // Going offline (or back to loading) closes an open band, at render so no
+  // frame paints it: a band that came back on its own when the API returned
+  // would be a request nobody made twice. Adjusted during render rather than
+  // in an effect, the pattern the table uses for the same reason.
+  const inert = offline || loading
+  const [wasInert, setWasInert] = useState(inert)
+  if (inert !== wasInert) {
+    setWasInert(inert)
+    if (inert) setOpenId(null)
+  }
 
   useEffect(() => {
     if (openId == null) return

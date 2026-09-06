@@ -110,6 +110,7 @@ export function Segmented({
   // Arrows move the choice and the focus together, wrapping, and skip a
   // struck option — it is information, not a stop.
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (disabled) return
     const live = opts.filter((o) => !o.disabled)
     if (!live.length) return
     const i = live.findIndex((o) => o.value === value)
@@ -161,7 +162,11 @@ export function Segmented({
             data-on={on || undefined}
             data-off={off || undefined}
             data-struck={o.disabled || undefined}
-            tabIndex={on ? 0 : -1}
+            // The chosen option is the group's one tab stop — unless the
+            // whole control is disabled, when it is not a stop at all: a
+            // control that takes focus and then ignores every key is a
+            // promise it does not keep.
+            tabIndex={on && !disabled ? 0 : -1}
             title={o.note}
             onClick={() => !off && pick(o.value)}
           >

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { httpErrorMessage } from '../lib/apiClient'
 import {
   createApiToken,
@@ -39,12 +39,17 @@ export function useTokens(enabled: boolean, orgs: AuthOrg[]): UseTokens {
   // Memberships change identity on every /api/me refresh; the ids are what
   // the policy reads depend on.
   const orgKey = orgs.map((o) => o.id).join(',')
+  // Every mutation bumps this; a list read that began before a mutation is
+  // stale by the time it lands, and applying it would undo what the
+  // mutation already showed. Such a read re-reads instead.
+  const mutSeq = useRef(0)
 
   useEffect(() => {
     if (!enabled) return
     const ctrl = new AbortController()
     const ids = orgKey ? orgKey.split(',') : []
     setLoading(true)
+    const seqAtStart = mutSeq.current
     void (async () => {
       try {
         const [rows, policies] = await Promise.all([
@@ -59,6 +64,10 @@ export function useTokens(enabled: boolean, orgs: AuthOrg[]): UseTokens {
           ),
         ])
         if (ctrl.signal.aborted) return
+        if (mutSeq.current !== seqAtStart) {
+          setGen((g) => g + 1)
+          return
+        }
         setTokens(rows)
         const next: Record<string, number | null> = {}
         for (const p of policies) if (p) next[p[0]] = p[1]
@@ -76,6 +85,7 @@ export function useTokens(enabled: boolean, orgs: AuthOrg[]): UseTokens {
 
   const create = useCallback(async (body: ApiTokenCreateRequest) => {
     const made = await createApiToken(body)
+    mutSeq.current++
     // The list is newest-first; the row is what the server returned, minus
     // the secret the list never carries.
     const { token: _secret, ...row } = made
@@ -86,11 +96,13 @@ export function useTokens(enabled: boolean, orgs: AuthOrg[]): UseTokens {
 
   const revoke = useCallback(async (id: string, opts?: { keepalive?: boolean }) => {
     await revokeApiToken(id, opts)
+    mutSeq.current++
     setTokens((t) => t.filter((r) => r.id !== id))
   }, [])
 
   const rename = useCallback(async (id: string, name: string) => {
     const row = await renameApiToken(id, name)
+    mutSeq.current++
     setTokens((t) => t.map((r) => (r.id === id ? row : r)))
     return row
   }, [])

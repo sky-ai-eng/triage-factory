@@ -91,7 +91,12 @@ export function expiresAtFor(pick: string, custom: string, now: number): string 
   return new Date(now + Number(pick) * DAY).toISOString()
 }
 
-/** ISO date (yyyy-mm-dd) `n` days out, for a date input's bounds. */
+/** The LOCAL calendar date (yyyy-mm-dd) `n` days out, for a date input's
+ *  bounds — the same calendar `expiresAtFor` reads a picked date in, so the
+ *  bound and the pick never disagree by a day across the UTC line. */
 export function isoDate(now: number, n: number): string {
-  return new Date(now + n * DAY).toISOString().slice(0, 10)
+  const d = new Date(now + n * DAY)
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return d.getFullYear() + '-' + mm + '-' + dd
 }

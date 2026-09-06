@@ -37,7 +37,9 @@ its neighbours use. Decided in the design canvas: **spine is the default.**
 reason on `note` (a native `title`, so it is on hover). It is **not** removed:
 absent is for verbs a viewer may never use, and a preset the org's policy rules
 out is information — "never" struck beside "90 days" says what the cap is.
-`disabled` on the whole control dims it to 40% and takes every click.
+`disabled` on the whole control dims it to 40%, takes every click and every
+key, and removes the tab stop. `className` and `style` merge onto the root for
+layout — a page places the control; it never restyles it.
 
 ## Type
 

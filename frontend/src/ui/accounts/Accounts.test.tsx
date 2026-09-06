@@ -127,6 +127,85 @@ describe('Accounts — the band', () => {
     expect(screen.queryByLabelText('ATLASSIAN ACCOUNT EMAIL')).not.toBeInTheDocument()
   })
 
+  it('keeps focus on the verb across a toggle, and hands it back from the band on close', () => {
+    render(<Accounts accounts={[{ ...bound[0], method: 'pat' }]} />)
+    const verb = screen.getByRole('button', { name: 'Change' })
+    verb.focus()
+    fireEvent.click(verb)
+    // Change became Cancel in place — the same element, still focused, until
+    // the field's autoFocus takes over.
+    const cancel = screen.getByRole('button', { name: 'Cancel' })
+    expect(cancel).toBe(verb)
+    const field = screen.getByLabelText('PERSONAL ACCESS TOKEN · GITHUB.COM')
+    field.focus()
+    expect(field).toHaveFocus()
+    fireEvent.click(cancel)
+    // Closed from inside the band: focus returns to the verb, not the page.
+    expect(screen.getByRole('button', { name: 'Change' })).toHaveFocus()
+  })
+
+  it('announces a refusal and ties it to the field', async () => {
+    const onVerify = vi.fn().mockRejectedValue(new Error('the token was refused'))
+    render(<Accounts accounts={[{ ...bound[0], method: 'pat' }]} onVerify={onVerify} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Change' }))
+    const field = screen.getByLabelText('PERSONAL ACCESS TOKEN · GITHUB.COM')
+    fireEvent.change(field, { target: { value: 'bad' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('the token was refused')
+    expect(field).toHaveAttribute('aria-describedby', alert.id)
+  })
+
+  it('takes one Verify at a time', async () => {
+    let settle: (v: string) => void = () => {}
+    const onVerify = vi.fn(() => new Promise<string>((ok) => (settle = ok)))
+    render(<Accounts accounts={[{ ...bound[0], method: 'pat' }]} onVerify={onVerify} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Change' }))
+    const field = screen.getByLabelText('PERSONAL ACCESS TOKEN · GITHUB.COM')
+    fireEvent.change(field, { target: { value: 'ghp_x' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    expect(screen.getByRole('button', { name: 'Verifying…' })).toBeDisabled()
+    expect(onVerify).toHaveBeenCalledTimes(1)
+    settle('@x')
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument(),
+    )
+  })
+
+  it('lets a verify the reader cancelled fall on the floor', async () => {
+    let settle: (v: string) => void = () => {}
+    const onVerify = vi.fn(() => new Promise<string>((ok) => (settle = ok)))
+    const onChange = vi.fn()
+    render(
+      <Accounts
+        accounts={[{ ...bound[0], method: 'pat' }]}
+        onVerify={onVerify}
+        onChange={onChange}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Change' }))
+    const field = screen.getByLabelText('PERSONAL ACCESS TOKEN · GITHUB.COM')
+    fireEvent.change(field, { target: { value: 'ghp_x' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    settle('@late')
+    await new Promise((r) => setTimeout(r, 0))
+    // Withdrawn: nothing applied, the line still says what it said.
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.getByText('@aallchin · github.com')).toBeInTheDocument()
+  })
+
+  it('closes an open band when the section goes offline', () => {
+    const { container, rerender } = render(<Accounts accounts={bound} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
+    expect(container.querySelector('.ac-band')).toBeInTheDocument()
+    rerender(<Accounts accounts={bound} offline />)
+    rerender(<Accounts accounts={bound} />)
+    // Back online, the band does not come back on its own.
+    expect(container.querySelector('.ac-band')).not.toBeInTheDocument()
+  })
+
   it('closes on Escape and on Cancel without sending', () => {
     const onVerify = vi.fn()
     const { container } = render(<Accounts accounts={bound} onVerify={onVerify} />)

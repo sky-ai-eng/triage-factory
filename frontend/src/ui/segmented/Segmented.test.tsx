@@ -80,11 +80,21 @@ describe('Segmented', () => {
     spy.mockRestore()
   })
 
-  it('takes every click when the whole control is disabled', () => {
+  it('takes every click and every key when the whole control is disabled, and is no tab stop', () => {
     const onChange = vi.fn()
     render(<Segmented options={['light', 'dark']} value="light" onChange={onChange} disabled />)
+    const group = screen.getByRole('radiogroup')
     fireEvent.click(screen.getByRole('radio', { name: 'dark' }))
+    fireEvent.keyDown(group, { key: 'ArrowRight' })
+    fireEvent.keyDown(group, { key: 'End' })
     expect(onChange).not.toHaveBeenCalled()
-    expect(screen.getByRole('radiogroup')).toHaveAttribute('aria-disabled', 'true')
+    expect(group).toHaveAttribute('aria-disabled', 'true')
+    // Focus never moved either: a key that cannot pick must not walk the
+    // ring to an option it cannot choose.
+    expect(screen.getByRole('radio', { name: 'dark' })).not.toHaveFocus()
+    expect(screen.getAllByRole('radio').map((r) => r.getAttribute('tabindex'))).toEqual([
+      '-1',
+      '-1',
+    ])
   })
 })

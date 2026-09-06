@@ -136,7 +136,9 @@ function stub(routes: Routes, opts: { tokens?: ApiToken[] } = {}) {
     return typeof r === 'function' ? r(init?.body ? JSON.parse(String(init.body)) : undefined) : r
   })
   api.apiListAll.mockImplementation(async (path: string) => {
-    if (path === '/api/me/tokens/list') return opts.tokens ?? TOKENS
+    // A fresh array per read, as a fetch would give — the Table keys its
+    // reset on the rows' identity.
+    if (path === '/api/me/tokens/list') return [...(opts.tokens ?? TOKENS)]
     throw new Error('unstubbed list ' + path)
   })
   api.apiFetch.mockResolvedValue({ status: 204, ok: true })
@@ -382,6 +384,113 @@ describe('UserSettingsPage — the sheet', () => {
   })
 })
 
+describe('UserSettingsPage — a refusal is shown, never swallowed', () => {
+  it('brings a token back and says why when a bulk revoke is refused', async () => {
+    stub(BASE)
+    api.apiFetch.mockRejectedValue(
+      new HttpError(
+        503,
+        JSON.stringify({
+          errors: [{ reason: 'UPSTREAM_UNAVAILABLE', message: 'the token store is unavailable' }],
+        }),
+        '/api/me/tokens/t1',
+      ),
+    )
+    await openTokens()
+    // Select the row by its checkbox and hold the bar's revoke.
+    const row = screen.getByText('laptop').closest('[data-trow]') as HTMLElement
+    fireEvent.click(within(row).getByRole('checkbox'))
+    const hold = await screen.findByRole('button', { name: /Hold to revoke/ })
+    fireEvent.pointerDown(hold, { button: 0, clientX: 0, clientY: 0 })
+    await act(async () => {
+      vi.advanceTimersByTime(900 + 220)
+    })
+    // The optimistic drop happened; the undo window then closes and the
+    // DELETE goes out.
+    await waitFor(() => expect(screen.queryByText('laptop')).not.toBeInTheDocument())
+    await act(async () => {
+      vi.advanceTimersByTime(11_000)
+    })
+    await waitFor(() =>
+      expect(api.apiFetch).toHaveBeenCalledWith(
+        '/api/me/tokens/t1',
+        expect.objectContaining({ method: 'DELETE' }),
+      ),
+    )
+    // Refused: the re-read brings the row back, with the server's words above it.
+    expect(await screen.findByText('the token store is unavailable')).toBeInTheDocument()
+    expect(await screen.findByText('laptop')).toBeInTheDocument()
+  })
+
+  it('keeps the sheet open on a refused revoke, and the stored name on a refused rename', async () => {
+    stub({
+      ...BASE,
+      '/api/me/tokens/t1': new HttpError(
+        409,
+        JSON.stringify({ errors: [{ reason: 'CONFLICT', message: 'name is taken' }] }),
+        '/api/me/tokens/t1',
+      ),
+    })
+    api.apiFetch.mockRejectedValue(
+      new HttpError(500, '{"errors":[{"reason":"INTERNAL","message":"boom"}]}', '/x'),
+    )
+    await openTokens()
+    fireEvent.click(screen.getByText('laptop'))
+    const dlg = await screen.findByRole('dialog')
+    fireEvent.click(within(dlg).getByRole('button', { name: 'laptop' }))
+    const field = within(dlg).getByLabelText('Rename')
+    fireEvent.change(field, { target: { value: 'nope' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    expect(await within(dlg).findByRole('alert')).toHaveTextContent('name is taken')
+    expect(within(dlg).getByRole('button', { name: 'laptop' })).toBeInTheDocument()
+
+    fireEvent.pointerDown(within(dlg).getByRole('button', { name: 'Hold to revoke' }), {
+      button: 0,
+      clientX: 0,
+      clientY: 0,
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(900 + 220)
+    })
+    expect(await within(dlg).findByText('boom')).toBeInTheDocument()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    // Still in the table too — nothing left.
+    expect(screen.getAllByText('tf_Ab41Xe0p…').length).toBeGreaterThan(0)
+  })
+
+  it('strikes nothing and pre-checks nothing when an org cap could not be read', async () => {
+    stub({ ...BASE, '/api/orgs/o1/api-token-policy': new Error('policy read failed') })
+    await openTokens()
+    // The footer names only the caps it knows.
+    expect(screen.getByText('sky-ai-labs sets no cap')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '+ new token' }))
+    const dlg = await screen.findByRole('dialog', { name: 'New API token' })
+    fireEvent.click(within(dlg).getByRole('button', { name: 'sky-ai-eng' }))
+    expect(within(dlg).getByRole('button', { name: 'never' })).not.toHaveAttribute('data-off')
+    expect(
+      within(dlg).getByText(
+        'sky-ai-eng’s cap could not be read — a date past it is refused when you create',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('moves a preset the new org rules out when the org changes mid-draft', async () => {
+    stub({ ...BASE, '/api/orgs/o2/api-token-policy': { max_age_days: 30 } })
+    await openTokens()
+    fireEvent.click(screen.getByRole('button', { name: '+ new token' }))
+    const dlg = await screen.findByRole('dialog', { name: 'New API token' })
+    fireEvent.click(within(dlg).getByRole('button', { name: 'sky-ai-eng' }))
+    fireEvent.click(within(dlg).getByRole('button', { name: '90 days' }))
+    expect(within(dlg).getByRole('button', { name: '90 days' })).toHaveAttribute('data-on')
+    fireEvent.click(within(dlg).getByRole('button', { name: 'sky-ai-labs' }))
+    // 90 is past sky-ai-labs's 30-day cap: struck now, and no longer chosen.
+    const ninety = within(dlg).getByRole('button', { name: '90 days' })
+    expect(ninety).toHaveAttribute('data-off')
+    expect(ninety).not.toHaveAttribute('data-on')
+    expect(within(dlg).getByRole('button', { name: '7 days' })).toHaveAttribute('data-on')
+  })
+})
+
 describe('UserSettingsPage — create, and the secret shown once', () => {
   it('sends an absolute expires_at for a preset, never a duration, and strikes presets past the cap', async () => {
     const made = token({ id: 't9', name: 'ci', token_prefix: 'tf_NEWNEWNE' })
@@ -494,6 +603,39 @@ describe('UserSettingsPage — create, and the secret shown once', () => {
     const once = await screen.findByRole('dialog', { name: 'Token created' })
     expect(within(once).getByText('Never expires')).toBeInTheDocument()
     expect(within(once).getByText('Accepted from 1 IP range')).toBeInTheDocument()
+  })
+
+  it('prints a 422 field fault verbatim too — the cap the server holds is the enforcement', async () => {
+    stub({
+      ...BASE,
+      '/api/orgs/o1/api-token-policy': new Error('policy read failed'),
+      '/api/me/tokens': new HttpError(
+        422,
+        JSON.stringify({
+          errors: [
+            {
+              reason: 'INVALID_FIELD',
+              field: 'expires_at',
+              message:
+                'this org caps API tokens at 90 days, so expires_at must be no later than 2026-12-04T12:00:00Z',
+            },
+          ],
+        }),
+        '/api/me/tokens',
+      ),
+    })
+    await openTokens()
+    fireEvent.click(screen.getByRole('button', { name: '+ new token' }))
+    const dlg = await screen.findByRole('dialog', { name: 'New API token' })
+    fireEvent.change(within(dlg).getByLabelText('Token name'), { target: { value: 'x' } })
+    fireEvent.click(within(dlg).getByRole('button', { name: 'sky-ai-eng' }))
+    fireEvent.click(within(dlg).getByRole('button', { name: 'never' }))
+    fireEvent.click(within(dlg).getByRole('button', { name: 'Create token' }))
+    expect(
+      await within(dlg).findByText(
+        'this org caps API tokens at 90 days, so expires_at must be no later than 2026-12-04T12:00:00Z',
+      ),
+    ).toBeInTheDocument()
   })
 
   it("surfaces the server's refusal verbatim and keeps the draft open", async () => {

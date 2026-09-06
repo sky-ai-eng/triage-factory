@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   expiry,
   expiresAtFor,
+  isoDate,
+  minutesSince,
   presetOff,
   PRESETS,
   shortDate,
@@ -51,6 +53,12 @@ describe('tokenMath — the day-math the ticket specifies', () => {
     expect(validCidr('10.4.0.0/16')).toBe(true)
     expect(validCidr('52.14.9.20/32')).toBe(true)
     expect(validCidr('2600:1f18::/32')).toBe(true)
+    // The whole address space, either family, and the compressed forms.
+    expect(validCidr('0.0.0.0/0')).toBe(true)
+    expect(validCidr('::/0')).toBe(true)
+    expect(validCidr('fd00:4d1e::/32')).toBe(true)
+    expect(validCidr('2001:db8:85a3::8a2e:370:7334/128')).toBe(true)
+    expect(validCidr('2001:0db8:0000:0000:0000:ff00:0042:8329/64')).toBe(true)
     expect(validCidr('10.4.0.0')).toBe(false)
     expect(validCidr('10.4.0.256/16')).toBe(false)
     expect(validCidr('10.4.0.0/33')).toBe(false)
@@ -71,5 +79,29 @@ describe('tokenMath — the day-math the ticket specifies', () => {
     expect(expiresAtFor('custom', '2027-06-09', NOW)).toBe(
       new Date('2027-06-09T00:00:00').toISOString(),
     )
+  })
+
+  it('measures minutes since, floored at zero', () => {
+    expect(minutesSince(new Date(NOW - 90 * 60_000).toISOString(), NOW)).toBe(90)
+    expect(minutesSince(new Date(NOW - 30_000).toISOString(), NOW)).toBe(0)
+    expect(minutesSince(new Date(NOW + 60_000).toISOString(), NOW)).toBe(0)
+  })
+
+  it('bounds the date input on the local calendar the pick is read in', () => {
+    // Whatever zone the test runs in, the bound n days out and the pick of
+    // that bound name the same local day — the two must never disagree
+    // across the UTC line.
+    for (const n of [1, 30, 400]) {
+      const bound = isoDate(NOW, n)
+      const local = new Date(NOW + n * DAY)
+      expect(bound).toBe(
+        local.getFullYear() +
+          '-' +
+          String(local.getMonth() + 1).padStart(2, '0') +
+          '-' +
+          String(local.getDate()).padStart(2, '0'),
+      )
+      expect(new Date(expiresAtFor('custom', bound, NOW) as string).getDate()).toBe(local.getDate())
+    }
   })
 })
