@@ -1549,6 +1549,9 @@ function fmtAccessTime(iso: string): string {
 // verified domain, and pulling a break-glass exemption each remove a way in.
 // Requiring SSO is deliberately NOT here — it tightens the org, but the tone
 // tracks access removed, and no principal loses standing by it.
+// An API token revoked is a credential removed — by its owner, or with their
+// membership — so it takes the same hue; a token created falls to the grant
+// hue with the rest. The label is the server's, in either case.
 const ACCESS_REVOCATIONS = new Set([
   'credential_removed',
   'org_member_revoked',
@@ -1557,6 +1560,7 @@ const ACCESS_REVOCATIONS = new Set([
   'sso_connection_disabled',
   'sso_domain_removed',
   'sso_break_glass_removed',
+  'api_token_revoked',
 ])
 
 function accessTone(action: string): string {

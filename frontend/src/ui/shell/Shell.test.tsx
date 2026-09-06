@@ -211,6 +211,26 @@ describe('Shell — a page can ask for the whole screen', () => {
   })
 })
 
+describe('Shell — the identity panel is a readout with one verb', () => {
+  it('carries no appearance control — that setting lives on the settings page', async () => {
+    const user = userEvent.setup()
+    render(
+      <Shell
+        mode="multi"
+        org="sky"
+        user={{ name: 'Aidan Allchin', email: 'aidan@allchin.com' }}
+        grants={['org-admin']}
+        onSignOut={() => {}}
+      />,
+    )
+    await user.click(document.querySelector('.sh-me') as HTMLElement)
+    // The panel keeps name, email, grants and Sign out; the theme control was
+    // a second copy of a personal setting, and a personal setting has one home.
+    expect(screen.queryByRole('radiogroup', { name: 'Appearance' })).not.toBeInTheDocument()
+    expect(screen.getByText('Sign out')).toBeInTheDocument()
+  })
+})
+
 describe('Shell — the scope switcher trades in team ids', () => {
   it('reports the clicked row by id, so two same-named teams stay two teams', async () => {
     // Nothing makes display names unique. The id is the selection's currency;

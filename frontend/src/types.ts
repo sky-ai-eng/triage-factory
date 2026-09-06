@@ -745,6 +745,16 @@ export interface LoginMethod {
   /** True for the identity backing the current browser session — the login
    *  method you're signed in with right now. */
   current: boolean
+  /** The identity-provider product behind a `saml` row — `entra | okta |
+   *  google | onelogin | ping | other` — so the door can wear its vendor's
+   *  mark. Absent for github rows, for a saml row whose connection has no
+   *  recorded IdP, and in a build without the SSO extension: absent reads as
+   *  plain SSO. */
+  idp?: string
+  /** The handle a `github` row is known by at GitHub — the door a person came
+   *  in by, distinct from `MeResponse.github_username`, which is the account
+   *  the factory ACTS as and may be a different one. Absent for saml rows. */
+  login?: string
 }
 
 /** GET /api/me/identities — the "Login methods" view. Personal read scoped to
@@ -1573,4 +1583,45 @@ export interface UsageOrgOps {
   duration_p50_ms?: number
   duration_p95_ms?: number
   failure_kinds: UsageOrgOpsFailureKind[]
+}
+
+/** One of the caller's API tokens, as `/api/me/tokens` reads it back. The
+ *  secret is absent by construction: only the create response carries it,
+ *  once. `token_prefix` is the first eleven characters — enough to tell two
+ *  tokens apart, far short of a search. */
+export interface ApiToken {
+  id: string
+  name: string
+  org_id: string
+  token_prefix: string
+  created_at: string
+  last_used_at: string | null
+  /** What the minter asked for; null = no expiry of their own. */
+  expires_at: string | null
+  /** When the token actually stops working, folding in the org's cap as it
+   *  reads now — earlier than `expires_at` when the cap is what decides it.
+   *  null = never. */
+  effective_expires_at: string | null
+  /** Never null: [] is "no restriction". */
+  allowed_cidrs: string[]
+}
+
+/** POST /api/me/tokens — the one response that carries the plaintext. */
+export interface ApiTokenCreated extends ApiToken {
+  token: string
+}
+
+/** POST /api/me/tokens body. `expires_at` is an absolute RFC3339 instant or
+ *  omitted; day presets are display math the form does before it calls. */
+export interface ApiTokenCreateRequest {
+  name: string
+  org_id: string
+  expires_at?: string
+  allowed_cidrs?: string[]
+}
+
+/** GET /api/orgs/{org}/api-token-policy — the cap that binds a member's
+ *  tokens in that org. null = no cap. */
+export interface ApiTokenPolicy {
+  max_age_days: number | null
 }

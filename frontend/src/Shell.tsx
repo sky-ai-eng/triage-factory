@@ -1,8 +1,7 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router'
 import UiShell from './ui/shell/Shell'
 import type { Grant, RailCounts } from './ui/shell/routes'
-import type { ThemeChoice } from './ui/shell/Shell'
 import { useOrgHref } from './hooks/useOrgHref'
 import { useRailCounts } from './hooks/useRailCounts'
 import { useWsConnected } from './hooks/useWebSocket'
@@ -11,7 +10,6 @@ import { useOrgRole } from './hooks/useOrgRole'
 import { useActiveTeam, useTeams } from './hooks/useTeams'
 import type { ShellScope } from './hooks/useShellScope'
 import { FeatureFleet, useEntitlements } from './hooks/useEntitlements'
-import { getStoredTheme, setTheme as applyStoredTheme } from './lib/theme'
 import { ChromeProvider } from './contexts/ChromeContext'
 
 // The application frame. This file is the ADAPTER: it resolves who the viewer
@@ -100,11 +98,6 @@ export default function Shell() {
   const { teams } = useTeams()
   const { has, loaded: entLoaded } = useEntitlements()
 
-  const [theme, setThemeState] = useState<ThemeChoice>(() => {
-    const stored = getStoredTheme()
-    return stored === 'auto' ? 'system' : stored
-  })
-
   const grants = useMemo<Grant[]>(() => {
     if (!isMulti) return []
     const g: Grant[] = []
@@ -131,14 +124,6 @@ export default function Shell() {
     },
     [navigate, orgHref],
   )
-
-  const onThemeChange = useCallback((t: ThemeChoice) => {
-    setThemeState(t)
-    // lib/theme's stored vocabulary is light | dark | auto; the rail's third
-    // option is labelled 'system', which is the same idea in the word a reader
-    // expects on a control rather than the one used in storage.
-    applyStoredTheme(t === 'system' ? 'auto' : t)
-  }, [])
 
   const activeOrg = auth?.orgs?.find((o) => o.id === auth?.serverActiveOrgId) ?? auth?.orgs?.[0]
   const teamRows = useMemo(() => teams.map((t) => ({ id: t.id, name: t.name })), [teams])
@@ -223,8 +208,6 @@ export default function Shell() {
               ? { name: auth.me.display_name || auth.me.email || 'You', email: auth.me.email || '' }
               : null
           }
-          theme={theme}
-          onThemeChange={onThemeChange}
           onSignOut={isMulti ? () => void auth?.logout() : undefined}
         >
           <Outlet context={scope} />

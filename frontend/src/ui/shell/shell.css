@@ -1044,28 +1044,6 @@
   color: var(--color-warm);
   max-width: 168px;
 }
-.sh-youseg {
-  position: relative;
-  display: flex;
-  align-self: stretch;
-  justify-content: space-between;
-  gap: 0;
-  user-select: none;
-}
-.sh-youopt {
-  font: 400 10px/1 var(--font-mono);
-  color: var(--color-ink-4);
-  cursor: pointer;
-  padding-bottom: 3px;
-  border-bottom: 1px solid transparent;
-}
-.sh-youopt:hover {
-  color: var(--color-ink-2);
-}
-.sh-youopt.on {
-  color: var(--color-ink-1);
-  border-bottom-color: var(--color-warm);
-}
 .sh-youout {
   position: relative;
   font: 400 11.5px/1 var(--font-sans);

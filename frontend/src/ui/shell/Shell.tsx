@@ -7,7 +7,6 @@ import { TitleField } from './TitleField'
 import './shell.css'
 
 export type Crumb = { name: string; onClick?: () => void }
-export type ThemeChoice = 'light' | 'dark' | 'system'
 
 export type ShellProps = {
   /** Deployment mode. Local hides everything multi-tenant. Default 'multi'. */
@@ -61,8 +60,6 @@ export type ShellProps = {
   /** Rail readouts, per route. */
   counts?: RailCounts
   user?: { name: string; email: string } | null
-  theme?: ThemeChoice
-  onThemeChange?: (t: ThemeChoice) => void
   onSignOut?: () => void
   /**
    * The page has asked for the whole screen. The rail and the header fade and
@@ -112,8 +109,6 @@ export function Shell({
   queued = null,
   counts = {},
   user = null,
-  theme = 'system',
-  onThemeChange,
   onSignOut,
   immersive = false,
   children,
@@ -410,21 +405,6 @@ export function Shell({
       {mode === 'multi' && grants.length > 0 && (
         <div className="sh-yougr">{grants.map((g) => grantLabel[g] || g).join(' · ')}</div>
       )}
-      <div className="sh-youseg" role="radiogroup" aria-label="Appearance">
-        {(['light', 'dark', 'system'] as ThemeChoice[]).map((t) => (
-          <div
-            key={t}
-            className={'sh-youopt' + (theme === t ? ' on' : '')}
-            onClick={() => onThemeChange?.(t)}
-            tabIndex={0}
-            role="radio"
-            aria-checked={theme === t}
-            onKeyDown={enter(() => onThemeChange?.(t))}
-          >
-            {t}
-          </div>
-        ))}
-      </div>
       {mode === 'multi' && onSignOut && (
         <div
           className="sh-youout"
