@@ -3,6 +3,7 @@ package agentproc
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -123,5 +124,76 @@ func TestConsumeStreamInteractive_InterruptMarksResult(t *testing.T) {
 	}
 	if merged == nil || !merged.Interrupted {
 		t.Error("merged accounting result should keep Interrupted sticky")
+	}
+}
+
+// TestLiveRun_QueuedTurnsCountSendsAgainstResults pins the reading the driver
+// takes at a turn boundary: every Send is a turn the process owes and every
+// result settles one, so the count is exactly the turns still to come. Two
+// messages sent (the prompt and a steer that arrived mid-turn) read as two
+// owed; the first result leaves one — the steered turn the process runs next —
+// and the second leaves none. A result with nothing owed floors at zero.
+func TestLiveRun_QueuedTurnsCountSendsAgainstResults(t *testing.T) {
+	l := &LiveRun{
+		stdin:  nopWriteCloser{},
+		ready:  make(chan struct{}),
+		done:   make(chan struct{}),
+		stream: NewStreamState(),
+	}
+	close(l.ready)
+
+	for i := range 2 {
+		if err := l.Send(context.Background(), "turn"); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+	if got := l.QueuedTurns(); got != 2 {
+		t.Fatalf("QueuedTurns after two sends = %d, want 2", got)
+	}
+
+	input := strings.Join([]string{
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"prose"}`,
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"more prose"}`,
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"unasked"}`,
+	}, "\n") + "\n"
+	var seen []int
+	// Sampled inside the result callback — the same moment the driver reads
+	// it, off the result it was just handed.
+	_, err := l.consumeStreamInteractive(strings.NewReader(input), NoopSink{}, l.stream, nil, func(*Result) { seen = append(seen, l.QueuedTurns()) }, "t")
+	if err != nil {
+		t.Fatalf("consumeStreamInteractive: %v", err)
+	}
+	if want := []int{1, 0, 0}; !slices.Equal(seen, want) {
+		t.Errorf("QueuedTurns at each result = %v, want %v", seen, want)
+	}
+}
+
+// TestLiveRun_SendRefusedOnceClosing: from the moment Close begins, a Send is
+// refused with ErrRunClosing rather than written into an input the wrapper is
+// ending — the driver has decided this process owes nothing more, and a
+// message accepted now would be recorded as delivered and never answered.
+func TestLiveRun_SendRefusedOnceClosing(t *testing.T) {
+	l := &LiveRun{
+		stdin:        nopWriteCloser{},
+		cancel:       func() {},
+		ready:        make(chan struct{}),
+		done:         make(chan struct{}),
+		stream:       NewStreamState(),
+		drainTimeout: time.Second,
+		killTimeout:  time.Second,
+	}
+	close(l.ready)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		close(l.done)
+	}()
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := l.Send(context.Background(), "late"); !errors.Is(err, ErrRunClosing) {
+		t.Errorf("Send after Close: err = %v, want ErrRunClosing", err)
+	}
+	if got := l.QueuedTurns(); got != 0 {
+		t.Errorf("a refused send must not count as an owed turn; QueuedTurns = %d", got)
 	}
 }

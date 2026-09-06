@@ -377,16 +377,17 @@ type ConversationStore interface {
 	// caller logs and continues — the racing path's terminal
 	// status stands.
 	//
-	// `open` is intentionally NOT in the protected set: an `open` conversation
-	// reaches failConversation only in the warm window after a no-conclusion
-	// turn flipped it open but before idle hibernation took its workspace
-	// snapshot (e.g. a proc.Send error on the next correction attempt). With no
-	// durable snapshot yet, the conversation can't be left resumably-open, so
-	// failing it is correct — and the conversation's cleanup then tears the
-	// worktree down. A durably-parked open conversation (snapshot taken,
-	// worktree kept) is only ever woken by a follow-up, which flips it to
-	// `running` before any failConversation could see it, so this never
-	// clobbers a resumable conversation.
+	// `open` is intentionally NOT in the protected set, and it is safe
+	// because of who can reach an `open` row with this write. A parked
+	// conversation is only ever driven again by a wake that flips it to
+	// `running` before any engagement could fail it, and the engagement
+	// that parked it released its claim in that same park — so its own late
+	// failure meets the claim fence (the ForClaimSystem twin refuses it),
+	// never this predicate. What is left is a claimless writer failing a
+	// conversation it still holds, and there a park that never took a
+	// durable snapshot is not a conversation that can be left resumably open,
+	// so failing it is correct — and the cleanup then tears the worktree
+	// down.
 	//
 	// failureKind is the machine-readable failure discriminator
 	// (domain.ConversationFailureKind vocabulary); "" → NULL (unclassified).

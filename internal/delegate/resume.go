@@ -301,6 +301,13 @@ type ResumeOptions struct {
 	// the absent-auto-deny resolve.
 	TeamID string
 
+	// TaskID is the task the conversation belongs to, for the board column
+	// a park recomputes: a turn the user pauses parks the conversation open
+	// from inside the driver, and the task's column has to follow. The
+	// dispatcher captures it from the task it already resolved; empty
+	// degrades to a no-op recompute.
+	TaskID string
+
 	// sidecar, when non-nil (TF_ROLE=executor), is the run network +
 	// credential sidecar the dispatcher stood up for this resume turn.
 	// ResumeWithMessage threads it into agentproc.RunOptions and the agenthost;
@@ -520,19 +527,17 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 
 	// Resume executes as a LiveRun (re-registered in procs, so a resumed run
 	// is interruptible/steerable), falling back to the one-shot sandbox path
-	// in multi mode. idleTimeout 0 disables hibernation AND the driver's
-	// multi-turn loop: a resume is a bounded re-invoke that drives to one
-	// terminal result, not a fresh long-lived autonomous run.
+	// in multi mode. idleTimeout 0 runs it without the idle backstop: a
+	// resume is one turn (plus whatever a steer queues behind it), bounded
+	// by the process itself — its result, its exit, or a stop — rather than
+	// by a clock.
 	var out liveOutcome
 	if agentproc.InteractiveSupported() {
 		out = s.runLiveAndDrive(ctx, liveRunSpec{
-			// taskID is intentionally omitted: hibernation is disabled on
-			// resumes (idleTimeout 0 below), so markConversationOpen — the only
-			// taskID consumer — is unreachable here. (It also degrades safely
-			// to a no-op board recompute if a future change re-enables idle.)
 			park: liveParkContext{
 				orgID:          orgID,
 				conversationID: conversationID,
+				taskID:         opts.TaskID,
 				namespace:      opts.Namespace,
 				claudeCwd:      cwd,
 				triggerType:    triggerType,

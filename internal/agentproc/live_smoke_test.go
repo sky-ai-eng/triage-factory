@@ -160,6 +160,156 @@ func TestSDK_LiveSmoke_InteractiveInterrupt(t *testing.T) {
 	t.Logf("interrupt ok: subtype=%s is_error=%v", res.Subtype, res.IsError)
 }
 
+// TestSDK_LiveSmoke_QueuedTurnRunsAfterTheCurrentOne pins the SDK behavior
+// the live driver's turn-boundary check rests on: a message sent while a turn
+// is running is queued and run as the NEXT turn, with its own result — it is
+// neither folded into the running turn nor dropped when that turn ends. The
+// count of owed turns is sampled at each result, the same moment the driver
+// reads it: two owed after both sends, one left when the first turn's result
+// lands (the steered turn is still to come), none after the second.
+func TestSDK_LiveSmoke_QueuedTurnRunsAfterTheCurrentOne(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	var (
+		mu       sync.Mutex
+		owedAt   []int
+		resultsC = make(chan *Result, 8)
+	)
+	sink := newLiveSink()
+	var lr *LiveRun
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd:     t.TempDir(),
+		Message: "Count from 1 to 60, one number per line, with no other text.",
+		Model:   "haiku",
+		TraceID: "live-queued-turn",
+		OnResult: func(r *Result) {
+			mu.Lock()
+			owedAt = append(owedAt, lr.QueuedTurns())
+			mu.Unlock()
+			resultsC <- r
+		},
+	}, sink, denyAllPermissions)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	defer func() { _ = lr.Close() }()
+
+	// Steer while the first turn is still being produced.
+	waitSession(t, lr, 60*time.Second)
+	if err := lr.Send(ctx, "Now reply with exactly the word PONG and nothing else."); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+	if got := lr.QueuedTurns(); got != 2 {
+		t.Errorf("QueuedTurns with a steer queued behind the running turn = %d, want 2", got)
+	}
+
+	for i := range 2 {
+		select {
+		case r := <-resultsC:
+			t.Logf("result %d: subtype=%s is_error=%v", i+1, r.Subtype, r.IsError)
+		case <-time.After(90 * time.Second):
+			t.Fatalf("result %d never arrived", i+1)
+		}
+	}
+	first := sink.waitAssistant(t, time.Second)
+	second := sink.waitAssistant(t, time.Second)
+	t.Logf("first turn: %q", first.Content)
+	t.Logf("second turn: %q", second.Content)
+	if !strings.Contains(second.Content, "PONG") {
+		t.Errorf("the queued message did not produce its own turn; second assistant message = %q", second.Content)
+	}
+	mu.Lock()
+	got := append([]int(nil), owedAt...)
+	mu.Unlock()
+	if len(got) != 2 || got[0] != 1 || got[1] != 0 {
+		t.Errorf("QueuedTurns sampled at each result = %v, want [1 0]", got)
+	}
+	if err := lr.Close(); err != nil {
+		t.Logf("close returned (non-fatal): %v", err)
+	}
+}
+
+// TestSDK_LiveSmoke_QueuedTurnSurvivesAnInterrupt is the pause half of the
+// same contract: a message queued behind a running turn is still run when
+// that turn is ended by interrupt() rather than by the model — the pause ends
+// the turn, not the queue. The driver leans on this to stay with a paused
+// process that has a steer owed rather than parking it.
+func TestSDK_LiveSmoke_QueuedTurnSurvivesAnInterrupt(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	resultsC := make(chan *Result, 8)
+	sink := newLiveSink()
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd:      t.TempDir(),
+		Message:  "Write a very long, detailed essay of at least 3000 words about the full history of computing. Take your time and be thorough.",
+		Model:    "haiku",
+		TraceID:  "live-queued-interrupt",
+		OnResult: func(r *Result) { resultsC <- r },
+	}, sink, denyAllPermissions)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	defer func() { _ = lr.Close() }()
+
+	waitSession(t, lr, 60*time.Second)
+	time.Sleep(2 * time.Second)
+	if err := lr.Send(ctx, "Now reply with exactly the word PONG and nothing else."); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+	if err := lr.Interrupt(ctx); err != nil {
+		t.Fatalf("Interrupt failed: %v", err)
+	}
+
+	var got []*Result
+	for i := range 2 {
+		select {
+		case r := <-resultsC:
+			t.Logf("result %d: subtype=%s is_error=%v interrupted=%v owed_after=%d", i+1, r.Subtype, r.IsError, r.Interrupted, lr.QueuedTurns())
+			got = append(got, r)
+		case <-time.After(90 * time.Second):
+			t.Fatalf("result %d never arrived", i+1)
+		}
+	}
+	if !got[0].Interrupted {
+		t.Errorf("first result should be the interrupted turn, got subtype=%s", got[0].Subtype)
+	}
+	if got[1].Interrupted || got[1].IsError {
+		t.Errorf("second result should be the queued turn's own, got %+v", got[1])
+	}
+	if owed := lr.QueuedTurns(); owed != 0 {
+		t.Errorf("QueuedTurns after both results = %d, want 0", owed)
+	}
+	// The interrupted essay may or may not have flushed an assistant message;
+	// the queued turn's reply is the one that must be there.
+	var sawPong bool
+	for range 2 {
+		select {
+		case m := <-sink.asst:
+			t.Logf("assistant: %.60q", m.Content)
+			if strings.Contains(m.Content, "PONG") {
+				sawPong = true
+			}
+		case <-time.After(time.Second):
+		}
+	}
+	if !sawPong {
+		t.Error("the queued message did not produce its turn after the interrupt")
+	}
+	if err := lr.Close(); err != nil {
+		t.Logf("close returned (non-fatal): %v", err)
+	}
+}
+
 // TestSDK_LiveSmoke_InteractivePermission asserts the canUseTool bridge:
 // a Write attempt surfaces a permission_request to the handler, and a
 // deny is honored (the file is never written). Mirrors

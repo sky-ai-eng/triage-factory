@@ -260,7 +260,7 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 	// executor's own log. CompareAndSwap fires only on a real transition.
 	switch {
 	case draining && s.draining.CompareAndSwap(false, true):
-		dispatchLog.Info("instance draining: operator asked this executor to quiesce — no new conversations will be claimed; live engagements finish or hibernate on idle", "instance", id)
+		dispatchLog.Info("instance draining: operator asked this executor to quiesce — no new conversations will be claimed; live engagements finish or park at their turn end", "instance", id)
 	case !draining && s.draining.CompareAndSwap(true, false):
 		dispatchLog.Info("instance resumed: drain cleared — claiming new conversations again", "instance", id)
 	}
