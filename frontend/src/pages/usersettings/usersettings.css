@@ -130,15 +130,23 @@
 .us-toktail[data-tone='warm'] {
   color: var(--color-warm);
 }
-/* The chevron: 5px, 1.3px borders, turning 135deg ↔ −45deg on the content curve. */
+/* The chevron: 5px, 1.3px borders, turning 135deg ↔ −45deg on the content
+   curve. The glyph is an L drawn in the box's top-right corner, so its
+   visual centre is not the box's — it is the L's bounding centre, 75% across
+   and 25% down. The turn is about that point, so the v and the ^ flip in
+   place, and the box is nudged by the same offset so that point sits on the
+   row's middle line; the box centre alone would leave the v a couple of
+   pixels low. */
 .us-chev {
+  --us-chev: 5px;
   flex: none;
-  width: 5px;
-  height: 5px;
+  width: var(--us-chev);
+  height: var(--us-chev);
   border-right: 1.3px solid var(--color-ink-4);
   border-top: 1.3px solid var(--color-ink-4);
+  transform-origin: 75% 25%;
+  translate: calc(var(--us-chev) * -0.25) calc(var(--us-chev) * 0.25);
   transform: rotate(135deg);
-  transform-origin: 60% 60%;
   transition: transform 0.34s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .us-chev[data-open] {
