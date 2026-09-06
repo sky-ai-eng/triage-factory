@@ -780,6 +780,10 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/me/tokens", s.handleAPITokenCreate)
 	s.apiMutating("POST /api/me/tokens/list", s.handleAPITokenList)
 	s.apiMutating("DELETE /api/me/tokens/{id}", s.handleAPITokenRevoke)
+	// The policy those tokens live under is the org's, so it is addressed at
+	// the org and readable by any member — the cap binds everyone's tokens,
+	// and a member picking an expiry should learn it before the 422 does.
+	s.api("GET /api/orgs/{org_id}/api-token-policy", s.handleAPITokenPolicy)
 	// The caller's own settings row. Viewer-relative, so the subject comes
 	// from the session and there is no id to address.
 	s.api("GET /api/me/settings", s.handleMeSettingsGet)

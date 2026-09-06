@@ -149,6 +149,65 @@ func (r *authRig) setTokenAgeCap(orgID uuid.UUID, days int) {
 	}
 }
 
+// ---------- policy ----------
+
+// TestAPITokenPolicy_MemberReadsTheCap pins the one read a member has of the
+// policy that binds their tokens: null while the org sets no cap, the number
+// once it does, and the same 404 for an org the caller is not in as every
+// other org-addressed read. A plain member (not an admin) is the caller, since
+// admins could already read it off the settings row.
+func TestAPITokenPolicy_MemberReadsTheCap(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, _ := r.seedOrg(owner, "policy-org")
+	member := r.seedUser()
+	if _, err := r.h.AdminDB.Exec(
+		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`,
+		member, orgID); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	sid := r.signIn(member)
+	path := "/api/orgs/" + orgID.String() + "/api-token-policy"
+
+	read := func() map[string]any {
+		t.Helper()
+		rec := r.tokensJSON("GET", path, nil, sid, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET policy = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+		}
+		return out
+	}
+
+	// Uncapped: the key is present and null — "no cap" is an answer.
+	if v, has := read()["max_age_days"]; !has || v != nil {
+		t.Errorf("uncapped max_age_days = %v (present=%v), want null", v, has)
+	}
+	r.setTokenAgeCap(orgID, 90)
+	if v := read()["max_age_days"]; v != float64(90) {
+		t.Errorf("capped max_age_days = %v, want 90", v)
+	}
+
+	// A token sealed to this org reads it too — the surface it is about is
+	// reachable under both credentials.
+	_, plaintext := r.mintToken(member, orgID, "reader")
+	rec := r.tokensJSON("GET", path, nil, "", plaintext)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"max_age_days":90`) {
+		t.Errorf("GET policy under bearer = %d %s, want 200 with the cap", rec.Code, rec.Body.String())
+	}
+
+	// Not a member: 404, indistinguishable from an org that does not exist.
+	stranger := r.seedUser()
+	rec = r.tokensJSON("GET", path, nil, r.signIn(stranger), "")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET policy as non-member = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // ---------- create ----------
 
 // TestAPITokenCreate_ReturnsPlaintextExactlyOnce is the shape of the whole
@@ -919,6 +978,7 @@ func TestAPITokens_LocalMode404(t *testing.T) {
 		{"POST", "/api/me/tokens", map[string]any{"name": "n", "org_id": uuid.NewString()}},
 		{"POST", "/api/me/tokens/list", map[string]any{}},
 		{"DELETE", "/api/me/tokens/" + uuid.NewString(), nil},
+		{"GET", "/api/orgs/" + uuid.NewString() + "/api-token-policy", nil},
 	} {
 		rec := doJSON(t, s, tc.method, tc.path, tc.body)
 		if rec.Code != http.StatusNotFound {

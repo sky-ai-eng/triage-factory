@@ -306,6 +306,57 @@ func (s *Server) checkTokenAgeCap(w http.ResponseWriter, r *http.Request, orgID 
 }
 
 // --------------------------------------------------------------------
+// policy
+// --------------------------------------------------------------------
+
+// apiTokenPolicyJSON is the org's API-token policy as any member reads it.
+// MaxAgeDays is null when the org sets no cap — null rather than 0, because
+// "no cap" is an answer and 0 is not a number of days a token may live.
+type apiTokenPolicyJSON struct {
+	MaxAgeDays *int `json:"max_age_days"`
+}
+
+// handleAPITokenPolicy answers the org's token policy to any of its members.
+//
+// GET /api/orgs/{org_id}/api-token-policy
+//
+// The cap is written through the org-settings surface, which only an admin
+// may read — but the cap binds every member's tokens, and a member choosing
+// an expiry needs to know it before the 422 tells them. It is its own node
+// rather than a field on /api/me because it is a fact about the ORG, not the
+// viewer: the org segment is what the answer depends on, so a member of three
+// orgs reads all three here without touching a session cursor, and a token
+// caller (sealed to one org) reads its own. Read-only, resource-pure, and
+// multi-only like the token surface it describes — in local mode there is no
+// token for a cap to bind, so the route is not there either.
+func (s *Server) handleAPITokenPolicy(w http.ResponseWriter, r *http.Request) {
+	if s.authDeps == nil {
+		notFound(w, "route")
+		return
+	}
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	var maxAge *int
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		set, err := tx.Orgs.GetSettings(r.Context(), orgID)
+		if err != nil {
+			return err
+		}
+		if set.APITokenMaxAgeDays > 0 {
+			v := set.APITokenMaxAgeDays
+			maxAge = &v
+		}
+		return nil
+	}); err != nil {
+		internalError(w, "api-token-policy", fmt.Errorf("org settings %s: %w", orgID, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, apiTokenPolicyJSON{MaxAgeDays: maxAge})
+}
+
+// --------------------------------------------------------------------
 // list
 // --------------------------------------------------------------------
 
