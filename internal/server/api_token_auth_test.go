@@ -600,8 +600,9 @@ func dialServerWSBearer(t *testing.T, baseURL, token string) *ws.Conn {
 // ---------- deprovisioning ----------
 
 // TestOrgMemberRemove_RevokesAPITokens pins the headless half of removal
-// hygiene: taking someone out of an org kills the tokens they hold in it, and
-// leaves the ones they hold elsewhere alone.
+// hygiene: taking someone out of an org kills every token they hold in it,
+// leaves the ones they hold elsewhere alone, and writes one audit row per
+// token so the log says which credentials the removal retired and why.
 func TestOrgMemberRemove_RevokesAPITokens(t *testing.T) {
 	r := newAuthRig(t)
 	adminID := r.seedUser()
@@ -615,7 +616,8 @@ func TestOrgMemberRemove_RevokesAPITokens(t *testing.T) {
 		t.Fatalf("add member: %v", err)
 	}
 
-	_, inOrg := r.mintToken(memberID, orgID, "will-die")
+	first, inOrg := r.mintToken(memberID, orgID, "will-die")
+	second, inOrgToo := r.mintToken(memberID, orgID, "will-die-too")
 	_, elsewhere := r.mintToken(memberID, otherOrg, "survives")
 
 	resp, _ := r.driveCallback(adminID)
@@ -627,29 +629,57 @@ func TestOrgMemberRemove_RevokesAPITokens(t *testing.T) {
 		t.Fatalf("remove member = %d, want 204: %s", got.StatusCode, b)
 	}
 
-	ctx := context.Background()
-	if id, err := r.srv.authDeps.apiTokens.LookupSystem(ctx, inOrg); err != nil {
-		t.Fatalf("lookup revoked token: %v", err)
-	} else if id != nil {
-		t.Error("the removed member's token in that org still authenticates")
+	// Through the same door a request takes: both in-org tokens are dead on
+	// their next call, the other-org one is not.
+	for _, dead := range []string{inOrg, inOrgToo} {
+		if rec := r.serve(r.bearerReq("GET", "/api/me", dead)); rec.Code != http.StatusUnauthorized {
+			t.Errorf("removed member's in-org token = %d, want 401", rec.Code)
+		}
 	}
-	if id, err := r.srv.authDeps.apiTokens.LookupSystem(ctx, elsewhere); err != nil {
-		t.Fatalf("lookup other-org token: %v", err)
-	} else if id == nil {
-		t.Error("removal from one org killed the member's token in another")
+	if rec := r.serve(r.bearerReq("GET", "/api/me", elsewhere)); rec.Code != http.StatusOK {
+		t.Errorf("removal from one org killed the member's token in another: %d", rec.Code)
 	}
 
-	// The revocation is auditable, and names both the admin who caused it and
-	// the member it happened to.
-	var n int
-	if err := r.h.AdminDB.QueryRow(`
-		SELECT COUNT(*) FROM public.access_change_log
+	// The revocation is auditable per token: each row names the admin who
+	// caused it, the member it happened to, the token it retired, and carries
+	// the membership_removed source so it reads as a consequence rather than
+	// as something the member did.
+	rows, err := r.h.AdminDB.Query(`
+		SELECT detail_json FROM public.access_change_log
 		 WHERE org_id = $1 AND action = 'api_token_revoked'
 		   AND actor_user_id = $2 AND target_user_id = $3
-	`, orgID, adminID, memberID).Scan(&n); err != nil {
-		t.Fatalf("count audit rows: %v", err)
+	`, orgID, adminID, memberID)
+	if err != nil {
+		t.Fatalf("query audit rows: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("api_token_revoked audit rows = %d, want 1", n)
+	defer rows.Close()
+	seen := map[string]string{}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatalf("scan audit row: %v", err)
+		}
+		var d struct {
+			TokenID string `json:"token_id"`
+			Name    string `json:"name"`
+			Prefix  string `json:"prefix"`
+			Source  string `json:"source"`
+		}
+		if err := json.Unmarshal(raw, &d); err != nil {
+			t.Fatalf("decode audit detail %s: %v", raw, err)
+		}
+		if d.Source != "membership_removed" {
+			t.Errorf("audit row for %s carries source %q, want membership_removed", d.Name, d.Source)
+		}
+		if d.Prefix == "" {
+			t.Errorf("audit row for %s carries no prefix", d.Name)
+		}
+		seen[d.TokenID] = d.Name
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate audit rows: %v", err)
+	}
+	if len(seen) != 2 || seen[first.ID] != "will-die" || seen[second.ID] != "will-die-too" {
+		t.Errorf("api_token_revoked audit rows = %v, want one per in-org token", seen)
 	}
 }
