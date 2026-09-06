@@ -92,6 +92,12 @@ type ConversationSeeder struct {
 	// back-to-back tie.
 	BackdateStartedAt func(t *testing.T, conversationID string, age time.Duration)
 
+	// BackdateQueuedAt is BackdateStartedAt for queued_at: it stages a
+	// conversation whose current queue episode began `age` ago, so the suite
+	// can tell a re-stamp from a stamp the row already carried. The wake is
+	// the one store write that touches the column after the mint.
+	BackdateQueuedAt func(t *testing.T, conversationID string, age time.Duration)
+
 	// ClaimRows returns the conversation's claims rows oldest-first, so
 	// the suite can assert mint/release bookkeeping.
 	ClaimRows func(t *testing.T, conversationID string) []ClaimRow
@@ -1117,6 +1123,51 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		resume(t, never)
 		if got := seed.PreferredExecutor(t, never); got != "" {
 			t.Errorf("preferred_executor_id on a never-claimed conversation = %q, want empty", got)
+		}
+	})
+
+	t.Run("MarkQueuedForResume_ReStampsQueuedAt", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		// An hour-old queue episode behind an hour-old mint: the wake must
+		// start a new episode without moving the mint.
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+		seed.BackdateStartedAt(t, conversationID, time.Hour)
+		seed.BackdateQueuedAt(t, conversationID, time.Hour)
+		before, err := store.Get(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("Get before: %v", err)
+		}
+		if before.QueuedAt == nil {
+			t.Fatal("seeded conversation has no queued_at to re-stamp")
+		}
+
+		if ok, err := store.ParkOpen(ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
+			t.Fatalf("park: ok=%v err=%v", ok, err)
+		}
+		woke := time.Now()
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
+			t.Fatalf("MarkQueuedForResume: ok=%v err=%v", ok, err)
+		}
+		after, err := store.Get(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("Get after: %v", err)
+		}
+		if after.QueuedAt == nil {
+			t.Fatal("queued_at is NULL after the wake")
+		}
+		// A generous tolerance: the two clocks (Go's and the backend's) and
+		// SQLite's whole-second column format only have to agree that the
+		// stamp is from the wake, not from an hour ago.
+		if after.QueuedAt.Before(woke.Add(-time.Minute)) {
+			t.Errorf("queued_at after the wake = %v, want re-stamped at the wake (%v); still carries the old episode (%v)", after.QueuedAt, woke, before.QueuedAt)
+		}
+		if !after.QueuedAt.After(*before.QueuedAt) {
+			t.Errorf("queued_at after the wake = %v, not later than the seeded episode's %v", after.QueuedAt, before.QueuedAt)
+		}
+		if !after.StartedAt.Equal(before.StartedAt) {
+			t.Errorf("started_at moved on the wake: %v -> %v; the mint stamp is the scheduler's fairness order", before.StartedAt, after.StartedAt)
 		}
 	})
 

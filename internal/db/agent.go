@@ -304,6 +304,11 @@ type ConversationStore interface {
 	// newest claim — advisory placement preference, not ownership: a resume
 	// should land where the workspace tree already is, and the last engagement
 	// is what says where that is. NULL when nothing ever claimed it.
+	//
+	// Re-stamps queued_at to now as well: the wake opens a new queue episode,
+	// and the column marks when the current one began — the placement
+	// claim's aging window and the UI's queue-dwell readout both measure
+	// from it. started_at is never touched.
 	// ok=false means the conversation is no longer resumable (a concurrent
 	// resume/cancel/claim already moved it, or it failed) — the caller maps
 	// the miss to 409.

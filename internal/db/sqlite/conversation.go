@@ -286,6 +286,11 @@ func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Par
 // everything regardless. It is written anyway because the column means the
 // same thing in both dialects: the executor whose engagement last held this
 // conversation's workspace.
+//
+// queued_at is re-stamped for the same reason: a wake starts a new queue
+// episode, and the column marks when the current one began. Placement's
+// aging window never reads it at N=1, but the queue-dwell readout does, and
+// a resumed conversation's wait is measured from the wake, not the mint.
 func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -295,6 +300,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = NULL,
 			                parked_at = NULL, park_reason = NULL,
+			                queued_at = ?,
 			                preferred_executor_id = (
 			                    SELECT c.executor_id FROM claims c
 			                    WHERE c.conversation_id = conversations.id
@@ -306,7 +312,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 			           AND NOT EXISTS (SELECT 1 FROM blueprint_runs br
 			                           WHERE br.id = conversations.blueprint_run_id
 			                             AND br.status = 'running')))
-		`, conversationID)
+		`, time.Now().UTC(), conversationID)
 		if err != nil {
 			return err
 		}

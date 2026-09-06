@@ -15,7 +15,7 @@ import (
 
 // placementClaimCfg is the enabled two-tier claim config every test here uses:
 // a 20s aging window and a 12s liveness window, matching the placement
-// defaults. Individual tests backdate started_at / heartbeats relative to
+// defaults. Individual tests backdate queued_at / heartbeats relative to
 // these to cross the thresholds deterministically (no sleeping).
 var placementClaimCfg = db.ClaimPlacement{Enabled: true, AgingInterval: 20 * time.Second, Liveness: 12 * time.Second}
 
@@ -45,7 +45,21 @@ func registerLiveExecutor(t *testing.T, stores db.Stores, id string) {
 	}
 }
 
-func backdatePgConversationStarted(t *testing.T, h *pgtest.Harness, conversationID string, age time.Duration) {
+// backdatePgConversationQueued ages the conversation's current queue episode:
+// queued_at is what the tier-2 aging arm reads, and started_at moves with it
+// so the fairness order agrees with the age the test is staging.
+func backdatePgConversationQueued(t *testing.T, h *pgtest.Harness, conversationID string, age time.Duration) {
+	t.Helper()
+	pgtest.MustExec(t, h.AdminDB,
+		`UPDATE conversations SET queued_at = now() - $2::interval, started_at = now() - $2::interval WHERE id = $1`,
+		conversationID, age.String())
+}
+
+// backdatePgConversationMint ages the conversation's mint stamp ALONE. It is
+// how a test stages a conversation that is old but freshly queued — the
+// shape every real resume has — to show the aging window does not read the
+// mint.
+func backdatePgConversationMint(t *testing.T, h *pgtest.Harness, conversationID string, age time.Duration) {
 	t.Helper()
 	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET started_at = now() - $2::interval WHERE id = $1`,
 		conversationID, age.String())
@@ -116,7 +130,7 @@ func TestPlacementClaim_AgesToSpillover(t *testing.T) {
 
 	registerLiveExecutor(t, stores, "exec-a") // owner, live (so it's only aging, not death, that spills)
 	conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
-	backdatePgConversationStarted(t, h, conversationID, 45*time.Second) // > 20s aging window
+	backdatePgConversationQueued(t, h, conversationID, 45*time.Second) // > 20s aging window
 
 	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
 	if err != nil || got == nil || got.ID != conversationID {
@@ -214,7 +228,7 @@ func TestPlacementClaim_OwnerPrefersOwnFirst(t *testing.T) {
 	// An OLDER foreign conversation (preferred=B), aged so exec-a may claim it
 	// via tier 2.
 	foreign := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-b")
-	backdatePgConversationStarted(t, h, foreign, 2*time.Minute)
+	backdatePgConversationQueued(t, h, foreign, 2*time.Minute)
 	// A NEWER own conversation (preferred=A), fresh.
 	own := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 
@@ -339,5 +353,54 @@ func TestPlacementClaim_ResumeFollowsTheWarmTree(t *testing.T) {
 	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
 	if err != nil || got == nil || got.ID != conversationID {
 		t.Fatalf("B's claim of a dead executor's resumed conversation = (%+v, %v), want conversation %s", got, err, conversationID)
+	}
+}
+
+// TestPlacementClaim_ResumeAgesFromTheWake is the anchor of the aging window:
+// a conversation minted long past the window, parked, and woken is its last
+// executor's alone for a FULL window from the wake — the conversation's age
+// buys a rival nothing — and claimable by anyone once the wake itself has
+// aged. The dead/draining/gated spills keep ignoring the anchor.
+func TestPlacementClaim_ResumeAgesFromTheWake(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+
+	registerLiveExecutor(t, stores, "exec-a")
+	registerLiveExecutor(t, stores, "exec-b")
+
+	conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "")
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
+	if err != nil || claimed == nil || claimed.ID != conversationID {
+		t.Fatalf("A's first claim = (%+v, %v), want conversation %s", claimed, err, conversationID)
+	}
+	// The conversation is an hour old by the time it is stopped and woken —
+	// the shape of every real resume.
+	backdatePgConversationMint(t, h, conversationID, time.Hour)
+	if ok, pErr := stores.Conversations.ParkOpen(ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); pErr != nil || !ok {
+		t.Fatalf("park: ok=%v err=%v", ok, pErr)
+	}
+	if ok, mErr := stores.Conversations.MarkQueuedForResume(ctx, orgID, conversationID); mErr != nil || !ok {
+		t.Fatalf("MarkQueuedForResume: ok=%v err=%v", ok, mErr)
+	}
+
+	// B is live and idle, and the conversation is far older than the window;
+	// it is still A's, because the window opened at the wake.
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
+	if err != nil {
+		t.Fatalf("B claim: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("exec-b claimed the hour-old resumed conversation %q inside the aging window; the window is anchored on the mint, not the wake", got.ID)
+	}
+
+	// The wake ages past the window while the mint stamp stays where it was:
+	// now anyone may take it.
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET queued_at = now() - interval '21 seconds' WHERE id = $1`, conversationID)
+	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
+	if err != nil || got == nil || got.ID != conversationID {
+		t.Fatalf("B's claim once the wake aged = (%+v, %v), want conversation %s", got, err, conversationID)
 	}
 }

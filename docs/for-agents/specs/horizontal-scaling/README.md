@@ -1065,6 +1065,17 @@ should be the cheapest self-healing thing available:
   spillover that makes affinity lose to capacity: a saturated or gated
   owner never head-of-line-blocks its shard — work ages briefly, then
   flows to headroom, exactly the TFAC-552 doctrine extended fleet-wide.
+- **The aging window anchors on `conversations.queued_at`** — the moment
+  the row entered the queue in the *current* episode — not on
+  `started_at`, the mint stamp. `queued_at` is written at enqueue and
+  re-stamped by the wake (`MarkQueuedForResume`), so a resume is
+  exclusively its last executor's for a full window from the wake,
+  however old the conversation is; anchored on the mint stamp, every
+  real resume would have aged past the window before it was even woken
+  and the affinity stamp would only order its owner's own scan.
+  `started_at` stays the scheduler's fairness order and the UI's
+  "started" time. The liveness spills (dead/draining/gated) never
+  consult the anchor.
 - At N=1 the hash always returns self; tier 1 always hits. No-op.
 
 ### 6.3 Curator homing — removed (TFAC-894)

@@ -190,6 +190,14 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 				t.Fatalf("backdate started_at of %s: %v", conversationID, err)
 			}
 		},
+		BackdateQueuedAt: func(t *testing.T, conversationID string, age time.Duration) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE conversations SET queued_at = datetime('now', ?) WHERE id = ?`,
+				fmt.Sprintf("-%d seconds", int64(age.Seconds())), conversationID); err != nil {
+				t.Fatalf("backdate queued_at of %s: %v", conversationID, err)
+			}
+		},
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
 			t.Helper()
 			rows, err := conn.Query(`

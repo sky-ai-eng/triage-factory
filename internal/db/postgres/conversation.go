@@ -403,12 +403,18 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 // who may UPDATE this row can SELECT its claims by construction, so there is
 // no invisible-row arm for the lookup to fall through.
 //
-// queued_at is NOT re-stamped: it records when the conversation first entered
-// the queue and is display-only (the scheduler orders by started_at).
+// queued_at is re-stamped too: it marks when the conversation entered the
+// queue in the current episode, and a wake starts one. Two readers depend on
+// that — the placement claim's aging window opens from it (so the affinity
+// stamp above is actually exclusive for a full window, whatever the
+// conversation's age), and the UI's queue-dwell readout measures the latest
+// episode from it. started_at is untouched: it is the scheduler's fairness
+// order and the UI's "started" time, neither of which a resume changes.
 func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE conversations SET status = NULL,
 		                parked_at = NULL, park_reason = NULL,
+		                queued_at = now(),
 		                preferred_executor_id = (
 		                    SELECT c.executor_id FROM claims c
 		                    WHERE c.org_id = conversations.org_id

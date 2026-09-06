@@ -269,8 +269,10 @@ export const QUEUE_DWELL_VISIBLE_MS = 5000
 
 // queueDwellMs — how long the conversation waited in the queue: live (now − QueuedAt)
 // while it is still queued, else the latest episode's settled dwell
-// (ClaimedAt − QueuedAt). null when the row predates the queue columns and the
-// dwell is unknowable.
+// (ClaimedAt − QueuedAt). QueuedAt is stamped when the conversation entered the
+// queue this episode — a resume re-stamps it at the wake — so the readout is
+// the current wait, never the whole life since mint. null when the row
+// predates the queue columns and the dwell is unknowable.
 export function queueDwellMs(conversation: Conversation, now: number = Date.now()): number | null {
   const queuedAt =
     conversation.QueuedAt ?? (conversation.Status === 'queued' ? conversation.StartedAt : null)
