@@ -586,6 +586,71 @@ func TestGitHubIdentityStatus(t *testing.T) {
 	}
 }
 
+// TestGitHubConnect_LoginMirrorYieldsToUserBinding pins the mirror's place in
+// the order of authority: a github.com binding the user made themselves (by
+// Connect or a pasted PAT) survives their next GitHub sign-in with a different
+// handle, while a binding the mirror wrote is still refreshed by it. Without
+// the first half, "Change" on the settings page is a verb the next login
+// silently undoes.
+func TestGitHubConnect_LoginMirrorYieldsToUserBinding(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "mirror-org")
+	seedOrgGitHubHost(t, rig, orgA.String(), "https://github.com")
+
+	readBinding := func() (login, source string) {
+		t.Helper()
+		if err := rig.h.AdminDB.QueryRow(`
+			SELECT login, source FROM user_github_identities
+			 WHERE user_id = $1 AND github_base_url = 'https://github.com'
+		`, alice.String()).Scan(&login, &source); err != nil {
+			t.Fatalf("read binding: %v", err)
+		}
+		return login, source
+	}
+	signInAs := func(handle string) {
+		t.Helper()
+		claims := validClaimsFor(alice)
+		claims["user_metadata"].(map[string]any)["user_name"] = handle
+		if resp, _ := rig.driveCallbackClaims(claims); resp.StatusCode != http.StatusFound {
+			t.Fatalf("callback status=%d, want 302", resp.StatusCode)
+		}
+	}
+
+	// A mirror-written row follows the login: the handle it mirrors changes,
+	// the row changes.
+	signInAs("alice-personal")
+	if login, source := readBinding(); login != "alice-personal" || source != "login_claim" {
+		t.Fatalf("after first login: %s/%s, want alice-personal/login_claim", login, source)
+	}
+	signInAs("alice-renamed")
+	if login, source := readBinding(); login != "alice-renamed" || source != "login_claim" {
+		t.Errorf("after handle change: %s/%s, want the mirror refreshed to alice-renamed/login_claim", login, source)
+	}
+
+	// The user then binds a different account for this host. That row is
+	// theirs, and the next sign-in leaves it exactly as they set it.
+	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
+		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), "https://github.com", "alice-corp", "", "", "connect_oauth")
+	}); err != nil {
+		t.Fatalf("bind by connect: %v", err)
+	}
+	signInAs("alice-renamed")
+	if login, source := readBinding(); login != "alice-corp" || source != "connect_oauth" {
+		t.Errorf("after login over a connect_oauth binding: %s/%s, want alice-corp/connect_oauth untouched", login, source)
+	}
+	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
+		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), "https://github.com", "alice-pat", "", "", "pat")
+	}); err != nil {
+		t.Fatalf("bind by pat: %v", err)
+	}
+	signInAs("alice-renamed")
+	if login, source := readBinding(); login != "alice-pat" || source != "pat" {
+		t.Errorf("after login over a pat binding: %s/%s, want alice-pat/pat untouched", login, source)
+	}
+}
+
 // TestGitHubConnect_IdentityPersistsAcrossLoginProvider closes a
 // regression by construction: a connect_oauth binding must survive a
 // subsequent login under a non-GitHub provider (no user_name claim), where

@@ -1438,6 +1438,13 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 	// GitHub-INTEGRATION binding (which github account the agent acts as) — a
 	// separate axis from the login identity. Only a real GitHub login mirrors it
 	// (source='login_claim'); a SAML login writes none. Keyed on the principal.
+	//
+	// The mirror is a convenience default, so it yields to a binding the user
+	// made themselves: the conflict arm refreshes only a row the mirror wrote.
+	// A row bound by Connect or a pasted PAT names the account the user CHOSE
+	// for this org's host — often a different one from the account they sign in
+	// with — and overwriting it at the next sign-in would silently undo that
+	// choice, and make "Change" on the settings page a verb that does not hold.
 	if !isSSO && ghUsername != "" {
 		githubEmail := ""
 		if claims.EmailVerified {
@@ -1456,6 +1463,7 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 			       source      = EXCLUDED.source,
 			       verified_at = EXCLUDED.verified_at,
 			       updated_at  = now()
+			 WHERE user_github_identities.source = 'login_claim'
 		`, principalID, ghUsername, providerSubject, githubEmail); err != nil {
 			return uuid.Nil, fmt.Errorf("upsert github login identity: %w", err)
 		}
