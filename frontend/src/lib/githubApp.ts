@@ -468,17 +468,34 @@ export async function disconnectOwnApp(orgId: string): Promise<SwitchToPatResult
 
 // ── The deployment App (managed class, multi mode only) ───────────────────
 
-// startManagedGitHubConnect starts the bind ceremony for the deployment's
-// GitHub App with a top-level navigation: the backend mints the pending-bind
-// record and cookie and sends the admin to the App's install page on GitHub,
-// which returns them to the callback where the bind completes. Control never
-// comes back here.
+// startManagedGitHubConnect starts the bind ceremony's install leg: the
+// backend mints the pending-bind record and cookie and answers with the App's
+// install page on GitHub, which this navigates to; GitHub returns the admin to
+// the callback where the bind completes. On success control never comes back
+// here; a refusal (the deployment has no App, the workspace already holds a
+// credential) rejects with the backend's sentence.
+//
+// A POST rather than a navigation to the route, because a ceremony must be
+// minted only by the admin's own page — never by a link or a popup another
+// page pointed at the route.
 //
 // It completes only for an account that does not have the App yet: GitHub's
 // install page offers an installed account nothing but Configure and never
 // returns. That account is connected by startManagedGitHubConnectAccount.
-export function startManagedGitHubConnect(orgId: string): void {
-  window.location.assign(`/api/orgs/${encodeURIComponent(orgId)}/github/managed/connect`)
+//
+// POST /api/orgs/{org_id}/github/managed/connect
+export async function startManagedGitHubConnect(orgId: string): Promise<void> {
+  let installUrl: string
+  try {
+    const out = await apiJSON<{ install_url: string }>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/managed/connect`,
+      { method: 'POST' },
+    )
+    installUrl = out.install_url
+  } catch (e) {
+    throw asError(e, 'Could not start connecting GitHub.')
+  }
+  window.location.assign(installUrl)
 }
 
 // startManagedGitHubConnectAccount is the ceremony for an account that already

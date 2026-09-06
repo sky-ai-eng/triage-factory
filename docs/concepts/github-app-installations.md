@@ -161,9 +161,10 @@ treats it as one:
   "Redirect on update" is ignored without a Setup URL, and the
   OAuth-during-install setting the install leg needs for its `code` blanks
   the Setup URL. So the ceremony has a second leg for exactly that account
-  (`POST /api/orgs/{org_id}/github/managed/connect-account`, a CSRF-guarded
-  POST because the account is chosen in the request): the same record and
-  cookie, GitHub's plain OAuth authorize carrying the ceremony's `state`, and
+  (`POST /api/orgs/{org_id}/github/managed/connect-account`; both starts are
+  CSRF-guarded POSTs that answer with the GitHub URL for the page to navigate
+  to, so a ceremony is only ever minted by the admin's own page): the same
+  record and cookie, GitHub's plain OAuth authorize carrying the ceremony's `state`, and
   a callback that refuses a response without it, proves the person's identity
   as above, and then finds the named account's installation **among the
   installations that person can see** — never under the App's own key, which

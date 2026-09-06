@@ -43,6 +43,15 @@ export default function GitHubInstalled() {
   const orgId = chosenOrgId ?? activeOrgId ?? orgs[0]?.id ?? null
   const org = orgs.find((o) => o.id === orgId) ?? null
   const canConnect = isOrgAdminRole(org?.role)
+  const [installError, setInstallError] = useState<string | null>(null)
+  const installElsewhere = async (id: string) => {
+    setInstallError(null)
+    try {
+      await startManagedGitHubConnect(id)
+    } catch (e) {
+      setInstallError((e as Error).message)
+    }
+  }
 
   return (
     <div className="min-h-screen bg-ground flex items-center justify-center p-4">
@@ -93,11 +102,12 @@ export default function GitHubInstalled() {
                 fresh install instead: the ordinary ceremony. */}
             <button
               type="button"
-              onClick={() => startManagedGitHubConnect(org.id)}
+              onClick={() => void installElsewhere(org.id)}
               className="w-full rounded-xl border border-line-1 px-4 py-2.5 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
             >
               Install on another account and connect it to {org.name}
             </button>
+            {installError && <p className="text-ui text-alarm">{installError}</p>}
           </div>
         )}
 

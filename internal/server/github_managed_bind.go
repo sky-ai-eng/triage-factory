@@ -366,17 +366,23 @@ func (b bindRefusal) withHosts(workspaceHost, deploymentHost string) bindRefusal
 	return b
 }
 
-// handleGitHubManagedConnect starts the ceremony: mint a nonce, write the
-// pending-bind record, set the cookie, and send the admin to GitHub's install
-// page for the deployment App.
+// handleGitHubManagedConnect starts the install leg: mint a nonce, write the
+// pending-bind record, set the cookie, and answer with the deployment App's
+// install page on GitHub for the page to navigate to.
 //
-// The redirect target is the deployment App's PUBLIC install page rather than
-// anything carrying state. GitHub's /installations/select_target does reportedly
-// preserve a state parameter, but that behaviour is undocumented, and the cookie
-// is needed regardless — one owned mechanism beats two where the cheaper one is
+// The install page is the App's PUBLIC one rather than anything carrying
+// state. GitHub's /installations/select_target does reportedly preserve a
+// state parameter, but that behaviour is undocumented, and the cookie is
+// needed regardless — one owned mechanism beats two where the cheaper one is
 // unowned.
 //
-// GET /api/orgs/{org_id}/github/managed/connect
+// A POST behind the CSRF guard, like the named-account start beside it, and
+// answering with the URL rather than redirecting to it for the same reason: a
+// ceremony is minted only by a request the admin's own page made, never by a
+// navigation another page induced, and a fetch cannot follow a cross-site
+// redirect into a top-level navigation.
+//
+// POST /api/orgs/{org_id}/github/managed/connect
 func (s *Server) handleGitHubManagedConnect(w http.ResponseWriter, r *http.Request) {
 	if s.deployCfg == nil || runmode.Current() != runmode.ModeMulti {
 		// The deployment App is a multi-mode credential — a distributed local
@@ -396,13 +402,13 @@ func (s *Server) handleGitHubManagedConnect(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if refusal != nil {
-		s.renderBindOutcome(w, orgID, *refusal)
+		writeBindRefusalJSON(w, *refusal)
 		return
 	}
 	if identity.Slug == "" {
 		// An App GitHub reports with no slug has no install page to send
 		// anyone to.
-		s.renderBindOutcome(w, orgID, refuseNoDeploymentApp)
+		writeBindRefusalJSON(w, refuseNoDeploymentApp)
 		return
 	}
 
@@ -412,14 +418,15 @@ func (s *Server) handleGitHubManagedConnect(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if refusal != nil {
-		s.renderBindOutcome(w, orgID, *refusal)
+		writeBindRefusalJSON(w, *refusal)
 		return
 	}
 
 	// The deployment App's install page. url.PathEscape on the slug because it
 	// is GitHub's answer to GET /app rather than a constant of ours.
-	target := ghWeb + "/apps/" + url.PathEscape(identity.Slug) + "/installations/new"
-	http.Redirect(w, r, target, http.StatusFound)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"install_url": ghWeb + "/apps/" + url.PathEscape(identity.Slug) + "/installations/new",
+	})
 }
 
 // connectAccountRequest names the GitHub account an admin wants to connect —
@@ -429,24 +436,27 @@ type connectAccountRequest struct {
 	Account string `json:"account"`
 }
 
-// githubLoginPattern is what a GitHub login can look like: alphanumerics and
-// single hyphens, neither first nor last, at most 39 characters. Checked before
-// the value goes anywhere, so a path-shaped or oversized string is refused as
-// a bad field rather than reaching a URL or a log line.
-var githubLoginPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`)
+// githubLoginPattern is the shape of a GitHub login: runs of alphanumerics
+// joined by single hyphens, so no leading, trailing or consecutive hyphen.
+// The length cap — 39 characters — is checked beside it, since a pattern that
+// also counted would obscure the shape. Checked before the value goes
+// anywhere, so a path-shaped or oversized string is refused as a bad field
+// rather than reaching a URL or a log line.
+var githubLoginPattern = regexp.MustCompile(`^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$`)
+
+// githubLoginMaxLen is GitHub's cap on a login's length.
+const githubLoginMaxLen = 39
 
 // handleGitHubManagedConnectAccount starts the named-account leg: the same
 // record and cookie as Connect, with the account the admin named on the record,
 // and instead of GitHub's install page the browser is sent through GitHub's
 // OAuth authorize with this ceremony's state.
 //
-// A POST behind the CSRF guard where Connect is a GET, and that is not
-// incidental. Connect's only side effect is a record that GitHub's picker will
-// let the admin fill in themselves, so a navigation an attacker page induces
-// buys nothing. Here the account is chosen in the request, so the request has
-// to be one the admin's own page made. The response carries the authorize URL
-// rather than redirecting to it, because a fetch cannot follow a cross-site
-// redirect into a top-level navigation; the page navigates.
+// A POST behind the CSRF guard, like Connect, and here doubly so: the account
+// is chosen in the request, so the request has to be one the admin's own page
+// made. The response carries the authorize URL rather than redirecting to it,
+// because a fetch cannot follow a cross-site redirect into a top-level
+// navigation; the page navigates.
 //
 // POST /api/orgs/{org_id}/github/managed/connect-account
 func (s *Server) handleGitHubManagedConnectAccount(w http.ResponseWriter, r *http.Request) {
@@ -468,7 +478,7 @@ func (s *Server) handleGitHubManagedConnectAccount(w http.ResponseWriter, r *htt
 			Reason: httpx.ReasonMissingField, Message: "A GitHub account login is required.", Field: "account"})
 		return
 	}
-	if !githubLoginPattern.MatchString(account) {
+	if len(account) > githubLoginMaxLen || !githubLoginPattern.MatchString(account) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonInvalidField, Message: "That isn't a GitHub account login.", Field: "account"})
 		return

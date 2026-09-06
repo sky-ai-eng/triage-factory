@@ -362,14 +362,35 @@ func namedCallbackQuery(state string) string {
 	return "code=gh_code&state=" + url.QueryEscape(state)
 }
 
-// connect drives the Connect click and returns the response.
+// connect drives the Connect click — the POST the admin's own page makes — and
+// returns the response.
 func (r *bindRig) connect(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest("GET", "/api/orgs/"+r.orgID.String()+"/github/managed/connect", nil)
-	req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: r.sid})
+	return r.connectFrom(t, r.srv.deployCfg.publicURL, r.sid)
+}
+
+// connectFrom is connect with the request's Origin and session chosen, for
+// the cases about who may start a ceremony.
+func (r *bindRig) connectFrom(t *testing.T, origin, sid string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/api/orgs/"+r.orgID.String()+"/github/managed/connect", nil)
+	req.Header.Set("Origin", origin)
+	req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
 	rec := httptest.NewRecorder()
 	r.srv.mux.ServeHTTP(rec, req)
 	return rec
+}
+
+// installURL reads the install page a Connect response answered with.
+func installURL(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		InstallURL string `json:"install_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode connect body %q: %v", rec.Body.String(), err)
+	}
+	return body.InstallURL
 }
 
 // bindCookie returns the ceremony cookie a Connect response set, failing when
@@ -422,8 +443,8 @@ func (r *bindRig) serveCallback(t *testing.T, cookie *http.Cookie, query, sid st
 func (r *bindRig) ceremony(t *testing.T) *http.Cookie {
 	t.Helper()
 	rec := r.connect(t)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("connect status=%d body=%s, want 302", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
 	return r.bindCookie(t, rec)
 }
@@ -494,12 +515,11 @@ func TestManagedBind_OrganizationTarget(t *testing.T) {
 	rig := newBindRig(t, gh)
 
 	rec := rig.connect(t)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("connect status=%d body=%s, want 302", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
-	if want := rig.ghBase + "/apps/tf-deployment/installations/new"; rec.Header().Get("Location") != want {
-		t.Errorf("connect redirect = %q, want the deployment App's install page %q",
-			rec.Header().Get("Location"), want)
+	if want := rig.ghBase + "/apps/tf-deployment/installations/new"; installURL(t, rec) != want {
+		t.Errorf("install_url = %q, want the deployment App's install page %q", installURL(t, rec), want)
 	}
 	cookie := rig.bindCookie(t, rec)
 
@@ -692,7 +712,7 @@ func TestManagedBind_Refusals(t *testing.T) {
 			// permission never reaches a callback — the refusal is asserted
 			// wherever the ceremony actually stops.
 			rec := rig.connect(t)
-			if rec.Code != http.StatusFound {
+			if rec.Code != http.StatusOK {
 				assertOutcome(t, rec, tc.outcome)
 				rig.assertNothingBound(t)
 				return
@@ -1044,6 +1064,27 @@ func TestManagedBind_RoleRevokedMidCeremony(t *testing.T) {
 	out := rig.callback(t, cookie, defaultCallbackQuery(4242))
 	assertOutcome(t, out, "not_workspace_admin")
 	rig.assertNothingBound(t)
+}
+
+// TestManagedBind_ConnectRequiresTheAdminsOwnOrigin: a ceremony is minted only
+// by a request the admin's own page made. A page elsewhere that navigates or
+// posts to the start gets nothing — not a record, not a cookie — so there is
+// never a live ceremony in a browser whose owner did not click Connect.
+func TestManagedBind_ConnectRequiresTheAdminsOwnOrigin(t *testing.T) {
+	rig := newBindRig(t, newFakeGitHub())
+	rec := rig.connectFrom(t, "https://attacker.test", rig.sid)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("cross-origin connect = %d, want 403", rec.Code)
+	}
+	for _, c := range (&http.Response{Header: rec.Header()}).Cookies() {
+		if c.Name == managedBindCookieName && c.Value != "" {
+			t.Error("a refused start set the ceremony cookie")
+		}
+	}
+	var n int
+	if err := rig.h.AdminDB.QueryRow(`SELECT count(*) FROM github_pending_binds WHERE org_id = $1`, rig.orgID.String()).Scan(&n); err != nil || n != 0 {
+		t.Errorf("%d pending binds minted by a refused start (%v), want 0", n, err)
+	}
 }
 
 func TestManagedBind_ConnectRequiresWorkspaceAdmin(t *testing.T) {
@@ -1843,8 +1884,9 @@ func TestManagedBind_NamedAccount_BoundElsewhere(t *testing.T) {
 func TestManagedBind_NamedAccount_Start(t *testing.T) {
 	t.Run("MalformedLoginIsABadField", func(t *testing.T) {
 		rig := newBindRig(t, newFakeGitHub())
-		for _, bad := range []string{`{"account":""}`, `{"account":"-acme"}`, `{"account":"acme/../x"}`,
-			`{"account":"` + strings.Repeat("a", 40) + `"}`, `{"account":"a b"}`, `{}`} {
+		for _, bad := range []string{`{"account":""}`, `{"account":"-acme"}`, `{"account":"acme-"}`,
+			`{"account":"a--b"}`, `{"account":"acme/../x"}`, `{"account":"` + strings.Repeat("a", 40) + `"}`,
+			`{"account":"a b"}`, `{}`} {
 			rec := rig.connectAccount(t, bad)
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("%s → %d, want 400", bad, rec.Code)
@@ -1855,6 +1897,11 @@ func TestManagedBind_NamedAccount_Start(t *testing.T) {
 		}
 		if rec := rig.connectAccount(t, `{"account":"acme","extra":1}`); rec.Code != http.StatusBadRequest {
 			t.Errorf("unknown field → %d, want 400", rec.Code)
+		}
+		// The longest login GitHub allows, with single hyphens inside it, is
+		// a login: the cap is 39 and the hyphen rule is about runs.
+		if rec := rig.connectAccount(t, `{"account":"`+strings.Repeat("ab-", 12)+`abc"}`); rec.Code != http.StatusOK {
+			t.Errorf("a 39-character login with single hyphens → %d body=%s, want 200", rec.Code, rec.Body.String())
 		}
 	})
 
@@ -1935,13 +1982,14 @@ func TestManagedBind_LocalModeIs404(t *testing.T) {
 	}
 	s.SetDeployConfig("http://localhost:3000", key)
 
-	for _, path := range []string{
-		"/api/orgs/" + runmode.LocalDefaultOrgID + "/github/managed/connect",
-		ManagedBindCallbackPath + "?code=x&installation_id=1",
+	for _, rt := range []struct{ method, path string }{
+		{"POST", "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/managed/connect"},
+		{"POST", "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/managed/connect-account"},
+		{"GET", ManagedBindCallbackPath + "?code=x&installation_id=1"},
 	} {
-		rec := doJSON(t, s, "GET", path, nil)
+		rec := doJSON(t, s, rt.method, rt.path, nil)
 		if rec.Code != http.StatusNotFound {
-			t.Errorf("GET %s in local mode = %d, want 404", path, rec.Code)
+			t.Errorf("%s %s in local mode = %d, want 404", rt.method, rt.path, rec.Code)
 		}
 	}
 }
