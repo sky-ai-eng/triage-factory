@@ -65,12 +65,14 @@
   border-top: 1px solid var(--color-line-1);
 }
 
-/* ---- appearance: one row, no rule (the accounts list's foot rule serves) ---- */
+/* ---- appearance: one row, no rule (the accounts list's foot rule serves).
+   Its own region, so the page gap sits on both sides of it and the row reads
+   as centred between the accounts list and the tokens head. ---- */
 .us-appearance {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 18px;
-  padding-top: 2px;
 }
 .us-seclabel {
   font: 500 9.5px/1 var(--font-mono);
@@ -161,27 +163,6 @@
   border-right: 1.3px solid var(--color-ink-4);
   border-top: 1.3px solid var(--color-ink-4);
   transform: rotate(45deg);
-}
-.us-tokfoot {
-  flex: none;
-  display: flex;
-  align-items: flex-start;
-  gap: 24px;
-  padding-top: 11px;
-  border-top: 1px solid var(--color-line-2);
-}
-.us-rotate {
-  flex: 1;
-  font: 400 10.5px/1.5 var(--font-mono);
-  color: var(--color-ink-3);
-  max-width: 80ch;
-  text-wrap: pretty;
-}
-.us-capnote {
-  flex: none;
-  font: 400 10.5px/1.5 var(--font-mono);
-  color: var(--color-ink-4);
-  text-align: right;
 }
 .us-err {
   font: 400 10.5px/1.5 var(--font-mono);

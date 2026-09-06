@@ -320,13 +320,6 @@ export default function UserSettingsPage() {
     return c
   }, [multiOrg])
 
-  const capParts = orgs
-    .filter((o) => o.id in tok.caps)
-    .map((o) => {
-      const cap = tok.caps[o.id]
-      return o.name + (cap ? ' caps tokens at ' + cap + ' days' : ' sets no cap')
-    })
-
   // ---- the sheet ----
   const det = detail ? (rows.find((r) => r.id === detail) ?? null) : null
   const sheet = det
@@ -624,18 +617,18 @@ export default function UserSettingsPage() {
             onVerify={onVerify}
           />
         </div>
+      </div>
 
-        <div className="us-appearance">
-          <span className="us-seclabel">APPEARANCE</span>
-          <span className="us-spacer" />
-          <Segmented
-            variant="spine"
-            options={['light', 'dark', 'system']}
-            value={themeLabel}
-            onChange={pickTheme}
-            label="Appearance"
-          />
-        </div>
+      <div className="us-appearance">
+        <span className="us-seclabel">APPEARANCE</span>
+        <span className="us-spacer" />
+        <Segmented
+          variant="spine"
+          options={['light', 'dark', 'system']}
+          value={themeLabel}
+          onChange={pickTheme}
+          label="Appearance"
+        />
       </div>
 
       <div className="us-tokens">
@@ -708,13 +701,6 @@ export default function UserSettingsPage() {
                 emptyLabel="No tokens. Everything you do in the browser uses your session instead."
                 onRowOpen={(row) => openDetail(String(row.id))}
               />
-            </div>
-            <div className="us-tokfoot">
-              <span className="us-rotate">
-                To rotate, create a replacement first, move your automation to it, then revoke this
-                one.
-              </span>
-              <span className="us-capnote">{capParts.join(' · ')}</span>
             </div>
           </>
         ) : null}

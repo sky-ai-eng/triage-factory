@@ -279,13 +279,13 @@ describe('UserSettingsPage — the tokens', () => {
     expect(screen.getAllByText('never').length).toBeGreaterThan(0)
     expect(screen.getByRole('columnheader', { name: /ORGANIZATION/ })).toBeInTheDocument()
     expect(screen.getByText('sky-ai-labs')).toBeInTheDocument()
-    // The head's tail changes with the section open; the footer names each cap.
+    // The head's tail changes with the section open. Nothing sits under the
+    // table: the caps are read where they bind, in the create dialog.
     expect(
       screen.getByText('a token acts as you inside one organization and nowhere else'),
     ).toBeInTheDocument()
-    expect(
-      screen.getByText('sky-ai-eng caps tokens at 90 days · sky-ai-labs sets no cap'),
-    ).toBeInTheDocument()
+    expect(screen.queryByText(/sets no cap/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/To rotate/)).not.toBeInTheDocument()
   })
 
   it('drops the org column for a single membership', async () => {
@@ -461,8 +461,6 @@ describe('UserSettingsPage — a refusal is shown, never swallowed', () => {
   it('strikes nothing and pre-checks nothing when an org cap could not be read', async () => {
     stub({ ...BASE, '/api/orgs/o1/api-token-policy': new Error('policy read failed') })
     await openTokens()
-    // The footer names only the caps it knows.
-    expect(screen.getByText('sky-ai-labs sets no cap')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '+ new token' }))
     const dlg = await screen.findByRole('dialog', { name: 'New API token' })
     fireEvent.click(within(dlg).getByRole('button', { name: 'sky-ai-eng' }))
