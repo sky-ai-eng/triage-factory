@@ -64,6 +64,7 @@ import {
   cutoverToApp,
   discardStagedApp,
   disconnectManagedGitHub,
+  disconnectOwnApp,
   disconnectManagedInstallation,
   getGitHubAppStatus,
   patPreflight,
@@ -365,6 +366,47 @@ export default function GitHubAccessControl({
     }
   }
 
+  // ── Own App: switch to the deployment's ──
+  // The teardown verb followed straight away by the deployment App's Connect,
+  // which is a navigation to GitHub's install page. The workspace holds no
+  // credential for the length of that trip; the app shell treats that as
+  // setup left unfinished and routes an admin who comes back without an
+  // account connected into the setup wizard, which is why the confirm says
+  // so. There is deliberately no bare disconnect here: a teardown with no
+  // replacement lands in exactly that wizard, and the only reason to want one
+  // is to connect something else — which is what this is.
+  const switchToDeploymentApp = async () => {
+    if (!orgId || busy) return
+    if (
+      !confirm(
+        `Switch this workspace to the deployment’s GitHub App? ${slug ? `The ${slug} App` : 'Your App'} is disconnected first (it stays registered on GitHub), then you pick a GitHub account to connect on GitHub. If you leave GitHub’s page without connecting one, this workspace has no GitHub access and you’ll be taken back to setup.`,
+      )
+    )
+      return
+    setBusy(true)
+    setError(null)
+    try {
+      await disconnectOwnApp(orgId)
+    } catch (e) {
+      setError((e as Error).message)
+      setBusy(false)
+      return
+    }
+    // The draft no longer describes an App, so a return from GitHub's page
+    // without a bind renders the empty state rather than a card for a
+    // registration that is gone.
+    ctx.patch({
+      githubAppRegistered: false,
+      githubAppStaged: false,
+      githubAppInstalled: false,
+      githubAppInstallCount: 0,
+      githubAppSlug: '',
+      hasGitHubPat: false,
+      githubPatLogin: '',
+    })
+    startManagedGitHubConnect(orgId)
+  }
+
   // ─────────────────────────────── render ───────────────────────────────
 
   // rotate-token — enter the replacement token; Continue validates it and
@@ -653,13 +695,30 @@ export default function GitHubAccessControl({
           )}
           <GitHubInstallationList installations={installations} drift={findings.drift} />
           <GitHubGrantFindings findings={findings} />
-          <button
-            type="button"
-            onClick={() => setPhase({ kind: 'to-pat-token' })}
-            className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
-          >
-            Switch to a personal access token…
-          </button>
+          {error && <p className="text-ui text-alarm">{error}</p>}
+          {/* The ways off the workspace's own App: the deployment's App where
+              the deployment offers one, or a token. Never a bare teardown —
+              see switchToDeploymentApp. */}
+          <div className="flex flex-wrap items-center gap-2">
+            {deploymentAppAvailable && orgId && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void switchToDeploymentApp()}
+                className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40"
+              >
+                Switch to the deployment&rsquo;s App…
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setPhase({ kind: 'to-pat-token' })}
+              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40"
+            >
+              Switch to a personal access token…
+            </button>
+          </div>
         </>
       ) : managed ? (
         // The deployment's App. Nothing here registers or imports an App —

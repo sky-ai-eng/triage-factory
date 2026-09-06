@@ -435,7 +435,7 @@ export async function patPreflight(orgId: string, pat: string): Promise<PatPrefl
 
 // discardStagedApp tears down a STAGED App registration — the exit for an
 // abandoned PAT→App switch. The live PAT is untouched. 409s for an active App
-// (use switchToPat to remove a live one).
+// (disconnectOwnApp removes a live one).
 //
 // DELETE /api/orgs/{org_id}/github/app
 export async function discardStagedApp(orgId: string): Promise<void> {
@@ -443,6 +443,26 @@ export async function discardStagedApp(orgId: string): Promise<void> {
     await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app`, { method: 'DELETE' })
   } catch (e) {
     throw asError(e, 'Could not discard the staged GitHub App.')
+  }
+}
+
+// disconnectOwnApp tears down the workspace's LIVE App with nothing bound in
+// its place: registration, installations, secrets and host go in one
+// transaction and the workspace is left as a fresh one, with every way in
+// open — the deployment's App included, which refuses a workspace that still
+// holds a credential. The App still exists on GitHub (the result carries the
+// link out, as switch-to-pat's does). 409s for a staged App (discardStagedApp
+// is that door).
+//
+// POST /api/orgs/{org_id}/github/app/disconnect
+export async function disconnectOwnApp(orgId: string): Promise<SwitchToPatResult> {
+  try {
+    return await apiJSON<SwitchToPatResult>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/app/disconnect`,
+      { method: 'POST' },
+    )
+  } catch (e) {
+    throw asError(e, 'Could not disconnect the GitHub App.')
   }
 }
 
