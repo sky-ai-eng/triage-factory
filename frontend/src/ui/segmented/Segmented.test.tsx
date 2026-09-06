@@ -68,6 +68,18 @@ describe('Segmented', () => {
     expect(onChange).not.toHaveBeenCalled()
   })
 
+  it('re-measures the mark when a label changes under the same option count', () => {
+    // jsdom has no layout, so the mark's numbers are all zero; what is worth
+    // pinning is that a relabel reaches the measurement at all — the
+    // bounding-box read runs again rather than only when the count changes.
+    const spy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+    const { rerender } = render(<Segmented options={['light', 'dark']} value="dark" />)
+    const before = spy.mock.calls.length
+    rerender(<Segmented options={['light', { value: 'dark', label: 'darker' }]} value="dark" />)
+    expect(spy.mock.calls.length).toBeGreaterThan(before)
+    spy.mockRestore()
+  })
+
   it('takes every click when the whole control is disabled', () => {
     const onChange = vi.fn()
     render(<Segmented options={['light', 'dark']} value="light" onChange={onChange} disabled />)

@@ -73,12 +73,20 @@ export function Segmented({
     setMark({ x: e.left - r.left, w: e.width })
   }, [value])
 
+  // Anything that can move or resize a label re-measures: the option set
+  // (its labels and which are struck, not just its length — a label can
+  // change under the same count), the face, and the variant's padding. The
+  // ResizeObserver below covers the rest, but two labels of equal width
+  // swapping would not change the root's size.
+  const optKey = opts
+    .map((o) => o.value + '\u0000' + o.label + (o.disabled ? '\u0001' : ''))
+    .join('|')
   useLayoutEffect(() => {
     // A measurement: the mark's place is the chosen label's box, which only
     // layout knows, so it is read here and written back before paint.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     measure()
-  }, [measure, opts.length, size, variant])
+  }, [measure, optKey, size, variant, mono])
 
   useEffect(() => {
     const t = setTimeout(() => setSettled(true), 0)

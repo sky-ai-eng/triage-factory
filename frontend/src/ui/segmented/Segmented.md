@@ -52,7 +52,9 @@ larger. Three sizes: 9.5 / 10.5 / 11.5px mono.
 Arrow keys (either axis) move the choice and the focus together, wrapping;
 Home and End go to the ends; a struck option is skipped. The focus ring draws
 on the group, keyboard only — `:focus-visible` on the option excludes a mouse
-press, so a click never wears the ring a keyboard user needs.
+press, so a click never wears the ring a keyboard user needs. The group-level
+ring takes `:has`; a browser without it draws the ring on the focused option
+instead, so no keyboard user is ever left without one.
 
 ## Do not
 

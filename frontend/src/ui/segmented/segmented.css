@@ -19,13 +19,26 @@
 }
 
 /* The ring is for a keyboard user finding the control, not for a click that
-   already knows where it is: :focus-visible on the option excludes a press. */
-.seg:has(.seg-opt:focus-visible) {
+   already knows where it is: :focus-visible on the option excludes a press.
+   The ring belongs on the GROUP — one control, one ring — which takes :has;
+   where the browser lacks it, the option wears the ring itself rather than
+   the keyboard user getting none. */
+.seg-opt:focus-visible {
   outline: 1.5px solid var(--color-warm);
   outline-offset: 3px;
+  border-radius: 3px;
 }
-.seg-opt:focus {
+.seg-opt:focus:not(:focus-visible) {
   outline: none;
+}
+@supports selector(:has(a)) {
+  .seg-opt:focus-visible {
+    outline: none;
+  }
+  .seg:has(.seg-opt:focus-visible) {
+    outline: 1.5px solid var(--color-warm);
+    outline-offset: 3px;
+  }
 }
 
 /* Size sets the face; mono is the default because the options are values the
