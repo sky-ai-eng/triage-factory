@@ -1,4 +1,4 @@
-/* The multi-mode personal settings page. One column, padding 26/32, 36px
+/* The multi-mode personal settings page. One column, padding 26/32, 18px
    between regions, the tokens region taking the slack. Nothing scrolls at
    845px with the token section collapsed. Every value is a token. */
 
@@ -12,7 +12,7 @@
   background: var(--color-ground);
   display: flex;
   flex-direction: column;
-  gap: 36px;
+  gap: 18px;
   padding: 26px 32px;
   overflow: auto;
 }
