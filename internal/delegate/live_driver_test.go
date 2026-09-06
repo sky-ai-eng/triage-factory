@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -23,10 +25,19 @@ type fakeLiveProc struct {
 	result    *agentproc.Result
 	err       error
 	sendCount int
+	// queued is what QueuedTurns answers: the turns the process still owes.
+	// A test stages it to model a message steered in while the turn ran —
+	// the real process counts its own sends against its results, which a
+	// fake fed results by hand cannot.
+	queued int
 	// onSend fires (with the 1-based send count) after each Send so a test can
 	// feed the next turn's result onto the results channel — the way the driver
 	// drives the invalid-envelope re-prompt loop.
 	onSend func(count int)
+	// onClose fires inside Close, before done is closed, so a test can pin
+	// what the world looks like at the moment the driver lets go of the
+	// process — the park must not have landed yet.
+	onClose func()
 }
 
 func newFakeLiveProc(sessionID string) *fakeLiveProc {
@@ -38,6 +49,15 @@ func (f *fakeLiveProc) SessionID() string         { return f.sessionID }
 func (f *fakeLiveProc) Stderr() string            { return "" }
 func (f *fakeLiveProc) Result() *agentproc.Result { f.mu.Lock(); defer f.mu.Unlock(); return f.result }
 func (f *fakeLiveProc) Err() error                { f.mu.Lock(); defer f.mu.Unlock(); return f.err }
+func (f *fakeLiveProc) QueuedTurns() int          { f.mu.Lock(); defer f.mu.Unlock(); return f.queued }
+
+// owe stages n turns the process still has to run, the reading a real
+// process gives while a steered message is queued behind the current turn.
+func (f *fakeLiveProc) owe(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.queued = n
+}
 
 func (f *fakeLiveProc) Send(_ context.Context, _ string) error {
 	f.mu.Lock()
@@ -58,6 +78,12 @@ func (f *fakeLiveProc) sends() int {
 }
 
 func (f *fakeLiveProc) Close() error {
+	f.mu.Lock()
+	hook := f.onClose
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.closed {
@@ -248,29 +274,82 @@ pumping:
 	}
 }
 
-// TestDriveLiveConversation_NoneKeepsProcOpenAndLoops: a turn that ends with no
-// conclusion (prose) must NOT close the process or hibernate — the run is
-// open, so the driver keeps the process warm and loops. We prove the loop by
-// delivering prose first and a valid conclusion second: the driver returns the
-// valid result, which it could only reach by looping past the prose.
-func TestDriveLiveConversation_NoneKeepsProcOpenAndLoops(t *testing.T) {
+// TestDriveLiveConversation_NoneClosesAndHandsBack: a turn that ends with no
+// conclusion (prose) and nothing queued behind it closes the process and hands
+// the result back for processCompletion to park — the driver does not keep the
+// process for a message that has not arrived. A second result left on the
+// channel proves it: the driver returned on the prose and never read it.
+func TestDriveLiveConversation_NoneClosesAndHandsBack(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 8)
-	results <- &agentproc.Result{Result: "Some prose with no completion envelope at all."}
+	prose := &agentproc.Result{Result: "Some prose with no completion envelope at all."}
+	results <- prose
+	results <- &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
+
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
+
+	if out.result != prose {
+		t.Errorf("result = %+v, want the no-conclusion turn handed back", out.result)
+	}
+	if out.hibernated {
+		t.Error("a no-conclusion turn is parked by processCompletion, not by the driver")
+	}
+	if !proc.wasClosed() {
+		t.Error("a no-conclusion turn with nothing queued must close the process")
+	}
+	if len(results) != 1 {
+		t.Errorf("results left = %d, want 1 (the driver must not read past the turn it returned)", len(results))
+	}
+	if proc.sends() != 0 {
+		t.Errorf("sends = %d, want 0 (a no-conclusion turn is not re-prompted)", proc.sends())
+	}
+}
+
+// TestDriveLiveConversation_QueuedTurnOutlivesTheTurnEnd: a message steered in
+// while the turn ran is queued by the process and starts the next turn, so a
+// no-conclusion end with a turn still owed is not a park — the driver stays
+// on the same process, under the same claim, and reads the turn the steer
+// produces. Delivering prose first and a valid conclusion second proves it:
+// the conclusion is only reachable by staying past the prose.
+func TestDriveLiveConversation_QueuedTurnOutlivesTheTurnEnd(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	proc := newFakeLiveProc("sess")
+	proc.owe(1)
+	results := make(chan *agentproc.Result, 8)
+	results <- &agentproc.Result{Result: "Some prose; the steered turn runs next."}
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
 	results <- want
 
 	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
 
 	if out.result != want {
-		t.Errorf("result = %+v, want the valid conclusion reached after looping past prose", out.result)
+		t.Errorf("result = %+v, want the conclusion the queued turn produced", out.result)
 	}
 	if out.hibernated {
-		t.Error("a no-conclusion turn must not hibernate while results keep arriving")
+		t.Error("a turn end with a turn still owed must not park")
 	}
-	if proc.sends() != 0 {
-		t.Errorf("sends = %d, want 0 (a no-conclusion turn is not re-prompted)", proc.sends())
+}
+
+// TestDriveLiveConversation_QueuedTurnOutlivesThePause is the same for a
+// paused turn: an interrupt that lands with a steer queued behind it ends
+// this turn, and the process starts the queued one next.
+func TestDriveLiveConversation_QueuedTurnOutlivesThePause(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	proc := newFakeLiveProc("sess")
+	proc.owe(1)
+	results := make(chan *agentproc.Result, 8)
+	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
+	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
+	results <- want
+
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
+
+	if out.result != want {
+		t.Errorf("result = %+v, want the conclusion the queued turn produced", out.result)
+	}
+	if out.hibernated {
+		t.Error("a pause with a turn still owed must not park")
 	}
 }
 
@@ -327,9 +406,10 @@ func TestDriveLiveConversation_BoundedResumeRepromptsInvalid(t *testing.T) {
 	}
 }
 
-// TestDriveLiveConversation_BoundedResumeNoneHandsBack: a bounded resume (idleTimeout 0)
-// has no idle timer to close a warm process, so a no-conclusion turn is handed
-// straight back (not looped) for processCompletion to mark open.
+// TestDriveLiveConversation_BoundedResumeNoneHandsBack: with no idle backstop
+// armed (idleTimeout 0, the resume's shape) a no-conclusion turn takes the same
+// exit as with one — the process is closed and the result handed back for
+// processCompletion to park.
 func TestDriveLiveConversation_BoundedResumeNoneHandsBack(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
@@ -343,7 +423,7 @@ func TestDriveLiveConversation_BoundedResumeNoneHandsBack(t *testing.T) {
 		t.Errorf("result = %+v, want the no-conclusion result handed back", out.result)
 	}
 	if !proc.wasClosed() {
-		t.Error("expected the process closed (a bounded resume does not keep it warm)")
+		t.Error("expected the process closed on the no-conclusion turn")
 	}
 }
 
@@ -371,19 +451,29 @@ func TestDriveLiveConversation_InvalidThenValidReturns(t *testing.T) {
 	}
 }
 
-// TestDriveLiveConversation_NoneFlipsStatusOpen: an autonomous turn that ends without a
-// conclusion flips the run to `open` in the DB while the process stays warm —
-// so a crash in the warm window leaves an open run (which the boot reconcile
-// leaves alone) rather than a running one (which it would re-queue). We deliver
-// a no-conclusion turn followed by a valid one: the driver returns the valid
-// result, and the row is left `open` from the no-conclusion turn (driveLiveConversation
-// records the conclusion via processCompletion, not here).
-func TestDriveLiveConversation_NoneFlipsStatusOpen(t *testing.T) {
+// activeClaimState reads one claim's release state: whether it is still
+// live, and the outcome it released with (empty while live).
+func activeClaimState(t *testing.T, database *sql.DB, claimID string) (live bool, outcome string) {
+	t.Helper()
+	var released sql.NullString
+	var out sql.NullString
+	if err := database.QueryRow(`SELECT released_at, outcome FROM claims WHERE id = ?`, claimID).Scan(&released, &out); err != nil {
+		t.Fatalf("read claim %s: %v", claimID, err)
+	}
+	return !released.Valid, out.String
+}
+
+// TestDriveLiveConversation_NoneLeavesTheClaimForCompletion pins the order the
+// fix depends on: a no-conclusion turn does NOT park from inside the driver.
+// The process is closed and the result handed back with the engagement's claim
+// still live, and processCompletion parks — so the claim is released only
+// after the process that wrote under it is gone. A park written here, with
+// the process still alive to take a steer, is what killed steered turns on
+// the fence.
+func TestDriveLiveConversation_NoneLeavesTheClaimForCompletion(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-none", "sess-none", "/tmp/wt-none")
-	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-none'`); err != nil {
-		t.Fatalf("set running: %v", err)
-	}
+	claimID := markEngaged(t, database, "r-none")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	var taskID string
@@ -392,39 +482,44 @@ func TestDriveLiveConversation_NoneFlipsStatusOpen(t *testing.T) {
 	}
 	proc := newFakeLiveProc("sess-none")
 	results := make(chan *agentproc.Result, 8)
-	results <- &agentproc.Result{Result: "prose, no completion envelope"}
-	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
-	results <- want
+	none := &agentproc.Result{Result: "prose, no completion envelope"}
+	results <- none
 	park := liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: "r-none", taskID: taskID,
 		namespace: "seedbpr-r-none", claudeCwd: "/tmp/wt-none",
 		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
+		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
 	}
 
 	out := s.driveLiveConversation(context.Background(), park, proc, results, make(chan struct{}), time.Minute)
-	if out.result != want {
-		t.Fatalf("result = %+v, want the valid conclusion after the open turn", out.result)
+	if out.result != none {
+		t.Fatalf("result = %+v, want the no-conclusion turn handed back", out.result)
 	}
-	var status string
+	if !proc.wasClosed() {
+		t.Error("the process must be closed before the result is handed back")
+	}
+	if live, outcome := activeClaimState(t, database, claimID); !live {
+		t.Errorf("claim released %q by the driver; the park (and the release) belong to processCompletion, after the process is gone", outcome)
+	}
+	var status sql.NullString
 	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-none'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
-	if status != "open" {
-		t.Errorf("status = %q, want open (a no-conclusion turn flips the run open)", status)
+	if status.Valid && status.String == "open" {
+		t.Error("status = open; the driver must not flip a row its process could still write to")
 	}
 }
 
-// TestDriveLiveConversation_InterruptParksOpenNotTerminal pins the pause semantics: a
-// result the reader marked Interrupted (our own interrupt() ended the turn)
-// is a pause, not a failure — the run flips open, the process stays warm, and
-// the driver keeps consuming turns. The follow-up valid conclusion proves the
-// loop survived the pause.
+// TestDriveLiveConversation_InterruptParksOpenNotTerminal pins the pause
+// semantics: a result the reader marked Interrupted (our own interrupt() ended
+// the turn) is a pause, not a failure — the run parks open with its claim
+// released 'parked', and the process is closed BEFORE that park lands, never
+// left alive for a message that has not arrived. A second result left on the
+// channel proves the driver returned on the pause.
 func TestDriveLiveConversation_InterruptParksOpenNotTerminal(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-pause", "sess-pause", "/tmp/wt-pause")
-	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-pause'`); err != nil {
-		t.Fatalf("set running: %v", err)
-	}
+	claimID := markEngaged(t, database, "r-pause")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	var taskID string
@@ -432,27 +527,43 @@ func TestDriveLiveConversation_InterruptParksOpenNotTerminal(t *testing.T) {
 		t.Fatalf("read task_id: %v", err)
 	}
 	proc := newFakeLiveProc("sess-pause")
+	// At the moment the driver lets go of the process, the claim is still
+	// live: the park comes after, once nothing can write under it.
+	proc.onClose = func() {
+		if live, outcome := activeClaimState(t, database, claimID); !live {
+			t.Errorf("claim released %q before the process was closed", outcome)
+		}
+	}
 
 	results := make(chan *agentproc.Result, 8)
 	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
-	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
-	results <- want
+	results <- &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
 	park := liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: "r-pause", taskID: taskID,
 		namespace: "seedbpr-r-pause", claudeCwd: "/tmp/wt-pause",
 		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
+		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
 	}
 
 	out := s.driveLiveConversation(context.Background(), park, proc, results, make(chan struct{}), time.Minute)
-	if out.result != want {
-		t.Fatalf("result = %+v, want the valid conclusion after the pause (pause must not be terminal)", out.result)
+	if !out.hibernated {
+		t.Fatalf("a pause with nothing queued should park open (hibernated), got %+v", out)
+	}
+	if !proc.wasClosed() {
+		t.Error("a pause with nothing queued must close the process")
+	}
+	if len(results) != 1 {
+		t.Errorf("results left = %d, want 1 (the driver must not read past the pause)", len(results))
 	}
 	var status string
 	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-pause'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != "open" {
-		t.Errorf("status = %q, want open (the paused turn flips the run open)", status)
+		t.Errorf("status = %q, want open (the paused turn parks the run open)", status)
+	}
+	if live, outcome := activeClaimState(t, database, claimID); live || outcome != "parked" {
+		t.Errorf("claim live=%v outcome=%q, want released 'parked'", live, outcome)
 	}
 }
 
@@ -475,9 +586,9 @@ func TestDriveLiveConversation_ErrorWithoutInterruptStaysTerminal(t *testing.T) 
 	}
 }
 
-// TestDriveLiveConversation_InterruptBoundedResumeParksOpen: pausing during a bounded
-// resume (no idle timer) can't loop — the driver closes the process and parks
-// the run open to a durable resume.
+// TestDriveLiveConversation_InterruptBoundedResumeParksOpen: a pause with no
+// idle backstop armed (the resume's shape) takes the same exit — the driver
+// closes the process and parks the run open to a durable resume.
 func TestDriveLiveConversation_InterruptBoundedResumeParksOpen(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess-bounded")

@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -80,6 +82,14 @@ const (
 	closeKillTimeout = 5 * time.Second
 )
 
+// ErrRunClosing is what Send returns once Close has begun. The wrapper's
+// input is being ended, so a message written now lands in a queue the query
+// is draining out of and is never answered — refusing it is what lets the
+// caller avoid recording a delivery that did not happen. A caller that meant
+// to reach the conversation rather than this process re-reads it: the park
+// this close precedes is what makes a queued follow-up the right door.
+var ErrRunClosing = errors.New("live run is closing")
+
 // LiveRun is a single long-lived streaming-input agent process you can
 // send messages to, interrupt, switch permission modes on, and answer
 // tool-permission prompts for. Created by RunInteractive; unlike the
@@ -120,6 +130,19 @@ type LiveRun struct {
 	// (not just consts) so tests can drive the timeout paths quickly.
 	drainTimeout time.Duration
 	killTimeout  time.Duration
+
+	// closing is raised at the top of Close, ahead of the end control, so a
+	// Send racing the close is refused (ErrRunClosing) instead of written
+	// into an input the wrapper is about to end.
+	closing atomic.Bool
+
+	// queuedTurns counts user messages sent in that no result has answered
+	// yet. Every Send is a turn the process owes — the SDK queues a message
+	// that arrives mid-turn and runs it as the next one — and every result
+	// settles one. Read at a turn boundary, it is how the driver tells a
+	// process with nothing left to do from one about to start a turn a
+	// steer queued while the last was running.
+	queuedTurns atomic.Int64
 
 	mu        sync.Mutex
 	termErr   error
@@ -225,8 +248,12 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 }
 
 // Send delivers a user message to the agent. It blocks until the wrapper
-// has signaled readiness (or the run finishes / ctx cancels first).
+// has signaled readiness (or the run finishes / ctx cancels first), and
+// refuses with ErrRunClosing once Close has begun.
 func (l *LiveRun) Send(ctx context.Context, text string) error {
+	if l.closing.Load() {
+		return ErrRunClosing
+	}
 	select {
 	case <-l.ready:
 	case <-l.done:
@@ -234,11 +261,38 @@ func (l *LiveRun) Send(ctx context.Context, text string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	// Counted before the write goes out, so the result answering it can
+	// never be read against a count that has not seen the send.
+	l.queuedTurns.Add(1)
 	if err := l.writeControl(map[string]any{"kind": "user_message", "text": text}); err != nil {
+		l.queuedTurns.Add(-1)
 		return err
 	}
 	l.stream.MarkRequest()
 	return nil
+}
+
+// QueuedTurns reports how many user messages sent in are still unanswered by
+// a result: the turns the process owes. Zero at a turn boundary means the
+// process has nothing left to do; more means a message queued mid-turn is
+// about to start the next one.
+func (l *LiveRun) QueuedTurns() int {
+	return int(l.queuedTurns.Load())
+}
+
+// turnAnswered settles one owed turn on a result, floored at zero: the count
+// is only ever a reading of sends the reader has not yet seen answered, and a
+// result the process produced on its own is not a debt below zero.
+func (l *LiveRun) turnAnswered() {
+	for {
+		n := l.queuedTurns.Load()
+		if n <= 0 {
+			return
+		}
+		if l.queuedTurns.CompareAndSwap(n, n-1) {
+			return
+		}
+	}
 }
 
 // Interrupt stops the agent's current turn. The wrapper acknowledges
@@ -266,6 +320,9 @@ func (l *LiveRun) SetMode(ctx context.Context, mode string) error {
 // process to exit, then SIGKILLs the process group on timeout. Returns
 // the run's terminal error, if any.
 func (l *LiveRun) Close() error {
+	// Raised before the end control goes out: from here a Send is refused,
+	// so no message can be queued behind an input the wrapper is ending.
+	l.closing.Store(true)
 	// Best-effort graceful end; ignore the write error (the process may
 	// already be gone, in which case the drain wait returns immediately).
 	_ = l.writeControl(map[string]any{"kind": "end"})
@@ -496,6 +553,10 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 				}
 
 				if result != nil {
+					// Settled before the result is handed on, so a driver
+					// reading QueuedTurns off the result it just received sees
+					// this turn already paid for.
+					l.turnAnswered()
 					if interruptPending {
 						// This result closes the turn our interrupt() ended.
 						// parseResult already marks Interrupted from the SDK's

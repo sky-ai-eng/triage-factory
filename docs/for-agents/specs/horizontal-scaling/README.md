@@ -594,7 +594,7 @@ claim → execute); three additions to the claim:
   the self-fence failed and is logged at error level as an incident
   signal.
 - **Graceful drain** (deploys, scale-down): set `draining=true` → the
-  executor stops claiming; live runs finish or hibernate-on-idle
+  executor stops claiming; live runs finish or park at their turn end
   (TFAC-305) — the fleet's natural quiesce; when `active_runs=0` the
   operator retires it. Dashboard badge + one CLI/API verb.
 

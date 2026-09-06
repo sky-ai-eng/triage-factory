@@ -1,9 +1,19 @@
 // Live-run execution: every run executes as a long-lived agentproc.LiveRun
 // (a streaming-input process you can message/interrupt) rather than a
 // one-shot blocking call. The driver here turns one live invocation into a
-// terminal disposition — a turn-terminal result, an idle hibernation, or a
-// process exit — and feeds the shared post-stream branching (processCompletion)
-// exactly as the one-shot path did.
+// terminal disposition — a turn-terminal result, a park, or a process exit —
+// and feeds the shared post-stream branching (processCompletion) exactly as
+// the one-shot path did.
+//
+// The process lives exactly as long as its engagement's claim. A turn that
+// ends without concluding closes the process and parks the conversation,
+// and a follow-up wakes a fresh claim that resumes the same session by id;
+// the one thing that keeps a process alive past a turn boundary is a turn it
+// already owes — a message steered in while the last one ran, which the SDK
+// queues and starts next. Nothing is kept warm between turns, because a
+// parked conversation has no claim, and every transcript write an engagement
+// makes is fenced on its claim: a process left alive past its park would be
+// killed by the fence on its next word.
 //
 // Two execution backends share one disposition shape (liveOutcome): the
 // LiveRun driver (both local direct runs and multi-mode gVisor-sandboxed runs
@@ -30,8 +40,9 @@ import (
 // liveProc is the slice of *agentproc.LiveRun the driver loop needs. Pulled
 // out as an interface so driveLiveConversation is unit-testable with a fake process
 // (no subprocess) — the real *agentproc.LiveRun satisfies it. Send delivers a
-// follow-up message into the same warm process (used by the invalid-envelope
-// re-prompt-to-fix).
+// follow-up message into the same live process (used by the invalid-envelope
+// re-prompt-to-fix); QueuedTurns is how many messages sent into it are still
+// unanswered, which at a turn boundary is whether it owes another turn.
 type liveProc interface {
 	Done() <-chan struct{}
 	Result() *agentproc.Result
@@ -39,11 +50,12 @@ type liveProc interface {
 	Stderr() string
 	Err() error
 	Send(ctx context.Context, text string) error
+	QueuedTurns() int
 	Close() error
 }
 
-// liveParkContext carries the identity an idle hibernation needs to snapshot
-// the workspace and park the run to open.
+// liveParkContext carries the identity a park needs to snapshot the
+// workspace and flip the run to open.
 type liveParkContext struct {
 	orgID          string
 	conversationID string
@@ -73,11 +85,13 @@ type liveParkContext struct {
 // ResumeWithMessage branch on a single shape:
 //
 //   - result set        → a turn produced a valid conclusion (or an IsError /
-//     crash result); the caller runs processCompletion (finalize / advance /
-//     fail-with-reason).
-//   - hibernated true    → the live process went idle and was parked to
-//     open (snapshot written, status flipped); the caller returns dormant,
-//     keeping the warm worktree.
+//     crash result, or ended with no conclusion at all); the caller runs
+//     processCompletion (finalize / advance / fail-with-reason / park open).
+//     The process is already closed.
+//   - hibernated true    → the driver parked the conversation open itself
+//     (snapshot written, status flipped): a paused turn, or a process quiet
+//     past the idle backstop. The caller returns dormant, keeping the
+//     worktree.
 //   - fenced true       → a park this driver tried to write was refused: the
 //     engagement's claim is gone and a successor owns the conversation. Not
 //     hibernated, because nothing was parked; the caller records nothing at
@@ -96,13 +110,13 @@ type liveOutcome struct {
 }
 
 // liveRunSpec bundles everything runLiveAndDrive needs to spawn, register,
-// drive, and (on idle) hibernate one live agent invocation.
+// drive, and park one live agent invocation.
 type liveRunSpec struct {
 	park        liveParkContext
 	opts        agentproc.RunOptions
 	perms       agentproc.PermissionHandler
 	sink        agentproc.Sink
-	idleTimeout time.Duration // <=0 disables idle hibernation (e.g. the gate's bounded resume)
+	idleTimeout time.Duration // <=0 disables the idle backstop (the bounded resume)
 }
 
 // resultsBufferDepth sizes the OnResult channel runLiveAndDrive hands the
@@ -118,8 +132,8 @@ const resultsBufferDepth = maxCompletionRetries + 5
 
 // runLiveAndDrive starts an interactive agent process for the run, registers
 // it in the process registry so control ops can reach it, stamps executor
-// ownership, and drives it to a terminal result or an idle hibernation. The
-// process is closed and the handle deregistered by the time this returns.
+// ownership, and drives it to a terminal result or a park. The process is
+// closed and the handle deregistered by the time this returns.
 // Shared by the initial run path and the resume path so every run executes
 // uniformly as a LiveRun.
 func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOutcome {
@@ -130,11 +144,13 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	activity := make(chan struct{}, 64)
 
 	spec.opts.OnResult = func(r *agentproc.Result) {
-		// The driver consumes a result per turn: a valid conclusion closes the
+		// The driver consumes a result per turn: a conclusion closes the
 		// process and returns, an invalid one is re-prompted (the next turn
-		// produces the next result), and a no-conclusion turn keeps the process
-		// warm. A full buffer means results are arriving faster than the driver
-		// selects them; a non-blocking send keeps the reader goroutine moving.
+		// produces the next result), and a no-conclusion turn closes it too
+		// unless a steered turn is queued behind it (then the next turn
+		// produces the next result). A full buffer means results are
+		// arriving faster than the driver selects them; a non-blocking send
+		// keeps the reader goroutine moving.
 		// The driver only ever acts on the result it reads next, so an overflow
 		// drop loses a stale turn, never the one it will decide on — and
 		// resultsBufferDepth stays above the in-flight turn count by
@@ -195,25 +211,38 @@ func foldAccounting(classified, merged *agentproc.Result) *agentproc.Result {
 //   - valid conclusion → close the process and hand the result back for
 //     orchestration (finalize / advance / fail-with-reason).
 //   - invalid conclusion attempt (envelope-shaped but malformed / missing a
-//     required field) → re-prompt the same warm process to fix it, up to
+//     required field) → re-prompt the same live process to fix it, up to
 //     maxCompletionRetries; fail the run if it never corrects.
-//   - no conclusion (prose / nothing) → the run is open: keep the process
-//     warm, reset the idle timer, and loop. Whether the OS process stays warm
-//     is in-memory only; the status only flips to open on idle hibernation.
+//   - no conclusion (prose / nothing) → the run is open: close the process
+//     and hand the result back, and processCompletion parks the conversation
+//     with a snapshot. The next message wakes a fresh claim that resumes the
+//     same session by id.
 //
-// The idle timer resets on every stream activity, so a slow-but-working agent
-// (constant tool/text output) never hibernates — only a genuinely quiet
-// process does. idleTimeout<=0 disables hibernation AND the multi-turn loop:
-// it's the bounded-resume backstop (ResumeWithMessage), which expects exactly
-// one turn, so any result there is terminal and an open turn-end is handed
-// back rather than looped (no idle timer would ever close it).
+// A turn-end only closes the process when the process owes nothing more. A
+// message steered in while the turn ran is queued by the SDK and starts the
+// next turn on its own (proc.QueuedTurns), and that turn belongs to this
+// engagement — its claim is still live — so the driver stays and reads it
+// like any other. That is the whole of what survives a turn boundary:
+// nothing is kept warm for a message that has not arrived, because a parked
+// conversation has released its claim and the fence would kill the process
+// on its first write.
+//
+// A paused turn (our own interrupt ended it) is a turn-end like the others:
+// with nothing queued the process closes and the conversation parks open,
+// and a queued steer is read next.
+//
+// The idle timer is the backstop against a process that has stopped
+// producing without ending its turn: it resets on every stream activity, so
+// a slow-but-working agent never trips it, and a genuinely quiet one is
+// closed and parked. idleTimeout<=0 disables it — the bounded resume runs
+// without one, so a turn there is bounded by the process itself (its result,
+// its exit, or a stop), never by a clock.
 //
 // The idle window is armed at entry (process spawn). The first stream event —
 // typically system/init, sub-second — resets it, so idleTimeout is effectively
-// the grace a *no-output* process gets before hibernating; keep it well above
+// the grace a *no-output* process gets before parking; keep it well above
 // agent-startup latency (the 5-min default is; a tiny injected value will
-// hibernate before the first turn, which is exactly what the idle test leans
-// on).
+// park before the first turn, which is exactly what the idle test leans on).
 //
 // Pulled out from runLiveAndDrive so it can be driven with a fake proc +
 // hand-fed channels in tests, without spawning a subprocess.
@@ -222,14 +251,6 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 	if idle != nil {
 		defer idle.Stop()
 	}
-	// keepWarmOnNone distinguishes a long-lived autonomous run (a no-conclusion
-	// turn leaves the process warm and loops; idle later closes it) from a
-	// bounded backstop resume (no idle timer, so a no-conclusion turn is handed
-	// straight back rather than looped forever). Both hold a live process, so an
-	// invalid envelope is re-prompted in place either way — only the
-	// no-conclusion handling differs. Keyed off idleTimeout so the two callers
-	// stay on one driver.
-	keepWarmOnNone := idleTimeout > 0
 	invalidAttempts := 0
 
 	for {
@@ -248,27 +269,20 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 			// first-class (Result.Interrupted, from the wrapper's
 			// control/interrupted ack), the same signal Claude Code's own UI
 			// uses to render Esc gracefully. The session survives an interrupt,
-			// so park the run open with the process warm for the composer's
-			// next message.
+			// so the conversation parks open for the composer's next message
+			// rather than failing.
 			if r.Interrupted {
-				if !keepWarmOnNone {
-					// Bounded resume: no idle timer will ever close the warm
-					// process — close it and park to a durable resume.
-					_ = proc.Close()
-					if s.parkConversationOpen(ctx, park, proc.SessionID()) {
-						return liveOutcome{fenced: true}
-					}
-					return liveOutcome{hibernated: true}
+				if proc.QueuedTurns() > 0 {
+					// The pause has a steered turn behind it, and the process
+					// starts it next.
+					resetIdleTimer(idle, idleTimeout)
+					continue
 				}
-				// A refused park means a successor is driving this conversation.
-				// Looping would keep a zombie agent producing turns against it,
-				// so close and hand the refusal back instead.
-				if s.markConversationOpen(ctx, park) {
-					_ = proc.Close()
+				_ = proc.Close()
+				if s.parkConversationOpen(ctx, park, proc.SessionID()) {
 					return liveOutcome{fenced: true}
 				}
-				resetIdleTimer(idle, idleTimeout)
-				continue
+				return liveOutcome{hibernated: true}
 			}
 			// An IsError result (max-turns, runtime error) is terminal
 			// regardless of envelope shape — hand it back; processCompletion
@@ -295,8 +309,7 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 					return liveOutcome{result: r}
 				}
 				// An envelope attempt that didn't validate — correct it in place on
-				// the warm process and wait for the next turn. Identical for an
-				// autonomous run and a bounded resume: both hold a live process.
+				// the live process and wait for the next turn.
 				invalidAttempts++
 				if err := proc.Send(ctx, invalidEnvelopeCorrection()); err != nil {
 					_ = proc.Close()
@@ -305,38 +318,30 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 				resetIdleTimer(idle, idleTimeout) // sending is activity
 
 			case turnNone:
-				if !keepWarmOnNone {
-					// Bounded resume: no idle timer would ever close a warm process,
-					// so don't loop — hand the no-conclusion result back and let
-					// processCompletion mark the run open.
-					_ = proc.Close()
-					return liveOutcome{result: r}
+				if proc.QueuedTurns() > 0 {
+					// The turn ended, but a message steered in while it ran is
+					// queued and starts the next one — the conversation is
+					// still being driven, under the same claim.
+					resetIdleTimer(idle, idleTimeout)
+					continue
 				}
-				// The turn ended without a conclusion → the run is open (not
-				// executing, not concluded). Flip the status now: the process stays
-				// warm in s.procs for a follow-up message, but whether it's warm is
-				// never a status — so a crash here leaves an `open` run that the boot
-				// reconcile correctly leaves alone (nothing to resume). No retry, no
-				// fail, no claim about why. Re-arm idle and loop; idle later closes
-				// the warm process (status stays open).
-				//
-				// Unless the fence refuses it — then this engagement lost the
-				// conversation mid-turn, and the next loop would be a zombie
-				// taking another turn on a run somebody else is driving.
-				if s.markConversationOpen(ctx, park) {
-					_ = proc.Close()
-					return liveOutcome{fenced: true}
-				}
-				resetIdleTimer(idle, idleTimeout)
+				// The turn ended without a conclusion and nothing is queued
+				// behind it → the run is open (not executing, not concluded).
+				// Close the process and hand the result back; processCompletion
+				// parks the conversation with a snapshot, and the status flips
+				// only once the process is gone — so the row never reads open
+				// while a process that could still write to it is alive.
+				_ = proc.Close()
+				return liveOutcome{result: r}
 			}
 
 		case <-activity:
 			resetIdleTimer(idle, idleTimeout)
 
 		case <-idleC:
-			// Quiet past the threshold with no input to act on — park the run open
-			// to a durable resume. The status flips to open here; whether a process
-			// was warm was never a status.
+			// Quiet past the threshold with no turn-end in sight — the process
+			// has stopped producing. Close it and park the run open to a
+			// durable resume.
 			_ = proc.Close()
 			if s.parkConversationOpen(ctx, park, proc.SessionID()) {
 				return liveOutcome{fenced: true}
@@ -363,14 +368,12 @@ func invalidEnvelopeCorrection() string {
 }
 
 // markConversationOpen flips a conversation's status to `open` under a race
-// guard, then nudges the board + UI. The shared flip for every park: the warm
-// path (the live driver's no-conclusion turn, where the process stays warm in
-// s.procs and there's nothing to snapshot yet), parkConversationOpen (process
-// gone — snapshots first), and a cancel (park.reason names the stop). Flipping
-// on the no-conclusion turn, rather than only at idle, is what makes a crash in
-// the warm window recover correctly: the boot reconcile leaves `open` runs
-// alone, since a restart provides no input to resume them. Nil-safe so the
-// no-DB driver tests can exercise the loop.
+// guard, then nudges the board + UI. The shared flip for every park:
+// parkConversationOpen (the process is gone — it opens the snapshot record
+// first, then flips, then persists), and the dispatcher's setup-time parks,
+// which have no workspace to snapshot yet. A cancel is a park too
+// (park.reason names the stop). Nil-safe so the no-DB driver tests can
+// exercise the loop.
 //
 // Routing has three arms, and which one a park takes says who is speaking. An
 // engagement parking its own run (claimID set) goes through the claim fence,
@@ -446,13 +449,14 @@ func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext
 	return false
 }
 
-// parkConversationOpen records a run as `open` when its process is gone — the live
-// driver idle-closed it, a one-shot/resume turn ended without a conclusion, or
-// someone cancelled it. It flips the status via markConversationOpen and then
-// snapshots the workspace (the cold-resume backstop) so a resume that lands
-// without the warm worktree can rebuild it. markConversationOpen is the
-// warm-process sibling (no snapshot — the process is still alive to take the
-// next message). "open" makes no claim about why the run stopped or who
+// parkConversationOpen records a run as `open` when its process is gone — a
+// turn ended without a conclusion, the live driver closed a paused or quiet
+// process, or someone cancelled it. It flips the status via
+// markConversationOpen and then snapshots the workspace (the cold-resume
+// backstop) so a resume that lands without the worktree can rebuild it. The
+// process is closed before this is reached, always: a status that reads open
+// while a process could still write to the row is a status the fence would
+// have to kill. "open" makes no claim about why the run stopped or who
 // continues it; any later input resumes it on the same ResumeWithMessage path.
 //
 // The cancel path is this same function, and that is the point: the old

@@ -228,18 +228,19 @@ func (s *Spawner) noteCapAcquireImmediate(capN int) {
 	}
 }
 
-// DefaultIdleHibernateTimeout is how long a live run may go quiet (no
-// stream activity) before it hibernates to a durable resume. Capacity-
-// driven, not a cache TTL — a warm-but-idle process holds an execution
-// slot, not the server-side prompt cache. Tunable via
-// SetIdleHibernateTimeout (tests inject a short value).
+// DefaultIdleHibernateTimeout is how long a live run may go quiet — no
+// stream activity, no turn end — before the driver gives up on it and parks
+// the conversation to a durable resume. A backstop against a process that
+// has stopped producing, not a between-turns keep-alive: the process is
+// closed the moment a turn ends with nothing queued behind it, so this only
+// ever fires on a turn that went silent. Tunable via SetIdleHibernateTimeout
+// (tests inject a short value).
 const DefaultIdleHibernateTimeout = 5 * time.Minute
 
 // liveRunHandle wraps a run's live agent process plus the identity a
 // control op needs to reach it. Held in s.procs for the lifetime of the
 // run's live execution; the driver registers it when the process spawns
-// and deregisters it when the process closes (terminal, hibernation, or
-// cancel).
+// and deregisters it when the process closes (terminal, park, or cancel).
 type liveRunHandle struct {
 	lr             *agentproc.LiveRun
 	conversationID string
@@ -261,7 +262,7 @@ func (s *Spawner) registerProc(orgID, conversationID string, lr *agentproc.LiveR
 }
 
 // getProc returns the live handle for a run, or nil when the run has no
-// live process (never started, already hibernated, or terminated).
+// live process (never started, parked, or terminated).
 func (s *Spawner) getProc(conversationID string) *liveRunHandle {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -425,7 +426,7 @@ func (s *Spawner) awaitingCredentialsKnobs() (time.Duration, time.Duration) {
 }
 
 // RunController routes a live-process control op to wherever the run's
-// process actually lives. Interrupt and Steer drive the warm process;
+// process actually lives. Interrupt and Steer drive the live process;
 // Cancel signals the hard-kill ctx. At N=1 the in-process impl resolves
 // the target from s.procs / s.cancels; horizontal scaling replaces it with
 // a DB-signal to the executor that owns the run's lease, leaving the
@@ -445,8 +446,10 @@ type RunController interface {
 }
 
 // ErrNoLiveProcess is the typed error the control seam returns when a run has
-// no live process to reach — it terminated, idle-hibernated, or never started.
-// The P3 interrupt/message endpoints map it to 409 Conflict.
+// no live process to reach — it terminated, parked, or never started. The
+// interrupt/message endpoints map it to 409 Conflict, which tells the client
+// to re-read the conversation: a run that just parked takes the same message
+// through the queue.
 var ErrNoLiveProcess = errors.New("run has no live process")
 
 // inProcessController is the N=1 RunController: every run's process lives
@@ -466,7 +469,20 @@ func (c inProcessController) Steer(ctx context.Context, conversationID, text str
 	if h == nil {
 		return fmt.Errorf("steer run %s: %w", conversationID, ErrNoLiveProcess)
 	}
-	return h.lr.Send(ctx, text)
+	return steerSendError(conversationID, h.lr.Send(ctx, text))
+}
+
+// steerSendError is what a steer reports of the process's answer. A process
+// the driver is closing is one the registry still lists (the handle comes out
+// after Close returns) but that can take no more input, and to the caller
+// that is the same answer as no process at all — ErrNoLiveProcess, the
+// re-read-and-retry signal — rather than a write fault, which would report a
+// delivery that was never going to happen as an error in the sending.
+func steerSendError(conversationID string, err error) error {
+	if errors.Is(err, agentproc.ErrRunClosing) {
+		return fmt.Errorf("steer run %s: %w", conversationID, ErrNoLiveProcess)
+	}
+	return err
 }
 
 func (c inProcessController) Cancel(conversationID string) bool {

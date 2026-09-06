@@ -517,3 +517,21 @@ func TestInterrupt_LiveRoutesToController(t *testing.T) {
 		t.Errorf("interrupt = {calls:%d conversationID:%q}, want {1 run-live}", fc.interruptCalls, fc.interruptConversationID)
 	}
 }
+
+// TestSteerSendError_ClosingReadsAsNoLiveProcess: a process the driver is
+// closing still sits in the registry until Close returns, and refuses the
+// send. The steer reports that as ErrNoLiveProcess — the 409 that tells the
+// client to re-read the conversation, which by then has parked and takes the
+// message through the queue — and leaves every other send error as it is.
+func TestSteerSendError_ClosingReadsAsNoLiveProcess(t *testing.T) {
+	if err := steerSendError("run-closing", agentproc.ErrRunClosing); !errors.Is(err, ErrNoLiveProcess) {
+		t.Errorf("closing process: err = %v, want ErrNoLiveProcess", err)
+	}
+	if err := steerSendError("run-live", nil); err != nil {
+		t.Errorf("accepted send: err = %v, want nil", err)
+	}
+	other := errors.New("write: broken pipe")
+	if err := steerSendError("run-live", other); !errors.Is(err, other) || errors.Is(err, ErrNoLiveProcess) {
+		t.Errorf("write fault: err = %v, want the fault itself", err)
+	}
+}

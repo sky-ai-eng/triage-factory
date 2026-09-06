@@ -602,7 +602,7 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	s.broadcastConversationFailed(orgID, conversationID, kind)
 
 	// A failed run won't resume, so drop the workspace snapshot it may have
-	// written when it parked (e.g. an idle hibernation that later failed
+	// written when it parked (e.g. a turn-end park that later failed
 	// mid-resume). Keyed by the run's own id: for a blueprint step (whose
 	// snapshot is keyed by blueprint_run_id) this is a harmless no-op and
 	// terminateBlueprint owns that blob; for a run that never snapshotted it's

@@ -160,7 +160,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	defer s.ExpirePermissionsForClaim(orgID, cfg.claimID)
 
 	// parked is set true when this run ends dormant rather than terminating:
-	// idle hibernation flips it to `open` (runAgent, below). The per-run cleanup
+	// a park flips it to `open` (runAgent, below). The per-run cleanup
 	// defers below read it to KEEP the worktree and session JSONL on disk as the
 	// warm resume cache — mirroring the isBlueprintStep skip. Captured by
 	// reference by the deferred closures, so they observe its final value at
@@ -700,8 +700,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		s.assertResumeCoordinates(context.WithoutCancel(ctx), orgID, conversationID, resumeCheckRest)
 	}
 
-	// Idle hibernation parked the run (status `open`, snapshot written) — a
-	// dormant disposition, so keep the warm worktree as the fast resume path.
+	// The driver parked the run itself (status `open`, snapshot written) — a
+	// paused turn, or the idle backstop — a dormant disposition, so keep the
+	// warm worktree as the fast resume path.
 	if out.hibernated {
 		parked = true
 		return
@@ -730,10 +731,10 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 //     advance or close). A queued review/PR is an async sidecar artifact and
 //     never parks the run; the step completes with its real outcome.
 //   - no conclusion (prose / nothing) → the run is open, not a termination:
-//     park it open (snapshot + flip + keep the warm worktree) and return. The
-//     live driver normally consumes this in its loop; it reaches here only from
-//     the one-shot/resume backends (which hold no warm process) or a crash that
-//     left a complete-but-open last turn.
+//     park it open (snapshot + flip + keep the warm worktree) and return.
+//     Every backend hands its no-conclusion turn here with the process
+//     already closed — the live driver included, which is what lets the flip
+//     land after the process is gone rather than under it.
 //   - invalid attempt / IsError → record failed (a knowable error) with the
 //     totals already folded onto the result.
 //

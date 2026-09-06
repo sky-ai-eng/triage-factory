@@ -191,8 +191,8 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		}
 		// Drain: an operator asked this instance to quiesce (the CLI drain
 		// verb flips instances.draining; the next heartbeat reads it back —
-		// see heartbeatOnce). Live runs finish or hibernate-on-idle; no new
-		// claims start.
+		// see heartbeatOnce). Live runs finish or park at their turn end; no
+		// new claims start.
 		if s.Draining() {
 			return
 		}
@@ -978,6 +978,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		ExtraAllowedTools: extraTools,
 		Namespace:         namespace,
 		TeamID:            conv.TeamID,
+		TaskID:            task.ID,
 		sidecar:           sidecar,
 		localGit:          localGit,
 		claimID:           conv.ClaimID,
