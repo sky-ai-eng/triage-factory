@@ -232,10 +232,12 @@ docker compose up -d
 
 Only the `triagefactory` (control) service carries these variables — it serves the connect ceremony and the webhook receiver, and its background brain mints a connected workspace's installation tokens and seals them into the per-run bundles executors receive. An executor never holds the App key, so nothing forwards it there.
 
+Keep the PEM `chmod 600` and owned by you; the pod makes its own copy readable to the uid it runs as ([file ownership](secrets.md#file-ownership)). In a source checkout, `secrets/` and `compose.override.yml` are gitignored.
+
 Check it took:
 
 1. `docker compose logs triagefactory | grep -i "deployment github app"` prints nothing. A line there names the variable that is wrong (a non-numeric App ID, a PEM that will not parse, a missing member of the four).
-2. On GitHub, open the App → **Advanced → Recent Deliveries**. The `ping` GitHub sent when you created the App failed with `401`, because TF did not have the webhook secret yet. Press **Redeliver**: it now returns `204`. That proves the URL, the secret, and TLS in one go.
+2. On GitHub, open the App → **Advanced → Recent Deliveries**. The `ping` GitHub sent when you created the App failed with `401`, because TF did not have the webhook secret yet. Press **Redeliver**: it now returns `204`. That proves the URL, the secret, and TLS in one go. A `302` here means something in front of TF answered instead — an identity-aware proxy such as Cloudflare Access, IAP or oauth2-proxy sends GitHub to its login page. Exempt `POST ${TF_PUBLIC_URL}/api/webhooks/github` from it (and `/api/webhooks/github/{org_id}`, which workspaces' own Apps deliver to). TF verifies every delivery's signature itself, so the exemption exposes nothing. Until then everything still works: GitHub is polled, and a webhook only makes a change land sooner.
 3. In any workspace with no GitHub credential, **Workspace Settings → GitHub access** now offers **Connect GitHub…**.
 
 ### 8.5 What to expect afterwards

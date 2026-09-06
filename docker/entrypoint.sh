@@ -6,9 +6,10 @@
 #      failure so a not-yet-ready Postgres doesn't hard-fail the
 #      container before compose/Fly finishes wiring DNS. Idempotent
 #      and safe to re-run on every restart.
-#   2. Privilege separation (multi mode only): spawn the cap-broker on a
-#      sandbox-hosting role (all, executor) — control skips it — then exec
-#      into the orchestrator with its capabilities dropped, on every role.
+#   2. Privilege separation (multi mode only): stage file-backed secrets
+#      for the orchestrator uid, spawn the cap-broker on a sandbox-hosting
+#      role (all, executor) — control skips it — then exec into the
+#      orchestrator with its capabilities dropped, on every role.
 #   3. exec the binary so tini/the container sees its signals
 #      directly (no shell intermediary swallowing SIGTERM).
 #
@@ -206,6 +207,26 @@ if [ "$(uname -s)" = "Linux" ] && multi_mode; then
     # default — see docs/security/privilege-separation.md.
     [ -d /data ] && chown "$TF_ORCHESTRATOR_UID:$TF_ORCHESTRATOR_GID" /data
     [ -d /opt/triagefactory/sandbox ] && chown "$TF_ORCHESTRATOR_UID:$TF_ORCHESTRATOR_GID" /opt/triagefactory/sandbox
+
+    # File-backed secrets (NAME_FILE) arrive as bind mounts that keep the
+    # host file's owner and mode — Docker Compose ignores a `file:` secret's
+    # uid/gid/mode, and says so — so a key the operator keeps 0600 is
+    # readable by root, which is how `migrate up` above already read it, and
+    # not by the uid the exec below switches to. Give the orchestrator its
+    # own copy of each one and point the variable at the copy. The mount is
+    # never chown'd or chmod'd: it is the operator's file on the host. A
+    # variable naming a file root cannot read is left as it is, so the
+    # binary's own set-but-unreadable check reports it rather than a copy
+    # failure here. The variable set is read from the environment so it
+    # follows secretenv's NAME_FILE convention without a second list.
+    TF_SECRET_STAGE_DIR="${TF_SECRET_STAGE_DIR:-/run/tf-secrets}"
+    for var in $(awk 'BEGIN { for (k in ENVIRON) if (k ~ /^TF_[A-Z0-9_]+_FILE$/) print k }'); do
+        src=$(eval "printf '%s' \"\$$var\"")
+        [ -n "$src" ] && [ -r "$src" ] || continue
+        [ -d "$TF_SECRET_STAGE_DIR" ] || install -d -m 0700 -o "$TF_ORCHESTRATOR_UID" -g "$TF_ORCHESTRATOR_GID" "$TF_SECRET_STAGE_DIR"
+        install -m 0400 -o "$TF_ORCHESTRATOR_UID" -g "$TF_ORCHESTRATOR_GID" "$src" "$TF_SECRET_STAGE_DIR/$var"
+        export "$var=$TF_SECRET_STAGE_DIR/$var"
+    done
 
     # The control role skips the broker entirely (see control_role above):
     # it never launches a sandbox, and the Go side role-gates the broker to
