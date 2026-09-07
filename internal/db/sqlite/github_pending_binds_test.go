@@ -36,9 +36,10 @@ func TestGitHubPendingBinds_SQLite(t *testing.T) {
 		}
 
 		return dbtest.GitHubPendingBindBackend{
-			Store:  stores.GitHubPendingBinds,
-			OrgID:  orgID,
-			UserID: uuid.NewString(),
+			Store:       stores.GitHubPendingBinds,
+			OrgID:       orgID,
+			UserID:      uuid.NewString(),
+			OtherUserID: uuid.NewString(),
 		}
 	})
 }

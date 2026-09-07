@@ -56,20 +56,26 @@ func (s *gitHubPendingBindStore) CreateSystem(ctx context.Context, bind domain.G
 	return stored, nil
 }
 
-func (s *gitHubPendingBindStore) ConsumeSystem(ctx context.Context, nonceHash string, now time.Time) (*domain.GitHubPendingBind, error) {
+func (s *gitHubPendingBindStore) ConsumeSystem(ctx context.Context, nonceHash, userID string, now time.Time) (*domain.GitHubPendingBind, error) {
 	now = now.UTC()
-	// One conditional UPDATE decides everything: absent, expired and
-	// already-consumed all match nothing, and a second caller arriving on the
-	// same row finds consumed_at already set. There is no read to lose a race
-	// against.
+	if !isValidUUID(userID) {
+		// A user id that cannot be a row's is the same answer as nobody's,
+		// and never reaches the query as a comparison against a uuid column.
+		return nil, nil
+	}
+	// One conditional UPDATE decides everything: absent, expired,
+	// already-consumed and somebody else's all match nothing, and a second
+	// caller arriving on the same row finds consumed_at already set. There is
+	// no read to lose a race against.
 	row := s.admin.QueryRowContext(ctx, `
 		UPDATE github_pending_binds
 		   SET consumed_at = $1
 		 WHERE nonce_hash = $2
+		   AND user_id = $3
 		   AND consumed_at IS NULL
 		   AND expires_at > $1
 		RETURNING `+pgPendingBindColumns,
-		now, nonceHash)
+		now, nonceHash, userID)
 	stored, err := scanPendingBind(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Nothing to spend. The caller refuses identically for every reason a

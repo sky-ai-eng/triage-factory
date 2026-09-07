@@ -17,6 +17,9 @@ type GitHubPendingBindBackend struct {
 	Store  db.GitHubPendingBindStore
 	OrgID  string
 	UserID string
+	// OtherUserID is a second, well-formed user id that started nothing —
+	// what a cookie replayed into another session presents as.
+	OtherUserID string
 }
 
 // GitHubPendingBindFactory returns a fresh, isolated backend per subtest so
@@ -87,7 +90,7 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 		be := mk(t)
 		create(t, be, "hash-consume", db.GitHubPendingBindTTL)
 
-		got, err := be.Store.ConsumeSystem(ctx, "hash-consume", time.Now().UTC())
+		got, err := be.Store.ConsumeSystem(ctx, "hash-consume", be.UserID, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("ConsumeSystem: %v", err)
 		}
@@ -118,7 +121,7 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 			if _, err := be.Store.CreateSystem(ctx, rec); err != nil {
 				t.Fatalf("CreateSystem(%s): %v", rec.NonceHash, err)
 			}
-			got, err := be.Store.ConsumeSystem(ctx, rec.NonceHash, now)
+			got, err := be.Store.ConsumeSystem(ctx, rec.NonceHash, be.UserID, now)
 			if err != nil || got == nil {
 				t.Fatalf("ConsumeSystem(%s) = %v, %v", rec.NonceHash, got, err)
 			}
@@ -129,15 +132,32 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 		}
 	})
 
+	t.Run("ConsumeIsScopedToItsInitiator", func(t *testing.T) {
+		// A cookie replayed into somebody else's session names a real record,
+		// and must spend nothing: the record stays for the person who
+		// started it, and the other session gets the same nil as for a nonce
+		// that never existed.
+		be := mk(t)
+		create(t, be, "hash-mine", db.GitHubPendingBindTTL)
+
+		if got, err := be.Store.ConsumeSystem(ctx, "hash-mine", be.OtherUserID, time.Now().UTC()); err != nil || got != nil {
+			t.Fatalf("ConsumeSystem as another user = (%v, %v), want (nil, nil)", got, err)
+		}
+		got, err := be.Store.ConsumeSystem(ctx, "hash-mine", be.UserID, time.Now().UTC())
+		if err != nil || got == nil {
+			t.Fatalf("ConsumeSystem as the initiator after a replay = (%v, %v), want the record — the replay must not have spent it", got, err)
+		}
+	})
+
 	t.Run("SecondConsumeFindsNothing", func(t *testing.T) {
 		be := mk(t)
 		create(t, be, "hash-once", db.GitHubPendingBindTTL)
 
-		first, err := be.Store.ConsumeSystem(ctx, "hash-once", time.Now().UTC())
+		first, err := be.Store.ConsumeSystem(ctx, "hash-once", be.UserID, time.Now().UTC())
 		if err != nil || first == nil {
 			t.Fatalf("first ConsumeSystem = (%v, %v), want a record", first, err)
 		}
-		second, err := be.Store.ConsumeSystem(ctx, "hash-once", time.Now().UTC())
+		second, err := be.Store.ConsumeSystem(ctx, "hash-once", be.UserID, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("second ConsumeSystem: %v", err)
 		}
@@ -167,7 +187,7 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 			go func() {
 				defer done.Done()
 				start.Wait()
-				got, err := be.Store.ConsumeSystem(ctx, "hash-race", time.Now().UTC())
+				got, err := be.Store.ConsumeSystem(ctx, "hash-race", be.UserID, time.Now().UTC())
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
@@ -196,7 +216,7 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 		// refuses it.
 		create(t, be, "hash-expired", -time.Minute)
 
-		got, err := be.Store.ConsumeSystem(ctx, "hash-expired", time.Now().UTC())
+		got, err := be.Store.ConsumeSystem(ctx, "hash-expired", be.UserID, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("ConsumeSystem: %v", err)
 		}
@@ -207,7 +227,7 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 
 	t.Run("UnknownNonceIsTheSameNilAsAnExpiredOne", func(t *testing.T) {
 		be := mk(t)
-		got, err := be.Store.ConsumeSystem(ctx, "hash-never-existed", time.Now().UTC())
+		got, err := be.Store.ConsumeSystem(ctx, "hash-never-existed", be.UserID, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("ConsumeSystem: %v", err)
 		}
@@ -221,12 +241,12 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 		create(t, be, "hash-a", db.GitHubPendingBindTTL)
 		create(t, be, "hash-b", db.GitHubPendingBindTTL)
 
-		if _, err := be.Store.ConsumeSystem(ctx, "hash-a", time.Now().UTC()); err != nil {
+		if _, err := be.Store.ConsumeSystem(ctx, "hash-a", be.UserID, time.Now().UTC()); err != nil {
 			t.Fatalf("ConsumeSystem(hash-a): %v", err)
 		}
 		// Spending one ceremony must not spend another the same admin started
 		// in a second tab.
-		got, err := be.Store.ConsumeSystem(ctx, "hash-b", time.Now().UTC())
+		got, err := be.Store.ConsumeSystem(ctx, "hash-b", be.UserID, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("ConsumeSystem(hash-b): %v", err)
 		}
@@ -242,7 +262,7 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 		create(t, be, "hash-ancient", -(db.GitHubPendingBindPruneAge + time.Hour))
 		create(t, be, "hash-live", db.GitHubPendingBindTTL)
 
-		if _, err := be.Store.ConsumeSystem(ctx, "hash-live", time.Now().UTC()); err != nil {
+		if _, err := be.Store.ConsumeSystem(ctx, "hash-live", be.UserID, time.Now().UTC()); err != nil {
 			t.Fatalf("ConsumeSystem(hash-live): %v", err)
 		}
 		// The pruned row is unspendable either way — it was already expired —

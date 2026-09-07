@@ -8,5 +8,10 @@
 -- to. App-validated.
 ALTER TABLE github_pending_binds ADD COLUMN leg TEXT NOT NULL DEFAULT 'authorize';
 
+-- A row with no account was minted for the install leg: the only records
+-- written without one are those, so the column says so rather than carrying
+-- the default for a leg the row never was.
+UPDATE github_pending_binds SET leg = 'install' WHERE account_login = '';
+
 -- +goose Down
 SELECT 'down not supported';

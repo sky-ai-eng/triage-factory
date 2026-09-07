@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -29,9 +30,10 @@ func TestGitHubPendingBinds_Postgres(t *testing.T) {
 		orgID := pgtest.SeedOrg(t, h, "bind-suite-org", userID)
 
 		return dbtest.GitHubPendingBindBackend{
-			Store:  stores.GitHubPendingBinds,
-			OrgID:  orgID,
-			UserID: userID,
+			Store:       stores.GitHubPendingBinds,
+			OrgID:       orgID,
+			UserID:      userID,
+			OtherUserID: uuid.NewString(),
 		}
 	})
 }

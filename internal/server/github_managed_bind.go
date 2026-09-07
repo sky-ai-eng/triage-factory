@@ -606,37 +606,42 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	record, err := s.githubPendingBinds.ConsumeSystem(r.Context(), hashBindNonce(nonce), timeNow().UTC())
+	claims := httpx.ClaimsFrom(r.Context())
+	if claims == nil || claims.Subject == "" {
+		s.renderBindOutcome(w, "", refuseSessionRequired)
+		return
+	}
+	userID := claims.Subject
+
+	// The record is spent AS THIS SESSION'S USER: the store's consume matches
+	// only a record that user started, so a colleague's still-live cookie on
+	// a shared machine names a record this session cannot spend, and it stays
+	// for the person who started it. The cookie proves the browser, the
+	// session proves the person, and the consume ties them together before
+	// anything is spent rather than after.
+	record, err := s.githubPendingBinds.ConsumeSystem(r.Context(), hashBindNonce(nonce), userID, timeNow().UTC())
 	if err != nil {
 		internalError(w, "github-managed-bind", err)
 		return
 	}
 	if record == nil {
-		// Absent, expired, or already spent — the store does not distinguish
-		// them and neither does the answer.
+		// Absent, expired, already spent, or somebody else's — the store does
+		// not distinguish them and neither does the answer. This is also the
+		// one refusal that renders with NO org, and the difference is the
+		// point: every other arm here is answering the person who started the
+		// ceremony, so a back-link into their own workspace's settings is both
+		// useful and something they already know, while a viewer holding a
+		// colleague's cookie has proven no relationship to any workspace at
+		// all, and naming one in a back-link would hand out an org id they
+		// never asked for — the disclosure the bound-elsewhere refusal is
+		// careful to avoid further down.
 		s.renderBindOutcome(w, "", refuseStaleCeremony)
 		return
 	}
 
 	// From here the org is the RECORD's, never a caller-supplied value. The
-	// session must be the admin who started this ceremony: the cookie proves
-	// the browser, this proves the person, and re-reading the role proves they
-	// still hold it now rather than when they clicked.
-	claims := httpx.ClaimsFrom(r.Context())
-	if claims == nil || claims.Subject != record.UserID {
-		// The one refusal below that renders with NO org, and the difference is
-		// the point. Every other arm here is answering the person who started
-		// the ceremony, so a back-link into their own workspace's settings is
-		// both useful and something they already know. This viewer is a
-		// different signed-in user holding a colleague's still-live cookie — a
-		// shared machine — and has proven no relationship to the record's
-		// workspace at all. Naming it in a back-link would hand out an org id
-		// they never asked for, which is the disclosure the bound-elsewhere
-		// refusal is careful to avoid two arms down.
-		s.renderBindOutcome(w, "", refuseStaleCeremony)
-		return
-	}
-	userID := claims.Subject
+	// role is read again now rather than trusted from the record: minutes
+	// have passed since the click.
 	orgID := record.OrgID
 	isAdmin, err := s.az.UserIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
@@ -657,13 +662,21 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 		hop     *installHop
 	)
 	switch {
-	case record.Leg == domain.GitHubBindLegInstall && record.AccountLogin != "":
+	case record.AccountLogin == "":
+		// Stored rows can carry no account: a record minted for the install
+		// leg by a build that sent the admin to GitHub's picker instead of
+		// asking for a name, still live for up to fifteen minutes across an
+		// upgrade. It completes as the install leg with no named account to
+		// hold the installation to — every other proof runs — so a connect
+		// that was legitimately started does not refuse because the pods
+		// changed underneath it.
+		refusal, account, err = s.completeManagedBind(r, orgID, userID, "")
+	case record.Leg == domain.GitHubBindLegInstall:
 		refusal, account, err = s.completeManagedBind(r, orgID, userID, record.AccountLogin)
-	case record.Leg == domain.GitHubBindLegAuthorize && record.AccountLogin != "":
+	case record.Leg == domain.GitHubBindLegAuthorize:
 		refusal, account, hop, err = s.completeNamedAccountBind(r, orgID, userID, nonce, record.AccountLogin)
 	default:
-		// A record this build cannot read — a leg it does not know, or one
-		// with no account — is not a ceremony it can complete.
+		// A leg this build does not know is not a ceremony it can complete.
 		refusal = &refuseStaleCeremony
 	}
 	if err != nil {
@@ -788,7 +801,7 @@ func (s *Server) completeManagedBind(r *http.Request, orgID, userID, namedLogin 
 		githubAppLog.Warn("managed bind: installation read answered for another installation", "org", orgID)
 		return &refuseInstallationUnreadable, "", nil
 	}
-	if !strings.EqualFold(inst.AccountLogin, namedLogin) {
+	if namedLogin != "" && !strings.EqualFold(inst.AccountLogin, namedLogin) {
 		// The ceremony was started for one account and GitHub installed on
 		// another: the preselection was changed on the way through. The gates
 		// below might well pass for this account too — the person may own

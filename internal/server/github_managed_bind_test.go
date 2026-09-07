@@ -1058,10 +1058,21 @@ func TestManagedBind_SessionIsNotTheInitiator(t *testing.T) {
 			t.Fatalf("insert org_membership: %v", err)
 		}
 		signIn(t, rig, other)
-
 		out := rig.callback(t, cookie, defaultCallbackQuery(4242))
 		assertOutcome(t, out, "link_expired")
 		rig.assertNothingBound(t)
+
+		// The colleague's attempt spent nothing: the record is still the
+		// initiator's to finish. This is what makes the refusal a refusal
+		// rather than a denial of service against whoever started it.
+		if rig.recordConsumed(t, cookie) {
+			t.Fatal("a callback from another session spent the initiator's record")
+		}
+		signIn(t, rig, rig.userID)
+		if out := rig.callback(t, cookie, defaultCallbackQuery(4242)); out.Code != http.StatusFound {
+			t.Errorf("the initiator could not finish after a colleague's replay: status=%d outcome=%q",
+				out.Code, out.Header().Get("X-TF-Bind-Outcome"))
+		}
 	})
 
 	// The disclosure case: a signed-in user with no relationship to the
@@ -1678,6 +1689,44 @@ func TestManagedBind_IdentityComparesByIDNotLogin(t *testing.T) {
 	}
 	if n := rig.installationCount(t); n != 1 {
 		t.Errorf("%d installation rows, want 1", n)
+	}
+}
+
+// TestManagedBind_RecordWithoutAnAccountCompletesAsTheInstallLeg: a record
+// minted by a build that sent the admin to GitHub's picker carries no account,
+// and it is live for up to fifteen minutes across an upgrade. Whatever leg the
+// column says — the value an older row acquired is a default — it completes
+// as the install leg with every proof, minus the one there is no name for.
+func TestManagedBind_RecordWithoutAnAccountCompletesAsTheInstallLeg(t *testing.T) {
+	for _, leg := range []string{domain.GitHubBindLegAuthorize, domain.GitHubBindLegInstall} {
+		t.Run("leg="+leg, func(t *testing.T) {
+			gh := newFakeGitHub()
+			rig := newBindRig(t, gh)
+
+			// The row as an older build wrote it, and the cookie it set.
+			nonce := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+			now := time.Now().UTC()
+			if _, err := rig.h.AdminDB.Exec(`
+				INSERT INTO github_pending_binds (nonce_hash, org_id, user_id, leg, account_login, created_at, expires_at)
+				VALUES ($1, $2, $3, $4, '', $5, $6)
+			`, hashBindNonce(nonce), rig.orgID.String(), rig.userID.String(), leg, now, now.Add(db.GitHubPendingBindTTL)); err != nil {
+				t.Fatalf("seed an older build's record: %v", err)
+			}
+			cookie := &http.Cookie{Name: managedBindCookieName, Value: nonce}
+
+			out := rig.callback(t, cookie, defaultCallbackQuery(4242))
+			if out.Code != http.StatusFound {
+				t.Fatalf("callback status=%d outcome=%q body=%s, want 302 — a connect an older build started must still land",
+					out.Code, out.Header().Get("X-TF-Bind-Outcome"), out.Body.String())
+			}
+			if n := rig.installationCount(t); n != 1 {
+				t.Errorf("%d installation rows, want 1", n)
+			}
+			// Every proof still ran: the identity proof and both gates.
+			if !gh.served("/api/v3/user") || !gh.served("/api/v3/user/installations") || !gh.served("/api/v3/orgs/acme/memberships/octocat") {
+				t.Error("a proof was skipped for an older build's record")
+			}
+		})
 	}
 }
 

@@ -289,9 +289,11 @@ const (
 type GitHubPendingBind struct {
 	NonceHash string
 	OrgID     string
-	// UserID is the admin who started the ceremony. The callback requires the
-	// returning session to be that same person, so a cookie replayed into
-	// somebody else's browser consumes nothing.
+	// UserID is the admin who started the ceremony. The consume matches only
+	// a record this user started — it is a condition of the conditional
+	// update, not a check made after it — so a cookie replayed into somebody
+	// else's session spends nothing, and the record stays for the person it
+	// belongs to.
 	UserID string
 	// Leg is the return the callback expects for this record — the record
 	// decides, never the query string. GitHubBindLegAuthorize is GitHub's

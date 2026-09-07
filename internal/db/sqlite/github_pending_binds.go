@@ -62,20 +62,21 @@ func (s *gitHubPendingBindStore) CreateSystem(ctx context.Context, bind domain.G
 	return stored, nil
 }
 
-func (s *gitHubPendingBindStore) ConsumeSystem(ctx context.Context, nonceHash string, now time.Time) (*domain.GitHubPendingBind, error) {
+func (s *gitHubPendingBindStore) ConsumeSystem(ctx context.Context, nonceHash, userID string, now time.Time) (*domain.GitHubPendingBind, error) {
 	now = now.UTC()
-	// One conditional UPDATE decides everything: absent, expired and
-	// already-consumed all match nothing, and a second caller arriving on the
-	// same row finds consumed_at already set. There is no read to lose a race
-	// against.
+	// One conditional UPDATE decides everything: absent, expired,
+	// already-consumed and somebody else's all match nothing, and a second
+	// caller arriving on the same row finds consumed_at already set. There is
+	// no read to lose a race against.
 	row := s.q.QueryRowContext(ctx, `
 		UPDATE github_pending_binds
 		   SET consumed_at = ?
 		 WHERE nonce_hash = ?
+		   AND user_id = ?
 		   AND consumed_at IS NULL
 		   AND expires_at > ?
 		RETURNING `+sqlitePendingBindColumns,
-		now, nonceHash, now)
+		now, nonceHash, userID, now)
 	stored, err := scanPendingBind(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Nothing to spend. The caller refuses identically for every reason a
