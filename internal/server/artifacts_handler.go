@@ -33,7 +33,7 @@ type artifactsHandler struct {
 	ghResolver ghclient.Resolver
 	// spawner is a lazy delegation-spawner accessor (wired by Server.routes via a
 	// closure over s.spawner) used to feed the drafting agent a <system-note> when
-	// a human resolves one of its artifacts (TFAC-493).
+	// a human resolves one of its artifacts.
 	spawner func() *delegate.Spawner
 	// publicURL is the deployment's externally-visible base ("" until the
 	// deploy config lands, or when none is configured), read lazily because

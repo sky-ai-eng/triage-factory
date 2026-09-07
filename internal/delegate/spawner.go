@@ -248,8 +248,8 @@ type Spawner struct {
 	ghClient *ghclient.Client
 	model    string
 	// publicURL is the deployment's externally-visible base URL, used to
-	// compute the {{RUN_URL}} prompt placeholder (TFAC-591) — the "view
-	// this run in TF" deep link. Wired post-construction via SetPublicURL
+	// compute the {{RUN_URL}} prompt placeholder — the "view this run in
+	// TF" deep link. Wired post-construction via SetPublicURL
 	// with the same value handed to Server.SetDeployConfig (internal/app/
 	// httpserver.go, both call sites). Empty disables the placeholder
 	// (renders "") rather than fabricating a localhost link in multi mode.
@@ -679,7 +679,7 @@ func (s *Spawner) publishEvent(orgID, eventType string, metadata any) {
 }
 
 // SetPublicURL wires the deployment's externally-visible base URL, used by
-// runURLFor to compute the {{RUN_URL}} prompt placeholder (TFAC-591). Call
+// runURLFor to compute the {{RUN_URL}} prompt placeholder. Call
 // with the same value handed to Server.SetDeployConfig — both call sites in
 // internal/app/httpserver.go. Nil-safe to leave unset: runURLFor then
 // renders the placeholder empty, never a fabricated localhost link.
