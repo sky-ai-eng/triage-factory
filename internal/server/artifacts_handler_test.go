@@ -900,8 +900,8 @@ func TestArtifactReject_PR(t *testing.T) {
 		t.Errorf("PR artifact state = %q, want closed", pr.State)
 	}
 	details, err := domain.ParsePRArtifactDetails(pr.DetailsJSON)
-	if err != nil || !details.BranchDeleted {
-		t.Errorf("PR details = %+v (err %v), want branch_deleted=true", details, err)
+	if err != nil || !details.Rejected || !details.BranchDeleted {
+		t.Errorf("PR details = %+v (err %v), want rejected=true branch_deleted=true", details, err)
 	}
 	if details.Proposed.Title != "Proposed title" {
 		t.Errorf("proposed snapshot must survive the flip; got %q", details.Proposed.Title)
@@ -944,16 +944,18 @@ func TestArtifactReject_PR(t *testing.T) {
 	}
 }
 
-// TestArtifactReject_BranchAlreadyGone pins the soft case from the ticket: a
-// branch deleted out-of-band before the reject is not a refusal — the PR is
-// still closed and the artifact resolved — and the response says the branch
-// was not deleted here, so the UI can word its toast honestly.
+// TestArtifactReject_BranchAlreadyGone pins the soft case: a branch deleted
+// out-of-band before the reject is not a refusal — the PR is still closed and
+// the artifact resolved (rejected, branch artifact retired) — but nothing may
+// claim this rejection deleted the branch: not the response, not the row's
+// branch_deleted, not the audit log, not the agent's note.
 func TestArtifactReject_BranchAlreadyGone(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	rs := newRejectStub(t, srv, http.StatusUnprocessableEntity, `{"message":"Reference does not exist"}`)
 
 	artID, conversationID, _ := seedDraftPRArtifactWithConversation(t, srv, "gone", "acme", "api", 42)
+	branchID := seedBranchArtifact(t, srv, conversationID, "acme/api", "refs/heads/feature/x")
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/reject", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("reject = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -964,8 +966,33 @@ func TestArtifactReject_BranchAlreadyGone(t *testing.T) {
 	if rs.closeState != "closed" {
 		t.Errorf("ClosePR sent state=%q, want closed", rs.closeState)
 	}
-	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePRClosed {
-		t.Errorf("artifact state = %q, want closed", got)
+	pr := getArtifact(t, srv, artID)
+	if pr.State != domain.ArtifactStatePRClosed {
+		t.Errorf("artifact state = %q, want closed", pr.State)
+	}
+	details, err := domain.ParsePRArtifactDetails(pr.DetailsJSON)
+	if err != nil || !details.Rejected || details.BranchDeleted {
+		t.Errorf("PR details = %+v (err %v), want rejected=true branch_deleted=false", details, err)
+	}
+	if note := domain.ArtifactResolutionNote(*pr); !strings.Contains(note, "already gone") || strings.Contains(note, "was deleted") {
+		t.Errorf("agent note = %q, must say the branch was already gone, not deleted", note)
+	}
+	if got := getArtifact(t, srv, branchID).State; got != domain.ArtifactStateBranchDeleted {
+		t.Errorf("branch artifact state = %q, want deleted (the branch is gone from the remote either way)", got)
+	}
+	acts, _, err := sqlitestore.New(srv.db).ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchDeleted})
+	if err != nil {
+		t.Fatalf("list actions: %v", err)
+	}
+	if len(acts) != 0 {
+		t.Errorf("no branch_deleted audit row may claim a delete this rejection did not do; got %d", len(acts))
+	}
+	closedActs, _, err := sqlitestore.New(srv.db).ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionPRClosed})
+	if err != nil {
+		t.Fatalf("list actions: %v", err)
+	}
+	if len(closedActs) != 1 {
+		t.Errorf("pr_closed audit rows = %d, want 1", len(closedActs))
 	}
 	var human string
 	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {

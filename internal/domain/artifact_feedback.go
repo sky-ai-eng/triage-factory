@@ -41,8 +41,8 @@ func WrapSystemNote(body string) string {
 //
 //   - pull_request → open      : approved, marked ready for review
 //   - pull_request → closed    : dismissed, draft closed (branch kept) — or,
-//     when the details carry branch_deleted, rejected: closed AND its branch
-//     deleted from the upstream
+//     when the details carry rejected, rejected: closed AND its branch gone
+//     from the upstream (deleted by the rejection, or found already gone)
 //   - review       → submitted : approved, submitted to GitHub
 //   - review       → dismissed : dismissed, discarded unsubmitted
 //
@@ -56,8 +56,11 @@ func ArtifactResolutionNote(a Artifact) string {
 		case ArtifactStatePROpen:
 			return fmt.Sprintf("A human approved your draft pull request %s and marked it ready for review.", ref)
 		case ArtifactStatePRClosed:
-			if d, err := ParsePRArtifactDetails(a.DetailsJSON); err == nil && d.BranchDeleted {
-				return fmt.Sprintf("A human rejected your draft pull request %s: it was closed and its branch %s was deleted from the upstream, so the work on it is gone from the remote.", ref, prHeadBranchOrPlaceholder(d))
+			if d, err := ParsePRArtifactDetails(a.DetailsJSON); err == nil && d.Rejected {
+				if d.BranchDeleted {
+					return fmt.Sprintf("A human rejected your draft pull request %s: it was closed and its branch %s was deleted from the upstream, so the work on it is gone from the remote.", ref, prHeadBranchOrPlaceholder(d))
+				}
+				return fmt.Sprintf("A human rejected your draft pull request %s: it was closed, and its branch %s was already gone from the upstream, so the work on it is gone from the remote.", ref, prHeadBranchOrPlaceholder(d))
 			}
 			return fmt.Sprintf("A human dismissed your draft pull request %s and closed it (its branch is kept).", ref)
 		}

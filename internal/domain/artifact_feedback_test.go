@@ -135,28 +135,36 @@ func TestArtifactLedgerBlock(t *testing.T) {
 	}
 }
 
-// TestArtifactResolutionNote_RejectedPRNamesDeletedBranch pins the fifth
-// shape: a closed PR whose details carry branch_deleted reads as a rejection
-// naming the deleted branch, distinct from the dismissal that keeps it — and
-// the ledger derivation, which reads only the row, gets the same copy.
+// TestArtifactResolutionNote_RejectedPRNamesDeletedBranch pins the rejection
+// shapes: a closed PR whose details carry rejected reads as a rejection naming
+// the branch, distinct from the dismissal that keeps it, and says "deleted"
+// only when branch_deleted is set — a branch found already gone is reported
+// as already gone, never as deleted by this rejection. The ledger derivation,
+// which reads only the row, gets the same copy.
 func TestArtifactResolutionNote_RejectedPRNamesDeletedBranch(t *testing.T) {
 	rejected := Artifact{
 		Kind:        ArtifactKindPullRequest,
 		Target:      "octo/repo#42",
 		State:       ArtifactStatePRClosed,
-		DetailsJSON: MarshalPRArtifactDetails(PRArtifactDetails{HeadBranch: "feature/x", Base: "main", BranchDeleted: true}),
+		DetailsJSON: MarshalPRArtifactDetails(PRArtifactDetails{HeadBranch: "feature/x", Base: "main", Rejected: true, BranchDeleted: true}),
 	}
 	dismissed := rejected
 	dismissed.DetailsJSON = MarshalPRArtifactDetails(PRArtifactDetails{HeadBranch: "feature/x", Base: "main"})
+	alreadyGone := rejected
+	alreadyGone.DetailsJSON = MarshalPRArtifactDetails(PRArtifactDetails{HeadBranch: "feature/x", Base: "main", Rejected: true})
 
 	got := ArtifactResolutionNote(rejected)
-	for _, want := range []string{"rejected", "octo/repo#42", "feature/x", "deleted"} {
+	for _, want := range []string{"rejected", "octo/repo#42", "feature/x", "was deleted"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("rejected note %q lacks %q", got, want)
 		}
 	}
 	if strings.Contains(got, "kept") {
 		t.Errorf("rejected note %q must not claim the branch is kept", got)
+	}
+	gone := ArtifactResolutionNote(alreadyGone)
+	if !strings.Contains(gone, "rejected") || !strings.Contains(gone, "already gone") || strings.Contains(gone, "was deleted") {
+		t.Errorf("already-gone rejection note = %q, want a rejection that says the branch was already gone, not deleted", gone)
 	}
 	if kept := ArtifactResolutionNote(dismissed); kept == got || !strings.Contains(kept, "kept") {
 		t.Errorf("dismissed note = %q, want the branch-kept dismissal shape distinct from the rejection", kept)

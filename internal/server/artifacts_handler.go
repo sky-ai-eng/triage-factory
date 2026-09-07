@@ -864,11 +864,16 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 	// Flip the PR artifact to closed with the rejection recorded on the row (the
 	// resolution note is derived from this row alone), retire the run's branch
 	// artifact for the same ref rather than leaving it for the reconciler to
-	// notice, and audit both writes — all in one tx, so the audit never
-	// disagrees with the state. The credential is classified before the tx
-	// opens: it can reach GitHub, and the tx must not wait on a round trip.
+	// notice, and audit the writes — all in one tx, so the audit never
+	// disagrees with the state. The branch artifact is retired either way (the
+	// branch is gone from the remote either way), but the branch_deleted audit
+	// row is written only when this rejection did the deleting: a branch that
+	// was already gone was not deleted here, and the audit log must not say it
+	// was. The credential is classified before the tx opens: it can reach
+	// GitHub, and the tx must not wait on a round trip.
 	credential := githubCredentialFor(cleanupCtx, ah.ghResolver, orgID, owner, repo)
-	details.BranchDeleted = true
+	details.Rejected = true
+	details.BranchDeleted = branchDeleted
 	closed := *art
 	closed.State = domain.ArtifactStatePRClosed
 	closed.DetailsJSON = domain.MarshalPRArtifactDetails(details)
@@ -885,6 +890,9 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 		if e := tx.ExternalActions.Record(cleanupCtx, orgID,
 			githubApprovalAction(art, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed, credential)); e != nil {
 			return e
+		}
+		if !branchDeleted {
+			return nil
 		}
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
 			branchDeletedAction(art, userID, repoPath, headRef, details.HeadBranch, branchURL, credential))
@@ -908,7 +916,7 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 	// Tell the drafting agent — live if warm, else via its ledger on resume,
-	// which re-derives the rejection from the branch_deleted flag on the row.
+	// which re-derives the rejection from the flags on the row.
 	ah.injectArtifactNote(orgID, closed)
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -921,7 +929,9 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 }
 
 // retireBranchArtifact flips the conversation's `branch` artifact for headRef
-// (on repoPath) to deleted, returning its web URL for the audit row. A
+// (on repoPath) to deleted — the branch is gone from the remote, whether this
+// rejection deleted it or found it gone — returning its web URL for the audit
+// row. A
 // conversation with no such artifact — a push the capture writers missed, or
 // no conversation at all — is not an error: the PR artifact carries the
 // rejection on its own, and the returned URL falls back to the public-host
