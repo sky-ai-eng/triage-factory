@@ -88,6 +88,7 @@ type AgentHostInfo struct {
 	TeamID         string `json:"team_id"`
 	ConversationID string `json:"conversation_id"`
 	EventTriggered bool   `json:"event_triggered,omitempty"`
+	RunURL         string `json:"run_url,omitempty"`
 }
 
 // StartProxiesResult is KindStartProxies' response payload: the non-secret

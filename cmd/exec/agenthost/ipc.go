@@ -299,14 +299,6 @@ func (c *IPCClient) CreateWorkspaceCheckout(ctx context.Context, owner, repo, re
 	return res.Path, nil
 }
 
-func (c *IPCClient) BuildAgentFooter(ctx context.Context, kind string) (string, error) {
-	var res buildAgentFooterResult
-	if err := c.call(ctx, methodBuildAgentFooter, buildAgentFooterArgs{Kind: kind}, &res); err != nil {
-		return "", err
-	}
-	return res.Footer, nil
-}
-
 // --- artifacts ---
 
 // UpsertArtifact ships the polymorphic artifact to the daemon, which stamps

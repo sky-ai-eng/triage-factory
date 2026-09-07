@@ -28,14 +28,29 @@ import (
 // per repo at call time, so App-only orgs work identically to PAT orgs. Mirrors
 // dashboardHandler's deps.
 type artifactsHandler struct {
-	tx            db.TxRunner
-	ws            *websocket.Hub
-	conversations db.ConversationStore
-	ghResolver    ghclient.Resolver
+	tx         db.TxRunner
+	ws         *websocket.Hub
+	ghResolver ghclient.Resolver
 	// spawner is a lazy delegation-spawner accessor (wired by Server.routes via a
 	// closure over s.spawner) used to feed the drafting agent a <system-note> when
 	// a human resolves one of its artifacts (TFAC-493).
 	spawner func() *delegate.Spawner
+	// publicURL is the deployment's externally-visible base ("" until the
+	// deploy config lands, or when none is configured), read lazily because
+	// the deploy config is wired after routes are registered. It is what the
+	// disclosure footer on a human-approved review links the run from.
+	publicURL func() string
+}
+
+// footerFor is the disclosure footer for content a conversation authored — the
+// same shape the agenthost appends when the run itself publishes, so a review
+// posted by a human's approval and one auto-posted at finalize disclose
+// identically. Empty with no conversation: nothing to disclose.
+func (ah *artifactsHandler) footerFor(kind, orgID, conversationID string) string {
+	if conversationID == "" {
+		return ""
+	}
+	return agentmeta.Build(kind, agentmeta.RunURL(ah.publicURL(), orgID, conversationID))
 }
 
 // artifactIDOr404 guards the {id} path value on every artifact-addressed route
@@ -505,22 +520,24 @@ func diffTruncationNote(fileCount int) string {
 	return note
 }
 
-// handleArtifactApprove promotes the draft PR to ready-for-review: it appends the
-// agentmeta footer to the body (UpdatePR), marks the PR ready (MarkPRReady),
-// flips the artifact to state=open, and captures the human verdict into
-// conversation_memory. Approval is a decoupled sidecar — it does NOT flip
-// conversation status or resume/terminate a blueprint; the only lifecycle
-// effect is the shared terminal-on-last task-closure check
+// handleArtifactApprove promotes the draft PR to ready-for-review: it marks the
+// PR ready (MarkPRReady), flips the artifact to state=open, and captures the
+// human verdict into conversation_memory. Approval is a decoupled sidecar — it
+// does NOT flip conversation status or resume/terminate a blueprint; the only
+// lifecycle effect is the shared terminal-on-last task-closure check
 // (closeTaskIfTerminalAndResolved), which closes the task iff this was the last
 // unresolved artifact on a cleanly-completed blueprint run.
 //
-// The content promoted is read LIVE from GitHub (never the cached snapshot), so a
-// stale or malformed snapshot can neither revert a direct GitHub edit nor write an
-// empty body that wipes the PR. The footer is appended idempotently (existing one
-// stripped first), so a retry after a partial failure leaves exactly one. The two
-// GitHub mutations come first and are pessimistic (non-2xx on failure); everything
-// after is detached best-effort bookkeeping — the PR is already ready, so a client
-// disconnect must not strand the conversation/task half-flipped.
+// The PR's title and body are left exactly as they are: the disclosure footer
+// is already on the body from creation, and a human may be editing the
+// description on GitHub at this very moment, so approval writes nothing it
+// would have to read first. The content the bookkeeping records is read LIVE
+// from GitHub (never the cached snapshot), so a stale or malformed snapshot
+// can neither misreport a direct GitHub edit nor blank the recorded body. The
+// one GitHub mutation comes first and is pessimistic (non-2xx on failure);
+// everything after is detached best-effort bookkeeping — the PR is already
+// ready, so a client disconnect must not strand the conversation/task
+// half-flipped.
 func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -554,11 +571,11 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	}
 
 	// Approval only makes sense on a draft awaiting it. A stale/double "Open PR"
-	// click on an already-open or closed artifact would otherwise re-run the
-	// GitHub mutations — a spurious footer rewrite (new timestamp/cost) and a
-	// no-op MarkPRReady — so reject it as a conflict. The state transition is
-	// gated here rather than in ghForArtifact, which the read paths (GET/diff) share
-	// and must keep serving non-draft PRs.
+	// click on an already-open or closed artifact would otherwise re-run a
+	// no-op MarkPRReady and record a second approval, so reject it as a
+	// conflict. The state transition is gated here rather than in
+	// ghForArtifact, which the read paths (GET/diff) share and must keep
+	// serving non-draft PRs.
 	if art.State != domain.ArtifactStatePRDraft {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonAlreadyTerminal,
@@ -569,16 +586,16 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 
 	// Parse the artifact details for the proposed (agent-draft) baseline the
 	// human-verdict memory diffs against. A parse failure is non-fatal: we still
-	// promote the PR from its LIVE content (below) and only skip the verdict diff.
+	// promote the PR and only skip the verdict diff.
 	details, derr := domain.ParsePRArtifactDetails(art.DetailsJSON)
 	if derr != nil {
 		artifactsLog.Warn("PR artifact details unparseable; promoting from live PR and skipping the verdict diff", "artifact", art.ID, "error", derr)
 	}
 
-	// Source the promoted content from the LIVE PR, never the cached snapshot: a
-	// stale snapshot would revert a direct-on-GitHub edit, and a malformed one
-	// would yield empty title/body that UpdatePR would write over the PR. GetPR
-	// failure is fatal here — we can't safely promote what we can't read.
+	// Read the content being promoted from the LIVE PR, never the cached
+	// snapshot: a stale snapshot would misreport a direct-on-GitHub edit, and a
+	// malformed one would record an empty title/body. GetPR failure is fatal
+	// here — we can't safely promote what we can't read.
 	live, err := gh.GetPRBasic(r.Context(), owner, repo, number)
 	if err != nil {
 		artifactsLog.Warn("approve GetPR failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
@@ -588,14 +605,6 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	finalTitle := live.Title
 	finalBody := live.Body
 
-	// Append the footer idempotently: strip any footer a prior (partially failed)
-	// approve already added before re-appending, so a retry can't stack footers.
-	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.conversations, orgID, art.ConversationID, "PR")
-	if err := gh.UpdatePR(r.Context(), owner, repo, number, finalTitle, footeredBody); err != nil {
-		artifactsLog.Warn("approve UpdatePR (footer) failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeUpstreamGitHub(w, "GitHub API error", err)
-		return
-	}
 	if err := gh.MarkPRReady(r.Context(), owner, repo, number); err != nil {
 		artifactsLog.Warn("MarkPRReady failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		writeUpstreamGitHub(w, "GitHub API error", err)
@@ -610,9 +619,8 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	cleanupCtx := context.WithoutCancel(r.Context())
 
 	// Step 1: flip the artifact to open and refresh its snapshot to the promoted
-	// (pre-footer) content. proposed stays frozen. When details didn't parse we
-	// still flip the state but leave the (malformed) details rather than blanking
-	// them.
+	// content. proposed stays frozen. When details didn't parse we still flip
+	// the state but leave the (malformed) details rather than blanking them.
 	//
 	// The credential is classified before the tx opens — the classification can
 	// reach GitHub, and the tx the row composes into must not wait on a network

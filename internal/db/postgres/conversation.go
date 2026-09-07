@@ -2145,53 +2145,6 @@ func (s *conversationStore) SetWindowStateSystem(ctx context.Context, orgID, con
 	return int(n), err
 }
 
-func (s *conversationStore) TokenTotalsSystem(ctx context.Context, orgID, conversationID string) (*domain.TokenTotals, error) {
-	row := s.admin.QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(model), ''),
-		       COALESCE(SUM(input_tokens), 0),
-		       COALESCE(SUM(output_tokens), 0),
-		       COALESCE(SUM(cache_read_tokens), 0),
-		       COALESCE(SUM(cache_creation_tokens), 0),
-		       COUNT(*)
-		FROM messages
-		WHERE org_id = $1 AND conversation_id = $2 AND role = 'assistant'
-	`, orgID, conversationID)
-
-	var t domain.TokenTotals
-	if err := row.Scan(&t.Model, &t.InputTokens, &t.OutputTokens, &t.CacheReadTokens, &t.CacheCreationTokens, &t.NumTurns); err != nil {
-		return nil, err
-	}
-	return &t, nil
-}
-
-func (s *conversationStore) BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeConversationID string) (float64, error) {
-	var cost sql.NullFloat64
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(m.cost_usd), 0)
-		FROM messages m
-		JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
-		WHERE c.org_id = $1 AND c.blueprint_run_id = $2 AND c.id <> $3
-	`, orgID, blueprintRunID, excludeConversationID).Scan(&cost)
-	if err != nil {
-		return 0, err
-	}
-	return cost.Float64, nil
-}
-
-func (s *conversationStore) BlueprintSiblingDurationMsSystem(ctx context.Context, orgID, blueprintRunID, excludeConversationID string) (int, error) {
-	var ms sql.NullInt64
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(cl.duration_ms), 0)
-		FROM claims cl
-		JOIN conversations c ON c.id = cl.conversation_id AND c.org_id = cl.org_id
-		WHERE c.org_id = $1 AND c.blueprint_run_id = $2 AND c.id <> $3
-	`, orgID, blueprintRunID, excludeConversationID).Scan(&ms)
-	if err != nil {
-		return 0, err
-	}
-	return int(ms.Int64), nil
-}
-
 // --- Helpers ---
 
 // conversationScanner is satisfied by both *sql.Row and *sql.Rows, so

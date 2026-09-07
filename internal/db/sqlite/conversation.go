@@ -2151,62 +2151,6 @@ func (s *conversationStore) SetWindowStateSystem(ctx context.Context, orgID, con
 	return int(n), err
 }
 
-func (s *conversationStore) TokenTotalsSystem(ctx context.Context, orgID, conversationID string) (*domain.TokenTotals, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	row := s.q.QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(model), ''),
-		       COALESCE(SUM(input_tokens), 0),
-		       COALESCE(SUM(output_tokens), 0),
-		       COALESCE(SUM(cache_read_tokens), 0),
-		       COALESCE(SUM(cache_creation_tokens), 0),
-		       COUNT(*)
-		FROM messages
-		WHERE conversation_id = ? AND role = 'assistant'
-	`, conversationID)
-
-	var t domain.TokenTotals
-	if err := row.Scan(&t.Model, &t.InputTokens, &t.OutputTokens, &t.CacheReadTokens, &t.CacheCreationTokens, &t.NumTurns); err != nil {
-		return nil, err
-	}
-	return &t, nil
-}
-
-func (s *conversationStore) BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeConversationID string) (float64, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return 0, err
-	}
-	var cost sql.NullFloat64
-	err := s.q.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(m.cost_usd), 0)
-		FROM messages m
-		JOIN conversations c ON c.id = m.conversation_id
-		WHERE c.blueprint_run_id = ? AND c.id <> ?
-	`, blueprintRunID, excludeConversationID).Scan(&cost)
-	if err != nil {
-		return 0, err
-	}
-	return cost.Float64, nil
-}
-
-func (s *conversationStore) BlueprintSiblingDurationMsSystem(ctx context.Context, orgID, blueprintRunID, excludeConversationID string) (int, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return 0, err
-	}
-	var ms sql.NullInt64
-	err := s.q.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(cl.duration_ms), 0)
-		FROM claims cl
-		JOIN conversations c ON c.id = cl.conversation_id
-		WHERE c.blueprint_run_id = ? AND c.id <> ?
-	`, blueprintRunID, excludeConversationID).Scan(&ms)
-	if err != nil {
-		return 0, err
-	}
-	return int(ms.Int64), nil
-}
-
 // --- Helpers ---
 
 // conversationScanner is satisfied by both *sql.Row and *sql.Rows, so

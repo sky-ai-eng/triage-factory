@@ -44,7 +44,6 @@ type Server struct {
 	users            db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities
 	blueprints       db.BlueprintStore       // used by event-handler + project test fixtures
 	tasks            db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
-	conversations    db.ConversationStore    // conversation lifecycle + transcript
 	repos            db.RepositoryStore      // repositories CRUD for repos/settings handlers
 	events           db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
 	taskMemory       db.TaskMemoryStore      // conversation_memory writes (human verdict capture on review/PR submit, task-disposition cleanup)
@@ -462,7 +461,6 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		users:              stores.Users,
 		blueprints:         stores.Blueprints,
 		tasks:              stores.Tasks,
-		conversations:      stores.Conversations,
 		repos:              stores.Repos,
 		events:             stores.Events,
 		taskMemory:         stores.TaskMemory,
@@ -1164,7 +1162,16 @@ func (s *Server) routes() {
 	// edit/delete inline comments on that pending review, approve submits it,
 	// and dismiss resolves a single artifact. The task-level resolve-all
 	// (drag-to-Done / Return-to-queue) flows through teardownTaskArtifacts.
-	ah := &artifactsHandler{tx: s.tx, ws: s.ws, conversations: s.conversations, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
+	ah := &artifactsHandler{
+		tx: s.tx, ws: s.ws, ghResolver: s.ghResolver,
+		spawner: func() *delegate.Spawner { return s.spawner },
+		publicURL: func() string {
+			if s.deployCfg == nil {
+				return ""
+			}
+			return s.deployCfg.publicURL
+		},
+	}
 	// One read for every kind; the writes are kind-scoped sub-resources, so a
 	// review-shaped body can never reach the PR write path.
 	s.api("GET /api/artifacts/{id}", ah.handleArtifactGet)

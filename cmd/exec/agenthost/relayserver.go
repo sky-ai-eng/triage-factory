@@ -326,17 +326,6 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(orgJiraBaseResult{URL: url})
 
-	case opBuildAgentFooter:
-		var a buildAgentFooterArgs
-		if err := json.Unmarshal(args, &a); err != nil {
-			return nil, err
-		}
-		footer, err := s.rt.AgentFooter(ctx, a.Kind)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(buildAgentFooterResult{Footer: footer})
-
 	case opUpsertArtifact:
 		var a upsertArtifactArgs
 		if err := json.Unmarshal(args, &a); err != nil {

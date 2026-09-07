@@ -926,12 +926,11 @@ func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string)
 // in the agent prompts, and the ls-remote preflight below enforces it early.
 //
 // The PR is always created as a draft — repo-visible, but not "ready for
-// review" — and stays a draft until a human approves it in the UI (which marks
-// it ready for review and appends the agentmeta footer). No footer is applied
-// here: the proposed body is what the agent drafted. The durable pull_request
-// artifact is recorded at the host choke point (LocalClient.GithubCreatePR),
-// deduped on the PR number — which is also the idempotency guard against a
-// repeated `pr create`, replacing the retired pending_prs one-per-run lock.
+// review" — and stays a draft until a human marks it ready in the UI. The
+// body leaves here as the agent drafted it; the disclosure footer joins it at
+// the host choke point (LocalClient.GithubCreatePR), which also records the
+// durable pull_request artifact, deduped on the PR number — the idempotency
+// guard against a repeated `pr create`.
 func prCreate(ctx context.Context, client ghAPI, args []string) {
 	title := flagVal(args, "--title")
 	body := flagVal(args, "--body")
@@ -972,12 +971,12 @@ func prCreate(ctx context.Context, client ghAPI, args []string) {
 	// Strip Claude Code's auto-appended citation line. Claude Code
 	// (the agent harness) routinely tacks "🤖 Generated with [Claude
 	// Code](https://claude.com/claude-code)" onto every PR body it
-	// produces. Triage Factory's footer (added by the server at
-	// submit time) already attributes the work — letting the
+	// produces. Triage Factory's disclosure footer, appended where
+	// the PR is opened, already attributes the work — letting the
 	// upstream Claude Code citation through would visually crowd
-	// out the TF citation and double-bill the PR. Strip before
-	// queuing so the user never sees it in the preview, even if the
-	// agent forgot to remove it.
+	// out the TF citation and double-bill the PR. Strip it here so
+	// the user never sees it in the preview, even if the agent
+	// forgot to remove it.
 	body = stripClaudeCodeCitation(body)
 
 	owner, repo := ownerRepo(args)

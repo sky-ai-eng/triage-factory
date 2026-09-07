@@ -155,8 +155,8 @@ func PricingLoadError() error {
 // Storage uses the complementary convention: the four token columns on messages
 // and system_llm_runs are DISJOINT, so they sum to the prompt without
 // double-counting — which is what every reader of them does (the compaction
-// trip's occupancy, the context gauge, the approximate-cost footer). Writers of
-// those columns take input tokens from NonCachedInputTokens.
+// trip's occupancy, the context gauge). Writers of those columns take input
+// tokens from NonCachedInputTokens.
 //
 // The field is named for bifrost's own PromptTokens rather than for the column
 // it eventually feeds, deliberately: it does not mean what a row's input_tokens

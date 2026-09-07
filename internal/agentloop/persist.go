@@ -106,8 +106,8 @@ func unreplayableTurn(row domain.Message) bool {
 // neutral usage counts the prompt inclusive of its cache buckets, the ledger
 // counts them beside it. Everything that reads these columns back sums all
 // four to recover the prompt: the compaction trip's occupancy, the context
-// gauge, the approximate-cost footer. Storing the inclusive figure here would
-// count every cached token twice in all three.
+// gauge. Storing the inclusive figure here would count every cached token
+// twice in both.
 func stampUsage(row *domain.Message, usage inference.Usage) {
 	in, out := usage.NonCachedInputTokens(), usage.OutputTokens
 	cr, cc := usage.CacheReadTokens, usage.CacheCreationTokens

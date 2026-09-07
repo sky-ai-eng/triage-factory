@@ -114,6 +114,7 @@ func TestReviewArtifactGet_SeverityRoundTrip(t *testing.T) {
 func TestReviewArtifactApprove(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
+	srv.SetDeployConfig("http://tf.test", [32]byte{})
 	var submitBody map[string]any
 	mux := newAppAPIMux()
 	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
@@ -140,8 +141,19 @@ func TestReviewArtifactApprove(t *testing.T) {
 	if submitBody["commit_id"] != "headsharappr" {
 		t.Errorf("submit commit_id = %v, want the pinned head SHA", submitBody["commit_id"])
 	}
-	if got, _ := submitBody["body"].(string); !strings.HasPrefix(got, "## Review") || !strings.Contains(got, "Triage Factory") {
+	// The footer is the same static disclosure the PR create verb appends: the
+	// AI line plus the run's deep link, and nothing that moves after posting.
+	got, _ := submitBody["body"].(string)
+	if !strings.HasPrefix(got, "## Review") || !strings.Contains(got, "Triage Factory") {
 		t.Errorf("submit body = %q, want staged body + agentmeta footer", got)
+	}
+	if !strings.Contains(got, "[View the run](http://tf.test/runs/"+conversationID+")") {
+		t.Errorf("submit body = %q, want the run's deep link in the footer", got)
+	}
+	for _, banned := range []string{"Time:", "Cost:", "Model:"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("submit body carries %q; the footer discloses, it does not meter: %q", banned, got)
+		}
 	}
 	comments, _ := submitBody["comments"].([]any)
 	if len(comments) != 1 {

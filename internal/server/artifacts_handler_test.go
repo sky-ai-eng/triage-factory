@@ -218,27 +218,27 @@ func TestArtifactGet_ServesEveryKind(t *testing.T) {
 	}
 }
 
-// TestArtifactApprove pins the promote-on-approval flow: the body gets the
-// agentmeta footer (UpdatePR), the draft is marked ready (MarkPRReady via
-// GraphQL), the artifact flips to open, and the human verdict lands in
-// conversation_memory. Approval is a decoupled sidecar: it must NOT touch
-// conversation status. The fixture pre-seeds the conversation as 'completed',
-// and we assert it STAYS 'completed' (approve didn't flip it). Task closure
-// here is a no-op because the fixture blueprint_run is still 'running' (not a
-// clean completion); the terminal-on-last closure is covered by the dedicated
-// dismiss/closure tests.
+// TestArtifactApprove pins the promote-on-approval flow: the draft is marked
+// ready (MarkPRReady via GraphQL), the artifact flips to open, and the human
+// verdict lands in conversation_memory — and the PR's title and body are never
+// written, because the disclosure footer is already on the body from creation
+// and approval has nothing to add. Approval is a decoupled sidecar: it must
+// NOT touch conversation status. The fixture pre-seeds the conversation as
+// 'completed', and we assert it STAYS 'completed' (approve didn't flip it).
+// Task closure here is a no-op because the fixture blueprint_run is still
+// 'running' (not a clean completion); the terminal-on-last closure is covered
+// by the dedicated dismiss/closure tests.
 func TestArtifactApprove(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	var marked bool
-	var patchBody map[string]any
+	var marked, patched bool
 	mux := newAppAPIMux()
 	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&patchBody)
+		patched = true
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
 	})
-	// approve reads the LIVE PR for the content to promote, so GET must serve the
-	// current title/body (matching the proposed snapshot here → "as drafted").
+	// approve reads the LIVE PR for the content it records, so GET must serve
+	// the current title/body (matching the proposed snapshot here → "as drafted").
 	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "node_id": "PR_node", "title": "Proposed title", "body": "Proposed body"})
 	})
@@ -255,12 +255,11 @@ func TestArtifactApprove(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if patchBody == nil || !marked {
-		t.Errorf("approve must UpdatePR (got %v) and MarkPRReady (got %v)", patchBody, marked)
+	if !marked {
+		t.Error("approve must MarkPRReady")
 	}
-	// The promoted body is the live content with the agentmeta footer appended.
-	if got, _ := patchBody["body"].(string); !strings.HasPrefix(got, "Proposed body") || !strings.Contains(got, "Triage Factory") {
-		t.Errorf("UpdatePR body = %q, want live body + footer", got)
+	if patched {
+		t.Error("approve must leave the PR's title and body alone")
 	}
 	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePROpen {
 		t.Errorf("artifact state = %q, want open", got)
@@ -647,22 +646,23 @@ func TestArtifactUpdate_PartialEdit_GetPRFailure_502(t *testing.T) {
 	}
 }
 
-// TestArtifactApprove_MalformedDetails_PromotesFromLive pins the data-loss fix:
-// even when details_json is unparseable, approve promotes the PR from its LIVE
-// content — never empty title/body that would wipe the PR.
-func TestArtifactApprove_MalformedDetails_PromotesFromLive(t *testing.T) {
+// TestArtifactApprove_MalformedDetails_StillPromotes pins that an unparseable
+// details_json costs only the verdict diff: approve still marks the PR ready
+// and flips the artifact, and still writes nothing to the PR's title or body.
+func TestArtifactApprove_MalformedDetails_StillPromotes(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	var patchBody map[string]any
+	var marked, patched bool
 	mux := newAppAPIMux()
 	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "node_id": "PR_node", "title": "Live title", "body": "Live body"})
 	})
 	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&patchBody)
+		patched = true
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
 	})
 	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
+		marked = true
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"markPullRequestReadyForReview": map[string]any{"pullRequest": map[string]any{"isDraft": false}}}})
 	})
 	stub := httptest.NewServer(mux)
@@ -677,28 +677,32 @@ func TestArtifactApprove_MalformedDetails_PromotesFromLive(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if title, _ := patchBody["title"].(string); title != "Live title" {
-		t.Errorf("UpdatePR title = %q, want live title (never empty from malformed details)", title)
+	if !marked {
+		t.Error("approve must MarkPRReady even when details are unparseable")
 	}
-	if got, _ := patchBody["body"].(string); !strings.HasPrefix(got, "Live body") {
-		t.Errorf("UpdatePR body = %q, want live body (+footer), never empty", got)
+	if patched {
+		t.Error("approve must leave the PR's title and body alone")
+	}
+	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePROpen {
+		t.Errorf("artifact state = %q, want open", got)
 	}
 }
 
-// TestArtifactApprove_FooterIdempotent pins that approving a PR whose live body
-// already carries a footer (a prior partially-failed approve) strips it before
-// re-appending, so exactly one footer survives.
-func TestArtifactApprove_FooterIdempotent(t *testing.T) {
+// TestArtifactApprove_BodyByteIdentical pins that approval never rewrites the
+// PR body: the disclosure footer the body already carries from creation is the
+// only one it will ever carry, and a human's concurrent edit on GitHub cannot
+// be clobbered by an approval that reads-then-writes. The stub fails the test
+// on any PATCH rather than merely recording one.
+func TestArtifactApprove_BodyByteIdentical(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	var patchBody map[string]any
-	liveBody := "Real body\n\n---\n*This PR was partially generated by AI using [Triage Factory](https://github.com/sky-ai-eng/triage-factory).*\n\nTime: 1s | Cost: $0.001"
+	liveBody := "Real body\n\n---\n*This PR was partially generated by AI using [Triage Factory](https://github.com/sky-ai-eng/triage-factory).*"
 	mux := newAppAPIMux()
 	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "node_id": "PR_node", "title": "T", "body": liveBody})
 	})
 	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&patchBody)
+		t.Error("approve must not PATCH the pull request")
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
 	})
 	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
@@ -713,19 +717,19 @@ func TestArtifactApprove_FooterIdempotent(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	got, _ := patchBody["body"].(string)
-	if n := strings.Count(got, "partially generated by AI using [Triage Factory]"); n != 1 {
-		t.Errorf("footer appears %d times, want exactly 1 (idempotent); body=%q", n, got)
+	// The snapshot the flip records is the live body verbatim, footer and all.
+	d, err := domain.ParsePRArtifactDetails(getArtifact(t, srv, artID).DetailsJSON)
+	if err != nil {
+		t.Fatalf("parse details: %v", err)
 	}
-	if !strings.HasPrefix(got, "Real body") {
-		t.Errorf("stripped body lost its real content: %q", got)
+	if d.Snapshot.Body != liveBody {
+		t.Errorf("recorded snapshot body = %q, want the live body verbatim %q", d.Snapshot.Body, liveBody)
 	}
 }
 
 // TestArtifactApprove_NonDraft_409 pins the state guard: approving an artifact
 // that's no longer a draft (already open or closed) is a conflict and performs
-// no GitHub mutation — a stale double-click can't trigger a spurious footer
-// rewrite.
+// no GitHub mutation — a stale double-click can't record a second approval.
 func TestArtifactApprove_NonDraft_409(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -693,23 +694,16 @@ func (s *Spawner) SetPublicURL(url string) {
 	s.publicURL = strings.TrimRight(url, "/")
 }
 
-// runURLFor computes the {{RUN_URL}} placeholder value — a deep link back to
-// this run in the TF UI. Empty publicURL degrades to "" (no wrong fallbacks:
+// runURLFor is the deep link back to this run in the TF UI — the {{RUN_URL}}
+// placeholder's value, and the link the disclosure footer on the run's PRs
+// and reviews carries. Empty publicURL degrades to "" (no wrong fallbacks:
 // never fabricate a localhost link when the deployment has no configured
-// public URL). Local mode's run route has no org segment
-// (frontend/src/main.tsx "/runs/:conversationID"); multi mode nests every route under
-// "/orgs/:org_id" ("/orgs/:org_id/runs/:conversationID").
+// public URL).
 func (s *Spawner) runURLFor(orgID, conversationID string) string {
 	s.mu.Lock()
 	publicURL := s.publicURL
 	s.mu.Unlock()
-	if publicURL == "" {
-		return ""
-	}
-	if runmode.Current() == runmode.ModeMulti {
-		return publicURL + "/orgs/" + orgID + "/runs/" + conversationID
-	}
-	return publicURL + "/runs/" + conversationID
+	return agentmeta.RunURL(publicURL, orgID, conversationID)
 }
 
 // notifyDrainer fires the QueueDrainer hook for a task if a drainer is

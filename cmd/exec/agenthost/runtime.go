@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -50,7 +49,6 @@ type Runtime interface {
 	GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error)
 	ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error)
 	OrgJiraBaseURL(ctx context.Context) (string, error)
-	AgentFooter(ctx context.Context, kind string) (string, error)
 
 	// ReviewPosture resolves the review-posting decision inputs for owner/repo:
 	// the run team's configured posture, and the identity of the credential that
@@ -179,20 +177,16 @@ const (
 	opDeleteConversationWorktree       = "delete_conversation_worktree"
 	opListConversationArtifacts        = "list_conversation_artifacts"
 	opOrgJiraBase                      = "org_jira_base"
-	// opBuildAgentFooter keeps "run": it builds the footer TF appends to
-	// agent-authored PR and review bodies, which names the run in the
-	// product's own vocabulary and links to /runs/{id}.
-	opBuildAgentFooter      = "build_agent_run_footer"
-	opUpsertArtifact        = "upsert_artifact"
-	opUpdateReviewDetails   = "update_review_details_if_pending"
-	opTransitionReviewState = "transition_review_state"
-	opRecordExternalWrite   = "record_external_write"
-	opRecordReadTouch       = "record_read_touch"
-	opMemoryLoad            = "memory_load"
-	opCheckEntitlement      = "check_entitlement"
-	opSourceDisabled        = "source_disabled"
-	opAvailableSources      = "available_sources"
-	opReviewPosture         = "review_posture"
+	opUpsertArtifact                   = "upsert_artifact"
+	opUpdateReviewDetails              = "update_review_details_if_pending"
+	opTransitionReviewState            = "transition_review_state"
+	opRecordExternalWrite              = "record_external_write"
+	opRecordReadTouch                  = "record_read_touch"
+	opMemoryLoad                       = "memory_load"
+	opCheckEntitlement                 = "check_entitlement"
+	opSourceDisabled                   = "source_disabled"
+	opAvailableSources                 = "available_sources"
+	opReviewPosture                    = "review_posture"
 	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
 	// the other core ops it is FS-bearing: the sidecar relays it because it owns
 	// neither the shared bare cache nor the run-root; the orchestrator serves it.
@@ -400,10 +394,6 @@ func (r *directRuntime) OrgJiraBaseURL(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return strings.TrimRight(set.JiraBaseURL, "/"), nil
-}
-
-func (r *directRuntime) AgentFooter(ctx context.Context, kind string) (string, error) {
-	return agentmeta.Build(r.stores.Conversations, r.info.OrgID, r.info.ConversationID, kind), nil
 }
 
 // ReviewPosture reads the run team's posture and — only when the posture
@@ -770,14 +760,6 @@ func (r *relayRuntime) OrgJiraBaseURL(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return res.URL, nil
-}
-
-func (r *relayRuntime) AgentFooter(ctx context.Context, kind string) (string, error) {
-	var res buildAgentFooterResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opBuildAgentFooter, buildAgentFooterArgs{Kind: kind}, &res); err != nil {
-		return "", err
-	}
-	return res.Footer, nil
 }
 
 func (r *relayRuntime) ReviewPosture(ctx context.Context, owner, repo string) (ReviewPostureResolution, error) {

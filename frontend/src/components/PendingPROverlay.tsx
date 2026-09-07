@@ -61,10 +61,10 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   // It renders as an inline banner while title/body editing + approve stay live.
   const [diffError, setDiffError] = useState<string | null>(null)
   // submitError is the "Open PR" (approve) failure, shown as an inline banner
-  // rather than the full-screen error state: a partial failure (UpdatePR landed
-  // but MarkPRReady failed) is safely retryable in place — the artifact stays
-  // draft and approve re-strips/re-appends the footer — so we keep the editor
-  // visible instead of forcing a close-and-reopen.
+  // rather than the full-screen error state: a failed approve is safely
+  // retryable in place — the artifact stays draft and approve touches nothing
+  // but the ready flag — so we keep the editor visible instead of forcing a
+  // close-and-reopen.
   const [submitError, setSubmitError] = useState<string | null>(null)
 
   // Trap keyboard focus inside the overlay while open and restore it to the
