@@ -1,19 +1,28 @@
-// The named-account way into the deployment App, for an account that already
-// has it installed. GitHub's install page offers such an account nothing but
-// Configure and never returns to Triage Factory, so the admin names the account
-// here instead, authorizes on GitHub as themselves, and the callback finds the
-// installation among the ones they can see. A reveal rather than an always-open
-// field: Connect is the common path, and this is the one for an install that
-// happened somewhere else first.
+// The one way a workspace connects a GitHub account to the deployment App: a
+// reveal, then a login. Whether that account already has the App installed is
+// the ceremony's business, not this form's — the panel may not know it, since
+// the answer is per-viewer — so the copy promises only what is true either
+// way: GitHub will ask to install if it has to, and the person confirms as
+// themselves. beforeStart, when given, runs first and can call the whole thing
+// off; the own-App card uses it to confirm and tear its App down before the
+// ceremony starts.
 import { useState } from 'react'
 import { startManagedGitHubConnectAccount } from '../../lib/githubApp'
 
-export default function ConnectInstalledAccount({
+export default function ConnectGitHubAccount({
   orgId,
+  label,
+  primary = false,
   disabled = false,
+  beforeStart,
 }: {
   orgId: string
+  label: string
+  primary?: boolean
   disabled?: boolean
+  // Runs after the account is entered and before the ceremony starts. A
+  // false return cancels quietly; a throw is shown inline.
+  beforeStart?: (account: string) => Promise<boolean>
 }) {
   const [open, setOpen] = useState(false)
   const [account, setAccount] = useState('')
@@ -26,9 +35,13 @@ export default function ConnectInstalledAccount({
         type="button"
         disabled={disabled}
         onClick={() => setOpen(true)}
-        className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40"
+        className={
+          primary
+            ? 'rounded-full bg-warm px-5 py-2 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90 disabled:opacity-40'
+            : 'rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40'
+        }
       >
-        Connect an account that already has the App…
+        {label}
       </button>
     )
   }
@@ -39,6 +52,10 @@ export default function ConnectInstalledAccount({
     setBusy(true)
     setError(null)
     try {
+      if (beforeStart && !(await beforeStart(login))) {
+        setBusy(false)
+        return
+      }
       // Navigates away on success; control never comes back here.
       await startManagedGitHubConnectAccount(orgId, login)
     } catch (e) {
@@ -56,9 +73,7 @@ export default function ConnectInstalledAccount({
       }}
     >
       <label className="block space-y-1.5">
-        <span className="text-label uppercase tracking-wide text-ink-3">
-          GitHub account with the App installed
-        </span>
+        <span className="text-label uppercase tracking-wide text-ink-3">GitHub account</span>
         <input
           type="text"
           value={account}
@@ -70,8 +85,9 @@ export default function ConnectInstalledAccount({
         />
       </label>
       <p className="text-reported leading-relaxed text-ink-3">
-        The organization or user the App is installed on. You&rsquo;ll confirm on GitHub as the
-        account linked to your Triage Factory user, which has to be an owner of it.
+        The organization or user to connect. If the App isn&rsquo;t installed there yet, GitHub will
+        ask you to install it. You&rsquo;ll confirm on GitHub as the account linked to your Triage
+        Factory user, which has to be an owner.
       </p>
       {error && <p className="text-ui text-alarm">{error}</p>}
       <div className="flex items-center gap-2">

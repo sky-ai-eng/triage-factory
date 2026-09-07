@@ -53,7 +53,7 @@ import { toast } from '../../../components/Toast/toastStore'
 import { isHttpUrl } from '../../../lib/reachability'
 import { GitHubAccountTypeStep, GitHubAppSourcePicker, GitHubAppStep } from '../../setup/GitHubStep'
 import GitHubAppImportForm from '../GitHubAppImportForm'
-import ConnectInstalledAccount from '../ConnectInstalledAccount'
+import ConnectGitHubAccount from '../ConnectGitHubAccount'
 import { appImportedPatch } from '../../setup/githubAppImported'
 import { GitHubAppInstallView } from '../GitHubAppInstallView'
 import GitHubWebhookHealthNotice from '../GitHubWebhookHealthNotice'
@@ -70,7 +70,6 @@ import {
   getGitHubAppStatus,
   patPreflight,
   refreshGitHubAppInstallations,
-  startManagedGitHubConnect,
   switchToPat,
   type AccessDiff,
   type GitHubAppInstallation,
@@ -368,34 +367,26 @@ export default function GitHubAccessControl({
   }
 
   // ── Own App: switch to the deployment's ──
-  // The teardown verb followed straight away by the deployment App's Connect,
-  // which is a navigation to GitHub's install page. The workspace holds no
-  // credential for the length of that trip; the app shell treats that as
-  // setup left unfinished and routes an admin who comes back without an
-  // account connected into the setup wizard, which is why the confirm says
+  // The account is asked for first, then the teardown verb, then the
+  // ceremony for that account — one gesture. The workspace holds no
+  // credential for the length of the trip to GitHub; the app shell treats
+  // that as setup left unfinished and routes an admin who comes back without
+  // an account connected into the setup wizard, which is why the confirm says
   // so. There is deliberately no bare disconnect here: a teardown with no
   // replacement lands in exactly that wizard, and the only reason to want one
   // is to connect something else — which is what this is.
-  const switchToDeploymentApp = async () => {
-    if (!orgId || busy) return
+  const disconnectOwnAppFor = async (account: string): Promise<boolean> => {
+    if (!orgId) return false
     if (
       !confirm(
-        `Switch this workspace to the deployment’s GitHub App? ${slug ? `The ${slug} App` : 'Your App'} is disconnected first (it stays registered on GitHub), then you pick a GitHub account to connect on GitHub. If you leave GitHub’s page without connecting one, this workspace has no GitHub access and you’ll be taken back to setup.`,
+        `Switch this workspace to the deployment’s GitHub App, connecting ${account}? ${slug ? `The ${slug} App` : 'Your App'} is disconnected first (it stays registered on GitHub), then you confirm on GitHub. If you leave GitHub without finishing, this workspace has no GitHub access and you’ll be taken back to setup.`,
       )
     )
-      return
-    setBusy(true)
-    setError(null)
-    try {
-      await disconnectOwnApp(orgId)
-    } catch (e) {
-      setError((e as Error).message)
-      setBusy(false)
-      return
-    }
-    // The draft no longer describes an App, so a return from GitHub's page
-    // without a bind renders the empty state rather than a card for a
-    // registration that is gone.
+      return false
+    await disconnectOwnApp(orgId)
+    // The draft no longer describes an App, so a return from GitHub without
+    // a bind renders the empty state rather than a card for a registration
+    // that is gone.
     ctx.patch({
       githubAppRegistered: false,
       githubAppStaged: false,
@@ -405,22 +396,7 @@ export default function GitHubAccessControl({
       hasGitHubPat: false,
       githubPatLogin: '',
     })
-    await connectManaged()
-  }
-
-  // ── Deployment App: Connect ──
-  // Starts the install leg and navigates to GitHub. A refusal lands inline —
-  // the start is a fetch now, so there is no page from the server to show it.
-  const connectManaged = async () => {
-    if (!orgId) return
-    setBusy(true)
-    setError(null)
-    try {
-      await startManagedGitHubConnect(orgId)
-    } catch (e) {
-      setError((e as Error).message)
-      setBusy(false)
-    }
+    return true
   }
 
   // ─────────────────────────────── render ───────────────────────────────
@@ -714,17 +690,15 @@ export default function GitHubAccessControl({
           {error && <p className="text-ui text-alarm">{error}</p>}
           {/* The ways off the workspace's own App: the deployment's App where
               the deployment offers one, or a token. Never a bare teardown —
-              see switchToDeploymentApp. */}
+              see disconnectOwnAppFor. */}
           <div className="flex flex-wrap items-center gap-2">
             {deploymentAppAvailable && orgId && (
-              <button
-                type="button"
+              <ConnectGitHubAccount
+                orgId={orgId}
+                label="Switch to the deployment’s App…"
                 disabled={busy}
-                onClick={() => void switchToDeploymentApp()}
-                className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40"
-              >
-                Switch to the deployment&rsquo;s App…
-              </button>
+                beforeStart={disconnectOwnAppFor}
+              />
             )}
             <button
               type="button"
@@ -772,15 +746,11 @@ export default function GitHubAccessControl({
           {error && <p className="text-ui text-alarm">{error}</p>}
           {orgId && (
             <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
+              <ConnectGitHubAccount
+                orgId={orgId}
+                label={installCount === 0 ? 'Connect GitHub…' : 'Connect another account…'}
                 disabled={busy}
-                onClick={() => void connectManaged()}
-                className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40"
-              >
-                {installCount === 0 ? 'Connect GitHub…' : 'Connect another account…'}
-              </button>
-              <ConnectInstalledAccount orgId={orgId} disabled={busy} />
+              />
               {/* The way out of the class, for a workspace that wants its own
                   App or a token instead. It releases every bound account; the
                   installations stay on GitHub. */}
@@ -867,17 +837,7 @@ export default function GitHubAccessControl({
           </p>
           <div className="flex flex-wrap items-center gap-2">
             {deploymentAppAvailable && orgId && (
-              <>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void connectManaged()}
-                  className="rounded-full bg-warm px-5 py-2 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90 disabled:opacity-40"
-                >
-                  Connect GitHub…
-                </button>
-                <ConnectInstalledAccount orgId={orgId} />
-              </>
+              <ConnectGitHubAccount orgId={orgId} label="Connect GitHub…" primary />
             )}
             <button
               type="button"

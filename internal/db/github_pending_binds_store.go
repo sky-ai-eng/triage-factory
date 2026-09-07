@@ -55,20 +55,23 @@ type GitHubPendingBindStore interface {
 	// authorizes it has already run in the handler.
 	CreateSystem(ctx context.Context, bind domain.GitHubPendingBind) (domain.GitHubPendingBind, error)
 
-	// ConsumeSystem spends the record whose nonce hashes to nonceHash and
-	// returns it, or nil when there is nothing to spend. It also
-	// opportunistically prunes records long past their expiry, the way
-	// GitHubDeliveryStore.MarkDeliveredSystem prunes deliveries.
+	// ConsumeSystem spends the record whose nonce hashes to nonceHash, if the
+	// user who started it is userID, and returns it — or nil when there is
+	// nothing to spend. It also opportunistically prunes records long past
+	// their expiry, the way GitHubDeliveryStore.MarkDeliveredSystem prunes
+	// deliveries.
 	//
 	// Single-use is the whole contract, and it is a conditional UPDATE …
 	// RETURNING rather than a read followed by a write: two callbacks arriving
 	// on one record at the same instant must not both proceed, and a
-	// read-then-write leaves exactly that window open.
+	// read-then-write leaves exactly that window open. The initiating user is
+	// one of the conditions for the same reason: a cookie replayed into
+	// somebody else's session must not spend the record it names, and a
+	// check made after the spend would already have spent it.
 	//
-	// Absent, expired and already-consumed collapse into one nil answer on
-	// purpose. The caller refuses identically for all three — the ticket's
-	// "no cookie, no record, expired, or already consumed → refuse" — so
-	// distinguishing them would only offer an unauthenticated caller a way to
-	// probe which nonces once existed.
-	ConsumeSystem(ctx context.Context, nonceHash string, now time.Time) (*domain.GitHubPendingBind, error)
+	// Absent, expired, already-consumed and somebody else's collapse into one
+	// nil answer on purpose. The caller refuses identically for all four, so
+	// distinguishing them would only offer a caller a way to probe which
+	// nonces once existed and whose they were.
+	ConsumeSystem(ctx context.Context, nonceHash, userID string, now time.Time) (*domain.GitHubPendingBind, error)
 }

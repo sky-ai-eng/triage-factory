@@ -27,12 +27,12 @@ var _ db.GitHubPendingBindStore = (*gitHubPendingBindStore)(nil)
 
 // pgPendingBindColumns is the one projection both statements return — the
 // insert's RETURNING and the consume's — so the two shapes cannot drift.
-const pgPendingBindColumns = `nonce_hash, org_id, user_id, account_login, created_at, expires_at, consumed_at`
+const pgPendingBindColumns = `nonce_hash, org_id, user_id, leg, account_login, created_at, expires_at, consumed_at`
 
 func scanPendingBind(row interface{ Scan(...any) error }) (domain.GitHubPendingBind, error) {
 	var b domain.GitHubPendingBind
 	var consumed sql.NullTime
-	if err := row.Scan(&b.NonceHash, &b.OrgID, &b.UserID, &b.AccountLogin, &b.CreatedAt, &b.ExpiresAt, &consumed); err != nil {
+	if err := row.Scan(&b.NonceHash, &b.OrgID, &b.UserID, &b.Leg, &b.AccountLogin, &b.CreatedAt, &b.ExpiresAt, &consumed); err != nil {
 		return domain.GitHubPendingBind{}, err
 	}
 	if consumed.Valid {
@@ -45,10 +45,10 @@ func scanPendingBind(row interface{ Scan(...any) error }) (domain.GitHubPendingB
 
 func (s *gitHubPendingBindStore) CreateSystem(ctx context.Context, bind domain.GitHubPendingBind) (domain.GitHubPendingBind, error) {
 	row := s.admin.QueryRowContext(ctx, `
-		INSERT INTO github_pending_binds (nonce_hash, org_id, user_id, account_login, created_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO github_pending_binds (nonce_hash, org_id, user_id, leg, account_login, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING `+pgPendingBindColumns,
-		bind.NonceHash, bind.OrgID, bind.UserID, bind.AccountLogin, bind.CreatedAt.UTC(), bind.ExpiresAt.UTC())
+		bind.NonceHash, bind.OrgID, bind.UserID, bind.Leg, bind.AccountLogin, bind.CreatedAt.UTC(), bind.ExpiresAt.UTC())
 	stored, err := scanPendingBind(row)
 	if err != nil {
 		return domain.GitHubPendingBind{}, fmt.Errorf("insert github_pending_binds: %w", err)
@@ -56,20 +56,26 @@ func (s *gitHubPendingBindStore) CreateSystem(ctx context.Context, bind domain.G
 	return stored, nil
 }
 
-func (s *gitHubPendingBindStore) ConsumeSystem(ctx context.Context, nonceHash string, now time.Time) (*domain.GitHubPendingBind, error) {
+func (s *gitHubPendingBindStore) ConsumeSystem(ctx context.Context, nonceHash, userID string, now time.Time) (*domain.GitHubPendingBind, error) {
 	now = now.UTC()
-	// One conditional UPDATE decides everything: absent, expired and
-	// already-consumed all match nothing, and a second caller arriving on the
-	// same row finds consumed_at already set. There is no read to lose a race
-	// against.
+	if !isValidUUID(userID) {
+		// A user id that cannot be a row's is the same answer as nobody's,
+		// and never reaches the query as a comparison against a uuid column.
+		return nil, nil
+	}
+	// One conditional UPDATE decides everything: absent, expired,
+	// already-consumed and somebody else's all match nothing, and a second
+	// caller arriving on the same row finds consumed_at already set. There is
+	// no read to lose a race against.
 	row := s.admin.QueryRowContext(ctx, `
 		UPDATE github_pending_binds
 		   SET consumed_at = $1
 		 WHERE nonce_hash = $2
+		   AND user_id = $3
 		   AND consumed_at IS NULL
 		   AND expires_at > $1
 		RETURNING `+pgPendingBindColumns,
-		now, nonceHash)
+		now, nonceHash, userID)
 	stored, err := scanPendingBind(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Nothing to spend. The caller refuses identically for every reason a

@@ -155,27 +155,36 @@ treats it as one:
 
 - The install callback with no ceremony behind it redirects to
   `/github/installed`, a page that says the install went through and is not yet
-  connected, and asks the admin to **name the account**. GitHub's install page
-  is no use for an account that already has the App: it offers nothing but
-  Configure, its in-place settings page, and never returns to the callback —
-  "Redirect on update" is ignored without a Setup URL, and the
-  OAuth-during-install setting the install leg needs for its `code` blanks
-  the Setup URL. So the ceremony has a second leg for exactly that account
-  (`POST /api/orgs/{org_id}/github/managed/connect-account`; both starts are
-  CSRF-guarded POSTs that answer with the GitHub URL for the page to navigate
-  to, so a ceremony is only ever minted by the admin's own page): the same
-  record and cookie, GitHub's plain OAuth authorize carrying the ceremony's `state`, and
-  a callback that refuses a response without it, proves the person's identity
-  as above, and then finds the named account's installation **among the
-  installations that person can see** — never under the App's own key, which
-  would name installations on accounts they have no relation to. The App's own
-  read of that installation is still the source of every persisted fact, the
-  authority and uniqueness gates run unchanged, and a name that resolves to
-  nothing is one answer whether the account has no installation or the person
-  cannot see it, so the route cannot be used to learn which accounts have the
-  App. There is still no path that creates a binding from an installation id
-  the browser carried in: a named ceremony ignores one on its query string.
-- A managed workspace with no bound installation shows the same buttons as its
+  connected, and offers the same connect form as everywhere else: **name the
+  account**. That form is the one way in, and the reason it is a name rather
+  than GitHub's picker is that GitHub's install page is no use for an account
+  that already has the App — it offers nothing but Configure, its in-place
+  settings page, and never returns to the callback, since "Redirect on update"
+  is ignored without a Setup URL and the OAuth-during-install setting the
+  install leg needs for its `code` blanks the Setup URL — while the panel
+  cannot know which case an account is, because the answer is per-viewer.
+  The ceremony (`POST /api/orgs/{org_id}/github/managed/connect-account`, a
+  CSRF-guarded POST that answers with the GitHub URL for the page to navigate
+  to, so a ceremony is only ever minted by the admin's own page) therefore
+  always begins on GitHub's plain OAuth **authorize** leg, carrying the
+  ceremony's `state`: the callback refuses a response without it, proves the
+  person's identity as above, and then looks for the named account's
+  installation **among the installations that person can see** — never under
+  the App's own key, which would name installations on accounts they have no
+  relation to. Found, the App's own read of it is the source of every
+  persisted fact and the authority and uniqueness gates run unchanged. Not
+  found — whether the account has no installation or the person cannot see
+  one; the two are indistinguishable and treated identically — the callback
+  continues onto the **install** leg: a fresh record for the same account,
+  the cookie replaced, and the browser sent to GitHub's install page with the
+  account preselected, from which GitHub returns a code and an installation
+  id to the same callback. That leg runs every proof again and binds only an
+  installation on the account that was named. A login that names no account
+  at all is the one refusal here, account existence being public. The record
+  says which leg it is waiting for; there is still no path that creates a
+  binding from an installation id the browser carried in, and an authorize
+  ceremony ignores one on its query string.
+- A managed workspace with no bound installation shows the same form as its
   Settings empty state.
 - The deployment webhook receiver acknowledges a delivery for an unbound
   installation with 2xx, writes nothing, and logs **one line at INFO** naming
@@ -199,11 +208,12 @@ reports, and the affordances are per class:
 
 - **A workspace with its own App** shows the App's slug, its installations, both
   findings below, and the ways off it: the switch to the deployment's App
-  (only where the deployment has one — it is the disconnect verb above
-  followed straight away by Connect, so the workspace holds no credential for
-  the length of the trip to GitHub's install page, and an admin who leaves
-  that page without connecting an account is routed to the setup wizard) and
-  the switch to a token. Never a bare disconnect.
+  (only where the deployment has one — the connect form under that label,
+  which asks for the account first, then runs the disconnect verb above and
+  starts the ceremony for that account, so the workspace holds no credential
+  for the length of the trip to GitHub, and an admin who leaves GitHub
+  without finishing is routed to the setup wizard) and the switch to a token.
+  Never a bare disconnect.
 - **A workspace on the deployment's App** (`using_deployment_default: true`)
   shows no App of its own — there is no row, and there never will be — and is
   never offered registration or import. What it shows is the accounts it has

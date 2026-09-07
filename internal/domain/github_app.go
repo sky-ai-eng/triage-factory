@@ -279,20 +279,33 @@ type UserGitHubIdentity struct {
 // NonceHash is the SHA-256 of the nonce in lowercase hex — never the nonce
 // itself, so a database read yields nothing that can complete a bind. The
 // browser's cookie holds the only copy of the plaintext.
+// The two legs a pending-bind record can expect. App-validated, like the
+// other closed vocabularies stored as text.
+const (
+	GitHubBindLegAuthorize = "authorize"
+	GitHubBindLegInstall   = "install"
+)
+
 type GitHubPendingBind struct {
 	NonceHash string
 	OrgID     string
-	// UserID is the admin who started the ceremony. The callback requires the
-	// returning session to be that same person, so a cookie replayed into
-	// somebody else's browser consumes nothing.
+	// UserID is the admin who started the ceremony. The consume matches only
+	// a record this user started — it is a condition of the conditional
+	// update, not a check made after it — so a cookie replayed into somebody
+	// else's session spends nothing, and the record stays for the person it
+	// belongs to.
 	UserID string
-	// AccountLogin is set when the ceremony was started for an account that
-	// already has the App installed: the login the admin named, and the only
-	// place it is carried — never a URL. It decides which return leg the
-	// callback expects: empty is GitHub's install redirect (code and
-	// installation_id together), non-empty is the OAuth authorize leg (code
-	// and state), where the installation is found among the ones the
-	// authorizing user can see rather than read off the query string.
+	// Leg is the return the callback expects for this record — the record
+	// decides, never the query string. GitHubBindLegAuthorize is GitHub's
+	// OAuth authorize (code and state), where the named account's
+	// installation is found among the ones the authorizing user can see;
+	// GitHubBindLegInstall is GitHub's install redirect (code and
+	// installation_id together), reached only from inside an authorize leg
+	// that found the account without the App.
+	Leg string
+	// AccountLogin is the account the admin named, the only place it is
+	// carried — never a URL. On the install leg it is what the installation
+	// GitHub returns has to be on.
 	AccountLogin string
 	CreatedAt    time.Time
 	ExpiresAt    time.Time

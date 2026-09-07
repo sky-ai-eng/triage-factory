@@ -3,8 +3,7 @@ import { Link, useLocation } from 'react-router'
 import { useAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { isOrgAdminRole } from '../hooks/useOrgRole'
-import { startManagedGitHubConnect } from '../lib/githubApp'
-import ConnectInstalledAccount from './settings/ConnectInstalledAccount'
+import ConnectGitHubAccount from './settings/ConnectGitHubAccount'
 
 /**
  * GitHubInstalled is where the deployment App's install callback lands when
@@ -14,13 +13,12 @@ import ConnectInstalledAccount from './settings/ConnectInstalledAccount'
  * installation is real and belongs to no workspace — an ordinary outcome of a
  * supported install path, not a failure, and the copy here never calls it one.
  *
- * The page does exactly two things: says what happened, and offers the way to
- * connect it — the named-account form, because the account now has the App
- * and GitHub's install page would offer it nothing but Configure. There is no
- * list of unbound installations to pick from — on a shared App such a list is
- * every other prospective tenant's GitHub account, and the page is handed
- * nothing about the installation that sent the visitor here, not even its id.
- * The admin names the account; the proof is GitHub's.
+ * The page does exactly two things: says what happened, and offers the one
+ * way to connect — the account's name. There is no list of unbound
+ * installations to pick from — on a shared App such a list is every other
+ * prospective tenant's GitHub account, and the page is handed nothing about
+ * the installation that sent the visitor here, not even its id. The admin
+ * names the account; the proof is GitHub's.
  *
  * Mounted at /github/installed in multi mode only, behind AuthGate: a visitor
  * with no session is sent to sign in with this page as the return target, and
@@ -43,15 +41,6 @@ export default function GitHubInstalled() {
   const orgId = chosenOrgId ?? activeOrgId ?? orgs[0]?.id ?? null
   const org = orgs.find((o) => o.id === orgId) ?? null
   const canConnect = isOrgAdminRole(org?.role)
-  const [installError, setInstallError] = useState<string | null>(null)
-  const installElsewhere = async (id: string) => {
-    setInstallError(null)
-    try {
-      await startManagedGitHubConnect(id)
-    } catch (e) {
-      setInstallError((e as Error).message)
-    }
-  }
 
   return (
     <div className="min-h-screen bg-ground flex items-center justify-center p-4">
@@ -96,19 +85,7 @@ export default function GitHubInstalled() {
         )}
 
         {org && !requested && canConnect && (
-          <div className="space-y-3">
-            <ConnectInstalledAccount orgId={org.id} />
-            {/* For a visitor who landed here some other way and wants a
-                fresh install instead: the ordinary ceremony. */}
-            <button
-              type="button"
-              onClick={() => void installElsewhere(org.id)}
-              className="w-full rounded-xl border border-line-1 px-4 py-2.5 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
-            >
-              Install on another account and connect it to {org.name}
-            </button>
-            {installError && <p className="text-ui text-alarm">{installError}</p>}
-          </div>
+          <ConnectGitHubAccount orgId={org.id} label={`Connect GitHub to ${org.name}`} primary />
         )}
 
         {org && !requested && !canConnect && (

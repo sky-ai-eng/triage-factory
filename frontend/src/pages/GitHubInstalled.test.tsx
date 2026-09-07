@@ -22,14 +22,12 @@ vi.mock('../contexts/OrgContext', () => ({
 }))
 
 const connect = vi.hoisted(() => ({
-  startManagedGitHubConnect: vi.fn(),
   startManagedGitHubConnectAccount: vi.fn(),
 }))
 vi.mock('../lib/githubApp', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/githubApp')>()
   return {
     ...actual,
-    startManagedGitHubConnect: connect.startManagedGitHubConnect,
     startManagedGitHubConnectAccount: connect.startManagedGitHubConnectAccount,
   }
 })
@@ -47,7 +45,6 @@ function renderAt(search = '') {
 const FAULT_WORDS = /\b(error|fail|failed|failure|wrong|problem)\b/i
 
 beforeEach(() => {
-  connect.startManagedGitHubConnect.mockReset()
   connect.startManagedGitHubConnectAccount.mockReset()
   connect.startManagedGitHubConnectAccount.mockResolvedValue(undefined)
   authState.orgs = [{ id: 'org-1', name: 'Acme', role: 'admin' }]
@@ -62,23 +59,21 @@ describe('GitHubInstalled', () => {
     expect(document.body.textContent).not.toMatch(FAULT_WORDS)
   })
 
-  it('connects the named account through the OAuth leg, and lists nothing to pick from', async () => {
+  it('connects the named account, and lists nothing to pick from', async () => {
     renderAt()
-    // Two buttons and no list: the named-account reveal, and the ordinary
-    // ceremony for a fresh install. Nothing enumerates installations.
-    expect(screen.getAllByRole('button')).toHaveLength(2)
+    // One button and no list: the connect form. Nothing enumerates
+    // installations, and nothing needs to know whether the account has
+    // the App — the ceremony works that out.
+    expect(screen.getAllByRole('button')).toHaveLength(1)
     expect(screen.queryByRole('list')).not.toBeInTheDocument()
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
 
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Connect an account that already has the App…' }),
-    )
+    fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub to Acme' }))
     fireEvent.change(screen.getByRole('textbox'), { target: { value: ' acme-corp ' } })
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     await waitFor(() => {
       expect(connect.startManagedGitHubConnectAccount).toHaveBeenCalledWith('org-1', 'acme-corp')
     })
-    expect(connect.startManagedGitHubConnect).not.toHaveBeenCalled()
   })
 
   it('surfaces a refused start inline and stays put', async () => {
@@ -86,23 +81,13 @@ describe('GitHubInstalled', () => {
       new Error('This workspace already has a GitHub personal access token.'),
     )
     renderAt()
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Connect an account that already has the App…' }),
-    )
+    fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub to Acme' }))
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'acme-corp' } })
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     expect(
       await screen.findByText('This workspace already has a GitHub personal access token.'),
     ).toBeInTheDocument()
     expect(screen.getByRole('textbox')).toBeInTheDocument()
-  })
-
-  it('still offers the ordinary ceremony for a fresh install on another account', () => {
-    renderAt()
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Install on another account and connect it to Acme' }),
-    )
-    expect(connect.startManagedGitHubConnect).toHaveBeenCalledWith('org-1')
   })
 
   it('links back to the workspace settings surface that carries the same button', () => {
@@ -137,13 +122,9 @@ describe('GitHubInstalled', () => {
       { id: 'org-2', name: 'Globex', role: 'admin' },
     ]
     renderAt()
-    expect(
-      screen.getByRole('button', { name: 'Install on another account and connect it to Acme' }),
-    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Connect GitHub to Acme' })).toBeInTheDocument()
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'org-2' } })
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Connect an account that already has the App…' }),
-    )
+    fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub to Globex' }))
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'globex' } })
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     expect(connect.startManagedGitHubConnectAccount).toHaveBeenCalledWith('org-2', 'globex')

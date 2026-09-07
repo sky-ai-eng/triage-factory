@@ -1332,7 +1332,6 @@ func (s *Server) routes() {
 	// credential) and someone who installed the App from its public page on
 	// GitHub, who has no session at all and must not be answered with a JSON
 	// 401. The bind cookie decides which, before any session lookup.
-	s.apiMutating("POST /api/orgs/{org_id}/github/managed/connect", s.handleGitHubManagedConnect)
 	s.apiMutating("POST /api/orgs/{org_id}/github/managed/connect-account", s.handleGitHubManagedConnectAccount)
 	// Leaving the class — the bind's mirror. Verb routes because each is a
 	// multi-row transition (soft-remove the rows, reset the class, record the

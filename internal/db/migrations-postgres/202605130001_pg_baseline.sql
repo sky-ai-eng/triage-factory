@@ -3547,9 +3547,14 @@ CREATE TABLE public.github_pending_binds (
     nonce_hash    text PRIMARY KEY,
     org_id        uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
     user_id       uuid NOT NULL,
-    -- The GitHub login the admin named when connecting an account that already
-    -- has the App installed; '' for a ceremony that goes through GitHub's
-    -- install page. Carried here and nowhere else, so it never rides a URL.
+    -- Which return the callback expects: 'authorize' (GitHub's OAuth authorize,
+    -- code and state) or 'install' (GitHub's install redirect, code and
+    -- installation_id). The record decides, never the query string.
+    -- App-validated.
+    leg           text NOT NULL DEFAULT 'authorize',
+    -- The GitHub login the admin named. Carried here and nowhere else, so it
+    -- never rides a URL; on the install leg it is what the installation GitHub
+    -- returns has to be on.
     account_login text NOT NULL DEFAULT '',
     created_at    timestamptz NOT NULL,
     expires_at  timestamptz NOT NULL,
