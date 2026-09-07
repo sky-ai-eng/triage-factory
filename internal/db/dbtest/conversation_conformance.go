@@ -202,8 +202,7 @@ type ConversationSeeder struct {
 //   - Queries return what they advertise (status filters, sort
 //     orders, JOIN-derived projections).
 //   - Transcript layer round-trips messages including JSONB
-//     metadata + tool_calls + user/claim attribution, and
-//     TokenTotalsSystem sums correctly.
+//     metadata + tool_calls + user/claim attribution.
 //   - Memory_missing derivation matches the four noncompliance
 //     forms (no row / NULL / "" / whitespace) + the populated
 //     baseline.
@@ -4223,48 +4222,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("TokenTotalsSystem_SumsAssistantOnly", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		// Two assistant messages with tokens, plus a user message that
-		// should NOT contribute to totals.
-		i1, i2 := 100, 50
-		o1, o2 := 200, 75
-		for _, tup := range []struct {
-			role           string
-			input, output  int
-			countsToTotals bool
-		}{
-			{"assistant", i1, o1, true},
-			{"assistant", i2, o2, true},
-			{"user", 99999, 99999, false},
-		} {
-			in, out := tup.input, tup.output
-			msg := &domain.Message{
-				ConversationID: conversationID, Role: tup.role, Content: "x",
-				InputTokens: &in, OutputTokens: &out,
-				Model: "claude-test",
-			}
-			if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
-				t.Fatalf("InsertMessage(%s): %v", tup.role, err)
-			}
-		}
-		tot, err := store.TokenTotalsSystem(ctx, orgID, conversationID)
-		if err != nil {
-			t.Fatalf("TokenTotalsSystem: %v", err)
-		}
-		if tot.InputTokens != i1+i2 {
-			t.Errorf("InputTokens = %d, want %d (user role must not count)", tot.InputTokens, i1+i2)
-		}
-		if tot.OutputTokens != o1+o2 {
-			t.Errorf("OutputTokens = %d, want %d", tot.OutputTokens, o1+o2)
-		}
-		if tot.NumTurns != 2 {
-			t.Errorf("NumTurns = %d, want 2 (assistant rows)", tot.NumTurns)
-		}
-	})
-
 	t.Run("LastAgentActivityAtSystem_NewestNonUserMessage", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -4311,154 +4268,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if !at2.Equal(toolAt) {
 			t.Errorf("watermark = %v, want the newer tool row %v", at2, toolAt)
-		}
-	})
-
-	t.Run("BlueprintSiblingCostUSDSystem_SumsSettledExcludingSelf", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		ent := seed.Entity(t, "bp-cost")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		brID := seed.BlueprintRun(t, taskID)
-
-		// Two conversations sharing one blueprint_run — sibling steps. (The
-		// seeder mints a fresh blueprint_run per call, so we reuse brID
-		// directly to stage the multi-step shape the footer aggregates
-		// over.)
-		step1 := seed.Conversation(t, domain.Conversation{
-			TaskID: taskID, PromptID: conversationTestPrompt(t),
-			Status: "running", Model: "m", BlueprintRunID: brID,
-		})
-		step2 := seed.Conversation(t, domain.Conversation{
-			TaskID: taskID, PromptID: conversationTestPrompt(t),
-			Status: "running", Model: "m", BlueprintRunID: brID,
-		})
-		// Each step streams a row and settles its cost lump on it — the
-		// sibling sum reads the ledger, not any conversation-level column.
-		settle := func(stepID string, cost float64) {
-			t.Helper()
-			if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: stepID, Role: "assistant", Content: "work"}); err != nil {
-				t.Fatalf("InsertMessage %s: %v", stepID, err)
-			}
-			if _, err := store.Complete(ctx, orgID, stepID, "completed", cost, 1000, 1, "", "finish", "", ""); err != nil {
-				t.Fatalf("Complete %s: %v", stepID, err)
-			}
-		}
-		settle(step1, 0.01)
-		settle(step2, 0.02)
-
-		near := func(got, want float64) bool { return got-want < 1e-9 && want-got < 1e-9 }
-
-		// Querying for step2 returns step1's settled cost only (self excluded).
-		sib, err := store.BlueprintSiblingCostUSDSystem(ctx, orgID, brID, step2)
-		if err != nil {
-			t.Fatalf("BlueprintSiblingCostUSDSystem(step2): %v", err)
-		}
-		if !near(sib, 0.01) {
-			t.Errorf("sibling cost excluding step2 = %v, want 0.01 (step1 only)", sib)
-		}
-		// Symmetric: querying for step1 returns step2's cost.
-		sib, err = store.BlueprintSiblingCostUSDSystem(ctx, orgID, brID, step1)
-		if err != nil {
-			t.Fatalf("BlueprintSiblingCostUSDSystem(step1): %v", err)
-		}
-		if !near(sib, 0.02) {
-			t.Errorf("sibling cost excluding step1 = %v, want 0.02 (step2 only)", sib)
-		}
-		// A blueprint_run with no other conversations sums to 0, not an error.
-		sib, err = store.BlueprintSiblingCostUSDSystem(ctx, orgID, uuid.New().String(), step1)
-		if err != nil {
-			t.Fatalf("BlueprintSiblingCostUSDSystem(empty): %v", err)
-		}
-		if !near(sib, 0) {
-			t.Errorf("sibling cost for empty blueprint_run = %v, want 0", sib)
-		}
-
-		// An unsettled sibling (seeded, never completed → no settlement
-		// stamps on its rows) contributes 0, not an error. Add a third,
-		// never-completed step and re-query for step2 — the settled total
-		// is unchanged (step1's 0.01 only).
-		_ = seed.Conversation(t, domain.Conversation{
-			TaskID: taskID, PromptID: conversationTestPrompt(t),
-			Status: "running", Model: "m", BlueprintRunID: brID,
-		})
-		sib, err = store.BlueprintSiblingCostUSDSystem(ctx, orgID, brID, step2)
-		if err != nil {
-			t.Fatalf("BlueprintSiblingCostUSDSystem(step2, unsettled sibling): %v", err)
-		}
-		if !near(sib, 0.01) {
-			t.Errorf("sibling cost with an unsettled step = %v, want 0.01 (NULL cost omitted)", sib)
-		}
-	})
-
-	t.Run("BlueprintSiblingDurationMsSystem_SumsSettledExcludingSelf", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		ent := seed.Entity(t, "bp-dur")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		brID := seed.BlueprintRun(t, taskID)
-
-		// Two conversations sharing one blueprint_run — sibling steps. Duration
-		// lives on the claim Complete releases, so each step goes live (minting
-		// a claim) before it completes.
-		step1 := seed.Conversation(t, domain.Conversation{
-			TaskID: taskID, PromptID: conversationTestPrompt(t),
-			Status: "running", Model: "m", BlueprintRunID: brID,
-		})
-		step2 := seed.Conversation(t, domain.Conversation{
-			TaskID: taskID, PromptID: conversationTestPrompt(t),
-			Status: "running", Model: "m", BlueprintRunID: brID,
-		})
-		settle := func(stepID string, durationMs int) {
-			t.Helper()
-			if _, err := store.SetExecutorSystem(ctx, orgID, stepID, "exec-dur", 1); err != nil {
-				t.Fatalf("SetExecutorSystem %s: %v", stepID, err)
-			}
-			if _, err := store.Complete(ctx, orgID, stepID, "completed", 0, durationMs, 1, "", "finish", "", ""); err != nil {
-				t.Fatalf("Complete %s: %v", stepID, err)
-			}
-		}
-		settle(step1, 1000)
-		settle(step2, 2000)
-
-		// Querying for step2 returns step1's settled duration only (self excluded).
-		ms, err := store.BlueprintSiblingDurationMsSystem(ctx, orgID, brID, step2)
-		if err != nil {
-			t.Fatalf("BlueprintSiblingDurationMsSystem(step2): %v", err)
-		}
-		if ms != 1000 {
-			t.Errorf("sibling duration excluding step2 = %d, want 1000 (step1 only)", ms)
-		}
-		// Symmetric: querying for step1 returns step2's duration.
-		ms, err = store.BlueprintSiblingDurationMsSystem(ctx, orgID, brID, step1)
-		if err != nil {
-			t.Fatalf("BlueprintSiblingDurationMsSystem(step1): %v", err)
-		}
-		if ms != 2000 {
-			t.Errorf("sibling duration excluding step1 = %d, want 2000 (step2 only)", ms)
-		}
-		// A blueprint_run with no other conversations sums to 0, not an error.
-		ms, err = store.BlueprintSiblingDurationMsSystem(ctx, orgID, uuid.New().String(), step1)
-		if err != nil {
-			t.Fatalf("BlueprintSiblingDurationMsSystem(empty): %v", err)
-		}
-		if ms != 0 {
-			t.Errorf("sibling duration for empty blueprint_run = %d, want 0", ms)
-		}
-		// An unsettled sibling (seeded, never claimed nor completed → no
-		// claim telemetry) contributes 0: SUM skips it, COALESCE floors at 0.
-		_ = seed.Conversation(t, domain.Conversation{
-			TaskID: taskID, PromptID: conversationTestPrompt(t),
-			Status: "running", Model: "m", BlueprintRunID: brID,
-		})
-		ms, err = store.BlueprintSiblingDurationMsSystem(ctx, orgID, brID, step2)
-		if err != nil {
-			t.Fatalf("BlueprintSiblingDurationMsSystem(step2, unsettled sibling): %v", err)
-		}
-		if ms != 1000 {
-			t.Errorf("sibling duration with an unsettled step = %d, want 1000 (NULL omitted)", ms)
 		}
 	})
 

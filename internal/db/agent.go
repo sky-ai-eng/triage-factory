@@ -119,8 +119,7 @@ func (p Park) ClaimOutcome() string {
 // construction — a denormalized column drifted from ground truth
 // whenever a memory row was written outside the spawner's gate.
 //
-// The transcript layer (Messages, InsertMessage, TokenTotalsSystem) sits on
-// the messages table.
+// The transcript layer (Messages, InsertMessage) sits on the messages table.
 // MessageWindow bounds a transcript read — see
 // ConversationStore.MessagesWindow for the direction rules.
 type MessageWindow struct {
@@ -1060,35 +1059,4 @@ type ConversationStore interface {
 	// dispatcher in the same process can claim a conversation on the key in
 	// between. Admin pool, for the same claims-less caller.
 	HasActiveClaimForBlueprintRunSystem(ctx context.Context, orgID, blueprintRunID string) (bool, error)
-
-	// TokenTotalsSystem sums token usage across all assistant messages
-	// in a conversation (Model is MAX(model), preserving last-wins-alphabetically),
-	// via the admin pool in Postgres. Consumed by agentmeta.Build, which
-	// formats the agent-metadata footer from contexts that don't carry
-	// JWT claims (delegate-spawned agent subprocesses calling
-	// `triagefactory exec gh pr-create`, server post-approval
-	// submit paths). The admin pool keeps the
-	// footer-building utility from having to construct a synthetic-
-	// claims tx just to read one aggregate row.
-	TokenTotalsSystem(ctx context.Context, orgID, conversationID string) (*domain.TokenTotals, error)
-
-	// BlueprintSiblingCostUSDSystem sums the messages ledger's cost_usd
-	// stamps across every conversation in blueprintRunID EXCEPT
-	// excludeConversationID. agentmeta.Build adds this to the authoring
-	// conversation's own cost so a multi-step blueprint's published review/PR
-	// discloses the total spend across all steps, not just the step that
-	// authored it. Routes through the admin pool in Postgres — the footer
-	// builds from claims-less contexts (agent subprocess, post-approval
-	// submit).
-	BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeConversationID string) (float64, error)
-
-	// BlueprintSiblingDurationMsSystem sums the claims' duration_ms
-	// telemetry across every conversation in blueprintRunID EXCEPT
-	// excludeConversationID. agentmeta.Build adds this to the authoring
-	// conversation's own duration so a multi-step blueprint's published review/PR
-	// discloses the total time spent across all steps, not just the step
-	// that authored it — the time analog of BlueprintSiblingCostUSDSystem.
-	// Routes through the admin pool in Postgres (footer builds from
-	// claims-less contexts).
-	BlueprintSiblingDurationMsSystem(ctx context.Context, orgID, blueprintRunID, excludeConversationID string) (int, error)
 }

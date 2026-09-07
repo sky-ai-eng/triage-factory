@@ -20,7 +20,7 @@ Gotchas:
   triagefactory exec gh pr review-view <review_id> --pr <pr_number> -v
   ```
   `pr thread-view` is also asymmetric: `<pr_number> <comment_id>` (two positionals, no `--pr` flag). When in doubt, run `--help` on the subcommand.
-- The `--body` for `finalize-review` should begin with a `##` title (e.g. "## Looks good — minor nits") followed by your summary. A top-level heading and metadata footer are added automatically; use `##` for yours.
+- The `--body` for `finalize-review` should begin with a `##` title (e.g. "## Looks good — minor nits") followed by your summary. A top-level heading and a disclosure footer are added automatically; use `##` for yours.
 - `finalize-review` is the **last** call in a delegated review run. Your review (summary + inline comments) is assembled TF-side, and what happens to it then is your team's review posture, not something this command decides: it is either submitted to GitHub or staged for a human to approve first. Read the response rather than assuming — `{"status": "submitted", ...}` or `{"status": "drafted_awaiting_approval", ...}` — and both mean your review work is done. After you see either, do NOT call `finalize-review` again (the second call will hard-error). Write your `_tfac/memory.md` memory file in your run root and return your completion JSON.
 - For multi-line `--body` arguments, use a heredoc:
   ```

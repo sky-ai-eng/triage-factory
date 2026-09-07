@@ -575,17 +575,6 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return createWorkspaceCheckoutResult{Path: path}, nil
 
-	case methodBuildAgentFooter:
-		var a buildAgentFooterArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		footer, err := client.BuildAgentFooter(ctx, a.Kind)
-		if err != nil {
-			return nil, err
-		}
-		return buildAgentFooterResult{Footer: footer}, nil
-
 	case methodUpsertArtifact:
 		var a upsertArtifactArgs
 		if err := dec(&a); err != nil {

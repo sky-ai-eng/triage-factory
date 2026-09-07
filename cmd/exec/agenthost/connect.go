@@ -71,6 +71,7 @@ func NewLocalFromEnv(ctx context.Context, stores db.Stores) (Client, error) {
 		ConversationID:   ident.ConversationID,
 		TeamID:           ident.TeamID,
 		IsEventTriggered: ident.IsEventTriggered,
+		RunURL:           os.Getenv(RunURLEnvVar),
 	}), nil
 }
 

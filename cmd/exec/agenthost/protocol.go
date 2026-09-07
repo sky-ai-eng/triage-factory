@@ -270,14 +270,6 @@ type createWorkspaceCheckoutResult struct {
 	Path string `json:"path"`
 }
 
-type buildAgentFooterArgs struct {
-	Kind string `json:"kind"`
-}
-
-type buildAgentFooterResult struct {
-	Footer string `json:"footer"`
-}
-
 // --- artifacts (capture writers) ---
 
 type upsertArtifactArgs struct {
@@ -655,7 +647,6 @@ const (
 	methodDeleteConversationWorktreeByRepoRef = "DeleteConversationWorktreeByRepoRef"
 	methodWorkspaceRoots                      = "WorkspaceRoots"
 	methodCreateWorkspaceCheckout             = "CreateWorkspaceCheckout"
-	methodBuildAgentFooter                    = "BuildAgentFooter"
 
 	methodUpsertArtifact = "UpsertArtifact"
 

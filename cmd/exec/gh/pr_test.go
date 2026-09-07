@@ -389,9 +389,9 @@ func TestBuildPRFilesResult_Truncated(t *testing.T) {
 
 // TestStripClaudeCodeCitation pins the rules for trimming Claude
 // Code's auto-citation off PR bodies before they hit the queue.
-// The TF footer (added at submit time) is the prominent
-// attribution; letting Claude Code's citation through would crowd
-// it out and double-bill the PR.
+// The TF disclosure footer is the prominent attribution; letting
+// Claude Code's citation through would crowd it out and double-bill
+// the PR.
 func TestStripClaudeCodeCitation(t *testing.T) {
 	cases := []struct {
 		name string

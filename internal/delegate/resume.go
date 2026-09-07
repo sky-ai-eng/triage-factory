@@ -389,6 +389,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		return nil, fmt.Errorf("resolve own binary path: %w", err)
 	}
 
+	runURL := s.publishedRunURLFor(orgID, conversationID)
 	extraEnv := []string{
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
 		// Mirror runAgent's TRIAGE_FACTORY_CONVERSATION_ROOT setting. The resume
@@ -404,6 +405,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		// invocation so the agent sees a consistent environment across
 		// every prompt of the conversation.
 		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cwd,
+		agenthost.RunURLEnvVar + "=" + runURL,
 	}
 	// Mirror runAgent's namespace export so a resumed agent resolves the per-run
 	// scratch paths its prompts name to the same place the initial invocation did.
@@ -444,6 +446,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		ConversationID:   conversationID,
 		TeamID:           opts.TeamID,
 		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
+		RunURL:           runURL,
 	}, opts.localGit.handler())
 	defer func() { _ = localGHCloser.Close() }()
 	ghChannel := opts.sidecar.ghChannel(conversationID)
@@ -467,6 +470,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		ConversationID:   conversationID,
 		TeamID:           opts.TeamID,
 		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
+		RunURL:           runURL,
 	})
 	if err != nil {
 		return nil, err

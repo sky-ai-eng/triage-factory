@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -379,7 +378,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		Repo:    repo,
 		Number:  number,
 		Details: details,
-		Footer:  agentmeta.Build(ah.conversations, orgID, fresh.ConversationID, "review"),
+		Footer:  ah.footerFor("review", orgID, fresh.ConversationID),
 		WebBase: func() string {
 			base, baseErr := ah.ghResolver.BaseURLFor(cleanupCtx, orgID)
 			if baseErr != nil {

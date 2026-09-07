@@ -140,8 +140,21 @@ func TestReviewArtifactApprove(t *testing.T) {
 	if submitBody["commit_id"] != "headsharappr" {
 		t.Errorf("submit commit_id = %v, want the pinned head SHA", submitBody["commit_id"])
 	}
-	if got, _ := submitBody["body"].(string); !strings.HasPrefix(got, "## Review") || !strings.Contains(got, "Triage Factory") {
+	// The footer is the same static disclosure the PR create verb appends: the
+	// AI line, and nothing that moves after posting. This server runs in local
+	// mode, where the run's address is the operator's own browser and so is
+	// never published.
+	got, _ := submitBody["body"].(string)
+	if !strings.HasPrefix(got, "## Review") || !strings.Contains(got, "Triage Factory") {
 		t.Errorf("submit body = %q, want staged body + agentmeta footer", got)
+	}
+	if strings.Contains(got, "View the run") {
+		t.Errorf("submit body = %q, want no run link in local mode", got)
+	}
+	for _, banned := range []string{"Time:", "Cost:", "Model:"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("submit body carries %q; the footer discloses, it does not meter: %q", banned, got)
+		}
 	}
 	comments, _ := submitBody["comments"].([]any)
 	if len(comments) != 1 {
