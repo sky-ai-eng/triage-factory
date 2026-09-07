@@ -260,7 +260,8 @@ export interface Conversation {
   // resolve UI lists one card per id. Each is editable through its kind's
   // sub-resource (PATCH /api/artifacts/{id}/pr | /review) and approvable
   // (POST /api/artifacts/{id}/approve); a draft PR is abandoned with
-  // POST /api/artifacts/{id}/dismiss, a review with PATCH …/review
+  // POST /api/artifacts/{id}/dismiss (branch kept) or POST …/reject (branch
+  // deleted from the upstream too), a review with PATCH …/review
   // {state:"dismissed"}. [] (not undefined) when nothing is unresolved but the
   // set was read; undefined under the transient-failure guard.
   pending_artifact_ids?: string[]

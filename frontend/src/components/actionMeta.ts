@@ -257,6 +257,15 @@ export const ACTION_META: Record<string, ActionMeta> = {
     text: 'text-ink-3',
     tone: 'good',
   },
+  // A human's rejection of a draft PR took its branch with it. 'problem' for the
+  // same reason as the failed push: work the agent produced is no longer on
+  // the remote, and this row is where a reader learns why.
+  branch_deleted: {
+    icon: GitBranch,
+    label: 'Branch deleted',
+    text: 'text-ink-3',
+    tone: 'problem',
+  },
   // The push the upstream turned down — nothing landed, so no branch artifact
   // exists and this row is the only trace of the attempt. 'problem' rather than
   // the denials' 'attention' below: those are Triage Factory declining to do

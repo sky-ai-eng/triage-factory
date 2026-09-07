@@ -167,6 +167,12 @@ const (
 	// Git branch push (the one double-capture case — see BranchPushDedupKey).
 	ActionBranchPushed = "branch_pushed"
 
+	// Git branch deleted from the upstream by a human rejecting the draft PR
+	// that carried it. The one branch write a human makes through TF, and the
+	// one write in the PR lifecycle that is irreversible, so it is audited
+	// beside the pr_closed row it lands with. detail_json carries {branch}.
+	ActionBranchDeleted = "branch_deleted"
+
 	// A branch GitHub created and linked to an issue. Not a branch_pushed:
 	// nothing was pushed and no commit exists yet — what the row records is the
 	// link between an issue and the branch meant to implement it.
@@ -373,7 +379,7 @@ func ExternalActionTypes() []string {
 		ActionCommentDeleted, ActionReactionAdded, ActionReactionRemoved, ActionLabelAdded,
 		ActionLabelRemoved, ActionConversationLocked, ActionConversationUnlocked,
 		ActionWorkflowDispatched, ActionWorkflowRunCancelled, ActionBranchPushed,
-		ActionLinkedBranchCreated, ActionBranchPushFailed, ActionGitDenied,
+		ActionLinkedBranchCreated, ActionBranchPushFailed, ActionBranchDeleted, ActionGitDenied,
 		ActionEgressDenied, ActionGHWriteDenied, ActionGHChannelWrite, ActionGraphQLWrite,
 		ActionIssueCreated, ActionIssueTransitioned, ActionIssueAssigned, ActionIssueUpdated,
 		ActionIssueCommentPosted, ActionIssueClosed, ActionIssueReopened, ActionIssueDeleted,

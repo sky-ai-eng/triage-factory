@@ -17,6 +17,10 @@ interface Props {
   onUpdateTitle: (title: string) => Promise<void>
   onUpdateBody: (body: string) => Promise<void>
   onSubmit: () => void
+  // onReject opens the overlay's confirmation for the irreversible resolution
+  // (close the draft AND delete its branch from the upstream). The summary only
+  // asks; the confirmation and the request live in the overlay.
+  onReject: () => void
   onClose: () => void
   submitting: boolean
 }
@@ -42,6 +46,7 @@ export default function PendingPRSummary({
   onUpdateTitle,
   onUpdateBody,
   onSubmit,
+  onReject,
   onClose,
   submitting,
 }: Props) {
@@ -250,8 +255,17 @@ export default function PendingPRSummary({
         )}
       </div>
 
-      {/* Footer actions */}
-      <div className="px-5 py-3 border-t border-line-1 flex items-center justify-end">
+      {/* Footer actions. Reject sits apart on the left: it is the one verb here
+          that cannot be undone, so it does not share the cluster a stray click
+          lands in. */}
+      <div className="px-5 py-3 border-t border-line-1 flex items-center justify-between">
+        <button
+          onClick={onReject}
+          disabled={submitting || saving}
+          className="text-reported font-medium text-alarm/80 hover:text-alarm px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Reject &amp; delete branch
+        </button>
         <div className="flex items-center gap-2">
           <button
             onClick={onClose}

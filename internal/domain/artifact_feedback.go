@@ -39,8 +39,11 @@ func WrapSystemNote(body string) string {
 // human-resolution states. The four strings are deliberately distinct so the
 // agent can tell which of (PR | review) × (approved | dismissed) happened:
 //
-//   - pull_request → open      : approved, marked ready for review
-//   - pull_request → closed    : dismissed, draft closed
+//   - pull_request → open      : approved, marked ready for review — or, when
+//     the details' resolution is github, marked ready on GitHub by someone
+//   - pull_request → closed    : dismissed, draft closed (branch kept) — or,
+//     per the details' resolution, rejected (closed AND its branch deleted
+//     from the upstream) or closed on GitHub by someone
 //   - review       → submitted : approved, submitted to GitHub
 //   - review       → dismissed : dismissed, discarded unsubmitted
 //
@@ -50,10 +53,20 @@ func ArtifactResolutionNote(a Artifact) string {
 	switch a.Kind {
 	case ArtifactKindPullRequest:
 		ref := prResolutionRef(a)
+		d, _ := ParsePRArtifactDetails(a.DetailsJSON)
 		switch a.State {
 		case ArtifactStatePROpen:
+			if d.Resolution == PRResolutionGitHub {
+				return fmt.Sprintf("Your draft pull request %s was marked ready for review on GitHub, outside Triage Factory.", ref)
+			}
 			return fmt.Sprintf("A human approved your draft pull request %s and marked it ready for review.", ref)
 		case ArtifactStatePRClosed:
+			switch d.Resolution {
+			case PRResolutionRejected:
+				return fmt.Sprintf("A human rejected your draft pull request %s: it was closed and its branch %s was deleted from the upstream, so the work on it is gone from the remote.", ref, prHeadBranchOrPlaceholder(d))
+			case PRResolutionGitHub:
+				return fmt.Sprintf("Your draft pull request %s was closed without merging on GitHub, outside Triage Factory.", ref)
+			}
 			return fmt.Sprintf("A human dismissed your draft pull request %s and closed it (its branch is kept).", ref)
 		}
 	case ArtifactKindReview:
@@ -127,4 +140,14 @@ func prResolutionRef(a Artifact) string {
 // guard.
 func reviewResolutionHandle(a Artifact) string {
 	return a.ID
+}
+
+// prHeadBranchOrPlaceholder names the head branch a rejection deleted, from the
+// PR details; a placeholder when the row never recorded one, so the note reads
+// grammatically rather than naming an empty branch.
+func prHeadBranchOrPlaceholder(d PRArtifactDetails) string {
+	if d.HeadBranch != "" {
+		return d.HeadBranch
+	}
+	return "(name unavailable)"
 }

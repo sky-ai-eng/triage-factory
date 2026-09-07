@@ -1164,7 +1164,8 @@ func (s *Server) routes() {
 	// (drag-to-Done / Return-to-queue) flows through teardownTaskArtifacts.
 	ah := &artifactsHandler{
 		tx: s.tx, ws: s.ws, ghResolver: s.ghResolver,
-		spawner: func() *delegate.Spawner { return s.spawner },
+		spawner:    func() *delegate.Spawner { return s.spawner },
+		reconciler: func() *reconcile.Reconciler { return s.reconciler },
 		publicURL: func() string {
 			if s.deployCfg == nil {
 				return ""
@@ -1182,6 +1183,10 @@ func (s *Server) routes() {
 	// Pull requests only: closing one is a real GitHub write. A review is
 	// abandoned through PATCH …/review {state:"dismissed"}.
 	s.apiMutating("POST /api/artifacts/{id}/dismiss", ah.handleArtifactDismiss)
+	// Dismiss's irreversible sibling: the head branch is deleted from the
+	// upstream as well. Its own verb because the branch delete is the one PR
+	// write that cannot be undone, so the client confirms it explicitly.
+	s.apiMutating("POST /api/artifacts/{id}/reject", ah.handleArtifactReject)
 	s.apiMutating("POST /api/artifacts/{id}/review/refresh", ah.handleReviewRefresh)
 	s.apiMutating("PATCH /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentUpdate)
 	s.apiMutating("DELETE /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentDelete)

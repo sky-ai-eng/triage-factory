@@ -30,12 +30,49 @@ type PRArtifactSnapshot struct {
 //     human-feedback diff and survives an abandon.
 //   - Snapshot: the latest known {title, body} (mirrors the live PR). Refreshed on
 //     every human edit (PATCH) and at approval.
+//   - Resolution: who moved the row into the state it holds — one of the
+//     PRResolution* values, stamped by the verb that resolved it (approve,
+//     dismiss, reject) or by the reconciler when it observed the change on
+//     GitHub. The state alone cannot say: a closed PR was dismissed with its
+//     branch kept, rejected with its branch deleted, or closed by someone on
+//     GitHub, and the agent-facing resolution note has to read differently for
+//     each. It lives on the PR row because that note is derived from this row
+//     alone — the resume ledger re-reads it with no join. Stored rows written
+//     before the field existed carry none, and read as the TF verb their
+//     state implies.
 type PRArtifactDetails struct {
 	NodeID     string             `json:"node_id,omitempty"`
 	HeadBranch string             `json:"head_branch,omitempty"`
 	Base       string             `json:"base,omitempty"`
 	Proposed   PRArtifactSnapshot `json:"proposed"`
 	Snapshot   PRArtifactSnapshot `json:"snapshot"`
+	Resolution string             `json:"resolution,omitempty"`
+}
+
+// PRResolution* is the closed vocabulary of PRArtifactDetails.Resolution.
+const (
+	// PRResolutionApproved: a human marked the draft ready through TF.
+	PRResolutionApproved = "approved"
+	// PRResolutionDismissed: a human closed the draft through TF, branch kept.
+	PRResolutionDismissed = "dismissed"
+	// PRResolutionRejected: a human closed the draft through TF and had its
+	// head branch deleted from the upstream.
+	PRResolutionRejected = "rejected"
+	// PRResolutionGitHub: the reconciler observed the transition on GitHub —
+	// nobody resolved it through TF.
+	PRResolutionGitHub = "github"
+)
+
+// StampPRResolution returns detailsJSON with Resolution set to resolution.
+// Unparseable details are returned unchanged: the caller is recording who
+// moved the row, and a corrupt payload is not made worse by leaving it be.
+func StampPRResolution(detailsJSON, resolution string) string {
+	d, err := ParsePRArtifactDetails(detailsJSON)
+	if err != nil {
+		return detailsJSON
+	}
+	d.Resolution = resolution
+	return MarshalPRArtifactDetails(d)
 }
 
 // PullRequestTarget is the artifact Target for a PR: owner/repo#<number>.
