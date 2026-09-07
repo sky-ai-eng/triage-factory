@@ -695,8 +695,7 @@ func (s *Spawner) SetPublicURL(url string) {
 }
 
 // runURLFor is the deep link back to this run in the TF UI — the {{RUN_URL}}
-// placeholder's value, and the link the disclosure footer on the run's PRs
-// and reviews carries. Empty publicURL degrades to "" (no wrong fallbacks:
+// placeholder's value. Empty publicURL degrades to "" (no wrong fallbacks:
 // never fabricate a localhost link when the deployment has no configured
 // public URL).
 func (s *Spawner) runURLFor(orgID, conversationID string) string {
@@ -704,6 +703,16 @@ func (s *Spawner) runURLFor(orgID, conversationID string) string {
 	publicURL := s.publicURL
 	s.mu.Unlock()
 	return agentmeta.RunURL(publicURL, orgID, conversationID)
+}
+
+// publishedRunURLFor is the link the disclosure footer on the run's PRs and
+// reviews carries — runURLFor narrowed to what a reader outside this
+// deployment can open, which in local mode is nothing.
+func (s *Spawner) publishedRunURLFor(orgID, conversationID string) string {
+	s.mu.Lock()
+	publicURL := s.publicURL
+	s.mu.Unlock()
+	return agentmeta.PublishedRunURL(publicURL, orgID, conversationID)
 }
 
 // notifyDrainer fires the QueueDrainer hook for a task if a drainer is

@@ -389,7 +389,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		return nil, fmt.Errorf("resolve own binary path: %w", err)
 	}
 
-	runURL := s.runURLFor(orgID, conversationID)
+	runURL := s.publishedRunURLFor(orgID, conversationID)
 	extraEnv := []string{
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
 		// Mirror runAgent's TRIAGE_FACTORY_CONVERSATION_ROOT setting. The resume

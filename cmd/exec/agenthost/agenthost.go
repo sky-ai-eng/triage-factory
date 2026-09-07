@@ -88,10 +88,11 @@ type ConversationInfo struct {
 	ConversationID   string `json:"conversation_id"`
 	TeamID           string `json:"team_id"`
 	IsEventTriggered bool   `json:"is_event_triggered"`
-	// RunURL is the run's deep link in the TF UI (agentmeta.RunURL), stamped
-	// by the spawner because only it holds the deployment's public URL.
-	// Empty when none is configured; the footer on everything this run
-	// publishes then carries no link rather than a fabricated one.
+	// RunURL is the run's deep link in the TF UI (agentmeta.PublishedRunURL),
+	// stamped by the spawner because only it holds the deployment's public
+	// URL. Empty in local mode and when none is configured; the footer on
+	// everything this run publishes then carries no link rather than one
+	// nobody else can open.
 	RunURL string `json:"run_url,omitempty"`
 }
 

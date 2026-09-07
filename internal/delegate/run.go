@@ -431,6 +431,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// authorizes whatever branch the worktree lands on.
 	branchTemplate := s.resolveBranchTemplate(context.WithoutCancel(ctx), task)
 	runURL := s.runURLFor(orgID, conversationID)
+	publishedRunURL := s.publishedRunURLFor(orgID, conversationID)
 	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, mission, cfg.scope, cfg.toolsRef, agentBin, agentRunRoot, branchTemplate, runURL, knowledge)
 
 	// The stop is read before the phase write, so a run stopped during
@@ -449,7 +450,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	extraEnv := []string{
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
 		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference the absolute _tfac/memory.md path that resolves regardless of which worktree the agent has cd'd into.
-		agenthost.RunURLEnvVar + "=" + runURL,
+		agenthost.RunURLEnvVar + "=" + publishedRunURL,
 		// The workflow run this step belongs to. Non-absolute, so it passes
 		// through translateEnvForSandbox unchanged. Prompts that share a drop
 		// point across the steps of one run (the parallel review passes) name
@@ -530,7 +531,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		ConversationID:   conversationID,
 		TeamID:           teamID,
 		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
-		RunURL:           runURL,
+		RunURL:           publishedRunURL,
 	}, cfg.localGit.handler())
 	defer func() { _ = localGHCloser.Close() }()
 	ghChannel := cfg.sidecar.ghChannel(conversationID)
@@ -555,7 +556,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		ConversationID:   conversationID,
 		TeamID:           teamID,
 		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
-		RunURL:           runURL,
+		RunURL:           publishedRunURL,
 	})
 	if err != nil {
 		return fail(err.Error(), domain.ConversationFailureUnclassified)

@@ -90,3 +90,26 @@ func TestRunURL_MultiMode(t *testing.T) {
 		t.Errorf("RunURL(multi) = %q, want %q", got, want)
 	}
 }
+
+// TestPublishedRunURL_LocalModeNeverLinks pins that a local deployment's
+// footer carries no link even with a browser URL configured: the address is
+// the operator's own machine, useless to every other reader of the PR.
+func TestPublishedRunURL_LocalModeNeverLinks(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	if got := PublishedRunURL("http://localhost:3000", "org-1", "run-1"); got != "" {
+		t.Errorf("PublishedRunURL(local) = %q, want empty", got)
+	}
+}
+
+// TestPublishedRunURL_MultiMode pins that multi mode publishes the same link
+// the prompt placeholder resolves to.
+func TestPublishedRunURL_MultiMode(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	want := "https://tf.example.com/orgs/org-1/runs/run-1"
+	if got := PublishedRunURL("https://tf.example.com", "org-1", "run-1"); got != want {
+		t.Errorf("PublishedRunURL(multi) = %q, want %q", got, want)
+	}
+	if got := PublishedRunURL("", "org-1", "run-1"); got != "" {
+		t.Errorf("PublishedRunURL(multi, no public URL) = %q, want empty", got)
+	}
+}

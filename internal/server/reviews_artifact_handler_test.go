@@ -114,7 +114,6 @@ func TestReviewArtifactGet_SeverityRoundTrip(t *testing.T) {
 func TestReviewArtifactApprove(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	srv.SetDeployConfig("http://tf.test", [32]byte{})
 	var submitBody map[string]any
 	mux := newAppAPIMux()
 	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
@@ -142,13 +141,15 @@ func TestReviewArtifactApprove(t *testing.T) {
 		t.Errorf("submit commit_id = %v, want the pinned head SHA", submitBody["commit_id"])
 	}
 	// The footer is the same static disclosure the PR create verb appends: the
-	// AI line plus the run's deep link, and nothing that moves after posting.
+	// AI line, and nothing that moves after posting. This server runs in local
+	// mode, where the run's address is the operator's own browser and so is
+	// never published.
 	got, _ := submitBody["body"].(string)
 	if !strings.HasPrefix(got, "## Review") || !strings.Contains(got, "Triage Factory") {
 		t.Errorf("submit body = %q, want staged body + agentmeta footer", got)
 	}
-	if !strings.Contains(got, "[View the run](http://tf.test/runs/"+conversationID+")") {
-		t.Errorf("submit body = %q, want the run's deep link in the footer", got)
+	if strings.Contains(got, "View the run") {
+		t.Errorf("submit body = %q, want no run link in local mode", got)
 	}
 	for _, banned := range []string{"Time:", "Cost:", "Model:"} {
 		if strings.Contains(got, banned) {

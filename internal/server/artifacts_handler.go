@@ -50,7 +50,7 @@ func (ah *artifactsHandler) footerFor(kind, orgID, conversationID string) string
 	if conversationID == "" {
 		return ""
 	}
-	return agentmeta.Build(kind, agentmeta.RunURL(ah.publicURL(), orgID, conversationID))
+	return agentmeta.Build(kind, agentmeta.PublishedRunURL(ah.publicURL(), orgID, conversationID))
 }
 
 // artifactIDOr404 guards the {id} path value on every artifact-addressed route

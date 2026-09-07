@@ -272,7 +272,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		ConversationID:   conv.ID,
 		TeamID:           conv.TeamID,
 		IsEventTriggered: conv.TriggerType == domain.TriggerTypeEvent,
-		RunURL:           s.runURLFor(orgID, conv.ID),
+		RunURL:           s.publishedRunURLFor(orgID, conv.ID),
 	}
 
 	// Git gate for the sidecar's git proxy: the DB-backed authorize/denial the
