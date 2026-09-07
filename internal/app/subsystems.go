@@ -219,6 +219,19 @@ func (a *App) buildAI() {
 	reachLog.Info("reachable-repo cache manager ready (per-org runners)", "ttl", reachcache.TTL)
 }
 
+// hookReconcilerToSpawner lets a draft PR marked ready on GitHub, rather than
+// through the approval click, still resolve its task: the reconciler observes
+// the transition and the spawner, which owns task placement, runs the closure.
+// The reconciler is a brain subsystem, so an executor has none to hook — its
+// spawner runs agents, and the control pod's spawner (built too, dispatcher
+// never started) is the one the closure runs on.
+func (a *App) hookReconcilerToSpawner() {
+	if a.reconcilerCore == nil {
+		return
+	}
+	a.reconcilerCore.SetPullRequestResolvedHook(a.spawner.CloseTaskIfTerminalAndResolved)
+}
+
 // buildExecution constructs the delegation spawner, wiring it to the
 // run-credential seam. Runs after buildAI and before buildRouting (the
 // router takes the spawner as its delegator). The spawner↔router back-edge
@@ -227,10 +240,7 @@ func (a *App) buildExecution() error {
 	// Per-run credentials resolve through the run-credential seam, not a
 	// process-global hot-swap.
 	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "")
-	// A draft PR marked ready on GitHub rather than through the approval
-	// click still resolves its task; the reconciler observes the transition
-	// and the spawner, which owns task placement, runs the closure.
-	a.reconcilerCore.SetPullRequestResolvedHook(a.spawner.CloseTaskIfTerminalAndResolved)
+	a.hookReconcilerToSpawner()
 	// Mirror run status/activity onto the bus (TFAC-592) so an EE
 	// subscriber (ExtensionAPI.Bus()) can observe run lifecycle — the
 	// bus is built in buildInfra, which runs before buildExecution.

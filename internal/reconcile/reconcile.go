@@ -70,6 +70,12 @@ func (rc *Reconciler) SetPullRequestResolvedHook(h PullRequestResolvedHook) {
 	rc.prResolved = h
 }
 
+// HasPullRequestResolvedHook reports whether a hook is installed — the wiring's
+// own check that a brain's reconciler was not left without one.
+func (rc *Reconciler) HasPullRequestResolvedHook() bool {
+	return rc.prResolved != nil
+}
+
 // ReconcileOrg lists the org's reconcilable non-terminal artifacts (admin pool,
 // org-wide) and reconciles them, then runs the gh-channel PR-artifact backstop.
 // The Tier-1 Runner's per-cycle body.
