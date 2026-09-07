@@ -677,6 +677,11 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 		refusal, account, hop, err = s.completeNamedAccountBind(r, orgID, userID, nonce, record.AccountLogin)
 	default:
 		// A leg this build does not know is not a ceremony it can complete.
+		// The refusal the person sees is the stale one, since their next step
+		// is the same; the operator's line names the value, because a leg
+		// nothing minted is a data fault, not a link that ran out.
+		githubAppLog.Warn("managed bind: record carries a leg this build does not know",
+			"org", orgID, "user", userID, "leg", record.Leg)
 		refusal = &refuseStaleCeremony
 	}
 	if err != nil {

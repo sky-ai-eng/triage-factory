@@ -1730,6 +1730,36 @@ func TestManagedBind_RecordWithoutAnAccountCompletesAsTheInstallLeg(t *testing.T
 	}
 }
 
+// TestManagedBind_UnknownLegIsRefusedAndNamed: a record carrying a leg this
+// build does not know is a data fault. The person gets the stale refusal —
+// their next step is the same — and the operator's log names the value,
+// which the generic refusal line would not.
+func TestManagedBind_UnknownLegIsRefusedAndNamed(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+	nonce := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	now := time.Now().UTC()
+	if _, err := rig.h.AdminDB.Exec(`
+		INSERT INTO github_pending_binds (nonce_hash, org_id, user_id, leg, account_login, created_at, expires_at)
+		VALUES ($1, $2, $3, 'teleport', 'acme', $4, $5)
+	`, hashBindNonce(nonce), rig.orgID.String(), rig.userID.String(), now, now.Add(db.GitHubPendingBindTTL)); err != nil {
+		t.Fatalf("seed a record with an unknown leg: %v", err)
+	}
+
+	var logbuf bytes.Buffer
+	restore := logging.SetOutput(&logbuf)
+	out := rig.callback(t, &http.Cookie{Name: managedBindCookieName, Value: nonce}, defaultCallbackQuery(4242))
+	restore()
+	assertOutcome(t, out, "link_expired")
+	rig.assertNothingBound(t)
+	if !strings.Contains(logbuf.String(), "leg this build does not know") || !strings.Contains(logbuf.String(), "teleport") {
+		t.Errorf("the log does not name the unknown leg:\n%s", logbuf.String())
+	}
+	if gh.callCount() != 0 {
+		t.Error("GitHub was asked about a record this build cannot read")
+	}
+}
+
 // --- The named-account leg ----------------------------------------------------
 
 // TestManagedBind_NamedAccount_Organization is the leg for an account that
