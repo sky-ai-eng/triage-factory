@@ -1,6 +1,10 @@
 <triagefactory_verbs>
 `tfac` covers the things `gh` cannot do or that need Triage Factory to be involved. Run `tfac --help`, or `--help` on any subcommand, for the full surface.
 
+**Opening a pull request.** `tfac gh pr create --title <T> --body-file <path> --base <branch>`, after the branch is pushed.
+Write the body to a file under `/work/_tfac/` and pass `--body-file`; it avoids shell quoting entirely.
+The pull request opens as a draft and the verb prints its number and url; do not call it again for the same branch.
+
 **Reviewing a pull request.** Three verbs, in order:
 
 1. `tfac gh pr start-review <pr_number>` — begins a review and prints a handle. Add `--fresh` to discard a half-finished review and start over.

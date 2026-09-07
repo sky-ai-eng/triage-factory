@@ -164,6 +164,7 @@ func (a *App) buildAI() {
 	// Reconciler is also handed to the server for the Tier-2 run-scoped refresh
 	// endpoint, so foreground and background reconciliation run one code path.
 	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores.Artifacts, a.stores.TaskMemory, a.wsHub)
+	a.reconcilerCore = reconciler
 	a.reconciler = reconcile.NewManager(reconciler)
 	a.srv.SetReconciler(reconciler)
 	reconcileLog.Info("artifact reconciler ready (per-org runners)")
@@ -226,6 +227,10 @@ func (a *App) buildExecution() error {
 	// Per-run credentials resolve through the run-credential seam, not a
 	// process-global hot-swap.
 	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "")
+	// A draft PR marked ready on GitHub rather than through the approval
+	// click still resolves its task; the reconciler observes the transition
+	// and the spawner, which owns task placement, runs the closure.
+	a.reconcilerCore.SetPullRequestResolvedHook(a.spawner.CloseTaskIfTerminalAndResolved)
 	// Mirror run status/activity onto the bus (TFAC-592) so an EE
 	// subscriber (ExtensionAPI.Bus()) can observe run lifecycle — the
 	// bus is built in buildInfra, which runs before buildExecution.

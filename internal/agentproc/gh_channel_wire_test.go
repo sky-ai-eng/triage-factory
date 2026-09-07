@@ -8,13 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ghchannel"
-	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
@@ -83,7 +83,7 @@ const (
 	wireReal   = "ghs_the_real_org_credential"
 )
 
-// fakeUpstream answers what `gh pr create` needs, in gh's own wire shapes, and
+// fakeUpstream answers what `gh pr view` needs, in gh's own wire shapes, and
 // records the Authorization header it was called with.
 func fakeUpstream(t *testing.T) (*httptest.Server, func() string) {
 	t.Helper()
@@ -110,9 +110,15 @@ func fakeUpstream(t *testing.T) (*httptest.Server, func() string) {
 				`","owner":{"login":"` + wireOwner + `"},"defaultBranchRef":{"name":"main"},` +
 				`"viewerPermission":"WRITE","hasIssuesEnabled":true,"mergeCommitAllowed":true,` +
 				`"rebaseMergeAllowed":true,"squashMergeAllowed":true}}}`))
-		case strings.Contains(query, "PullRequestCreate"):
-			_, _ = w.Write([]byte(`{"data":{"createPullRequest":{"pullRequest":{"id":"` + wirePRNode +
-				`","url":"` + wirePRURL + `"}}}}`))
+		case strings.Contains(query, "PullRequestByNumber"):
+			_, _ = w.Write([]byte(`{"data":{"repository":{"pullRequest":{"id":"` + wirePRNode +
+				`","number":` + strconv.Itoa(wirePRNum) + `,"url":"` + wirePRURL + `","title":"T","state":"OPEN","body":"B",` +
+				`"baseRefName":"main","headRefName":"feature","headRefOid":"deadbeef",` +
+				`"isCrossRepository":false,"mergeStateStatus":"CLEAN","mergeable":"MERGEABLE",` +
+				`"isInMergeQueue":false,"isMergeQueueEnabled":false,` +
+				`"headRepositoryOwner":{"id":"U_octo","login":"` + wireOwner + `"},` +
+				`"commits":{"totalCount":1,"nodes":[{"commit":{"oid":"deadbeef"}}]},` +
+				`"author":{"login":"someone"}}}}}`))
 		default:
 			_, _ = w.Write([]byte(`{"data":{}}`))
 		}
@@ -134,20 +140,11 @@ func TestLocalGHChannel_WiresRealGH(t *testing.T) {
 	upstream, upstreamAuth := fakeUpstream(t)
 	paths.SetForTest(t, t.TempDir())
 
-	var (
-		mu   sync.Mutex
-		seen []ghinjector.ObservedMutation
-	)
 	ch, err := ghchannel.Start(ghchannel.Config{
 		ConversationID: "conv-wire-1",
 		Upstream:       upstream.URL + "/api/v3",
 		BinDir:         wireBinDir(t),
 		TokenSource:    func(context.Context) (string, error) { return wireReal, nil },
-		Observe: func(_ context.Context, m ghinjector.ObservedMutation) {
-			mu.Lock()
-			defer mu.Unlock()
-			seen = append(seen, m)
-		},
 	})
 	if err != nil {
 		t.Fatalf("ghchannel.Start: %v", err)
@@ -181,15 +178,15 @@ func TestLocalGHChannel_WiresRealGH(t *testing.T) {
 	// Through a shell, so PATH resolution is the real thing rather than Go's
 	// parent-env lookup — this is the shape Claude Code's Bash tool produces.
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c",
-		"gh pr create -R "+wireOwner+"/"+wireRepo+" --head feature --base main --title T --body B")
+		"gh pr view "+strconv.Itoa(wirePRNum)+" -R "+wireOwner+"/"+wireRepo)
 	cmd.Env = env
 	cmd.Dir = t.TempDir()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("gh pr create failed: %v\n%s", err, out)
+		t.Fatalf("gh pr view failed: %v\n%s", err, out)
 	}
 	if !strings.Contains(string(out), wirePRURL) {
-		t.Errorf("gh output = %q, want the created PR url", out)
+		t.Errorf("gh output = %q, want the PR url (fixture drift?)", out)
 	}
 	if _, statErr := os.Stat(decoyMarker); statErr == nil {
 		t.Error("the user's own gh ran — PATH must lead with the TF-owned binary")
@@ -197,14 +194,6 @@ func TestLocalGHChannel_WiresRealGH(t *testing.T) {
 
 	if got := upstreamAuth(); got != "token "+wireReal {
 		t.Errorf("upstream Authorization = %q, want the injected real credential", got)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(seen) != 1 {
-		t.Fatalf("observations = %d (%+v), want exactly 1", len(seen), seen)
-	}
-	if m := seen[0]; m.Kind != "pull_request" || m.Owner != wireOwner || m.Repo != wireRepo || m.Number != wirePRNum {
-		t.Errorf("observation = %+v, want pull_request %s/%s#%d", m, wireOwner, wireRepo, wirePRNum)
 	}
 }
 

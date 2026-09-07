@@ -17,7 +17,7 @@ import (
 //
 // # What the gate refuses, and why those
 //
-// Two families, and one band that is not a family at all.
+// Three families, and one band that is not a family at all.
 //
 // REVIEW. The `gh pr` review verbs Triage Factory provides strictly dominate a
 // review posted through this channel: they anchor comments to lines, badge them
@@ -28,6 +28,18 @@ import (
 // REPOSITORY CREATION. The tracked repository set is chosen before a run starts
 // and is what scopes polling, task routing, and the run's own credential. A
 // repository that appears mid-run belongs to none of it.
+//
+// PULL REQUEST CREATION. The `gh pr create` verb is the one door, for the same
+// dominance reason as reviews: it opens the pull request as a draft, records
+// the title and body the agent proposed so a human can see what changed before
+// it was opened, and is idempotent on the number. A pull request opened raw
+// through gh's porcelain arrives as a GraphQL create whose response names only
+// the node id and url, so the artifact it leaves behind has no draft flag, no
+// title, and no body — a row that reads as already open, on which nothing can
+// be approved and from which nothing can be diffed. Marking a pull request
+// READY is deliberately not here: it is not destructive, a mission may ask for
+// it, and the draft-by-default posture is guidance the verb produces rather
+// than a rule this gate enforces.
 //
 // The band is the GraphQL requests that cannot be named at all — see gateGraphQL.
 //
@@ -63,6 +75,9 @@ const (
 	// GateReasonRepoCreate covers minting a repository, by any of the four
 	// spellings GitHub offers.
 	GateReasonRepoCreate = "repo_create"
+	// GateReasonPRCreate covers opening a pull request, including the revert
+	// mutation, which opens one too.
+	GateReasonPRCreate = "pr_create"
 	// GateReasonUnreadable covers a GraphQL request whose act could not be
 	// established. It is not a family — nobody knows what was refused, which is
 	// precisely why it is refused (see gateGraphQL).
@@ -110,13 +125,14 @@ type Refusal struct {
 // more dangerous of the two, so gating it while the merge itself transits would
 // refuse the cautious spelling and permit the direct one.
 //
-// TODO(TFAC-784): pr_created is absent pending that ticket's decision on
-// whether opening a pull request is governed here, through the verb path's
-// approval queue, or by draft-until-ready. Until it lands, a run opens pull
-// requests through this channel unrefused.
+// pr_reverted sits beside pr_created because it is a create wearing another
+// name: the revert mutation opens a new pull request, and one opened that way
+// leaves the same blind artifact a raw create does.
 var gatedActions = map[string]string{
 	domain.ActionReviewSubmitted: GateReasonReview,
 	domain.ActionRepoCreated:     GateReasonRepoCreate,
+	domain.ActionPRCreated:       GateReasonPRCreate,
+	domain.ActionPRReverted:      GateReasonPRCreate,
 }
 
 // gatedMutations are the GraphQL mutations gated by NAME because the classifier
@@ -293,6 +309,15 @@ func (r Refusal) Explain() Explanation {
 			"the run started, and a repository created now belongs to none of it."
 		e.NextStep = "If your mission genuinely needs a repository that does not exist, say so in your " +
 			"final message and stop there."
+	case GateReasonPRCreate:
+		e.Policy = "Triage Factory refuses pull requests opened through the `gh` credential channel. Its " +
+			"own `pr create` verb opens the pull request as a draft and records the title and body you " +
+			"proposed, which is what lets a human see what changed before marking it ready; a pull " +
+			"request opened here would be one Triage Factory cannot show, diff, or approve."
+		e.NextStep = "Push the branch, then open the pull request with the Triage Factory verb — " +
+			"`gh pr create --title <T> --body-file <path> --base <branch>` under the Triage Factory " +
+			"command, not the `gh` binary. It opens as a draft; mark it ready with `gh pr ready` only " +
+			"if your mission asks for that."
 	case GateReasonUnreadable:
 		e.Policy = "Triage Factory could not read this GraphQL request, so it could not be shown to be a " +
 			"read rather than one of the writes this channel refuses. Requests whose act cannot be " +

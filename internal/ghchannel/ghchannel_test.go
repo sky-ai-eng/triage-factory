@@ -158,24 +158,6 @@ func TestClose_NilSafe(t *testing.T) {
 	}
 }
 
-// Observe is optional: a caller that doesn't record artifacts must still get a
-// working channel rather than a nil-func panic on the first mutation.
-func TestStart_ObserveOptional(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-
-	cfg := okConfig(t)
-	cfg.Observe = nil
-	ch, err := Start(cfg)
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(func() { _ = ch.Close() })
-
-	if ch.Host == "" {
-		t.Error("channel bound no listener")
-	}
-}
-
 // TestStart_ObserveWriteReachesInjector pins the local half of the write audit:
 // a mutating REST call through the channel reaches the caller's ObserveWrite
 // hook with the upstream's outcome. Local mode has no relay hop, so this

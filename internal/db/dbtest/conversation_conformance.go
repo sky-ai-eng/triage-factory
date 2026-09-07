@@ -2511,6 +2511,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("order = [%s, %s], want [%s, %s] (newest first)",
 				convs[0].ID, convs[1].ID, second, first)
 		}
+		// The admin-pool read is the same read: same rows, same order.
+		sys, err := store.ListForTaskSystem(ctx, orgID, taskID)
+		if err != nil {
+			t.Fatalf("ListForTaskSystem: %v", err)
+		}
+		if len(sys) != 2 || sys[0].ID != second || sys[1].ID != first {
+			t.Errorf("ListForTaskSystem returned %d rows, want the same two rows newest first ([%s, %s])", len(sys), second, first)
+		}
 	})
 
 	t.Run("ListForTask_PreservesTriggerType", func(t *testing.T) {

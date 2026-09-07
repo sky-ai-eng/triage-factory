@@ -40,9 +40,8 @@
 // pull request is an edit, and a PATCH that closes one is the same request
 // shape with `state: closed` in a body nothing on this path may parse. So the
 // table names the act the URL identifies and stops there. The response body is
-// a different matter — it is already parsed for artifact observation, and the
-// create shapes flagged CreatesObject extend that to pick up the id and link of
-// the object that was just made.
+// a different matter — the create shapes flagged CreatesObject have theirs read
+// for the id and link of the object that was just made.
 package ghwrite
 
 import (
@@ -103,9 +102,8 @@ type Shape struct {
 	// CarriesProvenance marks a shape whose audit row keeps the raw method and
 	// path in its detail. It is set where "which channel performed this act" is
 	// itself a fact the reader needs: opening a pull request and submitting a
-	// review both have a governed verb path, and whether an autonomously-opened
-	// PR came through that path or a hand-written `gh api` call is exactly the
-	// question the policy work downstream of this table has to answer. The
+	// review both have a governed verb path that is meant to be the only door,
+	// so a row for either that came through this channel has to say so. The
 	// reply and comment shapes leave it clear on purpose — their rows are
 	// required to read identically to their verb's, and their detail carries
 	// the act's own context instead.

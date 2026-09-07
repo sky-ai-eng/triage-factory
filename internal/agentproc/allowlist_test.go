@@ -196,7 +196,7 @@ func TestBuildAllowedTools_GHPorcelainAllowed(t *testing.T) {
 	for _, want := range []string{
 		"Bash(gh pr view)", "Bash(gh pr view *)",
 		"Bash(gh pr list)", "Bash(gh pr diff *)", "Bash(gh pr checkout *)",
-		"Bash(gh pr create *)", "Bash(gh pr comment *)",
+		"Bash(gh pr comment *)",
 		"Bash(gh pr ready *)", "Bash(gh pr close *)",
 		"Bash(gh issue view *)", "Bash(gh issue list)",
 		"Bash(gh issue create *)", "Bash(gh issue comment *)",
@@ -216,8 +216,9 @@ func TestBuildAllowedTools_GHPorcelainAllowed(t *testing.T) {
 // `config` / `alias` / `extension` are credential and configuration surfaces
 // (extension install is plain arbitrary code execution). `gh pr merge` has no
 // local equivalent of the native loop's intent gate, so it stays unreachable
-// rather than ungated. A blanket `Bash(gh *)` added for convenience would
-// silently reopen every one of these.
+// rather than ungated. `gh pr create` is refused at the injector in favour of
+// the exec verb, and the allowlist says so first. A blanket `Bash(gh *)` added
+// for convenience would silently reopen every one of these.
 func TestBuildAllowedTools_GHEscapeHatchesBlocked(t *testing.T) {
 	gh := ghAllowlist()
 	if strings.Contains(gh, "Bash(gh *)") {
@@ -230,6 +231,7 @@ func TestBuildAllowedTools_GHEscapeHatchesBlocked(t *testing.T) {
 		"Bash(gh alias",
 		"Bash(gh extension",
 		"Bash(gh pr merge",
+		"Bash(gh pr create",
 	} {
 		if strings.Contains(gh, forbidden) {
 			t.Errorf("allowlist must NOT contain %q", forbidden)
@@ -248,7 +250,7 @@ func TestBuildAllowedTools_GHComposesWithExtras(t *testing.T) {
 	if !strings.Contains(got, "mcp__acme__search") {
 		t.Error("extras dropped when GH is enabled")
 	}
-	if !strings.Contains(got, "Bash(gh pr create *)") {
+	if !strings.Contains(got, "Bash(gh pr comment *)") {
 		t.Error("gh patterns dropped when extras are supplied")
 	}
 }

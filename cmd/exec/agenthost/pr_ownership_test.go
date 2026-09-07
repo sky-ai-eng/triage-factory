@@ -27,8 +27,8 @@ func prOwnershipFixture(t *testing.T) (*sql.DB, db.Stores, ConversationInfo, str
 }
 
 // botOpenedPR is the artifact the recording funnel receives when the agent
-// opens a PR — the same shape both write paths build (the exec verb via
-// recordGithubPR, the gh channel via ObservationArtifact).
+// opens a PR through the exec verb (recordGithubPR), the one door that mints
+// one.
 func botOpenedPR() domain.Artifact {
 	return domain.NewPullRequestArtifact(
 		"octo/repo", 42, "PR_kwDOABCD", "feature/x", "main",

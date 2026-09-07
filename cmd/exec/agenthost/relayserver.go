@@ -9,7 +9,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"go.opentelemetry.io/otel/trace"
@@ -598,38 +597,6 @@ func (s *RelayServer) repoReservedAt(ctx context.Context, repoID string) (time.T
 	return oldest, found, nil
 }
 
-// ObservationArtifact turns a gh-injector observation into the domain artifact
-// the recording side upserts. The conversation identity (ConversationID/OrgID/TeamID) is
-// stamped downstream by RecordExternalWrite from the caller's ConversationInfo — never
-// from the wire — so a sidecar cannot attribute an artifact to another conversation. A
-// review anchors to conversationID for its dedup key (the same conversation-scoped key a TF-side
-// draft would use, so a gh submit migrates a draft in place). ok is false for a
-// malformed observation (missing coordinates), which is dropped.
-//
-// Exported because both channel placements need the identical mapping: the
-// sidecar relays its observations here through the RelayServer, and a local-mode
-// run — whose injector runs in this very process — records them directly with no
-// relay hop at all.
-func ObservationArtifact(a agentproc.RecordObservationArgs, conversationID string) (domain.Artifact, bool) {
-	if a.Owner == "" || a.Repo == "" {
-		return domain.Artifact{}, false
-	}
-	repoPath := a.Owner + "/" + a.Repo
-	switch a.Kind {
-	case domain.ArtifactKindPullRequest:
-		if a.Number == 0 {
-			return domain.Artifact{}, false
-		}
-		return domain.NewPullRequestArtifact(repoPath, a.Number, a.NodeID, a.Head, a.Base, a.URL, a.Title, a.Body, a.Draft), true
-	case domain.ArtifactKindReview:
-		if a.Number == 0 || a.ReviewID == 0 {
-			return domain.Artifact{}, false
-		}
-		return domain.NewSubmittedReviewArtifact(repoPath, a.Number, a.ReviewID, a.ReviewState, a.URL, conversationID), true
-	}
-	return domain.Artifact{}, false
-}
-
 // authorizeGHWrite decides one gh-channel request the injector recognized as a
 // gated shape, and writes the refusal row when the answer is no.
 //
@@ -766,24 +733,6 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
 		defer cancel()
 		s.rt.Record(recCtx, a.Artifact, a.Action)
-
-	case agentproc.OpRecordObservation:
-		var a agentproc.RecordObservationArgs
-		if err := json.Unmarshal(args, &a); err != nil {
-			return fmt.Errorf("agenthost: decode relayed gh observation: %w", err)
-		}
-		art, ok := ObservationArtifact(a, s.info.ConversationID)
-		if !ok {
-			// A shape that maps to no artifact, not a lost one: the write's own
-			// audit row rides record_gh_write, which is a separate notify.
-			return nil
-		}
-		// The gh mutation already landed upstream; Record stamps the run identity
-		// from THIS server's ConversationInfo (never the wire) and upserts. Best-effort,
-		// capped like the other audit ops.
-		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
-		defer cancel()
-		s.rt.Record(recCtx, &art, nil)
 
 	case opRecordReadTouch:
 		var a recordReadTouchArgs

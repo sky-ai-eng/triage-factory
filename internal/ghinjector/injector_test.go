@@ -35,9 +35,8 @@ func (c *upstreamCapture) snap() (auth, path, method, rawq string) {
 }
 
 // newInjector starts an injector in front of upstream and returns a client that
-// trusts its per-run cert, plus the GH_HOST value (bound addr). The observe
-// callback (may be nil) is invoked for observed mutations.
-func newInjector(t *testing.T, upstream, incoming string, observe func(context.Context, ObservedMutation)) (*Server, *http.Client, string) {
+// trusts its per-run cert, plus the GH_HOST value (bound addr).
+func newInjector(t *testing.T, upstream, incoming string) (*Server, *http.Client, string) {
 	t.Helper()
 	cert, certPEM, err := GenerateCert("127.0.0.1")
 	if err != nil {
@@ -47,7 +46,6 @@ func newInjector(t *testing.T, upstream, incoming string, observe func(context.C
 		Upstream:      upstream,
 		IncomingToken: incoming,
 		Cert:          cert,
-		Observe:       observe,
 		TokenSource:   func(context.Context) (string, error) { return "ghs_realtoken", nil },
 	})
 	if err != nil {
@@ -86,7 +84,7 @@ func TestInjector_StripsPlaceholderInjectsRealToken(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	_, client, host := newInjector(t, upstream.URL, "placeholder-xyz", nil)
+	_, client, host := newInjector(t, upstream.URL, "placeholder-xyz")
 
 	req, _ := http.NewRequest(http.MethodGet, "https://"+host+"/api/v3/repos/octo/repo/pulls/7?per_page=1", nil)
 	req.Header.Set("Authorization", "token placeholder-xyz")
@@ -125,7 +123,7 @@ func TestInjector_RejectsWrongPlaceholder(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	_, client, host := newInjector(t, upstream.URL, "correct-token", nil)
+	_, client, host := newInjector(t, upstream.URL, "correct-token")
 
 	req, _ := http.NewRequest(http.MethodGet, "https://"+host+"/api/v3/repos/o/r", nil)
 	req.Header.Set("Authorization", "token WRONG")
@@ -182,7 +180,7 @@ func TestInjector_ErrorBodyPassesThroughVerbatim(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	_, client, host := newInjector(t, upstream.URL, "", nil)
+	_, client, host := newInjector(t, upstream.URL, "")
 
 	req, _ := http.NewRequest(http.MethodGet, "https://"+host+"/api/v3/repos/o/secret", nil)
 	resp, err := client.Do(req)
@@ -196,82 +194,6 @@ func TestInjector_ErrorBodyPassesThroughVerbatim(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "Not Found") {
 		t.Errorf("body = %q, want GitHub's verbatim 404 body", body)
-	}
-}
-
-// TestInjector_ObservesPRCreate asserts the injector emits a PR-create
-// observation with coordinates parsed from the 201 response, while the response
-// body still reaches the caller intact.
-func TestInjector_ObservesPRCreate(t *testing.T) {
-	prJSON := `{"number":42,"node_id":"PR_kwABC","html_url":"https://github.com/octo/repo/pull/42",` +
-		`"title":"Fix it","body":"the fix","draft":true,"head":{"ref":"fix/thing"},"base":{"ref":"main"}}`
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(prJSON))
-	}))
-	defer upstream.Close()
-
-	var (
-		mu  sync.Mutex
-		got []ObservedMutation
-	)
-	observe := func(_ context.Context, m ObservedMutation) {
-		mu.Lock()
-		got = append(got, m)
-		mu.Unlock()
-	}
-	_, client, host := newInjector(t, upstream.URL, "", observe)
-
-	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/v3/repos/octo/repo/pulls",
-		strings.NewReader(`{"title":"Fix it"}`))
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if !strings.Contains(string(body), `"number":42`) {
-		t.Errorf("caller body = %q, want the full PR JSON preserved", body)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(got) != 1 {
-		t.Fatalf("observations = %d, want exactly 1", len(got))
-	}
-	m := got[0]
-	if m.Kind != "pull_request" || m.Owner != "octo" || m.Repo != "repo" || m.Number != 42 {
-		t.Errorf("observation coords = %+v, want octo/repo#42 pull_request", m)
-	}
-	if m.NodeID != "PR_kwABC" || m.Head != "fix/thing" || m.Base != "main" || !m.Draft {
-		t.Errorf("observation details = %+v, want nodeID/head/base/draft parsed", m)
-	}
-	if m.URL != "https://github.com/octo/repo/pull/42" || m.Title != "Fix it" {
-		t.Errorf("observation url/title = %q / %q", m.URL, m.Title)
-	}
-}
-
-// TestParseObservation_ReviewCoordinates asserts a review-post observation
-// carries the PR number from the path and the review id/state from the response.
-//
-// Driven directly rather than through the proxy, because the refusal policy now
-// stops a review post before it is forwarded (see gate_test.go) and no response
-// to parse ever arrives. The parse is kept, and tested, for the same reason the
-// observation is: it is what an artifact row would be built from if the policy
-// ever admits the shape, and nothing about it is specific to the policy that
-// currently does not.
-func TestParseObservation_ReviewCoordinates(t *testing.T) {
-	reviewJSON := `{"id":9911,"state":"APPROVED","html_url":"https://github.com/octo/repo/pull/7#pullrequestreview-9911"}`
-
-	got, ok := parseObservation("review", "octo", "repo", 7, []byte(reviewJSON))
-	if !ok {
-		t.Fatal("review response did not parse")
-	}
-	if got.Kind != "review" || got.Owner != "octo" || got.Repo != "repo" || got.Number != 7 {
-		t.Errorf("observation coords = %+v, want octo/repo#7 review", got)
-	}
-	if got.ReviewID != 9911 || got.ReviewState != "APPROVED" {
-		t.Errorf("review id/state = %d / %q, want 9911 / APPROVED", got.ReviewID, got.ReviewState)
 	}
 }
 
@@ -309,105 +231,26 @@ func TestInjector_TokenSourceFailureIs502(t *testing.T) {
 	}
 }
 
-// TestParseObservation_IgnoresMalformed guards the parser: a non-JSON or
-// number-less body yields no observation rather than a bogus artifact.
-func TestParseObservation_IgnoresMalformed(t *testing.T) {
-	if _, ok := parseObservation("pull_request", "o", "r", 0, []byte("not json")); ok {
-		t.Error("parsed an observation from non-JSON PR body")
-	}
-	if _, ok := parseObservation("pull_request", "o", "r", 0, []byte(`{"title":"x"}`)); ok {
-		t.Error("parsed an observation from a PR body with no number")
-	}
-	// Sanity: a well-formed body still parses.
-	if _, ok := parseObservation("review", "o", "r", 3, []byte(`{"id":5,"state":"COMMENTED"}`)); !ok {
-		t.Error("failed to parse a well-formed review body")
-	}
-}
-
-// TestParseGraphQLObservation_KeysOnCreateMutationOnly pins the discrimination
-// the gh-driven wire tests exercise end to end, over the shapes that would be
-// tedious to provoke through gh: only the exact top-level data.createPullRequest
-// key counts, and a url that doesn't carry coordinates yields nothing rather
-// than a half-formed artifact.
-func TestParseGraphQLObservation_KeysOnCreateMutationOnly(t *testing.T) {
-	observed := []struct {
-		name                string
-		body                string
-		owner, repo, nodeID string
-		number              int
-	}{
-		{
-			name:  "create mutation",
-			body:  `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw1","url":"https://github.com/octo/repo/pull/42"}}}}`,
-			owner: "octo", repo: "repo", number: 42, nodeID: "PR_kw1",
-		},
-		{
-			name:  "GHES host and a repo named pull",
-			body:  `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw2","url":"https://ghe.corp/octo/pull/pull/7"}}}}`,
-			owner: "octo", repo: "pull", number: 7, nodeID: "PR_kw2",
-		},
-	}
-	for _, tc := range observed {
-		t.Run(tc.name, func(t *testing.T) {
-			m, ok := parseGraphQLObservation([]byte(tc.body))
-			if !ok {
-				t.Fatalf("no observation parsed from %s", tc.body)
-			}
-			if m.Kind != "pull_request" || m.Owner != tc.owner || m.Repo != tc.repo ||
-				m.Number != tc.number || m.NodeID != tc.nodeID {
-				t.Errorf("observation = %+v, want %s/%s#%d node %s", m, tc.owner, tc.repo, tc.number, tc.nodeID)
-			}
-		})
-	}
-
-	ignored := []struct{ name, body string }{
-		// A read nests its pullRequest under repository — recording it would
-		// attribute a PR the run only looked at.
-		{"pr view query", `{"data":{"repository":{"pullRequest":{"id":"PR_kw1","url":"https://github.com/octo/repo/pull/42"}}}}`},
-		{"pr list query", `{"data":{"repository":{"pullRequests":{"nodes":[{"id":"PR_kw1","url":"https://github.com/octo/repo/pull/42"}]}}}}`},
-		// Other mutations gh performs, none of which created anything.
-		{"review mutation", `{"data":{"addPullRequestReview":{"clientMutationId":null}}}`},
-		{"ready mutation", `{"data":{"markPullRequestReadyForReview":{"pullRequest":{"id":"PR_kw1"}}}}`},
-		{"merge mutation", `{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_kw1"}}}}`},
-		// Create shapes with nothing usable in them.
-		{"errors only", `{"data":{"createPullRequest":null},"errors":[{"message":"nope"}]}`},
-		{"no url", `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw1"}}}}`},
-		{"url without coordinates", `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw1","url":"https://github.com/octo/repo"}}}}`},
-		{"non-numeric number", `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw1","url":"https://github.com/octo/repo/pull/abc"}}}}`},
-		{"not json", `createPullRequest`},
-	}
-	for _, tc := range ignored {
-		t.Run(tc.name, func(t *testing.T) {
-			if m, ok := parseGraphQLObservation([]byte(tc.body)); ok {
-				t.Errorf("observed %+v, want nothing from %s", m, tc.body)
-			}
-		})
-	}
-}
-
-// TestInjector_OversizedBodyReachesAgentIntact is the regression for the
-// observation buffer truncating the agent's response. A mutation response larger
-// than maxObserveBody must reach the caller byte-for-byte — only the observation
-// degrades (the reconciler backstop covers that). Truncating here would corrupt
-// gh's JSON parse on large responses.
+// TestInjector_OversizedBodyReachesAgentIntact pins the delivery guarantee: a
+// create response past the buffer cap reaches the caller byte-for-byte, and the
+// audit is what degrades — its row still lands, without the created object's
+// coordinates.
 func TestInjector_OversizedBodyReachesAgentIntact(t *testing.T) {
-	// A well-formed PR JSON padded past the buffer cap.
-	pad := strings.Repeat("x", maxObserveBody+4096)
-	prJSON := `{"number":42,"node_id":"PR_kwABC","html_url":"https://github.com/octo/repo/pull/42",` +
-		`"title":"Fix it","draft":false,"head":{"ref":"fix"},"base":{"ref":"main"},"body":"` + pad + `"}`
+	// A well-formed comment JSON padded past the buffer cap.
+	pad := strings.Repeat("x", maxBufferedBody+4096)
+	commentJSON := `{"id":777,"html_url":"https://github.com/octo/repo/pull/42#issuecomment-777","body":"` + pad + `"}`
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(prJSON))
+		_, _ = w.Write([]byte(commentJSON))
 	}))
 	defer upstream.Close()
 
-	var observed int
-	observe := func(context.Context, ObservedMutation) { observed++ }
-	_, client, host := newInjector(t, upstream.URL, "", observe)
+	writes := make(chan ObservedWrite, 2)
+	client, host := newInjectorWithWrites(t, upstream.URL, func(_ context.Context, w ObservedWrite) { writes <- w })
 
-	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/v3/repos/octo/repo/pulls",
-		strings.NewReader(`{"title":"Fix it"}`))
+	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/v3/repos/octo/repo/issues/42/comments",
+		strings.NewReader(`{"body":"hi"}`))
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request: %v", err)
@@ -418,10 +261,10 @@ func TestInjector_OversizedBodyReachesAgentIntact(t *testing.T) {
 		t.Fatalf("read body: %v", err)
 	}
 
-	if len(got) != len(prJSON) {
-		t.Errorf("caller received %d bytes, want the full %d — the response was truncated", len(got), len(prJSON))
+	if len(got) != len(commentJSON) {
+		t.Errorf("caller received %d bytes, want the full %d — the response was truncated", len(got), len(commentJSON))
 	}
-	if string(got) != prJSON {
+	if string(got) != commentJSON {
 		t.Error("caller's body differs from the upstream body")
 	}
 	// The response must still be parseable JSON, which truncation would break.
@@ -429,8 +272,13 @@ func TestInjector_OversizedBodyReachesAgentIntact(t *testing.T) {
 	if err := json.Unmarshal(got, &probe); err != nil {
 		t.Errorf("delivered body is not valid JSON (truncated?): %v", err)
 	}
-	if observed != 0 {
-		t.Errorf("observations = %d, want 0 (oversized bodies skip observation)", observed)
+	select {
+	case w := <-writes:
+		if w.Status != http.StatusCreated || w.ExternalID != "" || w.URL != "" {
+			t.Errorf("write audit = %+v, want the 201 recorded with no created-object coordinates (body over the cap)", w)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no write audit for the over-cap create")
 	}
 }
 
@@ -448,17 +296,17 @@ func (b *countingBody) Read(p []byte) (int, error) {
 
 func (b *countingBody) Close() error { return nil }
 
-// TestBufferForObservation_DeclaredOversizeReadsNothing pins the short-circuit:
+// TestBufferBody_DeclaredOversizeReadsNothing pins the short-circuit:
 // when the upstream advertises a Content-Length past the cap the outcome is
 // already settled, so the body must stream to the agent untouched rather than
 // being dragged through a megabyte of doomed buffering first.
-func TestBufferForObservation_DeclaredOversizeReadsNothing(t *testing.T) {
-	payload := strings.Repeat("z", maxObserveBody+4096)
+func TestBufferBody_DeclaredOversizeReadsNothing(t *testing.T) {
+	payload := strings.Repeat("z", maxBufferedBody+4096)
 	body := &countingBody{r: strings.NewReader(payload)}
 	resp := &http.Response{ContentLength: int64(len(payload)), Body: body}
 
-	if buf, ok := bufferForObservation(resp); ok || buf != nil {
-		t.Errorf("bufferForObservation = (%d bytes, %v), want (nil, false)", len(buf), ok)
+	if buf, ok := bufferBody(resp); ok || buf != nil {
+		t.Errorf("bufferBody = (%d bytes, %v), want (nil, false)", len(buf), ok)
 	}
 	if body.read != 0 {
 		t.Errorf("read %d bytes from an over-cap declared body, want 0", body.read)
@@ -476,16 +324,16 @@ func TestBufferForObservation_DeclaredOversizeReadsNothing(t *testing.T) {
 	}
 }
 
-// TestBufferForObservation_UnknownLengthStillBuffers is the other side of that
+// TestBufferBody_UnknownLengthStillBuffers is the other side of that
 // short-circuit: a chunked response declares -1, which must not be read as
 // "under the cap" nor as "over" — it falls through to the read.
-func TestBufferForObservation_UnknownLengthStillBuffers(t *testing.T) {
+func TestBufferBody_UnknownLengthStillBuffers(t *testing.T) {
 	const payload = `{"number":1}`
 	resp := &http.Response{ContentLength: -1, Body: io.NopCloser(strings.NewReader(payload))}
 
-	buf, ok := bufferForObservation(resp)
+	buf, ok := bufferBody(resp)
 	if !ok {
-		t.Fatal("bufferForObservation skipped a chunked response")
+		t.Fatal("bufferBody skipped a chunked response")
 	}
 	if string(buf) != payload {
 		t.Errorf("buffered %q, want %q", buf, payload)
@@ -496,30 +344,28 @@ func TestBufferForObservation_UnknownLengthStillBuffers(t *testing.T) {
 	}
 }
 
-// TestInjector_BodyAtExactlyCapStillObserves guards the off-by-one in the
-// oversize probe: a body of exactly maxObserveBody is buffered and observed, not
-// misread as "over the cap".
-func TestInjector_BodyAtExactlyCapStillObserves(t *testing.T) {
-	head := `{"number":7,"node_id":"PR_x","html_url":"u","title":"t","draft":false,` +
-		`"head":{"ref":"h"},"base":{"ref":"b"},"body":"`
+// TestInjector_BodyAtExactlyCapStillParses is the boundary opposite the
+// oversize probe: a body of exactly maxBufferedBody is buffered and its created
+// object read, not skipped.
+func TestInjector_BodyAtExactlyCapStillParses(t *testing.T) {
+	head := `{"id":777,"html_url":"https://github.com/octo/repo/pull/42#issuecomment-777","body":"`
 	tail := `"}`
-	pad := strings.Repeat("y", maxObserveBody-len(head)-len(tail))
-	prJSON := head + pad + tail
-	if len(prJSON) != maxObserveBody {
-		t.Fatalf("fixture is %d bytes, want exactly %d", len(prJSON), maxObserveBody)
+	pad := strings.Repeat("y", maxBufferedBody-len(head)-len(tail))
+	commentJSON := head + pad + tail
+	if len(commentJSON) != maxBufferedBody {
+		t.Fatalf("fixture is %d bytes, want exactly %d", len(commentJSON), maxBufferedBody)
 	}
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(prJSON))
+		_, _ = w.Write([]byte(commentJSON))
 	}))
 	defer upstream.Close()
 
-	var observed int
-	observe := func(context.Context, ObservedMutation) { observed++ }
-	_, client, host := newInjector(t, upstream.URL, "", observe)
+	writes := make(chan ObservedWrite, 2)
+	client, host := newInjectorWithWrites(t, upstream.URL, func(_ context.Context, w ObservedWrite) { writes <- w })
 
-	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/v3/repos/octo/repo/pulls",
+	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/v3/repos/octo/repo/issues/42/comments",
 		strings.NewReader(`{}`))
 	resp, err := client.Do(req)
 	if err != nil {
@@ -528,11 +374,16 @@ func TestInjector_BodyAtExactlyCapStillObserves(t *testing.T) {
 	got, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	if len(got) != len(prJSON) {
-		t.Errorf("caller received %d bytes, want %d", len(got), len(prJSON))
+	if len(got) != len(commentJSON) {
+		t.Errorf("caller received %d bytes, want %d", len(got), len(commentJSON))
 	}
-	if observed != 1 {
-		t.Errorf("observations = %d, want 1 (a body exactly at the cap is still observed)", observed)
+	select {
+	case w := <-writes:
+		if w.ExternalID != "777" {
+			t.Errorf("write audit = %+v, want the created object read from a body exactly at the cap", w)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no write audit for the at-cap create")
 	}
 }
 
@@ -558,10 +409,8 @@ func TestGraphQLUpstream_ExactHostMatch(t *testing.T) {
 	}
 }
 
-// newInjectorWithWrites is newInjector with the write-audit callback wired too
-// (the observation callback stays available so a test can assert both fire).
+// newInjectorWithWrites is newInjector with the write-audit callback wired.
 func newInjectorWithWrites(t *testing.T, upstream string,
-	observe func(context.Context, ObservedMutation),
 	observeWrite func(context.Context, ObservedWrite)) (*http.Client, string) {
 	t.Helper()
 	cert, certPEM, err := GenerateCert("127.0.0.1")
@@ -571,7 +420,6 @@ func newInjectorWithWrites(t *testing.T, upstream string,
 	srv, err := New(Config{
 		Upstream:     upstream,
 		Cert:         cert,
-		Observe:      observe,
 		ObserveWrite: observeWrite,
 		TokenSource:  func(context.Context) (string, error) { return "ghs_realtoken", nil },
 	})
@@ -626,7 +474,7 @@ func TestInjector_ObservesRESTWrites(t *testing.T) {
 			defer upstream.Close()
 
 			writes := make(chan ObservedWrite, 4)
-			client, host := newInjectorWithWrites(t, upstream.URL, nil,
+			client, host := newInjectorWithWrites(t, upstream.URL,
 				func(_ context.Context, w ObservedWrite) { writes <- w })
 
 			body := tc.body
@@ -663,61 +511,6 @@ func TestInjector_ObservesRESTWrites(t *testing.T) {
 	}
 }
 
-// TestInjector_WriteAuditCoexistsWithObservation pins the intended overlap: a
-// REST PR create produces BOTH the artifact observation (the object exists) and
-// the write-audit row (the attempt happened). They answer different questions,
-// exactly as branch_pushed and branch_push_failed do — and the request body
-// still reaches the upstream byte-for-byte, since neither path reads it.
-func TestInjector_WriteAuditCoexistsWithObservation(t *testing.T) {
-	const body = `{"title":"Fix it","base":"main"}`
-	gotBody := make(chan string, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		gotBody <- string(b)
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"number":42,"node_id":"PR_x","html_url":"https://github.com/octo/repo/pull/42"}`))
-	}))
-	defer upstream.Close()
-
-	muts := make(chan ObservedMutation, 2)
-	writes := make(chan ObservedWrite, 2)
-	client, host := newInjectorWithWrites(t, upstream.URL,
-		func(_ context.Context, m ObservedMutation) { muts <- m },
-		func(_ context.Context, w ObservedWrite) { writes <- w })
-
-	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/v3/repos/octo/repo/pulls", strings.NewReader(body))
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	_ = resp.Body.Close()
-
-	select {
-	case b := <-gotBody:
-		if b != body {
-			t.Errorf("upstream saw body %q, want the caller's %q verbatim (requests are never inspected)", b, body)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("upstream never received the request")
-	}
-	select {
-	case m := <-muts:
-		if m.Number != 42 {
-			t.Errorf("observation = %+v, want the created PR", m)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("no artifact observation for a successful PR create")
-	}
-	select {
-	case w := <-writes:
-		if w.Method != http.MethodPost || w.Status != http.StatusCreated {
-			t.Errorf("write audit = %+v, want the POST and its 201", w)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("no write audit for a successful PR create")
-	}
-}
-
 // TestInjector_WriteAuditReadsCreatedObject pins the incident fix's injector
 // half: for a shape the shared classifier calls a create, the response body is
 // parsed for the new object's id and link so the audit row can name what was
@@ -737,7 +530,7 @@ func TestInjector_WriteAuditReadsCreatedObject(t *testing.T) {
 	defer upstream.Close()
 
 	writes := make(chan ObservedWrite, 2)
-	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+	client, host := newInjectorWithWrites(t, upstream.URL,
 		func(_ context.Context, w ObservedWrite) { writes <- w })
 
 	req, _ := http.NewRequest(http.MethodPost,
@@ -777,7 +570,7 @@ func TestInjector_WriteAuditReadsCreatedObject(t *testing.T) {
 // object coordinates. A declared length past the cap proves it: buffering would
 // have to skip it, and the row is unaffected either way.
 func TestInjector_WriteAuditSkipsBodyOffTheCreatePath(t *testing.T) {
-	huge := strings.Repeat("x", maxObserveBody+2048)
+	huge := strings.Repeat("x", maxBufferedBody+2048)
 	cases := []struct {
 		name   string
 		method string
@@ -796,7 +589,7 @@ func TestInjector_WriteAuditSkipsBodyOffTheCreatePath(t *testing.T) {
 			defer upstream.Close()
 
 			writes := make(chan ObservedWrite, 2)
-			client, host := newInjectorWithWrites(t, upstream.URL, nil,
+			client, host := newInjectorWithWrites(t, upstream.URL,
 				func(_ context.Context, w ObservedWrite) { writes <- w })
 
 			req, _ := http.NewRequest(tc.method, "https://"+host+tc.path, nil)
@@ -806,7 +599,7 @@ func TestInjector_WriteAuditSkipsBodyOffTheCreatePath(t *testing.T) {
 			}
 			got, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			if len(got) < maxObserveBody {
+			if len(got) < maxBufferedBody {
 				t.Errorf("caller received %d bytes, want the whole oversized body", len(got))
 			}
 
@@ -865,7 +658,7 @@ func TestInjector_GraphQLMutationIsAudited(t *testing.T) {
 		`{"data":{"addComment":{"commentEdge":{"node":{"url":"`+commentURL+`"}}}}}`)
 
 	writes := make(chan ObservedWrite, 2)
-	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+	client, host := newInjectorWithWrites(t, upstream.URL,
 		func(_ context.Context, w ObservedWrite) { writes <- w })
 
 	body := graphQLEnvelope(t,
@@ -920,7 +713,7 @@ func TestInjector_GraphQLReadIsNotAudited(t *testing.T) {
 	upstream, _ := graphQLUpstream(t, http.StatusOK, `{"data":{"repository":{"pullRequest":{"id":"PR_x"}}}}`)
 
 	writes := make(chan ObservedWrite, 2)
-	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+	client, host := newInjectorWithWrites(t, upstream.URL,
 		func(_ context.Context, w ObservedWrite) { writes <- w })
 
 	body := graphQLEnvelope(t,
@@ -948,7 +741,7 @@ func TestInjector_GraphQLErrorsRecordAnAttempt(t *testing.T) {
 		`{"data":{"mergePullRequest":null},"errors":[{"message":"Pull request is not mergeable"}]}`)
 
 	writes := make(chan ObservedWrite, 2)
-	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+	client, host := newInjectorWithWrites(t, upstream.URL,
 		func(_ context.Context, w ObservedWrite) { writes <- w })
 
 	body := graphQLEnvelope(t,
@@ -1021,7 +814,7 @@ func TestInjector_RESTWritesAreUnaffectedByTheGraphQLCapture(t *testing.T) {
 	defer upstream.Close()
 
 	writes := make(chan ObservedWrite, 2)
-	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+	client, host := newInjectorWithWrites(t, upstream.URL,
 		func(_ context.Context, w ObservedWrite) { writes <- w })
 
 	req, _ := http.NewRequest(http.MethodPost,
@@ -1105,11 +898,11 @@ func BenchmarkGraphQLCaptureMutation(b *testing.B) {
 // it" and "we could not tell" are different admissions.
 func TestInjector_GraphQLUnreadResponseIsNotASuccess(t *testing.T) {
 	huge := `{"data":{"mergePullRequest":{"clientMutationId":"` +
-		strings.Repeat("x", maxObserveBody+4096) + `"}}}`
+		strings.Repeat("x", maxBufferedBody+4096) + `"}}}`
 	upstream, _ := graphQLUpstream(t, http.StatusOK, huge)
 
 	writes := make(chan ObservedWrite, 2)
-	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+	client, host := newInjectorWithWrites(t, upstream.URL,
 		func(_ context.Context, w ObservedWrite) { writes <- w })
 
 	body := graphQLEnvelope(t,

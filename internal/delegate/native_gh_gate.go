@@ -1,19 +1,19 @@
-// The native runtime's pre-dispatch matcher on three `gh` commands, which get
+// The native runtime's pre-dispatch matcher on four `gh` commands, which get
 // two different kinds of answer for two different reasons.
 //
-// Posting a review and creating a repository are REFUSED, and refused again —
-// for real — at the credential injector every request on this channel passes
-// through (internal/ghinjector, keyed on the shared classifier in
-// internal/ghwrite). For those two this file is early UX in front of an
-// enforced policy: the same answer arrives better from a matcher than from a
-// proxy, since a refusal here costs one tool call and names the redirect in the
-// model's own terms, where the injector's arrives as a 403 partway through a
-// `gh` invocation, after the model has committed to a plan built around the
-// command succeeding.
+// Posting a review, creating a repository, and opening a pull request are
+// REFUSED, and refused again — for real — at the credential injector every
+// request on this channel passes through (internal/ghinjector, keyed on the
+// shared classifier in internal/ghwrite). For those three this file is early
+// UX in front of an enforced policy: the same answer arrives better from a
+// matcher than from a proxy, since a refusal here costs one tool call and names
+// the redirect in the model's own terms, where the injector's arrives as a 403
+// partway through a `gh` invocation, after the model has committed to a plan
+// built around the command succeeding.
 //
 // Merging gets a QUESTION, and nothing downstream enforces an answer. Refusing
 // it outright would mean deciding an intent the runtime cannot know — some
-// missions are for landing work — and unlike the other two there is no
+// missions are for landing work — and unlike the other three there is no
 // dominating alternative to redirect to. So the merge attempt is interrupted
 // once and asked to quote the line of its mission that authorizes it; a model
 // that re-issues proceeds. The value is the forced restatement of intent
@@ -31,11 +31,11 @@
 //     the SDK runtime, which has no matcher seam at all.
 //   - Self-attestation only. Nothing checks the answer to the merge question.
 //
-// For the two refusals none of that is load-bearing: the injector catches what
+// For the refusals none of that is load-bearing: the injector catches what
 // this misses. For the merge question all three stand, and the question is the
 // only control there is. What every one of these texts must be is TRUE — a
 // model that discovers a stated rule is false has cause to doubt the rest — so
-// the two refusals say "refused" because the act genuinely does not happen, and
+// the refusals say "refused" because the act genuinely does not happen, and
 // the merge question asks rather than claiming a refusal it cannot deliver.
 
 package delegate
@@ -109,11 +109,25 @@ const repoCreateRefusal = "This command was not run, and the same call made anot
 	"belongs to none of it. " +
 	"If your mission genuinely needs a repository that does not exist, say so in your final message and stop there."
 
+// prCreateRefusal answers `gh pr create` every time.
+//
+// The redirect is the exec verb of the same name, which the native harness
+// prompt documents: it opens the pull request as a draft and records the title
+// and body the agent proposed, which is what a human's approval diffs against.
+// A pull request opened raw leaves neither, so nothing Triage Factory shows can
+// be approved. Marking a draft ready is deliberately not refused anywhere — the
+// text says so, so a model told by its mission to do that does not hesitate.
+const prCreateRefusal = "This command was not run, and the same call made another way will be refused too. " +
+	"Triage Factory opens pull requests through its own verb, which records what you proposed so a human " +
+	"can see it before marking the pull request ready; one opened with `gh` directly cannot be shown or approved. " +
+	"Push the branch, then run `tfac gh pr create --title <T> --body-file <path> --base <branch>`. " +
+	"It opens as a draft; `gh pr ready` marks it ready if your mission asks for that."
+
 // ghCommandGate builds the native loop's BeforeToolCall hook.
 //
 // A denial is a synthetic is_error result the model reads in-band, so neither
 // answer ever ends a run: the refusals redirect and the question is answerable
-// by re-issuing. Nothing but the three matched shapes is looked at, so a run
+// by re-issuing. Nothing but the four matched shapes is looked at, so a run
 // that attempts none of them sees no evidence this exists — and only a matched
 // merge pays for the transcript read.
 func (s *Spawner) ghCommandGate(orgID, conversationID string) func(context.Context, domain.ToolCall) string {
@@ -123,6 +137,8 @@ func (s *Spawner) ghCommandGate(orgID, conversationID string) func(context.Conte
 			return reviewRefusal
 		case ghActionRepoCreate:
 			return repoCreateRefusal
+		case ghActionPRCreate:
+			return prCreateRefusal
 		case ghActionMerge:
 			if s.mergeAlreadyQuestioned(ctx, orgID, conversationID) {
 				return ""
@@ -206,6 +222,7 @@ const (
 	ghActionMerge
 	ghActionReview
 	ghActionRepoCreate
+	ghActionPRCreate
 )
 
 // classifyGHCommand reports which gated action, if any, a shell command
@@ -261,6 +278,8 @@ func classifyGHSegment(words []string) ghAction {
 			return ghActionMerge
 		case "review":
 			return ghActionReview
+		case "create":
+			return ghActionPRCreate
 		}
 	case chain[0] == "repo" && len(chain) > 1:
 		if chain[1] == "create" {

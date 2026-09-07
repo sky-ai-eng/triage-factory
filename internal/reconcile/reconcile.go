@@ -45,12 +45,29 @@ type Reconciler struct {
 	artifacts db.ArtifactStore
 	memory    db.TaskMemoryStore
 	ws        *websocket.Hub // nil-safe: broadcasts are skipped when unset (tests)
+	// prResolved runs after a pull request's draft → open transition commits.
+	// nil skips it (tests, and the window before the spawner is wired).
+	prResolved PullRequestResolvedHook
 }
+
+// PullRequestResolvedHook is what the reconciler calls when a draft pull
+// request became ready somewhere other than the approval click — a human on
+// GitHub, or an agent whose mission asked for it. The click runs the
+// terminal-on-last task closure itself; this is how the same closure reaches a
+// resolution nobody clicked, so a task does not sit in the approval column
+// with nothing left to approve.
+type PullRequestResolvedHook func(ctx context.Context, orgID, conversationID string)
 
 // NewReconciler builds the shared reconciler. ws may be nil (broadcasts become
 // no-ops); the store + resolver are required.
 func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, memory db.TaskMemoryStore, ws *websocket.Hub) *Reconciler {
 	return &Reconciler{resolver: resolver, artifacts: artifacts, memory: memory, ws: ws}
+}
+
+// SetPullRequestResolvedHook installs the closure a draft → open transition
+// runs. Set once at wiring, before any cycle runs.
+func (rc *Reconciler) SetPullRequestResolvedHook(h PullRequestResolvedHook) {
+	rc.prResolved = h
 }
 
 // ReconcileOrg lists the org's reconcilable non-terminal artifacts (admin pool,
@@ -64,24 +81,25 @@ func (rc *Reconciler) ReconcileOrg(ctx context.Context, orgID string) error {
 	if _, err := rc.Reconcile(ctx, orgID, arts); err != nil {
 		return err
 	}
-	// gh-channel backstop: record PRs a conversation created via the real gh
-	// whose injector observation was lost (channel severed, or the create raced
-	// a crash). Best-effort — a failure here never aborts the reconcile cycle.
+	// Backstop: record PRs that exist on a conversation's pushed branch with
+	// no artifact behind them (the create's own record was lost to a crash
+	// between the GitHub call and the write). Best-effort — a failure here
+	// never aborts the reconcile cycle.
 	if err := rc.BackfillPRArtifactsForBranches(ctx, orgID, arts); err != nil {
-		reconcileLog.Warn("gh-channel PR backstop failed", "org", orgID, "error", err)
+		reconcileLog.Warn("PR artifact backstop failed", "org", orgID, "error", err)
 	}
 	return nil
 }
 
-// BackfillPRArtifactsForBranches is the gh-channel PR-artifact backstop
-// (TFAC-669). Exec-verb self-reporting doesn't exist on the real-gh channel, so
-// a PR created there is normally recorded by the injector's observation relay;
-// this covers the two cases that path can't — the observation channel severed,
-// or the create raced an executor crash. For each conversation that pushed a
-// branch (its git:branch artifact carries the full ref), it discovers the open
-// PR on that branch and records the pull_request artifact via the insert-if-
-// absent write. Idempotent by construction: a PR the observation path (or a
-// prior pass) already recorded is left untouched, so re-running changes nothing.
+// BackfillPRArtifactsForBranches is the PR-artifact backstop. The create verb
+// records its pull request best-effort after the GitHub call lands, so a crash
+// between the two leaves a pull request with no artifact; a human opening one
+// by hand on a branch a run pushed leaves the same gap. For each conversation
+// that pushed a branch (its git:branch artifact carries the full ref), it
+// discovers the open PR on that branch and records the pull_request artifact
+// via the insert-if-absent write. Idempotent by construction: a PR the verb (or
+// a prior pass) already recorded is left untouched, so re-running changes
+// nothing.
 //
 // arts is the org's already-listed non-terminal set (branch artifacts included),
 // passed in by ReconcileOrg to avoid a second list; a nil arts makes this
@@ -262,6 +280,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	writeCtx := context.WithoutCancel(ctx)
 	var transitioned []domain.Artifact
 	terminalConversations := map[string]bool{}
+	resolvedConversations := map[string]bool{}
 	for _, a := range arts {
 		newState, ok := nextState(a, snapshots, branchExists)
 		if !ok || newState == a.State {
@@ -277,11 +296,34 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		if a.ConversationID != "" && isTerminalState(a.Kind, newState) {
 			terminalConversations[a.ConversationID] = true
 		}
+		if a.ConversationID != "" && isDraftResolved(a, newState) {
+			resolvedConversations[a.ConversationID] = true
+		}
 	}
 	for conversationID := range terminalConversations {
 		rc.recordConversationOutcome(writeCtx, orgID, conversationID)
 	}
+	// After every write in the cycle has landed, so the closure's unresolved
+	// check reads this cycle's transitions rather than racing them.
+	if rc.prResolved != nil {
+		for conversationID := range resolvedConversations {
+			rc.prResolved(writeCtx, orgID, conversationID)
+		}
+	}
 	return transitioned, nil
+}
+
+// isDraftResolved reports whether this transition is a draft pull request
+// leaving the approval column by any route GitHub can show: marked ready,
+// merged as a draft, or closed unopened. Each ends the approval the draft was
+// waiting on, and each is a route the approval click cannot have taken (the
+// click flips the row itself, so the reconciler never sees that one as a
+// transition). A review resolving is not here: a submitted review is terminal
+// and the outcome note covers it; the approval column reads reviews through
+// the same predicate, but nothing marks one ready out of band.
+func isDraftResolved(a domain.Artifact, newState string) bool {
+	return a.Kind == domain.ArtifactKindPullRequest && a.State == domain.ArtifactStatePRDraft &&
+		newState != domain.ArtifactStatePRDraft
 }
 
 // applyTransition writes the new state (admin pool) and broadcasts the change.
@@ -363,7 +405,7 @@ func nextState(a domain.Artifact, snapshots map[string]domain.PRSnapshot, branch
 		if !ok {
 			return "", false
 		}
-		return prState(snap), true
+		return prState(snap, a.State), true
 
 	case domain.ArtifactKindReview:
 		d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
@@ -390,16 +432,25 @@ func nextState(a domain.Artifact, snapshots map[string]domain.PRSnapshot, branch
 	return "", false
 }
 
-// prState maps a PR snapshot onto the artifact lifecycle. GitHub's PR.state is
-// OPEN/CLOSED/MERGED; merged is also flagged explicitly, checked first so a
-// merged PR never reads as merely closed.
-func prState(snap domain.PRSnapshot) string {
+// prState maps a PR snapshot onto the artifact lifecycle, given the state the
+// row holds now. GitHub's PR.state is OPEN/CLOSED/MERGED; merged is also
+// flagged explicitly, checked first so a merged PR never reads as merely
+// closed.
+//
+// Draft is one-way. A row that has left `draft` was resolved — a human, or an
+// agent on a human's instruction, marked it ready — and a later conversion
+// back to draft on GitHub is that human reworking the pull request, not a new
+// approval to wait on. Re-deriving `draft` from the flag would put the task
+// back in the approval column with nothing for the click to do and, on a task
+// already closed, surface a banner on a card nobody can act on. The only
+// producer of a `draft` row is the create verb, which stamps it at mint.
+func prState(snap domain.PRSnapshot, current string) string {
 	switch {
 	case snap.Merged || strings.EqualFold(snap.State, "MERGED"):
 		return domain.ArtifactStatePRMerged
 	case strings.EqualFold(snap.State, "CLOSED"):
 		return domain.ArtifactStatePRClosed
-	case snap.IsDraft:
+	case snap.IsDraft && current == domain.ArtifactStatePRDraft:
 		return domain.ArtifactStatePRDraft
 	default:
 		return domain.ArtifactStatePROpen

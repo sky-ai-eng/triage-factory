@@ -33,6 +33,9 @@ func TestGate_REST(t *testing.T) {
 		{"the org repo collection", "POST", "/orgs/acme/repos", GateReasonRepoCreate, domain.ActionRepoCreated},
 		{"the org collection behind the GHE prefix", "POST", "/api/v3/orgs/acme/repos", GateReasonRepoCreate, domain.ActionRepoCreated},
 		{"the template endpoint", "POST", "/repos/acme/tmpl/generate", GateReasonRepoCreate, domain.ActionRepoCreated},
+		{"opening a PR", "POST", "/repos/acme/widgets/pulls", GateReasonPRCreate, domain.ActionPRCreated},
+		{"opening a PR behind the GHE prefix", "POST", "/api/v3/repos/acme/widgets/pulls", GateReasonPRCreate, domain.ActionPRCreated},
+		{"opening a PR with a trailing slash", "POST", "/repos/acme/widgets/pulls/", GateReasonPRCreate, domain.ActionPRCreated},
 
 		// --- untouched ---
 		//
@@ -52,7 +55,7 @@ func TestGate_REST(t *testing.T) {
 		{name: "editing a PR", method: "PATCH", path: "/repos/acme/widgets/pulls/7"},
 		{name: "posting a comment", method: "POST", path: "/repos/acme/widgets/issues/7/comments"},
 		{name: "replying on a review thread", method: "POST", path: "/repos/acme/widgets/pulls/7/comments/5/replies"},
-		{name: "opening a PR", method: "POST", path: "/repos/acme/widgets/pulls"},
+		{name: "listing PRs", method: "GET", path: "/repos/acme/widgets/pulls"},
 		{name: "updating a PR branch", method: "PUT", path: "/repos/acme/widgets/pulls/7/update-branch"},
 		// A repository whose name is literally "repos", under an owner named
 		// "user": a repo-scoped path, not the collection that mints one.
@@ -110,6 +113,15 @@ func TestGate_GraphQL(t *testing.T) {
 			wantReason: GateReasonRepoCreate, wantAction: domain.ActionRepoCreated,
 		},
 		{
+			name: "opening a PR", facts: GraphQLFacts{Fields: []string{"createPullRequest"}},
+			wantReason: GateReasonPRCreate, wantAction: domain.ActionPRCreated,
+		},
+		{
+			// A create under another name: the revert opens a new pull request.
+			name: "reverting a PR", facts: GraphQLFacts{Fields: []string{"revertPullRequest"}},
+			wantReason: GateReasonPRCreate, wantAction: domain.ActionPRReverted,
+		},
+		{
 			// Every top-level field is checked, not just the single-field case
 			// the audit builder needs. A document selecting a comment AND a
 			// review performs the review, and the row it would take is beside
@@ -126,7 +138,11 @@ func TestGate_GraphQL(t *testing.T) {
 		{name: "disarming a merge", facts: GraphQLFacts{Fields: []string{"disablePullRequestAutoMerge"}}},
 		{name: "a comment", facts: GraphQLFacts{Fields: []string{"addComment"}}},
 		{name: "closing a PR", facts: GraphQLFacts{Fields: []string{"closePullRequest"}}},
-		{name: "opening a PR", facts: GraphQLFacts{Fields: []string{"createPullRequest"}}},
+		// Marking a PR ready is ungated by decision: it is not destructive, and
+		// a mission may ask for it. The draft-by-default posture is what the
+		// create verb produces, not a rule this gate enforces.
+		{name: "marking a PR ready", facts: GraphQLFacts{Fields: []string{"markPullRequestReadyForReview"}}},
+		{name: "converting a PR to draft", facts: GraphQLFacts{Fields: []string{"convertPullRequestToDraft"}}},
 		{name: "a mutation outside the table", facts: GraphQLFacts{Fields: []string{"followUser"}}},
 	}
 	for _, tc := range tests {
@@ -194,6 +210,7 @@ func TestExplain_SaysWhatToDoInstead(t *testing.T) {
 	refusals := []Refusal{
 		{Reason: GateReasonReview, Action: domain.ActionReviewSubmitted},
 		{Reason: GateReasonRepoCreate, Action: domain.ActionRepoCreated},
+		{Reason: GateReasonPRCreate, Action: domain.ActionPRCreated},
 		{Reason: GateReasonUnreadable, Unreadable: GraphQLOverCap},
 	}
 	for _, ref := range refusals {
@@ -238,6 +255,7 @@ func TestGate_EveryGatedActionIsInTheClassifier(t *testing.T) {
 	produced := map[string]bool{
 		// The REST half, by the one shape each act is reached through.
 		domain.ActionReviewSubmitted: true,
+		domain.ActionPRCreated:       true,
 	}
 	for _, entry := range graphQLMutations {
 		produced[entry.action] = true

@@ -29,23 +29,15 @@ const (
 	OpAuthorizeRepo = "authorize_repo"
 	OpRecordDenial  = "record_denial"
 	OpRecordPush    = "record_push"
-	// OpRecordObservation is the gh-channel injector's fire-and-forget report of
-	// an artifact-bearing mutation the real gh performed (a PR created, a review
-	// posted). The exec-verb channel self-reports its writes; the gh channel has
-	// no verb layer, so the injector observes the two mutation shapes and relays
-	// the coordinates. The orchestrator (which holds the DB and domain types)
-	// builds and upserts the artifact row — the capless sidecar never does.
-	OpRecordObservation = "record_observation"
 	// OpRecordEgressDenial is the egress proxy's fire-and-forget report of a
 	// refused CONNECT. Same shape as record_denial, one layer down: the proxy
 	// runs in the capless sidecar and the audit row is a DB write, so the
 	// coordinates travel up and the orchestrator writes.
 	OpRecordEgressDenial = "record_egress_denial"
 	// OpRecordGHWrite is the gh-channel injector's fire-and-forget report of a
-	// write it forwarded, with the upstream's outcome. Distinct from
-	// record_observation, which reports only the artifact-bearing creates: this
-	// one covers every mutating REST method and every GraphQL mutation, on both
-	// outcomes, so an edit, a merge, and a refused write all leave a trace.
+	// write it forwarded, with the upstream's outcome. It covers every mutating
+	// REST method and every GraphQL mutation, on both outcomes, so an edit, a
+	// merge, and a refused write all leave a trace.
 	// A GraphQL write carries what its request envelope disclosed alongside the
 	// wire facts, since its path says only that a POST reached /graphql.
 	OpRecordGHWrite = "record_gh_write"
@@ -188,32 +180,6 @@ type RecordPushArgs struct {
 	NewSHA  string `json:"new_sha"`
 	Created bool   `json:"created"`
 	Status  int    `json:"status"`
-}
-
-// RecordObservationArgs is record_observation's payload: the coordinates of an
-// artifact-bearing mutation the gh-channel injector saw complete. Kind is
-// "pull_request" or "review". A PR created through gh's porcelain (GraphQL)
-// carries only Number/NodeID/URL, since that is gh's whole selection set — the
-// reconciler fills the rest; one created through `gh api` (REST) also carries
-// Head/Base/Title/Body/Draft from the 201 response. For a review post, Number
-// comes from the request path and ReviewID/ReviewState/URL from the response.
-// The orchestrator binds ConversationID/OrgID/TeamID from its own ConversationInfo (the
-// sidecar never names them), so a sidecar cannot attribute an artifact to
-// another run.
-type RecordObservationArgs struct {
-	Kind        string `json:"kind"`
-	Owner       string `json:"owner"`
-	Repo        string `json:"repo"`
-	Number      int    `json:"number"`
-	NodeID      string `json:"node_id,omitempty"`
-	Head        string `json:"head,omitempty"`
-	Base        string `json:"base,omitempty"`
-	URL         string `json:"url,omitempty"`
-	Title       string `json:"title,omitempty"`
-	Body        string `json:"body,omitempty"`
-	Draft       bool   `json:"draft,omitempty"`
-	ReviewID    int    `json:"review_id,omitempty"`
-	ReviewState string `json:"review_state,omitempty"`
 }
 
 // RecordRelayDropArgs is record_relay_drop's payload: the namespace and op of

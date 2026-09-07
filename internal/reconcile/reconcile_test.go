@@ -28,21 +28,52 @@ import (
 
 func TestPrState(t *testing.T) {
 	cases := []struct {
-		name string
-		snap domain.PRSnapshot
-		want string
+		name    string
+		snap    domain.PRSnapshot
+		current string
+		want    string
 	}{
-		{"merged flag", domain.PRSnapshot{Merged: true, State: "OPEN"}, domain.ArtifactStatePRMerged},
-		{"merged state", domain.PRSnapshot{State: "MERGED"}, domain.ArtifactStatePRMerged},
-		{"closed", domain.PRSnapshot{State: "CLOSED"}, domain.ArtifactStatePRClosed},
-		{"draft", domain.PRSnapshot{State: "OPEN", IsDraft: true}, domain.ArtifactStatePRDraft},
-		{"open", domain.PRSnapshot{State: "OPEN"}, domain.ArtifactStatePROpen},
+		{"merged flag", domain.PRSnapshot{Merged: true, State: "OPEN"}, domain.ArtifactStatePROpen, domain.ArtifactStatePRMerged},
+		{"merged state", domain.PRSnapshot{State: "MERGED"}, domain.ArtifactStatePROpen, domain.ArtifactStatePRMerged},
+		{"closed", domain.PRSnapshot{State: "CLOSED"}, domain.ArtifactStatePROpen, domain.ArtifactStatePRClosed},
+		{"draft stays draft", domain.PRSnapshot{State: "OPEN", IsDraft: true}, domain.ArtifactStatePRDraft, domain.ArtifactStatePRDraft},
+		{"draft marked ready", domain.PRSnapshot{State: "OPEN"}, domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen},
+		{"open", domain.PRSnapshot{State: "OPEN"}, domain.ArtifactStatePROpen, domain.ArtifactStatePROpen},
+		// Draft is one-way: a resolved row converted back to draft on GitHub is
+		// a human reworking it, not a new approval to wait on.
+		{"open converted back to draft", domain.PRSnapshot{State: "OPEN", IsDraft: true}, domain.ArtifactStatePROpen, domain.ArtifactStatePROpen},
+		// A draft merged or closed as a draft still ends where GitHub says.
+		{"draft merged", domain.PRSnapshot{Merged: true, State: "MERGED", IsDraft: true}, domain.ArtifactStatePRDraft, domain.ArtifactStatePRMerged},
+		{"draft closed", domain.PRSnapshot{State: "CLOSED", IsDraft: true}, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed},
 		// Merged takes precedence over closed even if both somehow read truthy.
-		{"merged beats closed", domain.PRSnapshot{Merged: true, State: "CLOSED"}, domain.ArtifactStatePRMerged},
+		{"merged beats closed", domain.PRSnapshot{Merged: true, State: "CLOSED"}, domain.ArtifactStatePROpen, domain.ArtifactStatePRMerged},
 	}
 	for _, c := range cases {
-		if got := prState(c.snap); got != c.want {
+		if got := prState(c.snap, c.current); got != c.want {
 			t.Errorf("%s: prState = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestIsDraftResolved(t *testing.T) {
+	pr := func(state string) domain.Artifact {
+		return domain.Artifact{Kind: domain.ArtifactKindPullRequest, State: state}
+	}
+	cases := []struct {
+		name string
+		a    domain.Artifact
+		next string
+		want bool
+	}{
+		{"draft marked ready", pr(domain.ArtifactStatePRDraft), domain.ArtifactStatePROpen, true},
+		{"draft merged", pr(domain.ArtifactStatePRDraft), domain.ArtifactStatePRMerged, true},
+		{"draft closed", pr(domain.ArtifactStatePRDraft), domain.ArtifactStatePRClosed, true},
+		{"open merged", pr(domain.ArtifactStatePROpen), domain.ArtifactStatePRMerged, false},
+		{"review submitted", domain.Artifact{Kind: domain.ArtifactKindReview, State: domain.ArtifactStateReviewPending}, domain.ArtifactStateReviewSubmitted, false},
+	}
+	for _, c := range cases {
+		if got := isDraftResolved(c.a, c.next); got != c.want {
+			t.Errorf("%s: isDraftResolved = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
@@ -655,6 +686,81 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 	mem := getConversationMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-3", conversationID)
 	if mem != nil && strings.Contains(mem.Content, "Post-run outcome") {
 		t.Errorf("no terminal transition, but a post-run outcome note was written: %q", mem.Content)
+	}
+}
+
+// TestReconcile_DraftMarkedReadyRunsTheResolvedHook pins resolution from any
+// door: a draft PR that GitHub now reports as ready — marked so by a human on
+// GitHub, or by an agent whose mission asked — flips to open, and the hook
+// that closes its task runs once for the owning conversation, after the write
+// has landed.
+func TestReconcile_DraftMarkedReadyRunsTheResolvedHook(t *testing.T) {
+	stores, seedConversation, seedArt := reconcileTestStores(t)
+	const conversationID = "77777777-7777-7777-7777-777777777777"
+	seedConversation("ent-7", conversationID, "narrative")
+
+	draft := domain.NewPullRequestArtifact("octo/repo", 7, "PR_7", "x", "main", "u", "t", "b", true)
+	draft.ConversationID = conversationID
+	seedArt(draft)
+
+	stub := &stubGH{prs: map[string]string{"PR_7": prNodeJSON("PR_7", 7, "OPEN", false, false)}}
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
+	var (
+		mu       sync.Mutex
+		resolved []string
+	)
+	rc.SetPullRequestResolvedHook(func(_ context.Context, orgID, convID string) {
+		mu.Lock()
+		defer mu.Unlock()
+		// The write is visible to the hook: the closure's unresolved check
+		// must read the flipped row, not race it.
+		assertState(t, stores, orgID, draft.DedupKey, domain.ArtifactStatePROpen)
+		resolved = append(resolved, convID)
+	})
+
+	if err := rc.ReconcileOrg(context.Background(), runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("ReconcileOrg: %v", err)
+	}
+	assertState(t, stores, runmode.LocalDefaultOrgID, draft.DedupKey, domain.ArtifactStatePROpen)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(resolved) != 1 || resolved[0] != conversationID {
+		t.Errorf("resolved hook calls = %v, want exactly [%s]", resolved, conversationID)
+	}
+}
+
+// TestReconcile_OpenNeverReturnsToDraft pins the one-way rule: a PR that
+// already left draft — the approval click, or a ready observed above — is not
+// re-drafted when a human converts it back on GitHub. The row stays open, no
+// transition is reported, and the hook does not run.
+func TestReconcile_OpenNeverReturnsToDraft(t *testing.T) {
+	stores, seedConversation, seedArt := reconcileTestStores(t)
+	const conversationID = "88888888-8888-8888-8888-888888888888"
+	seedConversation("ent-8", conversationID, "narrative")
+
+	open := domain.NewPullRequestArtifact("octo/repo", 8, "PR_8", "x", "main", "u", "t", "b", false)
+	open.ConversationID = conversationID
+	seedArt(open)
+
+	stub := &stubGH{prs: map[string]string{"PR_8": prNodeJSON("PR_8", 8, "OPEN", true, false)}}
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
+	hookRan := false
+	rc.SetPullRequestResolvedHook(func(context.Context, string, string) { hookRan = true })
+
+	arts, err := stores.Artifacts.ListNonTerminalBySystem(context.Background(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("ListNonTerminalBySystem: %v", err)
+	}
+	updated, err := rc.Reconcile(context.Background(), runmode.LocalDefaultOrgID, arts)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(updated) != 0 {
+		t.Errorf("expected no transition for an open PR converted back to draft, got %+v", updated)
+	}
+	assertState(t, stores, runmode.LocalDefaultOrgID, open.DedupKey, domain.ArtifactStatePROpen)
+	if hookRan {
+		t.Error("resolved hook ran for a PR that was already resolved")
 	}
 }
 
