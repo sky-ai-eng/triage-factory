@@ -1162,7 +1162,15 @@ func getConversation(ctx context.Context, q queryer, orgID, conversationID strin
 }
 
 func (s *conversationStore) ListForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error) {
-	rows, err := s.q.QueryContext(ctx, `
+	return listConversationsForTask(ctx, s.q, orgID, taskID)
+}
+
+func (s *conversationStore) ListForTaskSystem(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error) {
+	return listConversationsForTask(ctx, s.admin, orgID, taskID)
+}
+
+func listConversationsForTask(ctx context.Context, q queryer, orgID, taskID string) ([]domain.Conversation, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT `+pgConversationColumns+`
 		FROM conversations r
 		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id

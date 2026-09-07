@@ -71,14 +71,9 @@ type Config struct {
 	// so the live secret store IS the credential source.
 	TokenSource func(context.Context) (string, error)
 
-	// Observe, when non-nil, receives each artifact-bearing mutation the
-	// injector sees complete. Local mode wires this straight into the artifact
-	// recorder in-process — there is no relay hop to make.
-	Observe func(context.Context, ghinjector.ObservedMutation)
-
 	// ObserveWrite, when non-nil, receives every mutating REST request the
-	// injector forwarded, with its outcome — the audit-log half of the same
-	// channel. Wired in-process too.
+	// injector forwarded, with its outcome — the write audit. Local mode wires
+	// this straight into the recorder in-process; there is no relay hop to make.
 	ObserveWrite func(context.Context, ghinjector.ObservedWrite)
 
 	// AuthorizeWrite decides the shapes the injector's refusal policy gates and
@@ -173,7 +168,6 @@ func Start(cfg Config) (*Channel, error) {
 		Cert:           cert,
 		ConversationID: cfg.ConversationID,
 		TokenSource:    cfg.TokenSource,
-		Observe:        cfg.Observe,
 		ObserveWrite:   cfg.ObserveWrite,
 		AuthorizeWrite: cfg.AuthorizeWrite,
 		GitHandler:     cfg.GitHandler,

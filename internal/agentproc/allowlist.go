@@ -354,6 +354,11 @@ func BuildAllowedToolsFor(o AllowedToolsOptions) string {
 //     lives in internal/agentloop and does not run here. Leaving merge
 //     unreachable is the honest answer while there is no local equivalent of
 //     that gate; an ungated merge is not.
+//   - gh pr create — refused at the credential injector whatever the client,
+//     because the exec verb of the same name is the one door: it opens the
+//     pull request as a draft and records what the agent proposed. Omitting it
+//     here is early UX in front of that refusal. `gh pr ready` stays: marking
+//     a draft ready is not destructive, and a mission may ask for it.
 //
 // Each verb gets a bare and a trailing-`*` form: gh's own porcelain is
 // frequently argument-free (`gh pr list`, `gh repo view`) and the pattern
@@ -362,7 +367,7 @@ func ghBashPatterns() []string {
 	verbs := []string{
 		// Pull requests — the delegated agent's main surface.
 		"gh pr view", "gh pr list", "gh pr diff", "gh pr checkout",
-		"gh pr create", "gh pr comment", "gh pr ready", "gh pr close",
+		"gh pr comment", "gh pr ready", "gh pr close",
 		// Issues.
 		"gh issue view", "gh issue list", "gh issue create", "gh issue comment",
 		// Actions — CI triage reads run metadata and pulls log archives.

@@ -253,3 +253,65 @@ func makeConversationBlueprintStep(t *testing.T, database *sql.DB, conversationI
 		t.Fatalf("set blueprint_run_id: %v", err)
 	}
 }
+
+// TestCloseTaskIfTerminalAndResolved_ClosesOnceTheLastDraftIsResolved pins the
+// closure a draft PR resolved off-click reaches: the blueprint completed with
+// the draft unresolved (task parked in the approval column); once the artifact
+// is no longer a draft — a human marked it ready on GitHub — the same
+// terminal-on-last rule closes the task.
+func TestCloseTaskIfTerminalAndResolved_ClosesOnceTheLastDraftIsResolved(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "resolved-closes")
+	stampBotClaim(t, database, taskID)
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
+	blueprintRunID := "bpr-" + conversationID
+	setConversationStatus(t, database, conversationID, "completed")
+	seedDraftPRArtifact(t, s, conversationID)
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
+		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
+		domain.BlueprintRunStatusCompleted, "", nil, true)
+	if got := readTaskStatus(t, database, taskID); got != "in_review" {
+		t.Fatalf("task.status = %q before resolution, want in_review", got)
+	}
+
+	// Still a draft: the closure is a no-op, whoever asks.
+	s.CloseTaskIfTerminalAndResolved(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	if got := readTaskStatus(t, database, taskID); got != "in_review" {
+		t.Fatalf("task.status = %q after a no-op closure, want in_review (the draft is still unresolved)", got)
+	}
+
+	// Marked ready on GitHub: the reconciler flips the row, then runs this.
+	arts, err := s.artifacts.ListByConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	if err != nil || len(arts) != 1 {
+		t.Fatalf("list artifacts: %v (%d)", err, len(arts))
+	}
+	arts[0].State = domain.ArtifactStatePROpen
+	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, arts[0]); err != nil {
+		t.Fatalf("flip artifact: %v", err)
+	}
+	s.CloseTaskIfTerminalAndResolved(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	if got := readTaskStatus(t, database, taskID); got != "done" {
+		t.Errorf("task.status = %q, want done (the last unresolved artifact was resolved on GitHub)", got)
+	}
+
+	// Idempotent: a second cycle observing nothing new changes nothing.
+	s.CloseTaskIfTerminalAndResolved(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	if got := readTaskStatus(t, database, taskID); got != "done" {
+		t.Errorf("task.status = %q after a repeat, want done", got)
+	}
+}
+
+// TestCloseTaskIfTerminalAndResolved_LeavesAnUnfinishedBlueprintAlone is the
+// guard: a resolved draft on a blueprint that has not completed cleanly — the
+// run is still going, or it aborted — closes nothing. An aborted blueprint
+// keeps its task open for a human to inspect, whatever happened to its PR.
+func TestCloseTaskIfTerminalAndResolved_LeavesAnUnfinishedBlueprintAlone(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "resolved-unfinished")
+	stampBotClaim(t, database, taskID)
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
+	setConversationStatus(t, database, conversationID, "running")
+	// The blueprint_runs row is seeded running; no terminate has happened.
+	s.CloseTaskIfTerminalAndResolved(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	if got := readTaskStatus(t, database, taskID); got == "done" {
+		t.Errorf("task closed while its blueprint run was still in flight")
+	}
+}

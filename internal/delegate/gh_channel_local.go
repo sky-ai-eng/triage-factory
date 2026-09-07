@@ -9,7 +9,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghbin"
 	"github.com/sky-ai-eng/triage-factory/internal/ghchannel"
@@ -107,12 +106,6 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 			}
 			return tok.Value, nil
 		},
-		Observe: func(ctx context.Context, m ghinjector.ObservedMutation) {
-			if !storesSet {
-				return
-			}
-			recordLocalObservation(ctx, stores, info, m)
-		},
 		ObserveWrite: func(ctx context.Context, w ghinjector.ObservedWrite) {
 			if !storesSet {
 				return
@@ -151,32 +144,6 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 		BinDir:         ch.BinDir,
 		ConfigDir:      ch.ConfigDir,
 	}, ch
-}
-
-// recordLocalObservation upserts the artifact behind one observed gh mutation.
-// The mutation already landed on GitHub, so this is best-effort by construction:
-// the same mapping and the same recording funnel the relayed (multi) path uses,
-// minus the relay — local mode holds the DB in this very process.
-func recordLocalObservation(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, m ghinjector.ObservedMutation) {
-	art, ok := agenthost.ObservationArtifact(agentproc.RecordObservationArgs{
-		Kind:        m.Kind,
-		Owner:       m.Owner,
-		Repo:        m.Repo,
-		Number:      m.Number,
-		NodeID:      m.NodeID,
-		Head:        m.Head,
-		Base:        m.Base,
-		URL:         m.URL,
-		Title:       m.Title,
-		Body:        m.Body,
-		Draft:       m.Draft,
-		ReviewID:    m.ReviewID,
-		ReviewState: m.ReviewState,
-	}, info.ConversationID)
-	if !ok {
-		return
-	}
-	agenthost.RecordExternalWrite(ctx, stores, info, &art, nil)
 }
 
 // githubAPIUpstreamFor resolves the REST API base the local gh channel's

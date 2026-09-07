@@ -15,10 +15,10 @@
 // and a request for a repo the run may work in is forwarded whatever it asks
 // of it — with one exception, which is the whole of this proxy's traffic policy.
 //
-// Two families of write are refused before they are forwarded: submitting a
-// review, and creating a repository. So is any GraphQL request whose act could
-// not be established at all, since a policy keyed on the act's name is walked
-// through by anything that stops the act being named. What is refused, and the
+// Three families of write are refused before they are forwarded: submitting a
+// review, creating a repository, and opening a pull request. So is any GraphQL
+// request whose act could not be established at all, since a policy keyed on
+// the act's name is walked through by anything that stops the act being named. What is refused, and the
 // reasoning for each — including why MERGING is deliberately not among them —
 // lives in internal/ghwrite alongside the classifier the audit log reads;
 // gate.go here is only the enforcement. There is no authorization mechanism and
@@ -124,53 +124,24 @@
 // handler — its ref gate, its base-branch push policy, its per-repo authorize
 // and audit — served behind a second front door.
 //
-// # Observation
-//
-// Exec-verb self-reporting doesn't exist on this channel, so the injector emits
-// an observation for the artifact-bearing mutations it can recognize, via a
-// caller-supplied callback the sidecar turns into an orchestrator relay. Two
-// transports carry them, because gh's porcelain and `gh api` do not agree:
-//
-//   - GraphQL. Every mutation in gh's porcelain goes through POST /api/graphql
-//     (verified against the pinned gh release). A successful create is
-//     recognized by the exact top-level response key data.createPullRequest —
-//     never by walking the payload for any pullRequest object, since a mere
-//     `gh pr view` nests one under data.repository.pullRequest and attributing
-//     a PR the run only read as one it produced is worse than missing a
-//     mutation. gh's field selection is just `pullRequest { id url }`, so the
-//     observation carries the node id and the html url (owner/repo/number
-//     parsed out of it) and nothing else; title and refs are left empty for
-//     the reconciler to fill, as it already does for its backstop rows.
-//   - REST, for `gh api` calls the agent writes by hand:
-//     POST .../pulls (PR created) and POST .../pulls/{n}/reviews (review
-//     posted), which is also the only way inline review comments are posted.
-//
-// The review half of that pair no longer fires, because a review submitted
-// through this channel is now refused before it is forwarded. It is kept rather
-// than deleted: the observation is what the artifact row would be built from if
-// the policy ever admits the shape, and nothing about it is specific to the
-// policy that currently does not.
-//
-// Decoding a response narrows nothing the agent may do and never alters a
-// request. `gh pr review` posts addPullRequestReview, whose response carries
-// only clientMutationId — the PR it targets is named in the *request*, so
-// observing it is out of scope by the invariant above; a reconciler backstop
-// owns that case.
-//
 // # Write audit
 //
-// Observation covers only the two artifact-bearing creates, so an edit, a
-// merge, a close, and every refused write used to leave no trace at all. The
-// second callback (ObserveWrite) closes that gap on both transports, and every
-// write leaves exactly one report whichever one it took.
+// Exec-verb self-reporting doesn't exist on this channel, so the injector
+// reports every write it forwards through a caller-supplied callback
+// (ObserveWrite) the sidecar turns into an orchestrator relay, and every write
+// leaves exactly one report whichever transport it took. The artifacts a run
+// leaves behind — its pull requests, its reviews — are never minted from this
+// channel: the shapes that would create one are refused here and belong to the
+// exec verbs, which record what the agent proposed alongside what landed.
 //
 // REST is read from the response's own request record — method, path, status —
 // so those requests stay unread. The shapes the shared classifier
 // (internal/ghwrite) marks as creates — a posted comment, a review-thread reply
 // — additionally have their RESPONSE body parsed for the new object's id and
-// link, through the same cap-and-stitch machinery artifact observation uses, so
-// the audit row reaches parity with the equivalent exec verb's. Every other
-// shape is fully described by its path and costs no buffering at all.
+// link, buffered under a cap and stitched back in front of the stream when the
+// cap is passed, so the audit row reaches parity with the equivalent exec
+// verb's. Every other shape is fully described by its path and costs no
+// buffering at all.
 //
 // GraphQL needs both ends of the hop. The act is named only in the request, so
 // the capture in Handler reads it there; the outcome is only in the response,
@@ -179,9 +150,9 @@
 // write as an attempt. A request whose document names no mutation is a read and
 // reports nothing at all, which is nearly all of this endpoint's traffic.
 //
-// Neither callback is a policy: reporting a write neither permits nor prevents
-// it. Both fire after the request has already transited, so a refused request
-// reaches neither of them — its one row is the refusal, written by the gate.
+// The callback is not a policy: reporting a write neither permits nor prevents
+// it. It fires after the request has already transited, so a refused request
+// never reaches it — its one row is the refusal, written by the gate.
 package ghinjector
 
 import (
@@ -214,16 +185,15 @@ const (
 	graphqlPath = "/api/graphql"
 )
 
-// maxObserveBody caps how much of an observed mutation's response body the
-// injector will BUFFER to parse the created object's coordinates. PR-create and
-// review-post responses are a few KB; the cap only guards against a pathological
-// upstream. A body past the cap is never truncated — observation is skipped for
-// that response (the reconciler backstop covers it) and the body streams on: a
-// declared Content-Length over the cap is skipped without reading anything at
-// all, and one discovered mid-read has its consumed prefix stitched back in
-// front of the untouched remainder. The agent's response is always delivered
-// whole; observation is the only thing that degrades.
-const maxObserveBody = 1 << 20
+// maxBufferedBody caps how much of a write's response body the injector will
+// BUFFER to read the created object's coordinates or a GraphQL outcome. Those
+// responses are a few KB; the cap only guards against a pathological upstream.
+// A body past the cap is never truncated — the audit goes without it and the
+// body streams on: a declared Content-Length over the cap is skipped without
+// reading anything at all, and one discovered mid-read has its consumed prefix
+// stitched back in front of the untouched remainder. The agent's response is
+// always delivered whole; the audit's detail is the only thing that degrades.
+const maxBufferedBody = 1 << 20
 
 // injectorLog carries what this package says out loud, which is only its
 // refusals. Everything it merely observes travels as a relayed audit row and is
@@ -248,32 +218,6 @@ const maxRequestBody = 1 << 20
 // picked up; an error (or empty token) surfaces to the agent as a 502, never a
 // silently-unauthenticated forward.
 type TokenSource func(ctx context.Context) (string, error)
-
-// ObservedMutation is one artifact-bearing mutation the injector saw complete
-// successfully. The sidecar relays it to the orchestrator, which owns the DB and
-// builds the artifact row (the injector holds no DB handle and no domain types).
-// Kind is "pull_request" or "review".
-type ObservedMutation struct {
-	Kind   string
-	Owner  string
-	Repo   string
-	Number int // PR number (response for a PR; request path for a REST review)
-
-	// PR-create fields. A GraphQL create populates only NodeID and URL — gh
-	// selects nothing else — so Head/Base/Title/Body/Draft carry values only on
-	// the REST path.
-	NodeID string
-	Head   string
-	Base   string
-	URL    string
-	Title  string
-	Body   string
-	Draft  bool
-
-	// Review-post fields.
-	ReviewID    int
-	ReviewState string // GitHub's review state, e.g. APPROVED / COMMENTED / CHANGES_REQUESTED
-}
 
 // ObservedWrite is one mutating REST request the injector forwarded, with the
 // outcome the upstream returned. It is the classifier package's Observation
@@ -301,17 +245,8 @@ type Config struct {
 	// (from GenerateCert). Required — gh forces https.
 	Cert tls.Certificate
 
-	// Observe, when non-nil, is called for each PR-create / review-post the
-	// injector sees complete. Best-effort and out of the response's critical
-	// path shape (called after the body is buffered, before it streams on).
-	Observe func(ctx context.Context, m ObservedMutation)
-
 	// ObserveWrite, when non-nil, is called for every mutating REST request the
-	// injector forwarded, whatever the outcome — the audit-parity callback, as
-	// opposed to Observe's artifact-parity one. Both fire for a successful REST
-	// PR create, and neither is redundant with the other: an artifact says the
-	// pull request exists, an action says this run opened it, and a reader
-	// asking either question is not served by the other's answer.
+	// injector forwarded, whatever the outcome — the write audit's callback.
 	// Called inline on the response path, so the callback must not block.
 	ObserveWrite func(ctx context.Context, w ObservedWrite)
 
@@ -758,30 +693,11 @@ func (s *Server) auditWantsBody(resp *http.Response, graphql bool) bool {
 	return ok && shape.CreatesObject
 }
 
-// observationCandidate reports whether this response is one of the
-// artifact-bearing mutations, with the coordinates the path supplies. GraphQL
-// is a candidate on shape alone — the operation is named in the request, which
-// is off limits, so its body has to say what it was.
-func (s *Server) observationCandidate(resp *http.Response, graphql bool) (kind, owner, repo string, number int, ok bool) {
-	if s.cfg.Observe == nil || resp.Request.Method != http.MethodPost ||
-		resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", "", 0, false
-	}
-	if graphql {
-		return "", "", "", 0, true
-	}
-	return classifyMutationPath(resp.Request.URL.Path)
-}
-
-// modifyResponse bumps the request counter, reports every mutating REST request
-// to the write audit, and, for the shapes whose response names an object,
-// buffers+parses the body before streaming it on unchanged. Never returns an
-// error (that would 502 the agent on a successful upstream write) — observation
-// failures are silently dropped and left to the reconciler backstop.
-//
-// The body is buffered at most once and shared by both consumers: they read
-// different objects out of it, but a response has one body and reading it twice
-// is not a thing that can be made to work.
+// modifyResponse bumps the request counter and reports every mutating request
+// to the write audit, buffering the body first for the shapes whose outcome or
+// created object lives in it, then streams it on unchanged. Never returns an
+// error (that would 502 the agent on a successful upstream write) — an audit
+// that could not read its body records what it could and moves on.
 func (s *Server) modifyResponse(resp *http.Response) error {
 	s.requestCount.Add(1)
 	if resp.Request == nil {
@@ -789,14 +705,13 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	}
 	graphql := resp.Request.URL.Path == s.graphqlURL.Path
 
-	kind, owner, repo, number, observing := s.observationCandidate(resp, graphql)
 	auditingCreate := s.auditWantsBody(resp, graphql)
 	// Non-nil only for a GraphQL request the capture in Handler read as a write.
 	facts, _ := resp.Request.Context().Value(graphQLFactsKey{}).(*ghwrite.GraphQLFacts)
 
 	var buf []byte
-	if observing || auditingCreate || facts != nil {
-		buf, _ = bufferForObservation(resp)
+	if auditingCreate || facts != nil {
+		buf, _ = bufferBody(resp)
 	}
 
 	if facts != nil {
@@ -806,34 +721,11 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		// as a merge.
 		s.auditGraphQLWrite(resp, facts, buf)
 	} else {
-		// The REST audit runs whatever the buffering produced — it covers the
-		// outcomes observation drops, a refused write and every mutating method
-		// that makes no artifact — but it is handed a body only when the
-		// classifier said this shape's response names a created object. The two
-		// conditions overlap for a REST create and diverge elsewhere, and
-		// handing over a body buffered for some other reason would hang whatever
-		// it happens to contain on a row with no use for it.
-		createdBody := buf
-		if !auditingCreate {
-			createdBody = nil
-		}
-		s.auditWrite(resp, graphql, createdBody)
-	}
-
-	if !observing || buf == nil {
-		return nil
-	}
-	var (
-		m      ObservedMutation
-		parsed bool
-	)
-	if graphql {
-		m, parsed = parseGraphQLObservation(buf)
-	} else {
-		m, parsed = parseObservation(kind, owner, repo, number, buf)
-	}
-	if parsed {
-		s.cfg.Observe(context.Background(), m)
+		// The REST audit runs whatever the buffering produced — it covers every
+		// outcome, a refused write and every mutating method alike — but it is
+		// handed a body only when the classifier said this shape's response
+		// names a created object.
+		s.auditWrite(resp, graphql, buf)
 	}
 	return nil
 }
@@ -853,32 +745,32 @@ func parseCreatedObject(body []byte) (externalID, url string) {
 	return strconv.FormatInt(o.ID, 10), o.HTMLURL
 }
 
-// bufferForObservation reads the whole response body into memory and re-presents
-// it to the caller, returning the buffered bytes. ok is false when the body is
-// larger than the injector will buffer or the read broke mid-stream; in both
-// cases the response is restored to a readable state (consumed prefix stitched
-// back in front of the remainder, original body kept as the Closer) and
-// observation is skipped for it.
+// bufferBody reads the whole response body into memory and re-presents it to
+// the caller, returning the buffered bytes. ok is false when the body is larger
+// than the injector will buffer or the read broke mid-stream; in both cases the
+// response is restored to a readable state (consumed prefix stitched back in
+// front of the remainder, original body kept as the Closer) and the audit goes
+// without it.
 //
 // Past the cap, that restoration is exact and the agent's response is delivered
-// whole, with observation the only thing degraded. On a broken read the same
-// stitch happens and this proxy still drops nothing of its own, but the
+// whole, with the audit's detail the only thing degraded. On a broken read the
+// same stitch happens and this proxy still drops nothing of its own, but the
 // remainder is a stream that already failed — an upstream body that cannot be
 // read is not one anything in the middle can deliver whole.
-func bufferForObservation(resp *http.Response) ([]byte, bool) {
+func bufferBody(resp *http.Response) ([]byte, bool) {
 	// A declared length past the cap settles the outcome before any I/O: the
 	// body would be skipped anyway, so read none of it and leave it streaming
 	// straight through to the agent. ContentLength is -1 when unknown (chunked),
 	// which falls through to the read below.
-	if resp.ContentLength > maxObserveBody {
+	if resp.ContentLength > maxBufferedBody {
 		return nil, false
 	}
 
 	// Read one byte past the cap so "body exceeded the cap" is distinguishable
 	// from "body is exactly the cap" (ReadAll on a LimitReader reports no error
 	// when it stops at the limit).
-	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxObserveBody+1))
-	if err != nil || len(buf) > maxObserveBody {
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxBufferedBody+1))
+	if err != nil || len(buf) > maxBufferedBody {
 		resp.Body = &prefixedBody{r: io.MultiReader(bytes.NewReader(buf), resp.Body), c: resp.Body}
 		return nil, false
 	}
@@ -897,138 +789,6 @@ type prefixedBody struct {
 
 func (b *prefixedBody) Read(p []byte) (int, error) { return b.r.Read(p) }
 func (b *prefixedBody) Close() error               { return b.c.Close() }
-
-// classifyMutationPath recognizes the two artifact-bearing POST paths on the
-// upstream request URL (post-rewrite, so REST base already prepended): a PR
-// create (.../repos/{o}/{r}/pulls) or a review post
-// (.../repos/{o}/{r}/pulls/{n}/reviews). Returns the kind + coordinates parsed
-// from the path; number is 0 for a PR create (assigned in the response).
-func classifyMutationPath(path string) (kind, owner, repo string, number int, ok bool) {
-	i := strings.Index(path, "/repos/")
-	if i < 0 {
-		return "", "", "", 0, false
-	}
-	segs := strings.Split(strings.Trim(path[i+len("/repos/"):], "/"), "/")
-	// pulls:            owner repo pulls
-	// reviews:          owner repo pulls {n} reviews
-	if len(segs) == 3 && segs[2] == "pulls" && segs[0] != "" && segs[1] != "" {
-		return "pull_request", segs[0], segs[1], 0, true
-	}
-	if len(segs) == 5 && segs[2] == "pulls" && segs[4] == "reviews" {
-		n, err := strconv.Atoi(segs[3])
-		if err != nil || segs[0] == "" || segs[1] == "" {
-			return "", "", "", 0, false
-		}
-		return "review", segs[0], segs[1], n, true
-	}
-	return "", "", "", 0, false
-}
-
-// createPullRequestField is the exact top-level response key GitHub returns for
-// the create mutation, and the sole trigger for a GraphQL observation.
-const createPullRequestField = "createPullRequest"
-
-// parseGraphQLObservation recognizes a PR creation in a GraphQL response body.
-// It keys on the exact top-level data.createPullRequest field rather than
-// searching the payload for a pullRequest object: a query result nests one under
-// data.repository.pullRequest, and recording a PR the run merely read as one it
-// created is a worse failure than missing an aliased hand-written mutation.
-//
-// gh's selection set is `createPullRequest(input:$input){ pullRequest{ id url }}`
-// and nothing more, so owner/repo/number come from parsing the html url; the
-// fields the REST shape supplies (title, refs, draft) have no GraphQL source
-// here and stay empty for the reconciler to fill.
-func parseGraphQLObservation(body []byte) (ObservedMutation, bool) {
-	// The field name is a prerequisite for the key being present, so this
-	// prescreen never costs a real observation — it just keeps the ordinary
-	// query traffic (which is most of what gh sends) out of the decoder.
-	if !bytes.Contains(body, []byte(createPullRequestField)) {
-		return ObservedMutation{}, false
-	}
-	var payload struct {
-		Data struct {
-			CreatePullRequest *struct {
-				PullRequest struct {
-					ID  string `json:"id"`
-					URL string `json:"url"`
-				} `json:"pullRequest"`
-			} `json:"createPullRequest"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil || payload.Data.CreatePullRequest == nil {
-		return ObservedMutation{}, false
-	}
-	pr := payload.Data.CreatePullRequest.PullRequest
-	owner, repo, number, ok := ghwrite.ParsePullRequestURL(pr.URL)
-	if !ok {
-		return ObservedMutation{}, false
-	}
-	return ObservedMutation{
-		Kind:   "pull_request",
-		Owner:  owner,
-		Repo:   repo,
-		Number: number,
-		NodeID: pr.ID,
-		URL:    pr.URL,
-	}, true
-}
-
-// parseObservation extracts the created object's coordinates from a mutation's
-// JSON response body.
-func parseObservation(kind, owner, repo string, number int, body []byte) (ObservedMutation, bool) {
-	switch kind {
-	case "pull_request":
-		var pr struct {
-			Number  int    `json:"number"`
-			NodeID  string `json:"node_id"`
-			HTMLURL string `json:"html_url"`
-			Title   string `json:"title"`
-			Body    string `json:"body"`
-			Draft   bool   `json:"draft"`
-			Head    struct {
-				Ref string `json:"ref"`
-			} `json:"head"`
-			Base struct {
-				Ref string `json:"ref"`
-			} `json:"base"`
-		}
-		if err := json.Unmarshal(body, &pr); err != nil || pr.Number == 0 {
-			return ObservedMutation{}, false
-		}
-		return ObservedMutation{
-			Kind:   "pull_request",
-			Owner:  owner,
-			Repo:   repo,
-			Number: pr.Number,
-			NodeID: pr.NodeID,
-			Head:   pr.Head.Ref,
-			Base:   pr.Base.Ref,
-			URL:    pr.HTMLURL,
-			Title:  pr.Title,
-			Body:   pr.Body,
-			Draft:  pr.Draft,
-		}, true
-	case "review":
-		var rv struct {
-			ID      int    `json:"id"`
-			HTMLURL string `json:"html_url"`
-			State   string `json:"state"`
-		}
-		if err := json.Unmarshal(body, &rv); err != nil || rv.ID == 0 {
-			return ObservedMutation{}, false
-		}
-		return ObservedMutation{
-			Kind:        "review",
-			Owner:       owner,
-			Repo:        repo,
-			Number:      number,
-			ReviewID:    rv.ID,
-			ReviewState: rv.State,
-			URL:         rv.HTMLURL,
-		}, true
-	}
-	return ObservedMutation{}, false
-}
 
 // Start binds addr and serves TLS with the per-run cert until Shutdown. Returns
 // the bound "host:port" (no scheme) — the value GH_HOST is set to.

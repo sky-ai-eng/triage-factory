@@ -33,7 +33,7 @@ const PRHelpText = `GitHub PR Commands:
                                                           reason to "Dismissed").
 
 PR Creation:
-  gh pr create --title <T> (--body <B> | --body-file <path>) --base <branch> [--head <branch>] [--draft] [--repo o/r]
+  gh pr create --title <T> (--body <B> | --body-file <path>) --base <branch> [--head <branch>] [--repo o/r]
                                                           Open a pull request. The head branch
                                                           must already be pushed to the upstream
                                                           (git push first). --head defaults to
@@ -45,8 +45,12 @@ PR Creation:
                                                           The PR is opened on GitHub right away,
                                                           always as a draft: repo-visible, not
                                                           ready for review. A human marks it
-                                                          ready in the Triage Factory UI. Do not
-                                                          call this twice for the same branch.
+                                                          ready; "gh pr ready" does the same only
+                                                          when your mission asks for it. This is
+                                                          the one way a run opens a pull request:
+                                                          the real gh's "pr create" is refused.
+                                                          Do not call this twice for the same
+                                                          branch.
 
 Review Lifecycle (managed locally, submitted atomically):
   gh pr start-review <number> [--repo o/r] [--fresh]      Start a local review draft. --fresh resets an
@@ -102,7 +106,7 @@ var HelpText = PRHelpText + "\n\n" + ActionsHelpText + "\n\n" + RepoResolutionHe
 // flag's value when hunting for the leading positional arg) and the --help scan
 // (which must not read `--body "--help"` as a help request).
 //
-// Booleans (-v/--verbose, --stdout, --draft, --fresh) are deliberately absent:
+// Booleans (-v/--verbose, --stdout, --fresh) are deliberately absent:
 // listing one would make `--stdout --help` look like the boolean's value and
 // swallow a real help request.
 var ValueFlags = map[string]bool{

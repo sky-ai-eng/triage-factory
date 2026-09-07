@@ -138,6 +138,9 @@ type App struct {
 	scorer     *ai.Manager
 	profiler   *repoprofile.Manager
 	reconciler *reconcile.Manager
+	// reconcilerCore is the shared Reconciler the Manager and the Tier-2
+	// endpoint drive; kept so the spawner, built later, can hook it.
+	reconcilerCore *reconcile.Reconciler
 	// reachCache refreshes the reachable-repo mirror the repository picker and
 	// the team-repos write gate read. grantReconciler is the App-installation
 	// grant reconcile it shares with the poller — one instance, two cadences

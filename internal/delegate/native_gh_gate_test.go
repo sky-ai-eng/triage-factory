@@ -48,6 +48,12 @@ func TestClassifyGHCommand(t *testing.T) {
 		{name: "a commenting review", command: `gh pr review 7 --comment --body "looks good"`, want: ghActionReview},
 		{name: "a review after a flag", command: "gh pr --repo owner/repo review 7 --request-changes -b nope", want: ghActionReview},
 
+		// --- pull request creation ---
+		{name: "creating a PR", command: `gh pr create --draft --title "fix" --body-file _tfac/pr-body.md`, want: ghActionPRCreate},
+		{name: "creating a PR with no arguments", command: "gh pr create", want: ghActionPRCreate},
+		{name: "creating a PR after a flag", command: "gh pr --repo owner/repo create --fill", want: ghActionPRCreate},
+		{name: "creating a PR after a cd", command: "cd /work/repo && git push -u origin topic && gh pr create --fill", want: ghActionPRCreate},
+
 		// --- repo create ---
 		{name: "the plain shape", command: "gh repo create acme/widgets --private", want: ghActionRepoCreate},
 		{name: "no arguments at all", command: "gh repo create", want: ghActionRepoCreate},
@@ -89,8 +95,8 @@ func TestClassifyGHCommand(t *testing.T) {
 		{name: "reading a PR", command: "gh pr view 7"},
 		{name: "diffing a PR", command: "gh pr diff 7"},
 		{name: "listing PRs", command: "gh pr list --state open"},
-		{name: "creating a PR", command: `gh pr create --draft --title "fix" --body-file _tfac/pr-body.md`},
 		{name: "marking a PR ready", command: "gh pr ready 7"},
+		{name: "the TF create verb", command: "tfac gh pr create --title fix --body-file _tfac/pr-body.md --base main"},
 		{name: "closing a PR", command: "gh pr close 7"},
 		{name: "commenting on a PR", command: `gh pr comment 7 --body "pushed a fix"`},
 		{name: "an issue verb", command: "gh issue view 12"},

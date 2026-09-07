@@ -394,8 +394,8 @@ func githubUpstreams(b *credbundle.Bundle) (git, api string) {
 // to the per-run path the orchestrator bind-mounts into the jail
 // (agenthost.WriteInjectorCert), and serves TLS. The injector's TokenSource
 // reads the held bundle's single team-set-scoped CLIToken live, so a mid-run
-// re-seal is picked up; the observation callback relays the two artifact-bearing
-// mutations to the orchestrator (which writes the artifact row).
+// re-seal is picked up; the write-audit callback relays every forwarded write
+// to the orchestrator (which writes the audit row).
 //
 // gitHandler is the run's git proxy handler, mounted behind the same listener so
 // one address serves the API and git smart-HTTP the way a real GHE host does.
@@ -470,29 +470,9 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			}
 			return bundle.GitHub.CLIToken.Token, nil
 		},
-		Observe: func(_ context.Context, m ghinjector.ObservedMutation) {
-			// Fire-and-forget: the mutation already landed on GitHub; the
-			// orchestrator (which holds the DB) builds and upserts the artifact.
-			r.notifyAudit(agentproc.OpRecordObservation,
-				agentproc.RecordObservationArgs{
-					Kind:        m.Kind,
-					Owner:       m.Owner,
-					Repo:        m.Repo,
-					Number:      m.Number,
-					NodeID:      m.NodeID,
-					Head:        m.Head,
-					Base:        m.Base,
-					URL:         m.URL,
-					Title:       m.Title,
-					Body:        m.Body,
-					Draft:       m.Draft,
-					ReviewID:    m.ReviewID,
-					ReviewState: m.ReviewState,
-				})
-		},
 		ObserveWrite: func(_ context.Context, w ghinjector.ObservedWrite) {
-			// Fire-and-forget beside Observe: the request already transited, and
-			// the orchestrator holds the DB that turns it into an audit row.
+			// Fire-and-forget: the request already transited, and the
+			// orchestrator holds the DB that turns it into an audit row.
 			// Every mutating REST call rides this, including the refused ones the
 			// artifact path drops. The created object's coordinates ride along
 			// for the shapes that make one — this process is the only one that

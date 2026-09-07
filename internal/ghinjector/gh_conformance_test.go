@@ -721,11 +721,13 @@ func ghArgs(args ...string) []string { return append(args, repoFlag...) }
 // draft, locked, merged or unmergeable is pointed at the object in that state.
 func porcelainWriteCases() []wireCase {
 	return []wireCase{
-		// The pull request itself.
+		// The pull request itself. Opening one is refused rather than
+		// classified: the exec verb is the one door, and a pull request opened
+		// here would leave an artifact with no draft flag, title, or body.
 		{
 			name: "pr create",
 			args: ghArgs("pr", "create", "--head", "feature", "--base", "main", "--title", "T", "--body", "B"),
-			want: []wireExpect{{mutation: "createPullRequest", action: domain.ActionPRCreated}},
+			want: []wireExpect{{mutation: "createPullRequest", refusal: ghwrite.GateReasonPRCreate}},
 		},
 		{
 			name: "pr comment",
@@ -835,11 +837,10 @@ func porcelainWriteCases() []wireCase {
 			want: []wireExpect{{mutation: "unlockLockable", action: domain.ActionConversationUnlocked}},
 		},
 		{
-			// A revert opens a pull request, and the row resolves to the one it
-			// opened rather than the one it undid.
+			// A revert opens a pull request, so it meets the create refusal.
 			name: "pr revert",
 			args: ghArgs("pr", "revert", "46", "--title", "Revert", "--body", "B"),
-			want: []wireExpect{{mutation: "revertPullRequest", action: domain.ActionPRReverted}},
+			want: []wireExpect{{mutation: "revertPullRequest", refusal: ghwrite.GateReasonPRCreate}},
 		},
 		{
 			name: "pr update-branch",
@@ -1086,6 +1087,14 @@ func handWrittenWriteCases() []wireCase {
 			args: []string{"api", "--method", "POST", "user/repos", "-f", "name=newrepo"},
 			want: []wireExpect{{method: "POST", path: "/user/repos", refusal: ghwrite.GateReasonRepoCreate}},
 		},
+		{
+			// The REST spelling of opening a pull request, which the porcelain
+			// never sends. Same act, same refusal.
+			name: "api open a pull request over REST",
+			args: []string{"api", "--method", "POST", "repos/octo/repo/pulls",
+				"-f", "title=T", "-f", "head=feature", "-f", "base=main"},
+			want: []wireExpect{{method: "POST", path: "/repos/octo/repo/pulls", refusal: ghwrite.GateReasonPRCreate}},
+		},
 
 		// The GraphQL half. These are written as anonymous inline documents,
 		// which is what an agent composing a raw call actually sends — and the
@@ -1132,7 +1141,7 @@ func handWrittenWriteCases() []wireCase {
 // reports as success is a gate the run has no reason to believe.
 func driveGH(t *testing.T, upstream *fakeUpstream, records *wireRecords, args []string) ([]byte, error) {
 	t.Helper()
-	env := ghEnvWithGate(t, upstream.server.URL, nil, records.audit, records.authorize)
+	env := ghEnvWithGate(t, upstream.server.URL, records.audit, records.authorize)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, ghBinary(t), args...)
@@ -1555,7 +1564,7 @@ func BenchmarkGraphQLCapturePinnedRead(b *testing.B) {
 func capturePinnedDocuments(b *testing.B) (read, mutation []byte) {
 	b.Helper()
 	upstream := newFakeUpstream(b)
-	env := ghEnvWithGate(b, upstream.server.URL, nil, nil, nil)
+	env := ghEnvWithGate(b, upstream.server.URL, nil, nil)
 	for _, args := range [][]string{ghArgs("pr", "view", "42"), ghArgs("pr", "close", "42")} {
 		runGH(b, env, args...)
 	}

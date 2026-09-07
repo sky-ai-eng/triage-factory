@@ -474,6 +474,12 @@ type ConversationStore interface {
 	// goroutine, which has no JWT-claims context.
 	HasActiveAutoConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
 
+	// ListForTaskSystem mirrors ListForTask on the admin pool, with org_id
+	// bound by argument. The artifact reconciler's task closure consumes it —
+	// a pull request resolved on GitHub has no requesting user to open a
+	// claims transaction as.
+	ListForTaskSystem(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error)
+
 	// ActiveAutoConversationIDForTaskSystem returns the ID of the task's active
 	// event-triggered conversation, or "" when none. Same predicate as
 	// HasActiveAutoConversationForTaskSystem (trigger_type='event', non-terminal);

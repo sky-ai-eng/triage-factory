@@ -939,7 +939,7 @@ func prCreate(ctx context.Context, client ghAPI, args []string) {
 	head := flagVal(args, "--head")
 
 	if title == "" {
-		exitErr("usage: gh pr create --title <T> (--body <B> | --body-file <path>) --base <branch> [--head <branch>] [--draft] [--repo owner/repo]\n--title is required")
+		exitErr("usage: gh pr create --title <T> (--body <B> | --body-file <path>) --base <branch> [--head <branch>] [--repo owner/repo]\n--title is required")
 	}
 	if base == "" {
 		exitErr("--base is required (the branch to merge into, e.g. main)")

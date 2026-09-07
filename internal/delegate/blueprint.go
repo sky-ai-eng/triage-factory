@@ -755,6 +755,54 @@ func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, bl
 	return s.conversationsHaveUnresolvedArtifacts(ctx, orgID, convs)
 }
 
+// CloseTaskIfTerminalAndResolved is the terminal-on-last task closure for a
+// pull request resolved somewhere other than the approval click: a human
+// marking it ready on GitHub, or an agent doing so because its mission asked.
+// The click's own handler closes the task the same way; this is the same rule
+// for a resolution nobody clicked, called by the artifact reconciler when it
+// observes the transition. Closes the conversation's task iff its blueprint
+// run finished cleanly and no conversation on the task — any attempt, not just
+// this blueprint's steps — still holds an unresolved artifact. Anything else is
+// a no-op: an aborted or failed blueprint keeps its task open for a human, and
+// a sibling draft keeps the approval column honest.
+//
+// Fails CLOSED on a read error, like the rest of this family: leaving a task
+// open spuriously is recoverable by a human, closing one with a draft still
+// pending silently drops the approval workflow. Runs with no request claims,
+// so every read is an admin-pool `...System` variant. The Jira mirror is not
+// re-asserted here for the same reason the approval click does not: the
+// blueprint's own completion already did.
+func (s *Spawner) CloseTaskIfTerminalAndResolved(ctx context.Context, orgID, conversationID string) {
+	if s.blueprints == nil || s.conversations == nil || s.tasks == nil || conversationID == "" {
+		return
+	}
+	br, _, err := s.blueprints.GetRunForConversationSystem(ctx, orgID, conversationID)
+	if err != nil {
+		blueprintLog.Warn("terminal-on-last close: blueprint lookup failed; leaving task open (fail closed)", "conversation", conversationID, "error", err)
+		return
+	}
+	if br == nil || br.TaskID == "" || br.Status != domain.BlueprintRunStatusCompleted {
+		return
+	}
+	convs, err := s.conversations.ListForTaskSystem(ctx, orgID, br.TaskID)
+	if err != nil {
+		blueprintLog.Warn("terminal-on-last close: list task conversations failed; leaving task open (fail closed)", "task", br.TaskID, "error", err)
+		return
+	}
+	if s.conversationsHaveUnresolvedArtifacts(ctx, orgID, convs) {
+		return
+	}
+	// CloseSystem's WHERE is state-guarded, so a task the approval click (or a
+	// concurrent cycle) already closed answers ErrNoSuchTask — not a failure.
+	if _, err := s.tasks.CloseSystem(ctx, orgID, br.TaskID, "run_completed", ""); err != nil {
+		if !errors.Is(err, db.ErrNoSuchTask) {
+			blueprintLog.Warn("terminal-on-last close: close task failed", "task", br.TaskID, "conversation", conversationID, "error", err)
+		}
+		return
+	}
+	s.broadcastTaskUpdate(orgID, br.TaskID, "done")
+}
+
 // conversationsHaveUnresolvedArtifacts reports whether any of the given runs produced an
 // unresolved artifact, reading each run's artifacts via the admin-pool reader.
 // Split out so a caller that already holds the run set (recomputeTaskBoardColumn)

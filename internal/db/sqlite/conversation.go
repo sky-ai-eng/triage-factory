@@ -741,6 +741,10 @@ func (s *conversationStore) Get(ctx context.Context, orgID, conversationID strin
 	return &r, nil
 }
 
+func (s *conversationStore) ListForTaskSystem(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error) {
+	return s.ListForTask(ctx, orgID, taskID)
+}
+
 func (s *conversationStore) ListForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

@@ -112,7 +112,6 @@ var coreNotifyOps = map[string]struct{}{
 	agentproc.OpRecordDenial:       {},
 	agentproc.OpRecordEgressDenial: {},
 	agentproc.OpRecordGHWrite:      {},
-	agentproc.OpRecordObservation:  {},
 	agentproc.OpRecordPush:         {},
 	agentproc.OpRecordRelayDrop:    {},
 	opRecordExternalWrite:          {},

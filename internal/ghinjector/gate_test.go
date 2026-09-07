@@ -240,13 +240,13 @@ func TestGate_MergeTransitsWhateverTheSpelling(t *testing.T) {
 	}
 }
 
-// TestGate_ReviewAndRepoCreationAreRefused covers the two gated families, in
-// each of the spellings the pinned gh and a hand-written call produce.
+// TestGate_GatedFamiliesAreRefused covers the three gated families, in each of
+// the spellings the pinned gh and a hand-written call produce.
 //
 // The two repository REST collections are the reason the gate cannot key on the
 // classifier alone: they POST outside /repos/{owner}/{repo}/, which is the
 // anchor the whole REST table hangs off, so there is nothing there to classify.
-func TestGate_ReviewAndRepoCreationAreRefused(t *testing.T) {
+func TestGate_GatedFamiliesAreRefused(t *testing.T) {
 	cases := []struct {
 		name   string
 		method string
@@ -301,6 +301,21 @@ func TestGate_ReviewAndRepoCreationAreRefused(t *testing.T) {
 			// repository out of an existing one.
 			name: "the template endpoint", method: http.MethodPost, path: "/api/v3/repos/acme/tmpl/generate",
 			body: `{"name":"widgets","owner":"acme"}`, reason: ghwrite.GateReasonRepoCreate,
+		},
+		{
+			name: "gh pr create", method: http.MethodPost, path: "/api/graphql",
+			body:   `{"query":"mutation($input:CreatePullRequestInput!){createPullRequest(input:$input){pullRequest{id url}}}"}`,
+			reason: ghwrite.GateReasonPRCreate,
+		},
+		{
+			// A create under another name.
+			name: "gh pr revert", method: http.MethodPost, path: "/api/graphql",
+			body:   `{"query":"mutation{revertPullRequest(input:{pullRequestId:\"PR_1\"}){revertPullRequest{url}}}"}`,
+			reason: ghwrite.GateReasonPRCreate,
+		},
+		{
+			name: "the REST pull request collection", method: http.MethodPost, path: "/api/v3/repos/acme/widgets/pulls",
+			body: `{"title":"T","head":"feature","base":"main"}`, reason: ghwrite.GateReasonPRCreate,
 		},
 	}
 	for _, tc := range cases {
