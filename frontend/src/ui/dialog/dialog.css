@@ -304,9 +304,17 @@
   color: var(--color-alarm);
 }
 /* A held confirm is the trigger inside a surface-mode Hold: the wrapper draws
-   the rings, and the verb keeps its ink above them. */
-.dlg-hold {
+   the rings, and the verb keeps its ink above them. A surface fills whatever
+   box it is given, which is right for a bar and wrong for a button in a flex
+   row — there it would take everything right of Cancel and the rings would run
+   across the empty row. The wrapper is sized to the verb, and the ring layers
+   clip to the verb's radius. */
+.dlg .dlg-acts .dlg-hold {
   display: inline-flex;
+  width: auto;
+  height: auto;
+  flex: 0 0 auto;
+  --hld-radius: 4px;
 }
 .dlg-hold .dlg-btn.go {
   position: relative;
