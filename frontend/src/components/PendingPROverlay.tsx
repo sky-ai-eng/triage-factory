@@ -6,6 +6,8 @@ import DiffFile from './DiffFile'
 import PendingPRSummary from './PendingPRSummary'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { Dialog } from '../ui/dialog/Dialog'
+import { toast } from './Toast/toastStore'
 
 // PRArtifact mirrors GET /api/artifacts/{id} for a pull_request artifact: the
 // shared artifact envelope, with the PR-shaped payload under `details`.
@@ -45,6 +47,12 @@ interface Props {
 // The diff comes from GitHub (/api/artifacts/{id}/diff) — the PR exists, so the
 // server proxies GitHub's diff with the same 406→per-file fallback the review
 // overlay uses.
+//
+// "Reject & delete branch" is the third outcome, beside Open PR and the row-level
+// dismiss: it closes the draft AND deletes its head branch from the upstream,
+// which is the one thing in this flow that cannot be undone. So it goes through
+// a destructive Dialog that names the branch, cancels on Escape and on the
+// backdrop, and confirms only on a held press — never a single keystroke.
 export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   const [pr, setPR] = useState<PRArtifact | null>(null)
   const [files, setFiles] = useState<FileData[]>([])
@@ -66,13 +74,21 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   // but the ready flag — so we keep the editor visible instead of forcing a
   // close-and-reopen.
   const [submitError, setSubmitError] = useState<string | null>(null)
+  // confirmingReject is the destructive confirmation's open state; rejecting is
+  // the in-flight request. A failed reject lands in submitError like a failed
+  // approve: the server changes nothing when GitHub refuses the branch delete,
+  // so the draft is still here to retry, dismiss, or open.
+  const [confirmingReject, setConfirmingReject] = useState(false)
+  const [rejecting, setRejecting] = useState(false)
 
   // Trap keyboard focus inside the overlay while open and restore it to the
   // trigger on close (WCAG 2.1.2); initial focus lands on the close button.
+  // The trap yields while the reject confirmation is up: the Dialog runs its
+  // own, and two traps on one document fight over Tab.
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
   const titleId = useId()
-  useFocusTrap(dialogRef, { active: open, initialFocus: closeRef })
+  useFocusTrap(dialogRef, { active: open && !confirmingReject, initialFocus: closeRef })
 
   // Fetch the PR artifact, then the diff. Reset stale state from any prior PR
   // before the new fetch lands so the user doesn't see leftover values briefly.
@@ -82,6 +98,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
     setLoading(true)
     setError(null)
     setSubmitError(null)
+    setConfirmingReject(false)
     setPR(null)
     setFiles([])
     setTruncationNote(null)
@@ -208,7 +225,40 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
     }
   }, [artifactId, onClose])
 
-  // Close on Escape
+  const handleReject = useCallback(async () => {
+    setRejecting(true)
+    setSubmitError(null)
+    try {
+      // Nothing to wait for on the save side: a rejection discards the PR
+      // whatever its title/body say, so an in-flight edit is irrelevant to it.
+      const out = await apiJSON<{ branch: string; branch_deleted: boolean }>(
+        `/api/artifacts/${artifactId}/reject`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      )
+      setConfirmingReject(false)
+      toast.success(
+        out.branch_deleted
+          ? `Draft PR closed and branch ${out.branch} deleted from the upstream.`
+          : `Draft PR closed. Branch ${out.branch} was already gone from the upstream.`,
+        'PR rejected',
+      )
+      onClose()
+    } catch (err) {
+      // The server refuses before touching anything when GitHub declines the
+      // branch delete, so the draft is intact: surface the reason both as a
+      // toast and inline, and keep the editor up for the retry.
+      const msg = httpErrorMessage(err, 'Could not reject the pull request.')
+      setConfirmingReject(false)
+      setSubmitError(msg)
+      toast.error(msg, 'Reject failed')
+    } finally {
+      setRejecting(false)
+    }
+  }, [artifactId, onClose])
+
+  // Close on Escape. The Dialog claims Escape first (capture + stopPropagation)
+  // while the reject confirmation is up, so cancelling it never closes the
+  // overlay underneath.
   useEffect(() => {
     if (!open) return
     const handler = (e: KeyboardEvent) => {
@@ -302,14 +352,15 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
                     onUpdateTitle={handleUpdateTitle}
                     onUpdateBody={handleUpdateBody}
                     onSubmit={handleSubmit}
+                    onReject={() => setConfirmingReject(true)}
                     onClose={onClose}
-                    submitting={submitting}
+                    submitting={submitting || rejecting}
                   />
 
                   {submitError && (
                     <div className="rounded-xl border border-alarm/30 bg-alarm/[0.06] px-4 py-3 text-ui text-ink-2">
-                      <span className="font-semibold text-ink-1">Couldn't open PR:</span>{' '}
-                      {submitError}. Your edits are saved on GitHub — you can retry Open PR.
+                      <span className="font-semibold text-ink-1">Couldn't resolve the PR:</span>{' '}
+                      {submitError}. The draft is unchanged on GitHub — you can retry.
                     </div>
                   )}
 
@@ -357,6 +408,43 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
               ) : null}
             </div>
           </motion.div>
+
+          {/* Reject confirmation — a sibling of the panel, not a child: the panel
+              animates a transform, which would re-anchor the Dialog's fixed
+              backdrop to the panel instead of the viewport. */}
+          <Dialog
+            open={confirmingReject}
+            kind="destructive"
+            build="quiet"
+            width={480}
+            title="Reject this pull request?"
+            body={
+              pr
+                ? `Draft #${pr.details.number} on ${pr.details.owner}/${pr.details.repo} will be closed, and its branch deleted from the upstream.`
+                : ''
+            }
+            consequences={[
+              {
+                text: `Branch ${pr?.details.head_branch ?? ''} is deleted from ${pr?.details.owner ?? ''}/${pr?.details.repo ?? ''} — every commit only it reached is gone from the remote.`,
+                tone: 'loss',
+              },
+              { text: 'The draft PR is closed on GitHub.', tone: 'loss' },
+              {
+                text: `${pr?.details.base_branch ?? 'The base branch'} is untouched, and the run's transcript and memory are kept.`,
+                tone: 'keep',
+              },
+            ]}
+            note="This cannot be undone. To close the PR but keep the branch, dismiss it from the run's artifact list instead."
+            confirmLabel={rejecting ? 'Rejecting…' : 'Hold to reject & delete branch'}
+            confirmHold={900}
+            cancelLabel="Keep it"
+            onConfirm={() => {
+              if (!rejecting) void handleReject()
+            }}
+            onCancel={() => {
+              if (!rejecting) setConfirmingReject(false)
+            }}
+          />
         </>
       )}
     </AnimatePresence>

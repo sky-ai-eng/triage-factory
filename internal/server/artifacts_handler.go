@@ -768,6 +768,215 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	})
 }
 
+// handleArtifactReject resolves ONE draft pull request the hard way: the head
+// branch is deleted from the upstream and the draft PR closed. It is the
+// sibling of dismiss — same decoupled-sidecar contract (the artifact flips, the
+// conversation lifecycle is never touched, the shared terminal-on-last check
+// runs after) — differing in exactly one write, and that write is the one
+// irreversible act in the whole PR lifecycle, which is why it is its own verb
+// behind its own confirmation rather than a flag on dismiss.
+//
+// The order is dictated by what can be undone. The branch delete goes first
+// and is pessimistic: if GitHub refuses (a protected branch, a credential
+// without contents:write, an outage) nothing has changed anywhere — the PR is
+// still a draft, the artifact still draft — so the caller sees the refusal and
+// can retry, dismiss, or open the PR conventionally. A ref the upstream no
+// longer holds is not a refusal (deleted by hand, or already gone): the intent
+// is satisfied, and the resolution proceeds. Once the branch is gone the PR is
+// doomed regardless — GitHub closes a PR whose head branch disappears — so the
+// close and the bookkeeping after it are best-effort or retry-safe: a DB
+// failure on the flip answers 500 with the artifact still draft, and the retry
+// converges because the delete then reads as already-gone.
+//
+// POST /api/artifacts/{id}/reject
+func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
+
+	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
+	if !ok {
+		return
+	}
+	if !requireArtifactKind(w, art, domain.ArtifactKindPullRequest, "a pull request") {
+		return
+	}
+	// Only a draft awaits a decision. A PR the user already opened, or one a
+	// prior dismiss/reject retired, is terminal here — and an open PR's branch
+	// is shipped work, never something this verb deletes.
+	if art.State != domain.ArtifactStatePRDraft {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonAlreadyTerminal,
+			Message: "this PR is no longer a draft awaiting resolution (state: " + art.State + ")",
+		})
+		return
+	}
+
+	// The head branch is the thing being deleted, so it has to be known and
+	// has to be a branch this verb may delete. Both refusals are 409: the row is
+	// real and readable, its recorded shape just cannot carry a rejection —
+	// dismiss still can.
+	details, derr := domain.ParsePRArtifactDetails(art.DetailsJSON)
+	if derr != nil || details.HeadBranch == "" {
+		conflict(w, "this PR's head branch is not recorded, so its branch cannot be deleted; dismiss it instead to close the PR and keep the branch")
+		return
+	}
+	if details.HeadBranch == details.Base {
+		conflict(w, "this PR's head branch is its base branch, which is never deleted; dismiss it instead")
+		return
+	}
+
+	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
+	if !ok {
+		return
+	}
+
+	// The irreversible write, pessimistic — see the ordering above.
+	branchDeleted := true
+	switch err := gh.DeleteBranchRef(r.Context(), owner, repo, details.HeadBranch); {
+	case err == nil:
+	case errors.Is(err, ghclient.ErrBranchRefMissing):
+		branchDeleted = false
+		artifactsLog.Info("reject: branch already gone from the upstream; proceeding", "artifact", art.ID, "owner", owner, "repo", repo, "branch", details.HeadBranch)
+	default:
+		artifactsLog.Warn("reject: DeleteBranchRef failed; nothing changed", "artifact", art.ID, "owner", owner, "repo", repo, "branch", details.HeadBranch, "error", err)
+		writeUpstreamGitHub(w, "GitHub refused to delete branch "+details.HeadBranch+"; the PR is still a draft", err)
+		return
+	}
+
+	// From here the rejection has happened on GitHub, so nothing below may be
+	// stranded by a client disconnect.
+	cleanupCtx := context.WithoutCancel(r.Context())
+
+	// Close the draft PR. GitHub closes a PR whose head branch disappears, so
+	// this is a no-op most of the time and best-effort always: a hiccup leaves
+	// the PR for reconciliation to retire, exactly as dismiss does.
+	if err := gh.ClosePR(cleanupCtx, owner, repo, number); err != nil {
+		artifactsLog.Warn("reject: ClosePR failed (branch already deleted; PR left for reconciliation)", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+	}
+
+	// Flip the PR artifact to closed with the rejection recorded on the row (the
+	// resolution note is derived from this row alone), retire the run's branch
+	// artifact for the same ref rather than leaving it for the reconciler to
+	// notice, and audit both writes — all in one tx, so the audit never
+	// disagrees with the state. The credential is classified before the tx
+	// opens: it can reach GitHub, and the tx must not wait on a round trip.
+	credential := githubCredentialFor(cleanupCtx, ah.ghResolver, orgID, owner, repo)
+	details.BranchDeleted = true
+	closed := *art
+	closed.State = domain.ArtifactStatePRClosed
+	closed.DetailsJSON = domain.MarshalPRArtifactDetails(details)
+	repoPath := owner + "/" + repo
+	headRef := "refs/heads/" + details.HeadBranch
+	if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
+		if _, e := tx.Artifacts.Upsert(cleanupCtx, orgID, closed); e != nil {
+			return e
+		}
+		branchURL, e := retireBranchArtifact(cleanupCtx, tx, orgID, art.ConversationID, repoPath, headRef)
+		if e != nil {
+			return e
+		}
+		if e := tx.ExternalActions.Record(cleanupCtx, orgID,
+			githubApprovalAction(art, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed, credential)); e != nil {
+			return e
+		}
+		return tx.ExternalActions.Record(cleanupCtx, orgID,
+			branchDeletedAction(art, userID, repoPath, headRef, details.HeadBranch, branchURL, credential))
+	}); err != nil {
+		internalError(w, "artifacts", err)
+		return
+	}
+
+	// Human verdict into the run's memory: the next agent on this entity should
+	// read that the work was discarded, not merely closed, and what it was.
+	if art.ConversationID != "" {
+		humanContent := formatPRRejectionHumanFeedback(details.Proposed.Title, details.Proposed.Body, details.HeadBranch, branchDeleted)
+		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
+			_, err := tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
+			return err
+		}); err != nil {
+			artifactsLog.Warn("reject: failed to record human verdict", "conversation", art.ConversationID, "error", err)
+		}
+	}
+
+	ah.pingConversationsResolved(orgID)
+	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
+	// Tell the drafting agent — live if warm, else via its ledger on resume,
+	// which re-derives the rejection from the branch_deleted flag on the row.
+	ah.injectArtifactNote(orgID, closed)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"number":         number,
+		"html_url":       art.URL,
+		"state":          domain.ArtifactStatePRClosed,
+		"branch":         details.HeadBranch,
+		"branch_deleted": branchDeleted,
+	})
+}
+
+// retireBranchArtifact flips the conversation's `branch` artifact for headRef
+// (on repoPath) to deleted, returning its web URL for the audit row. A
+// conversation with no such artifact — a push the capture writers missed, or
+// no conversation at all — is not an error: the PR artifact carries the
+// rejection on its own, and the returned URL falls back to the public-host
+// branch link so the audit row still links somewhere.
+func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversationID, repoPath, headRef string) (string, error) {
+	fallbackURL, _ := domain.BranchArtifactWebURL("", repoPath, headRef)
+	if conversationID == "" {
+		return fallbackURL, nil
+	}
+	arts, err := tx.Artifacts.ListByConversation(ctx, orgID, conversationID)
+	if err != nil {
+		return "", err
+	}
+	for i := range arts {
+		a := arts[i]
+		if a.Kind != domain.ArtifactKindBranch || a.Target != repoPath || a.ExternalID != headRef {
+			continue
+		}
+		if a.State != domain.ArtifactStateBranchDeleted {
+			a.State = domain.ArtifactStateBranchDeleted
+			if _, err := tx.Artifacts.Upsert(ctx, orgID, a); err != nil {
+				return "", err
+			}
+		}
+		if a.URL != "" {
+			return a.URL, nil
+		}
+		return fallbackURL, nil
+	}
+	return fallbackURL, nil
+}
+
+// branchDeletedAction builds the external_actions row for a rejection's branch
+// delete: a human-authorized, org-executed GitHub write against the PR's repo,
+// keyed on the ref the way branch_pushed is so the two read as one branch's
+// history. ConversationID is the drafting conversation, the actor the rejecting
+// human, the team the artifact's.
+func branchDeletedAction(art *domain.Artifact, userID, repoPath, headRef, branch, url, credential string) domain.ExternalAction {
+	detail, _ := json.Marshal(map[string]string{"branch": branch})
+	return domain.ExternalAction{
+		TeamID:         art.TeamID,
+		Provider:       domain.ArtifactProviderGitHub,
+		Action:         domain.ActionBranchDeleted,
+		Target:         repoPath,
+		ExternalID:     headRef,
+		URL:            url,
+		FromState:      domain.ArtifactStateBranchPushed,
+		ToState:        domain.ArtifactStateBranchDeleted,
+		ConversationID: art.ConversationID,
+		ActorUserID:    userID,
+		Credential:     credential,
+		DetailJSON:     string(detail),
+	}
+}
+
 // artifactPRNumber parses the PR number from an artifact's target for the dismiss
 // response. Returns 0 on a malformed target — the field is informational (the
 // artifact is already resolved), so it never blocks the success response.
@@ -967,5 +1176,27 @@ func formatPRHumanFeedback(proposedTitle, proposedBody, finalTitle, finalBody st
 		writeBlockquote(&b, finalBody)
 	}
 
+	return b.String()
+}
+
+// formatPRRejectionHumanFeedback builds the conversation_memory.human_content
+// block for a rejected draft PR: the outcome, what it implies for the next
+// agent on this entity, and the proposed title and body that were turned down —
+// quoted in full, because the branch that held the work is gone and this block
+// is the only record of what was proposed. branchDeleted=false says the branch
+// was already gone when the human rejected, so the note does not claim a
+// deletion that did not happen here. Same heading rule as
+// formatPRHumanFeedback: db.materializeMemory prepends the section heading.
+func formatPRRejectionHumanFeedback(proposedTitle, proposedBody, branch string, branchDeleted bool) string {
+	var b strings.Builder
+	if branchDeleted {
+		fmt.Fprintf(&b, "**Outcome:** Human rejected the PR — closed it and deleted its branch `%s` from the upstream.\n", branch)
+	} else {
+		fmt.Fprintf(&b, "**Outcome:** Human rejected the PR — closed it; its branch `%s` was already gone from the upstream.\n", branch)
+	}
+	b.WriteString("**Implication:** The PR you proposed was not accepted, and the human chose to discard the work rather than keep the branch for edits or a retry. Reconsider whether this entity warranted a PR at all, or whether a different approach is needed before proposing another.\n\n")
+	fmt.Fprintf(&b, "**Rejected title:** %s\n\n", proposedTitle)
+	b.WriteString("**Rejected body:**\n\n")
+	writeBlockquote(&b, proposedBody)
 	return b.String()
 }

@@ -810,3 +810,245 @@ func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, n
 	}
 	return "00000000-0000-4000-8000-000000000023", "r_ab", stored.ID
 }
+
+// rejectStub is the GitHub stub a reject exercises: the refs DELETE (answering
+// deleteStatus with deleteBody) and the PR-close PATCH. It records what the
+// handler sent so tests can pin the order-of-operations contract.
+type rejectStub struct {
+	deletePaths []string
+	closeState  string
+}
+
+func newRejectStub(t *testing.T, srv *Server, deleteStatus int, deleteBody string) *rejectStub {
+	t.Helper()
+	rs := &rejectStub{}
+	mux := newAppAPIMux()
+	mux.HandleFunc("DELETE /api/v3/repos/{owner}/{repo}/git/refs/heads/{branch...}", func(w http.ResponseWriter, r *http.Request) {
+		rs.deletePaths = append(rs.deletePaths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(deleteStatus)
+		_, _ = w.Write([]byte(deleteBody))
+	})
+	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		rs.closeState, _ = body["state"].(string)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "state": "closed"})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+	return rs
+}
+
+// seedBranchArtifact records the pushed-branch artifact the run's push would
+// have captured for the draft PR's head, so a reject has a sibling to retire.
+func seedBranchArtifact(t *testing.T, s *Server, conversationID, repoPath, ref string) string {
+	t.Helper()
+	a, ok := domain.NewBranchArtifact(repoPath, ref, "abc123", true)
+	if !ok {
+		t.Fatalf("NewBranchArtifact(%q, %q) refused", repoPath, ref)
+	}
+	a.ConversationID = conversationID
+	a.OrgID = runmode.LocalDefaultOrgID
+	a.TeamID = runmode.LocalDefaultTeamID
+	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
+	if err != nil {
+		t.Fatalf("seed branch artifact: %v", err)
+	}
+	return stored.ID
+}
+
+// TestArtifactReject_PR pins the whole rejection: the head branch is deleted
+// from the upstream, the draft PR closed, the PR artifact flipped to closed
+// carrying branch_deleted, the run's branch artifact retired, both writes
+// audited, the human verdict recorded — and, as with dismiss, the conversation
+// lifecycle untouched.
+func TestArtifactReject_PR(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	rs := newRejectStub(t, srv, http.StatusNoContent, "")
+
+	artID, conversationID, _ := seedDraftPRArtifactWithConversation(t, srv, "rej", "acme", "api", 42)
+	branchID := seedBranchArtifact(t, srv, conversationID, "acme/api", "refs/heads/feature/x")
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/reject", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reject = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		State         string `json:"state"`
+		Branch        string `json:"branch"`
+		BranchDeleted bool   `json:"branch_deleted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.State != domain.ArtifactStatePRClosed || resp.Branch != "feature/x" || !resp.BranchDeleted {
+		t.Errorf("response = %+v, want closed / feature/x / branch_deleted=true", resp)
+	}
+
+	if want := []string{"/api/v3/repos/acme/api/git/refs/heads/feature/x"}; !equalStrings(rs.deletePaths, want) {
+		t.Errorf("DELETE paths = %v, want %v", rs.deletePaths, want)
+	}
+	if rs.closeState != "closed" {
+		t.Errorf("ClosePR sent state=%q, want closed", rs.closeState)
+	}
+
+	pr := getArtifact(t, srv, artID)
+	if pr.State != domain.ArtifactStatePRClosed {
+		t.Errorf("PR artifact state = %q, want closed", pr.State)
+	}
+	details, err := domain.ParsePRArtifactDetails(pr.DetailsJSON)
+	if err != nil || !details.BranchDeleted {
+		t.Errorf("PR details = %+v (err %v), want branch_deleted=true", details, err)
+	}
+	if details.Proposed.Title != "Proposed title" {
+		t.Errorf("proposed snapshot must survive the flip; got %q", details.Proposed.Title)
+	}
+	if got := getArtifact(t, srv, branchID).State; got != domain.ArtifactStateBranchDeleted {
+		t.Errorf("branch artifact state = %q, want deleted", got)
+	}
+
+	acts, _, err := sqlitestore.New(srv.db).ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchDeleted})
+	if err != nil {
+		t.Fatalf("list actions: %v", err)
+	}
+	if len(acts) != 1 || acts[0].Target != "acme/api" || acts[0].ExternalID != "refs/heads/feature/x" || acts[0].ConversationID != conversationID {
+		t.Errorf("branch_deleted audit rows = %+v, want one on acme/api refs/heads/feature/x for the drafting conversation", acts)
+	}
+	closedActs, _, err := sqlitestore.New(srv.db).ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionPRClosed})
+	if err != nil {
+		t.Fatalf("list actions: %v", err)
+	}
+	if len(closedActs) != 1 {
+		t.Errorf("pr_closed audit rows = %d, want 1", len(closedActs))
+	}
+
+	var human string
+	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {
+		t.Fatalf("read human_content: %v", err)
+	}
+	for _, want := range []string{"rejected", "feature/x", "Proposed title", "> Proposed body"} {
+		if !strings.Contains(human, want) {
+			t.Errorf("human_content %q lacks %q", human, want)
+		}
+	}
+
+	var convStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if convStatus != "completed" {
+		t.Errorf("conversation status = %q, want completed (reject must not flip conversation lifecycle)", convStatus)
+	}
+}
+
+// TestArtifactReject_BranchAlreadyGone pins the soft case from the ticket: a
+// branch deleted out-of-band before the reject is not a refusal — the PR is
+// still closed and the artifact resolved — and the response says the branch
+// was not deleted here, so the UI can word its toast honestly.
+func TestArtifactReject_BranchAlreadyGone(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	rs := newRejectStub(t, srv, http.StatusUnprocessableEntity, `{"message":"Reference does not exist"}`)
+
+	artID, conversationID, _ := seedDraftPRArtifactWithConversation(t, srv, "gone", "acme", "api", 42)
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/reject", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reject = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"branch_deleted":false`) {
+		t.Errorf("response %s should report branch_deleted=false", rec.Body.String())
+	}
+	if rs.closeState != "closed" {
+		t.Errorf("ClosePR sent state=%q, want closed", rs.closeState)
+	}
+	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePRClosed {
+		t.Errorf("artifact state = %q, want closed", got)
+	}
+	var human string
+	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {
+		t.Fatalf("read human_content: %v", err)
+	}
+	if !strings.Contains(human, "already gone") {
+		t.Errorf("human_content %q should say the branch was already gone", human)
+	}
+}
+
+// TestArtifactReject_DeleteRefused_NothingChanges pins the pessimistic order:
+// when GitHub refuses the branch delete the handler answers 502, sends no
+// close, and leaves the artifact a draft — the user can retry, dismiss, or
+// open the PR conventionally.
+func TestArtifactReject_DeleteRefused_NothingChanges(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	rs := newRejectStub(t, srv, http.StatusForbidden, `{"message":"Resource not accessible by integration"}`)
+
+	artID, _, _ := seedDraftPRArtifactWithConversation(t, srv, "refused", "acme", "api", 42)
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/reject", nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("reject = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "feature/x") {
+		t.Errorf("error body %s should name the branch it could not delete", rec.Body.String())
+	}
+	if rs.closeState != "" {
+		t.Errorf("ClosePR must not run after a refused delete; sent state=%q", rs.closeState)
+	}
+	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePRDraft {
+		t.Errorf("artifact state = %q, want draft (nothing changed)", got)
+	}
+	acts, _, err := sqlitestore.New(srv.db).ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchDeleted})
+	if err != nil {
+		t.Fatalf("list actions: %v", err)
+	}
+	if len(acts) != 0 {
+		t.Errorf("no branch_deleted audit row may exist after a refused delete; got %d", len(acts))
+	}
+}
+
+// TestArtifactReject_TerminalArtifact409 pins the guard, and the race from the
+// ticket in both directions: a reject after a resolution is a clean 409, and an
+// approve racing a completed reject is the same clean 409 — never a panic, never
+// a second GitHub write.
+func TestArtifactReject_TerminalArtifact409(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	newRejectStub(t, srv, http.StatusNoContent, "")
+
+	artID, _, _ := seedDraftPRArtifactWithConversation(t, srv, "rej409", "acme", "api", 42)
+	if rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/reject", nil); rec.Code != http.StatusOK {
+		t.Fatalf("first reject = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/reject", nil); rec.Code != http.StatusConflict {
+		t.Errorf("second reject = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil); rec.Code != http.StatusConflict {
+		t.Errorf("approve after reject = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestArtifactReject_UnknownHeadBranch409 pins the data guard: a PR row that
+// never recorded its head branch cannot carry a rejection (there is nothing to
+// delete), and the answer is a 409 pointing at dismiss — not a delete of some
+// guessed ref.
+func TestArtifactReject_UnknownHeadBranch409(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	rs := newRejectStub(t, srv, http.StatusNoContent, "")
+
+	artID, _, _ := seedDraftPRArtifactWithConversation(t, srv, "nohead", "acme", "api", 42)
+	execSQL(t, srv.db, `UPDATE artifacts SET details_json = ? WHERE id = ?`,
+		domain.MarshalPRArtifactDetails(domain.PRArtifactDetails{Base: "main"}), artID)
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/reject", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("reject = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(rs.deletePaths) != 0 {
+		t.Errorf("no DELETE may be sent for an unknown head; got %v", rs.deletePaths)
+	}
+	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePRDraft {
+		t.Errorf("artifact state = %q, want draft", got)
+	}
+}

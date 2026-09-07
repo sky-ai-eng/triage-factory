@@ -134,3 +134,37 @@ func TestArtifactLedgerBlock(t *testing.T) {
 		t.Errorf("ledger block should not mention the unresolved draft o/r#2: %q", block)
 	}
 }
+
+// TestArtifactResolutionNote_RejectedPRNamesDeletedBranch pins the fifth
+// shape: a closed PR whose details carry branch_deleted reads as a rejection
+// naming the deleted branch, distinct from the dismissal that keeps it — and
+// the ledger derivation, which reads only the row, gets the same copy.
+func TestArtifactResolutionNote_RejectedPRNamesDeletedBranch(t *testing.T) {
+	rejected := Artifact{
+		Kind:        ArtifactKindPullRequest,
+		Target:      "octo/repo#42",
+		State:       ArtifactStatePRClosed,
+		DetailsJSON: MarshalPRArtifactDetails(PRArtifactDetails{HeadBranch: "feature/x", Base: "main", BranchDeleted: true}),
+	}
+	dismissed := rejected
+	dismissed.DetailsJSON = MarshalPRArtifactDetails(PRArtifactDetails{HeadBranch: "feature/x", Base: "main"})
+
+	got := ArtifactResolutionNote(rejected)
+	for _, want := range []string{"rejected", "octo/repo#42", "feature/x", "deleted"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rejected note %q lacks %q", got, want)
+		}
+	}
+	if strings.Contains(got, "kept") {
+		t.Errorf("rejected note %q must not claim the branch is kept", got)
+	}
+	if kept := ArtifactResolutionNote(dismissed); kept == got || !strings.Contains(kept, "kept") {
+		t.Errorf("dismissed note = %q, want the branch-kept dismissal shape distinct from the rejection", kept)
+	}
+	if !IsResolutionNoteState(rejected) {
+		t.Error("a rejected PR must be a resolution-note state so the resume ledger picks it up")
+	}
+	if block := ArtifactLedgerBlock([]Artifact{rejected}); !strings.Contains(block, "feature/x") {
+		t.Errorf("ledger block %q should carry the rejection line", block)
+	}
+}

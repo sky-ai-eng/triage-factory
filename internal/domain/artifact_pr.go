@@ -30,12 +30,18 @@ type PRArtifactSnapshot struct {
 //     human-feedback diff and survives an abandon.
 //   - Snapshot: the latest known {title, body} (mirrors the live PR). Refreshed on
 //     every human edit (PATCH) and at approval.
+//   - BranchDeleted: the human who closed this PR also deleted its head branch
+//     from the upstream (a rejection, as opposed to a dismissal that keeps the
+//     branch). Lives on the PR row rather than only on the sibling branch
+//     artifact because the agent-facing resolution note is derived from this
+//     row alone — the resume ledger re-reads it with no join.
 type PRArtifactDetails struct {
-	NodeID     string             `json:"node_id,omitempty"`
-	HeadBranch string             `json:"head_branch,omitempty"`
-	Base       string             `json:"base,omitempty"`
-	Proposed   PRArtifactSnapshot `json:"proposed"`
-	Snapshot   PRArtifactSnapshot `json:"snapshot"`
+	NodeID        string             `json:"node_id,omitempty"`
+	HeadBranch    string             `json:"head_branch,omitempty"`
+	Base          string             `json:"base,omitempty"`
+	Proposed      PRArtifactSnapshot `json:"proposed"`
+	Snapshot      PRArtifactSnapshot `json:"snapshot"`
+	BranchDeleted bool               `json:"branch_deleted,omitempty"`
 }
 
 // PullRequestTarget is the artifact Target for a PR: owner/repo#<number>.

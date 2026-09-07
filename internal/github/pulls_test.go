@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -590,5 +591,62 @@ func TestFilterDiffByFile_ExactMatch(t *testing.T) {
 	// A path not in the diff yields nothing.
 	if out := filterDiffByFile(diff, "missing.go"); out != "" {
 		t.Errorf("expected empty result for absent file; got:\n%s", out)
+	}
+}
+
+// TestDeleteBranchRef_HappyPath pins the wire shape: a DELETE on the refs
+// endpoint with a slash-bearing branch name kept as path segments (feature/x
+// maps to .../heads/feature/x, never a single escaped segment).
+func TestDeleteBranchRef_HappyPath(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := clientAgainst(srv.URL)
+	if err := c.DeleteBranchRef(context.Background(), "owner", "repo", "feature/x#1"); err != nil {
+		t.Fatalf("DeleteBranchRef: %v", err)
+	}
+	if gotMethod != "DELETE" {
+		t.Errorf("method = %q, want DELETE", gotMethod)
+	}
+	if gotPath != "/repos/owner/repo/git/refs/heads/feature/x%231" {
+		t.Errorf("path = %q, want /repos/owner/repo/git/refs/heads/feature/x%%231", gotPath)
+	}
+}
+
+// TestDeleteBranchRef_MissingRefIsSentinel pins the soft case: GitHub's 422
+// "Reference does not exist" is ErrBranchRefMissing, while any other refusal
+// (a protected branch's 422, a 403) stays an ordinary error.
+func TestDeleteBranchRef_MissingRefIsSentinel(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		body     string
+		wantGone bool
+	}{
+		{"missing ref", 422, `{"message":"Reference does not exist","documentation_url":"x"}`, true},
+		{"protected branch", 422, `{"message":"Cannot delete a protected branch"}`, false},
+		{"forbidden", 403, `{"message":"Resource not accessible by integration"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(srv.Close)
+			err := clientAgainst(srv.URL).DeleteBranchRef(context.Background(), "owner", "repo", "feature/x")
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := errors.Is(err, ErrBranchRefMissing); got != tc.wantGone {
+				t.Errorf("errors.Is(err, ErrBranchRefMissing) = %v, want %v (err=%v)", got, tc.wantGone, err)
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -662,6 +663,37 @@ func (c *Client) UpdatePR(ctx context.Context, owner, repo string, number int, t
 func (c *Client) ClosePR(ctx context.Context, owner, repo string, number int) error {
 	payload := map[string]any{"state": "closed"}
 	_, err := c.Patch(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number), payload)
+	return liftValidationErr(err)
+}
+
+// ErrBranchRefMissing is DeleteBranchRef's answer when the upstream holds no
+// such ref: GitHub reports a delete of a nonexistent ref as a 422 whose message
+// is "Reference does not exist". It is a sentinel rather than a failure because
+// a branch can legitimately be gone before the caller asks — deleted by hand
+// from another shell, or by GitHub's own delete-on-merge — and the caller's
+// intent ("this branch must not exist") is already satisfied.
+var ErrBranchRefMissing = errors.New("branch ref does not exist on the upstream")
+
+// DeleteBranchRef deletes a branch from the upstream via REST
+// (DELETE /repos/{o}/{r}/git/refs/heads/{branch}). This is the one irreversible
+// write in the PR lifecycle — the ref and every unmerged commit reachable only
+// from it are gone from the remote — so callers gate it behind an explicit
+// human confirmation. A ref the upstream no longer holds returns
+// ErrBranchRefMissing (see it for why that is not a failure); every other
+// non-2xx — a protected branch, a credential without contents:write, an outage
+// — is returned as-is so the caller can refuse to proceed. Branch names may
+// contain '/' (feature/x): each segment is path-escaped and the separators are
+// preserved, the same treatment the branch web URL gets.
+func (c *Client) DeleteBranchRef(ctx context.Context, owner, repo, branch string) error {
+	segs := strings.Split(branch, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	_, err := c.Delete(ctx, fmt.Sprintf("/repos/%s/%s/git/refs/heads/%s", owner, repo, strings.Join(segs, "/")))
+	var he *HTTPError
+	if errors.As(err, &he) && he.StatusCode == 422 && strings.Contains(he.Body, "Reference does not exist") {
+		return ErrBranchRefMissing
+	}
 	return liftValidationErr(err)
 }
 

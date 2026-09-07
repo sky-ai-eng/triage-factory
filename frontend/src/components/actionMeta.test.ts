@@ -62,6 +62,7 @@ describe('actionMeta', () => {
       'issue_unpinned',
       'issue_transferred',
       'linked_branch_created',
+      'branch_deleted',
     ]) {
       expect(metaForAction(action)).not.toBe(FALLBACK_ACTION_META)
     }
