@@ -637,6 +637,11 @@ func TestReconcile_PRClosed(t *testing.T) {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}
 	assertState(t, stores, runmode.LocalDefaultOrgID, prArt.DedupKey, domain.ArtifactStatePRClosed)
+	// Nobody resolved it through TF, and the row says so — the agent-facing note
+	// reads it to report an out-of-band close rather than a human dismissal.
+	if d, _ := domain.ParsePRArtifactDetails(findArtifact(t, stores, runmode.LocalDefaultOrgID, prArt.DedupKey).DetailsJSON); d.Resolution != domain.PRResolutionGitHub {
+		t.Errorf("resolution = %q, want github", d.Resolution)
+	}
 	// The review draft is never reconciled — it stays pending.
 	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewPending)
 
@@ -985,6 +990,23 @@ func reconcileSet(t *testing.T, stores db.Stores, res clientResolver, orgID stri
 		return nil, err
 	}
 	return rc.Reconcile(context.Background(), orgID, arts)
+}
+
+// findArtifact reads one artifact back by dedup key, for asserting on fields
+// beyond state.
+func findArtifact(t *testing.T, stores db.Stores, orgID, dedupKey string) domain.Artifact {
+	t.Helper()
+	all, _, err := stores.Artifacts.ListByTeam(context.Background(), orgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
+	if err != nil {
+		t.Fatalf("ListByTeam: %v", err)
+	}
+	for _, a := range all {
+		if a.DedupKey == dedupKey {
+			return a
+		}
+	}
+	t.Fatalf("artifact %s not found", dedupKey)
+	return domain.Artifact{}
 }
 
 func assertState(t *testing.T, stores db.Stores, orgID, dedupKey, want string) {

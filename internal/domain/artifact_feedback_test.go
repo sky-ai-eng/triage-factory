@@ -135,44 +135,51 @@ func TestArtifactLedgerBlock(t *testing.T) {
 	}
 }
 
-// TestArtifactResolutionNote_RejectedPRNamesDeletedBranch pins the rejection
-// shapes: a closed PR whose details carry rejected reads as a rejection naming
-// the branch, distinct from the dismissal that keeps it, and says "deleted"
-// only when branch_deleted is set — a branch found already gone is reported
-// as already gone, never as deleted by this rejection. The ledger derivation,
-// which reads only the row, gets the same copy.
-func TestArtifactResolutionNote_RejectedPRNamesDeletedBranch(t *testing.T) {
-	rejected := Artifact{
-		Kind:        ArtifactKindPullRequest,
-		Target:      "octo/repo#42",
-		State:       ArtifactStatePRClosed,
-		DetailsJSON: MarshalPRArtifactDetails(PRArtifactDetails{HeadBranch: "feature/x", Base: "main", Rejected: true, BranchDeleted: true}),
-	}
-	dismissed := rejected
-	dismissed.DetailsJSON = MarshalPRArtifactDetails(PRArtifactDetails{HeadBranch: "feature/x", Base: "main"})
-	alreadyGone := rejected
-	alreadyGone.DetailsJSON = MarshalPRArtifactDetails(PRArtifactDetails{HeadBranch: "feature/x", Base: "main", Rejected: true})
-
-	got := ArtifactResolutionNote(rejected)
-	for _, want := range []string{"rejected", "octo/repo#42", "feature/x", "was deleted"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("rejected note %q lacks %q", got, want)
+// TestArtifactResolutionNote_ReadsResolution pins that a closed or open PR's
+// note is decided by who resolved it, not by state alone: rejected names the
+// deleted branch, github says the change happened outside Triage Factory, and
+// the TF verbs (or a stored row with no resolution) keep the human-action
+// copy. The ledger derivation reads only the row, so it gets the same lines.
+func TestArtifactResolutionNote_ReadsResolution(t *testing.T) {
+	pr := func(state, resolution string) Artifact {
+		return Artifact{
+			Kind:        ArtifactKindPullRequest,
+			Target:      "octo/repo#42",
+			State:       state,
+			DetailsJSON: MarshalPRArtifactDetails(PRArtifactDetails{HeadBranch: "feature/x", Base: "main", Resolution: resolution}),
 		}
 	}
-	if strings.Contains(got, "kept") {
-		t.Errorf("rejected note %q must not claim the branch is kept", got)
+	cases := []struct {
+		name          string
+		a             Artifact
+		want, notWant []string
+	}{
+		{"rejected", pr(ArtifactStatePRClosed, PRResolutionRejected), []string{"rejected", "octo/repo#42", "feature/x", "was deleted"}, []string{"kept", "GitHub"}},
+		{"dismissed", pr(ArtifactStatePRClosed, PRResolutionDismissed), []string{"dismissed", "kept"}, []string{"rejected", "GitHub"}},
+		{"closed on github", pr(ArtifactStatePRClosed, PRResolutionGitHub), []string{"closed without merging on GitHub"}, []string{"human", "kept", "rejected"}},
+		{"closed, no resolution stored", pr(ArtifactStatePRClosed, ""), []string{"dismissed", "kept"}, []string{"rejected", "GitHub"}},
+		{"approved", pr(ArtifactStatePROpen, PRResolutionApproved), []string{"approved", "ready for review"}, []string{"GitHub"}},
+		{"marked ready on github", pr(ArtifactStatePROpen, PRResolutionGitHub), []string{"ready for review on GitHub"}, []string{"human"}},
 	}
-	gone := ArtifactResolutionNote(alreadyGone)
-	if !strings.Contains(gone, "rejected") || !strings.Contains(gone, "already gone") || strings.Contains(gone, "was deleted") {
-		t.Errorf("already-gone rejection note = %q, want a rejection that says the branch was already gone, not deleted", gone)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ArtifactResolutionNote(tc.a)
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("note %q lacks %q", got, w)
+				}
+			}
+			for _, nw := range tc.notWant {
+				if strings.Contains(got, nw) {
+					t.Errorf("note %q must not contain %q", got, nw)
+				}
+			}
+			if !IsResolutionNoteState(tc.a) {
+				t.Error("must be a resolution-note state so the resume ledger picks it up")
+			}
+		})
 	}
-	if kept := ArtifactResolutionNote(dismissed); kept == got || !strings.Contains(kept, "kept") {
-		t.Errorf("dismissed note = %q, want the branch-kept dismissal shape distinct from the rejection", kept)
-	}
-	if !IsResolutionNoteState(rejected) {
-		t.Error("a rejected PR must be a resolution-note state so the resume ledger picks it up")
-	}
-	if block := ArtifactLedgerBlock([]Artifact{rejected}); !strings.Contains(block, "feature/x") {
+	if block := ArtifactLedgerBlock([]Artifact{pr(ArtifactStatePRClosed, PRResolutionRejected)}); !strings.Contains(block, "feature/x") {
 		t.Errorf("ledger block %q should carry the rejection line", block)
 	}
 }

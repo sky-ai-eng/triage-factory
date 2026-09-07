@@ -1164,7 +1164,8 @@ func (s *Server) routes() {
 	// (drag-to-Done / Return-to-queue) flows through teardownTaskArtifacts.
 	ah := &artifactsHandler{
 		tx: s.tx, ws: s.ws, ghResolver: s.ghResolver,
-		spawner: func() *delegate.Spawner { return s.spawner },
+		spawner:    func() *delegate.Spawner { return s.spawner },
+		reconciler: func() *reconcile.Reconciler { return s.reconciler },
 		publicURL: func() string {
 			if s.deployCfg == nil {
 				return ""

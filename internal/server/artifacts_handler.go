@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -35,6 +36,11 @@ type artifactsHandler struct {
 	// closure over s.spawner) used to feed the drafting agent a <system-note> when
 	// a human resolves one of its artifacts.
 	spawner func() *delegate.Spawner
+	// reconciler is the Tier-2 artifact reconciler (nil where the deployment
+	// runs none), read lazily like spawner. The resolve verbs use it when the
+	// live PR turns out to have been resolved on GitHub already, so the row
+	// catches up before the caller is told to look again.
+	reconciler func() *reconcile.Reconciler
 	// publicURL is the deployment's externally-visible base ("" until the
 	// deploy config lands, or when none is configured), read lazily because
 	// the deploy config is wired after routes are registered. It is what the
@@ -538,6 +544,88 @@ func diffTruncationNote(fileCount int) string {
 // everything after is detached best-effort bookkeeping — the PR is already
 // ready, so a client disconnect must not strand the conversation/task
 // half-flipped.
+// liveDraftOr409 reads the PR from GitHub and confirms it is still the open
+// draft the artifact row says it is. Both resolve verbs run it before writing:
+// a draft the human is looking at can have been closed, merged, or marked
+// ready on GitHub since the overlay loaded, and acting on the stale row would
+// promote a closed PR (a GitHub error dressed as a 502) or delete the branch
+// under a PR somebody merged. When the live state has moved on, the row is
+// reconciled right here rather than left for the next pass, and the caller is
+// answered 409 ALREADY_TERMINAL naming what GitHub holds — the same fault a
+// stale click on an already-resolved row gets, because that is what it is. A
+// read failure is a 502: nothing can be safely promoted or deleted unread.
+func (ah *artifactsHandler) liveDraftOr409(w http.ResponseWriter, r *http.Request, gh *ghclient.Client, orgID, userID string, art *domain.Artifact, owner, repo string, number int) (*ghclient.PRView, bool) {
+	live, err := gh.GetPRBasic(r.Context(), owner, repo, number)
+	if err != nil {
+		artifactsLog.Warn("live PR read before resolve failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+		writeUpstreamGitHub(w, "couldn't read the PR on GitHub", err)
+		return nil, false
+	}
+	stillDraft := live.Draft && !live.Merged && strings.EqualFold(live.State, "open")
+	if stillDraft {
+		return live, true
+	}
+	ah.reconcileArtifactOutOfBand(r, orgID, userID, art)
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+		Reason:  httpx.ReasonAlreadyTerminal,
+		Message: "this PR was already resolved on GitHub outside Triage Factory (" + liveStateWord(live) + "); its record has been refreshed",
+	})
+	return nil, false
+}
+
+// liveStateWord names a live PR's state for a human: merged, closed, or open
+// for review.
+func liveStateWord(live *ghclient.PRView) string {
+	switch {
+	case live.Merged:
+		return "merged"
+	case strings.EqualFold(live.State, "closed"):
+		return "closed"
+	default:
+		return "marked ready for review"
+	}
+}
+
+// reconcileArtifactOutOfBand runs the Tier-2 reconcile over the artifact's
+// conversation — the same working set the refresh route drives — so a row a
+// resolve verb found stale on GitHub catches up now: state, memory outcome,
+// terminal-on-last task closure, and the artifact_updated broadcast that makes
+// the overlay refetch. Best-effort and detached from the request: the 409 the
+// caller is about to send is correct whether or not this lands, and the next
+// reconcile pass repairs a miss.
+func (ah *artifactsHandler) reconcileArtifactOutOfBand(r *http.Request, orgID, userID string, art *domain.Artifact) {
+	if ah.reconciler == nil {
+		return
+	}
+	rc := ah.reconciler()
+	if rc == nil {
+		return
+	}
+	ctx := context.WithoutCancel(r.Context())
+	arts := []domain.Artifact{*art}
+	if art.ConversationID != "" {
+		if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+			all, e := tx.Artifacts.ListByConversation(ctx, orgID, art.ConversationID)
+			if e != nil {
+				return e
+			}
+			arts = arts[:0]
+			for _, a := range all {
+				if domain.IsReconcilableNonTerminal(a.Kind, a.State) {
+					arts = append(arts, a)
+				}
+			}
+			return nil
+		}); err != nil {
+			artifactsLog.Warn("list conversation artifacts for out-of-band reconcile failed; reconciling the one row", "artifact", art.ID, "error", err)
+			arts = []domain.Artifact{*art}
+		}
+	}
+	if _, err := rc.Reconcile(ctx, orgID, arts); err != nil {
+		artifactsLog.Warn("out-of-band reconcile failed", "artifact", art.ID, "error", err)
+	}
+}
+
 func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -594,12 +682,10 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 
 	// Read the content being promoted from the LIVE PR, never the cached
 	// snapshot: a stale snapshot would misreport a direct-on-GitHub edit, and a
-	// malformed one would record an empty title/body. GetPR failure is fatal
-	// here — we can't safely promote what we can't read.
-	live, err := gh.GetPRBasic(r.Context(), owner, repo, number)
-	if err != nil {
-		artifactsLog.Warn("approve GetPR failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeUpstreamGitHub(w, "couldn't read the PR to promote it", err)
+	// malformed one would record an empty title/body. The same read confirms
+	// the PR is still a draft to promote at all.
+	live, ok := ah.liveDraftOr409(w, r, gh, orgID, userID, art, owner, repo, number)
+	if !ok {
 		return
 	}
 	finalTitle := live.Title
@@ -630,6 +716,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	openArt.State = domain.ArtifactStatePROpen
 	if derr == nil {
 		details.Snapshot = domain.PRArtifactSnapshot{Title: finalTitle, Body: finalBody}
+		details.Resolution = domain.PRResolutionApproved
 		openArt.DetailsJSON = domain.MarshalPRArtifactDetails(details)
 	}
 	// Compose the audit row with the flip (TFAC-483): the org-App MarkPRReady is a
@@ -741,6 +828,7 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	credential := githubCredentialForArtifact(r.Context(), ah.ghResolver, orgID, art)
 	closed := *art
 	closed.State = domain.ArtifactStatePRClosed
+	closed.DetailsJSON = domain.StampPRResolution(art.DetailsJSON, domain.PRResolutionDismissed)
 	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if _, e := tx.Artifacts.Upsert(r.Context(), orgID, closed); e != nil {
 			return e
@@ -776,17 +864,19 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 // irreversible act in the whole PR lifecycle, which is why it is its own verb
 // behind its own confirmation rather than a flag on dismiss.
 //
-// The order is dictated by what can be undone. The branch delete goes first
-// and is pessimistic: if GitHub refuses (a protected branch, a credential
-// without contents:write, an outage) nothing has changed anywhere — the PR is
-// still a draft, the artifact still draft — so the caller sees the refusal and
-// can retry, dismiss, or open the PR conventionally. A ref the upstream no
-// longer holds is not a refusal (deleted by hand, or already gone): the intent
-// is satisfied, and the resolution proceeds. Once the branch is gone the PR is
-// doomed regardless — GitHub closes a PR whose head branch disappears — so the
-// close and the bookkeeping after it are best-effort or retry-safe: a DB
-// failure on the flip answers 500 with the artifact still draft, and the retry
-// converges because the delete then reads as already-gone.
+// The order is dictated by what can be undone. First the live PR is read and
+// confirmed still a draft (liveDraftOr409): a PR resolved on GitHub in the
+// meantime is not this verb's to touch — least of all its branch. Then the
+// branch delete, pessimistic: if GitHub refuses (a protected branch, a
+// credential without contents:write, an outage) nothing has changed anywhere,
+// so the caller sees the refusal and can retry, dismiss, or open the PR
+// conventionally. A ref the upstream no longer holds is the same answer as a
+// resolved PR — reality moved, the row is reconciled, 409 — rather than a
+// rejection recorded over a deletion this verb never made. Once the branch is
+// gone the PR is doomed regardless (GitHub closes a PR whose head branch
+// disappears), so the close and the bookkeeping after it are best-effort or
+// retry-safe: a DB failure on the flip answers 500 with the artifact still
+// draft, and a retry finds the branch gone and reconciles.
 //
 // POST /api/artifacts/{id}/reject
 func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.Request) {
@@ -836,14 +926,21 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+	if _, ok := ah.liveDraftOr409(w, r, gh, orgID, userID, art, owner, repo, number); !ok {
+		return
+	}
 
 	// The irreversible write, pessimistic — see the ordering above.
-	branchDeleted := true
 	switch err := gh.DeleteBranchRef(r.Context(), owner, repo, details.HeadBranch); {
 	case err == nil:
 	case errors.Is(err, ghclient.ErrBranchRefMissing):
-		branchDeleted = false
-		artifactsLog.Info("reject: branch already gone from the upstream; proceeding", "artifact", art.ID, "owner", owner, "repo", repo, "branch", details.HeadBranch)
+		artifactsLog.Info("reject: branch already gone from the upstream; reconciling the row instead", "artifact", art.ID, "owner", owner, "repo", repo, "branch", details.HeadBranch)
+		ah.reconcileArtifactOutOfBand(r, orgID, userID, art)
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonAlreadyTerminal,
+			Message: "branch " + details.HeadBranch + " is already gone from the upstream, so this PR was resolved outside Triage Factory; its record has been refreshed",
+		})
+		return
 	default:
 		artifactsLog.Warn("reject: DeleteBranchRef failed; nothing changed", "artifact", art.ID, "owner", owner, "repo", repo, "branch", details.HeadBranch, "error", err)
 		writeUpstreamGitHub(w, "GitHub refused to delete branch "+details.HeadBranch+"; the PR is still a draft", err)
@@ -864,16 +961,11 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 	// Flip the PR artifact to closed with the rejection recorded on the row (the
 	// resolution note is derived from this row alone), retire the run's branch
 	// artifact for the same ref rather than leaving it for the reconciler to
-	// notice, and audit the writes — all in one tx, so the audit never
-	// disagrees with the state. The branch artifact is retired either way (the
-	// branch is gone from the remote either way), but the branch_deleted audit
-	// row is written only when this rejection did the deleting: a branch that
-	// was already gone was not deleted here, and the audit log must not say it
-	// was. The credential is classified before the tx opens: it can reach
-	// GitHub, and the tx must not wait on a round trip.
+	// notice, and audit both writes — all in one tx, so the audit never
+	// disagrees with the state. The credential is classified before the tx
+	// opens: it can reach GitHub, and the tx must not wait on a round trip.
 	credential := githubCredentialFor(cleanupCtx, ah.ghResolver, orgID, owner, repo)
-	details.Rejected = true
-	details.BranchDeleted = branchDeleted
+	details.Resolution = domain.PRResolutionRejected
 	closed := *art
 	closed.State = domain.ArtifactStatePRClosed
 	closed.DetailsJSON = domain.MarshalPRArtifactDetails(details)
@@ -891,9 +983,6 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 			githubApprovalAction(art, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed, credential)); e != nil {
 			return e
 		}
-		if !branchDeleted {
-			return nil
-		}
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
 			branchDeletedAction(art, userID, repoPath, headRef, details.HeadBranch, branchURL, credential))
 	}); err != nil {
@@ -904,7 +993,7 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 	// Human verdict into the run's memory: the next agent on this entity should
 	// read that the work was discarded, not merely closed, and what it was.
 	if art.ConversationID != "" {
-		humanContent := formatPRRejectionHumanFeedback(details.Proposed.Title, details.Proposed.Body, details.HeadBranch, branchDeleted)
+		humanContent := formatPRRejectionHumanFeedback(details.Proposed.Title, details.Proposed.Body, details.HeadBranch)
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 			_, err := tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
 			return err
@@ -916,22 +1005,19 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 	// Tell the drafting agent — live if warm, else via its ledger on resume,
-	// which re-derives the rejection from the flags on the row.
+	// which re-derives the rejection from the resolution on the row.
 	ah.injectArtifactNote(orgID, closed)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"number":         number,
-		"html_url":       art.URL,
-		"state":          domain.ArtifactStatePRClosed,
-		"branch":         details.HeadBranch,
-		"branch_deleted": branchDeleted,
+		"number":   number,
+		"html_url": art.URL,
+		"state":    domain.ArtifactStatePRClosed,
+		"branch":   details.HeadBranch,
 	})
 }
 
 // retireBranchArtifact flips the conversation's `branch` artifact for headRef
-// (on repoPath) to deleted — the branch is gone from the remote, whether this
-// rejection deleted it or found it gone — returning its web URL for the audit
-// row. A
+// (on repoPath) to deleted, returning its web URL for the audit row. A
 // conversation with no such artifact — a push the capture writers missed, or
 // no conversation at all — is not an error: the PR artifact carries the
 // rejection on its own, and the returned URL falls back to the public-host
@@ -1193,17 +1279,11 @@ func formatPRHumanFeedback(proposedTitle, proposedBody, finalTitle, finalBody st
 // block for a rejected draft PR: the outcome, what it implies for the next
 // agent on this entity, and the proposed title and body that were turned down —
 // quoted in full, because the branch that held the work is gone and this block
-// is the only record of what was proposed. branchDeleted=false says the branch
-// was already gone when the human rejected, so the note does not claim a
-// deletion that did not happen here. Same heading rule as
+// is the only record of what was proposed. Same heading rule as
 // formatPRHumanFeedback: db.materializeMemory prepends the section heading.
-func formatPRRejectionHumanFeedback(proposedTitle, proposedBody, branch string, branchDeleted bool) string {
+func formatPRRejectionHumanFeedback(proposedTitle, proposedBody, branch string) string {
 	var b strings.Builder
-	if branchDeleted {
-		fmt.Fprintf(&b, "**Outcome:** Human rejected the PR — closed it and deleted its branch `%s` from the upstream.\n", branch)
-	} else {
-		fmt.Fprintf(&b, "**Outcome:** Human rejected the PR — closed it; its branch `%s` was already gone from the upstream.\n", branch)
-	}
+	fmt.Fprintf(&b, "**Outcome:** Human rejected the PR — closed it and deleted its branch `%s` from the upstream.\n", branch)
 	b.WriteString("**Implication:** The PR you proposed was not accepted, and the human chose to discard the work rather than keep the branch for edits or a retry. Reconsider whether this entity warranted a PR at all, or whether a different approach is needed before proposing another.\n\n")
 	fmt.Fprintf(&b, "**Rejected title:** %s\n\n", proposedTitle)
 	b.WriteString("**Rejected body:**\n\n")

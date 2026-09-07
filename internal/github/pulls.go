@@ -28,6 +28,7 @@ type PRView struct {
 	Body         string            `json:"body"`
 	State        string            `json:"state"`
 	Merged       bool              `json:"merged"`
+	Draft        bool              `json:"draft"`
 	Author       string            `json:"author"`
 	Additions    int               `json:"additions"`
 	Deletions    int               `json:"deletions"`
@@ -94,6 +95,7 @@ func prViewFromRaw(raw map[string]any) *PRView {
 		Body:         strVal(raw, "body"),
 		State:        strVal(raw, "state"),
 		Merged:       boolVal(raw, "merged"),
+		Draft:        boolVal(raw, "draft"),
 		Additions:    intVal(raw, "additions"),
 		Deletions:    intVal(raw, "deletions"),
 		ChangedFiles: intVal(raw, "changed_files"),

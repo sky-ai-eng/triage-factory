@@ -5,7 +5,7 @@ import type { FileData } from 'react-diff-view'
 import DiffFile from './DiffFile'
 import PendingPRSummary from './PendingPRSummary'
 import { useFocusTrap } from '../hooks/useFocusTrap'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { HttpError, apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { Dialog } from '../ui/dialog/Dialog'
 import { toast } from './Toast/toastStore'
 
@@ -193,6 +193,22 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
     [patchPR],
   )
 
+  // resolvedElsewhere handles the one failure neither verb can retry: a 409
+  // says the PR was already resolved — on GitHub, or by another click — and the
+  // server has refreshed its record. The overlay is now a picture of something
+  // that no longer exists, so it reports what happened and closes; the
+  // conversation view repaints from the artifact_updated broadcast.
+  const resolvedElsewhere = useCallback(
+    (err: unknown): boolean => {
+      if (!(err instanceof HttpError) || err.status !== 409) return false
+      setConfirmingReject(false)
+      toast.info(httpErrorMessage(err, 'This PR was already resolved.'), 'Already resolved')
+      onClose()
+      return true
+    },
+    [onClose],
+  )
+
   const handleSubmit = useCallback(async () => {
     setSubmitting(true)
     setSubmitError(null)
@@ -217,13 +233,14 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
       })
       onClose()
     } catch (err) {
+      if (resolvedElsewhere(err)) return
       // Inline (not full-screen): keep the editor visible so the user can retry
       // "Open PR" in place — a partial failure is safely re-runnable.
       setSubmitError(httpErrorMessage(err, 'Could not open the pull request.'))
     } finally {
       setSubmitting(false)
     }
-  }, [artifactId, onClose])
+  }, [artifactId, onClose, resolvedElsewhere])
 
   const handleReject = useCallback(async () => {
     setRejecting(true)
@@ -231,19 +248,18 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
     try {
       // Nothing to wait for on the save side: a rejection discards the PR
       // whatever its title/body say, so an in-flight edit is irrelevant to it.
-      const out = await apiJSON<{ branch: string; branch_deleted: boolean }>(
-        `/api/artifacts/${artifactId}/reject`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' } },
-      )
+      const out = await apiJSON<{ branch: string }>(`/api/artifacts/${artifactId}/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
       setConfirmingReject(false)
       toast.success(
-        out.branch_deleted
-          ? `Draft PR closed and branch ${out.branch} deleted from the upstream.`
-          : `Draft PR closed. Branch ${out.branch} was already gone from the upstream.`,
+        `Draft PR closed and branch ${out.branch} deleted from the upstream.`,
         'PR rejected',
       )
       onClose()
     } catch (err) {
+      if (resolvedElsewhere(err)) return
       // The server refuses before touching anything when GitHub declines the
       // branch delete, so the draft is intact: surface the reason both as a
       // toast and inline, and keep the editor up for the retry.
@@ -254,7 +270,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
     } finally {
       setRejecting(false)
     }
-  }, [artifactId, onClose])
+  }, [artifactId, onClose, resolvedElsewhere])
 
   // Close on Escape. The Dialog claims Escape first (capture + stopPropagation)
   // while the reject confirmation is up, so cancelling it never closes the

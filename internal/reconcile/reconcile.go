@@ -340,6 +340,12 @@ func isDraftResolved(a domain.Artifact, newState string) bool {
 func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domain.Artifact, newState string) (domain.Artifact, error) {
 	next := a
 	next.State = newState
+	if a.Kind == domain.ArtifactKindPullRequest {
+		// Nobody resolved this through TF — the row records that so the
+		// agent-facing note reads "on GitHub" rather than crediting a human
+		// approval or dismissal that never happened.
+		next.DetailsJSON = domain.StampPRResolution(a.DetailsJSON, domain.PRResolutionGitHub)
+	}
 	updated, err := rc.artifacts.UpsertSystem(ctx, orgID, next)
 	if err != nil {
 		return domain.Artifact{}, err
