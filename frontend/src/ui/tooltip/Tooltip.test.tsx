@@ -121,6 +121,72 @@ describe('Tooltip', () => {
     expect(tip()).toBeNull()
   })
 
+  // jsdom does no layout, so the trigger's position is stubbed: a scroll
+  // moves it by setting `y` before firing.
+  const triggerAt = (y: { v: number }) =>
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: Element,
+    ) {
+      const top = this.classList?.contains('tip-host') ? y.v : 0
+      return { x: 0, y: top, left: 0, right: 0, top, bottom: top, width: 0, height: 0 } as DOMRect
+    })
+
+  it('closes on a scroll that moves the trigger, inside any scroller it sits in', () => {
+    const y = { v: 100 }
+    triggerAt(y)
+    render(
+      <div className="scroller" style={{ overflow: 'auto' }}>
+        <Tooltip content="definition">mark</Tooltip>
+      </div>,
+    )
+    const host = screen.getByText('mark').closest('.tip-host')!
+
+    fireEvent.focus(host)
+    expect(tip()).not.toBeNull()
+
+    // Scroll does not bubble; the listener is on the capture path, so a
+    // scroller between the trigger and the window still reaches it.
+    y.v = 60
+    fireEvent.scroll(document.querySelector('.scroller')!)
+    expect(tip()).toBeNull()
+
+    // A reopened hint measures fresh, and a scroll that moves it closes it
+    // again — nothing stale survives the close.
+    fireEvent.blur(host)
+    fireEvent.focus(host)
+    expect(tip()).not.toBeNull()
+    y.v = 20
+    fireEvent.scroll(document)
+    expect(tip()).toBeNull()
+    vi.restoreAllMocks()
+  })
+
+  it('survives a scroll that did not move the trigger — the one focus performs to bring it into view', () => {
+    const y = { v: 100 }
+    triggerAt(y)
+    render(<Tooltip content="definition">mark</Tooltip>)
+    const host = screen.getByText('mark').closest('.tip-host')!
+
+    // The into-view scroll lands before the focus event; its event fires
+    // after. The rect the focus measured is already the scrolled one.
+    fireEvent.focus(host)
+    expect(tip()).not.toBeNull()
+    fireEvent.scroll(document)
+    expect(tip()).not.toBeNull()
+    vi.restoreAllMocks()
+  })
+
+  it('closes on resize', () => {
+    render(<Tooltip content="definition">mark</Tooltip>)
+    const host = screen.getByText('mark').closest('.tip-host')!
+
+    fireEvent.focus(host)
+    expect(tip()).not.toBeNull()
+
+    fireEvent(window, new Event('resize'))
+    expect(tip()).toBeNull()
+  })
+
   it('stays inert with no content: no tab stop, no hint, no swallowed clicks', () => {
     const through = vi.fn()
     render(
@@ -180,7 +246,7 @@ describe('page clamp', () => {
     const t = open()
     // 8px clearance from a left edge at -40 is a 48px slide right.
     expect(t.style.getPropertyValue('--tip-dx')).toBe('48px')
-    expect(t.style.transform).toBe('translateX(calc(-50% + 48px))')
+    expect(t.style.transform).toBe('translate(calc(-50% + 48px), -100%)')
     expect(t.dataset.side).toBe('top')
   })
 
@@ -211,12 +277,105 @@ describe('page clamp', () => {
     bubble({ left: 300, right: 500, width: 200 })
     const t = open()
     expect(t.style.getPropertyValue('--tip-dx')).toBe('')
-    expect(t.style.transform).toBe('translateX(-50%)')
+    expect(t.style.transform).toBe('translate(-50%, -100%)')
   })
 
   it('treats an unmeasurable page as fitting — jsdom has no layout to clamp against', () => {
     const t = open()
     expect(t.style.getPropertyValue('--tip-dx')).toBe('')
     expect(t.dataset.side).toBe('top')
+  })
+})
+
+describe('top layer', () => {
+  // jsdom has no popover API, so the browser path is stubbed: `showPopover`
+  // on the prototype, and a rect for the host so the bubble has a page
+  // position to be placed against. Without the stub the bubble is an ordinary
+  // absolute child, which every test above exercises.
+  const shown = vi.fn()
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'showPopover', {
+      value: shown,
+      configurable: true,
+      writable: true,
+    })
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: Element,
+    ) {
+      const r = this.classList?.contains('tip-host')
+        ? { left: 100, right: 120, top: 200, bottom: 210, width: 20, height: 10 }
+        : {}
+      return {
+        x: 0,
+        y: 0,
+        left: 0,
+        right: 0,
+        top: 0,
+        bottom: 0,
+        width: 0,
+        height: 0,
+        ...r,
+      } as DOMRect
+    })
+  })
+  afterEach(() => {
+    shown.mockReset()
+    delete (HTMLElement.prototype as { showPopover?: unknown }).showPopover
+    vi.restoreAllMocks()
+  })
+
+  it('lifts the bubble as a manual popover, placed against the trigger on the page', () => {
+    render(<Tooltip content="definition">mark</Tooltip>)
+    const host = screen.getByText('mark').closest('.tip-host')!
+
+    fireEvent.focus(host)
+    const t = tip() as HTMLElement
+    // Manual, so it neither light-dismisses nor takes a dialog's Escape.
+    expect(t).toHaveAttribute('popover', 'manual')
+    expect(shown).toHaveBeenCalledTimes(1)
+    expect(shown.mock.instances[0]).toBe(t)
+    // Centered over the trigger, 7px above it; the transform does the rest.
+    expect(t.style.left).toBe('110px')
+    expect(t.style.top).toBe('193px')
+    expect(t.style.transform).toBe('translate(-50%, -100%)')
+    // Still under its host in the tree: described-by resolves.
+    expect(host.contains(t)).toBe(true)
+    expect(host.getAttribute('aria-describedby')).toBe(t.getAttribute('id'))
+  })
+
+  it('places each side from the trigger rect', () => {
+    for (const [side, left, top, transform] of [
+      ['bottom', '110px', '217px', 'translateX(-50%)'],
+      ['right', '129px', '205px', 'translateY(-50%)'],
+      ['left', '91px', '205px', 'translate(-100%, -50%)'],
+    ] as const) {
+      const { unmount } = render(
+        <Tooltip content="definition" side={side}>
+          mark
+        </Tooltip>,
+      )
+      fireEvent.focus(screen.getByText('mark').closest('.tip-host')!)
+      const t = tip() as HTMLElement
+      expect([t.style.left, t.style.top, t.style.transform]).toEqual([left, top, transform])
+      unmount()
+    }
+  })
+
+  it('keeps the tap toggle and scenery mode with the node lifted', () => {
+    const navigated = vi.fn()
+    render(
+      <a href="/run" onClick={navigated}>
+        <Tooltip content="definition" focusable={false}>
+          <span>mark</span>
+        </Tooltip>
+      </a>,
+    )
+    const host = screen.getByText('mark').closest('.tip-host')!
+
+    fireEvent.click(host)
+    expect(tip()).toHaveAttribute('aria-hidden', 'true')
+    expect(navigated).not.toHaveBeenCalled()
+    fireEvent.click(host)
+    expect(tip()).toBeNull()
   })
 })

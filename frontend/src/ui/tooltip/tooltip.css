@@ -38,6 +38,23 @@
   pointer-events: none;
 }
 
+/* In the top layer, where no ancestor's overflow can clip it. The UA styles
+   a popover as a centered panel and this resets the ones `.tip` does not
+   already set — padding, background, color and the border are `.tip`'s own
+   and already win over the UA sheet. `position: fixed` against the page is
+   what the viewport coordinates Tooltip.tsx writes are for; `inset: auto`
+   drops the UA's `inset: 0`, `margin: 0` its `margin: auto`, which would
+   otherwise center the bubble in the window. `pointer-events: none` still
+   holds: a bubble in the top layer is still not a hover target. */
+.tip[popover] {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  width: auto;
+  height: auto;
+  overflow: visible;
+}
+
 .tip[data-side='top'] {
   animation: tip-up 0.14s cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -51,10 +68,11 @@
   animation: tip-left 0.14s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-/* Each keyframe restates the resting transform, because an animation's
-   transform outranks the inline one for the whole run — and keeps outranking
-   it under a fill mode. Dropping it here would un-center every tooltip for
-   140ms.
+/* Each keyframe restates the resting transform — the `rest` function in
+   Tooltip.tsx, including the `-100%` that puts a top or left bubble on the
+   far side of its reference point — because an animation's transform
+   outranks the inline one for the whole run, and keeps outranking it under a
+   fill mode. Dropping it here would un-center every tooltip for 140ms.
 
    Which is also why an edge correction is a VARIABLE and not an inline
    transform alone: the keyframes have to be able to restate it. `--tip-dx`
@@ -64,7 +82,7 @@
 @keyframes tip-up {
   from {
     opacity: 0;
-    transform: translateX(calc(-50% + var(--tip-dx, 0px))) translateY(3px);
+    transform: translate(calc(-50% + var(--tip-dx, 0px)), -100%) translateY(3px);
   }
 }
 @keyframes tip-down {
@@ -82,7 +100,7 @@
 @keyframes tip-left {
   from {
     opacity: 0;
-    transform: translateY(-50%) translateX(3px);
+    transform: translate(-100%, -50%) translateX(3px);
   }
 }
 

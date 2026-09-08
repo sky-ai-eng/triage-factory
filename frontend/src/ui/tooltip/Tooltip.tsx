@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent, MouseEvent, ReactNode } from 'react'
 import './tooltip.css'
 
@@ -52,14 +52,48 @@ import './tooltip.css'
 /** The project's one tooltip delay. */
 export const TOOLTIP_DELAY = 200
 
-const SIDES = {
-  top: { bottom: 'calc(100% + 7px)', left: '50%', transform: 'translateX(-50%)' },
-  bottom: { top: 'calc(100% + 7px)', left: '50%', transform: 'translateX(-50%)' },
-  // The rail's own direction. Clear of the trigger rather than touching it: a
-  // hint that touches the thing it names reads as attached to it.
-  right: { left: 'calc(100% + 9px)', top: '50%', transform: 'translateY(-50%)' },
-  left: { right: 'calc(100% + 9px)', top: '50%', transform: 'translateY(-50%)' },
-} as const
+export type Side = 'top' | 'bottom' | 'left' | 'right'
+
+/** Whether this browser can lift the bubble into the top layer. Without it
+ *  the bubble stays an ordinary absolute child of its host. */
+const topLayer = () => typeof HTMLElement !== 'undefined' && 'showPopover' in HTMLElement.prototype
+
+// Where the bubble's reference point goes. In the top layer the bubble is
+// positioned against the page, so the point is the trigger's rect in viewport
+// coordinates; otherwise it is a point on the host's own box. Either way the
+// transform below turns that point into the bubble's edge or center, which
+// needs nothing about the bubble's size — the first render needs only the
+// trigger, and the correction pass measures the bubble afterwards.
+//
+// `right` is the rail's own direction. Clear of the trigger rather than
+// touching it: a hint that touches the thing it names reads as attached to it.
+const place = (r: DOMRect | null) =>
+  r
+    ? {
+        top: { left: r.left + r.width / 2, top: r.top - 7 },
+        bottom: { left: r.left + r.width / 2, top: r.bottom + 7 },
+        right: { left: r.right + 9, top: r.top + r.height / 2 },
+        left: { left: r.left - 9, top: r.top + r.height / 2 },
+      }
+    : {
+        top: { left: '50%', top: -7 },
+        bottom: { left: '50%', top: 'calc(100% + 7px)' },
+        right: { left: 'calc(100% + 9px)', top: '50%' },
+        left: { left: -9, top: '50%' },
+      }
+
+// The resting transform per side, with the measured shift folded in for the
+// two sides that can shift. The entrance keyframes in tooltip.css restate
+// every one of these, so a change here is a change there.
+const across = (dx?: number) => (dx ? 'calc(-50% + ' + dx + 'px)' : '-50%')
+const rest = (side: Side, dx?: number) =>
+  side === 'top'
+    ? 'translate(' + across(dx) + ', -100%)'
+    : side === 'bottom'
+      ? 'translateX(' + across(dx) + ')'
+      : side === 'right'
+        ? 'translateY(-50%)'
+        : 'translate(-100%, -50%)'
 
 /** Clearance kept between the bubble and the edge of the page. */
 const EDGE = 8
@@ -67,7 +101,7 @@ const FLIP = { left: 'right', right: 'left', top: 'top', bottom: 'bottom' } as c
 
 /** The measured correction keeping an open bubble on the page. One of three
  *  shapes, never combined — see the layout effect below for the order. */
-type Adjust = { dx?: number; side?: keyof typeof SIDES; wrap?: number }
+type Adjust = { dx?: number; side?: Side; wrap?: number }
 
 export type TooltipProps = {
   /** The trigger. Made focusable so the hint has a keyboard route. */
@@ -75,7 +109,7 @@ export type TooltipProps = {
   /** Omit or pass nothing and the trigger stays inert, focus included. */
   content?: ReactNode
   /** `right` is the shipped rail's own direction. */
-  side?: keyof typeof SIDES
+  side?: Side
   /**
    * Leave this alone. It exists for the rare trigger that needs a longer
    * guard, not for per-page taste — one delay across the project is the point.
@@ -108,11 +142,86 @@ export function Tooltip({
   focusable = true,
   className = '',
 }: TooltipProps) {
-  const [open, setOpen] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const host = useRef<HTMLSpanElement | null>(null)
   const pop = useRef<HTMLSpanElement | null>(null)
   const id = useId()
   const live = !disabled && content != null && content !== ''
+
+  // Open is the trigger's rect, measured by whichever route opened the hint,
+  // not a flag: a bubble in the top layer is placed against the page, so it
+  // needs the trigger's position, and reading it at the opening event keeps
+  // it out of render. It is measured once per open — a scroll that moves the
+  // trigger closes the hint instead (see the scroll effect below), so a
+  // reopened hint always measures fresh.
+  const [anchor, setAnchor] = useState<DOMRect | null>(null)
+  const open = anchor !== null
+  const measure = () => host.current?.getBoundingClientRect() ?? null
+  const lifted = topLayer()
+  // The edge correction, measured by the pass below once the bubble is up.
+  const [adj, setAdj] = useState<Adjust | null>(null)
+
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current)
+    },
+    [],
+  )
+
+  const show = () => {
+    if (!live) return
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = setTimeout(() => setAnchor(measure()), delay)
+  }
+  const hide = useCallback(() => {
+    if (timer.current) clearTimeout(timer.current)
+    setAnchor(null)
+    setAdj(null)
+  }, [])
+
+  // Closed by a scroll that moves the trigger, and by any resize. The edge
+  // correction is measured once on open and held until close, so once the
+  // trigger moves the correction is stale: a bubble shifted clear of the
+  // window edge keeps that shift somewhere it no longer fits. Capture, because
+  // scroll does not bubble — this catches the scroller a trigger sits in, not
+  // just the window. Re-measuring per frame is the other option and costs a
+  // rect per frame to keep a hint nobody is looking at.
+  //
+  // One rect per scroll event, compared against the one taken at open, rather
+  // than closing on every scroll: focusing an off-screen trigger scrolls it
+  // into view, and that scroll's event fires a frame AFTER the focus that
+  // opened the hint. Closing on it blind leaves a keyboard user tabbing down a
+  // list with no hint at all. The into-view scroll lands before the focus
+  // event measures, so the rects match and the hint stays; a scroll under a
+  // live pointer or a focused trigger moves it, and the hint closes.
+  useEffect(() => {
+    if (!anchor) return
+    const scrolled = () => {
+      const r = host.current?.getBoundingClientRect()
+      if (!r || r.left !== anchor.left || r.top !== anchor.top) hide()
+    }
+    document.addEventListener('scroll', scrolled, { capture: true, passive: true })
+    window.addEventListener('resize', hide)
+    return () => {
+      document.removeEventListener('scroll', scrolled, { capture: true })
+      window.removeEventListener('resize', hide)
+    }
+  }, [anchor, hide])
+
+  // Into the top layer, where no ancestor's overflow can clip it. A popover
+  // rather than a portal, because the top layer moves the element in paint
+  // only: the node stays under its host, so `aria-describedby` still resolves
+  // and focus still bubbles through the host in scenery mode. `manual`, not
+  // `auto`: `auto` light-dismisses and joins the popover stack, so it would
+  // take an Escape meant for a dialog underneath. Declared before the
+  // correction pass below because a popover is `display: none` until shown,
+  // and a hidden bubble measures as nothing.
+  useLayoutEffect(() => {
+    if (!open) return
+    const el = pop.current
+    if (!el || !('showPopover' in el)) return
+    el.showPopover()
+  }, [open])
 
   // Kept inside the page.
   //
@@ -134,7 +243,6 @@ export function Tooltip({
   // bubble with no correction on it, so the measurement is always of the
   // uncorrected position; once a correction is applied it stands until close,
   // and this cannot oscillate.
-  const [adj, setAdj] = useState<Adjust | null>(null)
   useLayoutEffect(() => {
     if (!open || adj) return
     const el = pop.current
@@ -159,24 +267,6 @@ export function Tooltip({
     setAdj(fix)
   }, [open, content, side, adj])
 
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current)
-    },
-    [],
-  )
-
-  const show = () => {
-    if (!live) return
-    if (timer.current) clearTimeout(timer.current)
-    timer.current = setTimeout(() => setOpen(true), delay)
-  }
-  const hide = () => {
-    if (timer.current) clearTimeout(timer.current)
-    setOpen(false)
-    setAdj(null)
-  }
-
   // Focus opens with no delay. A delay keeps a tooltip from flickering under a
   // pointer crossing the screen; a keyboard never crosses anything, so waiting
   // only makes the hint feel broken.
@@ -195,7 +285,7 @@ export function Tooltip({
     pointer.current = false
     if (!live || fromPointer) return
     if (timer.current) clearTimeout(timer.current)
-    setOpen(true)
+    setAnchor(measure())
   }
 
   // A tap toggles. Stopping the event is the load-bearing half: this mark is
@@ -209,7 +299,7 @@ export function Tooltip({
     e.preventDefault()
     e.stopPropagation()
     if (timer.current) clearTimeout(timer.current)
-    setOpen((v) => !v)
+    setAnchor(open ? null : measure())
     // Closing discards the correction; opening starts from none anyway.
     setAdj(null)
   }
@@ -223,6 +313,7 @@ export function Tooltip({
 
   return (
     <span
+      ref={host}
       className={('tip-host ' + className).trim()}
       onMouseEnter={show}
       onMouseLeave={hide}
@@ -249,9 +340,11 @@ export function Tooltip({
           aria-hidden={keyboard ? undefined : 'true'}
           className="tip"
           data-side={placed}
+          popover={lifted ? 'manual' : undefined}
           style={
             {
-              ...(SIDES[placed] ?? SIDES.top),
+              ...place(lifted ? anchor : null)[placed],
+              transform: rest(placed),
               ...(wrap
                 ? {
                     whiteSpace: 'normal',
@@ -265,12 +358,7 @@ export function Tooltip({
               // alone would animate in centered and jump sideways at the end.
               // The keyframes read the variable; the inline transform is the
               // resting position after they finish.
-              ...(adj?.dx
-                ? {
-                    '--tip-dx': adj.dx + 'px',
-                    transform: 'translateX(calc(-50% + ' + adj.dx + 'px))',
-                  }
-                : null),
+              ...(adj?.dx ? { '--tip-dx': adj.dx + 'px', transform: rest(placed, adj.dx) } : null),
               ...(adj?.wrap
                 ? { whiteSpace: 'normal', maxWidth: adj.wrap, overflowWrap: 'anywhere' }
                 : null),

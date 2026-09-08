@@ -70,10 +70,36 @@ navigate and leave touch with no route to the hint at all.
 
 ## Positioning
 
-Absolute against the trigger, not portaled. That keeps the component free of
-app machinery, and it means a trigger inside an `overflow: hidden` ancestor can
-clip its hint — if that happens, the fix is the trigger's container, not a
-portal here.
+Not portaled: the bubble stays a child of its host in the DOM, which keeps the
+component free of app machinery, keeps `aria-describedby` pointing at a node
+under the trigger, and keeps focus bubbling through the host in scenery mode.
+It escapes clipping anyway: the bubble is a `popover="manual"` shown from a
+layout effect on open, which puts it in the browser's **top layer** — a paint
+order, not a DOM move — where no ancestor's `overflow` can cut it off. Manual
+rather than `auto`, because `auto` light-dismisses and joins the popover
+stack, so it would take an Escape meant for a dialog underneath. The position
+is the trigger's rect on the page, measured by whichever event opened the
+hint, plus a transform that centers the bubble without knowing its size.
+
+Two alternatives were rejected and should not be substituted. A **portal**
+relocates the node and complicates both of the wiring points above. Bare
+**`position: fixed`** stops escaping the clip under any ancestor with
+`transform`, `filter`, `backdrop-filter`, `contain` or `will-change` — callers
+have these, so it would pass review and break in place.
+
+Where the popover API is missing the bubble is an ordinary absolute child of
+its host, clipped as before; the floor does not move.
+
+**The hint closes on a scroll that moves the trigger, and on resize** — a
+scroll inside any scroller the trigger sits in, not just the window's. Its
+position and edge correction are measured once on open, so once the trigger
+moves they are stale, and a hint is only open under a live pointer or a focused
+trigger, so a scroll that moves it is the reader leaving it. Re-measuring per
+frame would cost a rect per frame to keep a hint nobody is looking at. Each
+scroll event compares one rect against the one taken at open rather than
+closing blind, because focusing an off-screen trigger scrolls it into view and
+that scroll's event fires a frame after the focus that opened the hint —
+closing on it leaves a keyboard user tabbing down a list with no hint at all.
 
 ## It stays on the page
 
