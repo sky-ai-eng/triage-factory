@@ -8,7 +8,12 @@ import { Tooltip, TOOLTIP_DELAY } from './Tooltip'
 // sits inside.
 
 beforeEach(() => vi.useFakeTimers())
-afterEach(() => vi.useRealTimers())
+afterEach(() => {
+  vi.useRealTimers()
+  // Every rect stub below is a spy; undone here so a failing assertion
+  // cannot leak one into the next test.
+  vi.restoreAllMocks()
+})
 
 const tip = () => document.querySelector('.tip')
 
@@ -158,7 +163,6 @@ describe('Tooltip', () => {
     y.v = 20
     fireEvent.scroll(document)
     expect(tip()).toBeNull()
-    vi.restoreAllMocks()
   })
 
   it('survives a scroll that did not move the trigger — the one focus performs to bring it into view', () => {
@@ -173,7 +177,6 @@ describe('Tooltip', () => {
     expect(tip()).not.toBeNull()
     fireEvent.scroll(document)
     expect(tip()).not.toBeNull()
-    vi.restoreAllMocks()
   })
 
   it('closes on resize', () => {
@@ -293,6 +296,9 @@ describe('top layer', () => {
   // position to be placed against. Without the stub the bubble is an ordinary
   // absolute child, which every test above exercises.
   const shown = vi.fn()
+  // Whatever the prototype carried — nothing today, a real method once jsdom
+  // grows one — is put back exactly, not deleted.
+  const native = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'showPopover')
   beforeEach(() => {
     Object.defineProperty(HTMLElement.prototype, 'showPopover', {
       value: shown,
@@ -320,8 +326,8 @@ describe('top layer', () => {
   })
   afterEach(() => {
     shown.mockReset()
-    delete (HTMLElement.prototype as { showPopover?: unknown }).showPopover
-    vi.restoreAllMocks()
+    if (native) Object.defineProperty(HTMLElement.prototype, 'showPopover', native)
+    else delete (HTMLElement.prototype as { showPopover?: unknown }).showPopover
   })
 
   it('lifts the bubble as a manual popover, placed against the trigger on the page', () => {

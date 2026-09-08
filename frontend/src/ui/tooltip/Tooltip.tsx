@@ -97,6 +97,10 @@ const rest = (side: Side, dx?: number) =>
 
 /** Clearance kept between the bubble and the edge of the page. */
 const EDGE = 8
+/** How far the trigger may drift from where it was measured before an open
+ *  hint counts it as moved. Under a pixel: a rect can wobble by less than
+ *  that between two measurements of a trigger that has not moved at all. */
+const MOVED = 0.5
 const FLIP = { left: 'right', right: 'left', top: 'top', bottom: 'bottom' } as const
 
 /** The measured correction keeping an open bubble on the page. One of three
@@ -193,12 +197,16 @@ export function Tooltip({
   // opened the hint. Closing on it blind leaves a keyboard user tabbing down a
   // list with no hint at all. The into-view scroll lands before the focus
   // event measures, so the rects match and the hint stays; a scroll under a
-  // live pointer or a focused trigger moves it, and the hint closes.
+  // live pointer or a focused trigger moves it, and the hint closes. Always
+  // against the rect taken at open, never the previous event's, so a
+  // fractional-delta scroll closes once its movement adds up, and a
+  // sub-pixel wobble in a stationary measurement never does.
   useEffect(() => {
     if (!anchor) return
     const scrolled = () => {
       const r = host.current?.getBoundingClientRect()
-      if (!r || r.left !== anchor.left || r.top !== anchor.top) hide()
+      if (!r || Math.abs(r.left - anchor.left) > MOVED || Math.abs(r.top - anchor.top) > MOVED)
+        hide()
     }
     document.addEventListener('scroll', scrolled, { capture: true, passive: true })
     window.addEventListener('resize', hide)
