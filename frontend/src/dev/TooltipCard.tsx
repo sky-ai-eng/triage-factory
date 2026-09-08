@@ -91,6 +91,32 @@ export function TooltipCard() {
         </div>
 
         <div className="gal-spec">
+          <span className="gal-spec-tag">clipping, transformed scroller</span>
+          {/* The case a portal or a bare `position: fixed` would fail: an
+              ancestor that clips AND carries a transform, which makes it the
+              containing block for anything fixed inside it. The hint must
+              escape it whole, and close as soon as this box scrolls. */}
+          <div
+            style={{
+              overflow: 'auto',
+              transform: 'translateZ(0)',
+              width: 96,
+              height: 28,
+              border: '1px dashed var(--color-line-1)',
+              borderRadius: 3,
+              padding: '6px 8px 40px',
+              boxSizing: 'border-box',
+              font: '400 10px/1 var(--font-mono)',
+              color: 'var(--color-ink-3)',
+            }}
+          >
+            <Tooltip content="Escapes the clip; closes when this box scrolls." side="right">
+              <span>CLIPPED</span>
+            </Tooltip>
+          </div>
+        </div>
+
+        <div className="gal-spec">
           <span className="gal-spec-tag">wrap — two lines, capped</span>
           <Tooltip
             content="Runs are claimed in queue order; a claim that fails returns its slot."
