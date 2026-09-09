@@ -360,6 +360,39 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		conflict(w, "this review has not been finalized by the agent yet")
 		return
 	}
+	// The agent's finalize refused an empty draft; the human can empty one after
+	// it by deleting the last inline comment, and GitHub would refuse it too.
+	if review.Empty(details.ReviewEvent, details.ReviewBody, details.StagedComments) {
+		releaseClaim()
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "a " + strings.ToLower(details.ReviewEvent) + " review needs a summary body or at least one inline comment",
+		})
+		return
+	}
+
+	// Approve is the last moment before the atomic submit, and the PR can move
+	// between the human's last Refresh and this click. GitHub refuses a review
+	// pinned to anything but its current head, so the staged comments are
+	// reconciled to the live head here, under the claim (no edit can race it),
+	// on the finalize gate's own policy: a pure shift remaps silently and the
+	// submit pins the live head; anything outdated stops the approve, because
+	// dropping a comment is the human's decision and Refresh is where they make
+	// it. The reconciled set is what SubmitStaged reads and what the stamp
+	// persists, so the posted review and the row describe the same frame.
+	if len(details.StagedComments) > 0 {
+		outdated, err := ah.reconcileForApprove(r.Context(), gh, owner, repo, number, &details)
+		if err != nil {
+			releaseClaim()
+			writeUpstreamGitHub(w, "couldn't reconcile the review against the pull request's current head", err)
+			return
+		}
+		if outdated > 0 {
+			releaseClaim()
+			conflict(w, fmt.Sprintf("the pull request has moved past this review's head and %d inline comment(s) no longer match the current diff — refresh the review, then approve again", outdated))
+			return
+		}
+	}
 
 	// Publish through the shared submit (internal/review) — the same
 	// function the auto-post posture calls from the agent's finalize choke point,
@@ -560,6 +593,59 @@ func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// reconcileForApprove forward-maps the staged comments to the PR's live head
+// immediately before the atomic submit, mutating details in place on success
+// (survivors remapped and re-anchored, the finalize frame moved to the live PR)
+// and reporting how many comments went outdated — the caller refuses on any.
+//
+// It shares the finalize gate's policy, with one asymmetry: a live head that
+// can't be READ is not an error here. The read exists only to move the pin
+// forward, and GitHub itself is the gate on a stale one — submitting under the
+// recorded anchor costs at most the same 422 the reconcile is trying to
+// preempt, whereas refusing would turn every transient read failure into a
+// blocked approval. A compare that fails once the head is KNOWN to have moved
+// is an error: the comments are known-stale and unmappable, and the only
+// alternative is posting them mis-anchored.
+func (ah *artifactsHandler) reconcileForApprove(ctx context.Context, gh *ghclient.Client, owner, repo string, number int, details *domain.ReviewArtifactDetails) (outdated int, err error) {
+	pr, err := gh.GetPRBasic(ctx, owner, repo, number)
+	if err != nil || pr.HeadSHA == "" {
+		artifactsLog.Warn("review approve: live PR head unavailable; submitting under the recorded anchor",
+			"owner", owner, "repo", repo, "number", number, "error", err)
+		return 0, nil
+	}
+	liveHead := pr.HeadSHA
+	fallbackAnchor := details.FinalizedHeadSHA
+	if fallbackAnchor == "" {
+		fallbackAnchor = details.HeadSHA
+	}
+	outcomes := review.ReconcileToHead(details.StagedComments, liveHead, fallbackAnchor, func(anchor string) (ghclient.LineMap, error) {
+		cmp, e := gh.CompareCommits(ctx, owner, repo, anchor, liveHead)
+		if e != nil {
+			return ghclient.LineMap{}, e
+		}
+		return ghclient.ParseLineMapFromPatches(cmp.Files), nil
+	})
+	remapped := make([]domain.ReviewArtifactComment, len(outcomes))
+	for i, o := range outcomes {
+		if o.MapErr != nil {
+			return 0, fmt.Errorf("reconcile review comment on %s to head %s: %w", o.Comment.Path, liveHead, o.MapErr)
+		}
+		if o.Outdated() {
+			outdated++
+		}
+		remapped[i] = o.Comment
+	}
+	if outdated > 0 {
+		return outdated, nil
+	}
+	details.StagedComments = remapped
+	details.FinalizedHeadSHA = liveHead
+	if pr.BaseSHA != "" {
+		details.FinalizedBaseSHA = pr.BaseSHA
+	}
+	return 0, nil
+}
+
 // handleReviewRefresh re-reconciles a finalized review draft to the PR's current
 // head (POST /api/artifacts/{id}/review/refresh, TFAC-500) — the human-driven
 // counterpart to the agent's finalize gate, sharing the same forward-map
@@ -590,12 +676,16 @@ func (ah *artifactsHandler) handleReviewRefresh(w http.ResponseWriter, r *http.R
 // human confirmed the count first), and re-pins the finalize frame (base+head) to
 // the live PR so the overlay's diff and the comments move forward together. The
 // surviving comments all share the live head afterward, so the atomic submit stays
-// coherent — and the GC-422 risk shrinks (the pin follows a fresher commit).
+// coherent and its pin follows the freshest commit; a refresh that drops every
+// comment leaves a draft that pins nothing, and GitHub supplies the live head.
 //
 // Pessimistic and atomic: a transient compare failure aborts before anything is
-// persisted (never half-refresh against an unverified head). Refresh is optional —
-// a review submits fine without it (GitHub renders post-finalize drift as
-// "outdated" once submitted); this just clears that drift up front.
+// persisted (never half-refresh against an unverified head), and a refresh that
+// would drop the last inline comment of a body-less review refuses rather than
+// persist a draft the submit would reject — the human adds a summary first.
+// Refresh is optional — a review submits fine without it (GitHub renders
+// post-finalize drift as "outdated" once submitted); this just clears that drift
+// up front.
 func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Artifact) {
 	// Only a finalized, still-pending review can be refreshed: a submitted/dismissed
 	// one is terminal, and an unfinalized draft is still the agent's to shape.
@@ -659,6 +749,11 @@ func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request
 			moved++
 		}
 		survivors = append(survivors, o.Comment)
+	}
+
+	if review.Empty(details.ReviewEvent, details.ReviewBody, survivors) {
+		conflict(w, "refreshing would drop every inline comment and this review has no summary body — add a summary, then refresh again")
+		return
 	}
 
 	// Re-pin the staged set + the finalize frame to the live PR. Survivors all share

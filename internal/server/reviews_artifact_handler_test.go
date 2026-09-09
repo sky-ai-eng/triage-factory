@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // seedReviewArtifactWithConversation mints a completed (terminal) conversation
@@ -331,9 +333,20 @@ func TestReviewArtifactGet_Submitted_URLNoFreshness(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	mux := newAppAPIMux()
+	// The approve itself reads the live head to reconcile before posting; only
+	// the read AFTER the submit is forbidden.
+	var submitted atomic.Bool
 	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		t.Error("a submitted review's GET must not fetch the live PR head")
-		http.Error(w, "unexpected", http.StatusInternalServerError)
+		if submitted.Load() {
+			t.Error("a submitted review's GET must not fetch the live PR head")
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 7,
+			"base":   map[string]any{"ref": "main", "sha": "base1"},
+			"head":   map[string]any{"sha": "headsharsurl"},
+		})
 	})
 	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": 555})
@@ -346,6 +359,7 @@ func TestReviewArtifactGet_Submitted_URLNoFreshness(t *testing.T) {
 	if rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil); rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d; body=%s", rec.Code, rec.Body.String())
 	}
+	submitted.Store(true)
 
 	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
 	if rec.Code != http.StatusOK {
@@ -654,5 +668,41 @@ func TestReviewArtifactApprove_SharedCommitSHA_PinsToIt(t *testing.T) {
 	}
 	if submitBody["commit_id"] != "commit_v2" {
 		t.Errorf("submit commit_id = %v, want commit_v2 (the comments' anchor, not the start head)", submitBody["commit_id"])
+	}
+}
+
+// TestReviewArtifactApprove_EmptyReviewRefused pins the same rule the agent's
+// finalize applies, at the human's door: a COMMENT review that lost its last
+// inline comment and has no summary is refused with 422 before GitHub is
+// called, and the claim is released so the draft is editable again.
+func TestReviewArtifactApprove_EmptyReviewRefused(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	mux := newAppAPIMux()
+	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("an empty review must not reach GitHub")
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rempty", "acme", "api", 7, "COMMENT")
+	art := getArtifact(t, srv, artID)
+	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	d.ReviewBody = ""
+	d.StagedComments = nil
+	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("approve = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonInvalidField, "")
+	if got := getArtifact(t, srv, artID); got.State != domain.ArtifactStateReviewPending {
+		t.Errorf("state after refused approve = %q, want pending (claim released)", got.State)
 	}
 }

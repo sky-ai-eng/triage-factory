@@ -56,11 +56,14 @@ type ReviewArtifactProposed struct {
 // holds the full draft, not just a pointer to a live GitHub pending review:
 //
 //   - Number: the backing PR's per-repo number (a review anchors to a PR).
-//   - HeadSHA: the PR head at start-review. It is the FALLBACK commit_id for a
-//     comment-less review (an approve / body-only request-changes, which has no
-//     inline anchor); a review WITH comments pins commit_id to the commit those
-//     comments were validated against (each comment's CommitSHA), not this — the
-//     PR head can advance between start-review and the comments.
+//   - HeadSHA: the PR head at start-review — the frame the agent's checkout is
+//     measured against (ReviewAnchoredAtHead), and the FALLBACK commit_id for
+//     stored rows whose positioned comments carry no CommitSHA of their own. A
+//     review WITH anchored comments pins commit_id to the commit those comments
+//     were validated against (each comment's CommitSHA), not this — the PR head
+//     can advance between start-review and the comments — and a comment-less
+//     review (an approve / body-only request-changes) pins nothing, leaving
+//     GitHub to fill in the live head.
 //   - FinalizedHeadSHA: the PR head at finalize-review — the commit every staged
 //     comment was reconciled to, and the baseline the human-facing freshness
 //     check measures drift from: the review read compares it to the live PR

@@ -236,7 +236,7 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	// A comment / request_changes review must carry something actionable: a body,
 	// inline comments, or both. An approve needs neither (the approval is the
 	// signal). The comments are the locally staged set the agent added.
-	if body == "" && event != "APPROVE" && len(details.StagedComments) == 0 {
+	if review.Empty(event, body, details.StagedComments) {
 		return staged, fmt.Errorf("a %s review needs --body/--body-file or at least one inline comment", strings.ToLower(event))
 	}
 
@@ -661,12 +661,10 @@ func shortCommit(sha string) string {
 // and need to redo the inline comments): a review WITH comments pins the atomic
 // submit's commit_id to its comments' own CommitSHA anchors (set per comment at
 // add-review-comment, so the re-added comments anchor to the new HEAD), not to
-// this HeadSHA — HeadSHA is only the fallback commit_id for a comment-LESS review
-// (a pure approve / body-only request-changes). The one stale-SHA edge — pulling
-// past HeadSHA and then finalizing a comment-less review — can't arise from the
-// --fresh flow, since a comment-less review has no staged comments to clear in
-// the first place. If a future flow needs the head re-pinned, refresh it on the
-// normal (non-fresh) start-review path, which already reads the head.
+// this HeadSHA, and a comment-LESS review (a pure approve / body-only
+// request-changes) sends no commit_id at all, so a stale HeadSHA can't reach
+// GitHub from either shape. If a future flow needs the head re-pinned, refresh
+// it on the normal (non-fresh) start-review path, which already reads the head.
 func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID, commitSHA string, err error) {
 	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
