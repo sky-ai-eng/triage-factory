@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -332,9 +333,20 @@ func TestReviewArtifactGet_Submitted_URLNoFreshness(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	mux := newAppAPIMux()
+	// The approve itself reads the live head to reconcile before posting; only
+	// the read AFTER the submit is forbidden.
+	var submitted atomic.Bool
 	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		t.Error("a submitted review's GET must not fetch the live PR head")
-		http.Error(w, "unexpected", http.StatusInternalServerError)
+		if submitted.Load() {
+			t.Error("a submitted review's GET must not fetch the live PR head")
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 7,
+			"base":   map[string]any{"ref": "main", "sha": "base1"},
+			"head":   map[string]any{"sha": "headsharsurl"},
+		})
 	})
 	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": 555})
@@ -347,6 +359,7 @@ func TestReviewArtifactGet_Submitted_URLNoFreshness(t *testing.T) {
 	if rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil); rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d; body=%s", rec.Code, rec.Body.String())
 	}
+	submitted.Store(true)
 
 	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
 	if rec.Code != http.StatusOK {

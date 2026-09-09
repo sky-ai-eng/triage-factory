@@ -371,6 +371,29 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Approve is the last moment before the atomic submit, and the PR can move
+	// between the human's last Refresh and this click. GitHub refuses a review
+	// pinned to anything but its current head, so the staged comments are
+	// reconciled to the live head here, under the claim (no edit can race it),
+	// on the finalize gate's own policy: a pure shift remaps silently and the
+	// submit pins the live head; anything outdated stops the approve, because
+	// dropping a comment is the human's decision and Refresh is where they make
+	// it. The reconciled set is what SubmitStaged reads and what the stamp
+	// persists, so the posted review and the row describe the same frame.
+	if len(details.StagedComments) > 0 {
+		outdated, err := ah.reconcileForApprove(r.Context(), gh, owner, repo, number, &details)
+		if err != nil {
+			releaseClaim()
+			writeUpstreamGitHub(w, "couldn't reconcile the review against the pull request's current head", err)
+			return
+		}
+		if outdated > 0 {
+			releaseClaim()
+			conflict(w, fmt.Sprintf("the pull request has moved past this review's head and %d inline comment(s) no longer match the current diff — refresh the review, then approve again", outdated))
+			return
+		}
+	}
+
 	// Publish through the shared submit (internal/review) — the same
 	// function the auto-post posture calls from the agent's finalize choke point,
 	// so the commit pin, the comment payload, and the composed deep link can't
@@ -568,6 +591,59 @@ func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request
 		"review_id": art.ExternalID,
 		"state":     domain.ArtifactStateReviewDismissed,
 	})
+}
+
+// reconcileForApprove forward-maps the staged comments to the PR's live head
+// immediately before the atomic submit, mutating details in place on success
+// (survivors remapped and re-anchored, the finalize frame moved to the live PR)
+// and reporting how many comments went outdated — the caller refuses on any.
+//
+// It shares the finalize gate's policy, with one asymmetry: a live head that
+// can't be READ is not an error here. The read exists only to move the pin
+// forward, and GitHub itself is the gate on a stale one — submitting under the
+// recorded anchor costs at most the same 422 the reconcile is trying to
+// preempt, whereas refusing would turn every transient read failure into a
+// blocked approval. A compare that fails once the head is KNOWN to have moved
+// is an error: the comments are known-stale and unmappable, and the only
+// alternative is posting them mis-anchored.
+func (ah *artifactsHandler) reconcileForApprove(ctx context.Context, gh *ghclient.Client, owner, repo string, number int, details *domain.ReviewArtifactDetails) (outdated int, err error) {
+	pr, err := gh.GetPRBasic(ctx, owner, repo, number)
+	if err != nil || pr.HeadSHA == "" {
+		artifactsLog.Warn("review approve: live PR head unavailable; submitting under the recorded anchor",
+			"owner", owner, "repo", repo, "number", number, "error", err)
+		return 0, nil
+	}
+	liveHead := pr.HeadSHA
+	fallbackAnchor := details.FinalizedHeadSHA
+	if fallbackAnchor == "" {
+		fallbackAnchor = details.HeadSHA
+	}
+	outcomes := review.ReconcileToHead(details.StagedComments, liveHead, fallbackAnchor, func(anchor string) (ghclient.LineMap, error) {
+		cmp, e := gh.CompareCommits(ctx, owner, repo, anchor, liveHead)
+		if e != nil {
+			return ghclient.LineMap{}, e
+		}
+		return ghclient.ParseLineMapFromPatches(cmp.Files), nil
+	})
+	remapped := make([]domain.ReviewArtifactComment, len(outcomes))
+	for i, o := range outcomes {
+		if o.MapErr != nil {
+			return 0, fmt.Errorf("reconcile review comment on %s to head %s: %w", o.Comment.Path, liveHead, o.MapErr)
+		}
+		if o.Outdated() {
+			outdated++
+		}
+		remapped[i] = o.Comment
+	}
+	if outdated > 0 {
+		return outdated, nil
+	}
+	details.StagedComments = remapped
+	details.FinalizedHeadSHA = liveHead
+	if pr.BaseSHA != "" {
+		details.FinalizedBaseSHA = pr.BaseSHA
+	}
+	return 0, nil
 }
 
 // handleReviewRefresh re-reconciles a finalized review draft to the PR's current

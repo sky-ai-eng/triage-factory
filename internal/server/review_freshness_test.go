@@ -347,6 +347,119 @@ func TestReviewRefresh_RefusesToEmptyBodylessReview(t *testing.T) {
 	}
 }
 
+// approveDriftStub serves a PR whose live head is liveHead, one compare range
+// (any other range fails the test; "" means none is expected), and the review
+// POST recorded into submitBody.
+func approveDriftStub(t *testing.T, srv *Server, liveHead, compareRange, compareFiles string, submitBody *map[string]any) {
+	t.Helper()
+	mux := newAppAPIMux()
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 7,
+			"base":   map[string]any{"ref": "main", "sha": "base1"},
+			"head":   map[string]any{"sha": liveHead},
+		})
+	})
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/compare/{rng}", func(w http.ResponseWriter, r *http.Request) {
+		if rng := r.PathValue("rng"); compareFiles == "" || rng != compareRange {
+			t.Errorf("unexpected compare request for range %q (want %q)", rng, compareRange)
+			http.Error(w, "no such compare", http.StatusNotFound)
+			return
+		}
+		_, _ = io.WriteString(w, `{"ahead_by":1,"files":`+compareFiles+`}`)
+	})
+	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(submitBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 12345})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+}
+
+// TestReviewApprove_ShiftedSinceRefreshPinsLiveHead pins the approve-time
+// reconcile: the PR moved after the review's last frame (headA → headB) with a
+// pure shift on the commented line, so the approve remaps the comment, pins the
+// submit to headB, and stamps the moved frame onto the submitted row — no 422
+// for a push that landed between Refresh and Submit.
+func TestReviewApprove_ShiftedSinceRefreshPinsLiveHead(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var submitBody map[string]any
+	approveDriftStub(t, srv, "headB", "headA...headB",
+		`[{"filename":"a.go","status":"modified","patch":"@@ -1,5 +1,7 @@\n+newtop1\n+newtop2\n line1\n line2\n line3\n line4\n line5"}]`,
+		&submitBody)
+	artID := seedFinalizedReviewAt(t, srv, "rshift", 7, "headA", 3)
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if submitBody["commit_id"] != "headB" {
+		t.Errorf("submit commit_id = %v, want headB (the live head the comment was remapped to)", submitBody["commit_id"])
+	}
+	comments, _ := submitBody["comments"].([]any)
+	if len(comments) != 1 {
+		t.Fatalf("submit comments = %v, want the one remapped comment", submitBody["comments"])
+	}
+	if c, _ := comments[0].(map[string]any); c["line"] != float64(5) {
+		t.Errorf("submit comment line = %v, want 5 (3 shifted by two added lines)", c["line"])
+	}
+	d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON)
+	if d.FinalizedHeadSHA != "headB" || len(d.StagedComments) != 1 || d.StagedComments[0].CommitSHA != "headB" {
+		t.Errorf("stamped frame = head %q comments %+v, want the row to describe the headB frame it posted", d.FinalizedHeadSHA, d.StagedComments)
+	}
+}
+
+// TestReviewApprove_OutdatedSinceRefreshRefuses pins the other arm: the commented
+// line itself changed after the review's frame, so the approve refuses (409),
+// posts nothing, releases the claim, and leaves the draft on its known frame —
+// dropping the comment is the human's call through Refresh.
+func TestReviewApprove_OutdatedSinceRefreshRefuses(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var submitBody map[string]any
+	approveDriftStub(t, srv, "headB", "headA...headB",
+		`[{"filename":"a.go","status":"modified","patch":"@@ -1,5 +1,5 @@\n line1\n line2\n-line3\n+line3-changed\n line4\n line5"}]`,
+		&submitBody)
+	artID := seedFinalizedReviewAt(t, srv, "rstale", 7, "headA", 3)
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("approve = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if submitBody != nil {
+		t.Errorf("GitHub review POST was made with %v, want none", submitBody)
+	}
+	got := getArtifact(t, srv, artID)
+	if got.State != domain.ArtifactStateReviewPending {
+		t.Errorf("state = %q, want pending (claim released)", got.State)
+	}
+	d, _ := domain.ParseReviewArtifactDetails(got.DetailsJSON)
+	if d.FinalizedHeadSHA != "headA" || len(d.StagedComments) != 1 || d.StagedComments[0].CommitSHA != "headA" {
+		t.Errorf("refused approve moved the draft: head %q comments %+v, want untouched at headA", d.FinalizedHeadSHA, d.StagedComments)
+	}
+}
+
+// TestReviewApprove_CurrentHeadSkipsCompare pins the fast path: the live head is
+// the review's own frame, so the approve makes no compare call and pins that
+// head.
+func TestReviewApprove_CurrentHeadSkipsCompare(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var submitBody map[string]any
+	approveDriftStub(t, srv, "headA", "", "", &submitBody)
+	artID := seedFinalizedReviewAt(t, srv, "rcurr", 7, "headA", 3)
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if submitBody["commit_id"] != "headA" {
+		t.Errorf("submit commit_id = %v, want headA", submitBody["commit_id"])
+	}
+}
+
 // TestReviewRefresh_Guards pins the state guards: an unfinalized draft and a
 // terminal (submitted) review both 409 and make no GitHub call.
 func TestReviewRefresh_Guards(t *testing.T) {
