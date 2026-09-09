@@ -69,16 +69,13 @@ signs:
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
+# The changelog is release-please's: it writes one into CHANGELOG.md and the
+# same text into the GitHub Release body, before goreleaser runs. A second copy
+# generated here lands on that same body via `mode: append` below, and GitHub
+# caps a release body at 125,000 characters — a ceiling the duplicate alone is
+# enough to reach. goreleaser contributes only `release.header`.
 changelog:
-  sort: asc
-  use: github
-  filters:
-    exclude:
-      - "^docs:"
-      - "^chore:"
-      - "^test:"
-      - Merge pull request
-      - Merge branch
+  disable: true
 
 release:
   github:
