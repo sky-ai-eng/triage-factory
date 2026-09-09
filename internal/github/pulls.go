@@ -540,12 +540,16 @@ func reviewCommentsPayload(comments []SubmitReviewComment) []map[string]any {
 }
 
 // SubmitReview creates and submits a review atomically with all comments in one API call.
-// Event is "APPROVE", "REQUEST_CHANGES", or "COMMENT".
+// Event is "APPROVE", "REQUEST_CHANGES", or "COMMENT". An empty commitSHA omits
+// commit_id from the payload so GitHub pins the review to the PR's current head
+// itself.
 func (c *Client) SubmitReview(ctx context.Context, owner, repo string, number int, commitSHA, event, body string, comments []SubmitReviewComment) (int, string, error) {
 	payload := map[string]any{
-		"commit_id": commitSHA,
-		"event":     event,
-		"body":      body,
+		"event": event,
+		"body":  body,
+	}
+	if commitSHA != "" {
+		payload["commit_id"] = commitSHA
 	}
 
 	if ghComments := reviewCommentsPayload(comments); ghComments != nil {

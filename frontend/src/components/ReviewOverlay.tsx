@@ -435,7 +435,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
                   {submitError && (
                     <div className="rounded-xl border border-alarm/30 bg-alarm/[0.06] px-4 py-3 text-ui text-ink-2">
                       <span className="font-semibold text-ink-1">Couldn't submit review:</span>{' '}
-                      {submitError}. Your edits are saved on GitHub — you can retry Submit.
+                      {submitError}. Your edits are still staged — you can retry Submit.
                     </div>
                   )}
 

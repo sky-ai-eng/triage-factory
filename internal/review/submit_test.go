@@ -86,22 +86,33 @@ func TestSubmitStaged_PayloadAndLink(t *testing.T) {
 	}
 }
 
-// TestSubmitStaged_CommentlessPinsStartHead pins the fallback: a pure approve /
-// body-only review has no inline anchor, so the pin is the head recorded at
-// start-review.
-func TestSubmitStaged_CommentlessPinsStartHead(t *testing.T) {
-	sub := &recordingSubmitter{}
-	if _, err := SubmitStaged(context.Background(), sub, SubmitInput{
-		Owner: "octo", Repo: "repo", Number: 7,
-		Details: domain.ReviewArtifactDetails{HeadSHA: "start_review_head", ReviewEvent: "APPROVE"},
-	}); err != nil {
-		t.Fatalf("SubmitStaged: %v", err)
-	}
-	if sub.commitID != "start_review_head" {
-		t.Errorf("commit_id = %q, want the start-review head", sub.commitID)
-	}
-	if sub.comments == nil || len(sub.comments) != 0 {
-		t.Errorf("comments = %+v, want an empty (non-nil) set", sub.comments)
+// TestSubmitStaged_CommentlessSendsNoPin pins that a review with no inline
+// comments — a pure approve / body-only review, or one Refresh emptied — carries
+// no commit_id: every SHA the draft recorded is the head at some earlier moment,
+// GitHub refuses a pin that is not the live head, and with no positions to
+// protect the only pin that cannot go stale is the one GitHub fills in itself.
+func TestSubmitStaged_CommentlessSendsNoPin(t *testing.T) {
+	for name, details := range map[string]domain.ReviewArtifactDetails{
+		"pure approve": {HeadSHA: "start_review_head", ReviewEvent: "APPROVE"},
+		"body-only, refreshed past the start head": {
+			HeadSHA: "start_review_head", FinalizedHeadSHA: "refresh_head",
+			ReviewEvent: "COMMENT", ReviewBody: "looks fine", StagedComments: []domain.ReviewArtifactComment{},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sub := &recordingSubmitter{}
+			if _, err := SubmitStaged(context.Background(), sub, SubmitInput{
+				Owner: "octo", Repo: "repo", Number: 7, Details: details,
+			}); err != nil {
+				t.Fatalf("SubmitStaged: %v", err)
+			}
+			if sub.commitID != "" {
+				t.Errorf("commit_id = %q, want none — GitHub pins the live head", sub.commitID)
+			}
+			if sub.comments == nil || len(sub.comments) != 0 {
+				t.Errorf("comments = %+v, want an empty (non-nil) set", sub.comments)
+			}
+		})
 	}
 }
 

@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -45,6 +46,16 @@ type DivergentAnchorsError struct{ First, Second string }
 func (e *DivergentAnchorsError) Error() string {
 	return "staged review comments are anchored to two different commits (" +
 		e.First + " and " + e.Second + "); a review submits under one commit_id"
+}
+
+// Empty reports whether a review draft would reach GitHub with nothing to say:
+// a COMMENT or REQUEST_CHANGES carrying neither a summary body nor an inline
+// comment. An APPROVE needs neither — the approval is the signal. It is one
+// rule read at every door that can produce such a draft: the agent's finalize,
+// the human's approve, and a Refresh that would drop the last inline comment of
+// a body-less review.
+func Empty(event, body string, comments []domain.ReviewArtifactComment) bool {
+	return event != "APPROVE" && strings.TrimSpace(body) == "" && len(comments) == 0
 }
 
 // SubmitInput is the staged draft to publish plus the two pieces of context the
@@ -90,9 +101,15 @@ type SubmitResult struct {
 // draft's anchored comments all carry that one SHA, and the pin is it rather
 // than a representative sampled from them. A draft that disagrees with itself is
 // refused (DivergentAnchorsError) instead of posted under an arbitrary pick. A
-// comment-less review (approve / body-only) has no inline anchor, so it falls
-// back to the start-review head (Details.HeadSHA), as does a draft whose
-// comments all predate per-comment anchoring.
+// draft whose comments all predate per-comment anchoring falls back to the
+// start-review head (Details.HeadSHA), the frame those lines were validated in.
+//
+// A comment-less review (approve / body-only, or one Refresh emptied by dropping
+// every outdated comment) sends NO commit_id at all. GitHub refuses a pin that
+// is not the PR's current head, and a review with no inline positions has
+// nothing a pin would protect — so any SHA recorded on the draft is only a
+// chance to be stale, and GitHub filling in the live head at submit time is the
+// one answer that cannot be.
 //
 // Callers keep their own persistence: this makes the GitHub write and reports
 // what happened, and never touches the artifact row (the two callers claim,
@@ -121,9 +138,12 @@ func SubmitStaged(ctx context.Context, gh Submitter, in SubmitInput) (SubmitResu
 			Body:      c.Body,
 		})
 	}
-	commitID := in.Details.HeadSHA
-	if anchored != "" {
+	commitID := ""
+	switch {
+	case anchored != "":
 		commitID = anchored
+	case len(comments) > 0:
+		commitID = in.Details.HeadSHA
 	}
 
 	// SubmitReview returns the event it submitted (it doesn't parse an

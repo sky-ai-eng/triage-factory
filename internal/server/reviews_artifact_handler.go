@@ -360,6 +360,16 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		conflict(w, "this review has not been finalized by the agent yet")
 		return
 	}
+	// The agent's finalize refused an empty draft; the human can empty one after
+	// it by deleting the last inline comment, and GitHub would refuse it too.
+	if review.Empty(details.ReviewEvent, details.ReviewBody, details.StagedComments) {
+		releaseClaim()
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "a " + strings.ToLower(details.ReviewEvent) + " review needs a summary body or at least one inline comment",
+		})
+		return
+	}
 
 	// Publish through the shared submit (internal/review) — the same
 	// function the auto-post posture calls from the agent's finalize choke point,
@@ -590,12 +600,16 @@ func (ah *artifactsHandler) handleReviewRefresh(w http.ResponseWriter, r *http.R
 // human confirmed the count first), and re-pins the finalize frame (base+head) to
 // the live PR so the overlay's diff and the comments move forward together. The
 // surviving comments all share the live head afterward, so the atomic submit stays
-// coherent — and the GC-422 risk shrinks (the pin follows a fresher commit).
+// coherent and its pin follows the freshest commit; a refresh that drops every
+// comment leaves a draft that pins nothing, and GitHub supplies the live head.
 //
 // Pessimistic and atomic: a transient compare failure aborts before anything is
-// persisted (never half-refresh against an unverified head). Refresh is optional —
-// a review submits fine without it (GitHub renders post-finalize drift as
-// "outdated" once submitted); this just clears that drift up front.
+// persisted (never half-refresh against an unverified head), and a refresh that
+// would drop the last inline comment of a body-less review refuses rather than
+// persist a draft the submit would reject — the human adds a summary first.
+// Refresh is optional — a review submits fine without it (GitHub renders
+// post-finalize drift as "outdated" once submitted); this just clears that drift
+// up front.
 func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Artifact) {
 	// Only a finalized, still-pending review can be refreshed: a submitted/dismissed
 	// one is terminal, and an unfinalized draft is still the agent's to shape.
@@ -659,6 +673,11 @@ func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request
 			moved++
 		}
 		survivors = append(survivors, o.Comment)
+	}
+
+	if review.Empty(details.ReviewEvent, details.ReviewBody, survivors) {
+		conflict(w, "refreshing would drop every inline comment and this review has no summary body — add a summary, then refresh again")
+		return
 	}
 
 	// Re-pin the staged set + the finalize frame to the live PR. Survivors all share

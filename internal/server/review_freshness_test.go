@@ -240,6 +240,113 @@ func TestReviewRefresh_RemapsAndDrops(t *testing.T) {
 	}
 }
 
+// refreshOutdatedStub serves a PR whose live head is headB and a compare from
+// finA that changes the only line b.go carried — so a comment anchored there at
+// finA goes outdated on refresh — plus the review POST, recorded into submitBody
+// so a follow-up approve's payload can be asserted.
+func refreshOutdatedStub(t *testing.T, srv *Server, submitBody *map[string]any) {
+	t.Helper()
+	mux := newAppAPIMux()
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 7,
+			"base":   map[string]any{"ref": "main", "sha": "base1"},
+			"head":   map[string]any{"sha": "headB"},
+		})
+	})
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/compare/{rng}", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"ahead_by":1,"files":[`+
+			`{"filename":"b.go","status":"modified","patch":"@@ -1,3 +1,3 @@\n bline1\n-bline2\n+bline2-changed\n bline3"}`+
+			`]}`)
+	})
+	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(submitBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 12345})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+}
+
+// seedOutdatedOnlyReview stages a finalized review at finA whose single inline
+// comment sits on the b.go line refreshOutdatedStub rewrites, with the given
+// summary body.
+func seedOutdatedOnlyReview(t *testing.T, srv *Server, suffix, body string) string {
+	t.Helper()
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, suffix, "acme", "api", 7, "COMMENT")
+	art := getArtifact(t, srv, artID)
+	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	d.ReviewBody = body
+	d.FinalizedHeadSHA, d.FinalizedBaseSHA = "finA", "base0"
+	lb := 2
+	d.StagedComments = []domain.ReviewArtifactComment{
+		{ID: "c_b", Path: "b.go", Line: &lb, Body: "outdated", CommitSHA: "finA"},
+	}
+	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	return artID
+}
+
+// TestReviewRefresh_DropsLastCommentThenSubmitsUnpinned pins the shape a Refresh
+// can leave behind: every inline comment dropped as outdated, only the summary
+// left. The draft now has no position for a commit pin to protect, so the approve
+// sends no commit_id and GitHub pins the live head itself — a recorded SHA there
+// (the start head, or the head at refresh time) is only a chance to be stale and
+// be refused as "updated since you started reviewing".
+func TestReviewRefresh_DropsLastCommentThenSubmitsUnpinned(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var submitBody map[string]any
+	refreshOutdatedStub(t, srv, &submitBody)
+	artID := seedOutdatedOnlyReview(t, srv, "rdropall", "## Review\nsummary only")
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/review/refresh", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON)
+	if len(d.StagedComments) != 0 || d.FinalizedHeadSHA != "headB" {
+		t.Fatalf("after refresh: comments=%+v head=%q, want none / headB", d.StagedComments, d.FinalizedHeadSHA)
+	}
+
+	rec = doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if submitBody == nil {
+		t.Fatal("approve must call SubmitReview")
+	}
+	if pin, present := submitBody["commit_id"]; present {
+		t.Errorf("submit carried commit_id=%v, want the key absent so GitHub pins the live head", pin)
+	}
+	if submitBody["event"] != "COMMENT" {
+		t.Errorf("submit event = %v, want COMMENT", submitBody["event"])
+	}
+}
+
+// TestReviewRefresh_RefusesToEmptyBodylessReview pins the guard the drop needs:
+// a COMMENT review with no summary whose only inline comment went outdated would
+// refresh into a draft with nothing to submit, so the refresh 409s and persists
+// nothing — the human adds a summary and refreshes again.
+func TestReviewRefresh_RefusesToEmptyBodylessReview(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var submitBody map[string]any
+	refreshOutdatedStub(t, srv, &submitBody)
+	artID := seedOutdatedOnlyReview(t, srv, "rnobody", "")
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/review/refresh", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("refresh = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON)
+	if len(d.StagedComments) != 1 || d.FinalizedHeadSHA != "finA" {
+		t.Errorf("refused refresh persisted: comments=%+v head=%q, want the draft untouched at finA", d.StagedComments, d.FinalizedHeadSHA)
+	}
+}
+
 // TestReviewRefresh_Guards pins the state guards: an unfinalized draft and a
 // terminal (submitted) review both 409 and make no GitHub call.
 func TestReviewRefresh_Guards(t *testing.T) {
