@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.13.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.13.0...v1.13.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **deps:** patch the 17 advisories in the frontend dependency tree ([#1040](https://github.com/sky-ai-eng/triage-factory/issues/1040)) ([c6ec297](https://github.com/sky-ai-eng/triage-factory/commit/c6ec29707a630a75e34bfa92d3198e31ea4892eb))
+* **review:** stop pinning a stale commit on comment-less review submits ([#1041](https://github.com/sky-ai-eng/triage-factory/issues/1041)) ([a39d065](https://github.com/sky-ai-eng/triage-factory/commit/a39d065929d716101c9804a116069ef0a12164c0))
+
 ## [1.13.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.12.2...v1.13.0) (2026-09-08)
 
 
