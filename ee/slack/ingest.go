@@ -44,7 +44,7 @@ const slackThreadTitle = "New thread messages"
 // anonymous sentence does. So an unenriched pair returns exactly what the
 // entity already carries, and the caller detects "nothing to enrich" by
 // comparing against it. Capped at slackTitleMaxRunes so a pathologically long
-// name can't unbound the title.
+// name can't make the title unbounded.
 func composeThreadTitle(author, channelName string) string {
 	if channelName == "" {
 		return slackThreadTitle
