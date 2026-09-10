@@ -102,9 +102,9 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// Taking a task onto a human's plate takes it off the agent's: resolve
-	// every unresolved artifact the task holds and cancel any in-flight run.
-	s.teardownTaskConversations(r, orgID, userID, id, discardOutcomeClaimed, delegate.StopCauseTaskDispositioned)
+	// Taking a task onto a human's plate takes it off the agent's: stop any
+	// in-flight run and resolve every unresolved artifact the task holds.
+	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, discardOutcomeClaimed, delegate.StopCauseTaskDispositioned)
 	if jiraUserClient != nil {
 		s.syncJiraClaim(r, orgID, userID, id, jiraUserClient)
 	}
@@ -451,10 +451,10 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// Re-delegating is still a handoff off whatever was in flight: resolve the
-	// task's unresolved artifacts and cancel the running conversation before
+	// Re-delegating is still a handoff off whatever was in flight: stop the
+	// running conversation and resolve the task's unresolved artifacts before
 	// the new run starts.
-	s.teardownTaskConversations(r, orgID, userID, id, discardOutcomeRedelegated, delegate.StopCauseTaskDispositioned)
+	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, discardOutcomeRedelegated, delegate.StopCauseTaskDispositioned)
 
 	response := map[string]any{"status": newStatus}
 	if s.spawner != nil {
@@ -591,13 +591,14 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 // walked away" (dismiss) from "human resolved it" (complete) from "human took
 // over" (claim) from "re-delegate" from "still on the docket" (requeue).
 // Best-effort throughout.
-func (s *Server) teardownTaskConversations(r *http.Request, orgID, userID, id string, outcome discardOutcome, cause delegate.StopCause) {
-	// Teardown runs detached from r.Context() so a client disconnect after the
-	// response doesn't strand work: both the stop pass and the artifact
-	// teardown must complete regardless.
-	cleanupCtx := context.WithoutCancel(r.Context())
-	s.stopTaskConversations(cleanupCtx, orgID, userID, id, cause)
-	s.teardownTaskArtifacts(cleanupCtx, orgID, userID, id, outcome)
+//
+// ctx must already be detached from the request (context.WithoutCancel): a
+// client disconnect after the response must not leave a live agent running or
+// a GitHub draft stranded. The detach belongs to the caller because a caller
+// with further cleanup of its own needs every part of it on one context.
+func (s *Server) teardownTaskConversations(ctx context.Context, orgID, userID, id string, outcome discardOutcome, cause delegate.StopCause) {
+	s.stopTaskConversations(ctx, orgID, userID, id, cause)
+	s.teardownTaskArtifacts(ctx, orgID, userID, id, outcome)
 }
 
 // stopTaskConversations stops every active run on a task and cancels the

@@ -942,7 +942,7 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 	}
 	// Closing a task takes it off the agent's hands: stop any in-flight run
 	// and resolve every unresolved artifact it holds.
-	s.teardownTaskConversations(r, orgID, userID, id, outcome, delegate.StopCauseTaskDispositioned)
+	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, outcome, delegate.StopCauseTaskDispositioned)
 	s.broadcastTaskStatus(orgID, id, newStatus)
 	return true
 }
@@ -1184,14 +1184,14 @@ const (
 // detached cleanup carries the requesting user's identity without rereading a
 // (possibly nil-claimed) context post-cancel.
 func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, task *domain.Task) {
-	// Cleanup must outlive the request — the user already committed to
-	// requeueing via the surrounding /undo or /requeue handler, and bailing on
-	// browser close would leave a live agent running against a queued task.
-	// Both calls below detach: teardownTaskConversations does it internally,
-	// and WithoutCancel here inherits the request's values (claims among them)
-	// while breaking the cancel chain.
-	s.teardownTaskConversations(r, orgID, userID, taskID, discardOutcomeRequeued, delegate.StopCauseTaskRequeued)
-	s.revertJiraStateIfApplicable(context.WithoutCancel(r.Context()), orgID, userID, task)
+	// One context for the whole cleanup, and it outlives the request: the user
+	// already committed to requeueing via the surrounding /undo or /requeue
+	// handler, so bailing on browser close would leave a live agent running
+	// against a queued task. WithoutCancel inherits the request's values
+	// (claims among them) while breaking the cancel chain.
+	cleanupCtx := context.WithoutCancel(r.Context())
+	s.teardownTaskConversations(cleanupCtx, orgID, userID, taskID, discardOutcomeRequeued, delegate.StopCauseTaskRequeued)
+	s.revertJiraStateIfApplicable(cleanupCtx, orgID, userID, task)
 	// Requeue clears both claim cols and flips status to
 	// 'queued'. Peer Board sessions need a task_updated event to
 	// pull the card back into the Queued column; without this they
