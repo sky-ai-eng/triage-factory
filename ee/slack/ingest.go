@@ -19,28 +19,40 @@ import (
 // (composeThreadTitle) and the bot-outbound post title (mentionTitle).
 const slackTitleMaxRunes = 120
 
-// slackThreadTitle is the channel-less form of a thread entity's title,
-// written synchronously at ingest before the channel name resolves. A Slack
-// thread is a live conversation with no inherent name, and a single message's
-// text is the wrong grain for a card that outlives it (a thread accrues
-// follow-ups, each of which bumps the same task) — so the title names the
-// situation, not the opening message, and the async resolver (title.go)
-// upgrades it to "<this> in #<channel>" once the channel name is known. The
-// per-message content lives on each event's metadata_json; the message count
-// rides the task card as a badge.
+// slackThreadTitle is the anonymous form of a thread entity's title, written
+// synchronously at ingest before the author and channel names resolve. A
+// Slack thread is a live conversation with no inherent name, and a single
+// message's text is the wrong grain for a card that outlives it (a thread
+// accrues follow-ups, each of which bumps the same task) — so the title names
+// the situation, not the opening message, and the async resolver (title.go)
+// upgrades it to a "<author> in #<channel>" address once those names are
+// known. The per-message content lives on each event's metadata_json; the
+// message count rides the task card as a badge.
 const slackThreadTitle = "New thread messages"
 
-// composeThreadTitle appends the resolved channel name to slackThreadTitle:
-// "New thread messages in #general". An empty channelName (its lookup failed
-// or hasn't run) returns the channel-less form unchanged, so a caller can
-// detect "nothing to enrich" and skip the redundant write. Capped at
-// slackTitleMaxRunes so a pathologically long channel name can't unbound
-// the title.
-func composeThreadTitle(channelName string) string {
+// composeThreadTitle names a thread entity for the Board: who is waiting and
+// where, from the display names the async resolver (title.go) looked up.
+// There are exactly three outputs, the latter two being the anonymous forms
+// the entity was already seeded with:
+//
+//	author + channel → "Ada Lovelace in #general"
+//	channel alone    → "New thread messages in #general"
+//	neither          → "New thread messages"
+//
+// An author whose channel didn't resolve keeps the channel-less form rather
+// than composing half an address — a bare name says even less than the
+// anonymous sentence does. So an unenriched pair returns exactly what the
+// entity already carries, and the caller detects "nothing to enrich" by
+// comparing against it. Capped at slackTitleMaxRunes so a pathologically long
+// name can't make the title unbounded.
+func composeThreadTitle(author, channelName string) string {
 	if channelName == "" {
 		return slackThreadTitle
 	}
-	return truncateRunes(slackThreadTitle+" in #"+channelName, slackTitleMaxRunes)
+	if author == "" {
+		author = slackThreadTitle
+	}
+	return truncateRunes(author+" in #"+channelName, slackTitleMaxRunes)
 }
 
 // inboundMention is the transport-neutral shape both the Events API
@@ -104,9 +116,9 @@ type ingestPipeline struct {
 	// PermalinkResolver.dispatch. Nil-safe for the same reason as identity.
 	permalink *PermalinkResolver
 	// title upgrades a freshly-created thread entity's title into
-	// "New thread messages in #<channel>" once the channel name resolves,
-	// best-effort and detached — see TitleResolver.dispatch. Nil-safe for the
-	// same reason as identity.
+	// "<author> in #<channel>" once those display names resolve, best-effort
+	// and detached — see TitleResolver.dispatch. Nil-safe for the same reason
+	// as identity.
 	title *TitleResolver
 	// stats records each delivery's outcome (stats.go) — the message-volume
 	// counters TFAC-650's channel-firehose subscriptions made necessary.
@@ -201,10 +213,19 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 	if created && p.permalink != nil {
 		p.permalink.dispatch(ws, entity.ID, ev.Channel, root)
 	}
-	// Only on create, for the same reason: the channel name is resolved once
-	// and folded into the thread title, not re-derived per re-mention.
+	// Only on create, for the same reason: the author and channel names are
+	// resolved once and folded into the thread title, not re-derived per
+	// re-mention. kind decides which user the thread's author is — on a
+	// "thread" mention this message IS the root, so ev.User wrote it; on a
+	// "message" summons the root is someone else's and rootTS finds it.
 	if created && p.title != nil {
-		p.title.dispatch(ws, entity.ID, ev.Channel)
+		p.title.dispatch(ws, threadTitleRef{
+			entityID:    entity.ID,
+			channel:     ev.Channel,
+			rootTS:      root,
+			mentionUser: ev.User,
+			isRoot:      kind == "thread",
+		})
 	}
 
 	if err := p.publishMessage(ctx, ws, ev, entity.ID, true, occurredAt); err != nil {
