@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -939,9 +940,9 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 		writeTaskTerminal(w, "status")
 		return false
 	}
-	// Closing a task takes it off the agent's hands: resolve every unresolved
-	// artifact it holds and cancel any in-flight run.
-	s.teardownTaskConversations(r, orgID, userID, id, outcome)
+	// Closing a task takes it off the agent's hands: stop any in-flight run
+	// and resolve every unresolved artifact it holds.
+	s.teardownTaskConversations(r, orgID, userID, id, outcome, delegate.StopCauseTaskDispositioned)
 	s.broadcastTaskStatus(orgID, id, newStatus)
 	return true
 }
@@ -1142,14 +1143,25 @@ const (
 )
 
 // finalizeRequeue runs the side-effect cleanup that both /undo and
-// /requeue need after the task status flips back to queued:
+// /requeue need after the task status flips back to queued. Three steps, in
+// this order:
+//
+//   - stop: every run still working the task is stopped and the blueprint
+//     behind it cancelled. A requeued task is unclaimed and unowned, so an
+//     agent left executing against it keeps writing messages and landing
+//     artifacts on a task whose columns say nobody owns it — and the
+//     spawner's board-column recompute puts the card straight back out of
+//     Queued the moment it re-derives that agent's claim. The stop is what
+//     makes returning a live run to the queue safe, which is why the routes
+//     above take every status rather than guarding on one.
 //
 //   - artifact teardown: resolve every unresolved artifact the task's
 //     conversations hold (close all draft PRs, dismiss all pending reviews) and
 //     write the discard verdict to conversation_memory.human_content, so a
 //     returned-to-queue task leaves no stranded GitHub draft / pending
-//     review. Decoupled from conversation lifecycle — it never flips
-//     conversations.status.
+//     review. It rides inside teardownTaskConversations behind the stop, so it
+//     operates on settled conversations; it never flips conversations.status
+//     itself.
 //
 //   - Jira reversal: if the task is Jira-backed and we have a
 //     SourceStatus snapshot (recorded at claim time), unassign and
@@ -1158,37 +1170,35 @@ const (
 //     progressed out of the in-progress rule entirely (done, back to
 //     pickup, etc.).
 //
-// Both halves are best-effort and logged-not-failed: the task is
+// Every step is best-effort and logged-not-failed: the task is
 // already queued by the time we get here; failing the response would
 // confuse callers about what actually changed.
 //
-// taskID is taken separately from task because the artifact teardown
-// only needs the id — running it under a nil-task short-circuit (e.g.
-// when db.GetTask transiently fails or the task row was deleted
-// concurrently) would silently strand the very state this helper is
-// meant to clean up. Jira reversal needs the loaded row so it
-// nil-guards internally.
+// taskID is taken separately from task because only the Jira reversal needs
+// the loaded row, and it nil-guards internally — short-circuiting the whole
+// helper on a nil task (db.GetTask transiently failing, or the row deleted
+// concurrently) would silently strand the very state this is meant to clean
+// up.
 //
-// orgID + userID are captured BEFORE the goroutine launches so the
-// detached cleanup context inherits the requesting user's identity
-// without rereading the (possibly nil-claimed) context post-cancel.
+// orgID + userID are passed rather than re-read from the request so the
+// detached cleanup carries the requesting user's identity without rereading a
+// (possibly nil-claimed) context post-cancel.
 func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, task *domain.Task) {
-	// Cleanup must outlive the request — the user already committed
-	// to requeueing via the surrounding /undo or /requeue handler,
-	// and bailing on browser close would strand an unresolved GitHub
-	// draft / pending review. WithoutCancel inherits values from
-	// r.Context() (D9 will put request claims there) while breaking
-	// the cancel chain.
-	cleanupCtx := context.WithoutCancel(r.Context())
-	s.teardownTaskArtifacts(cleanupCtx, orgID, userID, taskID, discardOutcomeRequeued)
-	s.revertJiraStateIfApplicable(cleanupCtx, orgID, userID, task)
+	// Cleanup must outlive the request — the user already committed to
+	// requeueing via the surrounding /undo or /requeue handler, and bailing on
+	// browser close would leave a live agent running against a queued task.
+	// Both calls below detach: teardownTaskConversations does it internally,
+	// and WithoutCancel here inherits the request's values (claims among them)
+	// while breaking the cancel chain.
+	s.teardownTaskConversations(r, orgID, userID, taskID, discardOutcomeRequeued, delegate.StopCauseTaskRequeued)
+	s.revertJiraStateIfApplicable(context.WithoutCancel(r.Context()), orgID, userID, task)
 	// Requeue clears both claim cols and flips status to
 	// 'queued'. Peer Board sessions need a task_updated event to
 	// pull the card back into the Queued column; without this they
 	// keep showing the stale claim/status until the next refresh.
-	// teardownTaskArtifacts no longer broadcasts a conversation-status change
-	// (a resolve is decoupled from conversation lifecycle), so this is the sole
-	// board-update signal for a requeue.
+	// Nothing above broadcasts a task-level change — the stop's events are
+	// per-conversation and a resolve is decoupled from conversation lifecycle
+	// — so this is the sole board-update signal for a requeue.
 	if s.ws != nil {
 		s.ws.Broadcast(websocket.Event{
 			Type:  "task_updated",
@@ -1206,10 +1216,9 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 // pending review (finalized or not) has its GitHub pending review deleted +
 // flipped to dismissed. Pushed branches are kept (retention is separate).
 //
-// Decoupled from conversation lifecycle (TFAC-379): this never flips
-// conversations.status. A live conversation is cancelled by the caller
-// (swipeTeardownConversations' spawner.Cancel pass) — the process teardown owns
-// that transition; a terminal conversation simply stays terminal. Keyed on the
+// This never flips conversations.status. A live conversation is stopped by
+// teardownTaskConversations one step ahead of this pass, which owns that
+// transition; a terminal conversation simply stays terminal. Keyed on the
 // task's conversations (ListForTask spans the blueprint's step conversations and
 // any standalone conversation) rather than on a conversation status.
 //
