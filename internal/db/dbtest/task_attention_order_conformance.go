@@ -71,10 +71,12 @@ type TaskAttentionOrderSeeder struct {
 // The pressure is on two things. First that the tier outranks priority: every
 // fixture here carries a priority that would order the lane differently, so a
 // tier that silently stopped applying would show up as the priority order
-// rather than as an empty result. Second that it is GATED — the Done column
-// reads recency, and a closure still holding a draft pull request matches the
-// needs-you predicate, so a tier that leaked onto that lane would quietly
-// reorder it.
+// rather than as an empty result. Second that it never reaches a closed row —
+// a closure still holding a draft pull request matches the needs-you predicate,
+// and the tier is read before the recency term, so the terminal tail is where
+// this would go wrong. Two subtests cover that from both ends: a `done`-only
+// read, and the mixed read where the tier is live for the open rows in the same
+// statement.
 func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory) {
 	t.Helper()
 	ctx := context.Background()
