@@ -330,6 +330,24 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 	return tasks, total, nil
 }
 
+// FacetEventTypes mirrors the SQLite impl: the same WHERE List renders, so
+// the counts and the rows beneath them can never come from two predicates.
+func (s *taskStore) FacetEventTypes(ctx context.Context, orgID string, f db.TaskListFilter) ([]db.Facet, error) {
+	where, args := pgTaskListWhere(orgID, f)
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT t.event_type, COUNT(*)
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
+		WHERE `+where+`
+		GROUP BY t.event_type
+		ORDER BY t.event_type ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return db.ScanFacets(rows)
+}
+
 func (s *taskStore) FindActiveByEntityAndType(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error) {
 	return findActiveTasksByEntityAndType(ctx, s.q, orgID, entityID, eventType)
 }

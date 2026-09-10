@@ -1041,6 +1041,11 @@ func (s *Server) routes() {
 	// hidden filters. apiMutating is deliberate for a body-carrying read — see
 	// handleTaskList.
 	s.apiMutating("POST /api/tasks/list", s.handleTaskList)
+	// The lane's own event-type set, beside the list and under the same
+	// filters minus the reader's own — the chips a lane offers are about the
+	// lane, not about the page a filtered query happened to return. A POST
+	// for the same reason the list is: the filter is a structured body.
+	s.apiMutating("POST /api/tasks/facets", s.handleTaskFacets)
 	s.api("GET /api/tasks/{id}", s.handleTaskGet)
 	// The task's field-write path: the lifecycle axis and the wake time are
 	// columns, so they are PATCHed rather than given a route per value — a
