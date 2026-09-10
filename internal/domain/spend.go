@@ -25,10 +25,18 @@ const (
 // SpendRow is one row from the llm_spend view — a single unit of settled LLM
 // spend from either source. Read-only; assembled by db.SpendStore.
 //
-// Settled-spend semantics: TotalCostUSD and the four token counts are 0 for an
-// in-flight (non-terminal) delegated conversation and carry their real values
-// once a terminal write lands (normal completion, cancel, infra-failure, or a
-// boot-time orphan sweep). System rows are always terminal.
+// A 'run' row is one message, and TotalCostUSD is what that row carries —
+// which depends on the runtime that wrote it. The native loop prices every
+// assistant row at call time, so its rows carry cost while the engagement
+// is still running and the token counts beside it are that row's own. The
+// SDK runtime reports one process-wide total instead, settled as a single
+// lump on the engagement's newest own row when the engagement lets go of the
+// conversation — a park (idle, pause, cancel) or a terminal write
+// (completion, infra-failure, a boot-time orphan sweep) — so its other rows
+// read 0 and its lump row carries the whole engagement. Either way the
+// conversation's spend is the SUM over its rows, and a parked-and-resumed
+// conversation is the sum of its engagements. System rows are always
+// terminal.
 //
 // Nullable columns are pointers: TeamID is set only for 'run' rows (system
 // rows are org-level); Subtype carries the job name for system rows (NULL

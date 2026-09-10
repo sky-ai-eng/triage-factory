@@ -187,10 +187,10 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// just on a fence trip: a cancel is a park now, so the worktree stays as
 	// the warm resume cache exactly like an idle hibernation's does.
 	//
-	// sessionID rides in from the caller because it is only known once the
-	// agent has actually started — the pre-launch cancel below passes "" and
-	// snapshots a workspace with no transcript to carry.
-	cancelled := func(sessionID string) bool {
+	// sessionID and costUSD ride in from the caller because they are only
+	// known once the agent has actually started — the pre-launch cancel below
+	// passes "" and 0 and snapshots a workspace with no transcript to carry.
+	cancelled := func(sessionID string, costUSD float64) bool {
 		fenced := s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
@@ -202,6 +202,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			claimID:        cfg.claimID,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 			runtime:        domain.ConversationRuntimeSDK,
+			costUSD:        costUSD,
 		}, sessionID)
 		parked = true
 		return fenced
@@ -438,7 +439,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// bring-up parks here without ever asking the fence — the refusal below is
 	// then reserved for a claim that went away with no cancel behind it.
 	if ctx.Err() != nil {
-		return cancelled("")
+		return cancelled("", 0)
 	}
 	if s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting) {
 		// Fenced out before the runtime came up: nothing to write, no process
@@ -719,7 +720,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 
 	if out.err != nil {
 		if ctx.Err() != nil {
-			return cancelled(out.sessionID)
+			return cancelled(out.sessionID, out.costUSD)
 		}
 		return fail(fmt.Sprintf("%v\nstderr: %s", out.err, out.stderr), classifyFailureKind(out.err))
 	}
@@ -832,6 +833,7 @@ func (s *Spawner) processCompletion(
 			claimID:        claimID,
 			reason:         db.ParkIdle(),
 			runtime:        domain.ConversationRuntimeSDK,
+			costUSD:        completion.CostUSD,
 		}, sessionID)
 		return true, fencedOut
 	}

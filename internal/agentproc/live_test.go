@@ -127,6 +127,31 @@ func TestConsumeStreamInteractive_InterruptMarksResult(t *testing.T) {
 	}
 }
 
+// TestConsumeStreamInteractive_FoldTakesNewestRunningTotal pins the
+// accounting the merged result hands the driver: the SDK's total_cost_usd is
+// a process-wide running total on every result, so after two turns
+// reporting 0.10 then 0.30 the process spent 0.30. Each per-turn result
+// still reaches OnResult with its own wire figure.
+func TestConsumeStreamInteractive_FoldTakesNewestRunningTotal(t *testing.T) {
+	input := strings.Join([]string{
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_ms":1000,"total_cost_usd":0.10,"result":"one"}`,
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_ms":2600,"total_cost_usd":0.30,"result":"two"}`,
+	}, "\n") + "\n"
+
+	var got []*Result
+	l := &LiveRun{ready: make(chan struct{}), done: make(chan struct{})}
+	merged, err := l.consumeStreamInteractive(strings.NewReader(input), NoopSink{}, NewStreamState(), nil, func(r *Result) { got = append(got, r) }, "t")
+	if err != nil {
+		t.Fatalf("consumeStreamInteractive: %v", err)
+	}
+	if len(got) != 2 || got[0].CostUSD != 0.10 || got[1].CostUSD != 0.30 {
+		t.Fatalf("per-turn results must carry their own wire figures, got %+v", got)
+	}
+	if merged == nil || merged.CostUSD != 0.30 || merged.DurationMs != 2600 || merged.NumTurns != 2 {
+		t.Errorf("merged accounting must be the newest running total, got %+v", merged)
+	}
+}
+
 // TestLiveRun_QueuedTurnsCountSendsAgainstResults pins the reading the driver
 // takes at a turn boundary: every Send is a turn the process owes and every
 // result settles one, so the count is exactly the turns still to come. Two

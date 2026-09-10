@@ -64,32 +64,16 @@ func releaseActiveClaim(ctx context.Context, q queryer, conversationID, outcome 
 	return err
 }
 
-// completeConversationReturning does the terminal write Complete/CompleteSystem/
-// CompleteForClaimSystem all share, in the order the RETURNING contract needs:
-// the cost lump and the claim release run FIRST, and the conversations flip —
-// with the full Get-shaped RETURNING — runs LAST. The derived columns
-// (total_cost_usd, duration_ms, num_turns, executor_id) are correlated
-// subqueries over messages/claims, so the only way their values in the
-// returned row agree with a follow-up Get is for those tables to already
-// carry their final state by the time this statement runs. Same final
-// persisted data as the original top-to-bottom order — only the statement
-// order within the transaction changed.
-func completeConversationReturning(ctx context.Context, q queryer, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
-	// The active claim this terminal write releases identifies the
-	// engagement's own message rows (they insert claim-stamped), so
-	// the lump settles claim-keyed — every claim release's shape.
-	// Read before the release below: a released claim is no longer
-	// findable.
-	var claimID string
-	err := q.QueryRowContext(ctx, `
-		SELECT id FROM claims WHERE conversation_id = ? AND released_at IS NULL
-	`, conversationID).Scan(&claimID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
-	}
+// settleClaimCostLump lands one engagement's reported spend on the messages
+// ledger, the only spend record there is. claimID is the engagement whose rows
+// the lump belongs to — the active claim at a terminal write, the parking
+// claim at a park — and may already be released: the rows still carry it.
+// Shared by the terminal write and SettleClaimCostSystem so a park and a
+// completion settle by exactly one rule.
+func settleClaimCostLump(ctx context.Context, q queryer, conversationID, claimID string, costUSD float64) error {
 	settled := false
 	// A zero lump settles nothing, in either arm. Zero means the runtime
-	// had nothing to report at terminal time: the native loop settles
+	// had nothing to report when it wrote: the native loop settles
 	// spend per assistant row as it goes, and overwriting its newest
 	// stamp with 0 would erase real recorded dollars. An SDK invocation
 	// that reports zero leaves its rows NULL — price unknown — rather
@@ -119,11 +103,11 @@ func completeConversationReturning(ctx context.Context, q queryer, conversationI
 			            LIMIT 1)
 		`, costUSD, conversationID, claimID, domain.ModelSynthetic, domain.ModelSynthetic)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		settled = n > 0
 	}
@@ -158,11 +142,11 @@ func completeConversationReturning(ctx context.Context, q queryer, conversationI
 			            LIMIT 1)
 		`, costUSD, conversationID, conversationID, domain.ModelSynthetic, domain.ModelSynthetic)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if n == 0 {
 			// No message rows at all: the spend has no ledger row to
@@ -171,6 +155,35 @@ func completeConversationReturning(ctx context.Context, q queryer, conversationI
 			conversationLog.Warn("conversation cost has no message row to settle on; spend unrecorded",
 				"conversation_id", conversationID, "cost_usd", costUSD)
 		}
+	}
+	return nil
+}
+
+// completeConversationReturning does the terminal write Complete/CompleteSystem/
+// CompleteForClaimSystem all share, in the order the RETURNING contract needs:
+// the cost lump and the claim release run FIRST, and the conversations flip —
+// with the full Get-shaped RETURNING — runs LAST. The derived columns
+// (total_cost_usd, duration_ms, num_turns, executor_id) are correlated
+// subqueries over messages/claims, so the only way their values in the
+// returned row agree with a follow-up Get is for those tables to already
+// carry their final state by the time this statement runs. Same final
+// persisted data as the original top-to-bottom order — only the statement
+// order within the transaction changed.
+func completeConversationReturning(ctx context.Context, q queryer, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
+	// The active claim this terminal write releases identifies the
+	// engagement's own message rows (they insert claim-stamped), so
+	// the lump settles claim-keyed — every claim release's shape.
+	// Read before the release below: a released claim is no longer
+	// findable.
+	var claimID string
+	err := q.QueryRowContext(ctx, `
+		SELECT id FROM claims WHERE conversation_id = ? AND released_at IS NULL
+	`, conversationID).Scan(&claimID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if err := settleClaimCostLump(ctx, q, conversationID, claimID, costUSD); err != nil {
+		return nil, err
 	}
 	if _, err := q.ExecContext(ctx, `
 		UPDATE claims SET released_at = ?, outcome = ?, duration_ms = ?, num_turns = ?
@@ -1376,6 +1389,18 @@ func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context
 		return false, err
 	}
 	return flipped, nil
+}
+
+func (s *conversationStore) SettleClaimCostSystem(ctx context.Context, orgID, conversationID, claimID string, costUSD float64) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	if claimID == "" {
+		return errors.New("settle claim cost: claim id required")
+	}
+	return inTx(ctx, s.q, func(q queryer) error {
+		return settleClaimCostLump(ctx, q, conversationID, claimID, costUSD)
+	})
 }
 
 func (s *conversationStore) ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park db.Park) (bool, error) {

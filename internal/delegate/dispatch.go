@@ -989,6 +989,9 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		// the work survives the gesture.
 		park := resumeParkContext(orgID, conv, task, userID)
 		park.namespace, park.claudeCwd = namespace, resumeCwd
+		if outcome != nil {
+			park.costUSD = outcome.CostUSD
+		}
 		disposed = s.parkConversationOpen(ctx, park, conv.SessionID)
 		return
 	}

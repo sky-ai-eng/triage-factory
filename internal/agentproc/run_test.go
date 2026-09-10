@@ -97,8 +97,9 @@ func TestConsumeStream_HandlesOversizedToolResult(t *testing.T) {
 // regression: the interactive reader must NOT stop at the first result
 // the way one-shot consumeStream does. A canned two-turn stream
 // (ready + init + assistant + result, twice) must deliver both assistant
-// messages and fold both results into one (cost/turns summed), and the
-// ready signal must fire.
+// messages and fold both results into one — the accounting the process's
+// newest running total, as the wire carries it — and the ready signal must
+// fire.
 func TestConsumeStreamInteractive_MultiTurn(t *testing.T) {
 	stream := strings.Join([]string{
 		`{"type":"control","subtype":"ready"}`,
@@ -108,7 +109,7 @@ func TestConsumeStreamInteractive_MultiTurn(t *testing.T) {
 		`{"type":"result","subtype":"success","is_error":false,"duration_ms":10,"num_turns":1,"total_cost_usd":0.01,"stop_reason":"end_turn","result":"one"}`,
 		`{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"second"}]}}`,
 		`{"type":"assistant","message":{"id":"m2","stop_reason":"end_turn","content":[]}}`,
-		`{"type":"result","subtype":"success","is_error":false,"duration_ms":20,"num_turns":1,"total_cost_usd":0.02,"stop_reason":"end_turn","result":"two"}`,
+		`{"type":"result","subtype":"success","is_error":false,"duration_ms":30,"num_turns":2,"total_cost_usd":0.03,"stop_reason":"end_turn","result":"two"}`,
 		"",
 	}, "\n")
 
@@ -122,12 +123,13 @@ func TestConsumeStreamInteractive_MultiTurn(t *testing.T) {
 		t.Fatal("expected a folded terminal Result, got nil")
 	}
 
-	// Both turns folded.
+	// Both turns folded: the second result's running totals are the whole
+	// process's.
 	if result.NumTurns != 2 {
-		t.Errorf("NumTurns = %d, want 2 (results not folded)", result.NumTurns)
+		t.Errorf("NumTurns = %d, want 2 (newest running total)", result.NumTurns)
 	}
 	if result.CostUSD != 0.03 {
-		t.Errorf("CostUSD = %v, want 0.03 (results not folded)", result.CostUSD)
+		t.Errorf("CostUSD = %v, want 0.03 (newest running total)", result.CostUSD)
 	}
 	if result.Result != "two" {
 		t.Errorf("Result = %q, want two (resume text should win)", result.Result)

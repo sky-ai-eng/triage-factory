@@ -609,10 +609,11 @@ func TestDriveLiveConversation_InterruptBoundedResumeParksOpen(t *testing.T) {
 // deliberately sticky across turns, so a benign interrupted (pause) turn
 // earlier in the conversation infects the accounting fold — the disposition
 // processCompletion acts on must come from the turn the driver classified,
-// with only cost/duration/turns taken cumulatively.
+// with only cost/duration/turns taken from the fold, which carries the
+// process's newest running total.
 func TestFoldAccounting_PauseDoesNotPoisonConclusion(t *testing.T) {
 	pause := &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true, CostUSD: 0.25, DurationMs: 1000, NumTurns: 15}
-	conclusion := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`, Subtype: "success", CostUSD: 0.5, DurationMs: 500, NumTurns: 5}
+	conclusion := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`, Subtype: "success", CostUSD: 0.75, DurationMs: 1500, NumTurns: 20}
 	merged := agentproc.MergeResult(pause, conclusion)
 	if !merged.IsError || !merged.Interrupted {
 		t.Fatal("precondition: MergeResult keeps IsError/Interrupted sticky across turns")
@@ -626,9 +627,105 @@ func TestFoldAccounting_PauseDoesNotPoisonConclusion(t *testing.T) {
 		t.Errorf("classified turn's envelope/subtype must survive the fold: %+v", got)
 	}
 	if got.CostUSD != 0.75 || got.DurationMs != 1500 || got.NumTurns != 20 {
-		t.Errorf("accounting must be cumulative: cost=%v dur=%v turns=%v", got.CostUSD, got.DurationMs, got.NumTurns)
+		t.Errorf("accounting must be the process's running total: cost=%v dur=%v turns=%v", got.CostUSD, got.DurationMs, got.NumTurns)
 	}
-	if conclusion.CostUSD != 0.5 {
+	if conclusion.CostUSD != 0.75 {
 		t.Error("foldAccounting must not mutate the classified result in place")
+	}
+}
+
+// TestDriveLiveConversation_IdleParkSettlesProcessSpend: a run that goes
+// dormant carries what its process reported spending into the park, settled
+// as this engagement's lump on its own claim's row — so the ledger, and every
+// usage read over it, counts the run from the moment it parks rather than
+// from whenever a later resume concludes.
+func TestDriveLiveConversation_IdleParkSettlesProcessSpend(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-idle-spend", "sess-idle-spend", "/tmp/wt-idle-spend")
+	claimID := markEngaged(t, database, "r-idle-spend")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+
+	msgID, err := s.conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+		ConversationID: "r-idle-spend", Role: "assistant", Content: "working…", Model: "claude-sonnet-4-6", ClaimID: claimID,
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+	var taskID string
+	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id='r-idle-spend'`).Scan(&taskID); err != nil {
+		t.Fatalf("read task_id: %v", err)
+	}
+	proc := newFakeLiveProc("sess-idle-spend")
+	proc.result = &agentproc.Result{CostUSD: 0.42, NumTurns: 2}
+	park := liveParkContext{
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-idle-spend", taskID: taskID,
+		namespace: "seedbpr-r-idle-spend", claudeCwd: "/tmp/wt-idle-spend",
+		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID, claimID: claimID,
+	}
+
+	out := s.driveLiveConversation(context.Background(), park, proc, make(chan *agentproc.Result), make(chan struct{}), 20*time.Millisecond)
+
+	if !out.hibernated {
+		t.Fatalf("expected hibernation, got %+v", out)
+	}
+	if out.costUSD != 0.42 {
+		t.Errorf("outcome costUSD = %v, want 0.42 (the process's reported total)", out.costUSD)
+	}
+	var stamped sql.NullFloat64
+	if err := database.QueryRow(`SELECT cost_usd FROM messages WHERE id = ?`, msgID).Scan(&stamped); err != nil {
+		t.Fatalf("read cost_usd: %v", err)
+	}
+	if !stamped.Valid || stamped.Float64 != 0.42 {
+		t.Errorf("claim row cost_usd = %+v, want 0.42 settled at park", stamped)
+	}
+	var status string
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-idle-spend'`).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "open" {
+		t.Errorf("status = %q, want open", status)
+	}
+}
+
+// TestDriveLiveConversation_FencedParkStillSettlesSpend pins the ordering
+// the deliberate stop depends on: control parks the row and releases the
+// claim first, so the killed engagement's own park is refused — and its
+// spend, which nothing else holds, must land on its claim's row anyway.
+func TestDriveLiveConversation_FencedParkStillSettlesSpend(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-fenced-spend", "sess-fenced-spend", "/tmp/wt-fenced-spend")
+	claimID := markEngaged(t, database, "r-fenced-spend")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+
+	msgID, err := s.conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+		ConversationID: "r-fenced-spend", Role: "assistant", Content: "working…", Model: "claude-sonnet-4-6", ClaimID: claimID,
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
+
+	proc := newFakeLiveProc("sess-fenced-spend")
+	proc.result = &agentproc.Result{CostUSD: 0.31}
+	park := liveParkContext{
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-fenced-spend",
+		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID, claimID: claimID,
+	}
+
+	out := s.driveLiveConversation(context.Background(), park, proc, make(chan *agentproc.Result), make(chan struct{}), 20*time.Millisecond)
+
+	if !out.fenced {
+		t.Fatalf("expected the fenced park to report fenced, got %+v", out)
+	}
+	if stub.cancels != 1 {
+		t.Errorf("fenced park writes = %d, want 1", stub.cancels)
+	}
+	var stamped sql.NullFloat64
+	if err := database.QueryRow(`SELECT cost_usd FROM messages WHERE id = ?`, msgID).Scan(&stamped); err != nil {
+		t.Fatalf("read cost_usd: %v", err)
+	}
+	if !stamped.Valid || stamped.Float64 != 0.31 {
+		t.Errorf("claim row cost_usd = %+v, want 0.31 settled despite the refused park", stamped)
 	}
 }

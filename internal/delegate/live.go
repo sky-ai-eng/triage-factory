@@ -73,6 +73,12 @@ type liveParkContext struct {
 	// reason is why: db.ParkIdle() for a turn that simply ended,
 	// db.ParkStopped(...) for a cancel. See ConversationStore.ParkOpen.
 	reason db.Park
+	// costUSD is the spend this engagement's process reported — the SDK's
+	// running total for the process, which is this claim's own figure since a
+	// fresh process starts at zero — settled on the claim's rows before the
+	// flip (see settleEngagementSpend). Zero settles nothing: the native
+	// driver prices each assistant row as it goes and always passes zero.
+	costUSD float64
 	// runtime is the conversation's engine, for the workspace-snapshot span
 	// family (see snapshotWorkspace). Each construction site states it from
 	// what it structurally is — the SDK and native drivers each build their
@@ -107,6 +113,10 @@ type liveOutcome struct {
 	hibernated bool
 	fenced     bool
 	err        error
+	// costUSD is the process's reported spend on every exit, result or not —
+	// the cancelled path parks with it, since a killed engagement reports its
+	// total nowhere else. A dormant exit has already settled it in the park.
+	costUSD float64
 }
 
 // liveRunSpec bundles everything runLiveAndDrive needs to spawn, register,
@@ -177,6 +187,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	// the caller's completion + failure paths.
 	out.sessionID = lr.SessionID()
 	out.stderr = lr.Stderr()
+	out.costUSD = processSpend(lr)
 	// The driver hands back the per-turn result it decided on; the live process
 	// folds every turn (pause turns, re-prompt corrections, the conclusion)
 	// into its merged Result. Take ONLY the accounting fields from that fold —
@@ -194,7 +205,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 }
 
 // foldAccounting returns the classified turn's result carrying the
-// conversation-cumulative accounting (cost, duration, turns) from the merged
+// process-cumulative accounting (cost, duration, turns) from the merged
 // fold. Everything else — the disposition processCompletion acts on — is the
 // classified turn's own.
 func foldAccounting(classified, merged *agentproc.Result) *agentproc.Result {
@@ -203,6 +214,18 @@ func foldAccounting(classified, merged *agentproc.Result) *agentproc.Result {
 	r.DurationMs = merged.DurationMs
 	r.NumTurns = merged.NumTurns
 	return &r
+}
+
+// processSpend is the spend a live process has reported so far: the running
+// total the newest turn-end carried, zero before the first. Read at the
+// moment the driver lets go of the process — an idle or paused park, a
+// cancel — so the engagement's figure rides into the park rather than dying
+// with the process.
+func processSpend(proc liveProc) float64 {
+	if r := proc.Result(); r != nil {
+		return r.CostUSD
+	}
+	return 0
 }
 
 // driveLiveConversation is the select loop that resolves a live process into a
@@ -279,10 +302,11 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 					continue
 				}
 				_ = proc.Close()
+				park.costUSD = processSpend(proc)
 				if s.parkConversationOpen(ctx, park, proc.SessionID()) {
-					return liveOutcome{fenced: true}
+					return liveOutcome{fenced: true, costUSD: park.costUSD}
 				}
-				return liveOutcome{hibernated: true}
+				return liveOutcome{hibernated: true, costUSD: park.costUSD}
 			}
 			// An IsError result (max-turns, runtime error) is terminal
 			// regardless of envelope shape — hand it back; processCompletion
@@ -343,10 +367,11 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 			// has stopped producing. Close it and park the run open to a
 			// durable resume.
 			_ = proc.Close()
+			park.costUSD = processSpend(proc)
 			if s.parkConversationOpen(ctx, park, proc.SessionID()) {
-				return liveOutcome{fenced: true}
+				return liveOutcome{fenced: true, costUSD: park.costUSD}
 			}
-			return liveOutcome{hibernated: true}
+			return liveOutcome{hibernated: true, costUSD: park.costUSD}
 
 		case <-proc.Done():
 			// The process exited on its own (crash, or a Close from elsewhere).
@@ -482,6 +507,13 @@ func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext
 	willSnapshot := park.claudeCwd != "" && park.namespace != "" && s.Storage() != nil
 	leaseHeld := willSnapshot && s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)
 
+	// Spend lands BEFORE the flip: the `open` broadcast is what makes every
+	// watcher refetch, and the figure has to be on the ledger by then. It
+	// also lands whether or not the flip is refused — a fenced park after a
+	// deliberate stop is the ordinary case, and the engagement is still the
+	// only holder of what its process spent.
+	s.settleEngagementSpend(snapCtx, park)
+
 	fenced = s.markConversationOpen(ctx, park)
 	if fenced && leaseHeld && park.reason.Deliberate {
 		// The one refusal whose `open` is real: control parked this row on the
@@ -518,6 +550,28 @@ func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext
 	return false
 }
 
+// settleEngagementSpend records what the parking engagement's process
+// reported as spent, keyed to its claim, so a run that goes dormant counts
+// toward the usage reads and the daily caps from the moment it parks rather
+// than from whenever a resume happens to conclude. The SDK's figure is a
+// per-process total and a resumed process starts at zero, so each
+// engagement's lump is its own and engagements add on the ledger; the
+// resumed claim's terminal write settles only its own row.
+//
+// Only a claim-holding engagement has a claim to key on, and only a figure
+// above zero is a report at all (the native driver passes zero by design).
+// Best-effort like the snapshot beside it: a failed settle is logged, never
+// a reason to hold up the park. Nil-safe for the no-DB driver tests.
+func (s *Spawner) settleEngagementSpend(ctx context.Context, park liveParkContext) {
+	if s.conversations == nil || park.claimID == "" || park.costUSD == 0 {
+		return
+	}
+	if err := s.conversations.SettleClaimCostSystem(ctx, park.orgID, park.conversationID, park.claimID, park.costUSD); err != nil {
+		delegateLog.Warn("settle engagement spend at park failed; spend unrecorded",
+			"conversation", park.conversationID, "claim_id", park.claimID, "cost_usd", park.costUSD, "error", err)
+	}
+}
+
 // runOneShot wraps the blocking one-shot agentproc.Run into the shared
 // liveOutcome shape. The fallback backend for hosts where interactive runs
 // aren't supported yet (multi-mode gVisor sandbox); behavior is byte-for-byte
@@ -529,6 +583,9 @@ func (s *Spawner) runOneShot(ctx context.Context, opts agentproc.RunOptions, sin
 		out.result = outcome.Result
 		out.sessionID = outcome.SessionID
 		out.stderr = outcome.Stderr
+		if outcome.Result != nil {
+			out.costUSD = outcome.Result.CostUSD
+		}
 	}
 	return out
 }

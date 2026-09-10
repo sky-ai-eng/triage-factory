@@ -339,6 +339,9 @@ type ResumeOutcome struct {
 	Completion *agentproc.Result
 	Result     *agentResult
 	StderrText string
+	// CostUSD is what the resumed process reported spending, carried even
+	// when there is no Completion — a resume stopped mid-turn parks with it.
+	CostUSD float64
 }
 
 // ResumeWithMessage resumes a prior headless claude session with a new
@@ -568,6 +571,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	outcome := &ResumeOutcome{}
 	outcome.Completion = out.result
 	outcome.StderrText = out.stderr
+	outcome.CostUSD = out.costUSD
 	if out.result != nil {
 		outcome.Result = parseAgentResult(out.result.Result)
 	}
