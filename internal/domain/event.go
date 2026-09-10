@@ -240,3 +240,17 @@ func EventSources() []string {
 	sort.Strings(out)
 	return out
 }
+
+// EventTypeIDs returns the catalog's event-type ids, sorted. It is the
+// validation set for the event_type filters on list reads — derived from
+// AllEventTypes so a new type joins it by existing in the catalog rather than
+// by a parallel list, exactly as EventSources does for the source axis.
+func EventTypeIDs() []string {
+	all := AllEventTypes()
+	out := make([]string, 0, len(all))
+	for _, et := range all {
+		out = append(out, et.ID)
+	}
+	sort.Strings(out)
+	return out
+}

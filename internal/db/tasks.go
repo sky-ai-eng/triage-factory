@@ -103,10 +103,32 @@ var TaskListStatuses = []string{
 //     Unlike ClosedSince it applies to every status — "tasks created this
 //     week" is a question about the flow, not the terminal tail. Combined
 //     with a count-only page it is the "tasks · N days" figure.
+//   - CreatedBefore: the upper half of the same window — only tasks whose
+//     created_at is at or before it. Independent of CreatedSince; either,
+//     both or neither.
 //   - Sources: when non-empty, only tasks whose entity came from one of
 //     these sources (entities.source — the event catalog's vocabulary,
 //     domain.EventSources). The list already joins entities, so the filter
 //     narrows on the joined column rather than prefix-matching event_type.
+//   - EventTypes: when non-empty, only tasks at one of these stations
+//     (tasks.event_type — domain.EventTypeIDs). Empty = every station.
+//   - Search: a case-insensitive substring the row must carry in one of four
+//     fields — the entity's title or source_id, the task's ai_summary or
+//     event_type. A filter, not a ranked search: a row either holds the
+//     needle somewhere or it doesn't. The needle is matched literally, so a
+//     '%' in it means a percent sign rather than "anything".
+//
+// Sort names the ordering the *reader* asked for, and is the one part of the
+// order a caller may move (see TaskListSortKeys):
+//
+//   - SortKey: empty = the store's default order, which is the only order
+//     that carries the queue's own priority. A key replaces the preference
+//     terms of that order, never its lane structure — snoozed still sorts
+//     behind live, closed behind open, and the id tiebreaker still ends it.
+//   - SortDir: TaskSortDirAsc or TaskSortDirDesc, applying to SortKey alone.
+//     Empty alongside a key means descending. It is meaningless without a
+//     key — the default order has no direction to flip — and the HTTP layer
+//     refuses that combination rather than silently ignoring it.
 type TaskListFilter struct {
 	Statuses       []string
 	TeamIDs        []string
@@ -114,8 +136,38 @@ type TaskListFilter struct {
 	IncludeSnoozed bool
 	ClosedSince    *time.Time
 	CreatedSince   *time.Time
+	CreatedBefore  *time.Time
 	Sources        []string
+	EventTypes     []string
+	Search         string
+	SortKey        string
+	SortDir        string
 }
+
+// The task-list sort vocabulary: the keys a reader may order a lane by, and
+// the two directions. Each key names a value the card actually shows, which
+// is what keeps "sorted by title" checkable against the rendered column.
+const (
+	TaskSortTitle     = "title"
+	TaskSortCreated   = "created"
+	TaskSortEventType = "event_type"
+	// TaskSortClaimee orders by the claimant's display name — the agent's
+	// when a bot holds the task, the user's otherwise. Unclaimed rows sort
+	// last in BOTH directions: "nobody" is not a name that should lead an
+	// ascending list.
+	TaskSortClaimee = "claimee"
+
+	TaskSortDirAsc  = "asc"
+	TaskSortDirDesc = "desc"
+)
+
+// TaskListSortKeys is the full vocabulary TaskListFilter.SortKey accepts.
+// Empty is not a member: absent is how a caller asks for the default order,
+// so there is no "default" spelling to collide with a real key.
+var TaskListSortKeys = []string{TaskSortTitle, TaskSortCreated, TaskSortEventType, TaskSortClaimee}
+
+// TaskListSortDirs is the full vocabulary TaskListFilter.SortDir accepts.
+var TaskListSortDirs = []string{TaskSortDirAsc, TaskSortDirDesc}
 
 // TaskStore owns the tasks table — lifecycle, claims, dedup,
 // swipe-triggered transitions, plus the conversation-history queries that
@@ -169,11 +221,14 @@ type TaskStore interface {
 	// count the same filters match, not the page length), both computed
 	// on the same connection so a caller's page and total agree.
 	//
-	// See TaskListFilter for what the filters mean. Ordering is fixed and
-	// total (TaskListOrder): live before snoozed, open before closed,
-	// newest-closed first among closed, then the matching event_handler
-	// rule's sort_order, then priority_score DESC, then id — the id
-	// tiebreaker is what makes offset paging return each row exactly once.
+	// See TaskListFilter for what the filters mean. The default ordering
+	// is total: live before snoozed, open before closed, newest-closed
+	// first among closed, then the matching event_handler rule's
+	// sort_order, then priority_score DESC, then id — the id tiebreaker is
+	// what makes offset paging return each row exactly once. A
+	// filter.SortKey replaces the preference terms in the middle of that
+	// order and nothing else, so the lane structure and the tiebreaker
+	// survive whatever the reader picked.
 	List(ctx context.Context, orgID string, filter TaskListFilter, opts ListOpts) ([]domain.Task, int, error)
 
 	// FindActiveByEntityAndType returns non-terminal tasks for an

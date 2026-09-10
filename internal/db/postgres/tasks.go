@@ -144,13 +144,53 @@ const pgTaskRuleOrderJoin = `
 // sqliteTaskListOrder in meaning — the dbtest conformance suite asserts the
 // two dialects agree on the order, not just the set. See that constant for why
 // each term is there.
-const pgTaskListOrder = `
-	ORDER BY (t.status = 'snoozed') ASC,
-	         (t.closed_at IS NOT NULL) ASC,
+const pgTaskListOrder = pgTaskListLanes + `
 	         t.closed_at DESC,
 	         COALESCE(tr.sort_order, 999) ASC,
 	         COALESCE(t.priority_score, 0.5) DESC,
 	         t.id ASC`
+
+// pgTaskListLanes mirrors sqliteTaskListLanes: the lane partitions a reader's
+// sort key never displaces. See that constant for why the recency term below
+// it is preference rather than structure.
+const pgTaskListLanes = `
+	ORDER BY (t.status = 'snoozed') ASC,
+	         (t.closed_at IS NOT NULL) ASC,`
+
+// pgTaskClaimantJoin mirrors sqliteTaskClaimantJoin, org-scoped on the agents
+// side the way every other agents join in this package is.
+const pgTaskClaimantJoin = `
+	LEFT JOIN agents ca ON ca.id = t.claimed_by_agent_id AND ca.org_id = t.org_id
+	LEFT JOIN users cu ON cu.id = t.claimed_by_user_id`
+
+// pgTaskListSort mirrors sqliteTaskListSort — same keys, same fragments, same
+// refusal to interpolate a caller's value into an ORDER BY. The conformance
+// suite asserts the two dialects agree on the resulting order, not just the
+// set.
+func pgTaskListSort(f db.TaskListFilter) (joins, order string) {
+	dir := " DESC"
+	if f.SortDir == db.TaskSortDirAsc {
+		dir = " ASC"
+	}
+	var key string
+	switch f.SortKey {
+	case db.TaskSortTitle:
+		key = "LOWER(COALESCE(e.title, ''))"
+	case db.TaskSortCreated:
+		key = "t.created_at"
+	case db.TaskSortEventType:
+		key = "t.event_type"
+	case db.TaskSortClaimee:
+		joins = pgTaskClaimantJoin
+		key = `CASE WHEN t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL THEN 1 ELSE 0 END ASC,
+	         COALESCE(ca.display_name, cu.display_name, '')`
+	default:
+		return pgTaskRuleOrderJoin, pgTaskListOrder
+	}
+	return joins, pgTaskListLanes + `
+	         ` + key + dir + `,
+	         t.id ASC`
+}
 
 // pgTaskListWhere renders db.TaskListFilter as a WHERE body (no leading WHERE)
 // plus its args, numbering placeholders from $1. org_id is always $1 — in the
@@ -193,6 +233,24 @@ func pgTaskListWhere(orgID string, f db.TaskListFilter) (string, []any) {
 		args = append(args, f.CreatedSince.UTC())
 		clauses = append(clauses, fmt.Sprintf("t.created_at >= $%d", len(args)))
 	}
+	if f.CreatedBefore != nil {
+		args = append(args, f.CreatedBefore.UTC())
+		clauses = append(clauses, fmt.Sprintf("t.created_at <= $%d", len(args)))
+	}
+	if len(f.EventTypes) > 0 {
+		args = append(args, f.EventTypes)
+		clauses = append(clauses, fmt.Sprintf("t.event_type = ANY($%d)", len(args)))
+	}
+	if term := strings.TrimSpace(f.Search); term != "" {
+		// The SQLite mirror explains the shape; lower()+LIKE rather than
+		// ILIKE so both dialects fold case through the same expression.
+		args = append(args, "%"+db.LikeEscape(strings.ToLower(term))+"%")
+		p := fmt.Sprintf("$%d", len(args))
+		clauses = append(clauses, fmt.Sprintf(`(lower(e.title) LIKE %[1]s ESCAPE '\'
+		            OR lower(e.source_id) LIKE %[1]s ESCAPE '\'
+		            OR lower(t.ai_summary) LIKE %[1]s ESCAPE '\'
+		            OR lower(t.event_type) LIKE %[1]s ESCAPE '\')`, p))
+	}
 	if len(f.Sources) > 0 {
 		args = append(args, f.Sources)
 		clauses = append(clauses, fmt.Sprintf("e.source = ANY($%d)", len(args)))
@@ -220,11 +278,12 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 		return []domain.Task{}, total, nil
 	}
 
+	sortJoins, order := pgTaskListSort(f)
 	query := `
 		SELECT ` + pgTaskColumnsWithEntity + `
 		FROM tasks t
-		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id` + pgTaskRuleOrderJoin + `
-		WHERE ` + where + pgTaskListOrder
+		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id` + sortJoins + `
+		WHERE ` + where + order
 	pageArgs := args
 	if opts.Limit > 0 {
 		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)

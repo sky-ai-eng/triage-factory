@@ -106,13 +106,72 @@ const sqliteTaskRuleOrderJoin = `
 //     them, which is what keeps the two dialects' NULL-ordering defaults from
 //     diverging here.
 //  3. rule sort_order, then priority, then id — the queue's own ordering.
-const sqliteTaskListOrder = `
-	ORDER BY (t.status = 'snoozed') ASC,
-	         (t.closed_at IS NOT NULL) ASC,
+const sqliteTaskListOrder = sqliteTaskListLanes + `
 	         t.closed_at DESC,
 	         COALESCE(tr.sort_order, 999) ASC,
 	         COALESCE(t.priority_score, 0.5) DESC,
 	         t.id ASC`
+
+// sqliteTaskListLanes is the head every ordering keeps: the two partitions
+// that are lane structure rather than preference (terms 1 and 2 above). A
+// reader who picks a sort is expressing a preference among the rows of a
+// lane, so the partitions stay in front of their key — a snoozed row must not
+// climb over live work because it sorts first by title.
+//
+// The recency term below it (`t.closed_at DESC`) is preference, not
+// structure: it is the closed lane's DEFAULT ordering, and a reader who asks
+// for that lane by title means by title. It stays inside the replaceable
+// middle for that reason — and the partition above it still keeps a NULL
+// closed_at from ever being compared against a non-NULL one, which is what
+// holds the two dialects' NULL-ordering defaults together.
+const sqliteTaskListLanes = `
+	ORDER BY (t.status = 'snoozed') ASC,
+	         (t.closed_at IS NOT NULL) ASC,`
+
+// sqliteTaskClaimantJoin resolves the name the claimee sort orders on. Both
+// joins are on a primary key, so neither can drop or duplicate a row; they
+// are added only for that sort so every other query keeps the plan it had.
+const sqliteTaskClaimantJoin = `
+	LEFT JOIN agents ca ON ca.id = t.claimed_by_agent_id
+	LEFT JOIN users cu ON cu.id = t.claimed_by_user_id`
+
+// sqliteTaskListSort renders the joins and ORDER BY for a filter's sort — the
+// default order when it names no key, otherwise the reader's key between the
+// lane partitions and the id tiebreaker.
+//
+// The caller's values never reach the SQL as text: the key switches to a
+// constant fragment and the direction to one of two words, so an ORDER BY is
+// assembled from this file's own strings whatever the request said.
+func sqliteTaskListSort(f db.TaskListFilter) (joins, order string) {
+	dir := " DESC"
+	if f.SortDir == db.TaskSortDirAsc {
+		dir = " ASC"
+	}
+	var key string
+	switch f.SortKey {
+	case db.TaskSortTitle:
+		// COALESCE so a title-less entity sorts as empty rather than as
+		// NULL, whose position differs between the dialects by direction.
+		key = "LOWER(COALESCE(e.title, ''))"
+	case db.TaskSortCreated:
+		key = "t.created_at"
+	case db.TaskSortEventType:
+		key = "t.event_type"
+	case db.TaskSortClaimee:
+		joins = sqliteTaskClaimantJoin
+		key = `CASE WHEN t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL THEN 1 ELSE 0 END ASC,
+	         COALESCE(ca.display_name, cu.display_name, '')`
+	default:
+		// No key, or one no vocabulary defines — the HTTP layer refuses the
+		// latter, so reaching it means a caller built the filter directly.
+		// The default order is the honest answer either way; inventing SQL
+		// for an unknown key is not.
+		return sqliteTaskRuleOrderJoin, sqliteTaskListOrder
+	}
+	return joins, sqliteTaskListLanes + `
+	         ` + key + dir + `,
+	         t.id ASC`
+}
 
 // sqliteTaskListWhere renders db.TaskListFilter as a WHERE body (no leading
 // WHERE) plus its args in placeholder order. "1=1" for the empty filter keeps
@@ -167,6 +226,29 @@ func sqliteTaskListWhere(f db.TaskListFilter) (string, []any) {
 		clauses = append(clauses, "datetime(t.created_at) >= datetime(?)")
 		args = append(args, f.CreatedSince.UTC().Format("2006-01-02 15:04:05"))
 	}
+	if f.CreatedBefore != nil {
+		clauses = append(clauses, "datetime(t.created_at) <= datetime(?)")
+		args = append(args, f.CreatedBefore.UTC().Format("2006-01-02 15:04:05"))
+	}
+	if len(f.EventTypes) > 0 {
+		ph := strings.TrimRight(strings.Repeat("?, ", len(f.EventTypes)), ", ")
+		clauses = append(clauses, fmt.Sprintf("t.event_type IN (%s)", ph))
+		for _, et := range f.EventTypes {
+			args = append(args, et)
+		}
+	}
+	if term := strings.TrimSpace(f.Search); term != "" {
+		// The four fields the card shows, matched as a literal substring:
+		// LikeEscape neutralizes the wildcards, so a needle holding '%'
+		// matches a percent sign instead of every row. A NULL ai_summary
+		// simply fails its arm — no COALESCE needed for an OR.
+		pattern := "%" + db.LikeEscape(strings.ToLower(term)) + "%"
+		clauses = append(clauses, `(LOWER(e.title) LIKE ? ESCAPE '\'
+		            OR LOWER(e.source_id) LIKE ? ESCAPE '\'
+		            OR LOWER(t.ai_summary) LIKE ? ESCAPE '\'
+		            OR LOWER(t.event_type) LIKE ? ESCAPE '\')`)
+		args = append(args, pattern, pattern, pattern, pattern)
+	}
 	if len(f.Sources) > 0 {
 		ph := strings.TrimRight(strings.Repeat("?, ", len(f.Sources)), ", ")
 		clauses = append(clauses, fmt.Sprintf("e.source IN (%s)", ph))
@@ -205,11 +287,12 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 		return []domain.Task{}, total, nil
 	}
 
+	sortJoins, order := sqliteTaskListSort(f)
 	query := `
 		SELECT ` + sqliteTaskColumnsWithEntity + `
 		FROM tasks t
-		JOIN entities e ON t.entity_id = e.id` + sqliteTaskRuleOrderJoin + `
-		WHERE ` + where + sqliteTaskListOrder
+		JOIN entities e ON t.entity_id = e.id` + sortJoins + `
+		WHERE ` + where + order
 	pageArgs := args
 	if opts.Limit > 0 {
 		query += `

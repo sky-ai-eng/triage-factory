@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -376,6 +377,52 @@ func TestTaskList_StrictBody(t *testing.T) {
 			wantField:  "sources",
 		},
 		{
+			name:       "malformed created_before",
+			body:       map[string]any{"created_before": "next tuesday"},
+			wantReason: "INVALID_FIELD",
+			wantField:  "created_before",
+		},
+		{
+			name:       "unknown event type",
+			body:       map[string]any{"event_types": []string{domain.EventGitHubPRCICheckFailed, "github:pr:invented"}},
+			wantReason: "INVALID_FIELD",
+			wantField:  "event_types",
+		},
+		{
+			name:       "search past the rune cap",
+			body:       map[string]any{"search": strings.Repeat("x", 201)},
+			wantReason: "INVALID_FIELD",
+			wantField:  "search",
+		},
+		{
+			name:       "unknown sort_key",
+			body:       map[string]any{"sort_key": "priority"},
+			wantReason: "INVALID_FIELD",
+			wantField:  "sort_key",
+		},
+		{
+			// "default" is the client's word for the absent case, not a
+			// value the wire accepts — absent is how you ask for it.
+			name:       "sort_key spelled default",
+			body:       map[string]any{"sort_key": "default"},
+			wantReason: "INVALID_FIELD",
+			wantField:  "sort_key",
+		},
+		{
+			name:       "unknown sort_dir",
+			body:       map[string]any{"sort_key": "title", "sort_dir": "sideways"},
+			wantReason: "INVALID_FIELD",
+			wantField:  "sort_dir",
+		},
+		{
+			// The default order has no direction, so a lone sort_dir asks
+			// for something the answer can't show. Refused, not ignored.
+			name:       "sort_dir without sort_key",
+			body:       map[string]any{"sort_dir": "asc"},
+			wantReason: "INVALID_FIELD",
+			wantField:  "sort_dir",
+		},
+		{
 			name:       "page_size over the max",
 			body:       map[string]any{"page_size": 500},
 			wantReason: "OUT_OF_RANGE",
@@ -520,5 +567,187 @@ func TestTaskList_CreatedSinceAndSources(t *testing.T) {
 	page = postTaskList(t, s, map[string]any{"sources": []string{"github"}, "page_size": 0})
 	if len(page.Items) != 0 || page.TotalCount < 2 || page.NextPageToken != "" {
 		t.Errorf("count-only page = %+v, want no items, total >= 2, no token", page)
+	}
+}
+
+// TestTaskList_SearchNarrowsTheCountItReports is the whole reason search moved
+// to the server: the lane's `N of M` tail has to answer the query the items
+// came from. A client-side filter leaves M counting the unfiltered lane while
+// the rows above it are filtered, and a match on an unfetched page is invisible
+// with no Load-more button left to reach it.
+func TestTaskList_SearchNarrowsTheCountItReports(t *testing.T) {
+	s := newTestServer(t)
+	hit := seedTaskFixture(t, s.db, taskFixture{name: "searchable-widget", status: "queued"})
+	seedTaskFixture(t, s.db, taskFixture{name: "other-thing", status: "queued"})
+
+	unfiltered := postTaskList(t, s, map[string]any{"page_size": 0})
+	if unfiltered.TotalCount != 2 {
+		t.Fatalf("unfiltered total = %d, want 2", unfiltered.TotalCount)
+	}
+
+	page := postTaskList(t, s, map[string]any{"search": "searchable-widget"})
+	if got := listedIDs(page); len(got) != 1 || got[0] != hit {
+		t.Errorf("search returned %v, want just %s", got, hit)
+	}
+	if page.TotalCount != 1 {
+		t.Errorf("total under search = %d, want 1 — the count must run the filtered query", page.TotalCount)
+	}
+
+	// Surrounding whitespace is not part of the needle: the same query
+	// spelled loosely answers the same.
+	if padded := postTaskList(t, s, map[string]any{"search": "  searchable-widget  "}); padded.TotalCount != 1 {
+		t.Errorf("padded needle counted %d, want 1", padded.TotalCount)
+	}
+	// An empty-after-trim search is absent, not a match-nothing filter.
+	if blank := postTaskList(t, s, map[string]any{"search": "   ", "page_size": 0}); blank.TotalCount != 2 {
+		t.Errorf("whitespace-only search counted %d, want the unfiltered 2", blank.TotalCount)
+	}
+	if none := postTaskList(t, s, map[string]any{"search": "nothing matches this"}); len(none.Items) != 0 || none.TotalCount != 0 {
+		t.Errorf("unmatched needle = %+v, want an empty page", none)
+	}
+}
+
+// TestTaskList_EventTypesAndCreatedBefore covers the two remaining filters:
+// the station set, and the upper half of the created window whose lower half
+// already shipped.
+func TestTaskList_EventTypesAndCreatedBefore(t *testing.T) {
+	s := newTestServer(t)
+	a := seedTaskFixture(t, s.db, taskFixture{name: "et-a", status: "queued"})
+	b := seedTaskFixture(t, s.db, taskFixture{name: "et-b", status: "queued"})
+
+	// Every fixture sits at ci_check_failed, so that station is the whole
+	// set and any other station is none of it.
+	page := postTaskList(t, s, map[string]any{"event_types": []string{domain.EventGitHubPRCICheckFailed}})
+	if got := listedIDs(page); !slices.Contains(got, a) || !slices.Contains(got, b) {
+		t.Errorf("event_types on the seeded station returned %v, want both %s and %s", got, a, b)
+	}
+	page = postTaskList(t, s, map[string]any{"event_types": []string{domain.EventGitHubPRReviewRequested}})
+	if len(page.Items) != 0 || page.TotalCount != 0 {
+		t.Errorf("event_types on an unused station = %+v, want an empty page", page)
+	}
+
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	if page = postTaskList(t, s, map[string]any{"created_before": future, "page_size": 0}); page.TotalCount != 2 {
+		t.Errorf("created_before in the future counted %d, want 2", page.TotalCount)
+	}
+	if page = postTaskList(t, s, map[string]any{"created_before": past, "page_size": 0}); page.TotalCount != 0 {
+		t.Errorf("created_before in the past counted %d, want 0", page.TotalCount)
+	}
+	// Both ends together are a window.
+	if page = postTaskList(t, s, map[string]any{"created_since": past, "created_before": future, "page_size": 0}); page.TotalCount != 2 {
+		t.Errorf("bracketing window counted %d, want 2", page.TotalCount)
+	}
+}
+
+// TestTaskList_SortReordersTheLane pins what a sort key may and may not move:
+// it reorders the rows of a lane, and it never displaces the lane structure or
+// the id tiebreaker underneath it.
+func TestTaskList_SortReordersTheLane(t *testing.T) {
+	s := newTestServer(t)
+	// seedTaskFixture builds the entity title out of the name, so these are
+	// the sort keys.
+	for _, name := range []string{"ccc", "aaa", "bbb"} {
+		seedTaskFixture(t, s.db, taskFixture{name: "sort-" + name, status: "queued"})
+	}
+
+	read := func(dir string) []string {
+		t.Helper()
+		body := map[string]any{"statuses": []string{"queued"}, "sort_key": "title"}
+		if dir != "" {
+			body["sort_dir"] = dir
+		}
+		return listedIDs(postTaskList(t, s, body))
+	}
+
+	asc := read("asc")
+	if len(asc) != 3 {
+		t.Fatalf("title asc returned %d rows, want 3", len(asc))
+	}
+	desc := read("desc")
+	for i, id := range asc {
+		if got := desc[len(desc)-1-i]; got != id {
+			t.Errorf("title desc[%d] = %s, want %s (desc must be asc reversed)", len(desc)-1-i, got, id)
+		}
+	}
+	// An absent direction alongside a key is desc — the board's own default.
+	if implied := read(""); !slices.Equal(implied, desc) {
+		t.Errorf("sort_key with no sort_dir = %v, want the desc order %v", implied, desc)
+	}
+
+	// A snoozed row is lane structure: it stays behind the live ones however
+	// its title sorts. "aaa" would lead an ascending title sort otherwise.
+	snoozed := time.Now().UTC().Add(time.Hour)
+	sleeper := seedTaskFixture(t, s.db, taskFixture{
+		name: "sort-aaa-asleep", status: "snoozed", snoozeUntil: &snoozed,
+	})
+	withSleeper := listedIDs(postTaskList(t, s, map[string]any{
+		"statuses":        []string{"queued", "snoozed"},
+		"include_snoozed": true,
+		"sort_key":        "title",
+		"sort_dir":        "asc",
+	}))
+	if len(withSleeper) != 4 {
+		t.Fatalf("lane with the snoozed row returned %d rows, want 4", len(withSleeper))
+	}
+	if got := withSleeper[len(withSleeper)-1]; got != sleeper {
+		t.Errorf("snoozed row sorted to %v, want last — the lane partition outranks the key", withSleeper)
+	}
+}
+
+// TestTaskList_TokenIsBoundToItsSearchAndSort extends the token/filter binding
+// to the fields this route just gained: an offset addresses a position in an
+// ordering, so a token minted under one search or sort names different rows
+// under another.
+func TestTaskList_TokenIsBoundToItsSearchAndSort(t *testing.T) {
+	s := newTestServer(t)
+	for i := range 3 {
+		seedTaskFixture(t, s.db, taskFixture{name: fmt.Sprintf("bound-search-%d", i), status: "queued"})
+	}
+
+	mint := func(body map[string]any) string {
+		t.Helper()
+		body["page_size"] = 1
+		token := postTaskList(t, s, body).NextPageToken
+		if token == "" {
+			t.Fatal("no token minted for a partial page")
+		}
+		return token
+	}
+	refused := func(body map[string]any, token string) {
+		t.Helper()
+		body["page_size"] = 1
+		body["page_token"] = token
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/list", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		assertFirstError(t, rec, "INVALID_PARAM", "page_token")
+	}
+
+	searchToken := mint(map[string]any{"search": "bound-search"})
+	refused(map[string]any{"search": "bound-search-1"}, searchToken)
+	refused(map[string]any{}, searchToken)
+
+	// Case is not part of the query — the needle is folded before it reaches
+	// the predicate — so the same search spelled loudly keeps the token.
+	if page := postTaskList(t, s, map[string]any{
+		"search": "BOUND-SEARCH", "page_size": 1, "page_token": searchToken,
+	}); len(page.Items) != 1 {
+		t.Errorf("second page under a differently-cased needle = %d items, want 1", len(page.Items))
+	}
+
+	sortToken := mint(map[string]any{"sort_key": "title", "sort_dir": "asc"})
+	refused(map[string]any{"sort_key": "title", "sort_dir": "desc"}, sortToken)
+	refused(map[string]any{"sort_key": "created", "sort_dir": "asc"}, sortToken)
+
+	// The implied direction is the same query as the explicit one, so its
+	// token still works.
+	impliedToken := mint(map[string]any{"sort_key": "title"})
+	page := postTaskList(t, s, map[string]any{
+		"sort_key": "title", "sort_dir": "desc", "page_size": 1, "page_token": impliedToken,
+	})
+	if len(page.Items) != 1 {
+		t.Errorf("second page under the explicit spelling of the same sort = %d items, want 1", len(page.Items))
 	}
 }
