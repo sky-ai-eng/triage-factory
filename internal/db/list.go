@@ -12,13 +12,23 @@ import "strings"
 // as "no window" (every matching row), which is what the few internal callers
 // that page nothing want; it is never reachable from a list route.
 //
-// Offset is the number of matching rows to skip. Offset paging is what the
-// list contract's opaque page token encodes today; see internal/server/httpx's
-// pageToken for why that choice is reversible.
+// Offset is the number of matching rows to skip, and is the position most
+// reads still take. It is only correct on a result set that holds still: a row
+// removed above the cut makes the next page skip one, a row added above it
+// makes the next page repeat one.
+//
+// After is the keyset alternative, for a read whose rows mutate while they are
+// being paged: the previous page's last row rendered as one string per ORDER
+// BY term, which the impl compares against that exact tuple to resume where
+// the last page stopped, whatever happened above the cut. When it is set the
+// impl ignores Offset — the two are alternatives, and the page token they
+// resolve from can only carry one. Support is per-read: a store method that
+// hasn't implemented the comparison for its own order rejects a non-empty
+// After rather than quietly returning page 1 again.
 //
 // CountOnly asks the read for its filtered total and nothing else: the impl
 // runs the count query it would have run anyway and returns an empty page
-// without touching the row query. Limit and Offset are ignored when it is
+// without touching the row query. Every position field is ignored when it is
 // set. It exists for the explicit page_size: 0 request (httpx.Page.CountOnly
 // hands it through) — the zero ListOpts stays "no window", so the two
 // zero-adjacent meanings can't collide. Every List impl must honor it; one
@@ -27,6 +37,7 @@ import "strings"
 type ListOpts struct {
 	Limit     int
 	Offset    int
+	After     []string
 	CountOnly bool
 }
 

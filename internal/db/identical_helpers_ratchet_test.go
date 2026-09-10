@@ -51,6 +51,7 @@ var identicalHelperRatchet = []string{
 	"nullString",
 	"nullStringToPtr",
 	"observedAt",
+	"queryListedTasksCtx",
 	"queryTasksCtx",
 	"refreshInstant",
 	"reverseTaskMemories",

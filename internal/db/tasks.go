@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -168,6 +169,89 @@ var TaskListSortKeys = []string{TaskSortTitle, TaskSortCreated, TaskSortEventTyp
 
 // TaskListSortDirs is the full vocabulary TaskListFilter.SortDir accepts.
 var TaskListSortDirs = []string{TaskSortDirAsc, TaskSortDirDesc}
+
+// ErrBadPageCursor is what a List impl returns for a ListOpts.After that
+// doesn't fit the order it was asked to resume: the wrong number of terms for
+// the filter's ORDER BY tuple, or a term holding a value that term cannot be.
+// It can only come from a cursor this build didn't mint — a hand-built one, or
+// one carried across a change to the order — so it is a caller fault the HTTP
+// layer reports as a bad page_token, never a 500.
+var ErrBadPageCursor = errors.New("page cursor does not fit this read's order")
+
+// TaskSortKey renders one task row's position in a task list's total order:
+// the value of every term of that order, in the order's own term order, as the
+// strings ListOpts.After takes. Hand it the last row of a page and the next
+// page resumes immediately after it.
+//
+// It is dialect-neutral on purpose — each impl puts a cursor value back into
+// the shape its own ORDER BY term yields, with a cast, a wrapping expression
+// or a typed bind, so this function never has to reproduce a dialect's
+// collation, float formatting or timestamp layout in Go. What it must reproduce exactly is the *shape*: one string
+// per term, in the same sequence, including the terms that are lane structure
+// rather than preference. Both impls' term lists and this function are pinned
+// against each other by the paging conformance, which walks every sort.
+//
+// The two leading values are the lane partitions every task order keeps, so a
+// resumed page can't climb out of its lane; the trailing value is the id
+// tiebreaker that makes the order total. What sits between them is whatever
+// the filter's sort asked for.
+func TaskSortKey(f TaskListFilter, t domain.Task) []string {
+	key := []string{
+		taskKeyBool(t.Status == "snoozed"),
+		taskKeyBool(t.ClosedAt != nil),
+	}
+	switch f.SortKey {
+	case TaskSortTitle:
+		key = append(key, t.Title)
+	case TaskSortCreated:
+		key = append(key, taskKeyTime(&t.CreatedAt))
+	case TaskSortEventType:
+		key = append(key, t.EventType)
+	case TaskSortClaimee:
+		// The unclaimed-last flag is its own term, ahead of the name, exactly
+		// as the ORDER BY spells it — "nobody" is not a name, and folding it
+		// into the name would sort it among them.
+		key = append(key,
+			taskKeyBool(t.ClaimedByAgentID == "" && t.ClaimedByUserID == ""),
+			t.ListClaimeeName)
+	default:
+		// The default order: recency within the closed lane, then the queue's
+		// own priority. The COALESCE defaults are the ORDER BY's, not this
+		// function's — a row the SQL orders as 0.5 must key as 0.5 or the
+		// comparison lands in the wrong place.
+		priority := 0.5
+		if t.PriorityScore != nil {
+			priority = *t.PriorityScore
+		}
+		key = append(key,
+			taskKeyTime(t.ClosedAt),
+			strconv.Itoa(t.ListSortOrder),
+			strconv.FormatFloat(priority, 'g', -1, 64))
+	}
+	return append(key, t.ID)
+}
+
+// taskKeyBool renders a partition flag the way both dialects' key expressions
+// evaluate one: an integer, so the comparison is arithmetic in SQLite (which
+// would otherwise rank any text above any number) and in Postgres alike.
+func taskKeyBool(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+// taskKeyTime renders a timestamp for whatever its term does with one
+// dialect-side. Nanoseconds because a cursor must not round to a different
+// instant than the row it came from; UTC because the stored row is. A nil time
+// — an open task's closed_at — renders empty, and each impl maps that back
+// onto the sentinel its own term COALESCEs a NULL column to.
+func taskKeyTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
 
 // TaskStore owns the tasks table — lifecycle, claims, dedup,
 // swipe-triggered transitions, plus the conversation-history queries that

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -152,6 +153,91 @@ func TestResolvePage_RejectsUnusableTokens(t *testing.T) {
 
 	if page, faults := resolveFaults(t, PageRequest{PageToken: valid}, "fp", 0); len(faults) != 0 || page.Offset != 40 {
 		t.Errorf("valid token: page = %+v, faults = %+v", page, faults)
+	}
+}
+
+// TestResolvePage_KeysetTokenRoundTrip walks the keyset form the way a client
+// does: the token WriteListKeyset minted for one page resolves to the position
+// the next page resumes after, and nothing about the wire shape says which
+// form it is.
+func TestResolvePage_KeysetTokenRoundTrip(t *testing.T) {
+	page, _ := resolveFaults(t, PageRequest{PageSize: psize(2)}, "fp", 0)
+	rec := httptest.NewRecorder()
+	WriteListKeyset(rec, page, []string{"a", "b"}, 5, []string{"0", "2026-09-10T12:00:00Z", "b"})
+
+	var body struct {
+		Items         []string `json:"items"`
+		NextPageToken string   `json:"next_page_token"`
+		TotalCount    int      `json:"total_count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode envelope: %v (body=%s)", err, rec.Body.String())
+	}
+	if body.TotalCount != 5 || len(body.Items) != 2 {
+		t.Fatalf("envelope = %+v, want 2 items of 5", body)
+	}
+	if body.NextPageToken == "" {
+		t.Fatal("no next_page_token minted for a page with a next key")
+	}
+
+	next, faults := resolveFaults(t, PageRequest{PageSize: psize(2), PageToken: body.NextPageToken}, "fp", 0)
+	if len(faults) != 0 {
+		t.Fatalf("round-tripped keyset token rejected: %+v", faults)
+	}
+	if want := []string{"0", "2026-09-10T12:00:00Z", "b"}; !slices.Equal(next.After, want) {
+		t.Errorf("after = %v, want %v", next.After, want)
+	}
+	if next.Offset != 0 {
+		t.Errorf("offset = %d, want 0 — a keyset token carries no offset", next.Offset)
+	}
+}
+
+// TestWriteListKeyset_LastPageHasNoToken pins the one signal a keyset page has
+// for "there is no page after this": a nil key. It cannot be derived from the
+// total the way an offset page derives it, which is the whole reason the
+// caller passes it.
+func TestWriteListKeyset_LastPageHasNoToken(t *testing.T) {
+	page, _ := resolveFaults(t, PageRequest{PageSize: psize(3)}, "fp", 0)
+
+	// A short page of a much larger total still ends the walk when the caller
+	// says so: total is the filtered total, not a position.
+	rec := httptest.NewRecorder()
+	WriteListKeyset(rec, page, []string{"a", "b", "c"}, 900, nil)
+	if got := rec.Body.String(); strings.Contains(got, "next_page_token") {
+		t.Errorf("last page carries a token: %s", got)
+	}
+
+	// And a key with no rows to anchor it mints nothing either.
+	rec = httptest.NewRecorder()
+	WriteListKeyset[string](rec, page, nil, 0, []string{"stale"})
+	if got := rec.Body.String(); strings.Contains(got, "next_page_token") {
+		t.Errorf("empty page carries a token: %s", got)
+	}
+}
+
+// TestResolvePage_RejectsMultiPositionTokens pins the exclusivity of the three
+// positions a token can carry. A token holding two was not minted here, and
+// honoring either one would page from a position nothing produced.
+func TestResolvePage_RejectsMultiPositionTokens(t *testing.T) {
+	cases := map[string]pageToken{
+		"offset and keyset": {O: 20, F: "fp", K: []string{"a"}},
+		"cursor and keyset": {F: "fp", C: "upstream", K: []string{"a"}},
+		"offset and cursor": {O: 20, F: "fp", C: "upstream"},
+	}
+	for name, tok := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, faults := resolveFaults(t, PageRequest{PageToken: encodePageToken(tok)}, "fp", 0)
+			if len(faults) != 1 || faults[0].Reason != ReasonInvalidParam || faults[0].Field != "page_token" {
+				t.Fatalf("faults = %+v, want one INVALID_PARAM on page_token", faults)
+			}
+		})
+	}
+
+	// The fingerprint still gates a keyset token the same way it gates an
+	// offset one — the position form is not what a token is bound by.
+	_, faults := resolveFaults(t, PageRequest{PageToken: encodePageToken(pageToken{F: "other", K: []string{"a"}})}, "fp", 0)
+	if len(faults) != 1 || faults[0].Reason != ReasonInvalidParam {
+		t.Fatalf("faults = %+v, want one INVALID_PARAM for a keyset token minted elsewhere", faults)
 	}
 }
 

@@ -75,6 +75,19 @@ type Task struct {
 	// card surfaces this count to say how much of the conversation is
 	// waiting — it rises as follow-ups land while a conversation is in flight.
 	SlackMessageCount int `json:"slack_message_count,omitempty"`
+
+	// The two ordering values a task list orders on that live on neither the
+	// tasks row nor its entity: the sort_order of the lowest-numbered enabled
+	// rule covering this event type, and the display name of whoever holds the
+	// claim. Both come from joins only Tasks.List makes, so both are zero on a
+	// point read — and neither is on the wire, because they are the list's own
+	// ordering arithmetic rather than anything a card shows.
+	//
+	// They are projected so a keyset page can resume from the last row it
+	// returned: the position a token carries is the ORDER BY tuple's values,
+	// and a value the caller cannot see is a value it cannot resume from.
+	ListSortOrder   int    `json:"-"`
+	ListClaimeeName string `json:"-"`
 }
 
 // TaskScoreUpdate holds the fields to update on a task after AI scoring.
