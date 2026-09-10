@@ -91,6 +91,10 @@ const (
 	StopCauseTaskClosed StopCause = "task_closed"
 	// StopCauseTaskDispositioned — a user swiped the task away.
 	StopCauseTaskDispositioned StopCause = "task_dispositioned"
+	// StopCauseTaskRequeued — a user returned the task to the queue. Its own
+	// cause rather than a disposition because the task is still open: what
+	// ended is this attempt at it, not the work.
+	StopCauseTaskRequeued StopCause = "task_requeued"
 	// StopCauseTeamArchived — the team that owns the work was archived.
 	StopCauseTeamArchived StopCause = "team_archived"
 	// StopCauseFiringReverted — the firing that spawned the run was rolled
@@ -107,6 +111,8 @@ func (c StopCause) note() string {
 		return "Run stopped: the task it was working on was closed."
 	case StopCauseTaskDispositioned:
 		return "Run stopped: the task it was working on was dispositioned."
+	case StopCauseTaskRequeued:
+		return "Run stopped: the task it was working on was returned to the queue."
 	case StopCauseTeamArchived:
 		return "Run stopped: the team that owns this work was archived."
 	case StopCauseFiringReverted:

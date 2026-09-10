@@ -1413,3 +1413,201 @@ func TestTeardownTaskArtifacts_AgentContentNullSurvives(t *testing.T) {
 		t.Errorf("human_content not landed against NULL agent_content row: %v", humanContent)
 	}
 }
+
+// runningRunFixture installs the FK chain for a task an agent is actively
+// working: a bot-claimed `in_progress` task whose conversation is `running`
+// under a running blueprint run. Returns (taskID, conversationID,
+// blueprintRunID).
+//
+// This is the shape the Board's old drag guard refused to move and the
+// redesign makes draggable, so it is the shape the requeue stop pass exists
+// for: without a stop, the agent keeps executing against a task that says
+// nobody owns it.
+func runningRunFixture(t *testing.T, database *sql.DB, suffix string) (taskID, conversationID, blueprintRunID string) {
+	t.Helper()
+	const eventType = "github:pr:ci_check_failed"
+	entityID, eventID, promptID := fixtureUUID("e_"+suffix), fixtureUUID("ev_"+suffix), fixtureUUID("p_"+suffix)
+	taskID, conversationID = fixtureUUID("t_"+suffix), fixtureUUID("r_"+suffix)
+	execSQL(t, database,
+		`INSERT INTO entities (id, source, source_id, kind, state) VALUES (?, 'github', ?, 'pr', 'active')`,
+		entityID, "owner/repo#"+suffix)
+	execSQL(t, database,
+		`INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')`,
+		eventID, entityID, eventType)
+	execSQL(t, database,
+		`INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES (?, 'Fix CI', 'body', ?, ?)`,
+		promptID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
+	execSQL(t, database,
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
+		 VALUES (?, ?, ?, ?, 'in_progress', ?)`,
+		taskID, entityID, eventType, eventID, runmode.LocalDefaultAgentID)
+	blueprintRunID = seedBlueprintRunSQLite(t, database, taskID)
+	execSQL(t, database,
+		`INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index)
+		 VALUES (?, ?, ?, 'running', 'manual', ?, 0)`,
+		conversationID, taskID, promptID, blueprintRunID)
+	return taskID, conversationID, blueprintRunID
+}
+
+// assertRequeueStoppedTheRun checks every post-condition a requeue owes a live
+// run: the conversation parked `open` by a user-attributed stop, the last
+// transcript row explaining that the task went back to the queue, the
+// blueprint behind it cancelled rather than frozen 'running', and the task
+// itself queued and unclaimed. The last two together are the point — a task
+// nobody owns with an agent still executing against it is the state this
+// exists to prevent.
+func assertRequeueStoppedTheRun(t *testing.T, database *sql.DB, taskID, conversationID, blueprintRunID string) {
+	t.Helper()
+
+	var convStatus, parkReason string
+	if err := database.QueryRow(
+		`SELECT status, COALESCE(park_reason, '') FROM conversations WHERE id = ?`, conversationID,
+	).Scan(&convStatus, &parkReason); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if convStatus != "open" || parkReason != "user_cancelled" {
+		t.Errorf("conversation = (%q, %q), want (open, user_cancelled) — a requeue stops the run that was working the task",
+			convStatus, parkReason)
+	}
+
+	var role, subtype, content string
+	if err := database.QueryRow(
+		`SELECT role, subtype, COALESCE(content, '') FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 1`,
+		conversationID,
+	).Scan(&role, &subtype, &content); err != nil {
+		t.Fatalf("read last transcript row: %v", err)
+	}
+	if role != "user" || subtype != domain.MessageSubtypeStopNote {
+		t.Errorf("last transcript row = (role=%q, subtype=%q), want (user, %s) — the stop note is the record",
+			role, subtype, domain.MessageSubtypeStopNote)
+	}
+	if !strings.Contains(content, "returned to the queue") {
+		t.Errorf("stop note = %q; want the requeue cause's sentence — it is the whole explanation a reader of this transcript gets", content)
+	}
+	if strings.Contains(content, "dispositioned") {
+		t.Errorf("stop note = %q; the task is still open, so the disposition wording is the wrong sentence", content)
+	}
+
+	var bpStatus string
+	var cancelRequested bool
+	if err := database.QueryRow(
+		`SELECT status, cancel_requested FROM blueprint_runs WHERE id = ?`, blueprintRunID,
+	).Scan(&bpStatus, &cancelRequested); err != nil {
+		t.Fatalf("read blueprint run: %v", err)
+	}
+	if bpStatus != "cancelled" || !cancelRequested {
+		t.Errorf("blueprint_run = (%q, cancel_requested=%v), want (cancelled, true) — nothing resumes a requeued task's run, so freezing the plan 'running' would hold its worktree forever",
+			bpStatus, cancelRequested)
+	}
+
+	var taskStatus string
+	var claimedAgent, claimedUser sql.NullString
+	if err := database.QueryRow(
+		`SELECT status, claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = ?`, taskID,
+	).Scan(&taskStatus, &claimedAgent, &claimedUser); err != nil {
+		t.Fatalf("read task: %v", err)
+	}
+	if taskStatus != "queued" {
+		t.Errorf("task status = %q, want queued", taskStatus)
+	}
+	if claimedAgent.Valid || claimedUser.Valid {
+		t.Errorf("task claims = (agent=%v, user=%v), want both NULL", claimedAgent, claimedUser)
+	}
+}
+
+// TestHandleRequeue_StopsTheRunWorkingTheTask is the route's whole contract
+// against a live run. Requeue used to run artifact teardown, the Jira
+// reversal and a broadcast, and nothing that touched the agent — so the card
+// landed back in Queued while its agent kept writing messages, kept landing
+// artifacts on a conversation whose task said nobody owned it, and the
+// spawner's board-column recompute put the card straight back out of Queued
+// on the claim it re-derived.
+//
+// The frontend used to mask it by refusing to drag a mid-flight card. The
+// Board redesign drags every state, and this stop is what makes that safe —
+// which is also why the route still takes every status rather than growing a
+// guard.
+func TestHandleRequeue_StopsTheRunWorkingTheTask(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
+	taskID, conversationID, blueprintRunID := runningRunFixture(t, s.db, "requeue_live")
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	assertRequeueStoppedTheRun(t, s.db, taskID, conversationID, blueprintRunID)
+}
+
+// TestHandleUndo_StopsTheRunWorkingTheTask: /undo shares finalizeRequeue with
+// /requeue, so it inherits the stop. Asserted rather than assumed — the two
+// routes reaching the same finalizer is the reason undo is correct, and a
+// future split that gave undo its own body would otherwise reintroduce the
+// gap on the quieter of the two paths.
+func TestHandleUndo_StopsTheRunWorkingTheTask(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
+	taskID, conversationID, blueprintRunID := runningRunFixture(t, s.db, "undo_live")
+	seedCallerGesture(t, s.db, taskID, "delegate")
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	assertRequeueStoppedTheRun(t, s.db, taskID, conversationID, blueprintRunID)
+}
+
+// TestHandleRequeue_TerminalConversationIsNotStopped pins the other side: the
+// stop pass enumerates ACTIVE conversations, so a task whose run already
+// finished has nothing to stop and the finished conversation is left exactly
+// as it was — no park, no stop note, no cancelled blueprint written over a
+// conversation that concluded on its own. The artifact teardown still runs,
+// which is the half that was already correct.
+//
+// A real spawner rather than a stub: what proves no stop happened is that the
+// spawner had every means to do one and the completed row is untouched.
+func TestHandleRequeue_TerminalConversationIsNotStopped(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The teardown half still ran: artifact resolved, memory note written,
+	// task back in the queue, the completed conversation left completed.
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
+		"queued", "returned to the triage queue")
+
+	var parkReason sql.NullString
+	if err := s.db.QueryRow(`SELECT park_reason FROM conversations WHERE id = ?`, conversationID).Scan(&parkReason); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if parkReason.Valid {
+		t.Errorf("park_reason = %q; a conversation that already concluded has nothing to stop", parkReason.String)
+	}
+	var stopNotes int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND subtype = ?`,
+		conversationID, domain.MessageSubtypeStopNote,
+	).Scan(&stopNotes); err != nil {
+		t.Fatalf("count stop notes: %v", err)
+	}
+	if stopNotes != 0 {
+		t.Errorf("stop notes = %d, want 0 — nothing was stopped, so the transcript has nothing to say about one", stopNotes)
+	}
+	var bpStatus string
+	if err := s.db.QueryRow(
+		`SELECT br.status FROM blueprint_runs br JOIN conversations c ON c.blueprint_run_id = br.id WHERE c.id = ?`,
+		conversationID,
+	).Scan(&bpStatus); err != nil {
+		t.Fatalf("read blueprint run: %v", err)
+	}
+	if bpStatus == "cancelled" {
+		t.Error("blueprint_run status = cancelled; the stop pass reached a conversation it should not have enumerated")
+	}
+}

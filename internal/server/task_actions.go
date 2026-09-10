@@ -102,9 +102,9 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// Taking a task onto a human's plate takes it off the agent's: resolve
-	// every unresolved artifact the task holds and cancel any in-flight run.
-	s.teardownTaskConversations(r, orgID, userID, id, discardOutcomeClaimed)
+	// Taking a task onto a human's plate takes it off the agent's: stop any
+	// in-flight run and resolve every unresolved artifact the task holds.
+	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, discardOutcomeClaimed, delegate.StopCauseTaskDispositioned)
 	if jiraUserClient != nil {
 		s.syncJiraClaim(r, orgID, userID, id, jiraUserClient)
 	}
@@ -451,10 +451,10 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// Re-delegating is still a handoff off whatever was in flight: resolve the
-	// task's unresolved artifacts and cancel the running conversation before
+	// Re-delegating is still a handoff off whatever was in flight: stop the
+	// running conversation and resolve the task's unresolved artifacts before
 	// the new run starts.
-	s.teardownTaskConversations(r, orgID, userID, id, discardOutcomeRedelegated)
+	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, discardOutcomeRedelegated, delegate.StopCauseTaskDispositioned)
 
 	response := map[string]any{"status": newStatus}
 	if s.spawner != nil {
@@ -572,38 +572,60 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 	return newStatus, true
 }
 
-// teardownTaskConversations stops any run a task is handed off from. It
-// resolves every unresolved artifact the task holds (teardownTaskArtifacts —
-// closes all draft PRs, dismisses all pending reviews, a no-op when none
-// exist) and cancels in-flight runs. The discard memory note differs per
-// outcome so the next agent reading conversation_memory can tell apart "human
+// teardownTaskConversations takes a task off whoever was working on it: it
+// stops every run the task holds, then resolves every unresolved artifact
+// those runs left behind (teardownTaskArtifacts — closes all draft PRs,
+// dismisses all pending reviews, a no-op when none exist). Every handoff a
+// task can make comes through here — dismiss, complete, claim, re-delegate,
+// return to queue — so there is one stop pass rather than one per verb.
+//
+// Stop first, teardown second. The stop parks each conversation `open` and
+// releases its claim, so the teardown behind it operates on a settled
+// conversation rather than racing a live agent that can still land a fresh
+// draft PR into the window between the two.
+//
+// cause is the lifecycle event the caller is acting on. It reaches each
+// stopped transcript verbatim, so it is the whole explanation a human reading
+// that history gets. outcome shapes the discard note baked into
+// conversation_memory, so the next agent reading it can tell apart "human
 // walked away" (dismiss) from "human resolved it" (complete) from "human took
-// over" (claim) from "re-delegate". Best-effort.
-func (s *Server) teardownTaskConversations(r *http.Request, orgID, userID, id string, outcome discardOutcome) {
-	// Teardown runs detached from r.Context() so a client disconnect after the
-	// response doesn't strand work: both the artifact teardown and the
-	// active-run lookup + cancellation below must complete regardless.
-	cleanupCtx := context.WithoutCancel(r.Context())
-	s.teardownTaskArtifacts(cleanupCtx, orgID, userID, id, outcome)
+// over" (claim) from "re-delegate" from "still on the docket" (requeue).
+// Best-effort throughout.
+//
+// ctx must already be detached from the request (context.WithoutCancel): a
+// client disconnect after the response must not leave a live agent running or
+// a GitHub draft stranded. The detach belongs to the caller because a caller
+// with further cleanup of its own needs every part of it on one context.
+func (s *Server) teardownTaskConversations(ctx context.Context, orgID, userID, id string, outcome discardOutcome, cause delegate.StopCause) {
+	s.stopTaskConversations(ctx, orgID, userID, id, cause)
+	s.teardownTaskArtifacts(ctx, orgID, userID, id, outcome)
+}
+
+// stopTaskConversations stops every active run on a task and cancels the
+// blueprint behind each. Its callers own a lifecycle one layer up and have
+// already decided this attempt at the task is over, so the blueprints go
+// terminal with their runs rather than freezing 'running' — the plain
+// conversation stop is for a user pausing work they mean to come back to.
+//
+// Best-effort per conversation: a failed stop is logged and the remaining ones
+// are still attempted, because the task has already moved and leaving its
+// other runs live is the worse half-state.
+func (s *Server) stopTaskConversations(ctx context.Context, orgID, userID, taskID string, cause delegate.StopCause) {
 	if s.spawner == nil {
 		return
 	}
 	var ids []string
-	if err := s.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		ids, e = tx.Conversations.ActiveIDsForTask(cleanupCtx, orgID, id)
+		ids, e = tx.Conversations.ActiveIDsForTask(ctx, orgID, taskID)
 		return e
 	}); err != nil {
-		taskActionLog.Error("active-conversation lookup failed", "task", id, "error", err)
+		taskActionLog.Error("active-conversation lookup failed", "task", taskID, "error", err)
 		return
 	}
-	// The gesture is the task's own disposition, so the blueprints behind
-	// these runs go terminal with them rather than freezing 'running' — the
-	// plain conversation stop is for a user pausing work they mean to come
-	// back to.
 	for _, conversationID := range ids {
-		if err := s.spawner.StopConversationAndCancelBlueprint(orgID, conversationID, userID, delegate.StopCauseTaskDispositioned); err != nil {
-			taskActionLog.Warn("stop conversation failed", "conversation", conversationID, "task", id, "error", err)
+		if err := s.spawner.StopConversationAndCancelBlueprint(orgID, conversationID, userID, cause); err != nil {
+			taskActionLog.Warn("stop conversation failed", "conversation", conversationID, "task", taskID, "error", err)
 		}
 	}
 }
