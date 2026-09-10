@@ -168,6 +168,35 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 		}
 	})
 
+	t.Run("AMixedReadStillEndsInRecency", func(t *testing.T) {
+		// The unfiltered read — every lane at once — is the one query where the
+		// tier and the closed tail meet. The tier orders the open rows, and the
+		// closed tail stays a log: a stale closure still holding a draft PR
+		// must not climb over a later one that left nothing behind, because
+		// inside the closed partition the tier would otherwise be read before
+		// the recency term.
+		s, orgID, seed := mk(t)
+		older := time.Now().UTC().Add(-48 * time.Hour)
+		newer := time.Now().UTC().Add(-1 * time.Hour)
+		openNeeds := seed.Task(t, TaskAttentionFixture{Suffix: "attn-mix-open-needs", Title: "open needs", Status: "in_progress", Priority: 0.1})
+		openQuiet := seed.Task(t, TaskAttentionFixture{Suffix: "attn-mix-open-quiet", Title: "open quiet", Status: "in_progress", Priority: 0.9})
+		closedStale := seed.Task(t, TaskAttentionFixture{Suffix: "attn-mix-done-stale", Title: "done stale", Status: "done", Priority: 0.5, ClosedAt: &older})
+		closedRecent := seed.Task(t, TaskAttentionFixture{Suffix: "attn-mix-done-recent", Title: "done recent", Status: "done", Priority: 0.5, ClosedAt: &newer})
+
+		needsConv := seed.Conversation(t, openNeeds, domain.StatusCompleted)
+		seed.Artifact(t, needsConv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		seed.Conversation(t, openQuiet, domain.StatusCompleted)
+		staleConv := seed.Conversation(t, closedStale, domain.StatusCompleted)
+		seed.Artifact(t, staleConv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		seed.Conversation(t, closedRecent, domain.StatusCompleted)
+
+		got, _ := list(t, s, orgID, db.TaskListFilter{})
+		want := []string{openNeeds, openQuiet, closedRecent, closedStale}
+		if !slices.Equal(got, want) {
+			t.Errorf("unfiltered read = %v,\n                 want %v\n(the tier orders the open rows; the closed tail stays newest-first)", got, want)
+		}
+	})
+
 	t.Run("TheDoneLaneKeepsItsRecency", func(t *testing.T) {
 		// The gate. A closure still holding a draft PR matches the needs-you
 		// predicate, so a tier that reached this lane would sort it above a

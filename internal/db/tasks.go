@@ -126,9 +126,10 @@ var TaskListStatuses = []string{
 //     that carries the queue's own priority. A key replaces the preference
 //     terms of that order, never its lane structure — snoozed still sorts
 //     behind live, closed behind open, and the id tiebreaker still ends it.
-//     The attention tier (see OrdersByAttention) is structure too on the lanes
-//     that carry it: "sort by title" reorders an In Progress lane within each
-//     tier, so a run parked on a human still leads it.
+//     The attention tier (see OrdersByAttention) is structure too, over a
+//     lane's open rows: "sort by title" reorders an In Progress lane within
+//     each tier, so a run parked on a human still leads it. A closed row is
+//     never tiered, so a terminal tail sorts by the key alone.
 //   - SortDir: TaskSortDirAsc or TaskSortDirDesc, applying to SortKey alone.
 //     Empty alongside a key means descending. It is meaningless without a
 //     key — the default order has no direction to flip — and the HTTP layer
@@ -154,14 +155,18 @@ type TaskListFilter struct {
 // the two lanes whose reader is asking that question (in_progress, in_review)
 // and for the unfiltered read that contains them.
 //
-// A real gate, not an optimization: the tier is NOT inert on the lanes it
-// excludes. A done task still holding a draft pull request matches the
-// needs-you predicate, so a Done column that carried the tier would order its
-// closures by unfinished business rather than by recency, and a queued row's
-// place in line is the queue's own priority by definition.
+// This is a COST gate, and only that. The tier costs a correlated subquery per
+// row, which a lane whose rows would all tie at the same tier should not pay:
+// a queued row's place in line is the queue's own priority by definition, and a
+// closed row takes a constant tier whatever this answers. Correctness lives in
+// the tier expression instead — it guards the closed partition itself, so the
+// Done tail is ordered by recency under EVERY filter rather than only under the
+// ones this excludes. A gate is the wrong place for an invariant: it holds only
+// for the filters somebody thought of, and the mixed read is exactly the one
+// nobody sends today.
 //
 // It lives here rather than in either dialect so the two orderings cannot
-// disagree about which lanes carry the tier while agreeing on its SQL.
+// disagree about which lanes pay for the tier while agreeing on its SQL.
 func (f TaskListFilter) OrdersByAttention() bool {
 	if len(f.Statuses) == 0 {
 		return true

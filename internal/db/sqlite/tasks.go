@@ -104,7 +104,9 @@ const sqliteTaskRuleOrderJoin = `
 //     the queue keeps the ordering it had — and it never compares a NULL
 //     closed_at against a non-NULL one, which is what keeps the two dialects'
 //     NULL-ordering defaults from diverging at the recency term below.
-//  3. the attention tier, on the lanes that carry it (sqliteTaskAttentionTier).
+//  3. the attention tier over the open rows of the lanes that carry it
+//     (sqliteTaskAttentionTier) — a closed row is not tiered, so the term is
+//     inert inside the partition below and the recency term keeps it.
 //  4. newest-closed first — the Done column's recency, inert everywhere else.
 //  5. rule sort_order, then priority, then id — the queue's own ordering.
 //
@@ -133,17 +135,31 @@ const sqliteTaskListLanes = `
 	ORDER BY (t.status = 'snoozed') ASC,
 	         (t.closed_at IS NOT NULL) ASC,`
 
-// sqliteTaskAttentionTier orders a lane by whose move it is — the first
-// preference term on the In Progress and In Review lanes, so the card waiting
-// on a human is on page one rather than wherever its priority put it.
-// db.TaskListFilter.OrdersByAttention decides which lanes carry it; it is an
-// ORDER BY expression and no join, so it is absent from the count query by
-// construction.
+// sqliteTaskAttentionTier orders the OPEN rows of a lane by whose move it is —
+// the first preference term on the In Progress and In Review lanes, so the card
+// waiting on a human is on page one rather than wherever its priority put it.
+// It is an ORDER BY expression and no join, so it is absent from the count
+// query by construction.
 //
-// It is the one term that varies with the filter, and deliberately: the
-// statuses ARE the lane, so an order that varies with them is not a filter
-// quietly reshuffling a surface — it is each lane being ordered by the question
-// its reader is asking.
+// A closed row takes a constant tier, on the same `closed_at IS NOT NULL` the
+// partition above tests, and that is load-bearing rather than tidy. This term
+// is read BEFORE the recency term, so without the guard every read spanning
+// both partitions — an unfiltered one, or any explicit status set mixing open
+// rows with terminal ones — would order its closed tail by unfinished business
+// instead of by recency: a stale closure still holding a draft pull request
+// climbing over a later one that left nothing behind. Whether a lane carries
+// the tier at all is then only a question of cost
+// (db.TaskListFilter.OrdersByAttention), never of whether the tail is safe.
+//
+// The constant is 2 because that is what a closed row honestly is on this
+// scale: not anybody's move. Any constant would tie them; this one does not
+// need a reader to know it is a sentinel.
+//
+// Snoozed rows are deliberately NOT guarded the same way. They are segregated
+// by their own partition above, and inside that group the tier displaces
+// nothing a reader is owed — a deferred set falls straight through to rule
+// order and priority, which is the same preference class the tier belongs to.
+// The closed tail is the only group with a recency contract to protect.
 //
 // The tiers, and the reason each is where it is:
 //
@@ -176,7 +192,8 @@ const sqliteTaskListLanes = `
 // which no WHEN matches: the ELSE is what puts it in tier 2 rather than
 // needing its own arm.
 const sqliteTaskAttentionTier = `
-	         CASE WHEN EXISTS (SELECT 1 FROM conversations r
+	         CASE WHEN t.closed_at IS NOT NULL THEN 2
+	              WHEN EXISTS (SELECT 1 FROM conversations r
 	                           WHERE r.task_id = t.id AND ` + sqliteConversationAttentionSQL + `)
 	                   THEN 0
 	              ELSE CASE (SELECT ` + sqliteDisplayStatusSQL + `

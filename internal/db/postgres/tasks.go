@@ -158,16 +158,18 @@ const pgTaskListLanes = `
 	         (t.closed_at IS NOT NULL) ASC,`
 
 // pgTaskAttentionTier mirrors sqliteTaskAttentionTier — whose move is it, as
-// the first preference term on the lanes db.TaskListFilter.OrdersByAttention
-// names. See that constant for the tiers and for why tier 0 is the
-// conversations list's own needs-you predicate rather than a second definition
-// of it.
+// the first preference term over a lane's open rows. See that constant for the
+// tiers, for why tier 0 is the conversations list's own needs-you predicate
+// rather than a second definition of it, and for why a closed row takes a
+// constant instead: this term is read before the recency term, so the guard is
+// what keeps a mixed read's closed tail a log.
 //
 // Both subqueries carry the org id alongside the task id, the way every read in
 // this package does: the FK makes it redundant, and it is the defense in depth
 // that stands if the FK ever doesn't.
 const pgTaskAttentionTier = `
-	         CASE WHEN EXISTS (SELECT 1 FROM conversations r
+	         CASE WHEN t.closed_at IS NOT NULL THEN 2
+	              WHEN EXISTS (SELECT 1 FROM conversations r
 	                           WHERE r.org_id = t.org_id AND r.task_id = t.id
 	                             AND ` + pgConversationAttentionSQL + `)
 	                   THEN 0
