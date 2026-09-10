@@ -990,6 +990,27 @@ type ConversationStore interface {
 	// fence gets rebuilt.
 	ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park Park) (bool, error)
 
+	// SettleClaimCostSystem lands the spend one engagement reports onto the
+	// messages ledger — the same lump, by the same rule, that Complete settles
+	// at a terminal: an overwrite of claimID's newest own model-bearing row,
+	// falling back additively to the conversation's newest row when the
+	// claim streamed no rows. Zero settles nothing. It exists so a park can
+	// settle: the SDK reports a process's running total at every turn-end,
+	// and an engagement that parks rather than terminates would otherwise
+	// leave that total unrecorded until a resume happened to conclude, with
+	// the daily caps and every usage read blind to it in the meantime.
+	//
+	// Deliberately NOT fenced, and callable after the claim is released: a
+	// deliberate stop parks the row from the control side and releases the
+	// claim before the killed engagement's teardown arrives, and that
+	// teardown is still the only holder of the figure. The rows it stamps are
+	// its own — inserted under its claim — so a successor's state is never
+	// what this writes; a successor with no rows of its own can find its
+	// terminal fallback landing additively on this claim's row, which keeps
+	// the conversation total exact either way. Admin pool, org bound by
+	// argument.
+	SettleClaimCostSystem(ctx context.Context, orgID, conversationID, claimID string, costUSD float64) error
+
 	// SetClaimPhaseSystem writes claims.phase on one named claim — the
 	// claim-keyed sibling of SetActiveClaimPhaseSystem, for the engagement
 	// reporting its own setup progress. Empty phase clears to NULL. The

@@ -148,28 +148,16 @@ func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, c
 	return result, nil
 }
 
-// settleCompletionCostAndClaim does everything Complete's terminal write
-// needs to happen BEFORE the conversation flip: locate the active claim,
-// settle the cost lump onto the messages ledger, and release the claim with
-// its telemetry. Split out from the conversations UPDATE (completeConversationFlip)
-// specifically so callers can run it first — see Complete's doc for why the
-// order is load-bearing now that the flip RETURNINGs derived columns.
-func settleCompletionCostAndClaim(ctx context.Context, q queryer, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int) error {
-	// The active claim this terminal write releases identifies the
-	// engagement's own message rows (they insert claim-stamped), so the
-	// lump settles claim-keyed — every claim release's shape. Read
-	// before the release below: a released claim is no longer findable.
-	var claimID string
-	err := q.QueryRowContext(ctx, `
-		SELECT id FROM claims
-		WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
-	`, orgID, conversationID).Scan(&claimID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
+// settleClaimCostLump lands one engagement's reported spend on the messages
+// ledger, the only spend record there is. claimID is the engagement whose rows
+// the lump belongs to — the active claim at a terminal write, the parking
+// claim at a park — and may already be released: the rows still carry it.
+// Shared by the terminal write and SettleClaimCostSystem so a park and a
+// completion settle by exactly one rule.
+func settleClaimCostLump(ctx context.Context, q queryer, orgID, conversationID, claimID string, costUSD float64) error {
 	settled := false
 	// A zero lump settles nothing, in either arm. Zero means the runtime had
-	// nothing to report at terminal time: the native loop settles spend per
+	// nothing to report when it wrote: the native loop settles spend per
 	// assistant row as it goes, and overwriting its newest stamp with 0 would
 	// erase real recorded dollars. An SDK invocation that reports zero leaves
 	// its rows NULL — price unknown — rather than asserting the run was
@@ -251,6 +239,31 @@ func settleCompletionCostAndClaim(ctx context.Context, q queryer, orgID, convers
 				"conversation_id", conversationID, "org_id", orgID, "cost_usd", costUSD)
 		}
 	}
+	return nil
+}
+
+// settleCompletionCostAndClaim does everything Complete's terminal write
+// needs to happen BEFORE the conversation flip: locate the active claim,
+// settle the cost lump onto the messages ledger, and release the claim with
+// its telemetry. Split out from the conversations UPDATE (completeConversationFlip)
+// specifically so callers can run it first — see Complete's doc for why the
+// order is load-bearing now that the flip RETURNINGs derived columns.
+func settleCompletionCostAndClaim(ctx context.Context, q queryer, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int) error {
+	// The active claim this terminal write releases identifies the
+	// engagement's own message rows (they insert claim-stamped), so the
+	// lump settles claim-keyed — every claim release's shape. Read
+	// before the release below: a released claim is no longer findable.
+	var claimID string
+	err := q.QueryRowContext(ctx, `
+		SELECT id FROM claims
+		WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
+	`, orgID, conversationID).Scan(&claimID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err := settleClaimCostLump(ctx, q, orgID, conversationID, claimID, costUSD); err != nil {
+		return err
+	}
 	return releaseActiveClaimWithTelemetry(ctx, q, orgID, conversationID, claimOutcomeForStatus(status), durationMs, numTurns)
 }
 
@@ -314,6 +327,15 @@ func (s *conversationStore) ParkOpenSystem(ctx context.Context, orgID, conversat
 // ParkOpenForClaimSystem is ParkOpenSystem behind the fence — the self-park an
 // executor writes when its own run's ctx is killed. Its unfenced twin serves
 // the user-initiated cancel, which is deliberately not gated on ownership.
+func (s *conversationStore) SettleClaimCostSystem(ctx context.Context, orgID, conversationID, claimID string, costUSD float64) error {
+	if claimID == "" {
+		return errors.New("settle claim cost: claim id required")
+	}
+	return inTx(ctx, s.admin, func(q queryer) error {
+		return settleClaimCostLump(ctx, q, orgID, conversationID, claimID, costUSD)
+	})
+}
+
 func (s *conversationStore) ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park db.Park) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.admin, func(q queryer) error {

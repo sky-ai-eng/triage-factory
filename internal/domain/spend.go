@@ -25,10 +25,14 @@ const (
 // SpendRow is one row from the llm_spend view — a single unit of settled LLM
 // spend from either source. Read-only; assembled by db.SpendStore.
 //
-// Settled-spend semantics: TotalCostUSD and the four token counts are 0 for an
-// in-flight (non-terminal) delegated conversation and carry their real values
-// once a terminal write lands (normal completion, cancel, infra-failure, or a
-// boot-time orphan sweep). System rows are always terminal.
+// Settled-spend semantics: TotalCostUSD is 0 for a delegated engagement that
+// is still running and carries its real value once that engagement lets go
+// of the conversation — a park (idle, pause, cancel) or a terminal write
+// (completion, infra-failure, a boot-time orphan sweep) — each engagement
+// settling its own process's total on its own rows, so a parked-and-resumed
+// conversation reads as the sum of its engagements. The native runtime
+// prices each assistant row as it goes instead. System rows are always
+// terminal.
 //
 // Nullable columns are pointers: TeamID is set only for 'run' rows (system
 // rows are org-level); Subtype carries the job name for system rows (NULL

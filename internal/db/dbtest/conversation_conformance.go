@@ -469,6 +469,115 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	t.Run("SettleClaimCostSystem_ParkedEngagementLumpAddsToResumeLump", func(t *testing.T) {
+		// An engagement that parks settles the running total its process
+		// reported as one lump on its own claim's row — by the same rule the
+		// terminal write uses — and does so whether the claim is still
+		// active or was released ahead of it. The resumed engagement's
+		// terminal then settles only its own row, so the two add. The
+		// figures are binary fractions because the ledger column is a
+		// single-precision float on one dialect.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-park", 1); err != nil {
+			t.Fatalf("SetExecutorSystem 1: %v", err)
+		}
+		claims := seed.ClaimRows(t, conversationID)
+		if len(claims) != 1 {
+			t.Fatalf("claims = %+v, want 1", claims)
+		}
+		claim1 := claims[0].ID
+		msgA, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: conversationID, Role: "assistant", Content: "a", Model: "claude-sonnet-5"})
+		if err != nil {
+			t.Fatalf("InsertMessage a: %v", err)
+		}
+
+		if err := store.SettleClaimCostSystem(ctx, orgID, conversationID, "", 0.25); err == nil {
+			t.Error("SettleClaimCostSystem with no claim id must refuse")
+		}
+		if err := store.SettleClaimCostSystem(ctx, orgID, conversationID, claim1, 0.25); err != nil {
+			t.Fatalf("SettleClaimCostSystem: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, conversationID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.TotalCostUSD == nil || *got.TotalCostUSD != 0.25 {
+			t.Errorf("total_cost_usd after settle = %v, want 0.25", deref(got.TotalCostUSD))
+		}
+
+		// The same engagement reporting a newer running total overwrites —
+		// the figure IS the process total, never an increment.
+		if err := store.SettleClaimCostSystem(ctx, orgID, conversationID, claim1, 0.375); err != nil {
+			t.Fatalf("SettleClaimCostSystem (newer total): %v", err)
+		}
+		got, err = store.Get(ctx, orgID, conversationID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.TotalCostUSD == nil || *got.TotalCostUSD != 0.375 {
+			t.Errorf("total_cost_usd after re-settle = %v, want 0.375 (overwrite, not add)", deref(got.TotalCostUSD))
+		}
+
+		// Released ahead of the settle — the deliberate-stop order — the
+		// claim's rows still carry its id, and the settle still lands there.
+		if ok, err := store.ParkOpen(ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
+			t.Fatalf("ParkOpen: ok=%v err=%v", ok, err)
+		}
+		if err := store.SettleClaimCostSystem(ctx, orgID, conversationID, claim1, 0.5); err != nil {
+			t.Fatalf("SettleClaimCostSystem after release: %v", err)
+		}
+		// Zero settles nothing, released or not.
+		if err := store.SettleClaimCostSystem(ctx, orgID, conversationID, claim1, 0); err != nil {
+			t.Fatalf("SettleClaimCostSystem zero: %v", err)
+		}
+		got, err = store.Get(ctx, orgID, conversationID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.TotalCostUSD == nil || *got.TotalCostUSD != 0.5 {
+			t.Errorf("total_cost_usd after released settle = %v, want 0.5", deref(got.TotalCostUSD))
+		}
+
+		// The resume is its own engagement with its own lump.
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
+			t.Fatalf("MarkQueuedForResume: ok=%v err=%v", ok, err)
+		}
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-resume", 2); err != nil {
+			t.Fatalf("SetExecutorSystem 2: %v", err)
+		}
+		msgB, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: conversationID, Role: "assistant", Content: "b", Model: "claude-sonnet-5"})
+		if err != nil {
+			t.Fatalf("InsertMessage b: %v", err)
+		}
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 0.125, 0, 0, "", "finish", "", ""); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		got, err = store.Get(ctx, orgID, conversationID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.TotalCostUSD == nil || *got.TotalCostUSD != 0.625 {
+			t.Errorf("total_cost_usd = %v, want 0.625 (park lump 0.5 + terminal lump 0.125)", deref(got.TotalCostUSD))
+		}
+		msgs, err := store.Messages(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		costByID := map[int]*float64{}
+		for i := range msgs {
+			costByID[msgs[i].ID] = msgs[i].CostUSD
+		}
+		if c := costByID[int(msgA)]; c == nil || *c != 0.5 {
+			t.Errorf("parked engagement's row cost_usd = %v, want 0.5", deref(c))
+		}
+		if c := costByID[int(msgB)]; c == nil || *c != 0.125 {
+			t.Errorf("resumed engagement's row cost_usd = %v, want 0.125", deref(c))
+		}
+	})
+
 	t.Run("Complete_NoClaimAttributedRows_SettlesAdditivelyOnNewestRow", func(t *testing.T) {
 		// An engagement can bill while recording no rows of its own (an
 		// invocation bills for system-prompt / cache overhead even when
