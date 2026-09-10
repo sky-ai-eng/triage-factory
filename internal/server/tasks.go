@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -164,6 +165,29 @@ type taskListRequest struct {
 	// (domain.EventSources); an unknown value is a client fault, not an
 	// empty page. Empty = all sources.
 	Sources []string `json:"sources"`
+	// CreatedBefore (RFC3339) is CreatedSince's other half: rows created at
+	// or before it. The pair is how a lane asks for a window rather than a
+	// ray, and either end may stand alone.
+	CreatedBefore string `json:"created_before"`
+	// EventTypes narrows to these stations. Validated against the catalog
+	// (domain.EventTypeIDs) on the same terms as Sources. Empty = all.
+	EventTypes []string `json:"event_types"`
+	// Search is a case-insensitive substring the row must carry in its
+	// title, source id, ai_summary or event type. Trimmed; empty after the
+	// trim is absent. It runs here rather than in the client because a lane
+	// holds one page: a match on an unfetched page is invisible to a
+	// client-side filter, and the tail's total would answer a different
+	// query from the items above it.
+	Search string `json:"search"`
+	// SortKey reorders the lane (db.TaskListSortKeys). Absent asks for the
+	// store's default order — there is deliberately no "default" value to
+	// send, since a name for the absent case is a second spelling of it.
+	SortKey string `json:"sort_key"`
+	// SortDir is SortKey's direction. Absent alongside a key means desc.
+	// Alone it is refused rather than ignored: the default order has no
+	// direction, so a lone sort_dir is a caller expecting something the
+	// answer will not show.
+	SortDir string `json:"sort_dir"`
 
 	httpx.PageRequest
 }
@@ -179,8 +203,21 @@ type taskListFilterKey struct {
 	IncludeSnoozed bool     `json:"include_snoozed"`
 	ClosedSince    string   `json:"closed_since"`
 	CreatedSince   string   `json:"created_since"`
+	CreatedBefore  string   `json:"created_before"`
 	Sources        []string `json:"sources"`
+	EventTypes     []string `json:"event_types"`
+	Search         string   `json:"search"`
+	// The sort is part of the key for the same reason the filters are: an
+	// offset addresses a position in an ordering, so a token minted under
+	// one sort names different rows under another.
+	SortKey string `json:"sort_key"`
+	SortDir string `json:"sort_dir"`
 }
+
+// maxTaskSearchRunes caps the search needle. A needle longer than this is a
+// paste, not a search, and the cap is measured in runes so a multi-byte one
+// isn't refused for being multi-byte.
+const maxTaskSearchRunes = 200
 
 // taskCreateRequest is the body of POST /api/tasks: the station a task is
 // wanted at, named the way the dedup index names it. dedup_key may be empty —
@@ -472,6 +509,18 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 			createdSinceKey = ts.Format(time.RFC3339Nano)
 		}
 	}
+	var createdBefore *time.Time
+	createdBeforeKey := ""
+	if req.CreatedBefore != "" {
+		ts, err := time.Parse(time.RFC3339, req.CreatedBefore)
+		if err != nil {
+			v.Invalid("created_before", "created_before must be an RFC3339 timestamp")
+		} else {
+			ts = ts.UTC()
+			createdBefore = &ts
+			createdBeforeKey = ts.Format(time.RFC3339Nano)
+		}
+	}
 	sources := canonicalStrings(req.Sources)
 	validSources := domain.EventSources()
 	for _, src := range sources {
@@ -480,6 +529,39 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 				src, strings.Join(validSources, ", ")))
 		}
 	}
+	eventTypes := canonicalStrings(req.EventTypes)
+	validEventTypes := domain.EventTypeIDs()
+	for _, et := range eventTypes {
+		if !slices.Contains(validEventTypes, et) {
+			// The catalog is too long to spell into an error message, and it
+			// is already a route: name the offending value and say where the
+			// vocabulary lives.
+			v.Invalid("event_types", fmt.Sprintf("unknown event type %q; see GET /api/event-types for the catalog", et))
+		}
+	}
+	// Trimmed here rather than in the store so the fingerprint, the predicate
+	// and the cap all see the same needle — " ci " and "ci" are one query.
+	search := strings.TrimSpace(req.Search)
+	if utf8.RuneCountInString(search) > maxTaskSearchRunes {
+		v.Invalid("search", fmt.Sprintf("search must be at most %d characters", maxTaskSearchRunes))
+	}
+	sortKey, sortDir := req.SortKey, req.SortDir
+	if sortKey != "" && !slices.Contains(db.TaskListSortKeys, sortKey) {
+		v.Invalid("sort_key", fmt.Sprintf("unknown sort_key %q; must be one of: %s",
+			sortKey, strings.Join(db.TaskListSortKeys, ", ")))
+	}
+	if sortDir != "" {
+		if !slices.Contains(db.TaskListSortDirs, sortDir) {
+			v.Invalid("sort_dir", fmt.Sprintf("unknown sort_dir %q; must be one of: %s",
+				sortDir, strings.Join(db.TaskListSortDirs, ", ")))
+		}
+		if sortKey == "" {
+			v.Invalid("sort_dir", "sort_dir requires sort_key")
+		}
+	} else if sortKey != "" {
+		// Newest / Z-A first, which is what the board's controls default to.
+		sortDir = db.TaskSortDirDesc
+	}
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{
 		Statuses:       statuses,
 		TeamIDs:        teamIDs,
@@ -487,7 +569,15 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 		IncludeSnoozed: req.IncludeSnoozed,
 		ClosedSince:    closedSinceKey,
 		CreatedSince:   createdSinceKey,
+		CreatedBefore:  createdBeforeKey,
 		Sources:        sources,
+		EventTypes:     eventTypes,
+		// Case-folded, because the predicate is: two spellings of one needle
+		// match the same rows, so they must fingerprint as the same query
+		// rather than cost the caller its token.
+		Search:  strings.ToLower(search),
+		SortKey: sortKey,
+		SortDir: sortDir,
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -504,7 +594,12 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 			IncludeSnoozed: req.IncludeSnoozed,
 			ClosedSince:    closedSince,
 			CreatedSince:   createdSince,
+			CreatedBefore:  createdBefore,
 			Sources:        sources,
+			EventTypes:     eventTypes,
+			Search:         search,
+			SortKey:        sortKey,
+			SortDir:        sortDir,
 		}, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {

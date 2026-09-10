@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,6 +167,238 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		f.Sources = []string{other}
 		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || total != 0 {
 			t.Errorf("sources = [%s]: total = %d (err %v), want 0", other, total, err)
+		}
+	})
+
+	t.Run("List_created_before_windows_the_other_end", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		seed(t, "cb1")
+		seed(t, "cb2")
+
+		_, allTotal, err := s.List(ctx, orgID, queueFilter(), db.ListOpts{CountOnly: true})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if allTotal < 2 {
+			t.Fatalf("seeded queue has %d rows, want >= 2", allTotal)
+		}
+
+		past, future := time.Now().Add(-time.Hour).UTC(), time.Now().Add(time.Hour).UTC()
+		f := queueFilter()
+		f.CreatedBefore = &future
+		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || total != allTotal {
+			t.Errorf("created_before in the future: total = %d (err %v), want %d", total, err, allTotal)
+		}
+		f.CreatedBefore = &past
+		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || total != 0 {
+			t.Errorf("created_before in the past: total = %d (err %v), want 0", total, err)
+		}
+		// Both ends together are a window, not two independent rays: a
+		// window that brackets now keeps the set, an inverted one empties it.
+		f.CreatedSince, f.CreatedBefore = &past, &future
+		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || total != allTotal {
+			t.Errorf("bracketing window: total = %d (err %v), want %d", total, err, allTotal)
+		}
+		f.CreatedSince, f.CreatedBefore = &future, &past
+		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || total != 0 {
+			t.Errorf("inverted window: total = %d (err %v), want 0", total, err)
+		}
+	})
+
+	t.Run("List_event_types_filter", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		seed(t, "et1")
+		seed(t, "et2")
+
+		all, allTotal, err := s.List(ctx, orgID, queueFilter(), db.ListOpts{Limit: 50})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(all) < 2 {
+			t.Fatalf("seeded queue has %d rows, want >= 2", len(all))
+		}
+		seeded := all[0].EventType
+		if seeded == "" {
+			t.Fatal("seeded task carries no EventType")
+		}
+		other := domain.EventGitHubPRReviewRequested
+		if seeded == other {
+			other = domain.EventGitHubPRCICheckPassed
+		}
+
+		f := queueFilter()
+		f.EventTypes = []string{seeded}
+		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || total != allTotal {
+			t.Errorf("event_types = [%s]: total = %d (err %v), want %d", seeded, total, err, allTotal)
+		}
+		f.EventTypes = []string{other}
+		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || total != 0 {
+			t.Errorf("event_types = [%s]: total = %d (err %v), want 0", other, total, err)
+		}
+		// The list is an OR, so naming both keeps everything the one match
+		// kept — an unmatched member narrows nothing.
+		f.EventTypes = []string{seeded, other}
+		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || total != allTotal {
+			t.Errorf("event_types = [%s %s]: total = %d (err %v), want %d", seeded, other, total, err, allTotal)
+		}
+	})
+
+	t.Run("List_search_matches_a_substring_literally", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		// The seeders build the entity title out of the suffix, so the suffix
+		// is how this subtest chooses what the needle has to find. The '%' is
+		// the point of the second row: it must behave as a percent sign, not
+		// as "anything".
+		seed(t, "needle-alpha")
+		seed(t, "100%-covered")
+		seed(t, "unrelated")
+
+		_, allTotal, err := s.List(ctx, orgID, queueFilter(), db.ListOpts{CountOnly: true})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if allTotal != 3 {
+			t.Fatalf("seeded queue has %d rows, want 3", allTotal)
+		}
+
+		count := func(needle string) int {
+			t.Helper()
+			f := queueFilter()
+			f.Search = needle
+			rows, total, err := s.List(ctx, orgID, f, db.ListOpts{Limit: 50})
+			if err != nil {
+				t.Fatalf("List(search=%q): %v", needle, err)
+			}
+			if total != len(rows) {
+				t.Errorf("search %q: total = %d but the page holds %d — the count must run the same filters", needle, total, len(rows))
+			}
+			return total
+		}
+
+		if got := count("needle-alpha"); got != 1 {
+			t.Errorf("search for a title substring matched %d rows, want 1", got)
+		}
+		// Case folds both ways: the stored title is mixed-case, the needle
+		// isn't.
+		if got := count("NEEDLE-ALPHA"); got != 1 {
+			t.Errorf("upper-case needle matched %d rows, want 1", got)
+		}
+		// The event type is one of the four searched fields, and every seeded
+		// row shares one — so this needle is the whole set.
+		if got := count("ci_check_failed"); got != allTotal {
+			t.Errorf("search on the event type matched %d rows, want %d", got, allTotal)
+		}
+		// Escaping: a bare wildcard is a literal, so it finds only the row
+		// whose title actually holds one.
+		if got := count("%"); got != 1 {
+			t.Errorf("search for a literal %% matched %d rows, want 1 (the wildcard leaked)", got)
+		}
+		if got := count("100%-cov"); got != 1 {
+			t.Errorf("search spanning a literal %% matched %d rows, want 1", got)
+		}
+		if got := count("nothing-here"); got != 0 {
+			t.Errorf("search for an absent needle matched %d rows, want 0", got)
+		}
+	})
+
+	t.Run("List_sort_keys_reorder_within_the_lane", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		for _, suffix := range []string{"sort-ccc", "sort-aaa", "sort-bbb"} {
+			seed(t, suffix)
+		}
+
+		read := func(key, dir string) []domain.Task {
+			t.Helper()
+			f := queueFilter()
+			f.SortKey, f.SortDir = key, dir
+			rows, total, err := s.List(ctx, orgID, f, db.ListOpts{Limit: 50})
+			if err != nil {
+				t.Fatalf("List(sort=%s %s): %v", key, dir, err)
+			}
+			if total != 3 || len(rows) != 3 {
+				t.Fatalf("sort=%s %s returned %d rows / total %d, want 3 / 3", key, dir, len(rows), total)
+			}
+			return rows
+		}
+
+		// Titles are the one key this suite controls exactly, so they carry
+		// the strict assertion: descending is ascending reversed.
+		asc := read(db.TaskSortTitle, db.TaskSortDirAsc)
+		desc := read(db.TaskSortTitle, db.TaskSortDirDesc)
+		for i, task := range asc {
+			if got := desc[len(desc)-1-i].ID; got != task.ID {
+				t.Errorf("title desc[%d] = %s, want %s (desc must be asc reversed)", len(desc)-1-i, got, task.ID)
+			}
+		}
+		if !slices.IsSortedFunc(asc, func(a, b domain.Task) int { return strings.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title)) }) {
+			t.Errorf("title asc is not ordered by title: %v", titlesOf(asc))
+		}
+
+		// created and event_type assert monotonicity rather than a strict
+		// reversal: seeds inside one clock tick tie, and a tie falls through
+		// to the id tiebreaker in BOTH directions by design.
+		for _, dir := range []string{db.TaskSortDirAsc, db.TaskSortDirDesc} {
+			rows := read(db.TaskSortCreated, dir)
+			for i := 1; i < len(rows); i++ {
+				before := rows[i-1].CreatedAt
+				after := rows[i].CreatedAt
+				if dir == db.TaskSortDirAsc && after.Before(before) {
+					t.Errorf("created asc: row %d (%s) precedes row %d (%s)", i, after, i-1, before)
+				}
+				if dir == db.TaskSortDirDesc && after.After(before) {
+					t.Errorf("created desc: row %d (%s) follows row %d (%s)", i, after, i-1, before)
+				}
+			}
+		}
+		// Every seeded row shares an event type, so this sort is all tie —
+		// which is exactly what pins the id tiebreaker at the end of the
+		// ORDER BY: the two directions must agree.
+		etAsc, etDesc := read(db.TaskSortEventType, db.TaskSortDirAsc), read(db.TaskSortEventType, db.TaskSortDirDesc)
+		for i := range etAsc {
+			if etAsc[i].ID != etDesc[i].ID {
+				t.Errorf("event_type sort on all-tying rows differs by direction at %d: %s vs %s", i, etAsc[i].ID, etDesc[i].ID)
+			}
+		}
+		if !slices.IsSortedFunc(etAsc, func(a, b domain.Task) int { return strings.Compare(a.ID, b.ID) }) {
+			t.Errorf("all-tying sort didn't fall through to the id tiebreaker: %v", idsOf(etAsc))
+		}
+	})
+
+	t.Run("List_claimee_sort_puts_unclaimed_last_in_both_directions", func(t *testing.T) {
+		s, orgID, _, agentID, userID, seed, _ := mk(t)
+		_, _, byAgent := seed(t, "claimee-agent")
+		_, _, byUser := seed(t, "claimee-user")
+		_, _, unclaimed := seed(t, "claimee-none")
+		if _, err := s.SetClaimedByAgent(ctx, orgID, byAgent, agentID); err != nil {
+			t.Fatalf("SetClaimedByAgent: %v", err)
+		}
+		if _, err := s.SetClaimedByUser(ctx, orgID, byUser, userID); err != nil {
+			t.Fatalf("SetClaimedByUser: %v", err)
+		}
+
+		// The claim axis, not the pickable queue: queueFilter excludes
+		// claimed rows, which is the whole set this sort orders.
+		base := db.TaskListFilter{Statuses: []string{"queued"}, IncludeSnoozed: true}
+		for _, dir := range []string{db.TaskSortDirAsc, db.TaskSortDirDesc} {
+			f := base
+			f.SortKey, f.SortDir = db.TaskSortClaimee, dir
+			rows, total, err := s.List(ctx, orgID, f, db.ListOpts{Limit: 50})
+			if err != nil {
+				t.Fatalf("List(claimee %s): %v", dir, err)
+			}
+			if total != 3 || len(rows) != 3 {
+				t.Fatalf("claimee %s returned %d rows / total %d, want 3 / 3", dir, len(rows), total)
+			}
+			if got := rows[len(rows)-1].ID; got != unclaimed {
+				t.Errorf("claimee %s: last row is %s, want the unclaimed task %s", dir, got, unclaimed)
+			}
+			claimedSeen := map[string]bool{}
+			for _, task := range rows[:len(rows)-1] {
+				claimedSeen[task.ID] = true
+			}
+			if !claimedSeen[byAgent] || !claimedSeen[byUser] {
+				t.Errorf("claimee %s: claimed rows %s / %s didn't both sort ahead of the unclaimed one", dir, byAgent, byUser)
+			}
 		}
 	})
 
@@ -1374,4 +1607,22 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 			t.Errorf("unknown status returned %d ids / total %d, want 0 / 0", len(ids), total)
 		}
 	})
+}
+
+// titlesOf / idsOf render a page for a failure message — the assertion is on
+// the order, so the message has to show it.
+func titlesOf(tasks []domain.Task) []string {
+	out := make([]string, len(tasks))
+	for i, task := range tasks {
+		out[i] = task.Title
+	}
+	return out
+}
+
+func idsOf(tasks []domain.Task) []string {
+	out := make([]string, len(tasks))
+	for i, task := range tasks {
+		out[i] = task.ID
+	}
+	return out
 }
