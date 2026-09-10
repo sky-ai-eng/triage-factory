@@ -327,15 +327,6 @@ func (s *conversationStore) ParkOpenSystem(ctx context.Context, orgID, conversat
 // ParkOpenForClaimSystem is ParkOpenSystem behind the fence — the self-park an
 // executor writes when its own run's ctx is killed. Its unfenced twin serves
 // the user-initiated cancel, which is deliberately not gated on ownership.
-func (s *conversationStore) SettleClaimCostSystem(ctx context.Context, orgID, conversationID, claimID string, costUSD float64) error {
-	if claimID == "" {
-		return errors.New("settle claim cost: claim id required")
-	}
-	return inTx(ctx, s.admin, func(q queryer) error {
-		return settleClaimCostLump(ctx, q, orgID, conversationID, claimID, costUSD)
-	})
-}
-
 func (s *conversationStore) ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park db.Park) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.admin, func(q queryer) error {
@@ -353,6 +344,17 @@ func (s *conversationStore) ParkOpenForClaimSystem(ctx context.Context, orgID, c
 		return false, err
 	}
 	return flipped, nil
+}
+
+// SettleClaimCostSystem lands one engagement's reported spend on its own
+// claim's rows — see the interface doc for when and why it is unfenced.
+func (s *conversationStore) SettleClaimCostSystem(ctx context.Context, orgID, conversationID, claimID string, costUSD float64) error {
+	if claimID == "" {
+		return errors.New("settle claim cost: claim id required")
+	}
+	return inTx(ctx, s.admin, func(q queryer) error {
+		return settleClaimCostLump(ctx, q, orgID, conversationID, claimID, costUSD)
+	})
 }
 
 // parkOpen is the one row-write behind every park — see
