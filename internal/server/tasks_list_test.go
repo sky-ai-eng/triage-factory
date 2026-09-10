@@ -61,6 +61,10 @@ type taskFixture struct {
 	claimedBot  bool
 	snoozeUntil *time.Time
 	closedAt    *time.Time
+	// eventType is the station the row sits at. Empty defaults to
+	// ci_check_failed — most fixtures are about a lane rather than a station,
+	// and only the facet tests care which one.
+	eventType string
 	// inQueue is what the queue projection must answer for this row.
 	inQueue bool
 }
@@ -77,6 +81,10 @@ func seedTaskFixture(t *testing.T, database *sql.DB, f taskFixture) string {
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()
 	sourceID := fmt.Sprintf("list-%s-%d", f.name, now.UnixNano())
+	eventType := f.eventType
+	if eventType == "" {
+		eventType = domain.EventGitHubPRCICheckFailed
+	}
 
 	execSQL(t, database, `
 		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
@@ -85,7 +93,7 @@ func seedTaskFixture(t *testing.T, database *sql.DB, f taskFixture) string {
 	execSQL(t, database, `
 		INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at)
 		VALUES (?, ?, ?, '', '{}', ?)`,
-		eventID, entityID, domain.EventGitHubPRCICheckFailed, now)
+		eventID, entityID, eventType, now)
 
 	var userClaim, botClaim, snooze, closed any
 	if f.claimedUser {
@@ -109,7 +117,7 @@ func seedTaskFixture(t *testing.T, database *sql.DB, f taskFixture) string {
 		                   team_id, visibility,
 		                   claimed_by_user_id, claimed_by_agent_id, snooze_until, closed_at)
 		VALUES (?, ?, ?, '', ?, ?, 0.5, 'pending', ?, ?, 'team', ?, ?, ?, ?)`,
-		taskID, entityID, domain.EventGitHubPRCICheckFailed, eventID, f.status, now,
+		taskID, entityID, eventType, eventID, f.status, now,
 		runmode.LocalDefaultTeamID, userClaim, botClaim, snooze, closed)
 	return taskID
 }

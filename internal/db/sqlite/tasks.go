@@ -306,6 +306,30 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 	return tasks, total, nil
 }
 
+// FacetEventTypes renders the same WHERE List does — the facet counts the
+// rows the lane lists, and a second WHERE is how the two drift apart. The
+// rule-order join and the sort joins are absent for the same reason the
+// count query leaves them out: nothing here orders by a rule's sort_order or
+// a claimant's name, and neither join can change which rows are counted.
+func (s *taskStore) FacetEventTypes(ctx context.Context, orgID string, f db.TaskListFilter) ([]db.Facet, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	where, args := sqliteTaskListWhere(f)
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT t.event_type, COUNT(*)
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE `+where+`
+		GROUP BY t.event_type
+		ORDER BY t.event_type ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return db.ScanFacets(rows)
+}
+
 func (s *taskStore) FindActiveByEntityAndType(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
