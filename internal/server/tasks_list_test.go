@@ -61,6 +61,10 @@ type taskFixture struct {
 	claimedBot  bool
 	snoozeUntil *time.Time
 	closedAt    *time.Time
+	// priority is the row's priority_score. Nil takes the 0.5 every other
+	// fixture carries — a set that ties on priority is what lets a test about
+	// some other term read cleanly.
+	priority *float64
 	// inQueue is what the queue projection must answer for this row.
 	inQueue bool
 }
@@ -87,6 +91,10 @@ func seedTaskFixture(t *testing.T, database *sql.DB, f taskFixture) string {
 		VALUES (?, ?, ?, '', '{}', ?)`,
 		eventID, entityID, domain.EventGitHubPRCICheckFailed, now)
 
+	priority := 0.5
+	if f.priority != nil {
+		priority = *f.priority
+	}
 	var userClaim, botClaim, snooze, closed any
 	if f.claimedUser {
 		userClaim = runmode.LocalDefaultUserID
@@ -108,8 +116,8 @@ func seedTaskFixture(t *testing.T, database *sql.DB, f taskFixture) string {
 		                   status, priority_score, scoring_status, created_at,
 		                   team_id, visibility,
 		                   claimed_by_user_id, claimed_by_agent_id, snooze_until, closed_at)
-		VALUES (?, ?, ?, '', ?, ?, 0.5, 'pending', ?, ?, 'team', ?, ?, ?, ?)`,
-		taskID, entityID, domain.EventGitHubPRCICheckFailed, eventID, f.status, now,
+		VALUES (?, ?, ?, '', ?, ?, ?, 'pending', ?, ?, 'team', ?, ?, ?, ?)`,
+		taskID, entityID, domain.EventGitHubPRCICheckFailed, eventID, f.status, priority, now,
 		runmode.LocalDefaultTeamID, userClaim, botClaim, snooze, closed)
 	return taskID
 }
@@ -749,5 +757,82 @@ func TestTaskList_TokenIsBoundToItsSearchAndSort(t *testing.T) {
 	})
 	if len(page.Items) != 1 {
 		t.Errorf("second page under the explicit spelling of the same sort = %d items, want 1", len(page.Items))
+	}
+}
+
+// seedListConversation hangs one conversation off a seeded task in the given
+// stored status ("" = SQL NULL, the mid-flight state) and returns its id.
+// origin='interactive' is how a conversation with no blueprint behind it is
+// spelled — the origin CHECK demands the blueprint parents only for 'blueprint'.
+func seedListConversation(t *testing.T, database *sql.DB, taskID, storedStatus string) string {
+	t.Helper()
+	convID := uuid.New().String()
+	var status any
+	if storedStatus != "" {
+		status = storedStatus
+	}
+	execSQL(t, database, `
+		INSERT INTO conversations (id, task_id, status, trigger_type, origin,
+		                          team_id, visibility, creator_user_id)
+		VALUES (?, ?, ?, 'manual', 'interactive', ?, 'team', ?)`,
+		convID, taskID, status, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID)
+	return convID
+}
+
+// seedDraftPR leaves an unresolved artifact on the conversation — the shape
+// that makes a concluded run somebody's move.
+func seedDraftPR(t *testing.T, database *sql.DB, conversationID string) {
+	t.Helper()
+	id := uuid.New().String()
+	execSQL(t, database, `
+		INSERT INTO artifacts (id, conversation_id, team_id, provider, kind, target, state, dedup_key)
+		VALUES (?, ?, ?, 'github', 'pull_request', 'o/r#7', 'draft', ?)`,
+		id, conversationID, runmode.LocalDefaultTeamID, id)
+}
+
+// TestTaskList_AttentionOrderSurvivesPaging is the reason the attention tier
+// had to move server-side: the client's re-sort could only reorder the page it
+// held, so a needs-you card that the server's order put on page two stayed
+// there. The lane below is staged so priority alone would do exactly that —
+// both needs-you rows carry the LOWEST priority in the lane — and page one
+// holds them anyway.
+func TestTaskList_AttentionOrderSurvivesPaging(t *testing.T) {
+	s := newTestServer(t)
+	priority := func(v float64) *float64 { return &v }
+	seed := func(name string, p float64, needsYou bool) string {
+		t.Helper()
+		id := seedTaskFixture(t, s.db, taskFixture{
+			name: name, status: "in_progress", claimedUser: true, priority: priority(p),
+		})
+		conv := seedListConversation(t, s.db, id, domain.StatusCompleted)
+		if needsYou {
+			seedDraftPR(t, s.db, conv)
+		}
+		return id
+	}
+	// Descending priority within each tier, so both pages are a fixed order.
+	needsHigher := seed("paged-needs-hi", 0.2, true)
+	needsLower := seed("paged-needs-lo", 0.1, true)
+	quietHigher := seed("paged-quiet-hi", 0.9, false)
+	quietLower := seed("paged-quiet-lo", 0.8, false)
+
+	body := map[string]any{"statuses": []string{"in_progress"}, "page_size": 2}
+	first := postTaskList(t, s, body)
+	if want := []string{needsHigher, needsLower}; !slices.Equal(listedIDs(first), want) {
+		t.Errorf("page 1 = %v, want %v — the needs-you rows, despite being the lowest priority in the lane",
+			listedIDs(first), want)
+	}
+	if first.TotalCount != 4 {
+		t.Errorf("total_count = %d, want 4 — the tier orders the lane, it doesn't narrow it", first.TotalCount)
+	}
+	if first.NextPageToken == "" {
+		t.Fatal("no token minted for a partial page")
+	}
+
+	body["page_token"] = first.NextPageToken
+	second := postTaskList(t, s, body)
+	if want := []string{quietHigher, quietLower}; !slices.Equal(listedIDs(second), want) {
+		t.Errorf("page 2 = %v, want %v — the concluded rows, in priority order behind the tier",
+			listedIDs(second), want)
 	}
 }

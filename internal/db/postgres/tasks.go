@@ -140,22 +140,47 @@ const pgTaskRuleOrderJoin = `
 		GROUP BY org_id, event_type
 	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 
-// pgTaskListOrder is List's ordering. It must stay byte-for-byte equivalent to
-// sqliteTaskListOrder in meaning — the dbtest conformance suite asserts the
-// two dialects agree on the order, not just the set. See that constant for why
-// each term is there.
-const pgTaskListOrder = pgTaskListLanes + `
+// pgTaskListDefaultKeys is the preference half of List's default ordering. It
+// must stay equivalent to sqliteTaskListDefaultKeys in meaning — the dbtest
+// conformance suite asserts the two dialects agree on the order, not just the
+// set. See that constant for why each term is there.
+const pgTaskListDefaultKeys = `
 	         t.closed_at DESC,
 	         COALESCE(tr.sort_order, 999) ASC,
 	         COALESCE(t.priority_score, 0.5) DESC,
 	         t.id ASC`
 
 // pgTaskListLanes mirrors sqliteTaskListLanes: the lane partitions a reader's
-// sort key never displaces. See that constant for why the recency term below
-// it is preference rather than structure.
+// sort key never displaces. See that constant for why the recency term further
+// down is preference rather than structure.
 const pgTaskListLanes = `
 	ORDER BY (t.status = 'snoozed') ASC,
 	         (t.closed_at IS NOT NULL) ASC,`
+
+// pgTaskAttentionTier mirrors sqliteTaskAttentionTier — whose move is it, as
+// the first preference term on the lanes db.TaskListFilter.OrdersByAttention
+// names. See that constant for the tiers and for why tier 0 is the
+// conversations list's own needs-you predicate rather than a second definition
+// of it.
+//
+// Both subqueries carry the org id alongside the task id, the way every read in
+// this package does: the FK makes it redundant, and it is the defense in depth
+// that stands if the FK ever doesn't.
+const pgTaskAttentionTier = `
+	         CASE WHEN EXISTS (SELECT 1 FROM conversations r
+	                           WHERE r.org_id = t.org_id AND r.task_id = t.id
+	                             AND ` + pgConversationAttentionSQL + `)
+	                   THEN 0
+	              ELSE CASE (SELECT ` + pgDisplayStatusSQL + `
+	                         FROM conversations r
+	                         WHERE r.org_id = t.org_id AND r.task_id = t.id
+	                         ORDER BY r.started_at DESC, r.id
+	                         LIMIT 1)
+	                     WHEN 'failed'    THEN 1
+	                     WHEN 'completed' THEN 3
+	                     ELSE 2
+	                   END
+	         END ASC,`
 
 // pgTaskClaimantJoin mirrors sqliteTaskClaimantJoin, org-scoped on the agents
 // side the way every other agents join in this package is.
@@ -168,6 +193,11 @@ const pgTaskClaimantJoin = `
 // suite asserts the two dialects agree on the resulting order, not just the
 // set.
 func pgTaskListSort(f db.TaskListFilter) (joins, order string) {
+	// The structure both arms keep, whatever the reader asked for.
+	head := pgTaskListLanes
+	if f.OrdersByAttention() {
+		head += pgTaskAttentionTier
+	}
 	dir := " DESC"
 	if f.SortDir == db.TaskSortDirAsc {
 		dir = " ASC"
@@ -185,9 +215,9 @@ func pgTaskListSort(f db.TaskListFilter) (joins, order string) {
 		key = `CASE WHEN t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL THEN 1 ELSE 0 END ASC,
 	         COALESCE(ca.display_name, cu.display_name, '')`
 	default:
-		return pgTaskRuleOrderJoin, pgTaskListOrder
+		return pgTaskRuleOrderJoin, head + pgTaskListDefaultKeys
 	}
-	return joins, pgTaskListLanes + `
+	return joins, head + `
 	         ` + key + dir + `,
 	         t.id ASC`
 }
@@ -264,8 +294,9 @@ func pgTaskListWhere(orgID string, f db.TaskListFilter) (string, []any) {
 func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter, opts db.ListOpts) ([]domain.Task, int, error) {
 	where, args := pgTaskListWhere(orgID, f)
 
-	// Same filters, same connection as the page below — see the SQLite
-	// mirror for why the rule-order join is left out of the count.
+	// Same filters, same connection as the page below — see the SQLite mirror
+	// for why the count carries no ordering at all: neither the rule-order
+	// join nor the attention tier.
 	var total int
 	if err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(*)

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -125,6 +126,9 @@ var TaskListStatuses = []string{
 //     that carries the queue's own priority. A key replaces the preference
 //     terms of that order, never its lane structure — snoozed still sorts
 //     behind live, closed behind open, and the id tiebreaker still ends it.
+//     The attention tier (see OrdersByAttention) is structure too on the lanes
+//     that carry it: "sort by title" reorders an In Progress lane within each
+//     tier, so a run parked on a human still leads it.
 //   - SortDir: TaskSortDirAsc or TaskSortDirDesc, applying to SortKey alone.
 //     Empty alongside a key means descending. It is meaningless without a
 //     key — the default order has no direction to flip — and the HTTP layer
@@ -142,6 +146,27 @@ type TaskListFilter struct {
 	Search         string
 	SortKey        string
 	SortDir        string
+}
+
+// OrdersByAttention reports whether List's order leads with the attention tier
+// — whose move is it: a conversation parked on a human first, then a failed
+// one, then work in flight, then work already concluded. It answers yes for
+// the two lanes whose reader is asking that question (in_progress, in_review)
+// and for the unfiltered read that contains them.
+//
+// A real gate, not an optimization: the tier is NOT inert on the lanes it
+// excludes. A done task still holding a draft pull request matches the
+// needs-you predicate, so a Done column that carried the tier would order its
+// closures by unfinished business rather than by recency, and a queued row's
+// place in line is the queue's own priority by definition.
+//
+// It lives here rather than in either dialect so the two orderings cannot
+// disagree about which lanes carry the tier while agreeing on its SQL.
+func (f TaskListFilter) OrdersByAttention() bool {
+	if len(f.Statuses) == 0 {
+		return true
+	}
+	return slices.Contains(f.Statuses, "in_progress") || slices.Contains(f.Statuses, "in_review")
 }
 
 // The task-list sort vocabulary: the keys a reader may order a lane by, and
