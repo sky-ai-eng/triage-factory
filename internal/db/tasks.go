@@ -231,6 +231,25 @@ type TaskStore interface {
 	// survive whatever the reader picked.
 	List(ctx context.Context, orgID string, filter TaskListFilter, opts ListOpts) ([]domain.Task, int, error)
 
+	// FacetEventTypes is List's synthetic sibling: how many of the rows the
+	// same filters match sit at each event type, one Facet per type present,
+	// ordered by the type id ascending. It is what a lane's filter chips are
+	// drawn from — the chips must show every type the lane holds, including
+	// the ones the reader just filtered out, so a client holding one page of
+	// a filtered query cannot derive them.
+	//
+	// It takes no ListOpts: the grouping is over a closed vocabulary
+	// (domain.EventTypeIDs), so the answer is bounded by the catalog rather
+	// than by a page, and a window over it would answer a different question.
+	//
+	// Callers pass the LANE's filters — the ones that say which rows the
+	// column holds — and leave the reader's own narrowing (EventTypes,
+	// Search) unset: a facet narrowed by the filter it exists to offer
+	// answers about itself. The store does not enforce that; it renders
+	// whatever filter it is given through the same WHERE List does, which is
+	// what keeps a count from ever disagreeing with the rows beneath it.
+	FacetEventTypes(ctx context.Context, orgID string, filter TaskListFilter) ([]Facet, error)
+
 	// FindActiveByEntityAndType returns non-terminal tasks for an
 	// entity matching the given event type. Used by inline close
 	// checks to find sibling tasks to close.
