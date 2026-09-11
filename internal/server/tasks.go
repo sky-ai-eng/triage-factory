@@ -541,10 +541,16 @@ func teamDefaultPriority(ctx context.Context, tx db.TxStores, orgID, teamID, eve
 // the queue. An offset page 2 of a lane that lost a row above the cut skips
 // one, and the board fetches on scroll with no way to re-ask, so a skipped row
 // is simply never seen. The token stays opaque either way, so nothing a client
-// does changes — including an offset-form token minted before this: it is
-// still honored (the fingerprint is what gates a token, and an offset is still
-// a position this store can take), and the page it returns carries a keyset
-// token, so a client walks off the old form on its next request.
+// reads or writes changes shape.
+//
+// It accepts keyset tokens ONLY. An offset-form token — one this route minted
+// before the conversion — would still page, because the stores keep offset
+// paging for the routes that use it, and that is exactly why it is refused
+// (400 INVALID_PARAM, restart from the first page): an input that makes this
+// route page the way it no longer pages is the bug still reachable by request.
+// Nothing else holds such a token for long — the SPA ships inside this binary,
+// so there is no version skew to bridge — and a headless caller mid-walk gets
+// correct paging one request sooner by starting over.
 func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -594,7 +600,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 		// Newest / Z-A first, which is what the board's controls default to.
 		filter.SortDir = db.TaskSortDirDesc
 	}
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{
+	page := httpx.ResolveKeysetPage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{
 		Statuses:       filter.Statuses,
 		TeamIDs:        filter.TeamIDs,
 		OnlyUnclaimed:  filter.OnlyUnclaimed,

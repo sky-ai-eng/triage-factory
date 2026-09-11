@@ -241,6 +241,46 @@ func TestResolvePage_RejectsMultiPositionTokens(t *testing.T) {
 	}
 }
 
+// TestResolveKeysetPage_RefusesEveryOtherForm pins the pairing: a route that
+// mints keyset tokens accepts keyset tokens, so there is no input that makes
+// it page the way it no longer pages. The offset case is the one that matters
+// — it would otherwise page perfectly well, and wrongly.
+func TestResolveKeysetPage_RefusesEveryOtherForm(t *testing.T) {
+	cases := map[string]pageToken{
+		"an offset from before the conversion": {O: 40, F: "fp"},
+		"a proxy cursor":                       {F: "fp", C: "upstream"},
+		"a token carrying no position at all":  {F: "fp"},
+	}
+	for name, tok := range cases {
+		t.Run(name, func(t *testing.T) {
+			var v Validation
+			ResolveKeysetPage(&v, PageRequest{PageToken: encodePageToken(tok)}, "fp", 0)
+			if len(v.items) != 1 || v.items[0].Reason != ReasonInvalidParam || v.items[0].Field != "page_token" {
+				t.Fatalf("faults = %+v, want one INVALID_PARAM on page_token", v.items)
+			}
+		})
+	}
+
+	// Its own form passes, and so does no token at all — the first page needs
+	// none, which is what a refused caller restarts with.
+	var v Validation
+	page := ResolveKeysetPage(&v, PageRequest{PageToken: encodePageToken(pageToken{F: "fp", K: []string{"a", "b"}})}, "fp", 0)
+	if len(v.items) != 0 || !slices.Equal(page.After, []string{"a", "b"}) {
+		t.Errorf("keyset token: page = %+v, faults = %+v", page, v.items)
+	}
+	v = Validation{}
+	if page := ResolveKeysetPage(&v, PageRequest{}, "fp", 0); len(v.items) != 0 || page.Limit != DefaultPageSize {
+		t.Errorf("first page: page = %+v, faults = %+v", page, v.items)
+	}
+
+	// The offset door still takes what it always took, so converting one route
+	// leaves every other list alone.
+	v = Validation{}
+	if page := ResolvePage(&v, PageRequest{PageToken: encodePageToken(pageToken{O: 40, F: "fp"})}, "fp", 0); len(v.items) != 0 || page.Offset != 40 {
+		t.Errorf("offset door: page = %+v, faults = %+v", page, v.items)
+	}
+}
+
 // TestFilterFingerprint_DistinguishesFilterSets pins what the token binding
 // rests on: equal filters fingerprint equally, different ones don't.
 func TestFilterFingerprint_DistinguishesFilterSets(t *testing.T) {

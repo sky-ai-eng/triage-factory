@@ -377,27 +377,24 @@ func TestTaskList_PageTokenSurvivesTheLaneMoving(t *testing.T) {
 	}
 }
 
-// TestTaskList_OffsetTokenStillPages pins the decision on the token form this
-// route used to mint: an offset-form token is still accepted here. It is a
-// position this store can still take, the fingerprint is what actually binds a
-// token to its query, and refusing one would break a client mid-walk for
-// nothing. The page it answers with carries a keyset token, so a client walks
-// off the old form on its next request.
-func TestTaskList_OffsetTokenStillPages(t *testing.T) {
+// TestTaskList_OffsetTokenIsRefused pins the decision on the token form this
+// route used to mint: an offset-form token is refused, not honored.
+//
+// It would otherwise still work — the stores keep offset paging for the routes
+// that use it — and that is the reason to refuse it rather than a reason to
+// accept it: honoring one leaves this route an input that makes it page by
+// offset, which is the drop-and-repeat behavior it was converted to stop
+// doing. Nobody is stranded by this. The SPA ships inside this binary, so
+// there is no old client to bridge to, and a headless caller mid-walk across a
+// restart restarts one request earlier with paging that is actually correct.
+func TestTaskList_OffsetTokenIsRefused(t *testing.T) {
 	s := newTestServer(t)
 	for i := range 5 {
 		seedTaskFixture(t, s.db, taskFixture{name: fmt.Sprintf("offtok-%d", i), status: "queued"})
 	}
 
-	body := queueProjectionBody()
-	body["page_size"] = 50
-	whole := listedIDs(postTaskList(t, s, body))
-	if len(whole) != 5 {
-		t.Fatalf("unpaged read returned %d rows, want 5", len(whole))
-	}
-
 	// The token a client minted against the pre-keyset route: the same opaque
-	// envelope, carrying an offset instead of a key.
+	// envelope, fingerprinted for this very query, carrying an offset.
 	fingerprint := httpx.FilterFingerprint(taskListFilterKey{
 		Statuses:      []string{"queued"},
 		OnlyUnclaimed: true,
@@ -406,20 +403,26 @@ func TestTaskList_OffsetTokenStillPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal legacy token: %v", err)
 	}
+	body := queueProjectionBody()
 	body["page_size"] = 2
 	body["page_token"] = base64.RawURLEncoding.EncodeToString(raw)
 
-	page := postTaskList(t, s, body)
-	if got := listedIDs(page); !slices.Equal(got, whole[2:4]) {
-		t.Fatalf("offset-token page = %v, want %v", got, whole[2:4])
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/list", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	if page.NextPageToken == "" {
-		t.Fatal("no next_page_token minted for a partial page resumed from an offset token")
-	}
+	assertFirstError(t, rec, "INVALID_PARAM", "page_token")
+
+	// And the route's own tokens still walk it, so the refusal is about the
+	// form and not about tokens.
 	delete(body, "page_token")
-	body["page_token"] = page.NextPageToken
-	if got := listedIDs(postTaskList(t, s, body)); !slices.Equal(got, whole[4:5]) {
-		t.Errorf("page after the offset token = %v, want %v", got, whole[4:5])
+	first := postTaskList(t, s, body)
+	if first.NextPageToken == "" {
+		t.Fatal("no next_page_token minted for a partial page")
+	}
+	body["page_token"] = first.NextPageToken
+	if got := len(postTaskList(t, s, body).Items); got != 2 {
+		t.Errorf("second page = %d items, want 2", got)
 	}
 }
 

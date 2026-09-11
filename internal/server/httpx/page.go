@@ -140,9 +140,37 @@ func FilterFingerprint(filters any) string {
 // maxPageSize of 0 means MaxPageSize. fingerprint is the caller's
 // FilterFingerprint over its canonicalized filters.
 //
+// This is the offset door. A route that pages by keyset takes
+// ResolveKeysetPage instead, which refuses the tokens this one accepts.
+//
 // The returned Page is meaningful only when v flushed nothing; on a fault it
 // is the default window, which the caller never reaches.
 func ResolvePage(v *Validation, req PageRequest, fingerprint string, maxPageSize int) Page {
+	return resolvePage(v, req, fingerprint, maxPageSize, false)
+}
+
+// ResolveKeysetPage is ResolvePage for a route that pages by keyset, and it
+// pairs with WriteListKeyset the way ResolvePage pairs with WriteList: a route
+// uses one pair or the other, and this is what makes mixing them a fault
+// rather than a silent downgrade.
+//
+// The difference is one refusal: a page_token that carries anything but a
+// keyset is INVALID_PARAM here, where ResolvePage would have taken its offset
+// and paged from it. That matters because the offset would still WORK — the
+// stores keep offset paging for the routes that use it — and would quietly
+// hand this route's caller the drop-and-repeat behavior it was converted to
+// stop doing. A route that mints one form of token accepts that form only, so
+// there is no input that makes it page the way it no longer pages.
+//
+// A token from a build that predates the conversion is the case this refuses,
+// and the refusal is the honest answer to it: the caller restarts from the
+// first page and gets correct paging immediately, rather than finishing a walk
+// that silently skips rows.
+func ResolveKeysetPage(v *Validation, req PageRequest, fingerprint string, maxPageSize int) Page {
+	return resolvePage(v, req, fingerprint, maxPageSize, true)
+}
+
+func resolvePage(v *Validation, req PageRequest, fingerprint string, maxPageSize int, keyset bool) Page {
 	if maxPageSize <= 0 {
 		maxPageSize = MaxPageSize
 	}
@@ -175,6 +203,12 @@ func ResolvePage(v *Validation, req PageRequest, fingerprint string, maxPageSize
 			v.Add(ErrorItem{
 				Reason:  ReasonInvalidParam,
 				Message: "page_token was issued for a different set of filters; restart from the first page",
+				Field:   "page_token",
+			})
+		case keyset && len(tok.K) == 0:
+			v.Add(ErrorItem{
+				Reason:  ReasonInvalidParam,
+				Message: "page_token does not address this list's ordering; restart from the first page",
 				Field:   "page_token",
 			})
 		default:

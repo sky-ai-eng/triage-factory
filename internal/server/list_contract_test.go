@@ -22,7 +22,10 @@ import (
 //     a page and writes one of the list envelopes. A route can otherwise be
 //     named `/list`, decode a body, and answer a bare array — which is worse
 //     than not converting it, because the name now promises paging that isn't
-//     there.
+//     there. There are two doors, offset and keyset, and a route uses one pair
+//     end to end: resolving through one door and writing through the other is
+//     a route that hands out tokens it will refuse, or refuses the ones it
+//     hands out.
 //  2. No handler code constructs a bare `db.ListOpts{}`. An unwindowed store
 //     read is legitimate when the answer is a decision rather than a page, and
 //     `db.Unwindowed` is how a call site says that. The bare literal reads
@@ -62,10 +65,18 @@ func TestListRoutesResolveAPage(t *testing.T) {
 			// through the extension seam); its own package tests it.
 			continue
 		}
-		if !strings.Contains(body, "httpx.ResolvePage") {
-			t.Errorf("%s (%s) does not call httpx.ResolvePage — a /list route that "+
-				"doesn't resolve a page is a bare array wearing the list contract's name",
-				pattern, handler)
+		resolvesKeyset := strings.Contains(body, "httpx.ResolveKeysetPage")
+		writesKeyset := strings.Contains(body, "httpx.WriteListKeyset")
+		if !resolvesKeyset && !strings.Contains(body, "httpx.ResolvePage") {
+			t.Errorf("%s (%s) calls neither httpx.ResolvePage nor httpx.ResolveKeysetPage — "+
+				"a /list route that doesn't resolve a page is a bare array wearing the "+
+				"list contract's name", pattern, handler)
+		}
+		if resolvesKeyset != writesKeyset {
+			t.Errorf("%s (%s) mixes the two paging doors (keyset resolve=%t, keyset write=%t) — "+
+				"a route that mints one form of token is the route that accepts that form, "+
+				"so the pair goes together",
+				pattern, handler, resolvesKeyset, writesKeyset)
 		}
 		if _, excepted := listRouteExceptions[pattern]; excepted {
 			if !strings.Contains(body, "httpx.NextPageToken") {
@@ -74,7 +85,7 @@ func TestListRoutesResolveAPage(t *testing.T) {
 			}
 			continue
 		}
-		if !strings.Contains(body, "httpx.WriteList") && !strings.Contains(body, "httpx.WriteProxyList") {
+		if !writesKeyset && !strings.Contains(body, "httpx.WriteList") && !strings.Contains(body, "httpx.WriteProxyList") {
 			t.Errorf("%s (%s) resolves a page but writes no list envelope; if its shape "+
 				"genuinely cannot be the flat envelope, add it to listRouteExceptions with a reason",
 				pattern, handler)
