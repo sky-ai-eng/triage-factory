@@ -82,6 +82,12 @@ function parseArgs(argv) {
       case "--allowedTools":
         opts.allowedTools = next().split(",").filter(Boolean)
         break
+      case "--disallowedTools":
+        // Bare names here are removed from the model's context outright,
+        // so a tool nobody on the Go side can answer (AskUserQuestion) is
+        // never offered rather than offered and denied.
+        opts.disallowedTools = next().split(",").filter(Boolean)
+        break
       case "--add-dir":
         addDirs.push(next())
         break

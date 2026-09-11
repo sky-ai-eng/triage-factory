@@ -2,6 +2,21 @@ package agentproc
 
 import "strconv"
 
+// disallowedTools is the --disallowedTools value every SDK run carries. A
+// bare tool name here removes the tool from the model's context, which is
+// stronger than leaving it off the allowlist: an off-allowlist call is still
+// offered to the model and merely denied, and the deny lands as a turn the
+// model then spends retrying or stalling on.
+//
+// AskUserQuestion is removed because no consumer of this wrapper can answer
+// it. The one-shot path has nobody on the other end at all, and the
+// interactive path routes the call through the same canUseTool callback as a
+// permission prompt, so it would surface in the browser as a permission card
+// whose "allow" hands the question back with no answers attached. A run that
+// needs a decision from a person gets it through the permission prompt or a
+// follow-up message, never a question tool.
+const disallowedTools = "AskUserQuestion"
+
 // BuildArgs assembles the argv consumed by wrapper.mjs (which translates
 // it into Agent SDK Options). Pulled out of Run so the flag set is
 // unit-testable without spawning a subprocess.
@@ -49,6 +64,7 @@ func BuildArgs(opts RunOptions) []string {
 	if opts.AllowedTools != "" {
 		args = append(args, "--allowedTools", opts.AllowedTools)
 	}
+	args = append(args, "--disallowedTools", disallowedTools)
 	for _, dir := range opts.AddDirs {
 		if dir == "" {
 			continue
