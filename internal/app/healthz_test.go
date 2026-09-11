@@ -12,23 +12,26 @@ import (
 )
 
 // TestExecutorHealthy pins the 200/503 decision table, including the
-// fenced-is-informational override (#624).
+// fenced-is-informational override (#624) and the shutting-down override that
+// outranks it.
 func TestExecutorHealthy(t *testing.T) {
 	cases := []struct {
-		name                                              string
-		dispatcherAlive, heartbeatFresh, brokerOK, fenced bool
-		want                                              bool
+		name                                                            string
+		dispatcherAlive, heartbeatFresh, brokerOK, fenced, shuttingDown bool
+		want                                                            bool
 	}{
-		{"all green", true, true, true, false, true},
-		{"dispatcher dead", false, true, true, false, false},
-		{"heartbeat stale", true, false, true, false, false},
-		{"broker down", true, true, false, false, false},
-		{"fenced overrides stale heartbeat", true, false, true, true, true},
-		{"fenced overrides dead broker", true, true, false, true, true},
-		{"fenced overrides dead dispatcher", false, false, false, true, true},
+		{"all green", true, true, true, false, false, true},
+		{"dispatcher dead", false, true, true, false, false, false},
+		{"heartbeat stale", true, false, true, false, false, false},
+		{"broker down", true, true, false, false, false, false},
+		{"fenced overrides stale heartbeat", true, false, true, true, false, true},
+		{"fenced overrides dead broker", true, true, false, true, false, true},
+		{"fenced overrides dead dispatcher", false, false, false, true, false, true},
+		{"shutting down beats all green", true, true, true, false, true, false},
+		{"shutting down beats the fence override", true, true, true, true, true, false},
 	}
 	for _, tc := range cases {
-		if got := executorHealthy(tc.dispatcherAlive, tc.heartbeatFresh, tc.brokerOK, tc.fenced); got != tc.want {
+		if got := executorHealthy(tc.dispatcherAlive, tc.heartbeatFresh, tc.brokerOK, tc.fenced, tc.shuttingDown); got != tc.want {
 			t.Errorf("%s: executorHealthy = %v, want %v", tc.name, got, tc.want)
 		}
 	}

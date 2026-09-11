@@ -55,9 +55,23 @@ func (a *App) runStartupTasks(ctx context.Context) {
 }
 
 // startWorkers starts the long-lived background workers. They take the app
-// context so they shut down cleanly on SIGINT/SIGTERM — previously these
-// used a never-cancelled background context ("the binary has no top-level
-// cancel today").
+// context so they shut down cleanly on SIGINT/SIGTERM.
+//
+// Which of them shutdown JOINS, and which it does not, is a deliberate split —
+// the `go` statements below look alike and are not:
+//
+//   - Dispatches are joined (drainDispatches, shutdown.go). A dispatch
+//     goroutine's terminal write runs on a context.WithoutCancel precisely so a
+//     shutdown cannot strand a blueprint mid-finalize, which makes it the one
+//     worker whose work is not finished when its context is cancelled. Closing
+//     the pools under it turns that deliberate detachment into a failed write.
+//     RunDispatcher itself is not joined — it is a select loop that returns at
+//     its next tick and writes nothing on the way out.
+//   - Everything else here is deliberately NOT joined: the reapers, evictors,
+//     heartbeat, stat sampler, signal loops and backplane listeners are all
+//     periodic and idempotent, every write they make rides the cancellable app
+//     context, and a tick lost to shutdown is simply taken by the next boot.
+//     Waiting on them would add shutdown latency to buy nothing.
 func (a *App) startWorkers(ctx context.Context) {
 	// Dispatcher workers (executor/all): the conversation-queue dispatcher
 	// (claims + executes queued conversations, reconciling crash-stranded

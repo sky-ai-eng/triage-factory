@@ -34,13 +34,21 @@ type executorHealthzResponse struct {
 	ActiveRuns            int   `json:"active_runs"`
 	Draining              bool  `json:"draining"`
 	Fenced                bool  `json:"fenced"`
+	ShuttingDown          bool  `json:"shutting_down"`
 }
 
 // runExecutorHealthz serves the executor's localhost-only healthz endpoint
 // and blocks until ctx is cancelled (the executor's Run has no user HTTP
 // server to block on instead). The dispatcher, heartbeat, and reapers are
 // already running as background workers by the time this is reached.
-func (a *App) runExecutorHealthz(ctx context.Context) error {
+//
+// drain runs on cancellation, BEFORE this listener stops: it is the shutdown
+// join for in-flight dispatches, and it flips this endpoint to 503 as its
+// first act. Passing it in rather than running it after this returns is what
+// makes the ordering real — a draining pod that answers "not ready" tells a
+// rolling deploy to route away, where one that has already closed its socket
+// only tells it the pod is gone.
+func (a *App) runExecutorHealthz(ctx context.Context, drain func()) error {
 	addr := net.JoinHostPort("127.0.0.1", executorHealthzPort())
 
 	mux := http.NewServeMux()
@@ -66,6 +74,9 @@ func (a *App) runExecutorHealthz(ctx context.Context) error {
 		defer close(shutdownDone)
 		select {
 		case <-ctx.Done():
+			if drain != nil {
+				drain()
+			}
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = httpSrv.Shutdown(shutdownCtx)
@@ -97,6 +108,11 @@ func (a *App) runExecutorHealthz(ctx context.Context) error {
 // must not kill it prematurely. Because a fence also stops the heartbeat
 // loop — its last write goes stale — the fenced case is forced 200 so that
 // staleness doesn't read as a crash.
+//
+// shutting_down is the one exception, and it outranks the fence override: a
+// process on its way out is never ready, however healthy its parts still look,
+// and reporting otherwise is what sends a rolling deploy's traffic at a pod
+// that is seconds from exit.
 func (a *App) handleExecutorHealthz(w http.ResponseWriter, r *http.Request) {
 	resp := executorHealthzResponse{
 		DispatcherAlive: a.spawner.DispatcherAlive(),
@@ -104,6 +120,7 @@ func (a *App) handleExecutorHealthz(w http.ResponseWriter, r *http.Request) {
 		ActiveRuns:      a.spawner.ActiveRuns(),
 		Draining:        a.spawner.Draining(),
 		Fenced:          a.spawner.IdentityFenced(),
+		ShuttingDown:    a.shuttingDown.Load(),
 	}
 
 	age, everWritten := a.spawner.LastHeartbeatWriteAge()
@@ -117,7 +134,7 @@ func (a *App) handleExecutorHealthz(w http.ResponseWriter, r *http.Request) {
 	heartbeatFresh := everWritten && age <= staleThreshold
 
 	code := http.StatusOK
-	if !executorHealthy(resp.DispatcherAlive, heartbeatFresh, resp.BrokerOK, resp.Fenced) {
+	if !executorHealthy(resp.DispatcherAlive, heartbeatFresh, resp.BrokerOK, resp.Fenced, resp.ShuttingDown) {
 		code = http.StatusServiceUnavailable
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -131,7 +148,16 @@ func (a *App) handleExecutorHealthz(w http.ResponseWriter, r *http.Request) {
 // the fence is informational (#624) — the latch already stopped it claiming
 // and stopped its heartbeat loop (so heartbeatFresh would be false), and
 // TFAC-586 owns the actual exit; the HEALTHCHECK must not kill it early.
-func executorHealthy(dispatcherAlive, heartbeatFresh, brokerOK, fenced bool) bool {
+//
+// shuttingDown is tested first and wins over that override: the process is
+// leaving, so the honest answer is not-ready no matter what the fence says.
+// Once it latches, the dispatcher loop has already returned and the heartbeat
+// has already stopped, so every other input here is about to read unhealthy
+// anyway — this just makes the reason attributable instead of inferred.
+func executorHealthy(dispatcherAlive, heartbeatFresh, brokerOK, fenced, shuttingDown bool) bool {
+	if shuttingDown {
+		return false
+	}
 	if fenced {
 		return true
 	}

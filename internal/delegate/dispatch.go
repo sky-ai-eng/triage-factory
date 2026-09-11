@@ -240,11 +240,16 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 	}
 }
 
-// waitForDispatches blocks until every dispatch goroutine this spawner has in
+// WaitForDispatches blocks until every dispatch goroutine this spawner has in
 // flight has returned, reporting whether they all did before ctx expired. It
 // stops nothing on its own: cancel the dispatcher's ctx first, or the wait is
 // for a claim that is still legitimately running.
-func (s *Spawner) waitForDispatches(ctx context.Context) bool {
+//
+// A dispatch goroutine outlives its own cancellation by design — the reactor's
+// terminal write runs on a detached context so a blueprint is never stranded
+// mid-finalize — so joining here is what keeps that write off a pool the
+// shutdown path has already closed.
+func (s *Spawner) WaitForDispatches(ctx context.Context) bool {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

@@ -122,7 +122,7 @@ func stopWithTest(t *testing.T, s *Spawner) {
 		s.killAllLiveSandboxes()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if !s.waitForDispatches(ctx) {
+		if !s.WaitForDispatches(ctx) {
 			id, _ := s.executorIdentity()
 			t.Errorf("executor %s still has a dispatch in flight 30s after the test cancelled it; it will be holding a transaction open when the next test truncates", id)
 		}

@@ -313,10 +313,10 @@ type Spawner struct {
 	// outlives the dispatcher — a claim still writing rows after its owner
 	// believes it finished is a live transaction nothing is waiting on.
 	//
-	// TODO(TFAC-962): the shutdown path does not wait on this yet, so
-	// App.Close can still close the pools under a reactor write that
-	// context.WithoutCancel deliberately made un-cancellable. Only the test
-	// fixtures join through waitForDispatches today.
+	// The shutdown path joins through WaitForDispatches (internal/app's
+	// drainDispatches) before the pools close, because a dispatch's terminal
+	// write is deliberately un-cancellable (reactToStepTerminal's
+	// context.WithoutCancel) and would otherwise land on a closed pool.
 	dispatchWG sync.WaitGroup
 	// engagements holds the live claim attempt's trace root for each run
 	// currently dispatching, keyed by run id — the seam between the setup
