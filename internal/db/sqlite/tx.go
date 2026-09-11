@@ -111,11 +111,11 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		// See the Postgres twin: rolled back via the defer, and not
 		// recorded as an exception.
 		span.SetStatus(codes.Error, "tx body")
-		return err
+		return db.TxCause(ctx, err)
 	}
 	if err := tx.Commit(); err != nil {
 		span.SetStatus(codes.Error, "commit")
-		return err
+		return db.TxCause(ctx, err)
 	}
 	return nil
 }

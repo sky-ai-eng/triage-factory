@@ -601,8 +601,7 @@ first failure.
   failure; `POST …/knowledge` — self-described "207-ish semantics in a
   200" (`projects.go:1716`); backfill — 200 for an entirely-failed
   batch, leaking raw store errors per row (`backfill.go:222,254`);
-  `GET /api/integrations/status` — 200 + `"error"` key on vault
-  failure; invite preview — 200 `{"status":"not_found"}`;
+  invite preview — 200 `{"status":"not_found"}`;
   preflight-ssh — 200 `{ok:false}` locally but **404** +
   `{ok:false,"error"}` in multi, while the same no-SSH condition is a
   400 on settings/org — one condition, three statuses, three shapes.

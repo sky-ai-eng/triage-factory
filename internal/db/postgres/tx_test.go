@@ -248,6 +248,36 @@ func TestWithTx_Postgres_SurvivesCancelledOriginCtx(t *testing.T) {
 	}
 }
 
+// TestWithTx_Postgres_CanceledCtxSurfacesAsCanceled is the SQLite twin: a
+// ctx that dies mid-transaction surfaces as context.Canceled whichever of the
+// stdlib's rollback goroutine or the commit lands first.
+func TestWithTx_Postgres_CanceledCtxSurfacesAsCanceled(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedSyntheticClaimsOrg(t, h, "withtx-canceled")
+
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		if err := tx.Repos.SetConfigured(ctx, orgID, []string{"gone/client"}); err != nil {
+			return err
+		}
+		cancel()
+		return nil
+	})
+	if err == nil {
+		t.Fatal("WithTx committed under a canceled ctx")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("errors.Is(err, context.Canceled) = false; got %v", err)
+	}
+	if names := registryNames(t, stores, orgID); len(names) != 0 {
+		t.Errorf("row visible after canceled tx: %v", names)
+	}
+}
+
 // seedSyntheticClaimsOrg creates a fresh org + owner user + default
 // team for SyntheticClaimsWithTx tests. Mirrors seedPgEntityOrg's
 // shape but with a different label so the test files don't collide

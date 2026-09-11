@@ -99,7 +99,7 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 	// connection returns to authenticator when the tx ends.
 	if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE tf_app`); err != nil {
 		span.SetStatus(codes.Error, "set role")
-		return err
+		return db.TxCause(ctx, err)
 	}
 
 	claims, err := json.Marshal(map[string]any{
@@ -112,7 +112,7 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 	}
 	if _, err := tx.ExecContext(ctx, `SELECT set_config('request.jwt.claims', $1, true)`, string(claims)); err != nil {
 		span.SetStatus(codes.Error, "set claims")
-		return err
+		return db.TxCause(ctx, err)
 	}
 
 	if err := fn(s.txStoresFromTx(tx)); err != nil {
@@ -120,11 +120,11 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 		// handler refusing a write with a validation error is normal, and
 		// the error text can carry tenant data.
 		span.SetStatus(codes.Error, "tx body")
-		return err
+		return db.TxCause(ctx, err)
 	}
 	if err := tx.Commit(); err != nil {
 		span.SetStatus(codes.Error, "commit")
-		return err
+		return db.TxCause(ctx, err)
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package httpx
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -68,6 +69,8 @@ func TestIsClientGone(t *testing.T) {
 		{"canceled", context.Canceled, true},
 		{"wrapped canceled", fmt.Errorf("set request.jwt.claims: %w", context.Canceled), true},
 		{"double wrapped", fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", context.Canceled)), true},
+		{"tx done attributed to a canceled ctx", fmt.Errorf("%w (%w)", sql.ErrTxDone, context.Canceled), true},
+		{"tx done alone", sql.ErrTxDone, false},
 		{"deadline excluded", context.DeadlineExceeded, false},
 		{"wrapped deadline excluded", fmt.Errorf("team-in-org check: %w", context.DeadlineExceeded), false},
 		{"real error", errors.New("boom"), false},
