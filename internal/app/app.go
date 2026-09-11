@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/fs"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -229,6 +230,13 @@ type App struct {
 	// isn't running.
 	brainCancel context.CancelFunc
 
+	// shuttingDown latches once Run's blocking listener has unwound and the
+	// dispatch drain has begun (drainDispatches). The executor healthz reads
+	// it as a hard 503 so a rolling deploy stops routing to this pod while it
+	// is still finishing claimed work, rather than only noticing once the
+	// listener is gone.
+	shuttingDown atomic.Bool
+
 	// Runtime helpers.
 	reloader *reloader
 }
@@ -435,11 +443,20 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	if a.plan.serveHTTP {
-		return a.srv.ListenAndServeContext(ctx, a.cfg.Addr)
+		err := a.srv.ListenAndServeContext(ctx, a.cfg.Addr)
+		// After the listener unwinds and before main's deferred Close
+		// releases the pools. At role=all this process dispatches too, so the
+		// join is real here; a control pod claims nothing and it no-ops, as
+		// does a listener that returned without ever having served (it takes
+		// ctx to tell those apart).
+		a.drainDispatches(ctx)
+		return err
 	}
 	// Executor: no user HTTP. Serve the localhost healthz and block until
-	// shutdown; the dispatcher + heartbeat + reapers run as workers.
-	return a.runExecutorHealthz(ctx)
+	// shutdown; the dispatcher + heartbeat + reapers run as workers. The drain
+	// is handed to the healthz rather than run after it, so the probe is still
+	// answering (503) while in-flight dispatches finish.
+	return a.runExecutorHealthz(ctx, func() { a.drainDispatches(ctx) })
 }
 
 // Close flushes telemetry and releases the database pools and the instance

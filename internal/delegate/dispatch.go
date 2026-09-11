@@ -231,10 +231,89 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		// conv is a fresh per-iteration `:=` binding (not a loop variable), so each
 		// goroutine captures its own; the deferred receive hands the slot back on
 		// terminal.
+		//
+		// This Add is ordered against the shutdown join only by RunDispatcher's
+		// exit (see waitForDispatcherStop), so this loop must stay reachable
+		// from RunDispatcher alone. Driving it from a second place would
+		// register dispatches the join cannot know to wait for.
+		s.dispatchWG.Add(1)
 		go func() {
+			defer s.dispatchWG.Done()
 			defer func() { <-sem }()
 			s.dispatchClaimedConversation(ctx, conv)
 		}()
+	}
+}
+
+// dispatcherStopPoll is how often WaitForDispatches re-reads the dispatcher's
+// liveness flag while waiting for the claim loop to stop. Only ever paid on a
+// shutdown, and only for as long as the loop takes to notice its context is
+// gone, which is one claim round trip.
+const dispatcherStopPoll = 5 * time.Millisecond
+
+// WaitForDispatches blocks until the claim loop has stopped and every dispatch
+// goroutine this spawner has in flight has returned, reporting whether both
+// happened before ctx expired. It stops nothing on its own: cancel the
+// dispatcher's ctx first, or it waits out the deadline on a loop that is still
+// legitimately claiming.
+//
+// A dispatch goroutine outlives its own cancellation by design — the reactor's
+// terminal write runs on a detached context so a blueprint is never stranded
+// mid-finalize — so joining here is what keeps that write off a pool the
+// shutdown path has already closed.
+func (s *Spawner) WaitForDispatches(ctx context.Context) bool {
+	// The claim loop has to be provably stopped BEFORE the WaitGroup is
+	// waited on, not merely cancelled. drainConversationQueue only re-reads
+	// ctx between iterations, so a cancel landing mid-iteration still lets it
+	// register one more dispatch — and an Add that races a Wait on a zero
+	// counter is precisely what sync.WaitGroup documents as misuse. It panics
+	// when it catches it, and when it doesn't, Wait returns without joining
+	// the dispatch that just started, which is the one thing this function
+	// exists to prevent.
+	if !s.waitForDispatcherStop(ctx) {
+		return false
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.dispatchWG.Wait()
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// waitForDispatcherStop blocks until RunDispatcher's loop has returned,
+// reporting whether it did before ctx expired.
+//
+// dispatcherRunning is the ordering signal because of where it is cleared:
+// RunDispatcher's own defer, after the last drainConversationQueue has
+// returned and therefore after the last Add this spawner can make. That makes
+// observing it false a happens-after of every Add, which is the ordering the
+// WaitGroup requires and the reason drainConversationQueue must stay reachable
+// only from RunDispatcher — a second driver would register dispatches this
+// flag says nothing about. A spawner whose dispatcher was never started (a
+// control pod, a fixture driving the claim loop by hand) reads false on the
+// first check and never waits.
+func (s *Spawner) waitForDispatcherStop(ctx context.Context) bool {
+	if !s.dispatcherRunning.Load() {
+		return true
+	}
+	tick := time.NewTicker(dispatcherStopPoll)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-tick.C:
+			if !s.dispatcherRunning.Load() {
+				return true
+			}
+		}
 	}
 }
 

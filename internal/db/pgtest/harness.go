@@ -5,13 +5,19 @@
 //
 // The shared container is a single point of failure for the whole test
 // binary: on a loaded CI runner the kernel OOM killer sometimes takes
-// out the postmaster mid-suite, which used to cascade into every
-// remaining Postgres test failing at Reset ("unexpected EOF" from the
-// dying connections, then "connection refused" forever after). Shared
-// and Reset now detect that death (liveness probe, never error-string
-// matching) and boot a replacement in place — see reviveLocked — so a
-// one-off kill costs one container boot instead of the rest of the
-// suite.
+// out the postmaster mid-suite, which without recovery cascades into
+// every remaining Postgres test failing at Reset ("unexpected EOF" from
+// the dying connections, then "connection refused" forever after).
+// Shared and Reset detect that death (liveness probe, never
+// error-string matching) and boot a replacement in place — see
+// reviveLocked — so a one-off kill costs one container boot instead of
+// the rest of the suite.
+//
+// "In place" is literal, and it is what makes the recovery hold: the
+// three pools below are opened over swappable connectors (connector.go)
+// and re-aimed at the replacement, never closed and re-opened. A test
+// that captured one — directly, or inside a store bundle built above
+// its subtests — keeps a working handle across the revive.
 //
 // Three SQL connections are exposed (SystemDB being the tf_system
 // executor role documented on the Harness struct):
@@ -83,11 +89,20 @@ const systemPassword = "system_test_pw"
 
 // Harness is the shared per-process testcontainer + three connections.
 // All tests that touch Postgres acquire it via Shared(t).
+//
+// The three exported handles are fixed for the life of the harness —
+// bringUp re-aims them at each container it starts rather than opening
+// new ones — so holding one across a revive is safe. Container is not:
+// it names whichever container is current.
 type Harness struct {
 	Container *postgres.PostgresContainer
 	AdminDB   *sql.DB // supabase_admin; bypasses RLS
 	AppDB     *sql.DB // authenticator; use WithUser for RLS-active txns
 	SystemDB  *sql.DB // tf_system; least-privilege executor role, BYPASSRLS
+
+	// The pools behind the three handles above, which is how bringUp
+	// re-aims them. admin.db IS AdminDB, and so on.
+	admin, app, system *swappable
 }
 
 var (
@@ -158,22 +173,25 @@ func pingSharedLocked() error {
 }
 
 // reviveLocked replaces a dead shared container with a freshly booted,
-// fully migrated one, swapping the new connections into the existing
-// Harness value so pointers tests already hold observe the replacement.
-// A failed revive (or an exhausted budget) is sticky via sharedErr —
-// every subsequent Shared call fails fast rather than each paying a
-// multi-minute boot attempt against a broken environment. Callers hold
-// sharedMu; failures are returned, never t.Fatalf'd here, so callers
-// can release the lock before failing the test (t.Fatalf runs Goexit,
-// which would leak the lock and deadlock the rest of the suite).
+// fully migrated one, re-aiming the existing Harness value's pools at
+// it so both the pointers tests already hold and the stores they built
+// over those pools observe the replacement. A failed revive (or an
+// exhausted budget) is sticky via sharedErr — every subsequent Shared
+// call fails fast rather than each paying a multi-minute boot attempt
+// against a broken environment. Callers hold sharedMu; failures are
+// returned, never t.Fatalf'd here, so callers can release the lock
+// before failing the test (t.Fatalf runs Goexit, which would leak the
+// lock and deadlock the rest of the suite).
+//
+// The three *sql.DB handles are deliberately not closed here. A store
+// captured before the death holds the pointer, not the harness, so
+// closing one would trade a dead container for a permanent "sql:
+// database is closed" on that same pointer.
 func reviveLocked(cause error) error {
 	// The dead instance is torn down before the budget check so every
-	// exit path leaves no stale handles or exited container behind.
-	// Bounded: a stuck Docker daemon must not hang the revive forever.
-	// Terminate on an already-dead container just errors; ignore it.
-	_ = shared.AdminDB.Close()
-	_ = shared.AppDB.Close()
-	_ = shared.SystemDB.Close()
+	// exit path leaves no exited container behind. Bounded: a stuck
+	// Docker daemon must not hang the revive forever. Terminate on an
+	// already-dead container just errors; ignore it.
 	termCtx, termCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	_ = shared.Container.Terminate(termCtx)
 	termCancel()
@@ -185,24 +203,21 @@ func reviveLocked(cause error) error {
 	reviveBudget--
 	fmt.Fprintf(os.Stderr, "pgtest: shared Postgres container unreachable (%v); booting a replacement (%d revive(s) left in this process)\n", cause, reviveBudget)
 
-	fresh, err := boot()
-	if err != nil {
+	if err := shared.bringUp(); err != nil {
 		sharedErr = fmt.Errorf("revive after container death (%v): %w", cause, err)
 		return sharedErr
 	}
-	*shared = *fresh
 	return nil
 }
 
 // bootContainer starts a fresh supabase/postgres container and returns
-// it alongside its raw (postgres-user) DSN, its supabase_admin
-// (real superuser) DSN, and an admin connection opened from that DSN.
-// Factored out of boot() so NewInstance can reuse the exact same
-// container recipe to hand a test a dedicated, unmigrated instance —
-// the image's own init (auth schema, vault extension, authenticator
-// role) is complete, but db.Migrate has not yet run, which boot()
-// cannot offer once shared has been populated.
-func bootContainer(ctx context.Context) (pg *postgres.PostgresContainer, pgDSN, adminDSN string, adminDB *sql.DB, err error) {
+// it alongside its raw (postgres-user) DSN and its supabase_admin (real
+// superuser) DSN. Factored out of bringUp so NewInstance can reuse the
+// exact same container recipe to hand a test a dedicated, unmigrated
+// instance — the image's own init (auth schema, vault extension,
+// authenticator role) is complete, but db.Migrate has not yet run,
+// which the shared harness cannot offer once it has come up.
+func bootContainer(ctx context.Context) (pg *postgres.PostgresContainer, pgDSN, adminDSN string, err error) {
 	// Wait strategy: a single SQL probe for auth.users in the
 	// POSTGRES_DB-named DB. We tried a two-stage approach earlier
 	// (wait.ForLog "PostgreSQL init process complete" THEN ForSQL)
@@ -265,13 +280,13 @@ func bootContainer(ctx context.Context) (pg *postgres.PostgresContainer, pgDSN, 
 		testcontainers.WithWaitStrategyAndDeadline(3*time.Minute, waitStrategies...),
 	)
 	if err != nil {
-		return nil, "", "", nil, fmt.Errorf("start container: %w", err)
+		return nil, "", "", fmt.Errorf("start container: %w", err)
 	}
 
 	pgDSN, err = pg.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
 		_ = pg.Terminate(ctx)
-		return nil, "", "", nil, fmt.Errorf("admin dsn: %w", err)
+		return nil, "", "", fmt.Errorf("base dsn: %w", err)
 	}
 
 	// The supabase image demotes `postgres` to non-superuser during
@@ -284,88 +299,97 @@ func bootContainer(ctx context.Context) (pg *postgres.PostgresContainer, pgDSN, 
 	adminDSN, err = rewriteUser(pgDSN, "supabase_admin", "postgres")
 	if err != nil {
 		_ = pg.Terminate(ctx)
-		return nil, "", "", nil, fmt.Errorf("admin dsn rewrite: %w", err)
+		return nil, "", "", fmt.Errorf("admin dsn rewrite: %w", err)
 	}
-	adminDB, err = sql.Open("pgx", adminDSN)
-	if err != nil {
-		_ = pg.Terminate(ctx)
-		return nil, "", "", nil, fmt.Errorf("open admin db: %w", err)
-	}
-	return pg, pgDSN, adminDSN, adminDB, nil
+	return pg, pgDSN, adminDSN, nil
 }
 
+// boot creates a harness with its three pools and brings up the
+// container behind them. Only the very first call per process gets
+// here; a container death after that is a bringUp on this same value.
 func boot() (*Harness, error) {
+	h := &Harness{admin: newSwappable(), app: newSwappable(), system: newSwappable()}
+	h.AdminDB, h.AppDB, h.SystemDB = h.admin.db, h.app.db, h.system.db
+	if err := h.bringUp(); err != nil {
+		// Nothing outside this function has seen these pools yet, so
+		// closing them here costs no captured handle.
+		_ = h.AdminDB.Close()
+		_ = h.AppDB.Close()
+		_ = h.SystemDB.Close()
+		return nil, err
+	}
+	return h, nil
+}
+
+// bringUp starts a container, aims the harness's three pools at it,
+// migrates the schema, and gives the two non-superuser roles a
+// password. It opens no pool and closes none: the same three *sql.DB
+// handles serve every container a harness ever runs, which is what lets
+// a store built over one before a death keep working after the revive.
+//
+// A failure tears down the container it started and leaves the pools
+// aimed at it — harmless, because a failed bring-up is sticky (see
+// sharedErr) and no test gets to reach them.
+func (h *Harness) bringUp() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	pg, pgDSN, _, adminDB, err := bootContainer(ctx)
+	pg, pgDSN, adminDSN, err := bootContainer(ctx)
 	if err != nil {
-		return nil, err
+		return err
+	}
+	fail := func(err error) error {
+		_ = pg.Terminate(ctx)
+		return err
+	}
+
+	h.Container = pg
+	if err := h.admin.pointAt(adminDSN); err != nil {
+		return fail(fmt.Errorf("aim admin pool: %w", err))
 	}
 
 	// Run goose migrations as supabase_admin (real superuser). RLS is
 	// bypassed here by design — migrations create roles, grant
 	// defaults, install policies. Trying to do this as tf_app would
 	// fail on the GRANT statements.
-	if err := db.Migrate(adminDB, "postgres"); err != nil {
-		_ = adminDB.Close()
-		_ = pg.Terminate(ctx)
-		return nil, fmt.Errorf("migrate: %w", err)
+	if err := db.Migrate(h.AdminDB, "postgres"); err != nil {
+		return fail(fmt.Errorf("migrate: %w", err))
 	}
 
 	// The image ships authenticator LOGIN but with no password. Set
 	// one so AppDB can connect. Reserved-role ALTERs only succeed as
 	// the real superuser.
 	escapedAuthPassword := strings.ReplaceAll(authPassword, "'", "''")
-	if _, err := adminDB.ExecContext(ctx,
+	if _, err := h.AdminDB.ExecContext(ctx,
 		fmt.Sprintf("ALTER ROLE authenticator WITH PASSWORD '%s'", escapedAuthPassword),
 	); err != nil {
-		_ = adminDB.Close()
-		_ = pg.Terminate(ctx)
-		return nil, fmt.Errorf("set authenticator password: %w", err)
+		return fail(fmt.Errorf("set authenticator password: %w", err))
 	}
-
 	appDSN, err := rewriteUser(pgDSN, "authenticator", authPassword)
 	if err != nil {
-		_ = adminDB.Close()
-		_ = pg.Terminate(ctx)
-		return nil, fmt.Errorf("build app dsn: %w", err)
+		return fail(fmt.Errorf("build app dsn: %w", err))
 	}
-	appDB, err := sql.Open("pgx", appDSN)
-	if err != nil {
-		_ = adminDB.Close()
-		_ = pg.Terminate(ctx)
-		return nil, fmt.Errorf("open app db: %w", err)
+	if err := h.app.pointAt(appDSN); err != nil {
+		return fail(fmt.Errorf("aim app pool: %w", err))
 	}
 
 	// tf_system ships NOLOGIN in the baseline (production LOGIN comes from
 	// the postgres-postinit sidecar's ALTER, driven by TF_SYSTEM_PASSWORD —
 	// see docker-compose.yml). Mirror that here so SystemDB can connect.
 	escapedSystemPassword := strings.ReplaceAll(systemPassword, "'", "''")
-	if _, err := adminDB.ExecContext(ctx,
+	if _, err := h.AdminDB.ExecContext(ctx,
 		fmt.Sprintf("ALTER ROLE tf_system WITH LOGIN PASSWORD '%s'", escapedSystemPassword),
 	); err != nil {
-		_ = appDB.Close()
-		_ = adminDB.Close()
-		_ = pg.Terminate(ctx)
-		return nil, fmt.Errorf("set tf_system password: %w", err)
+		return fail(fmt.Errorf("set tf_system password: %w", err))
 	}
 	systemDSN, err := rewriteUser(pgDSN, "tf_system", systemPassword)
 	if err != nil {
-		_ = appDB.Close()
-		_ = adminDB.Close()
-		_ = pg.Terminate(ctx)
-		return nil, fmt.Errorf("build system dsn: %w", err)
+		return fail(fmt.Errorf("build system dsn: %w", err))
 	}
-	systemDB, err := sql.Open("pgx", systemDSN)
-	if err != nil {
-		_ = appDB.Close()
-		_ = adminDB.Close()
-		_ = pg.Terminate(ctx)
-		return nil, fmt.Errorf("open system db: %w", err)
+	if err := h.system.pointAt(systemDSN); err != nil {
+		return fail(fmt.Errorf("aim system pool: %w", err))
 	}
-
-	return &Harness{Container: pg, AdminDB: adminDB, AppDB: appDB, SystemDB: systemDB}, nil
+	return nil
 }
 
 // NewInstance boots a dedicated, independent supabase/postgres
@@ -404,9 +428,17 @@ func NewInstance(t *testing.T) (adminDB *sql.DB, adminDSN string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	pg, _, adminDSN, adminDB, err := bootContainer(ctx)
+	pg, _, adminDSN, err := bootContainer(ctx)
 	if err != nil {
 		t.Fatalf("pgtest.NewInstance: boot failed (Docker is reachable but bring-up errored): %v", err)
+	}
+	// A plain sql.Open, not the shared harness's swappable pool: a
+	// dedicated instance has nothing to revive into, and the caller
+	// owns its whole lifetime.
+	adminDB, err = sql.Open("pgx", adminDSN)
+	if err != nil {
+		_ = pg.Terminate(ctx)
+		t.Fatalf("pgtest.NewInstance: open admin db: %v", err)
 	}
 	t.Cleanup(func() {
 		_ = adminDB.Close()
@@ -563,8 +595,16 @@ func (h *Harness) truncateAll() error {
 	// table not in the list FKs into it; lumping them together avoids
 	// that ordering issue).
 	stmt := "TRUNCATE TABLE " + strings.Join(orgScopedTables, ", ") + " RESTART IDENTITY CASCADE"
-	if _, err := h.AdminDB.ExecContext(ctx, stmt); err != nil {
-		return fmt.Errorf("truncate org-scoped tables: %w", err)
+	// TRUNCATE takes ACCESS EXCLUSIVE on each table in turn, so it waits
+	// behind every other session still inside a transaction — and what
+	// Postgres hands back when that goes wrong ("deadlock detected") names
+	// neither the session nor the statement it lost to. Sample who else is
+	// live while this one is in flight, so a failure says who.
+	stopWatch := watchContention(h.AdminDB)
+	_, err := h.AdminDB.ExecContext(ctx, stmt)
+	contenders := stopWatch()
+	if err != nil {
+		return fmt.Errorf("truncate org-scoped tables: %w%s", err, describeBusyBackends(contenders))
 	}
 	// Drop auth.users rows we may have seeded. Image schema FKs from
 	// public.users → auth.users(id) ON DELETE CASCADE, but the TRUNCATE

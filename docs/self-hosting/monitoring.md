@@ -647,7 +647,8 @@ It reports:
   "broker_ok": true,
   "active_runs": 2,
   "draining": false,
-  "fenced": false
+  "fenced": false,
+  "shutting_down": false
 }
 ```
 
@@ -656,6 +657,13 @@ heartbeat write is older than 3× the heartbeat interval, **or** the cap-broker
 stops answering (`broker_ok:false` — an executor that can't launch sandboxes is
 useless). `draining` and `fenced` are informational and never flip the code: a
 fenced executor stays `200`-but-`fenced:true` so the HEALTHCHECK doesn't kill it
-before it can quiesce. The instance registry (`instances` table) carries each
-pod's role and build version, so version skew across a rolling deploy is visible
-there.
+before it can quiesce.
+
+`shutting_down` is the exception, and it outranks even the `fenced` override: it
+latches on SIGTERM while the pod finishes dispatches it already claimed, and a
+pod on its way out is never ready. Seeing `503` with `shutting_down:true` and a
+non-zero `active_runs` is a healthy graceful shutdown in progress, not a fault —
+see [Rolling restarts](scaling.md#rolling-restarts).
+
+The instance registry (`instances` table) carries each pod's role and build
+version, so version skew across a rolling deploy is visible there.

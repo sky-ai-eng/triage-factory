@@ -29,6 +29,10 @@ type fleetFixture struct {
 
 func seedFleetFixture(t *testing.T, h *pgtest.Harness) fleetFixture {
 	t.Helper()
+	// Registered before anything else this fixture or its scenario sets up, so
+	// it runs last: the backstop under every join below, and the only check
+	// that catches a goroutine a future scenario starts outside them.
+	t.Cleanup(func() { h.AssertNoBusyBackends(t) })
 	ctx := context.Background()
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
@@ -98,7 +102,43 @@ func newFleetSpawner(t *testing.T, h *pgtest.Harness, fx fleetFixture, executorI
 		t.Fatalf("register %s: %v", executorID, err)
 	}
 	s.SetExecutorID(executorID, epoch)
+	stopWithTest(t, s)
 	return s
+}
+
+// stopWithTest is the "process" going away when the test that stood it up
+// returns: every live engagement cancelled, every dispatch goroutine joined.
+//
+// A fleet spawner is a real dispatcher, and a claim it dispatches keeps
+// writing rows — phases, transcript, the claim's own release — long after the
+// call that started it returned. The spawners here share this binary's one
+// connection pool with every later test in the package, whose first act is a
+// Reset: a dispatch still in a transaction then is a session that Reset's
+// TRUNCATE waits behind, and deadlocks against. Joining is what makes "the
+// test is over" true of the goroutines too, not just of the test function.
+func stopWithTest(t *testing.T, s *Spawner) {
+	t.Helper()
+	t.Cleanup(func() {
+		s.killAllLiveSandboxes()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if !s.WaitForDispatches(ctx) {
+			id, _ := s.executorIdentity()
+			t.Errorf("executor %s still has a dispatch in flight 30s after the test cancelled it; it will be holding a transaction open when the next test truncates", id)
+		}
+	})
+}
+
+// drainQueue runs one pass of a spawner's claim loop under a context the test
+// cancels on its way out. The pass returns as soon as the queue is empty, but
+// the claims it dispatched are still running: cancelling their context is what
+// ends them, and the join in stopWithTest is what proves they ended.
+func drainQueue(t *testing.T, s *Spawner) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	// Registered after stopWithTest's join, so it runs before it.
+	t.Cleanup(cancel)
+	s.drainConversationQueue(ctx)
 }
 
 func backdateFleetHeartbeat(t *testing.T, h *pgtest.Harness, executorID string, age time.Duration) {
@@ -288,7 +328,7 @@ func TestFleet_Drain_DrainedInstanceStopsClaimingSurvivorDoesNot(t *testing.T) {
 		t.Fatal("A must read back draining=true from its own heartbeat")
 	}
 
-	sA.drainConversationQueue(ctx)
+	drainQueue(t, sA)
 	var claims int
 	if err := h.AdminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.conversationID).Scan(&claims); err != nil {
 		t.Fatalf("read back run: %v", err)
@@ -298,7 +338,7 @@ func TestFleet_Drain_DrainedInstanceStopsClaimingSurvivorDoesNot(t *testing.T) {
 	}
 
 	// B was never drained and claims normally.
-	sB.drainConversationQueue(ctx)
+	drainQueue(t, sB)
 	if err := h.AdminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.conversationID).Scan(&claims); err != nil {
 		t.Fatalf("read back run after B's drainConversationQueue: %v", err)
 	}
