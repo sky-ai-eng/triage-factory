@@ -210,6 +210,12 @@ func decodePageToken(s string) (pageToken, error) {
 	// The three positions are alternatives. A token carrying two of them was
 	// not minted here, and guessing which one to honor is how a caller ends up
 	// paging a result set from a position nothing produced.
+	//
+	// A zero O is "no offset", not "offset zero": the two are the same eight
+	// bytes on the wire, and a minted keyset token carries no O at all. Only
+	// the first page is at offset zero, and the first page is the one nobody
+	// needs a token for — so reading a zero as a position held would refuse
+	// every keyset token there is.
 	positions := 0
 	for _, held := range []bool{tok.O != 0, tok.C != "", len(tok.K) > 0} {
 		if held {
