@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -71,11 +72,15 @@ func (b *Backplane) publishViaOutbox(ctx context.Context, evtType string, payloa
 		}
 	}()
 
+	// db.TxCause on both post-begin failures: the publish ctx carries
+	// publishTimeout, and once it expires database/sql rolls the tx back from
+	// under us — the sql.ErrTxDone that surfaces after that says nothing about
+	// why, so the log gets the deadline that caused it alongside.
 	var outboxID int64
 	if err := tx.QueryRowContext(ctx,
 		`INSERT INTO ws_outbox (payload) VALUES ($1) RETURNING id`, payload,
 	).Scan(&outboxID); err != nil {
-		backplaneLog.Warn("tf_ws: insert outbox row failed; event stays local-only on this pod", "type", evtType, "error", err)
+		backplaneLog.Warn("tf_ws: insert outbox row failed; event stays local-only on this pod", "type", evtType, "error", db.TxCause(ctx, err))
 		return
 	}
 
@@ -84,7 +89,7 @@ func (b *Backplane) publishViaOutbox(ctx context.Context, evtType string, payloa
 		return
 	}
 	if err := tx.Commit(); err != nil {
-		backplaneLog.Warn("tf_ws: commit outbox tx failed; event stays local-only on this pod", "type", evtType, "outbox_id", outboxID, "error", err)
+		backplaneLog.Warn("tf_ws: commit outbox tx failed; event stays local-only on this pod", "type", evtType, "outbox_id", outboxID, "error", db.TxCause(ctx, err))
 		return
 	}
 	committed = true

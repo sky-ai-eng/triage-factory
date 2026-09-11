@@ -10,6 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -121,8 +122,12 @@ func newSQLiteForTxTest(t *testing.T) *sql.DB {
 
 // TestWithTx_SQLite_CanceledCtxSurfacesAsCanceled pins the disconnect
 // contract: a ctx that dies mid-transaction surfaces as context.Canceled from
-// WithTx no matter whether the stdlib's own rollback goroutine beat the commit
-// to it. The handler layer keys its client-gone classification on that.
+// WithTx on the branch where the stdlib's own rollback goroutine beat the
+// commit to it. The handler layer keys its client-gone classification on that.
+// The claims-bound helper owns its own transaction rather than routing through
+// db.InTx, so it needs its own pin. See dbtest.WaitTxDone for why the body
+// waits that race out instead of running it — here the probe is a store call,
+// since the closure is handed TxStores rather than the *sql.Tx under them.
 func TestWithTx_SQLite_CanceledCtxSurfacesAsCanceled(t *testing.T) {
 	conn := newSQLiteForTxTest(t)
 	stores := sqlitestore.New(conn)
@@ -135,10 +140,16 @@ func TestWithTx_SQLite_CanceledCtxSurfacesAsCanceled(t *testing.T) {
 				return err
 			}
 			cancel()
-			return nil
+			return dbtest.WaitTxDone(t, func(live context.Context) error {
+				_, _, err := tx.Repos.List(live, runmode.LocalDefaultOrgID, db.ListOpts{})
+				return err
+			})
 		})
 	if err == nil {
 		t.Fatal("WithTx committed under a canceled ctx")
+	}
+	if !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("test did not reach the ErrTxDone branch it exists to pin; got %v", err)
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("errors.Is(err, context.Canceled) = false; got %v", err)

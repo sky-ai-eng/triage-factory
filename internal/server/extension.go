@@ -357,17 +357,14 @@ func (a serverExtensionAPI) PKCEChallenge(verifier string) string { return pkceC
 // invite-accept's "joined the org"; team_id is NULL (JIT grants org-only); the
 // source in detail_json lets the viewer render "joined via SSO". See TFAC-486.
 func (a serverExtensionAPI) GrantOrgMembership(ctx context.Context, userID, orgID uuid.UUID, role string) error {
-	tx, err := a.s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin jit grant tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	netNew, err := grantOrgMembership(ctx, tx, userID, orgID, role, uuid.NullUUID{}, "")
-	if err != nil {
-		return err
-	}
-	if netNew {
+	return db.InTx(ctx, a.s.db, func(tx *sql.Tx) error {
+		netNew, err := grantOrgMembership(ctx, tx, userID, orgID, role, uuid.NullUUID{}, "")
+		if err != nil {
+			return err
+		}
+		if !netNew {
+			return nil
+		}
 		if err := recordAccessChangeTx(ctx, tx, orgID.String(), domain.AccessChange{
 			ActorUserID:  userID.String(),
 			Action:       domain.AccessActionOrgMemberGranted,
@@ -376,8 +373,8 @@ func (a serverExtensionAPI) GrantOrgMembership(ctx context.Context, userID, orgI
 		}); err != nil {
 			return fmt.Errorf("audit jit member granted: %w", err)
 		}
-	}
-	return tx.Commit()
+		return nil
+	})
 }
 
 func (a serverExtensionAPI) EmailDomain(email string) (string, bool) { return emailDomain(email) }

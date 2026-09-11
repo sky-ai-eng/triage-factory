@@ -31,24 +31,18 @@ func newEventQueueStore(conn *sql.DB) db.EventQueueStore {
 var _ db.EventQueueStore = (*eventQueueStore)(nil)
 
 func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.Event, traceparent string) (string, error) {
-	tx, err := s.conn.BeginTx(ctx, nil)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
-
-	// recordEvent (postgres/events.go) is the canonical events insert —
-	// reused so the queue's audit row matches every other event row
-	// (jsonb metadata cast, nullable occurred_at, org_id bind).
-	id, err := recordEvent(ctx, tx, orgID, evt)
-	if err != nil {
-		return "", err
-	}
-
-	if err := insertQueueRow(ctx, tx, orgID, id, evt, traceparent); err != nil {
-		return "", err
-	}
-	if err := tx.Commit(); err != nil {
+	var id string
+	if err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+		// recordEvent (postgres/events.go) is the canonical events insert —
+		// reused so the queue's audit row matches every other event row
+		// (jsonb metadata cast, nullable occurred_at, org_id bind).
+		var err error
+		id, err = recordEvent(ctx, tx, orgID, evt)
+		if err != nil {
+			return err
+		}
+		return insertQueueRow(ctx, tx, orgID, id, evt, traceparent)
+	}); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -75,36 +69,37 @@ func insertQueueRow(ctx context.Context, q queryer, orgID, eventID string, evt d
 // EnqueueBatchWithSnapshotCAS runs the snapshot CAS and the batch's
 // events + event_queue writes in one transaction — see the interface doc
 // for why they belong together. A CAS that matches zero rows returns
-// ok=false having written nothing: the rollback is what makes a losing
-// writer invisible rather than half-applied.
+// ok=false having written nothing: the loser skips the batch inside the
+// same transaction, so it is invisible rather than half-applied.
 func (s *eventQueueStore) EnqueueBatchWithSnapshotCAS(ctx context.Context, orgID, entityID, snapshotJSON string, expectedPollSeq int64, events []domain.Event, traceparents []string) (bool, []string, error) {
-	tx, err := s.conn.BeginTx(ctx, nil)
-	if err != nil {
-		return false, nil, err
-	}
-	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
-
-	won, err := updateSnapshotCAS(ctx, tx, orgID, entityID, snapshotJSON, expectedPollSeq)
-	if err != nil {
+	var won bool
+	var ids []string
+	if err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+		var err error
+		won, err = updateSnapshotCAS(ctx, tx, orgID, entityID, snapshotJSON, expectedPollSeq)
+		if err != nil {
+			return err
+		}
+		if !won {
+			return nil
+		}
+		ids = make([]string, 0, len(events))
+		for i, evt := range events {
+			id, err := recordEvent(ctx, tx, orgID, evt)
+			if err != nil {
+				return err
+			}
+			if err := insertQueueRow(ctx, tx, orgID, id, evt, db.TraceparentAt(traceparents, i)); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		return nil
+	}); err != nil {
 		return false, nil, err
 	}
 	if !won {
 		return false, nil, nil
-	}
-
-	ids := make([]string, 0, len(events))
-	for i, evt := range events {
-		id, err := recordEvent(ctx, tx, orgID, evt)
-		if err != nil {
-			return false, nil, err
-		}
-		if err := insertQueueRow(ctx, tx, orgID, id, evt, db.TraceparentAt(traceparents, i)); err != nil {
-			return false, nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := tx.Commit(); err != nil {
-		return false, nil, err
 	}
 	return true, ids, nil
 }

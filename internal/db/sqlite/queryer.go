@@ -63,15 +63,7 @@ func inTx(ctx context.Context, q queryer, fn func(queryer) error) error {
 	case *sql.Tx:
 		return fn(v)
 	case *sql.DB:
-		tx, err := v.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback() }()
-		if err := fn(tx); err != nil {
-			return db.TxCause(ctx, err)
-		}
-		return db.TxCause(ctx, tx.Commit())
+		return db.InTx(ctx, v, func(tx *sql.Tx) error { return fn(tx) })
 	default:
 		return fmt.Errorf("sqlite store: unexpected queryer type %T", q)
 	}

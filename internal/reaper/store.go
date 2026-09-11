@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -150,118 +151,112 @@ const releaseReapedClaimsSQL = `
 `
 
 func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Duration, maxAttempts int) (Counts, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Counts{}, err
-	}
-	defer tx.Rollback()
-
 	staleSecs := staleThreshold.Seconds()
 	var out Counts
+	if err := db.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		// 1. Cancel-requested candidates: finalize instead of requeuing —
+		// "cancel-requested rows go through the existing cancel finalization
+		// instead of requeue" (spec §4.3). No live owner to signal, so this IS the
+		// finalization: a dead executor can't apply a cancel signal to a process
+		// that no longer exists.
+		//
+		// The conversation PARKS `open` while its blueprint below takes the
+		// 'cancelled' terminal — the split every cancel path uses. Read the park as
+		// "stopped without concluding", NOT as "resumable": the blueprint is
+		// terminal, so the claim gate refuses the row. What it buys is the
+		// workspace, which the retention TTL collects on its own schedule instead
+		// of a reaper throwing it away the instant a host went quiet.
+		parkedBlueprintIDs, parkedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, nil, `
+			UPDATE conversations SET status = 'open', parked_at = COALESCE(parked_at, now()), park_reason = 'system_cancelled',
+				result_summary = 'Stopped: owning blueprint run was cancel-requested under a dead executor (reaper)'
+			WHERE id IN (
+				SELECT r.id `+reapCandidateJoin+`
+				  AND br.cancel_requested = true
+			)
+			RETURNING blueprint_run_id, id
+		`)
+		if err != nil {
+			return err
+		}
+		out.Cancelled = len(parkedBlueprintIDs)
+		if len(parkedBlueprintIDs) > 0 {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE blueprint_runs SET status = 'cancelled', completed_at = now()
+				WHERE id = ANY($1) AND status = 'running'
+			`, pgUUIDArray(parkedBlueprintIDs)); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, releaseReapedClaimsSQL, pgUUIDArray(parkedIDs)); err != nil {
+				return err
+			}
+		}
 
-	// 1. Cancel-requested candidates: finalize instead of requeuing —
-	// "cancel-requested rows go through the existing cancel finalization
-	// instead of requeue" (spec §4.3). No live owner to signal, so this IS the
-	// finalization: a dead executor can't apply a cancel signal to a process
-	// that no longer exists.
-	//
-	// The conversation PARKS `open` while its blueprint below takes the
-	// 'cancelled' terminal — the split every cancel path uses. Read the park as
-	// "stopped without concluding", NOT as "resumable": the blueprint is
-	// terminal, so the claim gate refuses the row. What it buys is the
-	// workspace, which the retention TTL collects on its own schedule instead
-	// of a reaper throwing it away the instant a host went quiet.
-	parkedBlueprintIDs, parkedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, nil, `
-		UPDATE conversations SET status = 'open', parked_at = COALESCE(parked_at, now()), park_reason = 'system_cancelled',
-			result_summary = 'Stopped: owning blueprint run was cancel-requested under a dead executor (reaper)'
-		WHERE id IN (
-			SELECT r.id `+reapCandidateJoin+`
-			  AND br.cancel_requested = true
-		)
-		RETURNING blueprint_run_id, id
-	`)
-	if err != nil {
-		return Counts{}, err
-	}
-	out.Cancelled = len(parkedBlueprintIDs)
-	if len(parkedBlueprintIDs) > 0 {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE blueprint_runs SET status = 'cancelled', completed_at = now()
-			WHERE id = ANY($1) AND status = 'running'
-		`, pgUUIDArray(parkedBlueprintIDs)); err != nil {
-			return Counts{}, err
+		// 2. Not cancel-requested, this loss episode exhausted: terminal-fail. The
+		// episode is what makes this a crash loop rather than a conversation with
+		// a long life behind it — see ReapDeadExecutors' contract.
+		failedBlueprintIDs, failedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, &maxAttempts, `
+			-- No park_reason: this arm does not park, it fails. failure_kind is
+			-- where a failure's cause is recorded, and stamping the same word into
+			-- the park column would put a value on a row that was never parked.
+			UPDATE conversations SET status = 'failed', failure_kind = 'executor_lost', completed_at = now(),
+				result_summary = 'Failed: executor lost repeatedly and the retry budget (TF_MAX_CLAIM_ATTEMPTS) for this loss episode is exhausted (reaper)'
+			WHERE id IN (
+				SELECT r.id `+reapCandidateJoin+`
+				  AND br.cancel_requested = false
+				  AND `+reapEpisodeAttemptsSQL+` >= $2
+			)
+			RETURNING blueprint_run_id, id
+		`)
+		if err != nil {
+			return err
 		}
-		if _, err := tx.ExecContext(ctx, releaseReapedClaimsSQL, pgUUIDArray(parkedIDs)); err != nil {
-			return Counts{}, err
+		out.Failed = len(failedBlueprintIDs)
+		if len(failedBlueprintIDs) > 0 {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE blueprint_runs SET status = 'failed', completed_at = now(), abort_reason = 'executor_lost'
+				WHERE id = ANY($1) AND status = 'running'
+			`, pgUUIDArray(failedBlueprintIDs)); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, releaseReapedClaimsSQL, pgUUIDArray(failedIDs)); err != nil {
+				return err
+			}
 		}
-	}
 
-	// 2. Not cancel-requested, this loss episode exhausted: terminal-fail. The
-	// episode is what makes this a crash loop rather than a conversation with
-	// a long life behind it — see ReapDeadExecutors' contract.
-	failedBlueprintIDs, failedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, &maxAttempts, `
-		-- No park_reason: this arm does not park, it fails. failure_kind is
-		-- where a failure's cause is recorded, and stamping the same word into
-		-- the park column would put a value on a row that was never parked.
-		UPDATE conversations SET status = 'failed', failure_kind = 'executor_lost', completed_at = now(),
-			result_summary = 'Failed: executor lost repeatedly and the retry budget (TF_MAX_CLAIM_ATTEMPTS) for this loss episode is exhausted (reaper)'
-		WHERE id IN (
-			SELECT r.id `+reapCandidateJoin+`
-			  AND br.cancel_requested = false
-			  AND `+reapEpisodeAttemptsSQL+` >= $2
-		)
-		RETURNING blueprint_run_id, id
-	`)
-	if err != nil {
-		return Counts{}, err
-	}
-	out.Failed = len(failedBlueprintIDs)
-	if len(failedBlueprintIDs) > 0 {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE blueprint_runs SET status = 'failed', completed_at = now(), abort_reason = 'executor_lost'
-			WHERE id = ANY($1) AND status = 'running'
-		`, pgUUIDArray(failedBlueprintIDs)); err != nil {
-			return Counts{}, err
+		// 3. Not cancel-requested, this loss episode has room left: requeue. Same
+		// semantics as ConversationQueueStore.RequeueConversation — releasing the claim (below) IS
+		// the requeue, since the conversation is mid-flight and re-enters the
+		// needs-driving predicate the moment it has no claim. That release is also
+		// what keeps the episode open, so the next death counts this one.
+		//
+		// preferred_executor_id is cleared: the reaper requeues precisely because
+		// the stamped executor is dead, so its stamp is the staler-than-a-dwell
+		// case the placement design calls out — NULL is "unowned, claimable by any
+		// live executor now" (no aging delay), which is the correct advisory
+		// answer here. Affinity is re-earned on the next enqueue, never carried
+		// toward a corpse.
+		_, requeuedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, &maxAttempts, `
+			UPDATE conversations SET
+				preferred_executor_id = NULL,
+				result_summary = 'Requeued: executor heartbeat stale (reaper)'
+			WHERE id IN (
+				SELECT r.id `+reapCandidateJoin+`
+				  AND br.cancel_requested = false
+				  AND `+reapEpisodeAttemptsSQL+` < $2
+			)
+			RETURNING blueprint_run_id, id
+		`)
+		if err != nil {
+			return err
 		}
-		if _, err := tx.ExecContext(ctx, releaseReapedClaimsSQL, pgUUIDArray(failedIDs)); err != nil {
-			return Counts{}, err
+		out.Requeued = len(requeuedIDs)
+		if len(requeuedIDs) > 0 {
+			if _, err := tx.ExecContext(ctx, releaseReapedClaimsSQL, pgUUIDArray(requeuedIDs)); err != nil {
+				return err
+			}
 		}
-	}
-
-	// 3. Not cancel-requested, this loss episode has room left: requeue. Same
-	// semantics as ConversationQueueStore.RequeueConversation — releasing the claim (below) IS
-	// the requeue, since the conversation is mid-flight and re-enters the
-	// needs-driving predicate the moment it has no claim. That release is also
-	// what keeps the episode open, so the next death counts this one.
-	//
-	// preferred_executor_id is cleared: the reaper requeues precisely because
-	// the stamped executor is dead, so its stamp is the staler-than-a-dwell
-	// case the placement design calls out — NULL is "unowned, claimable by any
-	// live executor now" (no aging delay), which is the correct advisory
-	// answer here. Affinity is re-earned on the next enqueue, never carried
-	// toward a corpse.
-	_, requeuedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, &maxAttempts, `
-		UPDATE conversations SET
-			preferred_executor_id = NULL,
-			result_summary = 'Requeued: executor heartbeat stale (reaper)'
-		WHERE id IN (
-			SELECT r.id `+reapCandidateJoin+`
-			  AND br.cancel_requested = false
-			  AND `+reapEpisodeAttemptsSQL+` < $2
-		)
-		RETURNING blueprint_run_id, id
-	`)
-	if err != nil {
-		return Counts{}, err
-	}
-	out.Requeued = len(requeuedIDs)
-	if len(requeuedIDs) > 0 {
-		if _, err := tx.ExecContext(ctx, releaseReapedClaimsSQL, pgUUIDArray(requeuedIDs)); err != nil {
-			return Counts{}, err
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
+		return nil
+	}); err != nil {
 		return Counts{}, err
 	}
 	return out, nil

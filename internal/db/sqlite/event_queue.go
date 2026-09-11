@@ -34,24 +34,18 @@ func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
 	}
-	tx, err := s.conn.BeginTx(ctx, nil)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
-
-	// recordEvent (sqlite/events.go) is the canonical events insert —
-	// reused so the queue's audit row matches every other event row
-	// (ns-resolution created_at, nullable occurred_at, generated id).
-	id, err := recordEvent(ctx, tx, evt)
-	if err != nil {
-		return "", err
-	}
-
-	if err := insertQueueRow(ctx, tx, id, evt, traceparent); err != nil {
-		return "", err
-	}
-	if err := tx.Commit(); err != nil {
+	var id string
+	if err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+		// recordEvent (sqlite/events.go) is the canonical events insert —
+		// reused so the queue's audit row matches every other event row
+		// (ns-resolution created_at, nullable occurred_at, generated id).
+		var err error
+		id, err = recordEvent(ctx, tx, evt)
+		if err != nil {
+			return err
+		}
+		return insertQueueRow(ctx, tx, id, evt, traceparent)
+	}); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -78,41 +72,43 @@ func insertQueueRow(ctx context.Context, q queryer, eventID string, evt domain.E
 // EnqueueBatchWithSnapshotCAS runs the snapshot CAS and the batch's
 // events + event_queue writes in one transaction — see the interface doc
 // for why they belong together. A CAS that matches zero rows returns
-// ok=false having written nothing: the rollback is what makes a losing
-// writer invisible rather than half-applied. SQLite/local is N=1 and has
-// no concurrent leader to lose to, but the transaction is what closes the
-// crash window, which is not a multi-mode-only concern.
+// ok=false having written nothing: the loser skips the batch inside the
+// same transaction, so it is invisible rather than half-applied.
+// SQLite/local is N=1 and has no concurrent leader to lose to, but the
+// transaction is what closes the crash window, which is not a
+// multi-mode-only concern.
 func (s *eventQueueStore) EnqueueBatchWithSnapshotCAS(ctx context.Context, orgID, entityID, snapshotJSON string, expectedPollSeq int64, events []domain.Event, traceparents []string) (bool, []string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, nil, err
 	}
-	tx, err := s.conn.BeginTx(ctx, nil)
-	if err != nil {
-		return false, nil, err
-	}
-	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
-
-	won, err := updateSnapshotCAS(ctx, tx, entityID, snapshotJSON, expectedPollSeq)
-	if err != nil {
+	var won bool
+	var ids []string
+	if err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+		var err error
+		won, err = updateSnapshotCAS(ctx, tx, entityID, snapshotJSON, expectedPollSeq)
+		if err != nil {
+			return err
+		}
+		if !won {
+			return nil
+		}
+		ids = make([]string, 0, len(events))
+		for i, evt := range events {
+			id, err := recordEvent(ctx, tx, evt)
+			if err != nil {
+				return err
+			}
+			if err := insertQueueRow(ctx, tx, id, evt, db.TraceparentAt(traceparents, i)); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		return nil
+	}); err != nil {
 		return false, nil, err
 	}
 	if !won {
 		return false, nil, nil
-	}
-
-	ids := make([]string, 0, len(events))
-	for i, evt := range events {
-		id, err := recordEvent(ctx, tx, evt)
-		if err != nil {
-			return false, nil, err
-		}
-		if err := insertQueueRow(ctx, tx, id, evt, db.TraceparentAt(traceparents, i)); err != nil {
-			return false, nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := tx.Commit(); err != nil {
-		return false, nil, err
 	}
 	return true, ids, nil
 }

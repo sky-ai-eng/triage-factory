@@ -265,7 +265,7 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 	// org from session claims, run its viewer gate, and read the task under
 	// RLS (so a task the caller can't see 404s before this is reached).
 	// org_id stays in every WHERE as defense in depth.
-	err := runInTxOn(ctx, s.admin, func(tx *sql.Tx) error {
+	err := inTxRaw(ctx, s.admin, func(tx *sql.Tx) error {
 		// Serialize concurrent undos on this task before either evaluates
 		// its guard. Without it two callers can both pass and both write —
 		// the row lock plus READ COMMITTED's per-statement snapshot means
@@ -324,34 +324,12 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 // the deferred tx rollback.
 var errNothingToUndo = errors.New("postgres swipes: the task's newest gesture isn't the caller's to undo")
 
-// runInTx is the Postgres-side counterpart of sqlite's inTx — opens
-// a tx on s.q if it's a *sql.DB, or runs the closure against the
-// caller's *sql.Tx if we're already inside WithTx. Lets mutating
-// store methods share atomicity-boundary code regardless of
-// composition context.
+// runInTx runs fn in a transaction on s.q — the caller's own *sql.Tx when
+// we're composed inside WithTx, a fresh one otherwise. UndoLastSwipe calls
+// inTxRaw against s.admin directly, since its half of the work has to see
+// rows RLS hides from the requesting user.
 func (s *swipeStore) runInTx(ctx context.Context, fn func(*sql.Tx) error) error {
-	return runInTxOn(ctx, s.q, fn)
-}
-
-// runInTxOn is runInTx against a named queryer, so UndoLastSwipe can open its
-// transaction on the admin pool while every other method stays on s.q.
-func runInTxOn(ctx context.Context, q queryer, fn func(*sql.Tx) error) error {
-	switch v := q.(type) {
-	case *sql.Tx:
-		return fn(v)
-	case *sql.DB:
-		tx, err := v.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback() }()
-		if err := fn(tx); err != nil {
-			return err
-		}
-		return tx.Commit()
-	default:
-		return errors.New("postgres swipes: unexpected queryer type")
-	}
+	return inTxRaw(ctx, s.q, fn)
 }
 
 // insertSwipeEventAs writes an audit row attributed to an explicit user. The
