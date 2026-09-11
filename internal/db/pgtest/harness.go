@@ -286,7 +286,7 @@ func bootContainer(ctx context.Context) (pg *postgres.PostgresContainer, pgDSN, 
 	pgDSN, err = pg.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
 		_ = pg.Terminate(ctx)
-		return nil, "", "", fmt.Errorf("admin dsn: %w", err)
+		return nil, "", "", fmt.Errorf("base dsn: %w", err)
 	}
 
 	// The supabase image demotes `postgres` to non-superuser during
