@@ -13,7 +13,12 @@ converges on (§1), and records a **full audit** of where the current
 surface falls short (§3), with file:line evidence, so remediation can be
 ticketed without re-deriving the findings.
 
-Status: **audit complete, contract settled — remediation unscheduled.**
+Status: **audit complete, contract settled — remediation shipped as
+TFAC-818 (eight tickets, 1/8–8/8).** §3 is the audit as of that snapshot
+and is kept as the record the tickets were cut from; the ratchet test
+(`internal/server/ratchet_test.go`) is the live statement of what still
+sits outside the contract, and its permanent section names the surfaces
+that do so deliberately.
 Audited 2026-08-15 against main at `ef2ceb3e` (~180 routes across
 `internal/server/` plus the ee Slack/SSO surfaces). Line references
 drift as files change; treat them as pointers, not anchors.
@@ -601,8 +606,7 @@ first failure.
   failure; `POST …/knowledge` — self-described "207-ish semantics in a
   200" (`projects.go:1716`); backfill — 200 for an entirely-failed
   batch, leaking raw store errors per row (`backfill.go:222,254`);
-  `GET /api/integrations/status` — 200 + `"error"` key on vault
-  failure; invite preview — 200 `{"status":"not_found"}`;
+  invite preview — 200 `{"status":"not_found"}`;
   preflight-ssh — 200 `{ok:false}` locally but **404** +
   `{ok:false,"error"}` in multi, while the same no-SSH condition is a
   400 on settings/org — one condition, three statuses, three shapes.

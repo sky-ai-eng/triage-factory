@@ -54,11 +54,11 @@ func WithTx(ctx context.Context, dbConn *sql.DB, claims Claims, fn func(*sql.Tx)
 	if _, err := tx.ExecContext(ctx,
 		`SELECT set_config('request.jwt.claims', $1, true)`, string(payload),
 	); err != nil {
-		return fmt.Errorf("set request.jwt.claims: %w", err)
+		return TxCause(ctx, fmt.Errorf("set request.jwt.claims: %w", err))
 	}
 
 	if err := fn(tx); err != nil {
-		return err
+		return TxCause(ctx, err)
 	}
-	return tx.Commit()
+	return TxCause(ctx, tx.Commit())
 }

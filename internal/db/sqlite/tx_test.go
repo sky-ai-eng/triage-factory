@@ -118,3 +118,29 @@ func newSQLiteForTxTest(t *testing.T) *sql.DB {
 	}
 	return conn
 }
+
+// TestWithTx_SQLite_CanceledCtxSurfacesAsCanceled pins the disconnect
+// contract: a ctx that dies mid-transaction surfaces as context.Canceled from
+// WithTx no matter whether the stdlib's own rollback goroutine beat the commit
+// to it. The handler layer keys its client-gone classification on that.
+func TestWithTx_SQLite_CanceledCtxSurfacesAsCanceled(t *testing.T) {
+	conn := newSQLiteForTxTest(t)
+	stores := sqlitestore.New(conn)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := stores.Tx.WithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
+		func(tx db.TxStores) error {
+			if err := tx.Repos.SetConfigured(ctx, runmode.LocalDefaultOrgID, []string{"gone/client"}); err != nil {
+				return err
+			}
+			cancel()
+			return nil
+		})
+	if err == nil {
+		t.Fatal("WithTx committed under a canceled ctx")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("errors.Is(err, context.Canceled) = false; got %v", err)
+	}
+}

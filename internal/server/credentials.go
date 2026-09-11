@@ -106,13 +106,12 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	// metadata without claims (a cheap existence probe); in multi mode an
 	// active org always exists, so configured is always true there and
 	// the field is unused (multi gates via AuthContext).
+	// A probe fault is a 500, never configured=false: the gate keeps its
+	// last known status on a non-2xx, whereas a 200 that says "no tenant"
+	// would bounce a founder back to the first-run screen over a hiccup.
 	org, err := s.orgs.GetOrgSystem(r.Context(), orgID)
 	if err != nil {
-		setupLog.Error("integrations status tenant probe failed", "error", err)
-		writeJSON(w, http.StatusOK, map[string]any{
-			"configured": false,
-			"error":      "failed to load integrations status",
-		})
+		internalError(w, "setup", fmt.Errorf("tenant probe: %w", err))
 		return
 	}
 	tenantExists := org != nil
@@ -161,10 +160,9 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		// GitHub access can be satisfied by a registered GitHub App (the
 		// multi-mode path) rather than a PAT, so the setup-complete gate must
 		// count an App as "GitHub configured." Best-effort here, unlike the
-		// availability read that shares the derivation: this route answers 200
-		// with configured=false on its own faults, so a failed probe leaves the
-		// PAT signal standing rather than turning a hiccup into a founder sent
-		// back through setup.
+		// availability read that shares the derivation: the gate polls this
+		// route, so a failed probe leaves the PAT signal standing rather than
+		// failing the whole read over a transient App lookup.
 		ready, ge := integrations.GitHubReady(r.Context(), tx.Orgs, tx.GitHubApps, orgID, creds)
 		if ge != nil {
 			setupLog.Warn("github access probe failed; github-configured gate falls back to the pat signal", "org", orgID, "error", ge)
@@ -174,27 +172,11 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		githubReady = ready
 		return nil
 	}); err != nil {
-		// Status endpoint returns 200 with configured=false so the
-		// frontend renders a sensible "not connected" UI even when
-		// the read failed; log the underlying error server-side
-		// instead of leaking it in the response body.
-		setupLog.Error("integrations status read failed", "error", err)
-		writeJSON(w, http.StatusOK, map[string]any{
-			"configured":     false,
-			"error":          "failed to load integrations status",
-			"setup_complete": false,
-			"setup_step":     "org",
-		})
+		internalError(w, "setup", err)
 		return
 	}
 	if credsErr != nil {
-		setupLog.Error("integrations status creds load failed", "error", credsErr)
-		writeJSON(w, http.StatusOK, map[string]any{
-			"configured":     false,
-			"error":          "failed to load credentials",
-			"setup_complete": false,
-			"setup_step":     "org",
-		})
+		internalError(w, "setup", fmt.Errorf("load credentials: %w", credsErr))
 		return
 	}
 
