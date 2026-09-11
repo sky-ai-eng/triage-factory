@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Task context model — conversations, boundaries, memory, and the shared workspace</title>
+<style>
+:root {
+  --bg: #030712;
+  --fg: #f8fafc;
+  --surface: rgba(17, 24, 39, 0.30);
+  --surface-2: rgba(31, 41, 55, 0.50);
+  --surface-floating: rgba(3, 7, 18, 0.80);
+  --border: #1f2937;
+  --border-2: #1e293b;
+  --border-3: #374151;
+  --muted: #94a3b8;
+  --muted-2: #6b7280;
+  --muted-3: #4b5563;
+  --accent: #22d3ee;
+  --accent-2: #06b6d4;
+  --violet: #a78bfa;
+  --violet-2: #8b5cf6;
+  --purple: #a855f7;
+  --pink: #f472b6;
+  --green: #22c55e;
+  --green-2: #4ade80;
+  --amber: #fbbf24;
+  --red: #ef4444;
+  --red-2: #f87171;
+  --radius: 8px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Mono", monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.mono, code, pre { font-family: var(--mono); }
+code { background: rgba(31, 41, 55, 0.5); padding: 1px 5px; border-radius: 3px; font-size: 0.92em; }
+a { color: var(--accent); text-underline-offset: 4px; }
+a:hover { text-decoration: underline; }
+
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-floating);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.topbar__inner {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px; height: 56px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; color: var(--muted);
+}
+.topbar__brand { display: flex; align-items: center; gap: 12px; }
+.topbar__brand .dot {
+  width: 8px; height: 8px; border-radius: 9999px;
+  background: linear-gradient(to bottom right, var(--accent-2), var(--purple));
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.6);
+}
+.topbar__brand strong { color: var(--fg); font-weight: 600; font-size: 13px; }
+.topbar__crumb { color: var(--muted-2); }
+.topbar__meta { display: flex; gap: 8px; align-items: center; }
+.pill { font-size: 11px; padding: 2px 10px; border-radius: 9999px; font-family: var(--mono); }
+.pill--draft { background: rgba(251, 191, 36, 0.20); color: var(--amber); border: 1px solid rgba(251, 191, 36, 0.30); }
+.pill--size  { background: rgba(139, 92, 246, 0.20); color: var(--violet); border: 1px solid rgba(139, 92, 246, 0.30); }
+
+.hero { margin: 0 auto; max-width: 1100px; padding: 56px 24px 24px; }
+.hero h1 {
+  font-size: 30px; font-weight: 200; letter-spacing: -0.02em;
+  margin: 0 0 12px;
+  background: linear-gradient(to right, var(--accent), var(--violet), var(--pink));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.hero .sub { color: var(--muted-2); font-family: var(--mono); font-size: 12px; margin-bottom: 16px; }
+.hero p.lede { color: var(--muted); font-size: 15px; margin: 0; max-width: 760px; }
+.hero__meta {
+  display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 12px;
+}
+.hero__meta .meta-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 9999px;
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--muted);
+}
+.hero__meta .meta-pill strong { color: var(--fg); font-weight: 500; }
+
+main {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px 96px;
+  display: grid; grid-template-columns: 200px 1fr; gap: 32px;
+}
+nav.toc { position: sticky; top: 80px; height: fit-content; padding: 16px 0; }
+.toc ol { list-style: none; padding: 0; margin: 0; counter-reset: item; }
+.toc li { font-size: 12px; margin-bottom: 4px; counter-increment: item; }
+.toc a {
+  display: block; padding: 6px 12px; border-radius: 6px;
+  color: var(--muted); text-decoration: none;
+  border-left: 2px solid transparent; transition: all 150ms;
+}
+.toc a:hover { color: var(--fg); background: var(--surface); border-left-color: var(--accent); text-decoration: none; }
+.toc a::before { content: counter(item, decimal-leading-zero) "  "; color: var(--muted-3); font-family: var(--mono); }
+
+article { min-width: 0; }
+section.block { margin-bottom: 48px; scroll-margin-top: 80px; }
+section.block > h2 { font-size: 22px; font-weight: 300; margin: 0 0 4px; letter-spacing: -0.01em; }
+section.block > .lede { color: var(--muted); font-size: 14px; margin: 0 0 24px; max-width: 760px; }
+section.block h3 { font-size: 14px; font-weight: 600; margin: 28px 0 10px; color: var(--fg); }
+.section-label { font-size: 10px; color: var(--muted-3); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; }
+p.note { font-size: 12px; color: var(--muted-2); margin: 8px 0 0; max-width: 760px; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+.callout {
+  background: var(--surface); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent); border-radius: var(--radius);
+  padding: 14px 18px; margin: 14px 0;
+  font-size: 13px; color: var(--muted);
+}
+.callout strong { color: var(--fg); }
+.callout--warn { border-left-color: var(--amber); }
+.callout--good { border-left-color: var(--green-2); }
+.callout--red  { border-left-color: var(--red-2); }
+
+pre.code {
+  background: rgba(3, 7, 18, 0.60); border: 1px solid var(--border);
+  border-radius: 6px; padding: 14px 16px;
+  font-size: 12px; line-height: 1.6; overflow-x: auto;
+  color: #cbd5e1; margin: 0;
+}
+pre.code .kw  { color: var(--violet); }
+pre.code .str { color: var(--green-2); }
+pre.code .num { color: var(--amber); }
+pre.code .com { color: var(--muted-3); }
+pre.code .fn  { color: var(--accent); }
+
+table.matrix { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 12px; }
+table.matrix thead th {
+  text-align: left; padding: 8px 12px; font-weight: 500;
+  font-size: 11px; color: var(--muted-2);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+}
+table.matrix tbody td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.matrix tbody tr:hover { background: var(--surface-2); }
+table.matrix code { font-size: 11px; }
+
+ul.tight { padding-left: 20px; margin: 6px 0; }
+ul.tight li { margin-bottom: 4px; }
+
+.tag {
+  display: inline-block; font-family: var(--mono); font-size: 11px;
+  padding: 1px 7px; border-radius: 4px;
+  background: rgba(139, 92, 246, 0.15); color: var(--violet);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+}
+.tag--cyan  { background: rgba(6, 182, 212, 0.15); color: var(--accent); border-color: rgba(6, 182, 212, 0.30); }
+.tag--green { background: rgba(34, 197, 94, 0.15); color: var(--green-2); border-color: rgba(34, 197, 94, 0.30); }
+.tag--red   { background: rgba(239, 68, 68, 0.15); color: var(--red-2); border-color: rgba(239, 68, 68, 0.30); }
+.tag--amber { background: rgba(251, 191, 36, 0.15); color: var(--amber); border-color: rgba(251, 191, 36, 0.30); }
+.tag--pink  { background: rgba(244, 114, 182, 0.15); color: var(--pink); border-color: rgba(244, 114, 182, 0.30); }
+
+.schema-table {
+  background: var(--surface); border: 1px solid var(--border-3);
+  border-radius: 8px; padding: 0; overflow: hidden;
+  font-family: var(--mono); font-size: 11px; line-height: 1.7;
+}
+.schema-table h5 {
+  margin: 0; padding: 8px 14px;
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+  font-size: 12px; font-weight: 600; color: var(--fg);
+  text-transform: lowercase; letter-spacing: 0.04em;
+}
+.schema-table h5 .h-meta { font-size: 10px; color: var(--muted-2); margin-left: 8px; text-transform: none; }
+.schema-table ul { list-style: none; padding: 8px 0; margin: 0; }
+.schema-table li { padding: 2px 14px; color: var(--muted); }
+.schema-table li .col-name { color: var(--fg); }
+.schema-table li.shared    { color: var(--muted); }
+.schema-table li.added     { background: rgba(6, 182, 212, 0.10); border-left: 2px solid var(--accent); padding-left: 12px; color: var(--accent); }
+.schema-table li.derived   { background: rgba(167, 139, 250, 0.10); border-left: 2px solid var(--violet); padding-left: 12px; color: var(--violet); }
+.schema-table li.absent    { color: var(--muted-3); font-style: italic; }
+.schema-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0 12px; }
+
+.phase-flow { display: flex; align-items: stretch; gap: 8px; margin: 18px 0 8px; flex-wrap: wrap; }
+.phase {
+  flex: 1; min-width: 180px;
+  background: var(--surface); border: 1px solid var(--border-3);
+  border-radius: var(--radius); padding: 12px 14px; position: relative;
+}
+.phase .phase-label {
+  font-family: var(--mono); font-size: 10px; color: var(--accent);
+  background: rgba(6, 182, 212, 0.10); border: 1px solid rgba(6, 182, 212, 0.30);
+  padding: 1px 7px; border-radius: 4px; display: inline-block; margin-bottom: 6px;
+}
+.phase .phase-title { font-size: 13px; font-weight: 600; color: var(--fg); margin-bottom: 4px; }
+.phase .phase-body { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.phase + .phase::before { content: "→"; color: var(--muted-3); position: absolute; left: -12px; top: 50%; transform: translateY(-50%); }
+
+.rules { counter-reset: rule; padding-left: 0; list-style: none; margin: 16px 0; }
+.rules > li {
+  counter-increment: rule; position: relative;
+  padding: 12px 0 14px 44px; border-bottom: 1px dashed var(--border);
+}
+.rules > li:last-child { border-bottom: none; }
+.rules > li::before {
+  content: "R" counter(rule);
+  position: absolute; left: 0; top: 12px;
+  font-family: var(--mono); font-size: 11px; color: var(--violet);
+  background: rgba(139, 92, 246, 0.10); border: 1px solid rgba(139, 92, 246, 0.30);
+  padding: 2px 7px; border-radius: 4px;
+}
+.rules > li > .rule-title { font-weight: 600; color: var(--fg); display: block; margin-bottom: 2px; }
+.rules > li > .rule-body  { color: var(--muted); font-size: 13px; }
+
+.steps { counter-reset: step; padding-left: 0; list-style: none; }
+.steps > li { counter-increment: step; position: relative; padding: 10px 0 14px 40px; border-bottom: 1px dashed var(--border); }
+.steps > li:last-child { border-bottom: none; }
+.steps > li::before {
+  content: counter(step, decimal-leading-zero);
+  position: absolute; left: 0; top: 10px;
+  font-family: var(--mono); font-size: 11px; color: var(--accent);
+  background: rgba(6, 182, 212, 0.08); border: 1px solid rgba(6, 182, 212, 0.30);
+  padding: 2px 7px; border-radius: 4px;
+}
+.steps > li > .step-title { font-weight: 500; color: var(--fg); display: block; margin-bottom: 2px; }
+.steps > li > .step-body  { color: var(--muted); font-size: 13px; }
+
+footer {
+  margin: 0 auto; max-width: 1100px;
+  padding: 24px 24px 64px;
+  font-size: 11px; color: var(--muted-3);
+  font-family: var(--mono);
+  border-top: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar__inner">
+    <div class="topbar__brand">
+      <span class="dot"></span>
+      <strong>Triage Factory</strong>
+      <span class="topbar__crumb">/ specs / task context model</span>
+    </div>
+    <div class="topbar__meta">
+      <span class="pill pill--size">SIZE · L</span>
+      <span class="pill pill--draft">DRAFT v0.1</span>
+    </div>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="sub">under epic TFAC-892 (UI V1) · precedes the Board rebuild (TFAC-951) · builds on TFAC-952 (#1048) · supersedes the Board handoff's <code>clear_history</code> ask</div>
+  <h1>Task context model: conversations, boundaries, memory, and the shared workspace</h1>
+  <p class="lede">A task owns its conversations, its workspace, and its artifacts, and they follow it across every handoff. A conversation is one mission; a small closed list of <em>boundaries</em> ends one and records its memory; whoever engages next opens a new conversation with the task's prior memories injected. Messages are never boundaries. There is no "clear": the transcript, the memory, and the pushed work are the durable record, and context is bounded by the rules rather than by deletion. Every mechanism below already exists for one blueprint run's steps; this widens it from the run to the task.</p>
+  <div class="hero__meta">
+    <span class="meta-pill"><strong>ONE INVARIANT</strong> · one workspace per task, one drivable conversation at a time, only the latest resumable — what a blueprint run enforces today, widened to the task</span>
+    <span class="meta-pill"><strong>NO NEW WORDS</strong> · task · conversation · memory · resume · boundary · handoff</span>
+    <span class="meta-pill"><strong>LANDED</strong> · TFAC-952 · 953 · 954 · 955 · 956 · 957 (#1047–#1052)</span>
+  </div>
+</header>
+
+<main>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#rules">The rules</a></li>
+    <li><a href="#why">Why now</a></li>
+    <li><a href="#today">What the code does today</a></li>
+    <li><a href="#vocab">Vocabulary</a></li>
+    <li><a href="#boundaries">Boundaries</a></li>
+    <li><a href="#context">Context at a new conversation</a></li>
+    <li><a href="#memory">Memory at a boundary</a></li>
+    <li><a href="#workspace">Workspace by task</a></li>
+    <li><a href="#artifacts">Artifacts</a></li>
+    <li><a href="#manual">The manual conversation</a></li>
+    <li><a href="#requeue">Requeue, and the Board dialog</a></li>
+    <li><a href="#schema">Schema delta</a></li>
+    <li><a href="#api">API delta</a></li>
+    <li><a href="#cases">Every case</a></li>
+    <li><a href="#decisions">Decisions</a></li>
+    <li><a href="#out-of-scope">Out of scope</a></li>
+    <li><a href="#steps">Implementation steps</a></li>
+    <li><a href="#risks">Risks</a></li>
+    <li><a href="#acceptance">Acceptance</a></li>
+  </ol>
+</nav>
+
+<article>
+
+<!-- ===================================================== -->
+<section class="block" id="rules">
+  <div class="section-label">§0</div>
+  <h2>The rules</h2>
+  <p class="lede">Six rules. Every case in §13 falls out of them; nothing below adds a case.</p>
+
+  <ol class="rules">
+    <li>
+      <span class="rule-title">A task owns its workspace, its artifacts, its visibility, and its conversations in order.</span>
+      <span class="rule-body">The workspace is keyed by task, not by blueprint run. The conversations are ordered, and each boundary is recorded on the row it ended, so a surface can render them as one sequence — the run station redesign that will is blocked on this spec and is not part of it (§15). A new task is a new workspace, even on the same entity.</span>
+    </li>
+    <li>
+      <span class="rule-title">A conversation is one mission.</span>
+      <span class="rule-body">A blueprint step is one; a human's own engagement with the agent on a task is one. It ends only at a boundary (§4). Steering it, resuming it, and reassigning the task's user claim never end it.</span>
+    </li>
+    <li>
+      <span class="rule-title">A conversation records one memory when it ends.</span>
+      <span class="rule-body">The agent's own, if it reached its completion gate; a generated one, if a boundary ended it first. The row is <code>conversation_memory</code>, per conversation, per entity, exactly as today; what changes is that every ending writes one.</span>
+    </li>
+    <li>
+      <span class="rule-title">Resume when no boundary has passed.</span>
+      <span class="rule-body">A message into the task's latest conversation continues it with its full context — steer if live, resume if parked or completed — exactly today's composer. User→user reassign moves the claim and leaves the conversation for the new claimant to resume.</span>
+    </li>
+    <li>
+      <span class="rule-title">Otherwise open a new conversation with the task's memories injected.</span>
+      <span class="rule-body">Every blueprint step, and every engagement after a boundary, opens a new conversation whose opening turn carries the task's prior conversation memories in order (today's <code>this-run/</code>, widened from the run to the task and injected inline rather than left as files). The entity's <em>other</em> tasks' memories stay as <code>history/</code> files to read.</span>
+    </li>
+    <li>
+      <span class="rule-title">Requeue is stop, record memory, back to the queue.</span>
+      <span class="rule-body">No Keep, no Clear. The parked conversation stays readable with its composer closed and the reason named; the next claimant opens a new conversation under R5. Artifacts are untouched.</span>
+    </li>
+  </ol>
+
+  <div class="callout callout--good">
+    <strong>Why this is small.</strong> A blueprint run already enforces "one workspace, one drivable conversation, only the current step resumable" (<code>internal/delegate/followup.go:296</code> — "an earlier step is never resumable, because the blueprint's one workspace has moved past it"; <code>blueprintDrivableSQL</code>, <code>internal/db/postgres/conversation_queue.go:198-228</code>). Step N+1 already starts fresh in the shared tree with step N's memory materialized. The spec generalizes that invariant from <em>run</em> to <em>task</em> and adds the boundaries that retire the latest conversation when the task, not the blueprint, moves on.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="why">
+  <div class="section-label">§1</div>
+  <h2>Why now</h2>
+  <p class="lede">The Board redesign asked for a requeue dialog with a "keep or clear the conversation" choice. Scoping it against the code showed that neither branch was implementable as drawn, and that the question underneath it was the wrong one.</p>
+
+  <ul class="tight">
+    <li><strong>"Clear" as a message delete is a cap bypass.</strong> <code>messages</code> is the spend ledger — <code>llm_spend</code> is a view over it (<code>202605130001_pg_baseline.sql:5296-5337</code>), the daily cost cap sums that view (<code>internal/delegate/cost_cap.go:60-63</code>), and every usage node reads it. Deleting a conversation's rows refunds the org's day. It is also the pending-input queue and the staged-injection store, and the executor role holds no DELETE on it by design (<code>:5355-5358</code>).</li>
+    <li><strong>"Keep" as artifacts-survive-on-a-queued-task reached seven readers</strong> that assume a queued task holds nothing outstanding, and the very next delegation tore the kept artifacts down anyway (<code>internal/server/task_actions.go:457</code>).</li>
+    <li><strong>The premise was per-run.</strong> The handoff treated a conversation as a run's transcript. A human who drags a task to Claimed and talks to the agent, then delegates, then hands off to a teammate, has one piece of context moving through three hands. The blueprint reactor already models that for its own steps; nothing modelled it for the task.</li>
+  </ul>
+
+  <p>So instead of a dialog, this: define what a conversation is, what ends one, and what the next one starts with, once, for every handoff in the system — user↔user, user↔blueprint, step↔step, and the task gestures — then build the Board's requeue on that.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="today">
+  <div class="section-label">§2</div>
+  <h2>What the code does today</h2>
+  <p class="lede">Verified against <code>main</code> at <code>95385f49</code>. Each row names the route and what happens to the run, the transcript, the artifacts, and the workspace.</p>
+
+  <table class="matrix">
+    <thead><tr><th>Gesture</th><th>Route</th><th>Live run</th><th>Transcript</th><th>Artifacts</th><th>Workspace</th></tr></thead>
+    <tbody>
+      <tr><td>Requeue (any → Queued)</td><td><code>POST /api/tasks/{id}/requeue</code> → <code>finalizeRequeue</code> (<code>tasks.go:1446</code>)</td><td>stopped and parked <code>open</code> (<code>StopCauseTaskRequeued</code>, #1048)</td><td>kept</td><td>torn down: draft PRs closed on GitHub, staged reviews dismissed, branches kept</td><td>untouched; snapshot lives 14d</td></tr>
+      <tr><td>Undo</td><td><code>POST /api/tasks/{id}/undo</code> → same finalizer</td><td>stopped</td><td>kept</td><td>torn down</td><td>untouched</td></tr>
+      <tr><td>Self-claim from unclaimed</td><td><code>POST /api/tasks/{id}/claim</code>, no target</td><td>stopped (<code>teardownTaskConversations</code>, <code>task_actions.go:599</code>)</td><td>kept</td><td>torn down</td><td>untouched</td></tr>
+      <tr><td>Takeover via the assignee picker (Agent → a person)</td><td>same route, no target, on a bot-claimed task</td><td>stopped</td><td>kept</td><td>torn down</td><td>untouched</td></tr>
+      <tr><td>Reassign user → user</td><td><code>POST /api/tasks/{id}/claim {target_user_id}</code></td><td colspan="3">"deliberately touches neither" (<code>task_actions.go:52-55</code>) — the conversation continues; B reads and posts under team RLS</td><td>untouched</td></tr>
+      <tr><td>Delegate / re-delegate</td><td><code>POST /api/tasks/{id}/delegate</code></td><td>stopped</td><td>kept</td><td>torn down, "redelegated" note in memory</td><td><strong>fresh clone</strong>: a new blueprint run is a new key (<code>delegate.go:343</code>); the old snapshot is orphaned</td></tr>
+      <tr><td>Step N → N+1</td><td>reactor, <code>dispatch.go:1151</code></td><td>N concluded</td><td>N+1 starts empty</td><td><strong>carried</strong> — pending PRs and staged reviews stay on N's row; the task's column recomputes to In Review</td><td><strong>shared</strong> — one tree per run</td></tr>
+      <tr><td>Complete / Dismiss</td><td><code>PATCH /api/tasks/{id}</code></td><td>stopped</td><td>kept</td><td>torn down</td><td>untouched</td></tr>
+      <tr><td>Message a conversation</td><td><code>POST /api/agent/conversations/{id}/message</code></td><td colspan="4">steer if live; resume if <code>open</code>, or <code>completed</code> and the current step of its run; <code>failed</code> and earlier steps refused (<code>followup.go:203-225, 296</code>)</td></tr>
+    </tbody>
+  </table>
+
+  <p>Two facts the rows lean on. Memory is written only at the completion gate, from the agent-authored <code>_tfac/memory.md</code> (<code>internal/delegate/native_run.go:632-641</code>, <code>run.go:846</code>, reader at <code>memory.go:103</code>); a stopped run writes none, and the human discard note is an UPDATE on a row that must already exist (<code>postgres/task_memory.go:131</code>). And there is no conversation outside a blueprint step: the only INSERT is <code>EnqueueConversation</code> from <code>enqueueBlueprintStep</code>, <code>type</code> and <code>visibility</code> are literals there, and <code>interactive</code> is declared and never minted (<code>internal/domain/agent.go:104-116</code>).</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="vocab">
+  <div class="section-label">§3</div>
+  <h2>Vocabulary</h2>
+  <p class="lede">Nothing is coined. Each word maps to a name in the code.</p>
+
+  <table class="matrix">
+    <thead><tr><th>Word</th><th>Means</th><th>In the code</th></tr></thead>
+    <tbody>
+      <tr><td><strong>task</strong></td><td>the unit that owns context</td><td><code>tasks</code>; <code>conversations.task_id</code>; <code>Conversations.ListForTask</code>; <code>tasks.team_id</code></td></tr>
+      <tr><td><strong>conversation</strong></td><td>one mission's transcript; one row</td><td><code>conversations</code>; a blueprint step is one today</td></tr>
+      <tr><td><strong>mission</strong></td><td>what the driver was asked to do</td><td>a step's <code>prompt_id</code> + <code>blueprint_step_index</code>, or the human's own opening message</td></tr>
+      <tr><td><strong>memory</strong></td><td>one conversation's narrative for later readers</td><td><code>conversation_memory</code> (<code>agent_content</code>; <code>human_content</code> is removed, §6)</td></tr>
+      <tr><td><strong>steer / resume</strong></td><td>a message into a conversation that has not ended</td><td><code>Spawner.SendMessage</code>; <code>MarkQueuedForResume</code>; the <code>resumable</code> ladder</td></tr>
+      <tr><td><strong>ended</strong></td><td>a boundary has passed for this conversation; orthogonal to <code>status</code>, which stays whatever the stop or completion left (<code>open</code> for a stopped run, <code>completed</code> for a concluded step)</td><td><code>conversations.ended_at IS NOT NULL</code> (§11); the gate the composer rung and <code>memory_pending</code> read, never <code>status</code></td></tr>
+      <tr><td><strong>boundary</strong></td><td>a gesture that ends the task's latest conversation</td><td>the disposition verbs plus step advance (§4)</td></tr>
+      <tr><td><strong>handoff</strong></td><td>the user claim moving to another user</td><td><code>reassignClaim</code> (<code>task_actions.go:290</code>)</td></tr>
+      <tr><td><strong>this-task / history</strong></td><td>memories of this task, injected; memories of the entity's other tasks, as files</td><td>today's <code>this-run/</code> and <code>history/</code> (<code>memory.go:300-366</code>), the first widened</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="boundaries">
+  <div class="section-label">§4</div>
+  <h2>Boundaries</h2>
+  <p class="lede">The closed list of things that end the task's latest conversation. A boundary records the conversation's memory (§6) and retires it from the composer. Everything not on this list is not a boundary.</p>
+
+  <table class="matrix">
+    <thead><tr><th>Boundary</th><th>Who</th><th>What it does to the conversation</th><th>Today</th></tr></thead>
+    <tbody>
+      <tr><td>Requeue / undo</td><td>human</td><td>stop if live; ends it; memory recorded</td><td>stops the run (#1048); the conversation stays resumable</td></tr>
+      <tr><td>Delegate / re-delegate</td><td>human, or an event handler</td><td>stop if live; ends it; the blueprint's step 0 is the next conversation</td><td>stops; tears artifacts down</td></tr>
+      <tr><td>Takeover — the assignee picker moves a bot claim to a person<sup>†</sup></td><td>human</td><td>stop, which cancels the blueprint; ends it; memory generation <strong>kicked at the flip</strong>; the task is blocked until it lands (§6); the human's next message opens a new conversation</td><td>stops; tears artifacts down</td></tr>
+      <tr><td>Complete / dismiss</td><td>human</td><td>stop if live; ends it; task ends</td><td>same, plus teardown (kept — nothing is coming back)</td></tr>
+      <tr><td>Close cascade, team archive</td><td>system</td><td>stop; ends it; task ends</td><td>same; artifacts left stranded (existing gap)</td></tr>
+      <tr><td>Step advance</td><td>reactor</td><td>N concluded; N+1 is the next conversation</td><td>identical</td></tr>
+      <tr><td>Failure — the conversation ends <code>failed</code> (<code>failConversation</code>, <code>stop.go:536</code>: agent error, no result, infra death after the claim retries are spent)</td><td>system</td><td>ends it, <code>ended_reason = failed</code>; <code>failConversation</code> reads <code>_tfac/memory.md</code> exactly as the concluded path does, and the conversation owes one when there is none — generated, or the empty row if it never started (§6); the tree survives (§7); the task stays bot-claimed and <code>in_progress</code> for a person to look at</td><td>marks <code>failed</code>, discards the blob (twice: <code>stop.go</code> per conversation, <code>blueprint.go:209</code> per run), reads no memory file, leaves the task bot-claimed with nothing running — the same dead end, minus the tree</td></tr>
+    </tbody>
+  </table>
+  <p class="note"><sup>†</sup> The picker is the only gesture that moves a claim. In the redesign a bot-managed card also drags to Queued (a requeue) and to Done (a complete) — those are the rows above, not part of takeover.</p>
+
+  <h3>Not boundaries</h3>
+  <ul class="tight">
+    <li><strong>Messaging a live conversation</strong> — steer. The task's claim does not move; a human steering a bot-claimed run is still a bot-claimed run.</li>
+    <li><strong>Messaging a parked or completed conversation</strong> — resume, today's rule, including the current-step restriction (<code>isCurrentBlueprintStep</code>, <code>followup.go:296</code>).</li>
+    <li><strong>Pause, permission prompts, parks</strong> — the conversation is <code>open</code> and resumable.</li>
+    <li><strong>User → user reassign</strong> (within the task's owning team, §14) — the claim moves, the conversation stays; the new claimant resumes it. <code>messages.user_id</code> attributes each row; RLS on <code>conversations</code> is team-scoped (<code>baseline:2367</code>), so a teammate can read and post.</li>
+  </ul>
+
+  <div class="callout">
+    <strong>Why takeover is a boundary by construction.</strong> A human claim and a running blueprint cannot coexist (the claim axis is XOR), so the takeover cancels the blueprint (<code>task_actions.go:627</code>), and a cancelled blueprint's step is unresumable by the existing rule (<code>blueprintCalledOff</code>, <code>followup.go:213-217</code>) — necessarily, since a human resuming it and ending a turn with <code>continue</code> would have the reactor fire the next step on a human-claimed task. Messaging the run while it stays bot-claimed is steering; the picker is the person saying the bot's attempt is over. <br /><br /><strong>Why requeue is a boundary and reassign is not.</strong> Both are ways to engage with the full context, and both are deliberate: a person who wants the running or finished conversation messages it, or hands it to a colleague by name. Requeue is the opposite statement — this attempt is over, the task goes back to the pool — and days may pass before anyone picks it up. Dropping the next claimant into a stale window would surprise them; starting them on the recorded memory is what "back to the queue" means.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="context">
+  <div class="section-label">§5</div>
+  <h2>Context at a new conversation</h2>
+  <p class="lede">What the model sees when a conversation opens, by runtime. The opening turn is the only thing that changes; the framework prompt stays byte-identical per <code>Spec</code>.</p>
+
+  <h3>Today</h3>
+  <p>Native: the system prompt is <code>agentprompt.Build(nativeSpec())</code> (or the non-terminal variant), and <code>mintOpeningTurn</code> writes one pending user row — <code>&lt;run_context&gt;</code>, <code>&lt;task_context&gt;</code>, the step wrapper mission — gated on an empty transcript (<code>native_run.go:265-330</code>). SDK: the same sections plus <code>&lt;tools&gt;</code> and the framework prompt travel as the first user message (<code>prompt.go:179-188</code>). Prior memory is <em>materialized</em> as files under <code>_tfac/entity-memory/{this-run,history}/</code> and the wrapper tells the agent to read them (<code>blueprint.go:385-387</code>).</p>
+
+  <h3>Under the model</h3>
+  <ul class="tight">
+    <li><strong>this-task, injected — one <code>role='user'</code> row per prior memory, rendered to the wire as one envelope.</strong> Before the task-context row is minted, the loop inserts one delivered row per prior memory on the task, oldest first: <code>subtype = 'injection:memory'</code> (a new member of the existing loop-authored vocabulary beside <code>injection:steer</code> / <code>injection:nudge</code>, <code>internal/domain/agent.go:118-160</code>, so the drain and the notice dedupe treat it as system-authored), <code>content</code> = the memory's <code>agent_content</code> — the memory text and nothing around it — and <code>metadata</code> = <code>{ "memory_id" }</code> and nothing else: the <code>conversation_memory</code> row already carries <code>conversation_id</code>, <code>entity_id</code> and <code>blueprint_run_id</code>, and the conversation row carries <code>prompt_id</code>, its step index, and how it ended. Copying any of those into the metadata would be a second spelling of a column one FK hop away, and a <code>prompt_id</code> in particular would name a user-editable, soft-deletable <code>prompts</code> row rather than the text the step ran, which is frozen in <code>blueprint_runs.step_plan</code>. The memory row cascades with its conversation, so the key cannot dangle. Rows rather than a rendered section, deliberately: the transcript is what the run page reads, and one row per memory with a foreign key back to its source is a shape a surface can render as a card that links to the original conversation, without the frontend parsing a blob. The alternative (reconstruct at read time from <code>conversation_memory</code> through the task, inserting nothing) is rejected because it makes what the model saw a function of a later join rather than of the transcript; a transcript must be its own record.
+    <p><strong>What the model sees is not N messages.</strong> Assembly already packs adjacent user rows into one wire message: <code>consolidateAdjacentUsers</code> (<code>internal/inference/assembly.go:82-131</code>) merges every run of adjacent <code>role='user'</code> messages into one message carrying their content blocks in order, because the API rejects back-to-back user turns. It merges by <em>adjacency in assembly order</em> — <code>COALESCE(seq, id)</code>, the row order — not by subtype; subtype only decides per-row wrapping (<code>wrapSteer</code>, <code>assembly.go:276-301</code>, brackets an <code>injection:steer</code> row in its <code>&lt;steer&gt;</code> tag). So the order the model reads is the order the loop inserted: memory rows first, task-context row last, and the merge folds them into a single user turn. What is missing today is the framing. A run of bare memory texts followed by the task context reads as N unlabelled documents, so assembly gains a second subtype-driven wrapper beside <code>wrapSteer</code>: the maximal run of adjacent <code>injection:memory</code> rows is bracketed as a whole — one opening block before the first, one closing block after the last, each memory its own block between them — and then consolidated with the task-context row that follows. The wire shape of the opening turn is exactly:</p>
+<pre class="code">&lt;system-note kind="task-memory"&gt;
+This task has {K} prior conversations. Their memory files are at _tfac/entity-memory/this-task/ and are injected below, deliberately, so you do not need to read them. Memories from other tasks on this entity are at _tfac/entity-memory/history/ and have not been included.
+
+{memory 1}
+
+{memory 2}
+
+…
+&lt;/system-note&gt;
+
+{the &lt;task_context&gt; row}</pre>
+    <p>The wrapper is a pure function of the rows, like <code>wrapSteer</code>: <code>{K}</code> is the count of rows in the run (what was injected, not the task's total — under the §14 budget the folder may hold more than the turn does, which is what the second sentence is for), the two paths are the fixed relative paths every run tree presents (<code>worktree.EntityMemoryDir</code>, today's <code>this-run</code> widened to <code>this-task</code>), and nothing per-run enters the text, so two executors assembling the same rows build the same bytes. An elided memory row keeps its place in the run and renders as the <code>[elided]</code> stub inside the envelope; once compaction marks the run inactive there is no run, so no envelope. The wrapper lives beside <code>wrapSteer</code> in <code>internal/inference</code>, and the SDK path reaches it by calling <code>RowsToMessages</code> over its own rows (below), so there is one renderer with one caller shape rather than two paths kept equal by care. Persistence stays row-granular — K rows, each carrying its source key — while the provider sees one note; what a surface draws from those rows is the run station redesign's (§15). The moving cache breakpoint lands where it does today, on the last block of the merged message, which is the task-context block.</p></li>
+    <li><strong>The mission moves to the system prompt, on both runtimes.</strong> Today the native system prompt is <code>Build(spec)</code> alone and the opening user row carries <code>&lt;run_context&gt;</code>, <code>&lt;task_context&gt;</code> and the mission (<code>composeNativeOpeningTurn</code>, <code>native_run.go:323-330</code>); the SDK path puts all of it, framework prompt included, in the first user turn (<code>buildPrompt</code>, <code>prompt.go:179-188</code>). Under the model the trusted sections — the framework prompt, the step wrapper mission, <code>&lt;run_context&gt;</code>, the tools reference — are appended to the system prompt on both runtimes. A manual conversation (§9) has no mission: its block 2 is <code>&lt;run_context&gt;</code> and the tools reference, and the human's opening message is an ordinary first row, because a human's messages are the transcript and the first one is only the oldest.: native as a <strong>second system block</strong> after <code>Build(spec)</code>, SDK through the <code>claude_code</code> preset's <code>append</code> the wrapper already wires for <code>--append-system-prompt</code> (<code>wrapper.mjs:88-97</code>).</li>
+    <li><strong>Cache mechanics, stated exactly.</strong> Today the native system prompt is one text block with one ephemeral breakpoint on it (<code>withSystemCacheBreakpoint</code>, <code>internal/inference/cachecontrol.go:40-50</code>); the cached prefix is tools + that block, shared across every conversation on the same model and tool schemas within the org's cache (the account and region on Bedrock). Appending per-conversation text <em>into</em> that block would end the only cacheable prefix after the per-conversation bytes and the framework prompt would never be shared again. So the system prompt becomes <strong>two blocks with one explicit breakpoint</strong>: block 1 is <code>Build(spec)</code> carrying the marker (the cross-conversation entry — explicit, because a cache entry exists only where some request placed a breakpoint, and the provider's own docs name "breakpoint on the varying block, no entry ever written at the static prefix" as the common mistake), block 2 is the per-conversation sections with <em>no marker</em>. The breakpoint count does not change: block 1's marker plus the moving conversation breakpoint, two of the provider's four, exactly what <code>cachecontrol.go</code> places today. Block 2 needs no marker of its own, and the reasoning is worth stating because the first draft of this spec gave it one. Writes happen only at breakpoints; reads check the breakpoint, walk back up to 20 block boundaries for an entry an earlier request wrote, and on a miss resume at the next explicit breakpoint. On the first turn the moving breakpoint writes one entry covering tools + block 1 + block 2 + the opening turn, and every later turn's lookback finds the previous turn's entry, so block 2 is read at cache-read price on every turn as part of the conversation prefix — the same cost shape a block-2 marker would give. A marker on block 2 would write an entry at a position only this conversation can ever match, and this conversation's later turns already match a longer one. The two cases where block 2's own entry would be the highest hit are both marginal: a turn that added 20 or more blocks (a batch of ten parallel tool calls does it) makes the lookback miss the conversation entry and resume at block 1, and a block-2 marker would move that fallback forward by block 2's few thousand tokens while the conversation is re-written either way — the fix for that case, if it is ever worth a slot, is a second moving breakpoint on the previous turn's last block, which makes the lookback exact; and an idle gap past the TTL expires block 2's entry together with the conversation's, since they were written at the same moment under the same TTL. Billing is by segment between breakpoints, so a nested marker would not double-charge; it would simply do nothing. Bifrost carries the shape: the Anthropic packer maps a system message's <code>ContentBlocks</code> with per-block <code>CacheControl</code> (<code>providers/anthropic/chat.go:649-690</code>); Bedrock keeps cache points on supporting models and strips them otherwise. <code>withSystemCacheBreakpoint</code> takes the two blocks instead of a string and stamps the <em>first</em>, not the last — <code>stampLastBlock</code> on a two-block system message would put the only system entry after the per-conversation bytes and the shared entry would never be written; that is the whole inference-side change, and the test that pins it asserts the marker's position, not its presence. Existing caveat, unchanged: tools precede the system prompt in the prefix, so block 1 is shared only among conversations with identical tool schemas. On the SDK, captured on the wire on 2026-09-10 (a local capture server, body shape only): the <code>append</code> is a <strong>system-role</strong> block — the request's <code>system</code> is an array of three text blocks (a billing line; a 94-char preamble with a 1h ephemeral breakpoint; a 27k-char block carrying Claude Code's instructions, its dynamic sections and the append, with its own 1h breakpoint) — never a user message. Claude Code does inject its own <code>&lt;system-reminder&gt;</code> text blocks ahead of the prompt in the first <em>user</em> message, which is how it delivers skills, agent types and CLAUDE.md, not how it delivers <code>append</code>. Measured across three sessions with two different appends: the ~16.5k tokens read from cache every session are the 67 tool schemas plus the two short blocks (cached at the preamble's breakpoint), and the ~7k written per session is the third block, which is per-session regardless of TF because it carries the date, cwd, git state and loaded instructions. The append shares that block, so it costs nothing cross-session that was not already per-session. Two notes for the ticket: Claude Code uses a 1h TTL on its breakpoints where the native path leaves the 5-minute default (<code>cachecontrol.go:17-19</code> already marks the TTL a policy decision); and dropping the append on resume makes the third block differ between a session's first and resumed turns — a cache miss on top of the missing mission. The untrusted <code>&lt;task_context&gt;</code> — "built entirely from external data" (<code>prompt.go:170-172</code>) — stays a <em>user</em> row on both, because putting attacker-influenced text in the instruction channel is a trust-posture change. Order of the opening user turn on both: memory rows, then the task-context row.</li>
+    <li><strong>Nothing is pinned through compaction, on either runtime.</strong> Today a delegation runs <code>MissionAnchored: true</code> (<code>native_run.go:211</code>) and <code>compactionSpan</code> (<code>internal/agentloop/compact.go:350-368</code>) pins every leading row before the first assistant turn, so the mission survives every compaction verbatim; a taskless conversation runs unanchored and <code>composeResultRow</code> re-injects its first human row as <code>&lt;original_request&gt;</code> instead (<code>compact.go:427-447</code>). The pin's reason — "the summary can never mutate the task" — is served by the system prompt once the mission lives there, and the SDK has no pin to offer, so keeping one on native would make the same task behave differently after a compaction in local and in multi. So <code>MissionAnchored</code> and the anchored arm of <code>compactionSpan</code> are deleted, not rewritten: every conversation takes the one remaining arm, memory rows and the task-context row compact like any delivered row, and the previous summary compacts into the next so nothing accumulates. What survives is retained, not re-sent. The mission is in the system prompt, re-sent every turn and never summarized. The task context is retained by reference on both runtimes: the launch writes it to <code>_tfac/task-context.md</code> in the run tree beside the memory tree, the mission block names that path, and an agent whose summary lost a PR number re-reads the original. Compacting the task context is also the better posture — it is externally authored text, and a pin would carry it verbatim into every window for the life of the conversation, where the summary is the model's own restatement. One consequence has to be handled: <code>originalRequest</code> (<code>compact.go:454-470</code>) picks the first row <code>IsHumanInput</code> admits (subtype empty or <code>injection:steer</code>, <code>drain.go:70-72</code>), and today's opening turn is minted as a plain user row (<code>mintOpeningTurn</code> → <code>pendingUserInput</code>, <code>native_run.go:265-275</code>) — with the pin gone it would be re-injected into every result row, which is the pin under another name and worse, since the text is untrusted. So the task-context row carries its own subtype, <code>injection:task-context</code>: <code>originalRequest</code> skips it structurally, and it is the same discriminator the three row-counting gates below key on. A manual conversation's opening message keeps its empty subtype, so the existing <code>&lt;original_request&gt;</code> re-injection applies to exactly the conversations it was written for. Consequence stated plainly: the mission stops being a transcript row on native; the transcript holds the task context and the memories, and the mission is readable as the blueprint's prompt.</li>
+    <li><strong>history, as files.</strong> The entity's other tasks' memories keep today's <code>history/</code> materialization, untouched. This task's non-empty memories are also materialized as files (<code>this-task/</code>, today's <code>this-run/</code> widened), so a memory that falls outside the injection budget is still readable on request. The split predicate moves from <code>blueprint_run_id</code> to the conversation's <code>task_id</code>, read through the join (§11).</li>
+    <li><strong>Budget.</strong> A count-and-size cap on injected rows, newest first, contiguous, whole rows only — the newest 5 within 32 KiB (§14). Memories past the cap are files only; nothing folds or truncates inside a row.</li>
+    <li><strong>Native gates that count rows must learn the new subtype.</strong> Three predicates answer "has this conversation started?" by looking at rows, and memory rows precede the mission: <code>mintOpeningTurn</code> mints only when <code>len(rows) == 0</code> (<code>native_run.go:265-277</code>); <code>conversationHasTranscript</code> (<code>dispatch.go</code>) decides fresh-versus-resumed from <code>ListForAssemblySystem</code>, and its own comment says a wrong answer "destroys its workspace and fails its blueprint"; <code>prepareInheritedMemory</code> (<code>native_run.go:364-384</code>) clears the agent memory file when nothing has been driven. Each becomes "is there an <code>injection:task-context</code> row yet", not "any row" — one subtype check, the same discriminator compaction uses. Missing one is a silent-non-claim or a wiped memory file, so all three are named in the ticket and pinned by test.</li>
+    </ul>
+  <h3>The SDK path, verified</h3>
+  <p>Read from the wrapper (<code>internal/agentproc/wrapper.mjs</code>), the Go side (<code>agentproc/live.go</code>, <code>stream.go</code>), the installed <code>@anthropic-ai/claude-agent-sdk</code> 0.3.195 (<code>sdk.d.ts</code>), and a smoke run against that SDK on 2026-09-10 (nine sessions, <code>claude-haiku-4-5</code>, scratch script; the shapes and counts below are what it produced). Local mode only; multi runs native.</p>
+  <ul class="tight">
+    <li><strong>How the first turn is delivered today.</strong> A delegated run and a resume both use streaming-input mode (<code>runLiveAndDrive</code> → <code>agentproc.RunInteractive</code>, <code>live.go:175</code>; <code>run.go:652</code>, <code>resume.go:543</code>). The opening prompt is one string sent as one <code>user_message</code> control once the wrapper is ready (<code>live.go:238-244</code>), which the wrapper turns into <code>{type:'user', message:{role:'user', content: text}}</code> (<code>wrapper.mjs:185-191</code>). Every such control is a turn — the SDK answers each, and the wrapper counts them as queued turns (<code>live.go:275-277</code>) — so N memories as N ordinary messages would have the model answer the first memory before seeing the mission.</li>
+    <li><strong>One row set, one assembler, one message.</strong> The standing rule is that <em>the opening row on native is the opening row on the SDK</em>, and the way to make that true by construction rather than by care is to derive the SDK's wire from the rows with the same function native uses. So the SDK path mints the same rows first — the <code>injection:memory</code> rows and the <code>injection:task-context</code> row, same subtypes, same metadata, through the insert the steer record uses (<code>recordSteeredMessage</code>, <code>followup.go:396-411</code>; today the SDK path writes no opening row at all — the prompt goes only to the subprocess, and <code>stream.go:194-205</code> records user lines as tool results only) — and then calls <code>inference.RowsToMessages(rows, {NoCacheBreakpoint: true})</code> over them. That yields exactly one user message whose blocks are the envelope open, the memories in order, the close, and the task context, because the envelope wrapper and <code>consolidateAdjacentUsers</code> run inside it. Those blocks are sent as the <code>content</code> of <em>one</em> <code>user_message</code> control: <code>SDKUserMessage.message</code> is the API's <code>MessageParam</code> (<code>sdk.d.ts:4233</code>), whose <code>content</code> accepts a block array as well as a string, so the control and the wrapper's <code>userMessage()</code> (<code>wrapper.mjs:185-191</code>) gain a blocks form and nothing else changes in the protocol. No <code>shouldQuery</code>, no ordered initial send, no wrapper filtering. The block boundaries match too — send blocks, never a joined string, or the text would match and the shape would not. <span class="tag tag--red">HAZARD</span> the mirror rows must be <code>delivered = true</code>: an undelivered user row on an SDK conversation is the pending-input queue (<code>pendingInput.Peek</code>, <code>dispatch.go:386-404</code>) and would be consumed as a resume message. Pin it.</li>
+    <li><strong><code>shouldQuery: false</code>, verified and set aside.</strong> Recorded so nobody re-derives it. <code>SDKUserMessage.shouldQuery</code> (<code>sdk.d.ts:4241-4244</code>) appends a message to the transcript without an assistant turn, merged into the next querying message. Observed in nine sessions: N non-querying messages then one querying message produce one assistant turn (9 of 9); the session file holds N+1 user entries chained by <code>parentUuid</code>, flag not persisted; the model reads them as one turn; <code>--resume</code> replays them; no user echo on the output stream. Also observed: each non-querying message emits a <code>system:init</code> and a <code>result:success</code> with <code>num_turns: 0</code> before the real turn, which TF's reader would count as a completed turn (<code>stream.go:206-211</code>). It would be the mechanism if the opening turn were more than one message. It is one message, so none of that ships.</li>
+    <li><strong>Divergences that remain, named.</strong> Everything below is the harness, not the opening row, and each is listed because the rule is that a divergence is reported, never absorbed. (1) <em>System prompt shape.</em> Native sends block 1 <code>Build(spec)</code> and block 2; the SDK sends Claude Code's own preamble and instructions with TF's blocks inside the <code>append</code> (captured 2026-09-10: three system blocks, the append in the third). Same TF bytes, different neighbours. (2) <em>Claude Code prepends its own <code>&lt;system-reminder&gt;</code> blocks to the first user message</em> — skills, agent types, loaded instructions — ahead of TF's blocks. Not ours and not tracked: the rule is that TF ships the same content to both runtimes in the same order and stores and renders it identically, and what the harness adds around that content is the harness's. (3) <em>Compaction.</em> Native compacts through TF's loop, the SDK through Claude Code's autocompact; neither pins, both retain the mission by the system prompt and the task context by file, but the summaries are different text. (4) <em>Resume.</em> The SDK drops the append on <code>--resume</code> today (<code>resume.go:483</code> vs <code>run.go:586</code>), which would drop the mission; phase C fixes it. (5) <em>Cache TTL.</em> Claude Code stamps 1h breakpoints, native leaves the 5-minute default.</li>
+    <li><strong>Compaction: no lever, and none needed.</strong> Verified against the declarations: <code>PreCompactHookInput</code> carries <code>custom_instructions</code> as an input (<code>sdk.d.ts:2158-2162</code>) and the <code>hookSpecificOutput</code> union has no PreCompact member (<code>:6418</code>); <code>preserved_messages</code> on the compact boundary (<code>:2779-2812</code>) reports the SDK's own choice; <code>autoCompactEnabled</code> (<code>:6125</code>) only turns it off. So TF cannot pin a transcript row on the SDK. It does not have to: the mission is in the system prompt (retained by construction), the memories are meant to be summarized, and the task context is summarized but re-readable from its file. Nothing is re-sent on either runtime.</li>
+  </ul>
+  <ul class="tight">
+    <li><strong>The SDK resume gap is closed as a side effect.</strong> <code>ResumeWithMessage</code> omits <code>RunOptions.SystemPrompt</code> (<code>resume.go:483-517</code>) where the first turn sets it (<code>run.go:586</code>), so a resumed local turn loses the non-terminal step addendum. Fix in the same pass; it is one field.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="memory">
+  <div class="section-label">§6</div>
+  <h2>Memory at a boundary</h2>
+  <p class="lede">R3 says every ending writes a memory. Today only the completion gate does. This is the one new piece of machinery.</p>
+
+  <ol class="steps">
+    <li><span class="step-title">Read the agent's file first.</span><span class="step-body"><code>_tfac/memory.md</code> rides the workspace snapshot (it is not in <code>scratchExcludes</code>, <code>workspace_snapshot.go:88-92</code>), so at a boundary it is available from the warm tree or the blob without new plumbing. If present and non-empty, record it through the existing upsert (<code>UpsertAgentMemorySystem</code>) — the same call the gate makes.</span></li>
+    <li><span class="step-title">Generate when there is none.</span><span class="step-body">A toolless call through <code>internal/systemllm</code> on the org's background-jobs model, summarizing the conversation's transcript into <code>agent_content</code> — it names the commits, the branch, the PR, and what was mid-flight, which is what the next conversation needs to make sense of a tree it did not build — recorded in <code>system_llm_runs</code> like the scorer's cycles. Prompt text lives beside its consumer (prompt-ownership rule). It runs where the transcript is: the control plane for a requeue or takeover (the handler has the rows and the credential), the executor's own teardown for a step the reactor ended.
+      <p><strong>Measured, local mode.</strong> In local mode a system call is <code>agentproc.Run</code> — a Claude Code SDK subprocess, one <code>-p</code> prompt, no tools — on the <code>haiku</code> alias local defaults to. Measured on 2026-09-10 against the installed SDK with synthetic code-heavy transcripts (numbers are one run each; the token column is the request's real cache-creation count, which includes Claude Code's ~5k dynamic block):</p>
+<table class="matrix">
+<thead><tr><th>transcript</th><th>request tokens</th><th>process → init</th><th>first token</th><th>total</th><th>output</th><th>cost</th></tr></thead>
+<tbody>
+<tr><td>~2k</td><td>5.5k (+14k cached)</td><td>1.1s</td><td>5.6s</td><td>9.3s</td><td>690</td><td>$0.02</td></tr>
+<tr><td>~60k</td><td>68k</td><td>0.7s</td><td>15.8s</td><td>18.1s</td><td>1847</td><td>$0.21</td></tr>
+<tr><td>~130k</td><td>134k</td><td>0.6s</td><td>7.9s</td><td>10.9s</td><td>586</td><td>$0.41</td></tr>
+<tr><td>~155k</td><td>161k</td><td>1.2s</td><td>9.7s</td><td>13.4s</td><td>793</td><td>$0.49</td></tr>
+<tr><td>~180k</td><td>—</td><td>0.8s</td><td>—</td><td>1.5s</td><td>—</td><td>refused: <code>prompt_too_long</code></td></tr>
+<tr><td>~500k</td><td>—</td><td>0.7s</td><td>—</td><td>1.5s</td><td>—</td><td>refused: <code>prompt_too_long</code></td></tr>
+</tbody></table>
+      <p>Four things follow. <em>Latency</em> is 10–18 seconds for any realistic transcript, dominated by time-to-first-token and output length rather than spin-up (the subprocess reaches <code>init</code> in about a second). <em>Size</em>: one message is bounded by the model's window minus Claude Code's own overhead, and Claude Code refuses client-side — no API call, ~1.5s — at its own estimate, which runs about 10% above the tokenizer ("the request is ~200,609 tokens (limit 200,000)… a single-exchange conversation cannot be compacted"). ~155k real transcript tokens passed on a 200k model, ~180k did not; a 500k transcript cannot be one message. The 1M-context alias (<code>sonnet[1m]</code>) is refused on this subscription ("usage credits required for 1M context"), so local cannot assume it. <em>A hazard in the seam</em>: that refusal arrives as a captured <code>result</code> with <code>subtype: success</code>, <code>is_error: true</code>, <code>terminal_reason: prompt_too_long</code> and the error text in <code>result</code>; <code>agentproc.Run</code> returns nil error whenever a result was captured (<code>run.go:534-566</code>), and <code>completeLocal</code> hands the text back as <code>Text</code> without reading <code>IsError</code> (<code>complete.go:140-165</code>). The scorer survives only because it JSON-parses what it gets; a free-text memory would store "Prompt is too long…" as <code>agent_content</code>. <code>completeLocal</code> maps <code>Result.IsError</code> to an error — every caller benefits, and the memory ticket carries the fix. <em>Cost</em>: Claude Code stamps 1-hour breakpoints, so a one-shot local system call pays the 1h cache-write premium on the whole prompt for an entry nothing re-reads; multi's direct path does not. Not ours to change, but the table's costs are what a local install actually pays.</p>
+      <p><strong>Windowing, therefore.</strong> The generator never sends the whole transcript. It fills a fixed input budget — 100k tokens by a bytes/3 estimate, conservative against Claude Code's estimator and small enough to leave the same headroom on a 200k window in either mode — as <em>head plus tail</em>: the opening turn first (the task-context row and the memory rows, which name the task and the prior state), then rows from the newest backwards until the budget is spent, with the elided middle replaced by one marker line carrying the count of rows dropped. The tail is where the state a memory needs lives — the branch, the last commits, what was mid-flight — and the head is what makes the tail legible. The same function serves both runtimes: a native transcript may already carry a compaction result row, which is a row like any other and rides along in the tail; an SDK transcript is the raw mirror with no summaries at all (nothing in <code>stream.go</code> records Claude Code's compaction events), so the tail rule is the only thing bounding it. A memory generated from a window says so in its first line, so a reader knows it is a reconstruction.</p></span></li>
+    <li><span class="step-title">Nothing to remember: the empty row.</span><span class="step-body">A conversation that ends with no assistant row at all — failed before the model's first turn (a task that would not load, a step plan out of range, a sandbox that never came up: the <code>terminateBlueprint</code> failures in <code>dispatch.go:310-547</code>), or cancelled while still queued — has nothing a memory could hold, and generating one anyway produces a paragraph about a task that was assigned and not started: not memory-worthy, and a wait for nothing. The failure's reason is not memory either. It is on the conversation already (the failure row <code>failConversation</code> inserts, the failure kind it marks) and is the person's to read, not the next agent's to be told. So the provisioner's fulfil reads the transcript before anything else: no assistant row → it writes the empty memory row mechanically — <code>agent_content NULL</code>, <code>source = none</code> — with no model call and no wait; presence clears <code>memory_pending</code>, and an empty row is never injected and never materialized (the §5 budget walk and the this-task folder skip it). That is the shape the store already has: <code>UpsertAgentMemory</code> with no content writes a row with NULL content, and the concluded path's own comment reads it as "the conversation terminated; the agent wrote no usable file". One ordering constraint makes the split between executor and brain safe: the executor's ending path reads <code>_tfac/memory.md</code> and upserts the agent's row <em>before</em> it stamps <code>ended_at</code>, so a sweep never sees an ended conversation whose file is still being filed — the predicate is only ever true once the file has had its chance.</span></li>
+    <li><span class="step-title">Owed at every boundary, and the task is blocked until it lands.</span><span class="step-body">A boundary that ends a conversation without the agent's own file — requeue, takeover, a reactor-ended step, a failure — leaves that conversation <em>owing</em> a memory, and generation is kicked at once wherever the transcript and a credential are together. The state is derived, never stored: <code>memory_pending</code> on a task is "an ended conversation on this task with no <code>conversation_memory</code> row" — both facts already exist as rows, and a column beside them would be a third that can disagree. While it is pending <strong>nothing new opens on the task</strong>: the composer lets the person type and disables Send, showing the state, and the memory's own slot — above the boundary separator, where the ended conversation's memory renders once it exists — shows a skeleton until it lands (that slot belongs to the run station redesign, §15, and is recorded there so it is not lost); whatever route opens a conversation on the task — the manual one is TFAC-378's to define (§15) — refuses while it is pending (409 <code>MEMORY_PENDING</code>) rather than waiting, since a request that sleeps for a generation is a request that times out and retries into a double mint; and the dispatcher does not claim a queued delegation on the task, so a requeue-then-delegate waits the same way. The invariant this buys is the reason to block at all: a new conversation never opens without the memory, so nothing ever has to receive a late memory as an injection into a run already in flight, and at most one conversation per task can be owing at any moment — a second boundary needs a second conversation, which cannot open. <code>task_updated</code> fires when the memory lands and the composer re-enables. Measured (§6 table), the person waits 10–18 seconds in local mode from the drag, most of it spent typing. Per attempt the bound is an explicit 90 seconds (the scorer's calls carry no timeout today, so there is none to borrow). A failed attempt leaves the task pending and says why: every fulfil writes a <code>conversation_memory_attempts</code> row (below), and the owing conversation's newest one carries the outcome and, on failure, a classified <code>error_kind</code> with a TF-worded message — no background model configured names the setting, a provider error names the provider. There is no retry verb: generation is a system job, and a person-facing trigger for one would be a second spelling of "the sweep will get to it". The one cause a person fixes is org configuration — the background-jobs model, a credential — and the save of that configuration is the re-kick: the settings and credential save handlers ring the <code>memory_owed</code> doorbell for the org with no conversation id, which the provisioner reads as "re-sweep this org now, ignoring backoff" — the <code>sources_changed</code> precedent, a config save nudging the brain (those handlers do not nudge it for this today; it is one publish each). Every other failure class is one a retry-now would not help: a provider outage hits the breaker, a timeout re-runs the same window. Who fulfils it is the credential provisioner's shape exactly (<code>internal/credprovision</code>): a <strong>brain-owned memory provisioner</strong>, constructed only by <code>startBrain</code>/<code>stopBrain</code>, holding the only in-flight set — the brain is one pod, so "an attempt is in flight" is process state there and needs no column, and a demoted leader's <code>stopBrain</code> cancels its attempts before a successor can start one. Three ways in, all landing on one idempotent <code>Fulfil(orgID, conversationID)</code>: the fast path is a <code>memory_owed</code> doorbell over <code>tf_ctl</code> (a new <code>ctlbus.Message</code> kind beside <code>cred_request</code>, which is the precedent — an executor nudging the brain about a row it cannot act on itself) published by the requeue and takeover handlers on any control pod and by the executor's reactor for a step it ended; the <strong>backstop sweep</strong> on the brain, every 5 seconds like <code>DefaultAwaitingSweepInterval</code> and for the same reason (it gates a person's Send), selecting owing conversations by the derived predicate — ended, no memory row — with no attempt in flight and the last attempt older than the bound (in-flight is process state on the brain — a crashed attempt's unfinished row must never read as still running — while the last attempt's time is the newest attempt row's <code>started_at</code>, so the backoff survives a brain restart); and the org-wide doorbell a configuration save rings. The relay is lossy by design, so the sweep is the completion path and the doorbell only shortens it; nothing is durable in the relay and nothing needs to be. Owing conversations on open tasks are swept first, since those block a person; a closed task's still owe (the memory is entity history for the next task) but block nothing. Local mode is the same code at N=1 — one process, always the brain, no relay. The block is narrower than it reads: takeover, requeue, complete, dismiss, and reading the tree and the transcript all work while the task is pending — only the two verbs that need a model, talking to an agent and delegating, wait, and a memory the generator cannot produce is usually a conversation the model could not have held either. Usually, not always, and the exception is a deadlock unless it has an exit: the background-jobs model and the conversation's model are separate settings that can sit on separate providers, so the failed run's provider can be healthy while the generator's is down, and a fresh multi org can have no background model configured at all. Transient faults are the provisioner's to outlast: it rides the <code>systemllm</code> breaker (<code>IsProviderBackoff</code>), so a provider in backoff is left for the next sweep rather than hammered, and the attempt row names it (<code>error_kind = provider_backoff</code>) so the task read can say what it is waiting on. A fault the sweep cannot outlast — no background-jobs model configured, a credential that no longer resolves, a provider that stays down — keeps the task waiting, and that is the answer rather than a gap: background jobs working is the steady state every deployment is assumed to hold (the scorer and profiler already stop silently without one), so an org in that condition has a configuration error to fix, not a task to unblock, and a waiver would only let the person walk past the error into a conversation missing its context while the error stays. There is deliberately no <code>waive</code> verb and no <code>without_memory</code> field on the mint. What the condition needs is to be <em>seen</em>: the owing conversation's newest attempt row and <code>memory_pending</code> on the task are the per-task signal, and a generation failure that persists is exactly the kind of quietly-wrong condition the durable-notifications epic (TFAC-878) exists to surface to an admin — it is recorded there as a consumer, and until it ships the composer's state text and the WARN the provisioner logs on every failed attempt are what there is. Nothing here is a stand-in that epic retires: the attempt rows are the per-attempt facts, and a notification is a coalesced condition <em>opened from</em> such rows (first-seen, last-seen, closed when an attempt succeeds), the same relation <code>poll_readiness</code> rows have to the toast read off them. The classification a condition needs is <code>error_kind</code>, stored per attempt where the provisioner handles the Go error, so the epic reads rows rather than log lines.</span></li>
+    <li><span class="step-title">Every fulfil is a row.</span><span class="step-body"><code>conversation_memory_attempts</code>, beside <code>conversation_memory</code> and <code>conversation_memory_entities</code>: one row per fulfil the brain runs, in both dialects. <code>org_id</code>; <code>conversation_id</code> with the same cascading FK the memory row carries; <code>started_at</code>; <code>completed_at</code>, NULL while running and left NULL by an attempt whose brain died — abandonment is derivable and never stamped; <code>outcome</code> generated | empty | failed, NULL until completed; <code>error_kind</code> no_model | provider_backoff | provider_error | timeout | other with a TF-worded <code>error_message</code>, never an upstream body, both NULL unless failed; <code>system_llm_run_id</code>, a nullable FK (<code>ON DELETE SET NULL</code>) to the call's cost, tokens and duration when a call was made, rather than copies of them; and <code>window_rows_total</code> / <code>window_rows_sent</code>, the windowing facts nothing else records. Admin-pool writes by the brain, app-pool reads, org-scoped RLS like <code>system_llm_runs</code>. That table alone cannot be the ledger, which is why this one exists: an attempt refused before any call — no model, breaker open — has no outcome, so <code>Record</code> no-ops and writes nothing, and a row it does write carries only <code>is_error</code>, no reason and no indexed conversation. The agent-file path writes no attempt: it is an executor-side read with nothing to try, and "how often the agent writes its own file" is already <code>conversation_memory.source</code>. What the table makes derived: the reason a task is waiting is its owing conversation's newest attempt, exposed on the task read (§12), with no column on <code>conversations</code>; the sweep's backoff is that row's <code>started_at</code>. Analytics come for free — attempts per conversation, generated-versus-agent share, wait from a boundary to its memory (<code>completed_at</code> minus the conversation's <code>ended_at</code>), failure rate by kind, how often windowing elided rows, and spend per attempt through the join.</span></li>
+    <li><span class="step-title">Mark provenance.</span><span class="step-body"><code>conversation_memory.source</code> = <code>agent</code> | <code>generated</code> (§11). A generated row is overwritten if the conversation is later resumed and concludes — the upsert already replaces <code>agent_content</code>.</span></li>
+    <li><span class="step-title">Remove <code>human_content</code>; artifact outcomes are read, not stored.</span><span class="step-body">The earlier draft of this spec called <code>human_content</code> "the way a person annotates a memory". That is not what it is. Checked at <code>95385f49</code>: no person ever types into it, no UI reads or writes it (nothing in <code>frontend/src</code> references it), and its five writers are all machine-composed verdicts about <em>artifacts</em>, keyed to the conversation the artifact row pins as its creator — a draft PR approved (<code>formatPRHumanFeedback</code>, the title/body diff, <code>artifacts_handler.go:742</code>), a draft PR rejected (a canned outcome-and-implication block plus the rejected title and body, <code>:998</code>), a staged review submitted or dismissed (the review-edit diff, <code>reviews_artifact_handler.go:517</code>), the artifact teardown at a disposition (<code>buildDiscardHumanContent</code>, five canned notes keyed by which verb discarded it, <code>tasks.go:1536</code>), and the reconciler's post-run outcome, which overwrites the whole column with the artifact set's terminal picture once GitHub reports a merge or close (<code>reconcile.go:360-378</code>). Its one reader concatenates it under a fixed heading into the memory text the file materializer and <code>tfac exec memory load</code> hand the agent. Under this model it is stale three ways. <em>Attribution</em>: artifacts carry across a task's conversations (§8), so a verdict on a PR that three conversations pushed to lands on the first one's memory, and injected in order it reads as a reaction to work that had not happened yet. <em>Timing</em>: the verdict is written whenever a person acts on the artifact, which is usually after the memory was already injected into a later conversation as a <code>messages</code> row — the snapshot is stale the moment it is taken, and the overwrite semantics also lose every verdict but the last. <em>Redundancy</em>: everything it records is on the <code>artifacts</code> row already (<code>state</code>, and <code>details_json</code> holding the proposed snapshot the diffs are computed from), and the PR's fate is on the PR entity's snapshot and history skeleton. So the column, its two store methods and the five writers go, and what the next agent still needs reaches it through two channels: <strong>now</strong> (new) — the opening turn's <code>&lt;task_context&gt;</code> gains the task's artifacts with their current state (kind, target, state, URL), which is task data and untrusted like the rest of that section, so a new conversation on the task knows what it inherits; and <strong>later</strong> (exists, unchanged) — a resolution after the turn opened reaches a live run as the artifact-feedback <code>&lt;system-note&gt;</code> and a parked one on its next follow-up (<code>artifact_feedback.go</code>, addressed to the conversation that made the artifact). Entity history carries the agent's memory only. A derived "artifacts beneath the memory" render for history files was considered and rejected: from the rows it can say one line per artifact — kind, target, state — and nothing more, since the reconciler's merged-title diff is fetched live from GitHub at merge time and the approval diff is against a final title the row never stored; for a PR entity that line duplicates the entity snapshot and skeleton, and for a ticket or thread entity the memory names the PR and the agent has <code>gh pr view</code>. What is genuinely lost is the reconciler's post-run diff — the one informative thing the column held — and if it matters its home is a stored final snapshot on the artifact row, a separate decision, not a memory column. The teardown's canned "implication" prose is the one thing not carried: it told the next agent what a discard meant, and under §8 teardown only happens at task end, where the state itself (a closed PR on a done task) says the same thing. The "bad run" case the earlier draft assigned to this column is served by the manual conversation instead: a person who wants the next agent to know "do not retry X" says so in the conversation, and it becomes transcript and then memory — which is the model's whole point.</span></li>
+    <li><span class="step-title">Human conversations write memory too — by guidance, checked by the transcript, never by cadence.</span><span class="step-body">A manual conversation has no completion gate, so the question is how its <code>_tfac/memory.md</code> stays current. Three ways were weighed. <em>A cadence</em> — a reminder every N user messages — is rejected: the count says nothing about whether work happened, so it fires through a ten-message discussion that changed nothing and misses the one message that produced three commits, and a reminder the model learns to ignore is noise in every transcript after it. <em>A would-stop nudge on every yield</em> — the mechanism <code>artifactContractNudge</code> already uses on native (<code>native_run.go:453-496</code>, re-armed by human input, read from the transcript) — is rejected for the steady state: it costs a full extra model turn each time the agent yields to the person, which in a conversation is every turn. What ships is the cheap path made common and the correct path made certain. <strong>Guidance</strong>: the workbench surface's memory block (§9) says to update the file when a piece of work is finished — a commit, a push, a decision, a dead end — and not per message; it is literal and byte-stable like every block. <strong>Staleness, derived</strong>: a write to <code>_tfac/memory.md</code> is a tool call, visible in the transcript as an assistant row's <code>tool_calls</code> on both runtimes (the SDK mirror records assistant lines with their tool use, <code>stream.go:186-215</code>), so at the boundary the file is <em>current</em> when no assistant tool call after the last such write is outside a short read-only allowlist (file reads, searches, the <code>view</code>/<code>list</code> exec verbs) and <em>stale</em> otherwise — no state, no counter, the same answer from any pod. <strong>Backstop</strong>: current means the agent's file is the memory (<code>source = agent</code>, no wait); stale or absent means it is generated (<code>source = generated</code>, the <code>memory_pending</code> state). The asymmetry is deliberate: a false "stale" costs the person one 10–18 second wait, a false "current" ships a memory that omits work, so the allowlist stays short and a shell command always counts as work. A conversation with no assistant turn at all gets the empty row (above), no model call. The one place the would-stop nudge <em>is</em> worth its turn is a delegated run's completion, which it already guards; a manual conversation is never "about to finish", so there is no moment for it to fire.</span></li>
+  </ol>
+
+  <div class="callout callout--warn">
+    <strong>Cost.</strong> One system call per boundary that finds no memory file. Requeues and takeovers are rare; step advances already have the agent's file. Budgeted on the background-jobs model with the same "no model configured → skip with a WARN, never substitute" rule the scorer uses.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="workspace">
+  <div class="section-label">§7</div>
+  <h2>Workspace by task</h2>
+  <p class="lede">The one structural change. Every helper already takes the key as a role parameter (<code>rootKey</code>, <code>keyID</code>); the callers stop passing the blueprint run id and pass the task id.</p>
+
+  <h3>Today's keying</h3>
+  <ul class="tight">
+    <li>Run root: <code>worktree.RunRoot(rootKey)</code> with <code>rootKey = br.ID</code> (the setups at <code>dispatch.go:1350-1354</code>).</li>
+    <li>Snapshot blob: <code>orgID/&lt;blueprintRunID&gt;/workspace.tar</code> (<code>workspace_snapshot.go:147</code>); lifecycle row <code>workspace_snapshots (org_id, blueprint_run_id)</code> (<code>baseline:5208-5221</code>).</li>
+    <li>Evictor and reaper group by blueprint run (<code>workspace_evictor.go:142</code>, <code>snapshot_reaper.go:7</code>); memory namespace is the run id (<code>memory.go:38-52</code>).</li>
+    <li>Drivability: <code>blueprintDrivableSQL</code> drives one conversation per run.</li>
+    <li>First claim of a run with no <code>worktree_path</code> is an unconditional fresh clone (<code>dispatch.go:1338-1398</code>).</li>
+  </ul>
+
+  <h3>Under the model</h3>
+  <ul class="tight">
+    <li><strong>Key = task id</strong> for the run root, the snapshot blob, the snapshot row, the memory namespace, and the evictor/reaper grouping. A blueprint run's steps share it as before; two runs on one task now share it too; the manual conversation (§9) shares it with whatever came before or after.</li>
+    <li><strong>One drivable conversation per task.</strong> <code>blueprintDrivableSQL</code> becomes a task-level predicate: the task's latest non-ended conversation, and for a blueprint run additionally the current step. Two agents in one tree remains impossible by construction.</li>
+    <li><strong>Fresh clone only when the task has no workspace.</strong> The branch at <code>buildStepConfig</code> keys on the task's recorded path rather than the run's. The warm-path stat stays on <code>conversations.worktree_path</code>; a new conversation on an existing task is stamped with the task's path at mint, so the ladder (warm → blob → wait → fresh) finds it.</li>
+    <li><strong>The branch follows the tree.</strong> A later blueprint pushes to the branch the task already has, so a pending draft PR is updated rather than duplicated. The per-run push allowance (<code>internal/pushpolicy</code>) is re-derived for the task's branch; base-branch policy is unchanged.</li>
+    <li><strong>A failed step does not drop the tree, which makes a failed task resumable — through its next conversation, not the failed one.</strong> Today the blob is discarded twice on failure: <code>failConversation</code> drops the conversation-keyed one (<code>stop.go:617</code>) and <code>terminateBlueprint</code> the run-keyed one (<code>blueprint.go:209</code>). With the tree owned by the task, an infra failure on one step must not destroy the next attempt's starting point; both discards move to task end, under retention. Stated explicitly because it is a behaviour change rather than a consequence: <em>the failed conversation row stays unresumable</em> — the composer's existing rule, unchanged (<code>MarkQueuedForResume</code> admits <code>open</code> and the current step's <code>completed</code>, <code>postgres/conversation.go:449-450</code>), and its blueprint run is terminal, so nothing revives the sequencer. <em>The task is resumable</em>: failure is a boundary (§4), so the failed conversation is ended with its memory (the agent's file if it wrote one before dying, generated otherwise), and the next conversation — a takeover's interactive one, a re-delegation's step 0, or whoever claims it after a requeue — opens in the surviving tree with that memory injected, exactly the §5 opening. What the task looks like in between is today's shape, kept: it stays bot-claimed and <code>in_progress</code> with nothing running (no writer clears <code>claimed_by_agent_id</code> on a terminal conversation — only the user verbs do, <code>SetClaimedByUser</code>, <code>TakeoverClaimFromAgent</code>, the requeue swipes), which is deliberate: a failure needs a person's look, the lane's attention order (TFAC-954) puts it second, and an automatic return to the queue would hand a broken tree to whoever picks it next without the context of why. A crash successor is below all of this: a claim retry on the same conversation (the executor's attempt budget) ends nothing.</li>
+    <li><strong>Local and multi alike.</strong> Local has a real blob store under the state root (<code>storage.go:87-101</code>); the evictor is disabled there by default and the restart sweep preserves parked trees. Nothing mode-specific changes.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="artifacts">
+  <div class="section-label">§8</div>
+  <h2>Artifacts</h2>
+  <p class="lede">Artifacts already belong to the conversation that made them and are read as the task's (<code>teardownTaskArtifacts</code> walks <code>ListForTask</code>). The change is policy: teardown moves from every disposition to task end.</p>
+
+  <table class="matrix">
+    <thead><tr><th>Boundary</th><th>Today</th><th>Under the model</th></tr></thead>
+    <tbody>
+      <tr><td>Step advance</td><td>carried; pending PR and staged review stay pending; column → In Review</td><td>carried, identically; the column bounce goes with the column (§10) — the task stays <code>in_progress</code> and the card frame carries the signal</td></tr>
+      <tr><td>Requeue, delegate, takeover, self-claim</td><td>draft PRs closed on GitHub, staged reviews dismissed</td><td><strong>carried.</strong> The queued card wears the warm frame the Board design already draws; the next human resumes with approve / dismiss live; the next blueprint pushes to the same PR</td></tr>
+      <tr><td>Complete, dismiss</td><td>torn down</td><td>torn down — nothing is coming back for them</td></tr>
+      <tr><td>Close cascade</td><td>stranded (no teardown outside <code>internal/server</code>)</td><td>torn down — the gap becomes reachable, so it is closed here</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Two hooks that must widen</h3>
+  <ul class="tight">
+    <li><strong><code>closeTaskIfTerminalAndResolved</code></strong> (<code>artifacts_handler.go:1136-1227</code>) closes the task when the artifact's blueprint run completed and nothing else is unresolved; <code>closeTaskRow</code>'s predicate admits <code>queued</code> (<code>postgres/tasks.go:913</code>). It must stand down unless the task is still bot-claimed by that run — otherwise approving a carried PR on a requeued or re-claimed task yanks it to Done under the person working on it.</li>
+    <li><strong><code>blueprintHasUnresolvedArtifacts</code></strong> (<code>blueprint.go:746</code>) reads only its own run's conversations. With artifacts carrying across runs, the final-step decision to close the task must read the task, which is the read the closing hook already performs.</li>
+  </ul>
+
+  <h3>Readers that assumed queued means empty</h3>
+  <ul class="tight">
+    <li>The spawner's column recompute (<code>recomputeTaskBoardColumn</code> / <code>placeTaskInApprovalColumn</code>, <code>spawner.go:1239-1340</code>) is deleted with the In Review column (§10); a bot-claimed task stays <code>in_progress</code> whatever its artifacts hold, and a queued one stays queued. The card frame and the lane's attention order (TFAC-954) are the signal.</li>
+    <li>The Overview's needs-you rows join tasks in <code>claimed | in_progress | in_review | done</code> only (<code>frontend/src/pages/overview/hooks.ts:203-217</code>) — becomes <code>queued | in_progress | done</code>.</li>
+    <li>The shipped Board fetches no conversations for the Queued lane and gates the card on <code>colId === 'queued'</code> (<code>Board.tsx:419-446, :1587</code>) — the rebuild replaces both.</li>
+    <li>The rail's <code>attention</code> count is per conversation (<code>postgres/conversation.go:1052</code>): a task whose two prior conversations each hold a pending artifact counts twice. Acceptable, and it resolves itself as artifacts are approved.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="manual">
+  <div class="section-label">§9</div>
+  <h2>The manual conversation</h2>
+  <p class="lede">A conversation a person drives on a task — the <code>interactive</code> type the vocabulary reserved and nothing mints today. This section defines what that conversation <em>is</em> once it exists, because §5, §6, §7 and §13 all depend on it: its row, its claim, its prompt, its workspace, its steady state, its end. How one is <em>started</em> — the route and its body, the preconditions, the Board gesture, what the task's column does — is deliberately not here; it is TFAC-378's and the Board v1's (§15).</p>
+
+  <ul class="tight">
+    <li><strong>Row:</strong> <code>type = 'interactive'</code> — the column that says what kind of conversation this is, and the one thing every reader keys on; <code>task_id</code> and <code>team_id</code> from the task; <code>creator_user_id</code> the person; no blueprint run, no step index, no <code>prompt_id</code>. The <code>origin</code> column is not this spec's concern: it is baseline headroom ("blueprint-step delegation vs other creation modes"), written only by its DEFAULT and read by nothing in Go, whose sole effect is the CHECK <code>conversations_origin_requires_parents</code> — a row with <code>origin = 'blueprint'</code> must carry its run, task and prompt. A manual conversation carries none, so whatever opens one writes a non-<code>blueprint</code> value there, and what that value is (or whether the column survives, given <code>type</code> already answers the question) is TFAC-378's call.</li>
+    <li><strong>Claim:</strong> it runs under the task's <em>human</em> claim. The claim axis is XOR, so a manual conversation and a running blueprint never coexist on a task — which is what makes takeover a boundary by construction (§4) — and the claim does not move when the conversation opens, idles, or ends.</li>
+    <li><strong>Drive:</strong> the same claim queue and dispatcher — the claim predicate already admits <code>interactive</code> (<code>domain/agent.go:112-115</code>); the drivability predicate is the task-level one from §7. Runtime stamped per dialect as today.</li>
+    <li><strong>Prompt:</strong> a second <em>surface</em> in the <code>agentprompt</code> manifest beside <code>machinist</code>. The surface axis is "who am I" (<code>spec.go:41-48</code>: a product concept, the delegated worker), so the name is a role, not the conversation type: <code>workbench</code> — the agent a person works with at one task's workbench, in that task's tree, on that task's entity. Not <code>interactive</code>, because interactivity is not what distinguishes it: a later team-scoped agent — one that oversees a whole team, calls Triage Factory's own API routes and triggers delegations of its own — is interactive too and is a different surface again, separated on the same axis by scope (one task's tree vs the team), powers (tools in a worktree vs TF's API), and identity, with its own block files rather than a variant of these. The workbench needs its own identity, communication and memory blocks (how to talk to someone who is present, when to ask rather than assume, when to update the memory file), not the machinist's with a paragraph appended. It varies on the surface axis only, per the manifest rules, so the runtime, family and mode arms are shared. Block 1 of the system prompt is <code>Build(spec)</code> for that surface, shared across every workbench conversation on the same tools; block 2 is <code>&lt;run_context&gt;</code> and the tools reference. No mission and no step wrapper: the person's opening message is an ordinary first row (§5), and the opening turn is the injected prior memories and the task's <code>&lt;task_context&gt;</code> exactly as for a delegation.</li>
+    <li><strong>Workspace:</strong> the task's (§7), so a later delegation continues in the same tree, and a manual conversation after a blueprint starts in the tree the blueprint left.</li>
+    <li><strong>Steady state:</strong> <code>open</code> after each turn — a manual conversation never "completes"; it idles. The completion gate never fires, which is why R3 and §6 exist.</li>
+    <li><strong>End:</strong> only at a boundary (§4) — requeue, delegate, task end; a user → user reassign is not one, the new claimant resumes it. Its memory follows §6: the file if current, generated otherwise, and the task waits while it is owed.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="requeue">
+  <div class="section-label">§10</div>
+  <h2>Requeue, and the Board dialog</h2>
+  <p class="lede">TFAC-952 (#1048) made requeue stop the run: <code>finalizeRequeue</code> now takes the same stop pass every other disposition does, under its own cause. This section is the rest of R6.</p>
+
+  <ul class="tight">
+    <li>Stop (already lands: parks the conversation <code>open</code>, cancels the blueprint) → record memory (§6) → stamp the boundary (§11) → flip the task row as today → broadcast. Jira reversal unchanged. Artifacts untouched.</li>
+    <li>The resumability ladder gains <code>ResumeBlockedTaskRequeued</code>: the conversation's resumability read answers with that rung, so a message to it is refused with the reason named. Its rows are untouched — the conversation and its transcript stay readable through the reads that exist today; nothing is hidden or scrubbed.</li>
+    <li>Undo takes the same path (it shares the finalizer).</li>
+  </ul>
+
+  <div class="callout callout--warn">
+    <strong>For the Board handoff.</strong> The requeue dialog's two-way "Keep the conversation / Clear the conversation" control and its per-branch consequence copy do not survive this model. What remains is a confirmation when a run is live ("This stops the run. Its work stays with the task."), and nothing at all otherwise — a requeue with nothing running is reversible by re-claiming. The bespoke radiogroup, the counted artifact clauses, and the "starts with nothing but the task" sentence go. Record this against TFAC-951 rather than re-deriving it in the rebuild.
+    <br /><br /><strong>Three lanes: Queued, In Progress, Done.</strong> Both middle columns go.
+    <br /><br /><em>Claimed</em> is a read projection — "status queued plus a claim column set" (<code>internal/db/tasks.go:62-69</code>) — and dragging into it is already unsupported (<code>Board.tsx:1141-1150</code>). With the picker as the only way to move a claim, nothing outside the Board reads it: the Overview's needs-you join names it as a status filter (one word), the Jira map and mirror never see it, the rail's queued count is unclaimed-only and stays so. The <code>claimed</code> value stays in the list filter vocabulary — "queued and held by someone" is a legitimate headless question — but no lane is built from it. A user-claimed task still <code>queued</code> sits in the Queued lane wearing its assignee mark (the lane drops <code>only_unclaimed</code>; the rail count keeps it) until something says "started" — what does, and whether opening a manual conversation is one of those things, is the Board's state machine, which is not this spec's (§15).
+    <br /><br /><em>In Review</em> was two things: for a bot-claimed task a <strong>derived</strong> approval column, flipped by <code>recomputeTaskBoardColumn</code> whenever the run held an unresolved artifact or parked <code>open</code>; for a user-claimed task a manual stage marker nothing read. Neither reached Jira — the mirror collapses both stages to InProgress on purpose (<code>jira_mirror.go:12-17</code>). Under this spec the derived meaning is already gone: needs-you lives on the card frame, at the head of the lane order (TFAC-954), in the rail count and on the Overview, and a queued task can hold artifacts, so the column was a third encoding of a fact the card shows. The manual meaning is the PR's or the ticket's state, not the task's. So <code>in_review</code> leaves the stored vocabulary: the <code>tasks_status_check</code> CHECK (<code>baseline:1034</code>) drops it, existing rows rewrite to <code>in_progress</code>, <code>patchableTaskStatuses</code> and <code>db.TaskListStatuses</code> drop it, the recompute and its approval-column twin are deleted, and <code>closeTaskIfTerminalAndResolved</code> keys on "bot-claimed by that run with nothing unresolved" rather than on a column. The Jira <code>in_review</code> <em>status rule</em> is a different axis and is untouched: an optional fourth rule on <code>jira_project_status_rules</code> that the settings save path already resolves and persists (<code>InReviewMembers</code> / <code>InReviewCanonical</code>, <code>internal/server/settings.go:107, 286</code>; the headless bootstrap too, <code>headless.go:485</code>), with its own migration (<code>202608220001_jira_in_review_rule.sql</code>) and a shipped settings UI (<code>JiraProjectRulesGroup.tsx</code>). What it lacks is a <em>reader</em> — the migration's own comment says it "feeds nothing TF polls or classifies on" and that no Jira status is read back into a TF column (TFAC-883). Removing the task status changes nothing about that rule in either direction.
+    <br /><br />Drags on the three-lane board: to Queued is requeue, to Done is complete, Queued → In Progress is the human's one stage marker. The status removal is a backend ticket with a migration in both dialects, sequenced ahead of TFAC-951; the lane deletions are TFAC-951's.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="schema">
+  <div class="section-label">§11</div>
+  <h2>Schema delta</h2>
+  <p class="lede">Postgres baseline edited directly (multi is unreleased); SQLite gets a forward migration. Small on purpose: the model is mostly a re-keying and a policy change.</p>
+
+  <div class="schema-pair">
+    <div class="schema-table">
+      <h5>conversations <span class="h-meta">boundary + interactive row</span></h5>
+      <ul>
+        <li class="shared"><span class="col-name">task_id, blueprint_run_id, blueprint_step_index</span> unchanged</li>
+        <li class="shared"><span class="col-name">type</span> 'interactive' — the reserved value, written by whatever opens a manual conversation (§9, §15)</li>
+        <li class="shared"><span class="col-name">origin</span> untouched by this spec — a DEFAULT-only column nothing reads; a manual conversation needs a non-'blueprint' value to satisfy the CHECK, which is TFAC-378's to name or retire (§9)</li>
+        <li class="added"><span class="col-name">ended_at</span> timestamptz — set by a boundary</li>
+        <li class="added"><span class="col-name">ended_reason</span> text — requeued | delegated | taken_over | task_closed | step_advanced | team_archived | failed; app-validated, NULL while open</li>
+        <li class="shared"><span class="col-name">archived_at</span> stays unused here (no Clear)</li>
+      </ul>
+    </div>
+    <div class="schema-table">
+      <h5>conversation_memory <span class="h-meta">one primary, provenance</span></h5>
+      <ul>
+        <li class="shared"><span class="col-name">blueprint_run_id</span> unchanged</li>
+        <li class="absent"><span class="col-name">entity_id</span> dropped — it duplicated the <code>primary</code> row in <code>conversation_memory_entities</code>, which the termination path already writes unconditionally (<code>attachConversationMemoryEntities</code>, <code>memory.go:518</code>) and which every memory read already goes through (<code>postgres/task_memory.go:162, 198, 227</code>); the upsert loses its entity argument and nothing that reads memory changes. A conversation with no task entity (a taskless one, later) simply has no primary row and is reachable through produced and touched</li>
+        <li class="derived"><span class="col-name">the this-task split</span> — <code>conversations.task_id</code> through <code>conversation_id</code>; no column, by the same test</li>
+        <li class="added"><span class="col-name">source</span> text — agent | generated | none; <code>agent_content IS NULL</code> exactly when source is none (app-validated)</li>
+        <li class="absent"><span class="col-name">human_content</span> dropped, with <code>UpdateConversationMemoryHumanContent</code>/<code>…System</code> and their five writers (§6); artifact outcomes are rendered from <code>artifacts</code> at read time</li>
+      </ul>
+    </div>
+    <div class="schema-table">
+      <h5>conversation_memory_attempts <span class="h-meta">new — one row per fulfil (§6)</span></h5>
+      <ul>
+        <li class="added"><span class="col-name">id, org_id, conversation_id</span> — the memory row's cascading FK shape</li>
+        <li class="added"><span class="col-name">started_at, completed_at</span> — completed NULL while running or abandoned</li>
+        <li class="added"><span class="col-name">outcome</span> generated | empty | failed; NULL until completed</li>
+        <li class="added"><span class="col-name">error_kind, error_message</span> — no_model | provider_backoff | provider_error | timeout | other, TF-worded; NULL unless failed</li>
+        <li class="added"><span class="col-name">system_llm_run_id</span> nullable FK, ON DELETE SET NULL — cost and tokens live there</li>
+        <li class="added"><span class="col-name">window_rows_total, window_rows_sent</span> — the §6 windowing facts</li>
+        <li class="derived"><span class="col-name">the task's waiting reason</span> — the owing conversation's newest row; no column anywhere</li>
+      </ul>
+    </div>
+    <div class="schema-table">
+      <h5>tasks <span class="h-meta">status vocabulary</span></h5>
+      <ul>
+        <li class="derived"><span class="col-name">status</span> CHECK drops 'in_review'; rows rewrite to 'in_progress' (SQLite: table rebuild for the CHECK; Postgres: baseline edit)</li>
+        <li class="shared"><span class="col-name">claimed_by_*</span> unchanged</li>
+      </ul>
+    </div>
+    <div class="schema-table">
+      <h5>workspace_snapshots <span class="h-meta">re-keyed</span></h5>
+      <ul>
+        <li class="derived"><span class="col-name">PK (org_id, task_id)</span> replaces (org_id, blueprint_run_id)</li>
+        <li class="shared"><span class="col-name">state, writer_claim_id, updated_at</span> unchanged</li>
+        <li class="absent">blueprint_runs.worktree_path — superseded by the task's recorded path (tasks.workspace_path, or derived from RunRoot(task_id)); decide in implementation, the blob key is what matters</li>
+      </ul>
+    </div>
+  </div>
+
+  <p><code>messages</code> gains no column: <code>injection:memory</code> and <code>injection:task-context</code> are new values of the app-validated <code>subtype</code> vocabulary, and the memory row's source link rides <code>metadata</code>. The boundary marker is also what a later run-station redesign or entity-history view would read to draw a sequence — neither is in scope here, but the data is shaped so they need nothing new: driver (<code>creator_user_id</code> / <code>actor_agent_id</code>), mission (<code>prompt_id</code> or the opening message), how it ended (<code>ended_reason</code>), and the memory it left (<code>conversation_memory</code>) are all first-class columns rather than reconstructions.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="api">
+  <div class="section-label">§12</div>
+  <h2>API delta</h2>
+  <ul class="tight">
+    <li><code>POST /api/tasks/{id}/requeue</code> — no body change; behaviour per §10. the stop landed in #1048; this adds the memory + boundary stamp.</li>
+    <li>Task read shapes gain <code>memory_pending</code> (derived, §6) and, when set, the owing conversation's newest attempt — <code>outcome</code>, <code>error_kind</code>, <code>error_message</code>, <code>started_at</code> — read from <code>conversation_memory_attempts</code>.</li>
+    <li>Conversation read shapes gain <code>ended_at</code> and <code>ended_reason</code>; the resumability ladder gains <code>ResumeBlockedTaskRequeued</code> (and the other boundary reasons, one rung each, since the copy differs).</li>
+    <li>No run-page change. <code>/runs/:conversationID</code> keeps resolving to that conversation as today; the existing <code>POST /api/agent/conversations/list</code> with <code>task_ids</code> already returns a task's conversations in order, which is all a later run-station redesign needs from this spec.</li>
+    <li><code>PATCH /api/tasks/{id}</code> <code>status</code> accepts <code>in_progress | done | dismissed</code>; <code>in_review</code> is refused as an unknown value (422, the field named). <code>POST /api/tasks/list</code> <code>statuses</code> drops <code>in_review</code>; <code>claimed</code> stays.</li>
+    <li>No delete, no archive, no scrub route. Retention remains the snapshot reaper's and, later, an admin tool's.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="cases">
+  <div class="section-label">§13</div>
+  <h2>Every case</h2>
+  <p class="lede">Each row is derived from the rules; none adds one.</p>
+
+  <table class="matrix">
+    <thead><tr><th>Case</th><th>New conversation?</th><th>Context</th><th>Workspace</th><th>Artifacts</th></tr></thead>
+    <tbody>
+      <tr><td>First delegation on a new task</td><td>yes (step 0)</td><td>history files only</td><td>fresh clone</td><td>—</td></tr>
+      <tr><td>Step N → N+1</td><td>yes</td><td>this-task injected (N's memory, and any before it)</td><td>shared</td><td>carried</td></tr>
+      <tr><td>Human claims a queued task and opens a manual conversation</td><td>yes</td><td>history files; this-task if the task had prior conversations</td><td>fresh clone, or the task's</td><td>carried</td></tr>
+      <tr><td>Human steers a live agent</td><td>no — steer</td><td>full</td><td>shared</td><td>carried</td></tr>
+      <tr><td>Human messages a parked or done conversation (current step)</td><td>no — resume</td><td>full</td><td>shared</td><td>carried</td></tr>
+      <tr><td>Human messages an earlier step</td><td colspan="4">refused, as today — the workspace has moved past it</td></tr>
+      <tr><td>Human resumes their own idle manual conversation</td><td>no — resume</td><td>full</td><td>shared</td><td>carried</td></tr>
+      <tr><td>User A → user B reassign</td><td>no — B resumes</td><td>full</td><td>shared</td><td>carried</td></tr>
+      <tr><td>User B delegates a blueprint</td><td>yes (step 0); B's conversation ends, memory recorded</td><td>this-task injected</td><td>shared</td><td>carried; later pushes land on the existing PR</td></tr>
+      <tr><td>Takeover via the picker while the bot is running</td><td>stop; yes on the human's first message</td><td>this-task injected (the interrupted step's memory, kicked at the flip; nothing opens on the task until it lands)</td><td>shared</td><td>carried</td></tr>
+      <tr><td>Requeue, then a human claims and talks</td><td>stop at requeue, memory recorded; yes</td><td>this-task injected</td><td>shared</td><td>carried</td></tr>
+      <tr><td>Requeue, then a blueprint is delegated</td><td>yes (step 0)</td><td>this-task injected</td><td>shared</td><td>carried</td></tr>
+      <tr><td>Re-delegate while running</td><td>stop; yes (step 0 of run B)</td><td>this-task injected (run A's steps)</td><td>shared</td><td>carried</td></tr>
+      <tr><td>Complete / dismiss / PR merged</td><td>no; task ends</td><td>—</td><td>kept under retention</td><td>torn down</td></tr>
+      <tr><td>Reassign to a user on another team</td><td colspan="4">refused (422, <code>target_user_id</code>); the task's team does not move — §14</td></tr>
+      <tr><td>Step fails; then takeover, requeue, or re-delegate (there is no automatic retry)</td><td>yes — failure is a boundary; the task stays bot-claimed and <code>in_progress</code> until a person acts</td><td>this-task injected (the failed step's memory: the agent's file if it wrote one, generated otherwise); the failed conversation itself refuses a message</td><td>shared — the tree is not dropped on failure</td><td>carried</td></tr>
+      <tr><td>Second task on the same entity</td><td>yes, new task</td><td>history files include the first task's memories</td><td>fresh clone</td><td>—</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="decisions">
+  <div class="section-label">§14</div>
+  <h2>Decisions</h2>
+  <p class="lede">Made in the design thread; recorded so they are not re-litigated in tickets.</p>
+  <ul class="tight">
+    <li><span class="tag tag--green">DECIDED</span> <strong>No Clear.</strong> Context is bounded by R5, not by deletion; the "bad run" case is a human verdict on the memory; a broken tree is a workspace concern; sensitive content is a retention tool. Cleared-line semantics, message scrubbing, and snapshot discard on a gesture are all out.</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>Requeue is a boundary; reassign is not.</strong> §4.</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>Fork, not reuse, and in fact no fork at all.</strong> Continuation is always a new row (R5) or a resume of the same row (R4). Nothing copies <code>messages</code>, nothing re-parents a conversation, and the SDK needs no session fork.</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>Blueprint steps get prior memories injected</strong>, not a file to read — as one <code>injection:memory</code> row per memory on both runtimes, with a link back to the source memory, rendered to the wire as one enveloped user message by the same assembler on both; the memories are compactable on both. §5.</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>The mission lives in the system prompt on both runtimes; the task context is a user row on both.</strong> Retention by construction, no re-injection anywhere; the SDK's summarizer is trusted with the task context, which is also written to a file the mission names. §5.</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>Artifacts carry across every boundary except task end.</strong> §8.</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>Workspace keyed by task.</strong> §7.</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>Three lanes.</strong> Claimed and In Review go; <code>in_review</code> leaves the stored status vocabulary; the bot's column recompute is deleted; the card frame and the attention order carry needs-you (§10).</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>Resumability of completed steps is unchanged</strong>: the current step only. A boundary additionally retires that one.</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>No cross-team reassign, for now.</strong> The reassign verb's target must be a member of the task's owning team (<code>tasks.team_id</code>); any other target is refused with 422 <code>INVALID_FIELD</code> on <code>target_user_id</code>. That narrows today's guard, which admits any user on a team that can <em>see</em> the task through <code>task_teams</code> (<code>task_actions.go:290-380</code>, "target user isn't on a team that can see this task") while never moving <code>tasks.team_id</code> — so under the current guard a claim can land on a user whose team RLS keeps out of the task's conversations, which is exactly the case the re-stamp question was about. Refusing removes the case rather than answering it. Moving a task between teams is a capability that does not exist today (<code>setOwnerTeam</code> stamps <code>team_id</code> at claim and nothing else writes it) and belongs with the equally unshipped transfer of entity ownership between teams; both are multi-mode concerns and neither is designed here. The one constraint this spec leaves for that work is a fact, not a prescription: <code>conversations.team_id</code> is frozen at insert, so a transfer cannot be a one-column update on <code>tasks</code>.</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>Injection budget: the newest 5, within 32 KiB total</strong>, both constants beside the composer. Walk the task's memories newest first and mint a row for each whole memory (its <code>agent_content</code>; empty rows — <code>source</code> none — are skipped and do not count) while the running count stays at or under 5 and the running size at or under 32 KiB; stop at the first that does not fit, so the injected set is always a contiguous newest-first window and the envelope's "these are the most recent" stays true. No floor: a newest memory that alone exceeds the byte cap is not injected either, and the run falls back to what it has today — the static <code>&lt;entity_memory&gt;</code> block pointing at the folder. Why 5: the memory contract is cumulative (each memory is written with the earlier ones in context, so the newest carries the running "what is left"), the longest shipped blueprint puts two prior steps in front of its last one, and a task past five boundaries is one where the older attempts are background the agent can read on request, not handoff. Why 32 KiB: the guidance asks for 150–300 words (<code>blocks/verbs/memory.txt</code>), about 2 KB, so five nominal memories are ~10 KB and the cap is three times that — room for a memory that "genuinely warrants" expansion, a bound on a log dump; nothing reads <code>memory.md</code> with a size limit today (<code>readAgentMemoryFile</code>, <code>memory.go:104-119</code>), so this is the only guard. The selection runs once, at mint, on both runtimes — assembly wraps whatever rows exist and never re-decides.</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>A memory's primary entity is a join row, not a column.</strong> <code>conversation_memory.entity_id</code> duplicated the <code>primary</code> role in <code>conversation_memory_entities</code>, the table that already fans one memory out to every entity a conversation produced or touched; the column goes, and the this-task split is a join on the conversation's <code>task_id</code> rather than a second denormalized column. This is what lets a taskless conversation write memory with no primary at all and still be found from the PR it opened (§11).</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>Generation that cannot happen keeps the task waiting; there is no waiver.</strong> Three answers for three cases (§6): a conversation that never reached an assistant turn gets the empty row mechanically, no model call; a transient provider fault is the provisioner's to outlast through the <code>systemllm</code> breaker, with the attempt row naming it; a persistent one is a configuration error the org fixes, surfaced per task now and durably once TFAC-878 lands. The block itself only ever holds the two verbs that need a model.</li>
+    <li><span class="tag tag--green">DECIDED</span> <strong>Where the generated memory runs for a step the reactor ends.</strong> The control plane, off the same derived state everything else reads: the reactor ends the step and writes nothing but the boundary (<code>ended_at</code>, <code>ended_reason</code>); the conversation is then <em>owing</em> by the §6 predicate (ended, no memory row), and a control-plane job — the scorer's shape, on the system-jobs path with the org's credential — fulfils it. The executor holds no model credential in multi, so it could never have generated it; the derived state is what the brain's provisioner sweeps, and the reactor rings the <code>memory_owed</code> doorbell over <code>tf_ctl</code> to shorten the wait — the <code>cred_request</code> pattern, doorbell plus backstop sweep (§6). Local is the same code at N=1.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="out-of-scope">
+  <div class="section-label">§15</div>
+  <h2>Out of scope</h2>
+  <p class="lede">Named so the backend tickets cut from this spec do not absorb them.</p>
+  <ul class="tight">
+    <li><strong>The run station redesign.</strong> Showing a task's conversations as one scroll, the boundary markers, the closed-composer rendering beyond the existing rung mechanism — all of it is blocked on this spec and none of it is in it. This spec ships the data (order, <code>ended_at</code>/<code>ended_reason</code>, the task-keyed reads) and leaves the surface as it is. One requirement is recorded here for that redesign so it is not lost, because it follows from §6 rather than from any design pass: each ended conversation renders its memory in a slot <em>above the boundary separator</em> that closes it — the agent's own file or the generated one, provenance shown — and while the task is <code>memory_pending</code> that slot is a skeleton, so the person disabled from sending can see where the summary they are waiting on will appear and that the wait is for it. The data for both states is already in this spec: the slot is filled by the <code>conversation_memory</code> row, and the skeleton is the derived state the composer reads.</li>
+    <li><strong>Starting a manual conversation.</strong> The route and its body, its preconditions (who may open one, what a live conversation on the task means for it), the Board gesture that leads to it, and whether opening one moves the task's column — none of it is here. It is TFAC-378's (user-triggered interactive runs) together with the Board v1 (TFAC-951), and it waits on that UI. What this spec fixes for that work so it does not have to re-decide: the row it writes (§9), the workspace it starts in (§7), the memories it opens with (§5), and the one invariant any opener holds — it refuses while the task is <code>memory_pending</code> (§6).</li>
+    <li><strong>An entity-history view.</strong> Same data, later.</li>
+    <li><strong>Retention and scrubbing.</strong> No delete, archive, or scrub route; the snapshot reaper is the only retention today, and an admin tool for transcripts is its own decision.</li>
+    <li><strong>A workspace reset verb.</strong> A broken tree is reset by the agent or by a later affordance; nothing here discards a task's workspace on a gesture.</li>
+    <li><strong>SDK session forking.</strong> Not needed: no conversation is ever forked (§14).</li>
+    <li><strong>Undoing external mutations.</strong> PRs, comments, and branches an agent produced are real objects with their own lifecycle; the existing teardown at task end is the only retraction.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="steps">
+  <div class="section-label">§16</div>
+  <h2>Implementation steps</h2>
+  <p class="lede">Ordered so each lands green on its own and nothing frontend-facing changes until the rules are enforced.</p>
+
+  <div class="phase-flow">
+    <div class="phase"><span class="phase-label">A</span><div class="phase-title">Boundaries + memory</div><div class="phase-body">the stop (landed, #1048); <code>ended_at</code>/<code>ended_reason</code>, including failure stamped as a boundary by <code>failConversation</code>; the memory-at-boundary path (§6) with the derived <code>memory_pending</code> gate on the dispatcher's claim (<code>blueprintDrivableSQL</code> gains the clause, both dialects), exposed on the task read for the composer — and, as an invariant, on any route that later opens a conversation on a task — plus the brain-owned memory provisioner (doorbell kind <code>memory_owed</code> + 5s backstop sweep, the <code>credprovision</code> shape), the <code>conversation_memory_attempts</code> table (both dialects, <code>dbtest</code> conformance) and the org-wide doorbell from the settings and credential save handlers; the composer rung. Teardown stays as today in this phase.</div></div>
+    <div class="phase"><span class="phase-label">B</span><div class="phase-title">Workspace by task</div><div class="phase-body">Re-key root, blob, snapshot row, namespace, evictor, reaper; task-level drivability; failed-step retention; push allowance for the task's branch.</div></div>
+    <div class="phase"><span class="phase-label">C</span><div class="phase-title">Injection + the mirror</div><div class="phase-body">the this-task split (a join on <code>conversations.task_id</code>); <code>conversation_memory.entity_id</code> dropped for the join table's <code>primary</code> row; both prompt composers move the trusted sections to the system prompt as an unmarked second block behind the shared block's breakpoint (<code>withSystemCacheBreakpoint</code> takes blocks and stamps the first) and leave the task context as a row; <code>injection:memory</code> rows, and the assembly-side envelope over a run of them (a sibling of <code>wrapSteer</code>, text in <code>internal/domain</code>); the task-context row is minted with <code>injection:task-context</code> and the three row-counting gates key on it; <code>MissionAnchored</code> and the anchored arm of <code>compactionSpan</code> are deleted; the launch writes <code>_tfac/task-context.md</code>. SDK: mirror rows minted first, the opening message assembled from them by <code>RowsToMessages</code> and sent as one block-content <code>user_message</code> (the control and <code>userMessage()</code> gain a blocks form), the resume system-prompt fix (now load-bearing). Smoke test gated like <code>live_smoke_test.go</code>.</div></div>
+    <div class="phase"><span class="phase-label">D</span><div class="phase-title">Artifacts carry; In Review goes</div><div class="phase-body">Teardown moves to task end; close cascade tears down; the two hooks widen. <code>in_review</code> leaves the status vocabulary (migration, both dialects); the column recompute is deleted; the Overview join becomes queued | in_progress | done.</div></div>
+    <div class="phase"><span class="phase-label">E</span><div class="phase-title">Manual conversation</div><div class="phase-body">The <code>workbench</code> surface in the <code>agentprompt</code> manifest with its memory guidance; the row shape's validation (type <code>interactive</code>, a non-blueprint origin) and the staleness predicate at its boundaries. Not the route that opens one — TFAC-378 (§15).</div></div>
+    <div class="phase"><span class="phase-label">F</span><div class="phase-title">Board</div><div class="phase-body">The Board rebuild (TFAC-951) consumes it: requeue confirm only, Queued cards carrying artifacts, no Keep/Clear. The run station is not in this phase (§15).</div></div>
+  </div>
+
+  <p>A through E are backend tickets to cut from this spec, one per phase, each self-contained (file:line, shapes, both dialects, conformance cases). F is the Board handoff's frontend work, unblocked once A and D are in.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="risks">
+  <div class="section-label">§17</div>
+  <h2>Risks</h2>
+  <ul class="tight">
+    <li><span class="tag tag--red">RISK</span> <strong>Re-keying the workspace touches the evictor, the reaper, and the claim gate at once.</strong> Mitigation: phase B is its own PR with the conformance suites for all three, and the key stays a role parameter so no helper changes signature.</li>
+    <li><span class="tag tag--red">RISK</span> <strong>A generated memory is worse than the agent's.</strong> Mitigation: provenance column; the agent's own overwrites it on a later conclusion; the human verdict channel remains.</li>
+    <li><span class="tag tag--amber">RISK</span> <strong>Injected memories grow the opening turn.</strong> Mitigation: the injection budget — the newest 5 memories within 32 KiB, decided in §14; the files stay for the rest.</li>
+    <li><span class="tag tag--amber">RISK</span> <strong>Behaviour change on self-claim and takeover:</strong> artifacts no longer torn down. Users who relied on "claim it to make the draft PR go away" now dismiss it explicitly. The card's warm frame (Board design) and the existing approve / dismiss verbs make that visible.</li>
+    <li><span class="tag tag--amber">RISK</span> <strong>Two blueprints on one branch.</strong> A second run pushing to the first run's PR is the intended behaviour, but a run that force-pushes would rewrite the reviewed history. The push policy's existing no-force rule covers it; assert it in phase B.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="acceptance">
+  <div class="section-label">§18</div>
+  <h2>Acceptance</h2>
+  <ul class="tight">
+    <li><span class="tag tag--green">PASS</span> Requeue on a live run: conversation parked <code>open</code>, <code>ended_reason = requeued</code>, a memory row exists (agent or generated, provenance set), the composer is refused with the requeue rung, artifacts unchanged, task <code>queued</code> with claim columns NULL.</li>
+    <li><span class="tag tag--green">PASS</span> Delegate after requeue: step 0's transcript opens with one <code>injection:memory</code> row per prior memory, each with <code>metadata.memory_id</code> resolving to a <code>conversation_memory</code> row whose conversation is on the task, then the task-context row; the assembled request (<code>RowsToMessages</code>) carries one user message whose blocks are the <code>task-memory</code> envelope open, the memories in order, the close, then the task context; after a forced native compaction neither the task-context row nor the memory rows are in the window, the result row carries no <code>&lt;original_request&gt;</code>, the mission is still in the system prompt and <code>_tfac/task-context.md</code> is still in the tree; the step starts in the task's tree (no clone); its pushes land on the existing branch; the prior draft PR is still <code>draft</code>.</li>
+    <li><span class="tag tag--green">PASS</span> Reassign user → user: no new conversation; B's message resumes A's row; <code>messages.user_id</code> = B on the new row.</li>
+    <li><span class="tag tag--green">PASS</span> Step N → N+1: byte-identical to today except the memory arrives inline; <code>this-task</code> contains N, <code>history/</code> contains the entity's other tasks only.</li>
+    <li><span class="tag tag--green">PASS</span> Manual conversation (opened by whatever route TFAC-378 lands, or by a test that inserts the row): it runs under the task's human claim, idles <code>open</code> after each turn, and a later delegation continues in the same tree with its memory injected.</li>
+    <li><span class="tag tag--green">PASS</span> Approving a carried draft PR on a re-claimed task does not close the task; approving the last one on a task still bot-claimed by the run that made it does.</li>
+    <li><span class="tag tag--green">PASS</span> A failed step: the conversation is <code>failed</code> with <code>ended_reason = failed</code>; a memory row exists (the agent's file when it wrote one, generated otherwise, provenance set); the task is still bot-claimed and <code>in_progress</code>; the task's tree and snapshot are in place; a message to the failed conversation is refused; a takeover opens a new conversation in that tree with the failed step's memory as its first <code>injection:memory</code> row.</li>
+    <li><span class="tag tag--green">PASS</span> A step that fails before any assistant turn: the conversation is ended with <code>ended_reason = failed</code>; the provisioner writes an empty memory row (<code>source = none</code>) with no <code>system_llm_runs</code> row; the task is not <code>memory_pending</code>; the next conversation's opening turn carries no <code>injection:memory</code> row for it and its this-task folder holds no file for it.</li>
+    <li><span class="tag tag--green">PASS</span> No waiver: with the background model unset, a takeover leaves the task <code>memory_pending</code> with a failed attempt row whose <code>error_kind</code> is <code>no_model</code> and no <code>system_llm_runs</code> row; the dispatcher does not claim a delegation on the task and the task read reports <code>memory_pending</code> on every attempt; saving the model setting rings the org-wide doorbell, the next sweep lands the row without waiting out the backoff, and both release.</li>
+    <li><span class="tag tag--green">PASS</span> Team usage totals are identical before and after every gesture above — nothing deletes a <code>messages</code> row.</li>
+    <li><span class="tag tag--cyan">TEST</span> <code>dbtest</code> conformance, both dialects: task-level drivability; the this-task split through <code>conversations.task_id</code>; entity reachability is the join table alone (a row with no primary is reached through produced and touched); the boundary stamp; snapshot rows keyed by task.</li>
+    <li><span class="tag tag--cyan">TEST</span> <code>internal/delegate</code>: memory-at-boundary reads the file first and generates only on absence; generated rows are overwritten by a later agent conclusion.</li>
+    <li><span class="tag tag--cyan">TEST</span> <code>internal/agentproc</code> smoke (local, real SDK, opt-in like <code>live_smoke_test.go</code>): one block-content <code>user_message</code> whose blocks are the envelope and the task context produces exactly one assistant turn and one result on the Go side; the session transcript holds one user entry whose content is that block array; a resume replays it; the model, asked to quote the first words of what it was replying to, quotes the envelope's first line.</li>
+    <li><span class="tag tag--green">PASS</span> Native cache: two conversations on the same model, tools and spec with different missions show a cache read of the full block-1 prefix on the second conversation's first call (usage <code>cache_read_input_tokens</code> ≥ block 1's size), and the same conversation's second call reads block 2.</li>
+    <li><span class="tag tag--green">PASS</span> Both runtimes: <code>messages</code> holds the memory rows then the task-context row before the first assistant row, all <code>delivered = true</code>, and no resume claim is minted by their presence; the mission text appears in neither transcript and in both system prompts.</li>
+    <li><span class="tag tag--cyan">TEST</span> <code>internal/server</code>: each boundary route stamps its reason; the composer rung; <code>PATCH status: in_review</code> → 422.</li>
+    <li><span class="tag tag--cyan">TEST</span> Migration shape: no <code>in_review</code> in the CHECK; a seeded <code>in_review</code> row reads back <code>in_progress</code> after upgrade (SQLite).</li>
+  </ul>
+</section>
+
+</article>
+</main>
+
+<footer>
+  task context model · v0.1 · 2026-09-11 · grounded against main@95385f49
+</footer>
+</body>
+</html>
