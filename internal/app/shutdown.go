@@ -26,7 +26,17 @@ const shutdownDrainTimeout = 15 * time.Second
 //
 // Only dispatches are joined — see startWorkers for why the rest of the worker
 // set deliberately is not.
-func (a *App) drainDispatches() {
+func (a *App) drainDispatches(ctx context.Context) {
+	// Only when the process is actually leaving. A listener also returns
+	// without ever having served — a port already in use is the common one —
+	// and there nothing is shutting down: the dispatcher is still running on a
+	// live context, so latching drain would stop it claiming and the join
+	// would wait out a run that has no reason to be finishing, delaying the
+	// bind error the operator actually needs to see behind a drain deadline
+	// that then reports an expiry nobody caused.
+	if ctx.Err() == nil {
+		return
+	}
 	// A role that never claims has nothing in flight to finish, and latching
 	// drain/shutting-down on one would only mislabel a control pod's healthz.
 	if !a.plan.dispatcher || a.spawner == nil {

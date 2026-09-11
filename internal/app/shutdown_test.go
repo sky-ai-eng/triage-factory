@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,11 +82,35 @@ func TestDrainDispatches_NoOpWithoutADispatcher(t *testing.T) {
 	a := newDrainTestApp()
 	a.plan = planForRole(runmode.RoleControl)
 
-	a.drainDispatches()
+	a.drainDispatches(cancelledContext())
 
 	if a.shuttingDown.Load() || a.spawner.Draining() {
 		t.Error("drainDispatches touched the drain state on a role that never dispatches")
 	}
+}
+
+// TestDrainDispatches_NoOpWhileTheContextIsLive: a listener also returns
+// without ever having served — a port already in use — and that is not a
+// shutdown. Draining there would stop a dispatcher that is still running, and
+// the join would hold the real bind error behind a deadline nobody caused.
+func TestDrainDispatches_NoOpWhileTheContextIsLive(t *testing.T) {
+	a := newDrainTestApp()
+
+	a.drainDispatches(context.Background())
+
+	if a.shuttingDown.Load() {
+		t.Error("a live context latched shutting_down; nothing is shutting down")
+	}
+	if a.spawner.Draining() {
+		t.Error("a live context latched draining; the dispatcher is still meant to claim")
+	}
+}
+
+// cancelledContext is the shutdown signal the drain gate looks for.
+func cancelledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
 }
 
 // TestRunExecutorHealthz_DrainsWhileStillAnswering is the ordering end to end,
@@ -107,7 +132,7 @@ func TestRunExecutorHealthz_DrainsWhileStillAnswering(t *testing.T) {
 	}
 	probed := make(chan probe, 1)
 	drain := func() {
-		a.drainDispatches()
+		a.drainDispatches(ctx)
 		// Still inside the shutdown hook: the listener has not been told to
 		// stop yet, so this probe is the assertion that a draining pod
 		// answers rather than refusing.
@@ -183,4 +208,47 @@ func waitForHealthz(t *testing.T, url string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("executor healthz never came up")
+}
+
+// TestRunExecutorHealthz_DoesNotDrainOnBindFailure is the executor's half of
+// the same rule: a healthz listener that cannot bind returns its error
+// straight away, never having served, so the shutdown hook must not fire. The
+// dispatcher is still running on a live context at that point.
+func TestRunExecutorHealthz_DoesNotDrainOnBindFailure(t *testing.T) {
+	// Hold the port so the listener under test cannot have it.
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold port: %v", err)
+	}
+	defer held.Close()
+	_, port, err := net.SplitHostPort(held.Addr().String())
+	if err != nil {
+		t.Fatalf("split addr: %v", err)
+	}
+	t.Setenv("TF_HEALTHZ_PORT", port)
+
+	a := newDrainTestApp()
+	// Atomic: the hook runs on the healthz goroutine, and this test's whole
+	// point is that it might.
+	var drained atomic.Bool
+
+	served := make(chan error, 1)
+	go func() {
+		served <- a.runExecutorHealthz(context.Background(), func() { drained.Store(true) })
+	}()
+
+	select {
+	case err := <-served:
+		if err == nil {
+			t.Fatal("runExecutorHealthz returned nil on a port it could not bind")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("runExecutorHealthz did not return the bind error")
+	}
+	if drained.Load() {
+		t.Error("the shutdown hook ran on a bind failure; nothing was shutting down")
+	}
+	if a.shuttingDown.Load() || a.spawner.Draining() {
+		t.Error("a bind failure latched the drain state")
+	}
 }

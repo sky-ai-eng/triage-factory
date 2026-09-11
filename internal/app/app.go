@@ -446,15 +446,17 @@ func (a *App) Run(ctx context.Context) error {
 		err := a.srv.ListenAndServeContext(ctx, a.cfg.Addr)
 		// After the listener unwinds and before main's deferred Close
 		// releases the pools. At role=all this process dispatches too, so the
-		// join is real here; a control pod claims nothing and it no-ops.
-		a.drainDispatches()
+		// join is real here; a control pod claims nothing and it no-ops, as
+		// does a listener that returned without ever having served (it takes
+		// ctx to tell those apart).
+		a.drainDispatches(ctx)
 		return err
 	}
 	// Executor: no user HTTP. Serve the localhost healthz and block until
 	// shutdown; the dispatcher + heartbeat + reapers run as workers. The drain
 	// is handed to the healthz rather than run after it, so the probe is still
 	// answering (503) while in-flight dispatches finish.
-	return a.runExecutorHealthz(ctx, a.drainDispatches)
+	return a.runExecutorHealthz(ctx, func() { a.drainDispatches(ctx) })
 }
 
 // Close flushes telemetry and releases the database pools and the instance
