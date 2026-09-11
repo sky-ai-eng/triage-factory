@@ -563,8 +563,16 @@ func (h *Harness) truncateAll() error {
 	// table not in the list FKs into it; lumping them together avoids
 	// that ordering issue).
 	stmt := "TRUNCATE TABLE " + strings.Join(orgScopedTables, ", ") + " RESTART IDENTITY CASCADE"
-	if _, err := h.AdminDB.ExecContext(ctx, stmt); err != nil {
-		return fmt.Errorf("truncate org-scoped tables: %w", err)
+	// TRUNCATE takes ACCESS EXCLUSIVE on each table in turn, so it waits
+	// behind every other session still inside a transaction — and what
+	// Postgres hands back when that goes wrong ("deadlock detected") names
+	// neither the session nor the statement it lost to. Sample who else is
+	// live while this one is in flight, so a failure says who.
+	stopWatch := watchContention(h.AdminDB)
+	_, err := h.AdminDB.ExecContext(ctx, stmt)
+	contenders := stopWatch()
+	if err != nil {
+		return fmt.Errorf("truncate org-scoped tables: %w%s", err, describeBusyBackends(contenders))
 	}
 	// Drop auth.users rows we may have seeded. Image schema FKs from
 	// public.users → auth.users(id) ON DELETE CASCADE, but the TRUNCATE

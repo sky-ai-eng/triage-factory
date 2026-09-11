@@ -44,6 +44,19 @@ type parkFleet struct {
 	// wtPath is the run tree, keyed by the blueprint run id — one tree for
 	// every step of the blueprint, and the snapshot key.
 	wtPath, owner, repo, keyID string
+	// goroutines counts what the fixture has running on a scenario's behalf.
+	// A scenario starts none of its own: go through spawn, or the thing you
+	// started outlives the test that started it.
+	goroutines sync.WaitGroup
+}
+
+// spawn runs fn in a goroutine the fixture joins before the test returns.
+func (f *parkFleet) spawn(fn func()) {
+	f.goroutines.Add(1)
+	go func() {
+		defer f.goroutines.Done()
+		fn()
+	}()
 }
 
 func seedParkFleet(t *testing.T) *parkFleet {
@@ -82,6 +95,7 @@ func seedParkFleet(t *testing.T) *parkFleet {
 	x := newFleetSpawner(t, h, fx, "park-x-"+short)
 	y := newFleetSpawner(t, h, fx, "park-y-"+short)
 	control := NewSpawner(h.AdminDB, fx.stores, nil, nil, "")
+	stopWithTest(t, control)
 	for _, s := range []*Spawner{x, y, control} {
 		s.SetStorage(gate)
 		s.SetConversationSignals(fx.stores.ConversationSignals, nil)
@@ -91,10 +105,30 @@ func seedParkFleet(t *testing.T) *parkFleet {
 	x.SetPlacement(nil, placement)
 	y.SetPlacement(nil, placement)
 
-	return &parkFleet{
+	f := &parkFleet{
 		fleetFixture: fx, h: h, x: x, y: y, control: control,
 		blobs: blobs, gate: gate,
 		wtPath: wtPath, owner: owner, repo: repo, keyID: fx.brID,
+	}
+	t.Cleanup(func() { waitOrFail(t, &f.goroutines, "the fixture's own goroutines") })
+	return f
+}
+
+// waitOrFail joins wg, failing the test rather than hanging the binary if
+// something it counts never returns. What is left running is the interesting
+// half: it holds a connection out of this binary's one pool, and the next
+// test's Reset takes ACCESS EXCLUSIVE on every table it might be writing to.
+func waitOrFail(t *testing.T, wg *sync.WaitGroup, what string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wg.Wait()
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Errorf("%s did not finish within 30s of the test ending; the next test's Reset will deadlock against whatever they are still doing", what)
 	}
 }
 
@@ -120,7 +154,22 @@ func (f *parkFleet) engage(t *testing.T, s *Spawner) *liveEngagement {
 	s.cancels[claimed.ID] = cancel
 	s.mu.Unlock()
 	e := &liveEngagement{conv: claimed, ctx: runCtx, done: make(chan struct{})}
-	go func() {
+	// A scenario that ends before its stop arrives leaves this goroutine
+	// parked on a cancel that never comes; one that ends between the stop and
+	// the join leaves the teardown's writes in flight. Cancelling and joining
+	// here covers both, and every scenario's own `<-e.done` makes it a no-op.
+	t.Cleanup(func() {
+		cancel()
+		// The teardown's upload runs on a context nothing here cancels, so a
+		// gate still held would make this a wait with no end to it.
+		f.gate.unhold(false)
+		select {
+		case <-e.done:
+		case <-time.After(30 * time.Second):
+			t.Errorf("the engagement under claim %s never finished its teardown after the test cancelled it", claimed.ClaimID)
+		}
+	})
+	f.spawn(func() {
 		defer close(e.done)
 		<-runCtx.Done()
 		s.mu.Lock()
@@ -138,7 +187,7 @@ func (f *parkFleet) engage(t *testing.T, s *Spawner) *liveEngagement {
 			runtime:        claimed.Runtime,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 		}, "")
-	}()
+	})
 	return e
 }
 
@@ -383,11 +432,12 @@ func (f *parkFleet) assertInvariants(t *testing.T) {
 // way a real store would rather than pinning the suite.
 type gatedPutStorage struct {
 	storage.Storage
-	mu      sync.Mutex
-	armed   bool
-	fail    bool
-	entered chan struct{}
-	release chan struct{}
+	mu       sync.Mutex
+	armed    bool
+	fail     bool
+	released bool
+	entered  chan struct{}
+	release  chan struct{}
 }
 
 // hold arms the gate for the next upload.
@@ -395,25 +445,30 @@ func (g *gatedPutStorage) hold() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.armed = true
+	g.released = false
 	g.release = make(chan struct{})
 }
 
-// let lets the held upload land.
-func (g *gatedPutStorage) let() {
+// unhold ends the held upload, landing it or failing it. Idempotent, because
+// a scenario that fataled before it got here still has a teardown goroutine
+// blocked in the gate, and the fixture's cleanup has to get it out.
+func (g *gatedPutStorage) unhold(fail bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.fail = false
+	if g.released {
+		return
+	}
+	g.released = true
+	g.fail = fail
 	close(g.release)
 }
 
+// let lets the held upload land.
+func (g *gatedPutStorage) let() { g.unhold(false) }
+
 // abort ends the held upload with a store error instead — the persist that
 // never lands.
-func (g *gatedPutStorage) abort() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.fail = true
-	close(g.release)
-}
+func (g *gatedPutStorage) abort() { g.unhold(true) }
 
 func (g *gatedPutStorage) Put(ctx context.Context, key string, r io.Reader) error {
 	g.mu.Lock()
@@ -653,10 +708,10 @@ func TestFleet_CrossExecutorResume_WaitsOutTheLiveWriter(t *testing.T) {
 	f.deliver(t, next)
 
 	spans := recordSpans(t)
-	go func() {
+	f.spawn(func() {
 		time.Sleep(150 * time.Millisecond)
 		f.gate.let()
-	}()
+	})
 	cwd, prov, err := f.ensureOn(t, f.y, next, failingFreshBuilder(t))
 	if err != nil {
 		t.Fatalf("ensureWorkspace on Y: %v", err)

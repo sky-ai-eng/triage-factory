@@ -231,10 +231,30 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		// conv is a fresh per-iteration `:=` binding (not a loop variable), so each
 		// goroutine captures its own; the deferred receive hands the slot back on
 		// terminal.
+		s.dispatchWG.Add(1)
 		go func() {
+			defer s.dispatchWG.Done()
 			defer func() { <-sem }()
 			s.dispatchClaimedConversation(ctx, conv)
 		}()
+	}
+}
+
+// waitForDispatches blocks until every dispatch goroutine this spawner has in
+// flight has returned, reporting whether they all did before ctx expired. It
+// stops nothing on its own: cancel the dispatcher's ctx first, or the wait is
+// for a claim that is still legitimately running.
+func (s *Spawner) waitForDispatches(ctx context.Context) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.dispatchWG.Wait()
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
