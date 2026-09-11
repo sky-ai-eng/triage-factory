@@ -150,10 +150,12 @@ func (a *App) handleExecutorHealthz(w http.ResponseWriter, r *http.Request) {
 // TFAC-586 owns the actual exit; the HEALTHCHECK must not kill it early.
 //
 // shuttingDown is tested first and wins over that override: the process is
-// leaving, so the honest answer is not-ready no matter what the fence says.
-// Once it latches, the dispatcher loop has already returned and the heartbeat
-// has already stopped, so every other input here is about to read unhealthy
-// anyway — this just makes the reason attributable instead of inferred.
+// leaving, so the honest answer is not-ready no matter what the fence says. It
+// latches at the START of the drain — before the dispatcher loop has
+// necessarily returned, while claimed work is still finishing and the last
+// heartbeat is still fresh — so for that window every other input here can
+// read perfectly healthy. Which is exactly why leaving is asked about
+// directly rather than inferred from the others going stale.
 func executorHealthy(dispatcherAlive, heartbeatFresh, brokerOK, fenced, shuttingDown bool) bool {
 	if shuttingDown {
 		return false

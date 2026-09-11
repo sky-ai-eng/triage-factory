@@ -2,9 +2,12 @@ package delegate
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -105,5 +108,83 @@ func TestWaitForDispatches_IdleSpawnerDrainsAtOnce(t *testing.T) {
 	}
 	if waited := time.Since(start); waited > time.Second {
 		t.Errorf("idle drain took %s; it must not wait on anything", waited)
+	}
+}
+
+// blockingClaimStore holds the claim loop inside ClaimNextConversation until
+// the test releases it, which is how a test puts the dispatcher in the state
+// the shutdown race needs: mid-iteration, past its context check, still able
+// to register one more dispatch. Everything else delegates to the real store.
+type blockingClaimStore struct {
+	db.ConversationQueueStore
+	entered   chan struct{}
+	enterOnce sync.Once
+	release   chan struct{}
+}
+
+func (b *blockingClaimStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, p db.ClaimPlacement) (*domain.Conversation, error) {
+	b.enterOnce.Do(func() { close(b.entered) })
+	<-b.release
+	return nil, nil // queue drained: the loop unwinds and RunDispatcher returns
+}
+
+// TestWaitForDispatches_WaitsForTheClaimLoopToStop pins the ordering
+// sync.WaitGroup requires. drainConversationQueue re-reads its context only
+// between iterations, so a cancel landing mid-iteration still lets it reach
+// dispatchWG.Add — and an Add racing a Wait on a zero counter is documented
+// misuse: it panics when the WaitGroup catches it, and otherwise lets Wait
+// return without joining the dispatch that just started.
+//
+// So the join must not report drained while the claim loop can still register
+// one. Holding the loop inside ClaimNextConversation is what makes that window
+// a state the test can observe rather than a race it has to hope for.
+func TestWaitForDispatches_WaitsForTheClaimLoopToStop(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := testSpawnerStores(database)
+	blocker := &blockingClaimStore{
+		ConversationQueueStore: stores.ConversationQueue,
+		entered:                make(chan struct{}),
+		release:                make(chan struct{}),
+	}
+	stores.ConversationQueue = blocker
+	s := NewSpawner(database, stores, nil, nil, "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.RunDispatcher(ctx, time.Hour) // the boot drain is what reaches the claim
+
+	select {
+	case <-blocker.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the dispatcher never reached its first claim")
+	}
+
+	cancel() // SIGTERM lands while the loop is mid-iteration
+
+	joined := make(chan bool, 1)
+	go func() {
+		joinCtx, joinCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer joinCancel()
+		joined <- s.WaitForDispatches(joinCtx)
+	}()
+
+	select {
+	case <-joined:
+		t.Fatal("WaitForDispatches reported drained while the claim loop was still inside ClaimNextConversation, where it can still register a dispatch")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	close(blocker.release) // the claim returns empty; the loop and RunDispatcher unwind
+
+	select {
+	case ok := <-joined:
+		if !ok {
+			t.Fatal("WaitForDispatches reported a timeout after the dispatcher stopped")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("WaitForDispatches never returned after the dispatcher stopped")
+	}
+	if s.DispatcherAlive() {
+		t.Error("the join returned while the dispatcher loop was still live")
 	}
 }

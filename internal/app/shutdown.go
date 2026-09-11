@@ -58,7 +58,9 @@ func (a *App) drainDispatches(ctx context.Context) {
 //     what actually stops the claiming; the flag is how a reader of the
 //     healthz can tell that from a stall.
 //  3. Join, on a detached context: the run context is cancelled already, so an
-//     inherited deadline would expire the drain before it began.
+//     inherited deadline would expire the drain before it began. The join
+//     covers the claim loop as well as the dispatches it started — see
+//     WaitForDispatches for why the two cannot be waited on separately.
 func (a *App) awaitDispatches(wait func(context.Context) bool, timeout time.Duration) bool {
 	a.shuttingDown.Store(true)
 	a.spawner.SetDraining(true)
