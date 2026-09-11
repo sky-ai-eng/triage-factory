@@ -272,7 +272,8 @@ func TestWithTx_Postgres_CanceledCtxSurfacesAsCanceled(t *testing.T) {
 		}
 		cancel()
 		return dbtest.WaitTxDone(t, func(live context.Context) error {
-			return tx.Repos.SetConfigured(live, orgID, []string{"gone/client"})
+			_, _, err := tx.Repos.List(live, orgID, db.ListOpts{})
+			return err
 		})
 	})
 	if err == nil {

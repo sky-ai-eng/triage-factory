@@ -141,7 +141,8 @@ func TestWithTx_SQLite_CanceledCtxSurfacesAsCanceled(t *testing.T) {
 			}
 			cancel()
 			return dbtest.WaitTxDone(t, func(live context.Context) error {
-				return tx.Repos.SetConfigured(live, runmode.LocalDefaultOrgID, []string{"gone/client"})
+				_, _, err := tx.Repos.List(live, runmode.LocalDefaultOrgID, db.ListOpts{})
+				return err
 			})
 		})
 	if err == nil {

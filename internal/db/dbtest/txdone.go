@@ -24,9 +24,11 @@ import (
 //
 // probe must run a statement on the transaction under the ctx it is handed —
 // a live one, so the only thing that can fail it is the transaction already
-// being done, which is the state being waited for. A non-nil return means the
-// transaction never finished, and the body should return it so the test fails
-// as a broken premise rather than a missing wrap.
+// being done, which is the state being waited for. Keep it a READ: until the
+// rollback lands the probe really does execute, and a write would replay its
+// effect on every poll. A non-nil return means the transaction never finished,
+// and the body should return it so the test fails as a broken premise rather
+// than a missing wrap.
 func WaitTxDone(t *testing.T, probe func(context.Context) error) error {
 	t.Helper()
 	const deadline = 2 * time.Second
