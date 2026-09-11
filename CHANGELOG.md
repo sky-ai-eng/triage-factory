@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.13.2](https://github.com/sky-ai-eng/triage-factory/compare/v1.13.1...v1.13.2) (2026-09-11)
+
+
+### Bug Fixes
+
+* **delegate:** settle SDK run spend at every park and read the SDK's cost as a running total ([#1045](https://github.com/sky-ai-eng/triage-factory/issues/1045)) ([7b9ab06](https://github.com/sky-ai-eng/triage-factory/commit/7b9ab0681b983ae089888476469e6ef94b2bb368))
+* **deps:** patch the 12 advisories in the Go and SDK-runtime trees ([#1043](https://github.com/sky-ai-eng/triage-factory/issues/1043)) ([0f9b7e3](https://github.com/sky-ai-eng/triage-factory/commit/0f9b7e326daba0f1234a44637912e9ddd48fe03d))
+* **slack:** name a thread task's title after its author, not just its channel (TFAC-957) ([#1047](https://github.com/sky-ai-eng/triage-factory/issues/1047)) ([414165c](https://github.com/sky-ai-eng/triage-factory/commit/414165c1f1f9d022161570d8cd9a86d977312138))
+* **tasks:** carry the attention tier in the task list's lane order (TFAC-954) ([#1051](https://github.com/sky-ai-eng/triage-factory/issues/1051)) ([6c31be1](https://github.com/sky-ai-eng/triage-factory/commit/6c31be1321d31cbfc013edb2d6f528d84fbb58b3))
+* **tasks:** page POST /api/tasks/list by keyset (TFAC-956) ([#1052](https://github.com/sky-ai-eng/triage-factory/issues/1052)) ([b8612d4](https://github.com/sky-ai-eng/triage-factory/commit/b8612d41e5abeb09ddca424dd9e42d10ee4526bb))
+* **tasks:** server-side search + sort on POST /api/tasks/list (TFAC-953) ([#1049](https://github.com/sky-ai-eng/triage-factory/issues/1049)) ([e370aac](https://github.com/sky-ai-eng/triage-factory/commit/e370aac5e207d09d8c66b3206362e72b3ce9e1c8))
+* **tasks:** stop the run when a task is returned to the queue (TFAC-952) ([#1048](https://github.com/sky-ai-eng/triage-factory/issues/1048)) ([f9a28d9](https://github.com/sky-ai-eng/triage-factory/commit/f9a28d9eda5d2236fcb4b968c0fe8912985fb60a))
+* **tasks:** the lane's own event-type set on POST /api/tasks/facets (TFAC-955) ([#1050](https://github.com/sky-ai-eng/triage-factory/issues/1050)) ([c7c6995](https://github.com/sky-ai-eng/triage-factory/commit/c7c699573593e3fcc9f3feb6905eba2515d0def9))
+
 ## [1.13.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.13.0...v1.13.1) (2026-09-09)
 
 
