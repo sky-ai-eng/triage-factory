@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.13.3](https://github.com/sky-ai-eng/triage-factory/compare/v1.13.2...v1.13.3) (2026-09-11)
+
+
+### Bug Fixes
+
+* **agentproc:** remove AskUserQuestion from every SDK run's tool set ([#1053](https://github.com/sky-ai-eng/triage-factory/issues/1053)) ([82c9eb7](https://github.com/sky-ai-eng/triage-factory/commit/82c9eb7b21c6de737ec0625db6849cedfe580fcc))
+* **api:** classify a client disconnect mid-transaction as client-gone ([#1055](https://github.com/sky-ai-eng/triage-factory/issues/1055)) ([2e200bd](https://github.com/sky-ai-eng/triage-factory/commit/2e200bd6f9aed1a164e4e7b4861f547280fffdcb))
+* **app:** join in-flight dispatches before shutdown closes the pools (TFAC-962) ([#1059](https://github.com/sky-ai-eng/triage-factory/issues/1059)) ([9e8aa81](https://github.com/sky-ai-eng/triage-factory/commit/9e8aa81b15f5fb6e704a5af9a78ead3fb0f5d90f))
+* **db:** route every hand-rolled transaction through one cancellation-aware helper (TFAC-959) ([#1056](https://github.com/sky-ai-eng/triage-factory/issues/1056)) ([7a881c3](https://github.com/sky-ai-eng/triage-factory/commit/7a881c32238509bca0d4abee083391f0149abada))
+* **delegate:** join the fleet fixture's goroutines before its test returns (TFAC-961) ([#1058](https://github.com/sky-ai-eng/triage-factory/issues/1058)) ([e13c994](https://github.com/sky-ai-eng/triage-factory/commit/e13c9947ad4f9d7b52a45e051d0992b31069fa01))
+
 ## [1.13.2](https://github.com/sky-ai-eng/triage-factory/compare/v1.13.1...v1.13.2) (2026-09-11)
 
 
