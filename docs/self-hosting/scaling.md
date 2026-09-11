@@ -65,11 +65,10 @@ Each executor's container HEALTHCHECK hits its localhost `GET /healthz` — see
 
 An executor that is asked to stop finishes what it already claimed before it
 goes. On SIGTERM it stops claiming new work, its `GET /healthz` flips to 503
-with `shutting_down: true`, and only then does it wait — up to
-`TF_SHUTDOWN_DRAIN_SEC` (default 20s) — for in-flight dispatches to return. The
-ordering is the point: a draining executor answers its probe rather than
-refusing connections, so an orchestrator sees a pod that is leaving instead of
-one that has already gone.
+with `shutting_down: true`, and only then does it wait — up to 15s — for
+in-flight dispatches to return. The ordering is the point: a draining executor
+answers its probe rather than refusing connections, so an orchestrator sees a
+pod that is leaving instead of one that has already gone.
 
 The wait exists because a dispatch's last act is un-cancellable by design — the
 blueprint it just ran must be advanced or finalized, so that write deliberately
@@ -79,11 +78,14 @@ re-runs it, which costs an attempt and an API bill for work already done.
 
 Two things to set alongside it:
 
-- **Termination grace period longer than the drain.** A SIGKILL truncates the
-  write whether or not TF is still waiting, so leave the drain room to finish
-  plus ~5s for the trace flush (the compose default 30s comfortably covers the
-  default 20s drain). If the deadline does expire, TF logs one WARN naming it
-  and closes anyway — the next boot's reconcile recovers the work.
+- **A termination grace period of at least 30s.** A SIGKILL truncates the write
+  whether or not TF is still waiting. The shutdown sequence is bounded at 25s
+  (15s drain, then 5s to stop the healthz listener and 5s to flush traces), so
+  the compose default of 30s covers it with room to spare. If the drain
+  deadline does expire, TF logs one WARN naming it and closes anyway — the next
+  boot's reconcile recovers the work. Reaching it at all means something is
+  wrong: the wait is for already-cancelled goroutines to unwind, which takes
+  seconds.
 - **Drain first for a long turn.** The shutdown wait is bounded by work already
   claimed, and an agent turn can outlast any sane grace period. To retire an
   executor cleanly, mark it draining (it stops claiming while live runs finish

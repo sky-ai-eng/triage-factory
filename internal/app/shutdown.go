@@ -2,38 +2,22 @@ package app
 
 import (
 	"context"
-	"os"
-	"strconv"
-	"strings"
 	"time"
 )
 
-// DefaultShutdownDrainTimeout bounds how long shutdown waits for in-flight
-// dispatches before the pools close under them (TF_SHUTDOWN_DRAIN_SEC).
+// shutdownDrainTimeout bounds how long shutdown waits for in-flight dispatches
+// before the pools close under them. A backstop, not a budget: the wait is for
+// already-cancelled goroutines to unwind and land their terminal write, which
+// takes seconds, so reaching this deadline means something is wrong rather than
+// something is slow.
 //
-// Bounded rather than indefinite, because the orchestrator's own grace period
-// is the real ceiling: a SIGKILL at the end of it truncates the write whether
-// or not we are still waiting, so an unbounded wait buys nothing and costs the
-// chance to log why the drain did not finish. 20s sits under the common 30s
-// default with room for Close's own 5s trace flush.
-const DefaultShutdownDrainTimeout = 20 * time.Second
-
-// shutdownDrainTimeout resolves TF_SHUTDOWN_DRAIN_SEC: unset is the default,
-// 0 disables the join outright (close immediately, accepting the truncated
-// write), and an unparseable or negative value warns and falls back.
-func shutdownDrainTimeout() time.Duration {
-	raw := strings.TrimSpace(os.Getenv("TF_SHUTDOWN_DRAIN_SEC"))
-	if raw == "" {
-		return DefaultShutdownDrainTimeout
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 0 {
-		appLog.Warn("invalid TF_SHUTDOWN_DRAIN_SEC; using default",
-			"value", raw, "default", DefaultShutdownDrainTimeout)
-		return DefaultShutdownDrainTimeout
-	}
-	return time.Duration(n) * time.Second
-}
+// Bounded rather than indefinite, because the orchestrator's grace period is
+// the real ceiling — a SIGKILL truncates the write whether or not we are still
+// waiting — so an unbounded wait buys nothing and costs the chance to log why
+// the drain did not finish. It shares that ceiling with the two deadlines that
+// follow it on an executor (5s to stop the healthz listener, 5s to flush
+// traces), so 15s keeps the whole sequence inside the common 30s default.
+const shutdownDrainTimeout = 15 * time.Second
 
 // drainDispatches is the shutdown join: it stops this process answering ready,
 // latches the drain flag, and blocks until every dispatch goroutine has
@@ -48,7 +32,7 @@ func (a *App) drainDispatches() {
 	if !a.plan.dispatcher || a.spawner == nil {
 		return
 	}
-	a.awaitDispatches(a.spawner.WaitForDispatches, shutdownDrainTimeout())
+	a.awaitDispatches(a.spawner.WaitForDispatches, shutdownDrainTimeout)
 }
 
 // awaitDispatches performs the drain sequence against an injected join and
@@ -69,12 +53,6 @@ func (a *App) awaitDispatches(wait func(context.Context) bool, timeout time.Dura
 	a.shuttingDown.Store(true)
 	a.spawner.SetDraining(true)
 
-	if timeout <= 0 {
-		appLog.Warn("shutdown drain disabled; in-flight dispatches will race the pool close and their terminal writes may fail — the next boot's reconcile re-queues them",
-			"env", "TF_SHUTDOWN_DRAIN_SEC")
-		return false
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -88,6 +66,6 @@ func (a *App) awaitDispatches(wait func(context.Context) bool, timeout time.Dura
 	// holding the process open past the orchestrator's grace period just moves
 	// the same truncation behind a SIGKILL where no line explains it.
 	appLog.Warn("shutdown drain deadline expired; dispatches are still in flight and their terminal writes may fail against the closing pool — the next boot's reconcile re-queues them",
-		"timeout", timeout, "env", "TF_SHUTDOWN_DRAIN_SEC")
+		"timeout", timeout)
 	return false
 }

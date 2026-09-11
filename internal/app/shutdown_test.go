@@ -74,24 +74,6 @@ func TestAwaitDispatches_DeadlineExpiryLogsAndReturns(t *testing.T) {
 	}
 }
 
-// TestAwaitDispatches_ZeroTimeoutSkipsTheJoin: TF_SHUTDOWN_DRAIN_SEC=0 is the
-// opt-out for an operator who would rather take the truncated write than the
-// delay. It must not consult the join at all.
-func TestAwaitDispatches_ZeroTimeoutSkipsTheJoin(t *testing.T) {
-	a := newDrainTestApp()
-
-	joined := false
-	if a.awaitDispatches(func(context.Context) bool { joined = true; return true }, 0) {
-		t.Error("a disabled drain must not report a clean drain")
-	}
-	if joined {
-		t.Error("a disabled drain still waited on the join")
-	}
-	if !a.shuttingDown.Load() {
-		t.Error("a disabled drain must still stop this pod reporting ready")
-	}
-}
-
 // TestDrainDispatches_NoOpWithoutADispatcher: a control pod claims nothing, so
 // it has nothing in flight to finish. Latching drain/shutting-down there would
 // only mislabel a pod whose real readiness signal is its own HTTP server.
@@ -106,30 +88,6 @@ func TestDrainDispatches_NoOpWithoutADispatcher(t *testing.T) {
 	}
 }
 
-// TestShutdownDrainTimeout pins the knob: unset is the default, a valid count
-// of seconds is taken as given, 0 disables, and anything unparseable falls
-// back rather than shortening the drain to nothing by accident.
-func TestShutdownDrainTimeout(t *testing.T) {
-	cases := []struct {
-		raw  string
-		want time.Duration
-	}{
-		{"", DefaultShutdownDrainTimeout},
-		{"45", 45 * time.Second},
-		{"  45  ", 45 * time.Second},
-		{"0", 0},
-		{"-1", DefaultShutdownDrainTimeout},
-		{"20s", DefaultShutdownDrainTimeout},
-		{"nonsense", DefaultShutdownDrainTimeout},
-	}
-	for _, tc := range cases {
-		t.Setenv("TF_SHUTDOWN_DRAIN_SEC", tc.raw)
-		if got := shutdownDrainTimeout(); got != tc.want {
-			t.Errorf("TF_SHUTDOWN_DRAIN_SEC=%q: got %s, want %s", tc.raw, got, tc.want)
-		}
-	}
-}
-
 // TestRunExecutorHealthz_DrainsWhileStillAnswering is the ordering end to end,
 // over a real socket: on cancellation the drain runs first and the endpoint is
 // still reachable while it does — answering 503 with shutting_down set, which
@@ -137,7 +95,6 @@ func TestShutdownDrainTimeout(t *testing.T) {
 // does the listener stop.
 func TestRunExecutorHealthz_DrainsWhileStillAnswering(t *testing.T) {
 	t.Setenv("TF_HEALTHZ_PORT", freePort(t))
-	t.Setenv("TF_SHUTDOWN_DRAIN_SEC", "5")
 	url := fmt.Sprintf("http://127.0.0.1:%s/healthz", executorHealthzPort())
 
 	a := newDrainTestApp()
