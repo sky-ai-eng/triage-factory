@@ -14,8 +14,8 @@ import (
 // Every paginated read on /api/* speaks this one contract: the request body
 // carries `page_size` + `page_token` (PageRequest, embedded in the route's own
 // filter struct), and the response is `{items, next_page_token, total_count}`
-// (WriteList). A route resolves the two into a Page — the store-facing
-// limit/offset window — with ResolvePage, which validates rather than repairs:
+// (WriteList). A route resolves the two into a Page — the store-facing window,
+// a size plus a position — with ResolvePage, which validates rather than repairs:
 // a page_size outside the range is a 400, never a clamp, so a caller asking
 // for 500 rows learns it didn't get them.
 
@@ -56,6 +56,14 @@ type Page struct {
 	Limit  int
 	Offset int
 
+	// After is the keyset position a store-backed list resumes from: the
+	// previous page's last row rendered as one string per ORDER BY term. It
+	// is the alternative to Offset, never a companion — a route that mints
+	// keyset tokens leaves Offset at 0 and vice versa — and it is what makes
+	// a page correct on a result set that mutates while it is being read.
+	// Empty on the first page and on every route that still pages by offset.
+	After []string
+
 	// CountOnly marks the explicit page_size: 0 request. Limit is 0 then,
 	// and 0 means "no window" to a store (db.Unwindowed), so a handler must
 	// hand this flag to db.ListOpts rather than let a zero Limit through —
@@ -71,25 +79,34 @@ type Page struct {
 }
 
 // pageToken is the decoded token payload. It is deliberately opaque on the
-// wire (base64url of this JSON): offset-based paging is what the stores
-// implement today — simple, uniform across arbitrary filter/sort combinations,
-// and correct in both dialects — but a keyset cursor can replace this payload
-// later without changing the wire contract, because no client is entitled to
-// read or construct one. Anything a client can parse is something it will
-// eventually depend on.
+// wire (base64url of this JSON), which is what let the keyset form below land
+// without moving anything a client sees: no client is entitled to read or
+// construct one, so the payload is ours to change. Anything a client can parse
+// is something it will eventually depend on.
 //
 // F is a short hash of the canonicalized filter set the token was minted with.
 // A token is only valid for that filter set: without the check, page 2 of one
-// query could be requested with page 1's token of another, and the offset would
-// silently address a different result set.
-// C carries an upstream position instead of O for a proxy list (see
-// WriteProxyList): the two are alternatives, never both, because a proxy list
-// has no offset of its own to advance and a store-backed list has no upstream
-// to resume.
+// query could be requested with page 1's token of another, and the position
+// would silently address a different result set.
+//
+// O, C and K are the three mutually exclusive positions a token can carry, and
+// decodePageToken refuses a token holding more than one:
+//
+//   - O is an offset — how many matching rows to skip. Simple and uniform
+//     across arbitrary filter/sort combinations, and wrong on a result set
+//     that mutates between pages: a row removed above the cut makes page 2
+//     skip one, a row inserted above it makes page 2 repeat one.
+//   - K is a keyset — the previous page's last row rendered as one string per
+//     ORDER BY term, which a store compares against the same tuple to resume
+//     exactly where the last page stopped, whatever happened above the cut.
+//     It is per-route: a route opts in by minting through WriteListKeyset.
+//   - C is an upstream position for a proxy list (see WriteProxyList), which
+//     has no offset of its own to advance.
 type pageToken struct {
-	O int    `json:"o"`
-	F string `json:"f"`
-	C string `json:"c,omitempty"`
+	O int      `json:"o"`
+	F string   `json:"f"`
+	C string   `json:"c,omitempty"`
+	K []string `json:"k,omitempty"`
 }
 
 // FilterFingerprint returns a short, stable hash of a list route's filter set.
@@ -123,9 +140,37 @@ func FilterFingerprint(filters any) string {
 // maxPageSize of 0 means MaxPageSize. fingerprint is the caller's
 // FilterFingerprint over its canonicalized filters.
 //
+// This is the offset door. A route that pages by keyset takes
+// ResolveKeysetPage instead, which refuses the tokens this one accepts.
+//
 // The returned Page is meaningful only when v flushed nothing; on a fault it
 // is the default window, which the caller never reaches.
 func ResolvePage(v *Validation, req PageRequest, fingerprint string, maxPageSize int) Page {
+	return resolvePage(v, req, fingerprint, maxPageSize, false)
+}
+
+// ResolveKeysetPage is ResolvePage for a route that pages by keyset, and it
+// pairs with WriteListKeyset the way ResolvePage pairs with WriteList: a route
+// uses one pair or the other, and this is what makes mixing them a fault
+// rather than a silent downgrade.
+//
+// The difference is one refusal: a page_token that carries anything but a
+// keyset is INVALID_PARAM here, where ResolvePage would have taken its offset
+// and paged from it. That matters because the offset would still WORK — the
+// stores keep offset paging for the routes that use it — and would quietly
+// hand this route's caller the drop-and-repeat behavior it was converted to
+// stop doing. A route that mints one form of token accepts that form only, so
+// there is no input that makes it page the way it no longer pages.
+//
+// A token from a build that predates the conversion is the case this refuses,
+// and the refusal is the honest answer to it: the caller restarts from the
+// first page and gets correct paging immediately, rather than finishing a walk
+// that silently skips rows.
+func ResolveKeysetPage(v *Validation, req PageRequest, fingerprint string, maxPageSize int) Page {
+	return resolvePage(v, req, fingerprint, maxPageSize, true)
+}
+
+func resolvePage(v *Validation, req PageRequest, fingerprint string, maxPageSize int, keyset bool) Page {
 	if maxPageSize <= 0 {
 		maxPageSize = MaxPageSize
 	}
@@ -144,6 +189,7 @@ func ResolvePage(v *Validation, req PageRequest, fingerprint string, maxPageSize
 	}
 
 	offset, cursor := 0, ""
+	var after []string
 	if req.PageToken != "" {
 		tok, err := decodePageToken(req.PageToken)
 		switch {
@@ -159,18 +205,25 @@ func ResolvePage(v *Validation, req PageRequest, fingerprint string, maxPageSize
 				Message: "page_token was issued for a different set of filters; restart from the first page",
 				Field:   "page_token",
 			})
+		case keyset && len(tok.K) == 0:
+			v.Add(ErrorItem{
+				Reason:  ReasonInvalidParam,
+				Message: "page_token does not address this list's ordering; restart from the first page",
+				Field:   "page_token",
+			})
 		default:
-			offset, cursor = tok.O, tok.C
+			offset, cursor, after = tok.O, tok.C, tok.K
 		}
 	}
-	return Page{Limit: limit, Offset: offset, CountOnly: countOnly, Cursor: cursor, fingerprint: fingerprint}
+	return Page{Limit: limit, Offset: offset, After: after, CountOnly: countOnly, Cursor: cursor, fingerprint: fingerprint}
 }
 
 func encodePageToken(tok pageToken) string {
 	raw, err := json.Marshal(tok)
 	if err != nil {
-		// pageToken is two scalar fields; Marshal cannot fail. An empty token
-		// reads as "last page", which is the safe degrade if it somehow does.
+		// pageToken is scalars and a string slice; Marshal cannot fail. An
+		// empty token reads as "last page", which is the safe degrade if it
+		// somehow does.
 		return ""
 	}
 	return base64.RawURLEncoding.EncodeToString(raw)
@@ -187,6 +240,24 @@ func decodePageToken(s string) (pageToken, error) {
 	}
 	if tok.O < 0 {
 		return pageToken{}, fmt.Errorf("negative offset %d", tok.O)
+	}
+	// The three positions are alternatives. A token carrying two of them was
+	// not minted here, and guessing which one to honor is how a caller ends up
+	// paging a result set from a position nothing produced.
+	//
+	// A zero O is "no offset", not "offset zero": the two are the same eight
+	// bytes on the wire, and a minted keyset token carries no O at all. Only
+	// the first page is at offset zero, and the first page is the one nobody
+	// needs a token for — so reading a zero as a position held would refuse
+	// every keyset token there is.
+	positions := 0
+	for _, held := range []bool{tok.O != 0, tok.C != "", len(tok.K) > 0} {
+		if held {
+			positions++
+		}
+	}
+	if positions > 1 {
+		return pageToken{}, fmt.Errorf("page token carries %d positions, want at most 1", positions)
 	}
 	return tok, nil
 }
@@ -217,6 +288,35 @@ func WriteList[T any](w http.ResponseWriter, page Page, items []T, total int) {
 	next := ""
 	if end := page.Offset + len(items); end < total && len(items) > 0 {
 		next = encodePageToken(pageToken{O: end, F: page.fingerprint})
+	}
+	WriteJSON(w, http.StatusOK, listResponse[T]{Items: items, NextPageToken: next, TotalCount: &total})
+}
+
+// WriteListKeyset writes the list envelope for one page of a keyset-paged
+// read — the same wire shape WriteList writes, minting a keyset position
+// instead of an offset. A route opts in by calling this instead; the tokens
+// the two mint are interchangeable to a client and distinguishable only to
+// ResolvePage, so converting one route leaves every other list alone.
+//
+// nextKey is the ORDER BY tuple of this page's last row — one string per term,
+// in the order's own term order — or nil when there is no page after this one.
+// A nil nextKey is the ONLY "last page" signal here: unlike WriteList there is
+// no offset to compare against total, because a keyset page does not know its
+// own position in the result set, and must not — a row deleted above the cut
+// is exactly what makes that arithmetic lie. So the caller proves it: it asks
+// the store for one row past the window and passes nil when that row wasn't
+// there.
+//
+// The key is not reflected off T. A route knows which columns its order ran
+// on; this writer would have to guess, and a guess that compiles is a guess
+// that pages wrong.
+func WriteListKeyset[T any](w http.ResponseWriter, page Page, items []T, total int, nextKey []string) {
+	if items == nil {
+		items = []T{}
+	}
+	next := ""
+	if len(nextKey) > 0 && len(items) > 0 {
+		next = encodePageToken(pageToken{F: page.fingerprint, K: nextKey})
 	}
 	WriteJSON(w, http.StatusOK, listResponse[T]{Items: items, NextPageToken: next, TotalCount: &total})
 }

@@ -1501,6 +1501,212 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		}
 	})
 
+	// keysetWalk pages a filter the way the task list handler does: each page
+	// asks for the rows after the previous page's last row, with the cursor
+	// minted from that row by db.TaskSortKey. It returns the pages, so a
+	// caller can assert where each one started as well as what the whole walk
+	// produced.
+	//
+	// mutate, when non-nil, runs once between page 1 and page 2 — after the
+	// cursor is minted, before it is used. That is the lane moving under the
+	// reader, which is the entire reason a task page is a keyset and not an
+	// offset.
+	keysetWalk := func(t *testing.T, s db.TaskStore, orgID string, f db.TaskListFilter, limit int, mutate func()) [][]string {
+		t.Helper()
+		var pages [][]string
+		var after []string
+		for page := 0; page < 32; page++ {
+			rows, _, err := s.List(ctx, orgID, f, db.ListOpts{Limit: limit, After: after})
+			if err != nil {
+				t.Fatalf("List(page %d, after %v): %v", page, after, err)
+			}
+			ids := make([]string, len(rows))
+			for i, row := range rows {
+				ids[i] = row.ID
+			}
+			pages = append(pages, ids)
+			if len(rows) < limit {
+				return pages
+			}
+			after = db.TaskSortKey(f, rows[len(rows)-1])
+			if page == 0 && mutate != nil {
+				mutate()
+			}
+		}
+		t.Fatalf("keyset walk did not terminate: %v", pages)
+		return nil
+	}
+
+	t.Run("List_keyset_pages_partition_the_result_set", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		// The seeder mints rows that tie on every term of the default order
+		// except the id — same status, no closed_at, one event type, one
+		// priority — so this walk is also the id tiebreaker's exercise: a
+		// keyset chain that stopped short of the last term would repeat or
+		// drop every one of them.
+		const n = 7
+		for i := range n {
+			seed(t, fmt.Sprintf("keyset-%d", i))
+		}
+		want, wantTotal := listIDs(t, s, orgID, queueFilter(), db.ListOpts{Limit: 50})
+		if wantTotal != n || len(want) != n {
+			t.Fatalf("unpaged read returned %d ids / total %d, want %d / %d", len(want), wantTotal, n, n)
+		}
+
+		pages := keysetWalk(t, s, orgID, queueFilter(), 3, nil)
+		var walked []string
+		for _, page := range pages {
+			walked = append(walked, page...)
+		}
+		if !slices.Equal(walked, want) {
+			t.Errorf("keyset walk = %v, want %v (pages must partition the total order)", walked, want)
+		}
+		if len(pages) != 3 || len(pages[0]) != 3 || len(pages[1]) != 3 || len(pages[2]) != 1 {
+			t.Errorf("page sizes = %v, want 3 / 3 / 1 over seven rows", pages)
+		}
+	})
+
+	t.Run("List_keyset_holds_when_a_row_above_the_cut_leaves", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		const n = 7
+		for i := range n {
+			seed(t, fmt.Sprintf("leaves-%d", i))
+		}
+		want, _ := listIDs(t, s, orgID, queueFilter(), db.ListOpts{Limit: 50})
+		if len(want) != n {
+			t.Fatalf("unpaged read returned %d ids, want %d", len(want), n)
+		}
+
+		pages := keysetWalk(t, s, orgID, queueFilter(), 3, func() {
+			// A run finishes and its card leaves the lane — from above the
+			// point page 1 stopped at.
+			if _, err := s.Close(ctx, orgID, want[1], "test", ""); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+		})
+		if !slices.Equal(pages[0], want[0:3]) {
+			t.Fatalf("page 1 = %v, want %v", pages[0], want[0:3])
+		}
+		if !slices.Equal(pages[1], want[3:6]) {
+			t.Errorf("page 2 = %v, want %v — the cursor names a position, so losing a row above it must not skip %s", pages[1], want[3:6], want[3])
+		}
+	})
+
+	t.Run("List_keyset_holds_when_a_row_arrives_above_the_cut", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		// Ordered by title, because the arriving row's position has to be
+		// exact: the default order ties these rows on everything but their
+		// ids, which is the right shape for the walk above and the wrong one
+		// for naming where a new row lands.
+		f := queueFilter()
+		f.SortKey, f.SortDir = db.TaskSortTitle, db.TaskSortDirAsc
+		const n = 7
+		for i := range n {
+			seed(t, fmt.Sprintf("arrives-b%d", i))
+		}
+		want, _ := listIDs(t, s, orgID, f, db.ListOpts{Limit: 50})
+		if len(want) != n {
+			t.Fatalf("unpaged read returned %d ids, want %d", len(want), n)
+		}
+
+		pages := keysetWalk(t, s, orgID, f, 3, func() {
+			// A poll mints a task that sorts at the head of the lane.
+			seed(t, "arrives-a")
+		})
+		if !slices.Equal(pages[0], want[0:3]) {
+			t.Fatalf("page 1 = %v, want %v", pages[0], want[0:3])
+		}
+		if !slices.Equal(pages[1], want[3:6]) {
+			t.Errorf("page 2 = %v, want %v — gaining a row above the cursor must not repeat %s", pages[1], want[3:6], want[2])
+		}
+	})
+
+	t.Run("List_keyset_walks_every_sort", func(t *testing.T) {
+		// The cursor db.TaskSortKey renders and the tuple each dialect
+		// compares it against are two halves of one order. If they disagree on
+		// a single term — its position, the COALESCE default it carries, its
+		// direction — the walk drops or repeats rows. Walking every sort, in
+		// both directions, across every lane is what pins the three of them
+		// together in both dialects.
+		s, orgID, _, agentID, userID, seed, _ := mk(t)
+		var ids []string
+		for _, suffix := range []string{"walk-ccc", "walk-aaa", "walk-eee", "walk-bbb", "walk-ddd", "walk-fff"} {
+			_, _, id := seed(t, suffix)
+			ids = append(ids, id)
+		}
+		// Every lane and every ordering value the terms can read: two closed
+		// rows (so the recency term compares real timestamps rather than the
+		// sentinel an open row keys as), a snoozed one, and two claims so the
+		// claimee sort has names as well as its unclaimed-last flag.
+		for _, id := range ids[:2] {
+			if _, err := s.Close(ctx, orgID, id, "test", ""); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+		}
+		if _, err := s.SetStatus(ctx, orgID, ids[2], "snoozed"); err != nil {
+			t.Fatalf("SetStatus snoozed: %v", err)
+		}
+		if _, err := s.SetClaimedByAgent(ctx, orgID, ids[3], agentID); err != nil {
+			t.Fatalf("SetClaimedByAgent: %v", err)
+		}
+		if _, err := s.SetClaimedByUser(ctx, orgID, ids[4], userID); err != nil {
+			t.Fatalf("SetClaimedByUser: %v", err)
+		}
+
+		for _, key := range append([]string{""}, db.TaskListSortKeys...) {
+			dirs := []string{db.TaskSortDirAsc, db.TaskSortDirDesc}
+			if key == "" {
+				// The default order has no direction to flip.
+				dirs = []string{""}
+			}
+			for _, dir := range dirs {
+				f := db.TaskListFilter{IncludeSnoozed: true, SortKey: key, SortDir: dir}
+				want, _ := listIDs(t, s, orgID, f, db.ListOpts{Limit: 50})
+				if len(want) != len(ids) {
+					t.Fatalf("sort %q %s: unpaged read returned %d ids, want %d", key, dir, len(want), len(ids))
+				}
+				var walked []string
+				for _, page := range keysetWalk(t, s, orgID, f, 2, nil) {
+					walked = append(walked, page...)
+				}
+				if !slices.Equal(walked, want) {
+					t.Errorf("sort %q %s: keyset walk = %v, want %v", key, dir, walked, want)
+				}
+			}
+		}
+	})
+
+	t.Run("List_refuses_a_cursor_that_does_not_fit_the_order", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		seed(t, "cursor-fit")
+
+		// Too few terms for this order's tuple: the cursor was minted by
+		// something that isn't this build, so there is no position to resume
+		// from and nothing to guess.
+		if _, _, err := s.List(ctx, orgID, queueFilter(), db.ListOpts{Limit: 2, After: []string{"nope"}}); !errors.Is(err, db.ErrBadPageCursor) {
+			t.Errorf("short cursor: err = %v, want db.ErrBadPageCursor", err)
+		}
+		// The right number of terms holding a value its term cannot be: the
+		// same fault, and it must stay one rather than reaching the driver as
+		// a type error the route would report as its own.
+		bad := db.TaskSortKey(queueFilter(), domain.Task{})
+		bad[len(bad)-3] = "not-a-number"
+		if _, _, err := s.List(ctx, orgID, queueFilter(), db.ListOpts{Limit: 2, After: bad}); !errors.Is(err, db.ErrBadPageCursor) {
+			t.Errorf("unparseable cursor value: err = %v, want db.ErrBadPageCursor", err)
+		}
+		// An empty timestamp is a NULL, and created_at has none. The term
+		// over a nullable column accepts it (that is how an open task's
+		// closed_at keys); this one must not, or it reaches a cast it cannot
+		// survive as the route's own fault rather than the caller's.
+		byCreated := queueFilter()
+		byCreated.SortKey, byCreated.SortDir = db.TaskSortCreated, db.TaskSortDirAsc
+		empty := db.TaskSortKey(byCreated, domain.Task{})
+		empty[len(empty)-2] = ""
+		if _, _, err := s.List(ctx, orgID, byCreated, db.ListOpts{Limit: 2, After: empty}); !errors.Is(err, db.ErrBadPageCursor) {
+			t.Errorf("empty cursor value on a NOT NULL timestamp term: err = %v, want db.ErrBadPageCursor", err)
+		}
+	})
+
 	t.Run("List_order_is_total_and_dialect_agnostic", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		// The seeder mints rows that tie on every ordering key except the

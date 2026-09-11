@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -140,23 +141,6 @@ const pgTaskRuleOrderJoin = `
 		GROUP BY org_id, event_type
 	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 
-// pgTaskListDefaultKeys is the preference half of List's default ordering. It
-// must stay equivalent to sqliteTaskListDefaultKeys in meaning — the dbtest
-// conformance suite asserts the two dialects agree on the order, not just the
-// set. See that constant for why each term is there.
-const pgTaskListDefaultKeys = `
-	         t.closed_at DESC,
-	         COALESCE(tr.sort_order, 999) ASC,
-	         COALESCE(t.priority_score, 0.5) DESC,
-	         t.id ASC`
-
-// pgTaskListLanes mirrors sqliteTaskListLanes: the lane partitions a reader's
-// sort key never displaces. See that constant for why the recency term further
-// down is preference rather than structure.
-const pgTaskListLanes = `
-	ORDER BY (t.status = 'snoozed') ASC,
-	         (t.closed_at IS NOT NULL) ASC,`
-
 // pgTaskAttentionTier mirrors sqliteTaskAttentionTier — whose move is it, as
 // the first preference term over a lane's open rows. See that constant for the
 // tiers, for why tier 0 is the conversations list's own needs-you predicate
@@ -167,22 +151,22 @@ const pgTaskListLanes = `
 // Both subqueries carry the org id alongside the task id, the way every read in
 // this package does: the FK makes it redundant, and it is the defense in depth
 // that stands if the FK ever doesn't.
-const pgTaskAttentionTier = `
-	         CASE WHEN t.closed_at IS NOT NULL THEN 2
-	              WHEN EXISTS (SELECT 1 FROM conversations r
-	                           WHERE r.org_id = t.org_id AND r.task_id = t.id
-	                             AND ` + pgConversationAttentionSQL + `)
-	                   THEN 0
-	              ELSE CASE (SELECT ` + pgDisplayStatusSQL + `
-	                         FROM conversations r
-	                         WHERE r.org_id = t.org_id AND r.task_id = t.id
-	                         ORDER BY r.started_at DESC, r.id
-	                         LIMIT 1)
-	                     WHEN 'failed'    THEN 1
-	                     WHEN 'completed' THEN 3
-	                     ELSE 2
-	                   END
-	         END ASC,`
+const pgTaskAttentionTier = `CASE
+	         WHEN t.closed_at IS NOT NULL THEN 2
+	         WHEN EXISTS (SELECT 1 FROM conversations r
+	                      WHERE r.org_id = t.org_id AND r.task_id = t.id
+	                        AND ` + pgConversationAttentionSQL + `)
+	              THEN 0
+	         ELSE CASE (SELECT ` + pgDisplayStatusSQL + `
+	                    FROM conversations r
+	                    WHERE r.org_id = t.org_id AND r.task_id = t.id
+	                    ORDER BY r.started_at DESC, r.id
+	                    LIMIT 1)
+	                WHEN 'failed'    THEN 1
+	                WHEN 'completed' THEN 3
+	                ELSE 2
+	              END
+	       END`
 
 // pgTaskClaimantJoin mirrors sqliteTaskClaimantJoin, org-scoped on the agents
 // side the way every other agents join in this package is.
@@ -190,38 +174,188 @@ const pgTaskClaimantJoin = `
 	LEFT JOIN agents ca ON ca.id = t.claimed_by_agent_id AND ca.org_id = t.org_id
 	LEFT JOIN users cu ON cu.id = t.claimed_by_user_id`
 
-// pgTaskListSort mirrors sqliteTaskListSort — same keys, same fragments, same
-// refusal to interpolate a caller's value into an ORDER BY. The conformance
-// suite asserts the two dialects agree on the resulting order, not just the
-// set.
-func pgTaskListSort(f db.TaskListFilter) (joins, order string) {
-	// The structure both arms keep, whatever the reader asked for.
-	head := pgTaskListLanes
+// taskSortTerm is one term of a task list's total order — see the SQLite
+// mirror for what expr and bind are and why they live on one struct, and for
+// what target is. Postgres is statically typed, so a cursor value reaches its
+// term's type through a cast in bind rather than through a Go conversion;
+// check is what keeps a value that cannot survive that cast a caller fault
+// rather than a driver error surfacing as a 500. What must not differ between
+// the dialects is the shape: the two term lists agree term for term, because
+// one dialect-neutral renderer mints the cursor both compare against.
+type taskSortTerm struct {
+	expr   string
+	bind   string
+	check  func(string) error
+	desc   bool
+	target func(*domain.Task) any
+}
+
+const (
+	pgTaskKeyInt   = "{}::int"
+	pgTaskKeyReal  = "{}::float8"
+	pgTaskKeyText  = "{}::text"
+	pgTaskKeyUUID  = "{}::uuid"
+	pgTaskKeyStamp = "{}::timestamptz"
+)
+
+func pgTaskCheckInt(s string) error {
+	_, err := strconv.ParseInt(s, 10, 64)
+	return err
+}
+
+func pgTaskCheckReal(s string) error {
+	_, err := strconv.ParseFloat(s, 64)
+	return err
+}
+
+func pgTaskCheckStamp(s string) error {
+	_, err := time.Parse(time.RFC3339Nano, s)
+	return err
+}
+
+// pgTaskCheckStampOrEmpty is the check for a term over a nullable timestamp,
+// where the empty string is the row's NULL — the term's bind maps it onto the
+// sentinel its expression COALESCEs the column to. A term over a NOT NULL
+// column takes pgTaskCheckStamp instead, so an empty value there is refused
+// here rather than reaching the cast it cannot survive.
+func pgTaskCheckStampOrEmpty(s string) error {
+	if s == "" {
+		return nil
+	}
+	return pgTaskCheckStamp(s)
+}
+
+func pgTaskCheckUUID(s string) error {
+	_, err := uuid.Parse(s)
+	return err
+}
+
+// pgTaskUnclaimedExpr mirrors sqliteTaskUnclaimedExpr.
+const pgTaskUnclaimedExpr = `CASE WHEN t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL THEN 1 ELSE 0 END`
+
+// pgTaskListTerms mirrors sqliteTaskListTerms — same keys, same terms in the
+// same sequence, same refusal to interpolate the request's sort into an ORDER
+// BY. See that function for the whole order and why each term is where it is.
+// The conformance suite asserts the two dialects agree on the resulting order,
+// not just the set, and walks a keyset page through every sort in both.
+//
+// Two terms are wrapped where SQLite wraps them and for the same reason:
+// closed_at is COALESCEd to a sentinel because a NULL breaks the keyset chain
+// below the partition that separates open rows from closed ones, and
+// priority_score is widened to float8 because the column is float4 while a
+// cursor value is a Go float64 — COALESCE against a numeric literal would pick
+// the comparison type instead.
+func pgTaskListTerms(f db.TaskListFilter) (joins string, terms []taskSortTerm) {
+	desc := f.SortDir != db.TaskSortDirAsc
+	terms = []taskSortTerm{
+		{expr: "(t.status = 'snoozed')::int", bind: pgTaskKeyInt, check: pgTaskCheckInt},
+		{expr: "(t.closed_at IS NOT NULL)::int", bind: pgTaskKeyInt, check: pgTaskCheckInt},
+	}
 	if f.OrdersByAttention() {
-		head += pgTaskAttentionTier
+		terms = append(terms, taskSortTerm{
+			expr: pgTaskAttentionTier, bind: pgTaskKeyInt, check: pgTaskCheckInt,
+			target: func(t *domain.Task) any { return &t.ListAttentionTier }})
 	}
-	dir := " DESC"
-	if f.SortDir == db.TaskSortDirAsc {
-		dir = " ASC"
-	}
-	var key string
 	switch f.SortKey {
 	case db.TaskSortTitle:
-		key = "LOWER(COALESCE(e.title, ''))"
+		terms = append(terms, taskSortTerm{
+			expr: "LOWER(COALESCE(e.title, ''))", bind: "LOWER(" + pgTaskKeyText + ")", desc: desc})
 	case db.TaskSortCreated:
-		key = "t.created_at"
+		terms = append(terms, taskSortTerm{
+			expr: "t.created_at", bind: pgTaskKeyStamp, check: pgTaskCheckStamp, desc: desc})
 	case db.TaskSortEventType:
-		key = "t.event_type"
+		terms = append(terms, taskSortTerm{
+			expr: "t.event_type", bind: pgTaskKeyText, desc: desc})
 	case db.TaskSortClaimee:
 		joins = pgTaskClaimantJoin
-		key = `CASE WHEN t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL THEN 1 ELSE 0 END ASC,
-	         COALESCE(ca.display_name, cu.display_name, '')`
+		terms = append(terms,
+			taskSortTerm{expr: pgTaskUnclaimedExpr, bind: pgTaskKeyInt, check: pgTaskCheckInt},
+			taskSortTerm{
+				expr: "COALESCE(ca.display_name, cu.display_name, '')", bind: pgTaskKeyText, desc: desc,
+				target: func(t *domain.Task) any { return &t.ListClaimeeName }})
 	default:
-		return pgTaskRuleOrderJoin, head + pgTaskListDefaultKeys
+		joins = pgTaskRuleOrderJoin
+		terms = append(terms,
+			taskSortTerm{
+				expr:  "COALESCE(t.closed_at, '-infinity'::timestamptz)",
+				bind:  "COALESCE(NULLIF({}, '')::timestamptz, '-infinity'::timestamptz)",
+				check: pgTaskCheckStampOrEmpty,
+				desc:  true},
+			taskSortTerm{
+				expr: "COALESCE(tr.sort_order, 999)", bind: pgTaskKeyInt, check: pgTaskCheckInt,
+				target: func(t *domain.Task) any { return &t.ListSortOrder }},
+			taskSortTerm{expr: "COALESCE(t.priority_score::float8, 0.5)", bind: pgTaskKeyReal, check: pgTaskCheckReal, desc: true})
 	}
-	return joins, head + `
-	         ` + key + dir + `,
-	         t.id ASC`
+	return joins, append(terms, taskSortTerm{expr: "t.id", bind: pgTaskKeyUUID, check: pgTaskCheckUUID})
+}
+
+// pgTaskOrderBy mirrors sqliteTaskOrderBy.
+func pgTaskOrderBy(terms []taskSortTerm) string {
+	parts := make([]string, len(terms))
+	for i, term := range terms {
+		dir := " ASC"
+		if term.desc {
+			dir = " DESC"
+		}
+		parts[i] = term.expr + dir
+	}
+	return `
+	ORDER BY ` + strings.Join(parts, `,
+	         `)
+}
+
+// pgTaskListProjection mirrors sqliteTaskListProjection: the SELECT list and
+// the scan targets for one List page, built together and in term order.
+func pgTaskListProjection(terms []taskSortTerm) (string, []func(*domain.Task) any) {
+	cols := pgTaskColumnsWithEntity
+	var targets []func(*domain.Task) any
+	for _, term := range terms {
+		if term.target == nil {
+			continue
+		}
+		cols += `,
+	` + term.expr
+		targets = append(targets, term.target)
+	}
+	return cols, targets
+}
+
+// pgTaskKeysetWhere mirrors sqliteTaskKeysetWhere — the same nested
+// lexicographic chain, for the same reason: it mentions each term's expression
+// twice rather than once per arm below it, and the attention tier's expression
+// is two correlated subqueries per row. It numbers its placeholders off
+// len(args) the way every other fragment in this file does, so it must be
+// rendered after the WHERE body it is appended to.
+func pgTaskKeysetWhere(terms []taskSortTerm, after []string, args []any) (string, []any, error) {
+	if len(after) != len(terms) {
+		return "", nil, db.ErrBadPageCursor
+	}
+	for i, term := range terms {
+		if term.check == nil {
+			continue
+		}
+		if err := term.check(after[i]); err != nil {
+			return "", nil, fmt.Errorf("%w: %v", db.ErrBadPageCursor, err)
+		}
+	}
+	bind := func(term taskSortTerm, value string) string {
+		args = append(args, value)
+		return strings.Replace(term.bind, "{}", fmt.Sprintf("$%d", len(args)), 1)
+	}
+	var chain func(i int) string
+	chain = func(i int) string {
+		op := " > "
+		if terms[i].desc {
+			op = " < "
+		}
+		clause := terms[i].expr + op + bind(terms[i], after[i])
+		if i == len(terms)-1 {
+			return clause
+		}
+		return clause + " OR (" + terms[i].expr + " = " + bind(terms[i], after[i]) +
+			" AND (" + chain(i+1) + "))"
+	}
+	return ` AND (` + chain(0) + `)`, args, nil
 }
 
 // pgTaskListWhere renders db.TaskListFilter as a WHERE body (no leading WHERE)
@@ -311,19 +445,33 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 		return []domain.Task{}, total, nil
 	}
 
-	sortJoins, order := pgTaskListSort(f)
-	query := `
-		SELECT ` + pgTaskColumnsWithEntity + `
-		FROM tasks t
-		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id` + sortJoins + `
-		WHERE ` + where + order
-	pageArgs := args
-	if opts.Limit > 0 {
-		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
-		query += fmt.Sprintf(`
-		LIMIT $%d OFFSET $%d`, len(pageArgs)-1, len(pageArgs))
+	joins, terms := pgTaskListTerms(f)
+	cols, targets := pgTaskListProjection(terms)
+	pageArgs := append([]any{}, args...)
+	keyset := ""
+	if len(opts.After) > 0 {
+		// The keyset replaces OFFSET rather than joining it — see the SQLite
+		// mirror.
+		var err error
+		if keyset, pageArgs, err = pgTaskKeysetWhere(terms, opts.After, pageArgs); err != nil {
+			return nil, 0, err
+		}
 	}
-	tasks, err := queryTasksCtx(ctx, s.q, query, pageArgs...)
+	query := `
+		SELECT ` + cols + `
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id` + joins + `
+		WHERE ` + where + keyset + pgTaskOrderBy(terms)
+	if opts.Limit > 0 {
+		pageArgs = append(pageArgs, opts.Limit)
+		query += fmt.Sprintf(`
+		LIMIT $%d`, len(pageArgs))
+		if len(opts.After) == 0 {
+			pageArgs = append(pageArgs, opts.Offset)
+			query += fmt.Sprintf(` OFFSET $%d`, len(pageArgs))
+		}
+	}
+	tasks, err := queryListedTasksCtx(ctx, s.q, targets, query, pageArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1375,6 +1523,17 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 	)
 }
 
+// listTargets extends targets with the ordering values pgTaskListProjection
+// appended for this order's terms. Each is NOT NULL by the expression that
+// produced it, so none needs a NullX intermediate.
+func (s *taskScanState) listTargets(t *domain.Task, extras []func(*domain.Task) any) []any {
+	out := s.targets(t)
+	for _, extra := range extras {
+		out = append(out, extra(t))
+	}
+	return out
+}
+
 func (s *taskScanState) finalize(t *domain.Task) {
 	if s.teamID.Valid {
 		v := s.teamID.String
@@ -1436,6 +1595,28 @@ func scanTaskBareRow(row *sql.Row, t *domain.Task) (domain.Task, error) {
 	}
 	s.finalize(t)
 	return *t, nil
+}
+
+// queryListedTasksCtx is queryTasksCtx for a List page, whose projection
+// carries this order's own ordering values after the canonical columns.
+func queryListedTasksCtx(ctx context.Context, q queryer, extras []func(*domain.Task) any, query string, args ...any) ([]domain.Task, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []domain.Task
+	for rows.Next() {
+		var t domain.Task
+		var st taskScanState
+		if err := rows.Scan(st.listTargets(&t, extras)...); err != nil {
+			return nil, err
+		}
+		st.finalize(&t)
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
 }
 
 func queryTasksCtx(ctx context.Context, q queryer, query string, args ...any) ([]domain.Task, error) {

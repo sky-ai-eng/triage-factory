@@ -132,6 +132,52 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 		}
 	})
 
+	t.Run("AKeysetPageResumesInsideItsTier", func(t *testing.T) {
+		// The tier is a leading term of the order, so it is a leading term of
+		// the cursor a page resumes from. A walk that dropped it would resume
+		// at the top of the tier ladder on every page — the needs-you row
+		// served again and the tail never reached — which is why this walks
+		// across four tiers rather than asserting the tuple's shape.
+		s, orgID, seed := mk(t)
+		needsYou := seed.Task(t, TaskAttentionFixture{Suffix: "keyset-needs", Title: "e needs you", Status: "in_progress", Priority: 0.1})
+		failed := seed.Task(t, TaskAttentionFixture{Suffix: "keyset-failed", Title: "d failed", Status: "in_progress", Priority: 0.2})
+		flight := seed.Task(t, TaskAttentionFixture{Suffix: "keyset-flight", Title: "c in flight", Status: "in_progress", Priority: 0.3})
+		none := seed.Task(t, TaskAttentionFixture{Suffix: "keyset-none", Title: "b no conversation", Status: "in_progress", Priority: 0.25})
+		quiet := seed.Task(t, TaskAttentionFixture{Suffix: "keyset-quiet", Title: "a concluded", Status: "in_progress", Priority: 0.9})
+
+		needsYouConv := seed.Conversation(t, needsYou, domain.StatusCompleted)
+		seed.Artifact(t, needsYouConv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		seed.Conversation(t, failed, domain.StatusFailed)
+		seed.ActiveClaim(t, seed.Conversation(t, flight, ""))
+		seed.Conversation(t, quiet, domain.StatusCompleted)
+
+		want := []string{needsYou, failed, flight, none, quiet}
+		if got, _ := list(t, s, orgID, inProgress()); !slices.Equal(got, want) {
+			t.Fatalf("unpaged lane = %v, want %v", got, want)
+		}
+
+		// Two at a time, each page resuming after the last row of the one
+		// before it — exactly what the task list handler does.
+		var walked []string
+		var after []string
+		for page := 0; page < len(want); page++ {
+			rows, _, err := s.List(ctx, orgID, inProgress(), db.ListOpts{Limit: 2, After: after})
+			if err != nil {
+				t.Fatalf("List(page %d, after %v): %v", page, after, err)
+			}
+			for _, row := range rows {
+				walked = append(walked, row.ID)
+			}
+			if len(rows) < 2 {
+				break
+			}
+			after = db.TaskSortKey(inProgress(), rows[len(rows)-1])
+		}
+		if !slices.Equal(walked, want) {
+			t.Errorf("keyset walk = %v,\n              want %v\n(the cursor carries the tier, so a page resumes inside it)", walked, want)
+		}
+	})
+
 	t.Run("AnUnansweredPromptIsWhoseMoveItIs", func(t *testing.T) {
 		// The other half of tier 0, and the half a live conversation reaches:
 		// a prompt owned by the conversation's active claim outranks the same

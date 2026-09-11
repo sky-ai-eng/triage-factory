@@ -534,6 +534,23 @@ func teamDefaultPriority(ctx context.Context, tx db.TxStores, orgID, teamID, eve
 // read registers through apiMutating like any other POST so the CSRF
 // same-origin check applies symmetrically — the method is what a browser
 // preflights on, not the intent. The read itself has no side effects.
+//
+// It is the one list route that pages by keyset rather than offset, because it
+// is the one whose rows move under the reader: a run finishes and its card
+// leaves In Progress, a card is dragged, a poll mints a task at the head of
+// the queue. An offset page 2 of a lane that lost a row above the cut skips
+// one, and the board fetches on scroll with no way to re-ask, so a skipped row
+// is simply never seen. The token stays opaque either way, so nothing a client
+// reads or writes changes shape.
+//
+// It accepts keyset tokens ONLY. An offset-form token — one this route minted
+// before the conversion — would still page, because the stores keep offset
+// paging for the routes that use it, and that is exactly why it is refused
+// (400 INVALID_PARAM, restart from the first page): an input that makes this
+// route page the way it no longer pages is the bug still reachable by request.
+// Nothing else holds such a token for long — the SPA ships inside this binary,
+// so there is no version skew to bridge — and a headless caller mid-walk gets
+// correct paging one request sooner by starting over.
 func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -583,7 +600,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 		// Newest / Z-A first, which is what the board's controls default to.
 		filter.SortDir = db.TaskSortDirDesc
 	}
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{
+	page := httpx.ResolveKeysetPage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{
 		Statuses:       filter.Statuses,
 		TeamIDs:        filter.TeamIDs,
 		OnlyUnclaimed:  filter.OnlyUnclaimed,
@@ -604,22 +621,48 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One row past the window, so the answer to "is there a page after this
+	// one" is a row we either got or didn't. A keyset page cannot derive it
+	// from the total the way an offset page does, because it doesn't know its
+	// own position in the result set — and a lane that loses a row while it is
+	// being read is exactly why it must not pretend to.
+	opts := db.ListOpts{Limit: page.Limit, Offset: page.Offset, After: page.After, CountOnly: page.CountOnly}
+	if opts.Limit > 0 {
+		opts.Limit++
+	}
+
 	var tasks []domain.Task
 	var total int
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		tasks, total, e = tx.Tasks.List(r.Context(), orgID, filter,
-			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
+		tasks, total, e = tx.Tasks.List(r.Context(), orgID, filter, opts)
 		return e
 	}); err != nil {
+		if errors.Is(err, db.ErrBadPageCursor) {
+			// A cursor that doesn't fit the order it names: not a token this
+			// build minted, so it is a bad page_token like any other
+			// unreadable one rather than a server fault.
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidParam,
+				Message: "page_token does not address this ordering; restart from the first page",
+				Field:   "page_token",
+			})
+			return
+		}
 		internalError(w, "tasks", err)
 		return
+	}
+
+	var nextKey []string
+	if page.Limit > 0 && len(tasks) > page.Limit {
+		tasks = tasks[:page.Limit]
+		nextKey = db.TaskSortKey(filter, tasks[len(tasks)-1])
 	}
 	items := make([]taskJSON, len(tasks))
 	for i, t := range tasks {
 		items[i] = taskToJSON(t)
 	}
-	httpx.WriteList(w, page, items, total)
+	httpx.WriteListKeyset(w, page, items, total, nextKey)
 }
 
 // taskFacetsRequest is the body of POST /api/tasks/facets: the lane, and
