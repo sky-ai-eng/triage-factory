@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -1111,6 +1112,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	runTaskListConformance(ctx, t, mk)
+	runTaskFacetConformance(ctx, t, mk)
 
 	// --- Author-centric owner routing ---
 
@@ -1811,6 +1813,114 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		ids, total := listIDs(t, s, orgID, db.TaskListFilter{Statuses: []string{"not_a_status"}}, db.ListOpts{Limit: 50})
 		if len(ids) != 0 || total != 0 {
 			t.Errorf("unknown status returned %d ids / total %d, want 0 / 0", len(ids), total)
+		}
+	})
+}
+
+// runTaskFacetConformance pins FacetEventTypes against the lane it is handed.
+// The facet's whole contract is that it counts the rows its sibling List
+// returns — a chip reading "12" above a column that holds eight is worse than
+// no chip — so every assertion here checks the answer against List as well as
+// against the seeded set.
+func runTaskFacetConformance(ctx context.Context, t *testing.T, mk TaskStoreFactory) {
+	t.Helper()
+
+	// facetMap reads a lane's facet as value → count, asserting on the way
+	// that the values came back ascending (the chips are alphabetical, and a
+	// client that has to re-sort was told the wrong thing) and that the
+	// counts sum to the lane's own filtered total.
+	facetMap := func(t *testing.T, s db.TaskStore, orgID string, f db.TaskListFilter) map[string]int {
+		t.Helper()
+		facets, err := s.FacetEventTypes(ctx, orgID, f)
+		if err != nil {
+			t.Fatalf("FacetEventTypes(%+v): %v", f, err)
+		}
+		out := map[string]int{}
+		values := make([]string, 0, len(facets))
+		sum := 0
+		for _, x := range facets {
+			out[x.Value] = x.Count
+			values = append(values, x.Value)
+			sum += x.Count
+		}
+		if !slices.IsSorted(values) {
+			t.Errorf("facet values = %v, want ascending", values)
+		}
+		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || sum != total {
+			t.Errorf("facet counts sum to %d (err %v), want the lane's own total %d", sum, err, total)
+		}
+		return out
+	}
+
+	t.Run("FacetEventTypes_counts_one_lane_by_event_type", func(t *testing.T) {
+		s, orgID, teamID, _, _, seed, _ := mk(t)
+		entityID, eventID, _ := seed(t, "facet-a")
+		seed(t, "facet-b")
+
+		// The seeder picks the event type, so read it back rather than
+		// naming it here: what this subtest needs is two DIFFERENT types in
+		// one lane, not any particular pair.
+		all, _, err := s.List(ctx, orgID, queueFilter(), db.ListOpts{Limit: 50})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		seeded := all[0].EventType
+		other := domain.EventGitHubPRReviewRequested
+		if seeded == other {
+			other = domain.EventGitHubPRCICheckPassed
+		}
+		// A second station on the first entity — same lane, different type.
+		if _, created, err := s.FindOrCreateAt(ctx, orgID, teamID, entityID, other, "", eventID, 0.5, time.Now().UTC()); err != nil || !created {
+			t.Fatalf("second station: created=%v err=%v", created, err)
+		}
+		// And a row in a lane this facet is not about: it must contribute
+		// nothing, however many of the same type sit in it.
+		_, _, closedID := seed(t, "facet-closed")
+		if _, err := s.Close(ctx, orgID, closedID, "test", ""); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		got := facetMap(t, s, orgID, queueFilter())
+		want := map[string]int{seeded: 2, other: 1}
+		if !maps.Equal(got, want) {
+			t.Errorf("queue lane facet = %v, want %v (the closed row is another lane's)", got, want)
+		}
+
+		// A lane nothing has reached is an empty answer, not a nil one — the
+		// same shape every other list read in the package returns.
+		empty, err := s.FacetEventTypes(ctx, orgID, db.TaskListFilter{Statuses: []string{"in_review"}})
+		if err != nil {
+			t.Fatalf("FacetEventTypes on an empty lane: %v", err)
+		}
+		if empty == nil || len(empty) != 0 {
+			t.Errorf("empty lane facet = %v, want an empty non-nil slice", empty)
+		}
+	})
+
+	t.Run("FacetEventTypes_excludes_the_snoozed_row_the_lane_excludes", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		seed(t, "facet-live")
+		_, _, snoozedID := seed(t, "facet-snoozed")
+		if _, err := s.SetStatus(ctx, orgID, snoozedID, "snoozed"); err != nil {
+			t.Fatalf("SetStatus snoozed: %v", err)
+		}
+		all, _, err := s.List(ctx, orgID, queueWithSnoozedFilter(), db.ListOpts{Limit: 50})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		seeded := all[0].EventType
+
+		// The deferred row is out of the pickable lane and in when the
+		// board's toggle widens it — so the chip count moves with the column
+		// rather than reporting a row the reader cannot see. The snooze axis
+		// is exercised here through the status set because no TaskStore
+		// method writes a wake time; the wake-window half is a fixture the
+		// HTTP-layer test writes directly.
+		if got, want := facetMap(t, s, orgID, queueFilter())[seeded], 1; got != want {
+			t.Errorf("queue lane facet count = %d, want %d (the snoozed row is not in it)", got, want)
+		}
+		if got, want := facetMap(t, s, orgID, queueWithSnoozedFilter())[seeded], 2; got != want {
+			t.Errorf("queue+snoozed lane facet count = %d, want %d", got, want)
 		}
 	})
 }

@@ -1,6 +1,9 @@
 package db
 
-import "strings"
+import (
+	"database/sql"
+	"strings"
+)
 
 // ListOpts is the pagination window every paginated store read takes. It is
 // deliberately dialect-neutral and filter-neutral: the filters are the read's
@@ -56,6 +59,36 @@ type ListOpts struct {
 // reason this constant exists rather than a bare `ListOpts{}` literal that
 // reads the same at both kinds of call site.
 var Unwindowed = ListOpts{}
+
+// Facet is one value of a grouped-by column and the number of rows carrying
+// it under a read's filters. It is the shape of a *synthetic* read — numbers
+// about rows rather than rows — so it deliberately carries no page: a facet
+// groups a closed vocabulary (an event type, a source), and the answer is
+// bounded by that vocabulary rather than by a window the caller chose.
+//
+// The counts a facet reports must be the ones its sibling list would return
+// under the same filters, which is why every facet read renders the list's
+// own WHERE rather than a second one of its own.
+type Facet struct {
+	Value string
+	Count int
+}
+
+// ScanFacets drains a (value, count) result into Facets. Both dialects share
+// it so neither can disagree with the other about the empty answer: a filter
+// nothing matches is an empty slice, never nil, the same way every other list
+// read in this package answers.
+func ScanFacets(rows *sql.Rows) ([]Facet, error) {
+	out := []Facet{}
+	for rows.Next() {
+		var f Facet
+		if err := rows.Scan(&f.Value, &f.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
 
 // LikeEscape escapes the LIKE metacharacters in a literal so it matches
 // itself. The escape character it inserts is a single backslash, and the

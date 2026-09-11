@@ -90,19 +90,85 @@ const sqliteTaskRuleOrderJoin = `
 		GROUP BY org_id, event_type
 	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 
+// sqliteTaskAttentionTier orders the OPEN rows of a lane by whose move it is —
+// the first preference term on the In Progress and In Review lanes, so the card
+// waiting on a human is on page one rather than wherever its priority put it.
+// It is a subquery and no join, so it is absent from the count query by
+// construction; the page projects it as well as orders by it, because a keyset
+// cursor resumes from the tuple's values and this is one of them.
+//
+// A closed row takes a constant tier, on the same `closed_at IS NOT NULL` the
+// partition above tests, and that is load-bearing rather than tidy. This term
+// is read BEFORE the recency term, so without the guard every read spanning
+// both partitions — an unfiltered one, or any explicit status set mixing open
+// rows with terminal ones — would order its closed tail by unfinished business
+// instead of by recency: a stale closure still holding a draft pull request
+// climbing over a later one that left nothing behind. Whether a lane carries
+// the tier at all is then only a question of cost
+// (db.TaskListFilter.OrdersByAttention), never of whether the tail is safe.
+//
+// The constant is 2 because that is what a closed row honestly is on this
+// scale: not anybody's move. Any constant would tie them; this one does not
+// need a reader to know it is a sentinel.
+//
+// Snoozed rows are deliberately NOT guarded the same way. They are segregated
+// by their own partition above, and inside that group the tier displaces
+// nothing a reader is owed — a deferred set falls straight through to rule
+// order and priority, which is the same preference class the tier belongs to.
+// The closed tail is the only group with a recency contract to protect.
+//
+// The tiers, and the reason each is where it is:
+//
+//	0  needs you   — the task holds a conversation matching the per-conversation
+//	                 needs-you predicate: an unanswered permission prompt, or a
+//	                 conversation that is not live and still holds an unresolved
+//	                 artifact.
+//	1  failed      — its newest conversation died. Nothing is coming; a human
+//	                 decides what happens next, but there is no question
+//	                 waiting on them, so it sits below tier 0.
+//	2  in flight   — an agent is working, and a task with no conversation at
+//	                 all: neither is anybody's move, and a row that has not
+//	                 started must not sort below finished work.
+//	3  completed   — its newest conversation concluded. Done reading, last.
+//
+// Tier 0 is `sqliteConversationAttentionSQL` — the SAME predicate the
+// conversations list's `attention` filter and the rail's `needs` count read,
+// lifted to a per-task EXISTS. A second definition of "needs you" would let a
+// lane disagree with the rail counted above it.
+//
+// The status halves read the DISPLAY status, not the stored column: the card a
+// human is looking at reads the display ladder, and a conversation mid-claim
+// carries no stored status at all. `failed` / `completed` mirror
+// domain.StatusFailed / domain.StatusCompleted, which SQL cannot import; the
+// dual-dialect conformance suite is what holds the two literals to them.
+//
+// "Newest" is (started_at DESC, id) — the same ordering ConversationStore.List
+// groups a task's conversations by, so the conversation this reads is the one
+// the board renders on the card. A task with no conversation yields SQL NULL,
+// which no WHEN matches: the ELSE is what puts it in tier 2 rather than
+// needing its own arm.
+const sqliteTaskAttentionTier = `CASE
+	         WHEN t.closed_at IS NOT NULL THEN 2
+	         WHEN EXISTS (SELECT 1 FROM conversations r
+	                      WHERE r.task_id = t.id AND ` + sqliteConversationAttentionSQL + `)
+	              THEN 0
+	         ELSE CASE (SELECT ` + sqliteDisplayStatusSQL + `
+	                    FROM conversations r
+	                    WHERE r.task_id = t.id
+	                    ORDER BY r.started_at DESC, r.id
+	                    LIMIT 1)
+	                WHEN 'failed'    THEN 1
+	                WHEN 'completed' THEN 3
+	                ELSE 2
+	              END
+	       END`
+
 // sqliteTaskClaimantJoin resolves the name the claimee sort orders on. Both
-// joins are on a primary key, so neither can drop or duplicate a row.
+// joins are on a primary key, so neither can drop or duplicate a row; they
+// are added only for that sort so every other query keeps the plan it had.
 const sqliteTaskClaimantJoin = `
 	LEFT JOIN agents ca ON ca.id = t.claimed_by_agent_id
 	LEFT JOIN users cu ON cu.id = t.claimed_by_user_id`
-
-// sqliteTaskListJoins is what every List page carries, whichever sort it runs.
-// Only one of the two feeds the ORDER BY at a time, but both feed the columns
-// the page projects for its keyset cursor — a sort_order or a claimant name
-// the caller can't see is a position it can't resume from, and a projection
-// that appeared and vanished with the sort would be two column shapes and two
-// scan paths for one read.
-const sqliteTaskListJoins = sqliteTaskRuleOrderJoin + sqliteTaskClaimantJoin
 
 // taskSortTerm is one term of a task list's total order.
 //
@@ -111,19 +177,27 @@ const sqliteTaskListJoins = sqliteTaskRuleOrderJoin + sqliteTaskClaimantJoin
 // the shape that expression yields, so the keyset comparison lands where the
 // ORDER BY put the row: bind wraps the placeholder in whatever the expression
 // does to its column (`{}` stands in for the placeholder), and conv decides
-// the Go value the driver binds. All three live on one struct because an ORDER
-// BY and a comparison that disagree are a page that silently skips rows.
+// the Go value the driver binds. They live on one struct because an ORDER BY
+// and a comparison that disagree are a page that silently skips rows.
 //
 // conv is what SQLite needs rather than a cast. Its comparisons rank by
 // storage class before value, so a cursor bound as text sorts above every
 // integer in a column rather than among them; and a timestamp must reach the
 // column's own TEXT layout to compare against it, which the driver does for a
 // time.Time and no date function does without rounding to the second.
+//
+// target, when set, names where this term's value scans on the returned row.
+// It is set for exactly the terms whose value lives on no column the task read
+// already carries — the matching rule's sort_order, the claimant's name, the
+// attention tier — and the page adds the term's expr to its SELECT for each.
+// A caller mints its next cursor from the row it was handed, so a term whose
+// value the row cannot show is a position it cannot resume from.
 type taskSortTerm struct {
-	expr string
-	bind string
-	conv func(string) (any, error)
-	desc bool
+	expr   string
+	bind   string
+	conv   func(string) (any, error)
+	desc   bool
+	target func(*domain.Task) any
 }
 
 // sqliteTaskKeyBind is the bind for a term whose expression reads its column
@@ -171,30 +245,31 @@ const sqliteTaskUnclaimedExpr = `CASE WHEN t.claimed_by_agent_id IS NULL AND t.c
 
 // sqliteTaskListTerms renders the joins and the ordered terms for a filter's
 // sort — the default order when it names no key, otherwise the reader's key
-// between the lane partitions and the id tiebreaker. The request's sort never
+// between the lane structure and the id tiebreaker. The request's sort never
 // reaches the SQL as text: the key switches to a constant fragment and the
 // direction to a bool, so an ORDER BY is assembled from this file's own
 // strings whatever the request said.
 //
-// Read the default order top to bottom as "what does the reader want to see
-// first":
+// The whole default order, read top to bottom as "what does the reader want to
+// see first":
 //
 //  1. live before snoozed — a deferred entry never jumps above pickable work,
 //     however high its priority. SQLite evaluates the comparison as 0/1, so
 //     false (live) sorts first; Postgres orders false before true identically.
-//  2. open before closed, then newest-closed first. Both terms are inert on a
-//     single-lane query (every row ties), so the queue keeps the ordering it
-//     had and the Done column keeps recency — and neither term ever compares a
-//     NULL against a non-NULL closed_at, because the partition above separates
-//     them, which is what keeps the two dialects' NULL-ordering defaults from
-//     diverging here.
-//  3. rule sort_order, then priority, then id — the queue's own ordering.
+//  2. open before closed. Inert on a single-lane query (every row ties), so
+//     the queue keeps the ordering it had — and it never compares a NULL
+//     closed_at against a non-NULL one, which is what keeps the two dialects'
+//     NULL-ordering defaults from diverging at the recency term below.
+//  3. the attention tier over the open rows of the lanes that carry it
+//     (sqliteTaskAttentionTier) — a closed row is not tiered, so the term is
+//     inert inside the partition below and the recency term keeps it.
+//  4. newest-closed first — the Done column's recency, inert everywhere else.
+//  5. rule sort_order, then priority, then id — the queue's own ordering.
 //
-// The first two terms are lane structure rather than preference, so they stay
-// in front of a reader's key: a snoozed row must not climb over live work
-// because it sorts first by title. The recency term below them is the closed
-// lane's DEFAULT ordering — preference — so a reader who asks for that lane by
-// title gets it by title, and the term drops out.
+// Terms 1-3 are structure rather than preference, so they stay in front of a
+// reader's key: a snoozed row must not climb over live work because it sorts
+// first by title, and a run parked on a human still leads its lane. Terms 4
+// and 5 are what a sort_key replaces.
 //
 // One term wraps a column the ORDER BY could read bare: closed_at is COALESCEd
 // to a sentinel because a NULL breaks a keyset chain — every comparison
@@ -207,6 +282,11 @@ func sqliteTaskListTerms(f db.TaskListFilter) (joins string, terms []taskSortTer
 	terms = []taskSortTerm{
 		{expr: "(t.status = 'snoozed')", bind: sqliteTaskKeyBind, conv: sqliteTaskKeyInt},
 		{expr: "(t.closed_at IS NOT NULL)", bind: sqliteTaskKeyBind, conv: sqliteTaskKeyInt},
+	}
+	if f.OrdersByAttention() {
+		terms = append(terms, taskSortTerm{
+			expr: sqliteTaskAttentionTier, bind: sqliteTaskKeyBind, conv: sqliteTaskKeyInt,
+			target: func(t *domain.Task) any { return &t.ListAttentionTier }})
 	}
 	switch f.SortKey {
 	case db.TaskSortTitle:
@@ -221,24 +301,30 @@ func sqliteTaskListTerms(f db.TaskListFilter) (joins string, terms []taskSortTer
 		terms = append(terms, taskSortTerm{
 			expr: "t.event_type", bind: sqliteTaskKeyBind, desc: desc})
 	case db.TaskSortClaimee:
+		joins = sqliteTaskClaimantJoin
 		terms = append(terms,
 			taskSortTerm{expr: sqliteTaskUnclaimedExpr, bind: sqliteTaskKeyBind, conv: sqliteTaskKeyInt},
-			taskSortTerm{expr: "COALESCE(ca.display_name, cu.display_name, '')", bind: sqliteTaskKeyBind, desc: desc})
+			taskSortTerm{
+				expr: "COALESCE(ca.display_name, cu.display_name, '')", bind: sqliteTaskKeyBind, desc: desc,
+				target: func(t *domain.Task) any { return &t.ListClaimeeName }})
 	default:
 		// No key, or one no vocabulary defines — the HTTP layer refuses the
 		// latter, so reaching it means a caller built the filter directly.
 		// The default order is the honest answer either way; inventing SQL
 		// for an unknown key is not.
+		joins = sqliteTaskRuleOrderJoin
 		terms = append(terms,
 			taskSortTerm{expr: "COALESCE(t.closed_at, '')", bind: sqliteTaskKeyBind, conv: sqliteTaskKeyTimeOrEmpty, desc: true},
-			taskSortTerm{expr: "COALESCE(tr.sort_order, 999)", bind: sqliteTaskKeyBind, conv: sqliteTaskKeyInt},
+			taskSortTerm{
+				expr: "COALESCE(tr.sort_order, 999)", bind: sqliteTaskKeyBind, conv: sqliteTaskKeyInt,
+				target: func(t *domain.Task) any { return &t.ListSortOrder }},
 			taskSortTerm{expr: "COALESCE(t.priority_score, 0.5)", bind: sqliteTaskKeyBind, conv: sqliteTaskKeyReal, desc: true})
 	}
 	// The id tiebreaker is what makes the order total, and a total order is
 	// what makes a page a window rather than a sample: without it, rows tying
 	// on every other term are dropped and repeated across pages by offset and
 	// keyset alike.
-	return sqliteTaskListJoins, append(terms, taskSortTerm{expr: "t.id", bind: sqliteTaskKeyBind})
+	return joins, append(terms, taskSortTerm{expr: "t.id", bind: sqliteTaskKeyBind})
 }
 
 // sqliteTaskOrderBy renders the terms as the query's ORDER BY.
@@ -262,11 +348,18 @@ func sqliteTaskOrderBy(terms []taskSortTerm) string {
 // is the whole filtered set, not what is left of it).
 //
 // A mixed-direction tuple can't use one row comparison, so this is the
-// expanded lexicographic chain: strictly past the first term, or tied on it
-// and past the second, or tied on both and past the third, … Each comparison
-// takes its own term's direction, and each bound value goes through its term's
-// own normalization, so the chain cuts the result set at exactly the point the
+// lexicographic chain spelled out: past the first term, or tied on it and past
+// the second, or tied on both and past the third, … Each comparison takes its
+// own term's direction and each bound value goes through its term's own
+// normalization, so the chain cuts the result set at exactly the point the
 // ORDER BY put that row.
+//
+// It nests rather than flattening into one OR-list of AND-chains. The two
+// forms are equivalent — the nested one distributes into the flat one — but
+// nesting mentions each term's expression exactly twice instead of once per
+// arm below it, and the attention tier's expression is a correlated subquery
+// per row. A flat chain would run it up to four times where this runs it
+// twice.
 func sqliteTaskKeysetWhere(terms []taskSortTerm, after []string, args []any) (string, []any, error) {
 	if len(after) != len(terms) {
 		return "", nil, db.ErrBadPageCursor
@@ -279,29 +372,38 @@ func sqliteTaskKeysetWhere(terms []taskSortTerm, after []string, args []any) (st
 		args = append(args, v)
 		return strings.Replace(term.bind, "{}", "?", 1), nil
 	}
-	arms := make([]string, len(terms))
-	for i, term := range terms {
-		conds := make([]string, 0, i+1)
-		for j := 0; j < i; j++ {
-			ph, err := bind(terms[j], after[j])
-			if err != nil {
-				return "", nil, err
-			}
-			conds = append(conds, terms[j].expr+" = "+ph)
-		}
+	// Descends the terms in order, which is also the order the placeholders
+	// appear in — SQLite binds `?` by position, so a chain assembled in any
+	// other order would read its cursor values shuffled.
+	var chain func(i int) (string, error)
+	chain = func(i int) (string, error) {
 		op := " > "
-		if term.desc {
+		if terms[i].desc {
 			op = " < "
 		}
-		ph, err := bind(term, after[i])
+		past, err := bind(terms[i], after[i])
 		if err != nil {
-			return "", nil, err
+			return "", err
 		}
-		conds = append(conds, term.expr+op+ph)
-		arms[i] = "(" + strings.Join(conds, " AND ") + ")"
+		clause := terms[i].expr + op + past
+		if i == len(terms)-1 {
+			return clause, nil
+		}
+		tied, err := bind(terms[i], after[i])
+		if err != nil {
+			return "", err
+		}
+		rest, err := chain(i + 1)
+		if err != nil {
+			return "", err
+		}
+		return clause + " OR (" + terms[i].expr + " = " + tied + " AND (" + rest + "))", nil
 	}
-	return ` AND (` + strings.Join(arms, `
-	          OR `) + `)`, args, nil
+	body, err := chain(0)
+	if err != nil {
+		return "", nil, err
+	}
+	return ` AND (` + body + `)`, args, nil
 }
 
 // sqliteTaskKeyValue converts one cursor value for its term. A value that
@@ -416,10 +518,11 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 
 	// The total runs the same filters on the same connection as the page, so
 	// a caller's "showing 50 of 213" can't be assembled from two different
-	// snapshots. The rule-order join is absent here on purpose: it is a LEFT
-	// JOIN of a grouped derived table referenced only by the ORDER BY, so it
-	// can neither drop nor duplicate a row — including it would only make the
-	// count slower.
+	// snapshots. It carries no ordering at all — neither the rule-order join
+	// (a LEFT JOIN of a grouped derived table referenced only by the ORDER BY,
+	// so it can neither drop nor duplicate a row) nor the attention tier's
+	// per-row subqueries. Counting is not ordering, and both would only make
+	// it slower.
 	var total int
 	if err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(*)
@@ -433,6 +536,7 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 	}
 
 	joins, terms := sqliteTaskListTerms(f)
+	cols, targets := sqliteTaskListProjection(terms)
 	pageArgs := append([]any{}, args...)
 	keyset := ""
 	if len(opts.After) > 0 {
@@ -445,7 +549,7 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 		}
 	}
 	query := `
-		SELECT ` + sqliteTaskListColumns + `
+		SELECT ` + cols + `
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id` + joins + `
 		WHERE ` + where + keyset + sqliteTaskOrderBy(terms)
@@ -458,11 +562,35 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 			pageArgs = append(pageArgs, opts.Offset)
 		}
 	}
-	tasks, err := queryListedTasksCtx(ctx, s.q, query, pageArgs...)
+	tasks, err := queryListedTasksCtx(ctx, s.q, targets, query, pageArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
 	return tasks, total, nil
+}
+
+// FacetEventTypes renders the same WHERE List does — the facet counts the
+// rows the lane lists, and a second WHERE is how the two drift apart. The
+// rule-order join and the sort joins are absent for the same reason the
+// count query leaves them out: nothing here orders by a rule's sort_order or
+// a claimant's name, and neither join can change which rows are counted.
+func (s *taskStore) FacetEventTypes(ctx context.Context, orgID string, f db.TaskListFilter) ([]db.Facet, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	where, args := sqliteTaskListWhere(f)
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT t.event_type, COUNT(*)
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE `+where+`
+		GROUP BY t.event_type
+		ORDER BY t.event_type ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return db.ScanFacets(rows)
 }
 
 func (s *taskStore) FindActiveByEntityAndType(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error) {
@@ -1411,14 +1539,24 @@ const sqliteTaskColumnsWithEntity = `
 		ELSE 0
 	END`
 
-// sqliteTaskListColumns is what a List page projects: the canonical column
-// list plus the two values its ORDER BY can run on that live on neither table
-// the point reads select from. Both come from sqliteTaskListJoins, so both are
-// present on every list read whichever sort is active, and both are what a
-// keyset cursor for that sort is minted from.
-const sqliteTaskListColumns = sqliteTaskColumnsWithEntity + `,
-	COALESCE(tr.sort_order, 999),
-	COALESCE(ca.display_name, cu.display_name, '')`
+// sqliteTaskListProjection is the SELECT list and the scan targets for one
+// List page: the canonical columns every task read projects, plus this order's
+// own ordering values — the ones the terms carry a target for, because they
+// live on no column the canonical list has. The two are built together and in
+// term order, so a column can't be added without somewhere to scan it.
+func sqliteTaskListProjection(terms []taskSortTerm) (string, []func(*domain.Task) any) {
+	cols := sqliteTaskColumnsWithEntity
+	var targets []func(*domain.Task) any
+	for _, term := range terms {
+		if term.target == nil {
+			continue
+		}
+		cols += `,
+	` + term.expr
+		targets = append(targets, term.target)
+	}
+	return cols, targets
+}
 
 // sqliteTaskBareColumns is tasks' own columns — no entity join — in the
 // order taskScanState.bareTargets expects. It is the leading, identical
@@ -1472,11 +1610,15 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 	)
 }
 
-// listTargets extends targets with sqliteTaskListColumns' two trailing
-// ordering values. Both are NOT NULL by their COALESCE, so neither needs a
-// NullX intermediate.
-func (s *taskScanState) listTargets(t *domain.Task) []any {
-	return append(s.targets(t), &t.ListSortOrder, &t.ListClaimeeName)
+// listTargets extends targets with the ordering values sqliteTaskListProjection
+// appended for this order's terms. Each is NOT NULL by the expression that
+// produced it, so none needs a NullX intermediate.
+func (s *taskScanState) listTargets(t *domain.Task, extras []func(*domain.Task) any) []any {
+	out := s.targets(t)
+	for _, extra := range extras {
+		out = append(out, extra(t))
+	}
+	return out
 }
 
 func (s *taskScanState) finalize(t *domain.Task) {
@@ -1542,8 +1684,9 @@ func scanTaskBareRow(row *sql.Row, t *domain.Task) (domain.Task, error) {
 	return *t, nil
 }
 
-// queryListedTasksCtx is queryTasksCtx for a sqliteTaskListColumns query.
-func queryListedTasksCtx(ctx context.Context, q queryer, query string, args ...any) ([]domain.Task, error) {
+// queryListedTasksCtx is queryTasksCtx for a List page, whose projection
+// carries this order's own ordering values after the canonical columns.
+func queryListedTasksCtx(ctx context.Context, q queryer, extras []func(*domain.Task) any, query string, args ...any) ([]domain.Task, error) {
 	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -1554,7 +1697,7 @@ func queryListedTasksCtx(ctx context.Context, q queryer, query string, args ...a
 	for rows.Next() {
 		var t domain.Task
 		var st taskScanState
-		if err := rows.Scan(st.listTargets(&t)...); err != nil {
+		if err := rows.Scan(st.listTargets(&t, extras)...); err != nil {
 			return nil, err
 		}
 		st.finalize(&t)

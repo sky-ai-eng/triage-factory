@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"time"
 
@@ -126,6 +127,10 @@ var TaskListStatuses = []string{
 //     that carries the queue's own priority. A key replaces the preference
 //     terms of that order, never its lane structure — snoozed still sorts
 //     behind live, closed behind open, and the id tiebreaker still ends it.
+//     The attention tier (see OrdersByAttention) is structure too, over a
+//     lane's open rows: "sort by title" reorders an In Progress lane within
+//     each tier, so a run parked on a human still leads it. A closed row is
+//     never tiered, so a terminal tail sorts by the key alone.
 //   - SortDir: TaskSortDirAsc or TaskSortDirDesc, applying to SortKey alone.
 //     Empty alongside a key means descending. It is meaningless without a
 //     key — the default order has no direction to flip — and the HTTP layer
@@ -143,6 +148,31 @@ type TaskListFilter struct {
 	Search         string
 	SortKey        string
 	SortDir        string
+}
+
+// OrdersByAttention reports whether List's order leads with the attention tier
+// — whose move is it: a conversation parked on a human first, then a failed
+// one, then work in flight, then work already concluded. It answers yes for
+// the two lanes whose reader is asking that question (in_progress, in_review)
+// and for the unfiltered read that contains them.
+//
+// This is a COST gate, and only that. The tier costs a correlated subquery per
+// row, which a lane whose rows would all tie at the same tier should not pay:
+// a queued row's place in line is the queue's own priority by definition, and a
+// closed row takes a constant tier whatever this answers. Correctness lives in
+// the tier expression instead — it guards the closed partition itself, so the
+// Done tail is ordered by recency under EVERY filter rather than only under the
+// ones this excludes. A gate is the wrong place for an invariant: it holds only
+// for the filters somebody thought of, and the mixed read is exactly the one
+// nobody sends today.
+//
+// It lives here rather than in either dialect so the two orderings cannot
+// disagree about which lanes pay for the tier while agreeing on its SQL.
+func (f TaskListFilter) OrdersByAttention() bool {
+	if len(f.Statuses) == 0 {
+		return true
+	}
+	return slices.Contains(f.Statuses, "in_progress") || slices.Contains(f.Statuses, "in_review")
 }
 
 // The task-list sort vocabulary: the keys a reader may order a lane by, and
@@ -191,14 +221,18 @@ var ErrBadPageCursor = errors.New("page cursor does not fit this read's order")
 // rather than preference. Both impls' term lists and this function are pinned
 // against each other by the paging conformance, which walks every sort.
 //
-// The two leading values are the lane partitions every task order keeps, so a
-// resumed page can't climb out of its lane; the trailing value is the id
-// tiebreaker that makes the order total. What sits between them is whatever
-// the filter's sort asked for.
+// The leading values are the structure every task order keeps — the two lane
+// partitions, and the attention tier on the lanes that carry it — so a resumed
+// page can't climb out of its lane or out of its tier. The trailing value is
+// the id tiebreaker that makes the order total. What sits between them is
+// whatever the filter's sort asked for.
 func TaskSortKey(f TaskListFilter, t domain.Task) []string {
 	key := []string{
 		taskKeyBool(t.Status == "snoozed"),
 		taskKeyBool(t.ClosedAt != nil),
+	}
+	if f.OrdersByAttention() {
+		key = append(key, strconv.Itoa(t.ListAttentionTier))
 	}
 	switch f.SortKey {
 	case TaskSortTitle:
@@ -314,6 +348,25 @@ type TaskStore interface {
 	// order and nothing else, so the lane structure and the tiebreaker
 	// survive whatever the reader picked.
 	List(ctx context.Context, orgID string, filter TaskListFilter, opts ListOpts) ([]domain.Task, int, error)
+
+	// FacetEventTypes is List's synthetic sibling: how many of the rows the
+	// same filters match sit at each event type, one Facet per type present,
+	// ordered by the type id ascending. It is what a lane's filter chips are
+	// drawn from — the chips must show every type the lane holds, including
+	// the ones the reader just filtered out, so a client holding one page of
+	// a filtered query cannot derive them.
+	//
+	// It takes no ListOpts: the grouping is over a closed vocabulary
+	// (domain.EventTypeIDs), so the answer is bounded by the catalog rather
+	// than by a page, and a window over it would answer a different question.
+	//
+	// Callers pass the LANE's filters — the ones that say which rows the
+	// column holds — and leave the reader's own narrowing (EventTypes,
+	// Search) unset: a facet narrowed by the filter it exists to offer
+	// answers about itself. The store does not enforce that; it renders
+	// whatever filter it is given through the same WHERE List does, which is
+	// what keeps a count from ever disagreeing with the rows beneath it.
+	FacetEventTypes(ctx context.Context, orgID string, filter TaskListFilter) ([]Facet, error)
 
 	// FindActiveByEntityAndType returns non-terminal tasks for an
 	// entity matching the given event type. Used by inline close

@@ -133,12 +133,17 @@ func taskIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-// taskListRequest is the body of POST /api/tasks/list: the filter set plus
-// the shared paging fields. Every field is optional — `{}` is "every task I
-// can see that isn't sleeping, first page" — but nothing about it is implicit:
-// a caller that wants only the pickable queue says so, and a caller that wants
-// the last week of closed work passes the window it means.
-type taskListRequest struct {
+// taskLaneRequest is the lane half of a task query: the filters that decide
+// which rows a surface is ABOUT, as against the ones a reader then applies
+// inside it. Both of the tasks resource's reads take it — the list renders
+// the lane's rows, its facet counts them by event type — from one struct and
+// one validator, so a rule can't hold on one door and not its sibling.
+//
+// Every field is optional. The zero lane is "every task I can see that isn't
+// sleeping", and nothing about it is implicit: a caller that wants only the
+// pickable queue says so, and one that wants the last week of closed work
+// passes the window it means.
+type taskLaneRequest struct {
 	// Statuses selects the lanes. Empty = all. Validated against
 	// db.TaskListStatuses; an unknown value is a client fault, not an
 	// empty page.
@@ -165,9 +170,19 @@ type taskListRequest struct {
 	// (domain.EventSources); an unknown value is a client fault, not an
 	// empty page. Empty = all sources.
 	Sources []string `json:"sources"`
+}
+
+// taskListRequest is the body of POST /api/tasks/list: the lane, the reader's
+// own narrowing of it, and the shared paging fields.
+type taskListRequest struct {
+	taskLaneRequest
+
 	// CreatedBefore (RFC3339) is CreatedSince's other half: rows created at
 	// or before it. The pair is how a lane asks for a window rather than a
-	// ray, and either end may stand alone.
+	// ray, and either end may stand alone. It sits with the reader's own
+	// narrowing rather than in the lane: it is the moving end of the window
+	// a column's filter popover offers, so a facet computed under it would
+	// describe the reader's slice instead of the column.
 	CreatedBefore string `json:"created_before"`
 	// EventTypes narrows to these stations. Validated against the catalog
 	// (domain.EventTypeIDs) on the same terms as Sources. Empty = all.
@@ -190,6 +205,66 @@ type taskListRequest struct {
 	SortDir string `json:"sort_dir"`
 
 	httpx.PageRequest
+}
+
+// taskLaneKeys is the part of a resolved lane the page fingerprint needs and
+// the store filter cannot supply: the fingerprint is taken over text, and a
+// *time.Time has no canonical spelling of its own.
+type taskLaneKeys struct {
+	ClosedSince  string
+	CreatedSince string
+}
+
+// resolveTaskLane validates the lane filters and renders them as the store
+// filter both task reads take. Faults land on v — every failing field, not
+// the first — so a caller sees the whole bad body at once.
+func resolveTaskLane(v *httpx.Validation, req taskLaneRequest) (db.TaskListFilter, taskLaneKeys) {
+	f := db.TaskListFilter{
+		Statuses:       canonicalStrings(req.Statuses),
+		TeamIDs:        canonicalStrings(req.TeamIDs),
+		OnlyUnclaimed:  req.OnlyUnclaimed,
+		IncludeSnoozed: req.IncludeSnoozed,
+		Sources:        canonicalStrings(req.Sources),
+	}
+	for _, st := range f.Statuses {
+		if !slices.Contains(db.TaskListStatuses, st) {
+			v.Invalid("statuses", fmt.Sprintf("unknown status %q; must be one of: %s",
+				st, strings.Join(db.TaskListStatuses, ", ")))
+		}
+	}
+	for _, id := range f.TeamIDs {
+		if _, err := uuid.Parse(id); err != nil {
+			v.Invalid("team_ids", fmt.Sprintf("team id %q is not a valid team id", id))
+		}
+	}
+	validSources := domain.EventSources()
+	for _, src := range f.Sources {
+		if !slices.Contains(validSources, src) {
+			v.Invalid("sources", fmt.Sprintf("unknown source %q; must be one of: %s",
+				src, strings.Join(validSources, ", ")))
+		}
+	}
+	var keys taskLaneKeys
+	f.ClosedSince, keys.ClosedSince = parseTaskWindow(v, "closed_since", req.ClosedSince)
+	f.CreatedSince, keys.CreatedSince = parseTaskWindow(v, "created_since", req.CreatedSince)
+	return f, keys
+}
+
+// parseTaskWindow parses one RFC3339 bound of a task query's time window,
+// returning the instant and the canonical text the page fingerprint is taken
+// over. An absent bound is (nil, "") — no window — and a malformed one names
+// its own field rather than the pair's.
+func parseTaskWindow(v *httpx.Validation, field, raw string) (*time.Time, string) {
+	if raw == "" {
+		return nil, ""
+	}
+	ts, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		v.Invalid(field, field+" must be an RFC3339 timestamp")
+		return nil, ""
+	}
+	ts = ts.UTC()
+	return &ts, ts.Format(time.RFC3339Nano)
 }
 
 // taskListFilterKey is the canonicalized form of a taskListRequest's filters —
@@ -483,66 +558,12 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var v httpx.Validation
-	statuses := canonicalStrings(req.Statuses)
-	for _, st := range statuses {
-		if !slices.Contains(db.TaskListStatuses, st) {
-			v.Invalid("statuses", fmt.Sprintf("unknown status %q; must be one of: %s",
-				st, strings.Join(db.TaskListStatuses, ", ")))
-		}
-	}
-	teamIDs := canonicalStrings(req.TeamIDs)
-	for _, id := range teamIDs {
-		if _, err := uuid.Parse(id); err != nil {
-			v.Invalid("team_ids", fmt.Sprintf("team id %q is not a valid team id", id))
-		}
-	}
-	var closedSince *time.Time
-	closedSinceKey := ""
-	if req.ClosedSince != "" {
-		ts, err := time.Parse(time.RFC3339, req.ClosedSince)
-		if err != nil {
-			v.Invalid("closed_since", "closed_since must be an RFC3339 timestamp")
-		} else {
-			ts = ts.UTC()
-			closedSince = &ts
-			closedSinceKey = ts.Format(time.RFC3339Nano)
-		}
-	}
-	var createdSince *time.Time
-	createdSinceKey := ""
-	if req.CreatedSince != "" {
-		ts, err := time.Parse(time.RFC3339, req.CreatedSince)
-		if err != nil {
-			v.Invalid("created_since", "created_since must be an RFC3339 timestamp")
-		} else {
-			ts = ts.UTC()
-			createdSince = &ts
-			createdSinceKey = ts.Format(time.RFC3339Nano)
-		}
-	}
-	var createdBefore *time.Time
-	createdBeforeKey := ""
-	if req.CreatedBefore != "" {
-		ts, err := time.Parse(time.RFC3339, req.CreatedBefore)
-		if err != nil {
-			v.Invalid("created_before", "created_before must be an RFC3339 timestamp")
-		} else {
-			ts = ts.UTC()
-			createdBefore = &ts
-			createdBeforeKey = ts.Format(time.RFC3339Nano)
-		}
-	}
-	sources := canonicalStrings(req.Sources)
-	validSources := domain.EventSources()
-	for _, src := range sources {
-		if !slices.Contains(validSources, src) {
-			v.Invalid("sources", fmt.Sprintf("unknown source %q; must be one of: %s",
-				src, strings.Join(validSources, ", ")))
-		}
-	}
-	eventTypes := canonicalStrings(req.EventTypes)
+	filter, laneKeys := resolveTaskLane(&v, req.taskLaneRequest)
+	var createdBeforeKey string
+	filter.CreatedBefore, createdBeforeKey = parseTaskWindow(&v, "created_before", req.CreatedBefore)
+	filter.EventTypes = canonicalStrings(req.EventTypes)
 	validEventTypes := domain.EventTypeIDs()
-	for _, et := range eventTypes {
+	for _, et := range filter.EventTypes {
 		if !slices.Contains(validEventTypes, et) {
 			// The catalog is too long to spell into an error message, and it
 			// is already a route: name the offending value and say where the
@@ -552,62 +573,48 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	}
 	// Trimmed here rather than in the store so the fingerprint, the predicate
 	// and the cap all see the same needle — " ci " and "ci" are one query.
-	search := strings.TrimSpace(req.Search)
-	if utf8.RuneCountInString(search) > maxTaskSearchRunes {
+	filter.Search = strings.TrimSpace(req.Search)
+	if utf8.RuneCountInString(filter.Search) > maxTaskSearchRunes {
 		v.Invalid("search", fmt.Sprintf("search must be at most %d characters", maxTaskSearchRunes))
 	}
-	sortKey, sortDir := req.SortKey, req.SortDir
-	if sortKey != "" && !slices.Contains(db.TaskListSortKeys, sortKey) {
+	filter.SortKey, filter.SortDir = req.SortKey, req.SortDir
+	if filter.SortKey != "" && !slices.Contains(db.TaskListSortKeys, filter.SortKey) {
 		v.Invalid("sort_key", fmt.Sprintf("unknown sort_key %q; must be one of: %s",
-			sortKey, strings.Join(db.TaskListSortKeys, ", ")))
+			filter.SortKey, strings.Join(db.TaskListSortKeys, ", ")))
 	}
-	if sortDir != "" {
-		if !slices.Contains(db.TaskListSortDirs, sortDir) {
+	if filter.SortDir != "" {
+		if !slices.Contains(db.TaskListSortDirs, filter.SortDir) {
 			v.Invalid("sort_dir", fmt.Sprintf("unknown sort_dir %q; must be one of: %s",
-				sortDir, strings.Join(db.TaskListSortDirs, ", ")))
+				filter.SortDir, strings.Join(db.TaskListSortDirs, ", ")))
 		}
-		if sortKey == "" {
+		if filter.SortKey == "" {
 			v.Invalid("sort_dir", "sort_dir requires sort_key")
 		}
-	} else if sortKey != "" {
+	} else if filter.SortKey != "" {
 		// Newest / Z-A first, which is what the board's controls default to.
-		sortDir = db.TaskSortDirDesc
+		filter.SortDir = db.TaskSortDirDesc
 	}
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{
-		Statuses:       statuses,
-		TeamIDs:        teamIDs,
-		OnlyUnclaimed:  req.OnlyUnclaimed,
-		IncludeSnoozed: req.IncludeSnoozed,
-		ClosedSince:    closedSinceKey,
-		CreatedSince:   createdSinceKey,
+		Statuses:       filter.Statuses,
+		TeamIDs:        filter.TeamIDs,
+		OnlyUnclaimed:  filter.OnlyUnclaimed,
+		IncludeSnoozed: filter.IncludeSnoozed,
+		ClosedSince:    laneKeys.ClosedSince,
+		CreatedSince:   laneKeys.CreatedSince,
 		CreatedBefore:  createdBeforeKey,
-		Sources:        sources,
-		EventTypes:     eventTypes,
+		Sources:        filter.Sources,
+		EventTypes:     filter.EventTypes,
 		// Case-folded, because the predicate is: two spellings of one needle
 		// match the same rows, so they must fingerprint as the same query
 		// rather than cost the caller its token.
-		Search:  strings.ToLower(search),
-		SortKey: sortKey,
-		SortDir: sortDir,
+		Search:  strings.ToLower(filter.Search),
+		SortKey: filter.SortKey,
+		SortDir: filter.SortDir,
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
-	filter := db.TaskListFilter{
-		Statuses:       statuses,
-		TeamIDs:        teamIDs,
-		OnlyUnclaimed:  req.OnlyUnclaimed,
-		IncludeSnoozed: req.IncludeSnoozed,
-		ClosedSince:    closedSince,
-		CreatedSince:   createdSince,
-		CreatedBefore:  createdBefore,
-		Sources:        sources,
-		EventTypes:     eventTypes,
-		Search:         search,
-		SortKey:        sortKey,
-		SortDir:        sortDir,
-	}
 	// One row past the window, so the answer to "is there a page after this
 	// one" is a row we either got or didn't. A keyset page cannot derive it
 	// from the total the way an offset page does, because it doesn't know its
@@ -650,6 +657,119 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 		items[i] = taskToJSON(t)
 	}
 	httpx.WriteListKeyset(w, page, items, total, nextKey)
+}
+
+// taskFacetsRequest is the body of POST /api/tasks/facets: the lane, and
+// nothing a reader narrows it with.
+//
+// The refused fields are declared here rather than left to strict decode's
+// unknown-field arm, because "unknown field" would be the wrong answer: each
+// is a real field of the sibling list, so a caller sending one has misread
+// what this route answers rather than mistyped a name. They are
+// json.RawMessage so PRESENCE is what's detected — `"search": ""` is still a
+// caller narrowing a lane whose whole point is to be unnarrowed — and the
+// paging pair is spelled out here instead of embedding httpx.PageRequest,
+// which would accept them.
+type taskFacetsRequest struct {
+	taskLaneRequest
+
+	EventTypes    json.RawMessage `json:"event_types"`
+	Search        json.RawMessage `json:"search"`
+	SortKey       json.RawMessage `json:"sort_key"`
+	SortDir       json.RawMessage `json:"sort_dir"`
+	CreatedBefore json.RawMessage `json:"created_before"`
+	PageSize      json.RawMessage `json:"page_size"`
+	PageToken     json.RawMessage `json:"page_token"`
+}
+
+// taskFacet is one event type present in a lane and how many of its tasks sit
+// there. `value` rather than `event_type` because the shape is the resource's
+// facet shape: a second cut (sources) is a sibling key of the response, not a
+// second shape.
+type taskFacet struct {
+	Value string `json:"value"`
+	Count int    `json:"count"`
+}
+
+// taskFacetsResponse is the fixed schema of named cuts a synthetic read
+// answers with. One cut today; a `sources` cut lands beside this key without
+// a wire change, and never as a `group_by=` parameter that would reshape the
+// response.
+type taskFacetsResponse struct {
+	EventTypes []taskFacet `json:"event_types"`
+}
+
+// handleTaskFacets is the tasks list's synthetic sibling: the event types
+// present in a lane and how many rows carry each — the set a lane's filter
+// chips are drawn from.
+//
+// It is a node beside the list rather than a field on it because the answer
+// is numbers about rows rather than rows, and it takes the lane's filters
+// without the reader's own: the chips exist to show which types the lane
+// holds INCLUDING the ones the reader just filtered out, so a facet narrowed
+// by `event_types` would answer about itself. A client cannot derive the set
+// from the list either — it holds one page of a filtered query, and a lane
+// whose first page is all one type would offer no chip for the twenty rows of
+// another sitting on page two.
+//
+// No paging and no total_count: the grouping is over a closed vocabulary, so
+// the answer is bounded by the catalog rather than by a window. Authorization
+// is the list's — RLS scopes the rows and team_ids narrows within that — and
+// it registers through apiMutating for the same reason the list does: it is a
+// POST, and CSRF follows the method rather than the intent.
+//
+// POST /api/tasks/facets
+func (s *Server) handleTaskFacets(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+
+	var req taskFacetsRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+
+	var v httpx.Validation
+	const narrows = "%s narrows a lane; the facet answers for the whole lane, including the values a reader filtered out"
+	const pages = "%s is not accepted: the facet is one bounded answer over the event-type catalog, not a page"
+	for _, refused := range []struct {
+		field  string
+		sent   json.RawMessage
+		reason string
+	}{
+		{"event_types", req.EventTypes, narrows},
+		{"search", req.Search, narrows},
+		{"sort_key", req.SortKey, narrows},
+		{"sort_dir", req.SortDir, narrows},
+		{"created_before", req.CreatedBefore, narrows},
+		{"page_size", req.PageSize, pages},
+		{"page_token", req.PageToken, pages},
+	} {
+		if refused.sent != nil {
+			v.Invalid(refused.field, fmt.Sprintf(refused.reason, refused.field))
+		}
+	}
+	filter, _ := resolveTaskLane(&v, req.taskLaneRequest)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var facets []db.Facet
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		facets, e = tx.Tasks.FacetEventTypes(r.Context(), orgID, filter)
+		return e
+	}); err != nil {
+		internalError(w, "tasks", err)
+		return
+	}
+	out := taskFacetsResponse{EventTypes: make([]taskFacet, len(facets))}
+	for i, f := range facets {
+		out.EventTypes[i] = taskFacet{Value: f.Value, Count: f.Count}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // canonicalStrings sorts and dedups a filter list so the same query always

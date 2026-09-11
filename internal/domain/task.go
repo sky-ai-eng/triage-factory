@@ -76,18 +76,23 @@ type Task struct {
 	// waiting — it rises as follow-ups land while a conversation is in flight.
 	SlackMessageCount int `json:"slack_message_count,omitempty"`
 
-	// The two ordering values a task list orders on that live on neither the
-	// tasks row nor its entity: the sort_order of the lowest-numbered enabled
-	// rule covering this event type, and the display name of whoever holds the
-	// claim. Both come from joins only Tasks.List makes, so both are zero on a
-	// point read — and neither is on the wire, because they are the list's own
-	// ordering arithmetic rather than anything a card shows.
+	// The ordering values a task list orders on that live on no column the
+	// task read otherwise carries: the sort_order of the lowest-numbered
+	// enabled rule covering this event type, the display name of whoever holds
+	// the claim, and the attention tier — whose move the task is. Each comes
+	// from a join or subquery Tasks.List adds only for the order it is running,
+	// so each is zero on a point read and on a list whose order doesn't use it.
+	// None is on the wire: they are the list's own ordering arithmetic rather
+	// than anything a card shows.
 	//
 	// They are projected so a keyset page can resume from the last row it
 	// returned: the position a token carries is the ORDER BY tuple's values,
-	// and a value the caller cannot see is a value it cannot resume from.
-	ListSortOrder   int    `json:"-"`
-	ListClaimeeName string `json:"-"`
+	// and a value the caller cannot see is a value it cannot resume from. Which
+	// of them a given read fills is db.TaskSortKey's business — it reads
+	// exactly the ones that read's order put in the tuple.
+	ListSortOrder     int    `json:"-"`
+	ListClaimeeName   string `json:"-"`
+	ListAttentionTier int    `json:"-"`
 }
 
 // TaskScoreUpdate holds the fields to update on a task after AI scoring.
