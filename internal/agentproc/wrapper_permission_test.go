@@ -41,6 +41,50 @@ export function query({ options }) {
 }
 `
 
+// optionsEchoStubSDK stands in for the SDK to read back the Options the
+// wrapper assembled from argv: query() yields them once and ends, so a test
+// can assert on what the real SDK would have been handed.
+const optionsEchoStubSDK = `
+export function query({ options }) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      yield { type: "stub_options", disallowedTools: options.disallowedTools ?? null }
+    },
+    async interrupt() {},
+    async setPermissionMode() {},
+  }
+}
+`
+
+// TestWrapperDisallowedToolsReachSDKOptions pins that --disallowedTools is
+// parsed into options.disallowedTools as a list, the same split the
+// allowlist gets. A flag the wrapper ignored would log and drop it, and the
+// tool it names would silently stay in the model's context.
+func TestWrapperDisallowedToolsReachSDKOptions(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	w := startWrapper(t, node, optionsEchoStubSDK, "--disallowedTools", "AskUserQuestion,WebSearch")
+	msg := w.next()
+	if msg["type"] != "stub_options" {
+		t.Fatalf("first non-ready line = %v, want stub_options", msg)
+	}
+	got, _ := msg["disallowedTools"].([]any)
+	want := []any{"AskUserQuestion", "WebSearch"}
+	if len(got) != len(want) {
+		t.Fatalf("disallowedTools = %v, want %v", msg["disallowedTools"], want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("disallowedTools[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
+	if strings.Contains(w.stderr.String(), "ignoring unknown arg --disallowedTools") {
+		t.Errorf("wrapper did not recognize --disallowedTools: %s", w.stderr.String())
+	}
+}
+
 // TestWrapperPermissionRequestUsesToolUseID pins the identifier the wrapper
 // puts on a permission prompt: the SDK's own toolUseID for the gated call,
 // emitted as tool_call_id, with the SDK's prompt copy alongside it. The reply

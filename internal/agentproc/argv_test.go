@@ -18,6 +18,7 @@ func TestBuildArgs_InitialInvocation(t *testing.T) {
 		"--output-format", "stream-json",
 		"--verbose",
 		"--allowedTools", "Read,Write",
+		"--disallowedTools", "AskUserQuestion",
 		"--max-turns", "100",
 	}
 	if !slices.Equal(got, want) {
@@ -79,6 +80,27 @@ func TestBuildArgs_PermissionPromptsFlag(t *testing.T) {
 	oneShot := BuildArgs(RunOptions{Interactive: false, PermissionPrompts: true, Message: "hi"})
 	if slices.Contains(oneShot, "--permission-prompts") {
 		t.Errorf("expected --permission-prompts omitted in one-shot mode: %v", oneShot)
+	}
+}
+
+func TestBuildArgs_DisallowsAskUserQuestion(t *testing.T) {
+	// AskUserQuestion is removed from the model's context on every path,
+	// not just left off the allowlist: one-shot, interactive, and resume
+	// all carry the flag, and it never depends on caller-supplied fields.
+	cases := map[string]RunOptions{
+		"one-shot":    {Message: "hi"},
+		"interactive": {Interactive: true, PermissionPrompts: true},
+		"resume":      {Message: "hi", SessionID: "sess-123"},
+	}
+	for name, opts := range cases {
+		got := BuildArgs(opts)
+		idx := slices.Index(got, "--disallowedTools")
+		if idx < 0 || idx+1 >= len(got) {
+			t.Fatalf("%s: expected --disallowedTools flag: %v", name, got)
+		}
+		if got[idx+1] != "AskUserQuestion" {
+			t.Errorf("%s: --disallowedTools value = %q, want AskUserQuestion", name, got[idx+1])
+		}
 	}
 }
 
