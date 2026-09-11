@@ -307,6 +307,17 @@ type Spawner struct {
 	teamKB kbstore.KB
 
 	cancels map[string]context.CancelFunc // conversationID → cancel the entire run
+	// dispatchWG counts the dispatch goroutines drainConversationQueue has in
+	// flight. Cancelling their ctx is what stops them; this is how their owner
+	// learns they are actually gone, which matters wherever the process
+	// outlives the dispatcher — a claim still writing rows after its owner
+	// believes it finished is a live transaction nothing is waiting on.
+	//
+	// TODO(TFAC-962): the shutdown path does not wait on this yet, so
+	// App.Close can still close the pools under a reactor write that
+	// context.WithoutCancel deliberately made un-cancellable. Only the test
+	// fixtures join through waitForDispatches today.
+	dispatchWG sync.WaitGroup
 	// engagements holds the live claim attempt's trace root for each run
 	// currently dispatching, keyed by run id — the seam between the setup
 	// span (which ends at agent-live) and the punctual spans that link back
