@@ -193,85 +193,82 @@ func (s *Store) MintSystem(
 		return Token{}, "", err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Token{}, "", fmt.Errorf("begin mint tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
+	var tok Token
+	if err := db.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`,
+			userID+":"+orgID, mintLockSalt,
+		); err != nil {
+			return fmt.Errorf("acquire mint lock: %w", err)
+		}
 
-	if _, err := tx.ExecContext(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`,
-		userID+":"+orgID, mintLockSalt,
-	); err != nil {
-		return Token{}, "", fmt.Errorf("acquire mint lock: %w", err)
-	}
+		// Live means "could still authenticate": not revoked, not past its own
+		// stored expiry. The org cap deliberately doesn't narrow this — it moves,
+		// and a token it currently hides is still a row its owner has to clean up
+		// and one a loosened cap would bring back.
+		var live int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM public.user_api_tokens
+			 WHERE user_id = $1 AND org_id = $2
+			   AND revoked_at IS NULL
+			   AND (expires_at IS NULL OR expires_at > now())
+		`, userID, orgID).Scan(&live); err != nil {
+			return fmt.Errorf("count live tokens: %w", err)
+		}
+		if live >= MaxPerUserOrg {
+			return ErrTokenLimit
+		}
 
-	// Live means "could still authenticate": not revoked, not past its own
-	// stored expiry. The org cap deliberately doesn't narrow this — it moves,
-	// and a token it currently hides is still a row its owner has to clean up
-	// and one a loosened cap would bring back.
-	var live int
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM public.user_api_tokens
-		 WHERE user_id = $1 AND org_id = $2
-		   AND revoked_at IS NULL
-		   AND (expires_at IS NULL OR expires_at > now())
-	`, userID, orgID).Scan(&live); err != nil {
-		return Token{}, "", fmt.Errorf("count live tokens: %w", err)
-	}
-	if live >= MaxPerUserOrg {
-		return Token{}, "", ErrTokenLimit
-	}
+		// The cap in force right now, for the audit row. An org with no settings
+		// row is uncapped.
+		var capDays sql.NullInt64
+		switch err := tx.QueryRowContext(ctx,
+			`SELECT api_token_max_age_days FROM public.org_settings WHERE org_id = $1`, orgID,
+		).Scan(&capDays); {
+		case err == nil, errors.Is(err, sql.ErrNoRows):
+		default:
+			return fmt.Errorf("read token max age: %w", err)
+		}
 
-	// The cap in force right now, for the audit row. An org with no settings
-	// row is uncapped.
-	var capDays sql.NullInt64
-	switch err := tx.QueryRowContext(ctx,
-		`SELECT api_token_max_age_days FROM public.org_settings WHERE org_id = $1`, orgID,
-	).Scan(&capDays); {
-	case err == nil, errors.Is(err, sql.ErrNoRows):
-	default:
-		return Token{}, "", fmt.Errorf("read token max age: %w", err)
-	}
+		// A data-modifying CTE, not a follow-up read: the row still comes from the
+		// INSERT's own RETURNING, and the outer SELECT only reaches the org's cap
+		// so the returned row carries the same effective expiry a list read would.
+		var cidrArg any
+		if len(cidrs) > 0 {
+			cidrArg = cidrs
+		}
+		row, err := scanToken(tx.QueryRowContext(ctx, `
+			WITH ins AS (
+				INSERT INTO public.user_api_tokens
+					(user_id, org_id, name, token_hash, token_prefix, allowed_cidrs, expires_at)
+				VALUES ($1, $2, $3, $4, $5, $6::text[]::cidr[], $7)
+				RETURNING *
+			)
+			SELECT `+tokenColumns+`
+			  FROM ins t
+			  LEFT JOIN public.org_settings os ON os.org_id = t.org_id
+		`, userID, orgID, name, hash, prefix, cidrArg, expiresAt).Scan)
+		if err != nil {
+			return fmt.Errorf("insert api token: %w", err)
+		}
+		tok = row
 
-	// A data-modifying CTE, not a follow-up read: the row still comes from the
-	// INSERT's own RETURNING, and the outer SELECT only reaches the org's cap
-	// so the returned row carries the same effective expiry a list read would.
-	var cidrArg any
-	if len(cidrs) > 0 {
-		cidrArg = cidrs
-	}
-	tok, err := scanToken(tx.QueryRowContext(ctx, `
-		WITH ins AS (
-			INSERT INTO public.user_api_tokens
-				(user_id, org_id, name, token_hash, token_prefix, allowed_cidrs, expires_at)
-			VALUES ($1, $2, $3, $4, $5, $6::text[]::cidr[], $7)
-			RETURNING *
-		)
-		SELECT `+tokenColumns+`
-		  FROM ins t
-		  LEFT JOIN public.org_settings os ON os.org_id = t.org_id
-	`, userID, orgID, name, hash, prefix, cidrArg, expiresAt).Scan)
-	if err != nil {
-		return Token{}, "", fmt.Errorf("insert api token: %w", err)
-	}
-
-	var capForAudit *int
-	if capDays.Valid {
-		days := int(capDays.Int64)
-		capForAudit = &days
-	}
-	if err := recordAccessChange(ctx, tx, orgID, domain.AccessChange{
-		ActorUserID: actorForAudit,
-		Action:      domain.AccessActionAPITokenCreated,
-		DetailJSON: domain.AccessDetailAPITokenCreated(
-			tok.ID, tok.Name, tok.Prefix, tok.ExpiresAt, capForAudit, tok.AllowedCIDRs),
+		var capForAudit *int
+		if capDays.Valid {
+			days := int(capDays.Int64)
+			capForAudit = &days
+		}
+		if err := recordAccessChange(ctx, tx, orgID, domain.AccessChange{
+			ActorUserID: actorForAudit,
+			Action:      domain.AccessActionAPITokenCreated,
+			DetailJSON: domain.AccessDetailAPITokenCreated(
+				tok.ID, tok.Name, tok.Prefix, tok.ExpiresAt, capForAudit, tok.AllowedCIDRs),
+		}); err != nil {
+			return fmt.Errorf("audit token creation: %w", err)
+		}
+		return nil
 	}); err != nil {
-		return Token{}, "", fmt.Errorf("audit token creation: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return Token{}, "", fmt.Errorf("commit mint: %w", err)
+		return Token{}, "", err
 	}
 	return tok, plaintext, nil
 }
@@ -491,37 +488,30 @@ func (s *Store) RevokeSystem(ctx context.Context, userID, tokenID, actorForAudit
 	if !isValidUUID(tokenID) || !isValidUUID(userID) {
 		return ErrNoSuchToken
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin revoke tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
+	return db.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		var orgID, name, prefix string
+		err := tx.QueryRowContext(ctx, `
+			UPDATE public.user_api_tokens
+			   SET revoked_at = now()
+			 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+			RETURNING org_id::text, name, token_prefix
+		`, tokenID, userID).Scan(&orgID, &name, &prefix)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNoSuchToken
+		}
+		if err != nil {
+			return fmt.Errorf("revoke api token: %w", err)
+		}
 
-	var orgID, name, prefix string
-	err = tx.QueryRowContext(ctx, `
-		UPDATE public.user_api_tokens
-		   SET revoked_at = now()
-		 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
-		RETURNING org_id::text, name, token_prefix
-	`, tokenID, userID).Scan(&orgID, &name, &prefix)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNoSuchToken
-	}
-	if err != nil {
-		return fmt.Errorf("revoke api token: %w", err)
-	}
-
-	if err := recordAccessChange(ctx, tx, orgID, domain.AccessChange{
-		ActorUserID: actorForAudit,
-		Action:      domain.AccessActionAPITokenRevoked,
-		DetailJSON:  domain.AccessDetailAPITokenRevoked(tokenID, name, prefix, ""),
-	}); err != nil {
-		return fmt.Errorf("audit token revocation: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit revoke: %w", err)
-	}
-	return nil
+		if err := recordAccessChange(ctx, tx, orgID, domain.AccessChange{
+			ActorUserID: actorForAudit,
+			Action:      domain.AccessActionAPITokenRevoked,
+			DetailJSON:  domain.AccessDetailAPITokenRevoked(tokenID, name, prefix, ""),
+		}); err != nil {
+			return fmt.Errorf("audit token revocation: %w", err)
+		}
+		return nil
+	})
 }
 
 // RevokeForUserInOrgSystem is the deprovisioning revoke: it kills every token
@@ -539,50 +529,47 @@ func (s *Store) RevokeForUserInOrgSystem(ctx context.Context, userID, orgID, act
 	if !isValidUUID(userID) || !isValidUUID(orgID) {
 		return 0, nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("begin revoke-all tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
-
-	rows, err := tx.QueryContext(ctx, `
-		UPDATE public.user_api_tokens
-		   SET revoked_at = now()
-		 WHERE user_id = $1 AND org_id = $2 AND revoked_at IS NULL
-		RETURNING id::text, name, token_prefix
-	`, userID, orgID)
-	if err != nil {
-		return 0, fmt.Errorf("revoke api tokens for user %s in org %s: %w", userID, orgID, err)
-	}
 	type revoked struct{ id, name, prefix string }
 	var killed []revoked
-	for rows.Next() {
-		var r revoked
-		if err := rows.Scan(&r.id, &r.name, &r.prefix); err != nil {
+	if err := db.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		killed = nil
+		rows, err := tx.QueryContext(ctx, `
+			UPDATE public.user_api_tokens
+			   SET revoked_at = now()
+			 WHERE user_id = $1 AND org_id = $2 AND revoked_at IS NULL
+			RETURNING id::text, name, token_prefix
+		`, userID, orgID)
+		if err != nil {
+			return fmt.Errorf("revoke api tokens for user %s in org %s: %w", userID, orgID, err)
+		}
+		for rows.Next() {
+			var r revoked
+			if err := rows.Scan(&r.id, &r.name, &r.prefix); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan revoked token: %w", err)
+			}
+			killed = append(killed, r)
+		}
+		if err := rows.Err(); err != nil {
 			rows.Close()
-			return 0, fmt.Errorf("scan revoked token: %w", err)
+			return fmt.Errorf("revoke api tokens: %w", err)
 		}
-		killed = append(killed, r)
-	}
-	if err := rows.Err(); err != nil {
 		rows.Close()
-		return 0, fmt.Errorf("revoke api tokens: %w", err)
-	}
-	rows.Close()
 
-	for _, r := range killed {
-		if err := recordAccessChange(ctx, tx, orgID, domain.AccessChange{
-			ActorUserID:  actorUserID,
-			Action:       domain.AccessActionAPITokenRevoked,
-			TargetUserID: userID,
-			DetailJSON: domain.AccessDetailAPITokenRevoked(
-				r.id, r.name, r.prefix, domain.AccessSourceMembershipRemoved),
-		}); err != nil {
-			return 0, fmt.Errorf("audit token revocation: %w", err)
+		for _, r := range killed {
+			if err := recordAccessChange(ctx, tx, orgID, domain.AccessChange{
+				ActorUserID:  actorUserID,
+				Action:       domain.AccessActionAPITokenRevoked,
+				TargetUserID: userID,
+				DetailJSON: domain.AccessDetailAPITokenRevoked(
+					r.id, r.name, r.prefix, domain.AccessSourceMembershipRemoved),
+			}); err != nil {
+				return fmt.Errorf("audit token revocation: %w", err)
+			}
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit revoke-all: %w", err)
+		return nil
+	}); err != nil {
+		return 0, err
 	}
 	return len(killed), nil
 }

@@ -30,24 +30,21 @@ type queryer interface {
 // e.g. RepositoryStore.SetConfigured deletes dropped repos and upserts
 // skeleton rows for new ones inside one tx so the table can't
 // observe a partial mid-sync state.
-//
-// BlueprintStore inlines its own tx wrapper because it needs
-// savepoint-on-claim-race semantics. Stores without that requirement
-// should use this helper.
 func inTx(ctx context.Context, q queryer, fn func(queryer) error) error {
+	return inTxRaw(ctx, q, func(tx *sql.Tx) error { return fn(tx) })
+}
+
+// inTxRaw is inTx for bodies that need the *sql.Tx itself rather than the
+// queryer subset — a helper they hand it to, a statement whose result they
+// read off the tx. Same composition rule: an outer *sql.Tx wins, a *sql.DB
+// gets a fresh transaction. db.InTx owns the begin/commit half so the
+// cancellation attribution every transaction needs lives in one place.
+func inTxRaw(ctx context.Context, q queryer, fn func(*sql.Tx) error) error {
 	switch v := q.(type) {
 	case *sql.Tx:
 		return fn(v)
 	case *sql.DB:
-		tx, err := v.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback() }()
-		if err := fn(tx); err != nil {
-			return db.TxCause(ctx, err)
-		}
-		return db.TxCause(ctx, tx.Commit())
+		return db.InTx(ctx, v, fn)
 	default:
 		return fmt.Errorf("postgres store: unexpected queryer type %T", q)
 	}

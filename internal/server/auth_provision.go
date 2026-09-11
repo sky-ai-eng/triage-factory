@@ -8,6 +8,8 @@ import (
 	"hash/fnv"
 
 	"github.com/google/uuid"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // Signup no longer provisions a tenant.
@@ -145,88 +147,83 @@ func (s *Server) lookupEarliestMembership(ctx context.Context, q membershipQuery
 // seeders route through the admin pool and refuse to run inside a
 // WithTx.
 func (s *Server) provisionOrg(ctx context.Context, userID uuid.UUID, name, slugBase string) (orgID, teamID uuid.UUID, slug string, err error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return uuid.Nil, uuid.Nil, "", fmt.Errorf("begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Per-user advisory lock serializes concurrent create calls for the
-	// same founder (double-submit safety). Released on commit/rollback.
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, userLockKey(userID)); err != nil {
-		return uuid.Nil, uuid.Nil, "", fmt.Errorf("acquire advisory lock: %w", err)
-	}
-
-	// Race-safe slug allocation. `ON CONFLICT (slug) DO NOTHING
-	// RETURNING id` lets the loser of a cross-user race cleanly observe
-	// zero rows and advance to the next candidate (slugBase-2, -3, …)
-	// instead of erroring out on the unique violation a plain INSERT would
-	// raise. Note this avoids the *error*, not the *wait*: if a concurrent
-	// tx holds an uncommitted row on the same slug, Postgres still blocks
-	// this INSERT until that tx commits or rolls back before deciding
-	// whether the conflict stands — a tail-latency cost under contention,
-	// not a failure. owner_user_id is set explicitly — the admin pool is
-	// BYPASSRLS, so the orgs INSERT's RLS WITH CHECK isn't what guards
-	// ownership here.
-	for i := 0; i < 64; i++ {
-		candidate := slugBase
-		if i > 0 {
-			candidate = fmt.Sprintf("%s-%d", slugBase, i+1)
+	if err := db.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		// Per-user advisory lock serializes concurrent create calls for the
+		// same founder (double-submit safety). Released on commit/rollback.
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, userLockKey(userID)); err != nil {
+			return fmt.Errorf("acquire advisory lock: %w", err)
 		}
-		var got uuid.NullUUID
-		serr := tx.QueryRowContext(ctx, `
-			INSERT INTO public.orgs (slug, name, owner_user_id)
-			VALUES ($1, $2, $3)
-			ON CONFLICT (slug) DO NOTHING
+
+		// Race-safe slug allocation. `ON CONFLICT (slug) DO NOTHING
+		// RETURNING id` lets the loser of a cross-user race cleanly observe
+		// zero rows and advance to the next candidate (slugBase-2, -3, …)
+		// instead of erroring out on the unique violation a plain INSERT would
+		// raise. Note this avoids the *error*, not the *wait*: if a concurrent
+		// tx holds an uncommitted row on the same slug, Postgres still blocks
+		// this INSERT until that tx commits or rolls back before deciding
+		// whether the conflict stands — a tail-latency cost under contention,
+		// not a failure. owner_user_id is set explicitly — the admin pool is
+		// BYPASSRLS, so the orgs INSERT's RLS WITH CHECK isn't what guards
+		// ownership here.
+		for i := 0; i < 64; i++ {
+			candidate := slugBase
+			if i > 0 {
+				candidate = fmt.Sprintf("%s-%d", slugBase, i+1)
+			}
+			var got uuid.NullUUID
+			serr := tx.QueryRowContext(ctx, `
+				INSERT INTO public.orgs (slug, name, owner_user_id)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (slug) DO NOTHING
+				RETURNING id
+			`, candidate, name, userID).Scan(&got)
+			if errors.Is(serr, sql.ErrNoRows) {
+				continue
+			}
+			if serr != nil {
+				return fmt.Errorf("insert orgs: %w", serr)
+			}
+			if !got.Valid {
+				continue
+			}
+			orgID = got.UUID
+			slug = candidate
+			break
+		}
+		if orgID == uuid.Nil {
+			return fmt.Errorf("could not allocate slug starting from %q after 64 tries", slugBase)
+		}
+
+		if err := tx.QueryRowContext(ctx, `
+			INSERT INTO public.teams (org_id, slug, name, created_by_user_id)
+			VALUES ($1, 'default', 'Default', $2)
 			RETURNING id
-		`, candidate, name, userID).Scan(&got)
-		if errors.Is(serr, sql.ErrNoRows) {
-			continue
+		`, orgID, userID).Scan(&teamID); err != nil {
+			return fmt.Errorf("insert teams: %w", err)
 		}
-		if serr != nil {
-			return uuid.Nil, uuid.Nil, "", fmt.Errorf("insert orgs: %w", serr)
-		}
-		if !got.Valid {
-			continue
-		}
-		orgID = got.UUID
-		slug = candidate
-		break
-	}
-	if orgID == uuid.Nil {
-		return uuid.Nil, uuid.Nil, "", fmt.Errorf("could not allocate slug starting from %q after 64 tries", slugBase)
-	}
 
-	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO public.teams (org_id, slug, name, created_by_user_id)
-		VALUES ($1, 'default', 'Default', $2)
-		RETURNING id
-	`, orgID, userID).Scan(&teamID); err != nil {
-		return uuid.Nil, uuid.Nil, "", fmt.Errorf("insert teams: %w", err)
-	}
+		// Founder gets org-level 'owner' + team-level 'admin' on the Default
+		// team, through the shared primitive invite-accept (and later JIT/SCIM)
+		// also use. The org + team were just created in this tx, so the
+		// ON CONFLICT DO NOTHING inside never trips here — behaviour unchanged.
+		//
+		// The founder self-grant is deliberately NOT written to
+		// access_change_log. The first owner is self-evident — orgs.owner_user_id
+		// and this org_memberships row already record it durably, and there is no
+		// third-party actor whose action needs auditing (the founder grants
+		// themselves). The audit log captures governance changes *after* the org
+		// exists (role changes, revokes, transfers, later grants via invite).
+		if _, err := grantOrgMembership(ctx, tx, userID, orgID, "owner",
+			uuid.NullUUID{UUID: teamID, Valid: true}, "admin"); err != nil {
+			return err
+		}
 
-	// Founder gets org-level 'owner' + team-level 'admin' on the Default
-	// team, through the shared primitive invite-accept (and later JIT/SCIM)
-	// also use. The org + team were just created in this tx, so the
-	// ON CONFLICT DO NOTHING inside never trips here — behaviour unchanged.
-	//
-	// TFAC-471: the founder self-grant is deliberately NOT written to
-	// access_change_log. The first owner is self-evident — orgs.owner_user_id
-	// and this org_memberships row already record it durably, and there is no
-	// third-party actor whose action needs auditing (the founder grants
-	// themselves). The audit log captures governance changes *after* the org
-	// exists (role changes, revokes, transfers, later grants via invite).
-	if _, err := grantOrgMembership(ctx, tx, userID, orgID, "owner",
-		uuid.NullUUID{UUID: teamID, Valid: true}, "admin"); err != nil {
+		if err := seedSettingsRows(ctx, tx, orgID, teamID); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
 		return uuid.Nil, uuid.Nil, "", err
-	}
-
-	if err := seedSettingsRows(ctx, tx, orgID, teamID); err != nil {
-		return uuid.Nil, uuid.Nil, "", err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return uuid.Nil, uuid.Nil, "", fmt.Errorf("commit: %w", err)
 	}
 
 	orgsLog.Info("provisioned org", "org", orgID, "team", teamID, "owner", userID, "slug", slug)

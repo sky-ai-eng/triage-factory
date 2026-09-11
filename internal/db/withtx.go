@@ -41,21 +41,42 @@ type Claims struct {
 //     the original fn error takes precedence (it's the meaningful one
 //     for the caller).
 func WithTx(ctx context.Context, dbConn *sql.DB, claims Claims, fn func(*sql.Tx) error) error {
-	tx, err := dbConn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return fmt.Errorf("marshal claims: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		`SELECT set_config('request.jwt.claims', $1, true)`, string(payload),
-	); err != nil {
-		return TxCause(ctx, fmt.Errorf("set request.jwt.claims: %w", err))
+	return InTx(ctx, dbConn, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`SELECT set_config('request.jwt.claims', $1, true)`, string(payload),
+		); err != nil {
+			return fmt.Errorf("set request.jwt.claims: %w", err)
+		}
+		return fn(tx)
+	})
+}
+
+// InTx runs fn inside a transaction on conn, committing when fn returns nil
+// and rolling back otherwise. It is the claims-less sibling of WithTx — the
+// same begin/body/commit boundary for callers that set no
+// `request.jwt.claims`: the admin (BYPASSRLS) pool, the SQLite handle, a
+// store composing its own multi-statement write.
+//
+// Both the body's error and Commit's go through TxCause, which is the reason
+// to reach for this rather than hand-roll the three lines. database/sql binds
+// a Tx to its ctx and rolls it back from a background goroutine the moment
+// that ctx is canceled, so whatever lands after the rollback reports
+// sql.ErrTxDone instead of the cancellation that caused it — and a caller
+// classifying a client disconnect by errors.Is(err, context.Canceled) would
+// read half of them as internal faults.
+//
+// Same caveats as WithTx: fn must not retain tx past the call, and rollback
+// on a body error is best-effort — the body's error is the one returned.
+func InTx(ctx context.Context, conn *sql.DB, fn func(*sql.Tx) error) error {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
 	}
+	defer func() { _ = tx.Rollback() }()
 
 	if err := fn(tx); err != nil {
 		return TxCause(ctx, err)

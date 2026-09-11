@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 )
 
@@ -129,8 +130,10 @@ func (e forcedErr) Error() string { return string(e) }
 
 // TestWithTx_CanceledCtxSurfacesAsCanceled pins the disconnect contract on
 // the claims-setting helper: a ctx that dies inside fn surfaces as
-// context.Canceled whichever of the stdlib's rollback goroutine or the
-// commit lands first, so a handler's client-gone classification holds.
+// context.Canceled on the branch where the stdlib's rollback goroutine beat
+// the commit, so a handler's client-gone classification holds. See
+// dbtest.WaitTxDone for why the body waits that race out instead of running
+// it.
 func TestWithTx_CanceledCtxSurfacesAsCanceled(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -143,12 +146,74 @@ func TestWithTx_CanceledCtxSurfacesAsCanceled(t *testing.T) {
 				return err
 			}
 			cancel()
-			return nil
+			return dbtest.WaitTxDone(t, func(live context.Context) error {
+				_, err := tx.ExecContext(live, `SELECT 1`)
+				return err
+			})
 		})
 	if err == nil {
 		t.Fatal("WithTx committed under a canceled ctx")
 	}
+	if !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("test did not reach the ErrTxDone branch it exists to pin; got %v", err)
+	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("errors.Is(err, context.Canceled) = false; got %v", err)
+	}
+}
+
+// TestInTx_CanceledCtxSurfacesAsCanceled pins the disconnect contract on the
+// claims-less helper every hand-rolled transaction now routes through, on the
+// branch that actually regressed: the stdlib's rollback goroutine beat the
+// commit, so Commit reports sql.ErrTxDone and says nothing about the
+// cancellation that caused it. httpx.IsClientGone matches only
+// context.Canceled — and must keep doing so, since under a live ctx
+// ErrTxDone is a real double-commit bug — so the attribution has to come from
+// here or a disconnect is answered 500.
+//
+// Which of the two lands first is a race inside database/sql, so the body
+// waits the race out rather than running it: once a statement on a live ctx
+// reports ErrTxDone, the rollback has definitively completed and the Commit
+// below can only take that branch.
+func TestInTx_CanceledCtxSurfacesAsCanceled(t *testing.T) {
+	h := pgtest.Shared(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := db.InTx(ctx, h.AdminDB, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `SELECT 1`); err != nil {
+			return err
+		}
+		cancel()
+		return dbtest.WaitTxDone(t, func(live context.Context) error {
+			_, err := tx.ExecContext(live, `SELECT 1`)
+			return err
+		})
+	})
+	if err == nil {
+		t.Fatal("InTx committed under a canceled ctx")
+	}
+	if !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("test did not reach the ErrTxDone branch it exists to pin; got %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("errors.Is(err, context.Canceled) = false; got %v", err)
+	}
+}
+
+// TestInTx_LiveCtxKeepsBodyError is the other half: with the ctx alive, the
+// body's error comes back untouched, so a caller matching a sentinel still
+// matches and nothing reads as a cancellation.
+func TestInTx_LiveCtxKeepsBodyError(t *testing.T) {
+	h := pgtest.Shared(t)
+
+	err := db.InTx(context.Background(), h.AdminDB, func(tx *sql.Tx) error {
+		return errForcedRollback
+	})
+	if err != errForcedRollback {
+		t.Fatalf("InTx returned %v, want the body error unchanged", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Error("a live-ctx body error read as a cancellation")
 	}
 }

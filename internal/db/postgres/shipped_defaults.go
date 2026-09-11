@@ -50,85 +50,81 @@ func (s *shippedDefaultsStore) SeedShippedIntoTeam(ctx context.Context, orgID, t
 	if !ok {
 		return fmt.Errorf("postgres shipped_defaults: SeedShippedIntoTeam requires a *sql.DB admin handle, got %T", s.admin)
 	}
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin admin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	var blueprintIDsBySlug map[string]string
+	if err := db.InTx(ctx, conn, func(tx *sql.Tx) error {
+		now := time.Now().UTC()
 
-	now := time.Now().UTC()
-
-	// Phase 1: prompts. ON CONFLICT DO NOTHING makes re-seeding idempotent;
-	// the follow-up SELECT resolves the (existing or freshly inserted) id
-	// so blueprint steps + triggers can wire to it. Always source='system',
-	// creator_user_id NULL — the shipped Go slices carry no other source.
-	promptIDsBySlug := make(map[string]string, len(shippedPrompts))
-	for _, p := range shippedPrompts {
-		if p.SystemSlug == "" {
-			return fmt.Errorf("shipped_defaults seed: shipped prompt %q has empty system_slug", p.Name)
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO prompts (id, org_id, team_id, system_slug, creator_user_id, name, body, source, allowed_tools, model, usage_count, user_modified, created_at, updated_at)
-			VALUES ($1, $2, $3::uuid, $4, NULL, $5, $6, 'system', $7, $8, 0, FALSE, $9, $9)
-			ON CONFLICT (org_id, team_id, system_slug) DO NOTHING
-		`, uuid.New().String(), orgID, teamID, p.SystemSlug, p.Name, p.Body, p.AllowedTools, p.Model, now); err != nil {
-			return fmt.Errorf("seed prompt %s: %w", p.SystemSlug, err)
-		}
-		var id string
-		if err := tx.QueryRowContext(ctx,
-			`SELECT id FROM prompts WHERE org_id = $1 AND team_id = $2 AND system_slug = $3`, orgID, teamID, p.SystemSlug,
-		).Scan(&id); err != nil {
-			return fmt.Errorf("resolve prompt %s: %w", p.SystemSlug, err)
-		}
-		promptIDsBySlug[p.SystemSlug] = id
-	}
-
-	// Phase 2: blueprints + steps. Steps are written only when the
-	// blueprint is freshly inserted (RowsAffected > 0) so a re-seed never
-	// clobbers a team's edited step list.
-	blueprintIDsBySlug := make(map[string]string, len(shippedBlueprints))
-	for _, b := range shippedBlueprints {
-		if b.SystemSlug == "" {
-			return fmt.Errorf("shipped_defaults seed: shipped blueprint %q has empty system_slug", b.Name)
-		}
-		res, err := tx.ExecContext(ctx, `
-			INSERT INTO blueprints (id, org_id, team_id, system_slug, creator_user_id, name, source, usage_count, user_modified, created_at, updated_at)
-			VALUES ($1, $2, $3::uuid, $4, NULL, $5, 'system', 0, FALSE, $6, $6)
-			ON CONFLICT (org_id, team_id, system_slug) DO NOTHING
-		`, uuid.New().String(), orgID, teamID, b.SystemSlug, b.Name, now)
-		if err != nil {
-			return fmt.Errorf("seed blueprint %s: %w", b.SystemSlug, err)
-		}
-		var bpID string
-		if err := tx.QueryRowContext(ctx,
-			`SELECT id FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = $3`, orgID, teamID, b.SystemSlug,
-		).Scan(&bpID); err != nil {
-			return fmt.Errorf("resolve blueprint %s: %w", b.SystemSlug, err)
-		}
-		blueprintIDsBySlug[b.SystemSlug] = bpID
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			continue // already existed — leave its steps untouched
-		}
-		for i, slug := range b.StepPromptSlugs {
-			promptID, ok := promptIDsBySlug[slug]
-			if !ok || promptID == "" {
-				return fmt.Errorf("seed blueprint %s: step prompt slug %q not found (seed prompts before blueprints)", b.SystemSlug, slug)
+		// Phase 1: prompts. ON CONFLICT DO NOTHING makes re-seeding idempotent;
+		// the follow-up SELECT resolves the (existing or freshly inserted) id
+		// so blueprint steps + triggers can wire to it. Always source='system',
+		// creator_user_id NULL — the shipped Go slices carry no other source.
+		promptIDsBySlug := make(map[string]string, len(shippedPrompts))
+		for _, p := range shippedPrompts {
+			if p.SystemSlug == "" {
+				return fmt.Errorf("shipped_defaults seed: shipped prompt %q has empty system_slug", p.Name)
 			}
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO blueprint_steps (org_id, team_id, blueprint_id, step_index, step_prompt_id, brief, created_at)
-				VALUES ($1, $2::uuid, $3, $4, $5, '', $6)
-			`, orgID, teamID, bpID, i, promptID, now); err != nil {
-				return fmt.Errorf("seed blueprint %s step %d: %w", b.SystemSlug, i, err)
+				INSERT INTO prompts (id, org_id, team_id, system_slug, creator_user_id, name, body, source, allowed_tools, model, usage_count, user_modified, created_at, updated_at)
+				VALUES ($1, $2, $3::uuid, $4, NULL, $5, $6, 'system', $7, $8, 0, FALSE, $9, $9)
+				ON CONFLICT (org_id, team_id, system_slug) DO NOTHING
+			`, uuid.New().String(), orgID, teamID, p.SystemSlug, p.Name, p.Body, p.AllowedTools, p.Model, now); err != nil {
+				return fmt.Errorf("seed prompt %s: %w", p.SystemSlug, err)
+			}
+			var id string
+			if err := tx.QueryRowContext(ctx,
+				`SELECT id FROM prompts WHERE org_id = $1 AND team_id = $2 AND system_slug = $3`, orgID, teamID, p.SystemSlug,
+			).Scan(&id); err != nil {
+				return fmt.Errorf("resolve prompt %s: %w", p.SystemSlug, err)
+			}
+			promptIDsBySlug[p.SystemSlug] = id
+		}
+
+		// Phase 2: blueprints + steps. Steps are written only when the
+		// blueprint is freshly inserted (RowsAffected > 0) so a re-seed never
+		// clobbers a team's edited step list.
+		blueprintIDsBySlug = make(map[string]string, len(shippedBlueprints))
+		for _, b := range shippedBlueprints {
+			if b.SystemSlug == "" {
+				return fmt.Errorf("shipped_defaults seed: shipped blueprint %q has empty system_slug", b.Name)
+			}
+			res, err := tx.ExecContext(ctx, `
+				INSERT INTO blueprints (id, org_id, team_id, system_slug, creator_user_id, name, source, usage_count, user_modified, created_at, updated_at)
+				VALUES ($1, $2, $3::uuid, $4, NULL, $5, 'system', 0, FALSE, $6, $6)
+				ON CONFLICT (org_id, team_id, system_slug) DO NOTHING
+			`, uuid.New().String(), orgID, teamID, b.SystemSlug, b.Name, now)
+			if err != nil {
+				return fmt.Errorf("seed blueprint %s: %w", b.SystemSlug, err)
+			}
+			var bpID string
+			if err := tx.QueryRowContext(ctx,
+				`SELECT id FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = $3`, orgID, teamID, b.SystemSlug,
+			).Scan(&bpID); err != nil {
+				return fmt.Errorf("resolve blueprint %s: %w", b.SystemSlug, err)
+			}
+			blueprintIDsBySlug[b.SystemSlug] = bpID
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				continue // already existed — leave its steps untouched
+			}
+			for i, slug := range b.StepPromptSlugs {
+				promptID, ok := promptIDsBySlug[slug]
+				if !ok || promptID == "" {
+					return fmt.Errorf("seed blueprint %s: step prompt slug %q not found (seed prompts before blueprints)", b.SystemSlug, slug)
+				}
+				if _, err := tx.ExecContext(ctx, `
+					INSERT INTO blueprint_steps (org_id, team_id, blueprint_id, step_index, step_prompt_id, brief, created_at)
+					VALUES ($1, $2::uuid, $3, $4, $5, '', $6)
+				`, orgID, teamID, bpID, i, promptID, now); err != nil {
+					return fmt.Errorf("seed blueprint %s step %d: %w", b.SystemSlug, i, err)
+				}
 			}
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit shipped_defaults seed: %w", err)
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// Phase 3: handlers. EventHandlerStore.Seed already does exactly this —
@@ -211,88 +207,76 @@ func resolveBlueprintIDsBySlugPG(ctx context.Context, conn *sql.DB, orgID, teamI
 
 // backfillShippedDefaults runs the one-time grandfather pass on the admin pool.
 func (s *shippedDefaultsStore) backfillShippedDefaults(ctx context.Context, conn *sql.DB, orgID, teamID string, shippedBlueprints []domain.SeedBlueprint) error {
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin admin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var backfilledAt sql.NullTime
-	switch err := tx.QueryRowContext(ctx,
-		`SELECT shipped_defaults_backfilled_at FROM teams WHERE org_id = $1 AND id = $2`, orgID, teamID,
-	).Scan(&backfilledAt); {
-	case errors.Is(err, sql.ErrNoRows):
-		return nil // team vanished mid-sweep; nothing to backfill
-	case err != nil:
-		return fmt.Errorf("read backfill marker: %w", err)
-	}
-	if backfilledAt.Valid {
-		return nil // already backfilled
-	}
-	now := time.Now().UTC()
-	for _, b := range shippedBlueprints {
-		if b.SystemSlug == "" {
-			continue
-		}
-		var bpID string
+	return db.InTx(ctx, conn, func(tx *sql.Tx) error {
+		var backfilledAt sql.NullTime
 		switch err := tx.QueryRowContext(ctx,
-			`SELECT id FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = $3 AND deleted_at IS NULL`,
-			orgID, teamID, b.SystemSlug,
-		).Scan(&bpID); {
+			`SELECT shipped_defaults_backfilled_at FROM teams WHERE org_id = $1 AND id = $2`, orgID, teamID,
+		).Scan(&backfilledAt); {
 		case errors.Is(err, sql.ErrNoRows):
-			continue
+			return nil // team vanished mid-sweep; nothing to backfill
 		case err != nil:
-			return fmt.Errorf("read blueprint %s: %w", b.SystemSlug, err)
+			return fmt.Errorf("read backfill marker: %w", err)
 		}
-		slugs, err := pgLoadStepSlugs(ctx, tx, orgID, bpID)
-		if err != nil {
-			return err
+		if backfilledAt.Valid {
+			return nil // already backfilled
 		}
-		if db.SlugsDiverged(slugs, b.StepPromptSlugs) {
-			// The blueprints set_updated_at BEFORE-UPDATE trigger bumps updated_at
-			// on this stamp — unlike SQLite, which deliberately preserves it. That
-			// cosmetic divergence is accepted: multi-mode has no users yet and the
-			// grandfather pass runs once. Suppressing the trigger here would need
-			// schema surgery for no present benefit.
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE blueprints SET user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, bpID,
-			); err != nil {
-				return fmt.Errorf("stamp user_modified on %s: %w", b.SystemSlug, err)
+		now := time.Now().UTC()
+		for _, b := range shippedBlueprints {
+			if b.SystemSlug == "" {
+				continue
+			}
+			var bpID string
+			switch err := tx.QueryRowContext(ctx,
+				`SELECT id FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = $3 AND deleted_at IS NULL`,
+				orgID, teamID, b.SystemSlug,
+			).Scan(&bpID); {
+			case errors.Is(err, sql.ErrNoRows):
+				continue
+			case err != nil:
+				return fmt.Errorf("read blueprint %s: %w", b.SystemSlug, err)
+			}
+			slugs, err := pgLoadStepSlugs(ctx, tx, orgID, bpID)
+			if err != nil {
+				return err
+			}
+			if db.SlugsDiverged(slugs, b.StepPromptSlugs) {
+				// The blueprints set_updated_at BEFORE-UPDATE trigger bumps updated_at
+				// on this stamp — unlike SQLite, which deliberately preserves it. That
+				// cosmetic divergence is accepted: multi-mode has no users yet and the
+				// grandfather pass runs once. Suppressing the trigger here would need
+				// schema surgery for no present benefit.
+				if _, err := tx.ExecContext(ctx,
+					`UPDATE blueprints SET user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, bpID,
+				); err != nil {
+					return fmt.Errorf("stamp user_modified on %s: %w", b.SystemSlug, err)
+				}
 			}
 		}
-	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE teams SET shipped_defaults_backfilled_at = $1 WHERE org_id = $2 AND id = $3`, now, orgID, teamID,
-	); err != nil {
-		return fmt.Errorf("set backfill marker: %w", err)
-	}
-	return tx.Commit()
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE teams SET shipped_defaults_backfilled_at = $1 WHERE org_id = $2 AND id = $3`, now, orgID, teamID,
+		); err != nil {
+			return fmt.Errorf("set backfill marker: %w", err)
+		}
+		return nil
+	})
 }
 
 // syncUnit loads one shipped blueprint's team-side state, plans the sync, and
 // executes it in one admin-pool transaction.
 func (s *shippedDefaultsStore) syncUnit(ctx context.Context, conn *sql.DB, orgID, teamID string, b domain.SeedBlueprint, shippedBySlug map[string]domain.Prompt) error {
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin admin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	st, err := pgLoadTeamUnitState(ctx, tx, orgID, teamID, b)
-	if err != nil {
-		return err
-	}
-	plan := db.PlanUnitSync(b, shippedBySlug, st)
-	switch plan.Action {
-	case db.UnitSkip, db.UnitEqual:
-		return nil // nothing written; rollback is a no-op
-	case db.UnitInsert, db.UnitApply:
-		if err := pgExecuteUnitPlan(ctx, tx, orgID, teamID, b, st, plan); err != nil {
+	return db.InTx(ctx, conn, func(tx *sql.Tx) error {
+		st, err := pgLoadTeamUnitState(ctx, tx, orgID, teamID, b)
+		if err != nil {
 			return err
 		}
-		return tx.Commit()
-	}
-	return nil
+		plan := db.PlanUnitSync(b, shippedBySlug, st)
+		switch plan.Action {
+		case db.UnitInsert, db.UnitApply:
+			return pgExecuteUnitPlan(ctx, tx, orgID, teamID, b, st, plan)
+		default:
+			return nil // UnitSkip / UnitEqual: nothing written, so the commit is a no-op
+		}
+	})
 }
 
 // pgLoadStepSlugs returns a blueprint's ordered step prompt system_slugs.

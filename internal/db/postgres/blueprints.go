@@ -371,7 +371,7 @@ func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID st
 		return domain.Blueprint{}, fmt.Errorf("briefs length %d must match stepPromptIDs length %d", len(briefs), len(stepPromptIDs))
 	}
 	var stamped domain.Blueprint
-	if err := s.runInTx(ctx, func(tx queryer) error {
+	if err := inTx(ctx, s.app, func(tx queryer) error {
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`,
 			orgID, blueprintID); err != nil {
@@ -431,7 +431,7 @@ func reparentBlueprintStepsPG(ctx context.Context, q queryer, orgID, fromBluepri
 }
 
 func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID string) error {
-	return s.runInTx(ctx, func(tx queryer) error {
+	return inTx(ctx, s.app, func(tx queryer) error {
 		var hostLen int
 		if err := tx.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`,
@@ -548,7 +548,7 @@ func insertIsolationBlueprintPG(ctx context.Context, q queryer, orgID, id, srcBl
 }
 
 func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex int, newBlueprintID, newName string) (string, error) {
-	err := s.runInTx(ctx, func(tx queryer) error {
+	err := inTx(ctx, s.app, func(tx queryer) error {
 		// Create the new trigger-less downstream blueprint (team derived from the
 		// blueprint being split so both halves share a team).
 		if err := insertTriggerlessBlueprintPG(ctx, tx, orgID, newBlueprintID, newName, id); err != nil {
@@ -572,7 +572,7 @@ func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex 
 
 func (s *blueprintStore) DeleteStep(ctx context.Context, orgID, blueprintID string, stepIndex int, newName string) (string, error) {
 	var downstreamID string
-	err := s.runInTx(ctx, func(tx queryer) error {
+	err := inTx(ctx, s.app, func(tx queryer) error {
 		var n int
 		if err := tx.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`,
@@ -654,7 +654,7 @@ func (s *blueprintStore) DuplicatePrompts(ctx context.Context, orgID, teamID str
 		return nil, db.ErrDuplicateNoPrompts
 	}
 	var newIDs []string
-	err := s.runInTx(ctx, func(tx queryer) error {
+	err := inTx(ctx, s.app, func(tx queryer) error {
 		// Resolve each prompt id → its step + prompt payload. org_id is threaded
 		// through every join for defense in depth alongside RLS; copy-only means
 		// a live prompt is a step of at most one non-deleted blueprint.
@@ -1459,25 +1459,4 @@ func conversationsForBlueprint(ctx context.Context, q queryer, orgID, blueprintR
 		out = append(out, r)
 	}
 	return out, rows.Err()
-}
-
-// runInTx is the multi-statement helper for ReplaceSteps. Composes with the
-// caller's *sql.Tx inside WithTx; otherwise opens a fresh tx on the app pool.
-func (s *blueprintStore) runInTx(ctx context.Context, fn func(queryer) error) error {
-	switch v := s.app.(type) {
-	case *sql.Tx:
-		return fn(v)
-	case *sql.DB:
-		tx, err := v.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback() }()
-		if err := fn(tx); err != nil {
-			return err
-		}
-		return tx.Commit()
-	default:
-		return errors.New("postgres blueprints: unexpected queryer type")
-	}
 }

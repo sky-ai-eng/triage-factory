@@ -484,7 +484,7 @@ func (s *eventHandlerStore) RetargetBlueprint(ctx context.Context, orgID, id, ne
 }
 
 func (s *eventHandlerStore) Reorder(ctx context.Context, orgID string, ids []string) error {
-	return s.runInTx(ctx, func(tx *sql.Tx) error {
+	return inTxRaw(ctx, s.app, func(tx *sql.Tx) error {
 		for i, id := range ids {
 			if !isValidUUID(id) {
 				continue
@@ -563,39 +563,28 @@ func (s *eventHandlerStore) Sync(ctx context.Context, orgID, teamID string, ship
 }
 
 func (s *eventHandlerStore) syncOne(ctx context.Context, conn *sql.DB, orgID, teamID string, h db.ShippedEventHandler, blueprintIDsBySlug map[string]string) error {
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin admin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	row, err := loadTeamHandlerRowPG(ctx, tx, orgID, teamID, h.ID)
-	if err != nil {
-		return err
-	}
-
-	var resolvedBP string
-	var bpOK bool
-	if h.Kind == domain.EventHandlerKindTrigger {
-		resolvedBP, bpOK = blueprintIDsBySlug[h.BlueprintID]
-	}
-
-	plan := db.PlanHandlerSync(h, resolvedBP, bpOK, row)
-	switch plan.Action {
-	case db.HandlerSkip, db.HandlerEqual:
-		return nil // nothing written; rollback is a no-op
-	case db.HandlerInsert:
-		if err := insertHandlerPG(ctx, tx, orgID, teamID, h, plan); err != nil {
+	return db.InTx(ctx, conn, func(tx *sql.Tx) error {
+		row, err := loadTeamHandlerRowPG(ctx, tx, orgID, teamID, h.ID)
+		if err != nil {
 			return err
 		}
-	case db.HandlerApply:
-		if err := applyHandlerPG(ctx, tx, orgID, row.ID, h.Kind, plan); err != nil {
-			return err
+
+		var resolvedBP string
+		var bpOK bool
+		if h.Kind == domain.EventHandlerKindTrigger {
+			resolvedBP, bpOK = blueprintIDsBySlug[h.BlueprintID]
 		}
-	default:
-		return nil
-	}
-	return tx.Commit()
+
+		plan := db.PlanHandlerSync(h, resolvedBP, bpOK, row)
+		switch plan.Action {
+		case db.HandlerInsert:
+			return insertHandlerPG(ctx, tx, orgID, teamID, h, plan)
+		case db.HandlerApply:
+			return applyHandlerPG(ctx, tx, orgID, row.ID, h.Kind, plan)
+		default:
+			return nil // HandlerSkip / HandlerEqual: nothing written, so the commit is a no-op
+		}
+	})
 }
 
 // loadTeamHandlerRowPG reads the team's row for one shipped handler's
@@ -741,25 +730,6 @@ func (s *eventHandlerStore) scanList(ctx context.Context, query string, args []a
 	}
 	defer rows.Close()
 	return collectEventHandlers(rows)
-}
-
-func (s *eventHandlerStore) runInTx(ctx context.Context, fn func(*sql.Tx) error) error {
-	switch v := s.app.(type) {
-	case *sql.Tx:
-		return fn(v)
-	case *sql.DB:
-		tx, err := v.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback() }()
-		if err := fn(tx); err != nil {
-			return err
-		}
-		return tx.Commit()
-	default:
-		return errors.New("postgres event_handlers: unexpected queryer type")
-	}
 }
 
 func collectEventHandlers(rows *sql.Rows) ([]domain.EventHandler, error) {

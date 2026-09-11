@@ -1307,7 +1307,7 @@ func distinctNonEmpty(vs []string) []string {
 // SSO user binds GitHub later via PAT/Connect). An Entra assertion can carry a
 // preferred_username that is a UPN/email, not a github.com handle, so mirroring
 // it would mint a bogus identity — hence the gate.
-func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.UUID, claims *verify.Claims, ssoProviderID string) (uuid.UUID, error) {
+func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid.UUID, claims *verify.Claims, ssoProviderID string) (uuid.UUID, error) {
 	isSSO := ssoProviderID != ""
 	provider := "github"
 	if isSSO {
@@ -1352,139 +1352,134 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 		loginHandle = ghUsername
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("begin principal tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
-
-	// Serialize concurrent logins for the SAME identity (browser double-submit /
-	// retry) so two requests can't both miss the lookup, both mint a principal,
-	// and collide on the user_identities PK (which would 500 the second). Taken
-	// on every login, keyed on auth_user_id (salt 1).
-	if _, err := tx.ExecContext(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended($1, 1))`, authUserID.String()); err != nil {
-		return uuid.Nil, fmt.Errorf("acquire identity lock: %w", err)
-	}
-	// Additionally serialize concurrent first-logins by DIFFERENT identities that
-	// share a verified email (salt 0), so they link to one principal rather than
-	// racing into two. A missing or unverified email skips this — those never
-	// link. Consistent lock order (identity then email) avoids deadlock.
-	if email != "" && claims.EmailVerified {
-		if _, err := tx.ExecContext(ctx,
-			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, email); err != nil {
-			return uuid.Nil, fmt.Errorf("acquire email lock: %w", err)
-		}
-	}
-
 	var principalID uuid.UUID
-	lookupErr := tx.QueryRowContext(ctx,
-		`SELECT user_id FROM public.user_identities WHERE auth_user_id = $1`, authUserID,
-	).Scan(&principalID)
-	switch {
-	case lookupErr == nil:
-		// Returning identity — fall through to the profile/email refresh below.
-	case errors.Is(lookupErr, sql.ErrNoRows):
-		// New identity. Link to an existing principal by verified email, else mint.
+	if err := tfdb.InTx(ctx, conn, func(tx *sql.Tx) error {
+		// Serialize concurrent logins for the SAME identity (browser double-submit /
+		// retry) so two requests can't both miss the lookup, both mint a principal,
+		// and collide on the user_identities PK (which would 500 the second). Taken
+		// on every login, keyed on auth_user_id (salt 1).
+		if _, err := tx.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, 1))`, authUserID.String()); err != nil {
+			return fmt.Errorf("acquire identity lock: %w", err)
+		}
+		// Additionally serialize concurrent first-logins by DIFFERENT identities that
+		// share a verified email (salt 0), so they link to one principal rather than
+		// racing into two. A missing or unverified email skips this — those never
+		// link. Consistent lock order (identity then email) avoids deadlock.
 		if email != "" && claims.EmailVerified {
-			if lerr := tx.QueryRowContext(ctx, `
-				SELECT user_id FROM public.user_identities
-				 WHERE lower(email) = $1 AND email_verified
-				 LIMIT 1`, email,
-			).Scan(&principalID); lerr != nil && !errors.Is(lerr, sql.ErrNoRows) {
-				return uuid.Nil, fmt.Errorf("verified-email link lookup: %w", lerr)
+			if _, err := tx.ExecContext(ctx,
+				`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, email); err != nil {
+				return fmt.Errorf("acquire email lock: %w", err)
 			}
 		}
-		if principalID == uuid.Nil {
-			if err := tx.QueryRowContext(ctx, `
-				INSERT INTO public.users (display_name, avatar_url, created_at, updated_at)
-				VALUES (NULLIF($1, ''), NULLIF($2, ''), now(), now())
-				RETURNING id`, displayName, avatarURL,
-			).Scan(&principalID); err != nil {
-				return uuid.Nil, fmt.Errorf("create principal: %w", err)
+
+		lookupErr := tx.QueryRowContext(ctx,
+			`SELECT user_id FROM public.user_identities WHERE auth_user_id = $1`, authUserID,
+		).Scan(&principalID)
+		switch {
+		case lookupErr == nil:
+			// Returning identity — fall through to the profile/email refresh below.
+		case errors.Is(lookupErr, sql.ErrNoRows):
+			// New identity. Link to an existing principal by verified email, else mint.
+			if email != "" && claims.EmailVerified {
+				if lerr := tx.QueryRowContext(ctx, `
+					SELECT user_id FROM public.user_identities
+					 WHERE lower(email) = $1 AND email_verified
+					 LIMIT 1`, email,
+				).Scan(&principalID); lerr != nil && !errors.Is(lerr, sql.ErrNoRows) {
+					return fmt.Errorf("verified-email link lookup: %w", lerr)
+				}
+			}
+			if principalID == uuid.Nil {
+				if err := tx.QueryRowContext(ctx, `
+					INSERT INTO public.users (display_name, avatar_url, created_at, updated_at)
+					VALUES (NULLIF($1, ''), NULLIF($2, ''), now(), now())
+					RETURNING id`, displayName, avatarURL,
+				).Scan(&principalID); err != nil {
+					return fmt.Errorf("create principal: %w", err)
+				}
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO public.user_identities
+					(auth_user_id, user_id, provider, provider_subject, sso_provider_id, login, email, email_verified, created_at, updated_at)
+				VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), $8, now(), now())
+			`, authUserID, principalID, provider, providerSubject, ssoProviderID, loginHandle, email, claims.EmailVerified); err != nil {
+				return fmt.Errorf("link identity: %w", err)
+			}
+		default:
+			return fmt.Errorf("identity lookup: %w", lookupErr)
+		}
+
+		// Refresh the principal's profile + this identity's email on every login
+		// (provider responses drift; COALESCE keeps a field we already have when the
+		// claim omits it).
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE public.users
+			   SET display_name = COALESCE(NULLIF($2, ''), display_name),
+			       avatar_url   = COALESCE(NULLIF($3, ''), avatar_url),
+			       updated_at   = now()
+			 WHERE id = $1
+		`, principalID, displayName, avatarURL); err != nil {
+			return fmt.Errorf("refresh principal: %w", err)
+		}
+		// Refresh email + its verification from the claim, but only when the claim
+		// actually carries an email: a later login that omits it must NOT NULL out a
+		// known email or downgrade its verified flag (that would silently disable
+		// future linking). When an email IS present we take the provider's current
+		// truth for it — including a genuine un-verify — rather than forcing
+		// monotonicity, since a stale verified=true on a changed/unverified email
+		// would be the unsafe direction (it could let a later identity wrongly link).
+		// The provider id and the GitHub handle are refreshed the same way — only
+		// when this login carries one — so a row that predates either stamp gains
+		// it at the next sign-in, and a login that lacks one never blanks it.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE public.user_identities
+			   SET email           = COALESCE(NULLIF($2, ''), email),
+			       email_verified  = CASE WHEN NULLIF($2, '') IS NOT NULL THEN $3 ELSE email_verified END,
+			       sso_provider_id = COALESCE(NULLIF($4, ''), sso_provider_id),
+			       login           = COALESCE(NULLIF($5, ''), login),
+			       updated_at      = now()
+			 WHERE auth_user_id = $1
+		`, authUserID, email, claims.EmailVerified, ssoProviderID, loginHandle); err != nil {
+			return fmt.Errorf("refresh identity: %w", err)
+		}
+
+		// GitHub-INTEGRATION binding (which github account the agent acts as) — a
+		// separate axis from the login identity. Only a real GitHub login mirrors it
+		// (source='login_claim'); a SAML login writes none. Keyed on the principal.
+		//
+		// The mirror is a convenience default, so it yields to a binding the user
+		// made themselves: the conflict arm refreshes only a row the mirror wrote.
+		// A row bound by Connect or a pasted PAT names the account the user CHOSE
+		// for this org's host — often a different one from the account they sign in
+		// with — and overwriting it at the next sign-in would silently undo that
+		// choice, and make "Change" on the settings page a verb that does not hold.
+		if !isSSO && ghUsername != "" {
+			githubEmail := ""
+			if claims.EmailVerified {
+				githubEmail = email
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO public.user_github_identities
+					(user_id, github_base_url, login, github_user_id, email, source, verified_at, created_at, updated_at)
+				VALUES ($1, 'https://github.com', $2, NULLIF($3, ''), NULLIF($4, ''), 'login_claim', now(), now(), now())
+				ON CONFLICT (user_id, github_base_url) DO UPDATE
+				   SET login       = EXCLUDED.login,
+				       github_user_id = COALESCE(EXCLUDED.github_user_id, user_github_identities.github_user_id),
+				       email       = CASE
+				                       WHEN user_github_identities.login IS DISTINCT FROM EXCLUDED.login THEN EXCLUDED.email
+				                       ELSE COALESCE(EXCLUDED.email, user_github_identities.email) END,
+				       source      = EXCLUDED.source,
+				       verified_at = EXCLUDED.verified_at,
+				       updated_at  = now()
+				 WHERE user_github_identities.source = 'login_claim'
+			`, principalID, ghUsername, providerSubject, githubEmail); err != nil {
+				return fmt.Errorf("upsert github login identity: %w", err)
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO public.user_identities
-				(auth_user_id, user_id, provider, provider_subject, sso_provider_id, login, email, email_verified, created_at, updated_at)
-			VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), $8, now(), now())
-		`, authUserID, principalID, provider, providerSubject, ssoProviderID, loginHandle, email, claims.EmailVerified); err != nil {
-			return uuid.Nil, fmt.Errorf("link identity: %w", err)
-		}
-	default:
-		return uuid.Nil, fmt.Errorf("identity lookup: %w", lookupErr)
-	}
-
-	// Refresh the principal's profile + this identity's email on every login
-	// (provider responses drift; COALESCE keeps a field we already have when the
-	// claim omits it).
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE public.users
-		   SET display_name = COALESCE(NULLIF($2, ''), display_name),
-		       avatar_url   = COALESCE(NULLIF($3, ''), avatar_url),
-		       updated_at   = now()
-		 WHERE id = $1
-	`, principalID, displayName, avatarURL); err != nil {
-		return uuid.Nil, fmt.Errorf("refresh principal: %w", err)
-	}
-	// Refresh email + its verification from the claim, but only when the claim
-	// actually carries an email: a later login that omits it must NOT NULL out a
-	// known email or downgrade its verified flag (that would silently disable
-	// future linking). When an email IS present we take the provider's current
-	// truth for it — including a genuine un-verify — rather than forcing
-	// monotonicity, since a stale verified=true on a changed/unverified email
-	// would be the unsafe direction (it could let a later identity wrongly link).
-	// The provider id and the GitHub handle are refreshed the same way — only
-	// when this login carries one — so a row that predates either stamp gains
-	// it at the next sign-in, and a login that lacks one never blanks it.
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE public.user_identities
-		   SET email           = COALESCE(NULLIF($2, ''), email),
-		       email_verified  = CASE WHEN NULLIF($2, '') IS NOT NULL THEN $3 ELSE email_verified END,
-		       sso_provider_id = COALESCE(NULLIF($4, ''), sso_provider_id),
-		       login           = COALESCE(NULLIF($5, ''), login),
-		       updated_at      = now()
-		 WHERE auth_user_id = $1
-	`, authUserID, email, claims.EmailVerified, ssoProviderID, loginHandle); err != nil {
-		return uuid.Nil, fmt.Errorf("refresh identity: %w", err)
-	}
-
-	// GitHub-INTEGRATION binding (which github account the agent acts as) — a
-	// separate axis from the login identity. Only a real GitHub login mirrors it
-	// (source='login_claim'); a SAML login writes none. Keyed on the principal.
-	//
-	// The mirror is a convenience default, so it yields to a binding the user
-	// made themselves: the conflict arm refreshes only a row the mirror wrote.
-	// A row bound by Connect or a pasted PAT names the account the user CHOSE
-	// for this org's host — often a different one from the account they sign in
-	// with — and overwriting it at the next sign-in would silently undo that
-	// choice, and make "Change" on the settings page a verb that does not hold.
-	if !isSSO && ghUsername != "" {
-		githubEmail := ""
-		if claims.EmailVerified {
-			githubEmail = email
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO public.user_github_identities
-				(user_id, github_base_url, login, github_user_id, email, source, verified_at, created_at, updated_at)
-			VALUES ($1, 'https://github.com', $2, NULLIF($3, ''), NULLIF($4, ''), 'login_claim', now(), now(), now())
-			ON CONFLICT (user_id, github_base_url) DO UPDATE
-			   SET login       = EXCLUDED.login,
-			       github_user_id = COALESCE(EXCLUDED.github_user_id, user_github_identities.github_user_id),
-			       email       = CASE
-			                       WHEN user_github_identities.login IS DISTINCT FROM EXCLUDED.login THEN EXCLUDED.email
-			                       ELSE COALESCE(EXCLUDED.email, user_github_identities.email) END,
-			       source      = EXCLUDED.source,
-			       verified_at = EXCLUDED.verified_at,
-			       updated_at  = now()
-			 WHERE user_github_identities.source = 'login_claim'
-		`, principalID, ghUsername, providerSubject, githubEmail); err != nil {
-			return uuid.Nil, fmt.Errorf("upsert github login identity: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return uuid.Nil, fmt.Errorf("commit principal tx: %w", err)
+		return nil
+	}); err != nil {
+		return uuid.Nil, err
 	}
 	return principalID, nil
 }
