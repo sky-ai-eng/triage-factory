@@ -89,24 +89,29 @@ const sqliteTaskRuleOrderJoin = `
 		GROUP BY org_id, event_type
 	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 
-// sqliteTaskListOrder is List's ordering — fixed (it never varies with the
-// filters, so a filter change can't silently reshuffle a surface) and total
-// (the id tiebreaker is what makes offset paging return each row exactly once
-// instead of dropping and repeating rows that tie on every other key).
+// sqliteTaskListDefaultKeys is the preference half of List's default ordering
+// — the terms a reader's sort_key stands in for, plus the id tiebreaker that
+// makes offset paging return each row exactly once instead of dropping and
+// repeating rows that tie on every other key.
 //
-// Read top to bottom as "what does the reader want to see first":
+// The whole order, read top to bottom as "what does the reader want to see
+// first":
 //
 //  1. live before snoozed — a deferred entry never jumps above pickable work,
 //     however high its priority. SQLite evaluates the comparison as 0/1, so
 //     false (live) sorts first; Postgres orders false before true identically.
-//  2. open before closed, then newest-closed first. Both terms are inert on a
-//     single-lane query (every row ties), so the queue keeps the ordering it
-//     had and the Done column keeps recency — and neither term ever compares a
-//     NULL against a non-NULL closed_at, because the partition above separates
-//     them, which is what keeps the two dialects' NULL-ordering defaults from
-//     diverging here.
-//  3. rule sort_order, then priority, then id — the queue's own ordering.
-const sqliteTaskListOrder = sqliteTaskListLanes + `
+//  2. open before closed. Inert on a single-lane query (every row ties), so
+//     the queue keeps the ordering it had — and it never compares a NULL
+//     closed_at against a non-NULL one, which is what keeps the two dialects'
+//     NULL-ordering defaults from diverging at the recency term below.
+//  3. the attention tier over the open rows of the lanes that carry it
+//     (sqliteTaskAttentionTier) — a closed row is not tiered, so the term is
+//     inert inside the partition below and the recency term keeps it.
+//  4. newest-closed first — the Done column's recency, inert everywhere else.
+//  5. rule sort_order, then priority, then id — the queue's own ordering.
+//
+// Terms 4 and 5 are what a sort_key replaces; 1-3 stay in front of it.
+const sqliteTaskListDefaultKeys = `
 	         t.closed_at DESC,
 	         COALESCE(tr.sort_order, 999) ASC,
 	         COALESCE(t.priority_score, 0.5) DESC,
@@ -118,15 +123,89 @@ const sqliteTaskListOrder = sqliteTaskListLanes + `
 // lane, so the partitions stay in front of their key — a snoozed row must not
 // climb over live work because it sorts first by title.
 //
-// The recency term below it (`t.closed_at DESC`) is preference, not
-// structure: it is the closed lane's DEFAULT ordering, and a reader who asks
-// for that lane by title means by title. It stays inside the replaceable
-// middle for that reason — and the partition above it still keeps a NULL
-// closed_at from ever being compared against a non-NULL one, which is what
-// holds the two dialects' NULL-ordering defaults together.
+// The attention tier follows them, and is structure on the same argument: it
+// is which lane of a lane a row is in. The recency term after that
+// (`t.closed_at DESC`) is preference, not structure — it is the closed lane's
+// DEFAULT ordering, and a reader who asks for that lane by title means by
+// title. It stays inside the replaceable middle for that reason, and the
+// partition above still keeps a NULL closed_at from ever being compared
+// against a non-NULL one, which is what holds the two dialects' NULL-ordering
+// defaults together.
 const sqliteTaskListLanes = `
 	ORDER BY (t.status = 'snoozed') ASC,
 	         (t.closed_at IS NOT NULL) ASC,`
+
+// sqliteTaskAttentionTier orders the OPEN rows of a lane by whose move it is —
+// the first preference term on the In Progress and In Review lanes, so the card
+// waiting on a human is on page one rather than wherever its priority put it.
+// It is an ORDER BY expression and no join, so it is absent from the count
+// query by construction.
+//
+// A closed row takes a constant tier, on the same `closed_at IS NOT NULL` the
+// partition above tests, and that is load-bearing rather than tidy. This term
+// is read BEFORE the recency term, so without the guard every read spanning
+// both partitions — an unfiltered one, or any explicit status set mixing open
+// rows with terminal ones — would order its closed tail by unfinished business
+// instead of by recency: a stale closure still holding a draft pull request
+// climbing over a later one that left nothing behind. Whether a lane carries
+// the tier at all is then only a question of cost
+// (db.TaskListFilter.OrdersByAttention), never of whether the tail is safe.
+//
+// The constant is 2 because that is what a closed row honestly is on this
+// scale: not anybody's move. Any constant would tie them; this one does not
+// need a reader to know it is a sentinel.
+//
+// Snoozed rows are deliberately NOT guarded the same way. They are segregated
+// by their own partition above, and inside that group the tier displaces
+// nothing a reader is owed — a deferred set falls straight through to rule
+// order and priority, which is the same preference class the tier belongs to.
+// The closed tail is the only group with a recency contract to protect.
+//
+// The tiers, and the reason each is where it is:
+//
+//	0  needs you   — the task holds a conversation matching the per-conversation
+//	                 needs-you predicate: an unanswered permission prompt, or a
+//	                 conversation that is not live and still holds an unresolved
+//	                 artifact.
+//	1  failed      — its newest conversation died. Nothing is coming; a human
+//	                 decides what happens next, but there is no question
+//	                 waiting on them, so it sits below tier 0.
+//	2  in flight   — an agent is working, and a task with no conversation at
+//	                 all: neither is anybody's move, and a row that has not
+//	                 started must not sort below finished work.
+//	3  completed   — its newest conversation concluded. Done reading, last.
+//
+// Tier 0 is `sqliteConversationAttentionSQL` — the SAME predicate the
+// conversations list's `attention` filter and the rail's `needs` count read,
+// lifted to a per-task EXISTS. A second definition of "needs you" would let a
+// lane disagree with the rail counted above it.
+//
+// The status halves read the DISPLAY status, not the stored column: the card a
+// human is looking at reads the display ladder, and a conversation mid-claim
+// carries no stored status at all. `failed` / `completed` mirror
+// domain.StatusFailed / domain.StatusCompleted, which SQL cannot import; the
+// dual-dialect conformance suite is what holds the two literals to them.
+//
+// "Newest" is (started_at DESC, id) — the same ordering ConversationStore.List
+// groups a task's conversations by, so the conversation this reads is the one
+// the board renders on the card. A task with no conversation yields SQL NULL,
+// which no WHEN matches: the ELSE is what puts it in tier 2 rather than
+// needing its own arm.
+const sqliteTaskAttentionTier = `
+	         CASE WHEN t.closed_at IS NOT NULL THEN 2
+	              WHEN EXISTS (SELECT 1 FROM conversations r
+	                           WHERE r.task_id = t.id AND ` + sqliteConversationAttentionSQL + `)
+	                   THEN 0
+	              ELSE CASE (SELECT ` + sqliteDisplayStatusSQL + `
+	                         FROM conversations r
+	                         WHERE r.task_id = t.id
+	                         ORDER BY r.started_at DESC, r.id
+	                         LIMIT 1)
+	                     WHEN 'failed'    THEN 1
+	                     WHEN 'completed' THEN 3
+	                     ELSE 2
+	                   END
+	         END ASC,`
 
 // sqliteTaskClaimantJoin resolves the name the claimee sort orders on. Both
 // joins are on a primary key, so neither can drop or duplicate a row; they
@@ -137,12 +216,17 @@ const sqliteTaskClaimantJoin = `
 
 // sqliteTaskListSort renders the joins and ORDER BY for a filter's sort — the
 // default order when it names no key, otherwise the reader's key between the
-// lane partitions and the id tiebreaker.
+// lane structure and the id tiebreaker.
 //
 // The caller's values never reach the SQL as text: the key switches to a
 // constant fragment and the direction to one of two words, so an ORDER BY is
 // assembled from this file's own strings whatever the request said.
 func sqliteTaskListSort(f db.TaskListFilter) (joins, order string) {
+	// The structure both arms keep, whatever the reader asked for.
+	head := sqliteTaskListLanes
+	if f.OrdersByAttention() {
+		head += sqliteTaskAttentionTier
+	}
 	dir := " DESC"
 	if f.SortDir == db.TaskSortDirAsc {
 		dir = " ASC"
@@ -166,9 +250,9 @@ func sqliteTaskListSort(f db.TaskListFilter) (joins, order string) {
 		// latter, so reaching it means a caller built the filter directly.
 		// The default order is the honest answer either way; inventing SQL
 		// for an unknown key is not.
-		return sqliteTaskRuleOrderJoin, sqliteTaskListOrder
+		return sqliteTaskRuleOrderJoin, head + sqliteTaskListDefaultKeys
 	}
-	return joins, sqliteTaskListLanes + `
+	return joins, head + `
 	         ` + key + dir + `,
 	         t.id ASC`
 }
@@ -271,10 +355,11 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 
 	// The total runs the same filters on the same connection as the page, so
 	// a caller's "showing 50 of 213" can't be assembled from two different
-	// snapshots. The rule-order join is absent here on purpose: it is a LEFT
-	// JOIN of a grouped derived table referenced only by the ORDER BY, so it
-	// can neither drop nor duplicate a row — including it would only make the
-	// count slower.
+	// snapshots. It carries no ordering at all — neither the rule-order join
+	// (a LEFT JOIN of a grouped derived table referenced only by the ORDER BY,
+	// so it can neither drop nor duplicate a row) nor the attention tier's
+	// per-row subqueries. Counting is not ordering, and both would only make
+	// it slower.
 	var total int
 	if err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(*)
