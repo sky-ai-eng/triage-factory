@@ -1,6 +1,15 @@
 package sqlite
 
-import "testing"
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"testing"
+
+	_ "modernc.org/sqlite"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+)
 
 // TestChunkIDs pins the IN-list chunker used by the batched run-list reads:
 // empty → nil, an under-cap slice → one chunk aliasing the input, and an
@@ -51,5 +60,33 @@ func TestChunkIDs(t *testing.T) {
 	}
 	if total != n {
 		t.Errorf("covered %d ids, want %d", total, n)
+	}
+}
+
+// TestInTx_CanceledCtxSurfacesAsCanceled pins the disconnect contract on the
+// store-internal transaction helper: a ctx that dies inside fn surfaces as
+// context.Canceled whichever of the stdlib's rollback goroutine or the commit
+// lands first.
+func TestInTx_CanceledCtxSurfacesAsCanceled(t *testing.T) {
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err = inTx(ctx, conn, func(q queryer) error {
+		if _, err := q.ExecContext(ctx, `SELECT 1`); err != nil {
+			return err
+		}
+		cancel()
+		return nil
+	})
+	if err == nil {
+		t.Fatal("inTx committed under a canceled ctx")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("errors.Is(err, context.Canceled) = false; got %v", err)
 	}
 }

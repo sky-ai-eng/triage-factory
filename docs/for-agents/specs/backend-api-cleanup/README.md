@@ -13,7 +13,12 @@ converges on (§1), and records a **full audit** of where the current
 surface falls short (§3), with file:line evidence, so remediation can be
 ticketed without re-deriving the findings.
 
-Status: **audit complete, contract settled — remediation unscheduled.**
+Status: **audit complete, contract settled — remediation shipped as
+TFAC-818 (eight tickets, 1/8–8/8).** §3 is the audit as of that snapshot
+and is kept as the record the tickets were cut from; the ratchet test
+(`internal/server/ratchet_test.go`) is the live statement of what still
+sits outside the contract, and its permanent section names the surfaces
+that do so deliberately.
 Audited 2026-08-15 against main at `ef2ceb3e` (~180 routes across
 `internal/server/` plus the ee Slack/SSO surfaces). Line references
 drift as files change; treat them as pointers, not anchors.

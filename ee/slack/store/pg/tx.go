@@ -31,9 +31,9 @@ func inTx(ctx context.Context, q db.Execer, fn func(db.Execer) error) error {
 		}
 		defer func() { _ = tx.Rollback() }()
 		if err := fn(tx); err != nil {
-			return err
+			return db.TxCause(ctx, err)
 		}
-		return tx.Commit()
+		return db.TxCause(ctx, tx.Commit())
 	default:
 		return fmt.Errorf("slack store: unexpected execer type %T", q)
 	}

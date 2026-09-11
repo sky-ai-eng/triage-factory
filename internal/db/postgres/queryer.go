@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // queryer is the minimum interface a Postgres store impl needs from
@@ -43,9 +45,9 @@ func inTx(ctx context.Context, q queryer, fn func(queryer) error) error {
 		}
 		defer func() { _ = tx.Rollback() }()
 		if err := fn(tx); err != nil {
-			return err
+			return db.TxCause(ctx, err)
 		}
-		return tx.Commit()
+		return db.TxCause(ctx, tx.Commit())
 	default:
 		return fmt.Errorf("postgres store: unexpected queryer type %T", q)
 	}

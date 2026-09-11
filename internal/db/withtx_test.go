@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -125,3 +126,29 @@ var errForcedRollback = forcedErr("forced rollback for test")
 type forcedErr string
 
 func (e forcedErr) Error() string { return string(e) }
+
+// TestWithTx_CanceledCtxSurfacesAsCanceled pins the disconnect contract on
+// the claims-setting helper: a ctx that dies inside fn surfaces as
+// context.Canceled whichever of the stdlib's rollback goroutine or the
+// commit lands first, so a handler's client-gone classification holds.
+func TestWithTx_CanceledCtxSurfacesAsCanceled(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := db.WithTx(ctx, h.AdminDB, db.Claims{Sub: "11111111-1111-1111-1111-111111111111"},
+		func(tx *sql.Tx) error {
+			if _, err := tx.ExecContext(ctx, `SELECT 1`); err != nil {
+				return err
+			}
+			cancel()
+			return nil
+		})
+	if err == nil {
+		t.Fatal("WithTx committed under a canceled ctx")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("errors.Is(err, context.Canceled) = false; got %v", err)
+	}
+}
