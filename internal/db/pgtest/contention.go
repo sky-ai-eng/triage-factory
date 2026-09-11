@@ -17,6 +17,11 @@ import (
 // gives a lock before it declares a deadlock.
 const contentionSampleInterval = 250 * time.Millisecond
 
+// contentionProbeTimeout bounds one sample. It is a backstop against a probe
+// that hangs while the statement being watched is still running — it does not
+// bound how long stopping takes, which is the watcher's context instead.
+const contentionProbeTimeout = 5 * time.Second
+
 // busySettle is how long AssertNoBusyBackends waits before it starts looking,
 // and busyProbeWindow how long it looks for. The settle is for the one thing a
 // correct cleanup still leaves behind: a statement the client cancelled on its
@@ -102,7 +107,7 @@ func describeBusyBackends(backends []busyBackend) string {
 // committed and gone idle by the time the loser's error surfaces — so a
 // snapshot taken on the error path routinely finds nobody at all.
 func watchContention(db *sql.DB) (stop func() []busyBackend) {
-	done := make(chan struct{})
+	watchCtx, cancel := context.WithCancel(context.Background())
 	var (
 		mu   sync.Mutex
 		last []busyBackend
@@ -115,12 +120,12 @@ func watchContention(db *sql.DB) (stop func() []busyBackend) {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-done:
+			case <-watchCtx.Done():
 				return
 			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				got, err := busyBackends(ctx, db)
-				cancel()
+				probeCtx, probeCancel := context.WithTimeout(watchCtx, contentionProbeTimeout)
+				got, err := busyBackends(probeCtx, db)
+				probeCancel()
 				if err != nil || len(got) == 0 {
 					continue
 				}
@@ -131,7 +136,11 @@ func watchContention(db *sql.DB) (stop func() []busyBackend) {
 		}
 	}()
 	return func() []busyBackend {
-		close(done)
+		// Cancel, then join. Every probe runs on a context derived from this
+		// one, so stopping ends the probe in flight instead of waiting it out:
+		// the statement being watched has just finished, and the watcher must
+		// not add a query of its own to how long that took.
+		cancel()
 		wg.Wait()
 		mu.Lock()
 		defer mu.Unlock()
