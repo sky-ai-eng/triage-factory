@@ -61,14 +61,20 @@ func (m *Manager) Nudge(orgID, conversationID string) {
 // sweep works one page of owed conversations. backoff is how recently a
 // conversation must have been attempted for the read to skip it — zero takes
 // everything, which is the doorbell's org-wide form. orgID empty is every org,
-// which is the ticker's.
+// which is the ticker's; one org's configuration save is not a reason to
+// re-sweep every other org's backlog ahead of schedule.
+//
+// Both scopes are the read's, never a filter over its result: the page is
+// capped, so an org's rows taken out of the fleet's first hundred are not that
+// org's page — on a busy deployment they can be none of them while that org
+// owes plenty.
 //
 // Serial by design: the page is ordered open tasks first and then oldest
 // boundary first, which is the order a person waiting would choose, and
 // running it in parallel would spend an org's whole background budget on a
 // backlog that nobody is watching all of.
 func (m *Manager) sweep(ctx context.Context, backoff time.Duration, orgID string) {
-	owed, err := m.stores.Conversations.ListMemoryOwedSystem(ctx, backoff, sweepLimit)
+	owed, err := m.stores.Conversations.ListMemoryOwedSystem(ctx, orgID, backoff, sweepLimit)
 	if err != nil {
 		log.Warn("list conversations owing a memory failed; retrying next tick", "error", err)
 		return
@@ -76,13 +82,6 @@ func (m *Manager) sweep(ctx context.Context, backoff time.Duration, orgID string
 	for _, o := range owed {
 		if ctx.Err() != nil {
 			return
-		}
-		// The read is fleet-wide (the brain holds no org scope), so the
-		// org-wide doorbell narrows it here rather than in SQL — one org's
-		// configuration save is not a reason to re-sweep every other org's
-		// backlog ahead of schedule.
-		if orgID != "" && o.OrgID != orgID {
-			continue
 		}
 		if err := m.Fulfil(ctx, o.OrgID, o.ConversationID); err != nil {
 			log.Warn("settling an owed memory failed", "conversation", o.ConversationID, "org", o.OrgID, "error", err)

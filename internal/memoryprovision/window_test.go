@@ -163,3 +163,32 @@ func firstLines(s string, n int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// TestBuildWindowWithin_NeverExceedsItsBudget walks every budget across a range
+// so the exact-fill boundaries are all hit, rather than hoping one hand-written
+// fixture lands on the one that matters: head and tail filling the budget
+// exactly is precisely the case where the elision marker appended afterwards
+// pushes the render over it.
+func TestBuildWindowWithin_NeverExceedsItsBudget(t *testing.T) {
+	rows := []domain.Message{{Role: roleUser, Content: "the opening turn"}}
+	for i := range 40 {
+		rows = append(rows, domain.Message{Role: roleAssistant, Content: fmt.Sprintf("step %02d %s", i, strings.Repeat("w", 40))})
+	}
+
+	elided, whole := false, false
+	for budget := elisionMarkerReserve; budget <= 3000; budget++ {
+		win := buildWindowWithin(rows, budget)
+		if len(win.text) > budget {
+			t.Fatalf("budget %d rendered %d bytes:\n%s", budget, len(win.text), firstLines(win.text, 3))
+		}
+		switch {
+		case win.rowsSent < win.rowsTotal:
+			elided = true
+		default:
+			whole = true
+		}
+	}
+	if !elided || !whole {
+		t.Fatalf("the range must cover both a windowed transcript and a whole one; elided=%v whole=%v", elided, whole)
+	}
+}

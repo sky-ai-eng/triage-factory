@@ -26,6 +26,15 @@ const windowBytesPerToken = 3
 // it measures is a byte.
 const windowByteBudget = WindowTokenBudget * windowBytesPerToken
 
+// elisionMarkerReserve is held back from the row budget so the marker line the
+// walk may add afterwards is paid for rather than charged to nobody — without
+// it a head and tail that exactly fill the budget render a transcript over it.
+// Reserved unconditionally, even when nothing is elided: the walk cannot know
+// whether it needs the line until it has already spent the budget deciding, and
+// thirty-odd bytes out of three hundred thousand is not worth a second pass to
+// reclaim. Sized for a count wider than any transcript this will ever meet.
+const elisionMarkerReserve = len("[… 18446744073709551615 rows elided …]\n")
+
 // toolContentLimit caps a rendered tool result. A single 100 KB file read
 // must not spend the whole tail: the memory needs the shape of what the agent
 // did, and the first few KB of a result carry that where the rest does not.
@@ -86,10 +95,19 @@ type window struct {
 // the tail; an SDK transcript is the raw mirror with no summaries in it at
 // all, so the tail rule is the only thing bounding it.
 func buildWindow(rows []domain.Message) window {
+	return buildWindowWithin(rows, windowByteBudget)
+}
+
+// buildWindowWithin is buildWindow against an explicit byte budget, so the
+// walk's boundaries — the exact fill in particular — can be exercised at sizes
+// a test can write out rather than only at the production budget.
+func buildWindowWithin(rows []domain.Message, byteBudget int) window {
 	total := len(rows)
 	if total == 0 {
 		return window{}
 	}
+	// What the rows themselves may spend; the remainder is the marker's.
+	rowBudget := byteBudget - elisionMarkerReserve
 
 	rendered := make([]string, total)
 	for i, r := range rows {
@@ -112,7 +130,7 @@ func buildWindow(rows []domain.Message) window {
 	spent, head := 0, 0
 	for i := 0; i < headEnd; i++ {
 		cost := len(rendered[i]) + 1
-		if spent+cost > windowByteBudget {
+		if spent+cost > rowBudget {
 			break
 		}
 		spent += cost
@@ -122,7 +140,7 @@ func buildWindow(rows []domain.Message) window {
 	tailStart := total
 	for i := total - 1; i >= head; i-- {
 		cost := len(rendered[i]) + 1
-		if spent+cost > windowByteBudget {
+		if spent+cost > rowBudget {
 			break
 		}
 		spent += cost

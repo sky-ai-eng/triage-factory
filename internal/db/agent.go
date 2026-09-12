@@ -1149,11 +1149,19 @@ type ConversationStore interface {
 	// longest wait is served first. limit caps the page; a sweep takes the
 	// next page on its next tick rather than draining the world in one pass.
 	//
-	// Reads across tenants with no org scoping, like the retention sweeps it
-	// sits beside: the caller is the brain's provisioner, a boot-launched
-	// goroutine with no JWT claims, so the admin pool is the right door and
-	// each row carries the org it belongs to.
-	ListMemoryOwedSystem(ctx context.Context, backoff time.Duration, limit int) ([]domain.MemoryOwed, error)
+	// orgID narrows the scan to one tenant; empty reads across tenants, like
+	// the retention sweeps it sits beside. Both callers are the brain's
+	// provisioner: its backstop sweep wants the whole fleet, while the
+	// doorbell a configuration save rings wants the org that saved. The scope
+	// is a predicate here rather than a filter the caller applies to the
+	// result, because it has to be inside the LIMIT — one org's page taken
+	// out of the fleet's first hundred rows is not that org's page, and on a
+	// busy deployment it can be empty while that org owes plenty.
+	//
+	// Either way the caller is a boot-launched goroutine with no JWT claims,
+	// so the admin pool is the right door and each row carries the org it
+	// belongs to.
+	ListMemoryOwedSystem(ctx context.Context, orgID string, backoff time.Duration, limit int) ([]domain.MemoryOwed, error)
 
 	// HasActiveClaimForBlueprintRunSystem reports whether any conversation
 	// under blueprintRunID has a live claim — i.e. whether an executor is
