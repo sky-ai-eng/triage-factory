@@ -47,9 +47,10 @@ func IsMemorySource(source string) bool {
 // and why. The agent writes it to the one fixed path `./_tfac/memory.md` in
 // its run root; the orchestrator reads it at termination and ingests it into
 // the `conversation_memory` table before worktree teardown. Materialized back
-// into future conversations' worktrees under `_tfac/entity-memory/` so iterations on
-// the same entity can read what prior attempts tried — and so the sibling steps
-// of one blueprint run can read each other's memory as their handoff.
+// into future conversations' worktrees under `_tfac/entity-memory/` so work on
+// the same entity can read what prior attempts tried, split there by the task
+// that produced it — and the newest of the task's own are injected into a new
+// conversation's opening rows rather than left as files to find.
 //
 // Which entities a row is reachable from is the `conversation_memory_entities`
 // join, not a column here. Stored in the `conversation_memory` table with a
@@ -61,6 +62,14 @@ type TaskMemory struct {
 	Content        string
 	Source         MemorySource
 	CreatedAt      time.Time
+
+	// TaskID is the producing conversation's task, projected through the same
+	// join StepIndex and PromptName come through. It is what splits an
+	// entity's memories into this task's and the rest, and it is a join rather
+	// than a column here because the conversation already carries the task:
+	// a second copy on the memory row would be one more thing that can
+	// disagree with it. Empty for a conversation that names no task.
+	TaskID string
 
 	// StepIndex and PromptName come from the producing conversation, not the
 	// memory row: they are what lets a materializer name the file after the

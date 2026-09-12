@@ -385,8 +385,9 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 		fmt.Fprintf(&b, "Next step: %q\n", nextLabel)
 	}
 	// Prior steps' findings are their memory files under
-	// _tfac/entity-memory/this-run/ — the <entity_memory> contract tells the
-	// agent to read them first as its handoff. No separate handoff file.
+	// _tfac/entity-memory/this-task/, the newest of them also injected into the
+	// conversation's opening turn — the <entity_memory> contract tells the agent
+	// where each is. No separate handoff file.
 	return b.String()
 }
 

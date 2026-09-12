@@ -206,15 +206,17 @@ func getMemoriesForEntityTeamScoped(ctx context.Context, q queryer, orgID, entit
 }
 
 // taskMemoryColumns is the canonical projection of a conversation_memory row
-// joined with the two facts about its producing conversation that let a
-// reader name the memory after the work it records (its blueprint step index
-// and the prompt it ran) rather than after a row id — the columns
+// joined with the three facts about its producing conversation a reader needs
+// and the memory row does not carry: the task it ran on, which splits an
+// entity's memories into this task's and the rest, and the step index plus
+// prompt name that let the memory be named after the work it records rather
+// than after a row id — the columns
 // scanTaskMemory reads, off the row alias `rm` (+ `c`/`p` for the join).
 // Every read SELECTs it and every write RETURNs it (via taskMemoryWrittenSelect,
 // re-applying the same join over the write's own output row), so the write
 // shape cannot drift from the read shape.
 const taskMemoryColumns = `rm.id, rm.conversation_id, rm.blueprint_run_id, rm.agent_content, rm.source, rm.created_at,
-	       c.blueprint_step_index, p.name`
+	       c.task_id, c.blueprint_step_index, p.name`
 
 // taskMemorySelect / taskMemorySelectTeamScoped are the SELECT + FROM the
 // reads start from. They differ only in how the conversation is
@@ -253,18 +255,19 @@ const taskMemoryWrittenSelect = `
 // read, and the single-row write's RETURNING.
 func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, error) {
 	var m domain.TaskMemory
-	var blueprintRunID, agentContent, promptName sql.NullString
+	var blueprintRunID, agentContent, taskID, promptName sql.NullString
 	var source string
 	var stepIndex sql.NullInt64
 	var createdAt time.Time
 	if err := row.Scan(&m.ID, &m.ConversationID, &blueprintRunID, &agentContent, &source, &createdAt,
-		&stepIndex, &promptName); err != nil {
+		&taskID, &stepIndex, &promptName); err != nil {
 		return domain.TaskMemory{}, err
 	}
 	m.BlueprintRunID = blueprintRunID.String
 	m.Content = agentContent.String
 	m.Source = domain.MemorySource(source)
 	m.CreatedAt = createdAt
+	m.TaskID = taskID.String
 	if stepIndex.Valid {
 		idx := int(stepIndex.Int64)
 		m.StepIndex = &idx

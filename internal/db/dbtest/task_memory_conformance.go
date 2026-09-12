@@ -35,10 +35,14 @@ const (
 )
 
 // AssertTaskMemoryNamingFacts checks one read's row against what the seeders
-// stamp. Exported so a backend's own team-scoped tests — the arm the shared
+// stamp, wantTaskID being the task the producing conversation was seeded
+// under. Exported so a backend's own team-scoped tests — the arm the shared
 // suite deliberately leaves to them — assert the same contract.
-func AssertTaskMemoryNamingFacts(t *testing.T, mem domain.TaskMemory) {
+func AssertTaskMemoryNamingFacts(t *testing.T, mem domain.TaskMemory, wantTaskID string) {
 	t.Helper()
+	if mem.TaskID != wantTaskID {
+		t.Errorf("TaskID = %q, want %q", mem.TaskID, wantTaskID)
+	}
 	if mem.PromptName != TaskMemorySeedPromptName {
 		t.Errorf("PromptName = %q, want %q", mem.PromptName, TaskMemorySeedPromptName)
 	}
@@ -72,6 +76,13 @@ type TaskMemorySeeder struct {
 	// DELETE SET NULL), and returns the blueprint_run id. Only the
 	// round-trip subtest needs it.
 	BlueprintRun func(t *testing.T, suffix string) (blueprintRunID string)
+
+	// TaskFor reads back the task a seeded conversation was inserted under,
+	// directly (the store interface has no conversation read) — the id the
+	// entity reads must project onto TaskMemory.TaskID, which is what splits
+	// an entity's memories into one task's and the rest. Only the naming-facts
+	// subtest needs it.
+	TaskFor func(t *testing.T, conversationID string) string
 
 	// Role reads back the role column of a conversation_memory_entities row
 	// directly (bypassing the store interface, which has no
@@ -402,8 +413,9 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 
 	t.Run("GetMemoriesForEntity_carries_producing_conversation_naming_facts", func(t *testing.T) {
 		// The reader names materialized memory after the work it records —
-		// step order plus the prompt that ran — so both entity reads must
-		// project those two facts off the producing conversation, not just
+		// step order plus the prompt that ran — and splits the entity's
+		// memories on the task that produced them, so both entity reads must
+		// project all three facts off the producing conversation, not just
 		// the memory row's own columns.
 		s, orgID, seed := mk(t)
 		conversationID, entityID := seed.Conversation(t, "naming-facts")
@@ -419,7 +431,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if len(mems) != 1 {
 			t.Fatalf("len(mems) = %d, want 1", len(mems))
 		}
-		AssertTaskMemoryNamingFacts(t, mems[0])
+		AssertTaskMemoryNamingFacts(t, mems[0], seed.TaskFor(t, conversationID))
 	})
 
 	t.Run("RecordEntityTouchSystem_role_precedence", func(t *testing.T) {

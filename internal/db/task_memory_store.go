@@ -127,7 +127,7 @@ type TaskMemoryStore interface {
 
 	// GetMemoriesForEntitySystem mirrors GetMemoriesForEntity but
 	// routes through the admin pool. The consumer is the delegate
-	// spawner's engagement-start materializer (materializePriorMemories),
+	// spawner's engagement-start materializer (materializeEntityMemories),
 	// which fires inside the runAgent goroutine with no JWT-claims
 	// context. org_id stays in the WHERE clause as defense in depth.
 	//

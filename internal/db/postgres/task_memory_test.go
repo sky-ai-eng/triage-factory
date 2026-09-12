@@ -39,6 +39,10 @@ func TestTaskMemoryStore_Postgres(t *testing.T) {
 				t.Helper()
 				return seedPgBlueprintRunForTaskMemory(t, h, orgID, userID, suffix)
 			},
+			TaskFor: func(t *testing.T, conversationID string) string {
+				t.Helper()
+				return taskForPgConversation(t, h, conversationID)
+			},
 			Role: func(t *testing.T, conversationID, entityID string) string {
 				t.Helper()
 				return roleForPgJoinRow(t, h, conversationID, entityID)
@@ -72,6 +76,10 @@ func TestTaskMemoryStore_Postgres_ReturnedRowConformance(t *testing.T) {
 			BlueprintRun: func(t *testing.T, suffix string) string {
 				t.Helper()
 				return seedPgBlueprintRunForTaskMemory(t, h, orgID, userID, suffix)
+			},
+			TaskFor: func(t *testing.T, conversationID string) string {
+				t.Helper()
+				return taskForPgConversation(t, h, conversationID)
 			},
 			Role: func(t *testing.T, conversationID, entityID string) string {
 				t.Helper()
@@ -113,6 +121,19 @@ func TestTaskMemoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("WithUser: %v", err)
 	}
+}
+
+// taskForPgConversation reads back the seeded conversation's task_id via the
+// admin pool (bypasses RLS) — the store interface has no conversation read, and
+// the naming-facts conformance subtest needs the id the entity reads must
+// project.
+func taskForPgConversation(t *testing.T, h *pgtest.Harness, conversationID string) string {
+	t.Helper()
+	var taskID sql.NullString
+	if err := h.AdminDB.QueryRow(`SELECT task_id FROM conversations WHERE id = $1`, conversationID).Scan(&taskID); err != nil {
+		t.Fatalf("read conversations.task_id: %v", err)
+	}
+	return taskID.String
 }
 
 // roleForPgJoinRow reads back conversation_memory_entities.role directly via the
@@ -412,7 +433,7 @@ func TestTaskMemoryStore_Postgres_SystemReadTeamScoped(t *testing.T) {
 	// The team-scoped SELECT is its own SQL — it must project the producing
 	// conversation's naming facts exactly like the app-pool read the shared
 	// conformance suite covers. This is the read the run-start materializer uses.
-	dbtest.AssertTaskMemoryNamingFacts(t, mems1[0])
+	dbtest.AssertTaskMemoryNamingFacts(t, mems1[0], taskForPgConversation(t, h, conv1))
 
 	// Symmetric: a run owned by team2 sees only team2's memory.
 	mems2, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, team2)

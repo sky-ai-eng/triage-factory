@@ -782,7 +782,7 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 // {runRoot}/{owner}/{repo}/ and inserts a row into conversation_worktrees.
 //
 // The agent's initial cwd is the run-root: a throwaway dir holding
-// only ./_tfac/ (whose entity-memory is materializePriorMemories' rendering, or
+// only ./_tfac/ (whose entity-memory is materializeEntityMemories' rendering, or
 // under a jail the symlink standing in for its read-only mount). Both gh and
 // jira tool surfaces are exposed since the agent
 // will need both to implement and ship a PR.

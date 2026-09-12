@@ -1871,7 +1871,7 @@ func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, c
 // none: a resume continues a conversation that has already been driven, so
 // it is the first case by construction.
 func (s *Spawner) disposeOfExhaustedConversation(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
-	if br == nil || s.conversationHasTranscript(orgID, conv.ID) {
+	if br == nil || s.conversationStarted(orgID, conv.ID) {
 		dispatchLog.Error("the runtime failed to start on every attempt; parking the conversation instead of failing it",
 			"conversation", conv.ID, "attempts", conv.Attempts, "error", cause)
 		s.parkAfterLaunchExhaustion(orgID, conv, cause)
@@ -1885,15 +1885,27 @@ func (s *Spawner) disposeOfExhaustedConversation(orgID string, br *domain.Bluepr
 	return false
 }
 
-// conversationHasTranscript reports whether anything has been said in this
-// conversation yet — the same signal mintOpeningTurn and prepareInheritedMemory
-// read to answer the same question.
+// conversationStarted reports whether this conversation has been opened yet —
+// conversationOpened's reading of the transcript, the same one mintOpeningRows
+// and prepareInheritedMemory make.
+//
+// It asks for the task-context row rather than for any row because the rows
+// that can precede an opening are all the control plane's own: a claim-time
+// notice, a follow-up queued while the conversation sat in the queue. A step
+// that never launched carries no work to protect however many of those it
+// collected.
 //
 // A read failure answers "yes". The two ways of being wrong are not
 // symmetric: treating a live conversation as fresh destroys its workspace and
 // fails its blueprint, while treating a fresh one as live costs a park nobody
 // resumes and a task that has to be re-fired by hand.
-func (s *Spawner) conversationHasTranscript(orgID, conversationID string) bool {
+//
+// TODO(TFAC-994): this gate serves both runtimes, and only the native one mints
+// a task-context row today — so an SDK conversation that has really been driven
+// reads as fresh here, and an exhausted claim on one fails its blueprint where
+// it used to park. That ticket mints the same opening rows on the SDK path,
+// which is what makes this predicate true of both.
+func (s *Spawner) conversationStarted(orgID, conversationID string) bool {
 	if s.conversations == nil {
 		return false
 	}
@@ -1903,7 +1915,7 @@ func (s *Spawner) conversationHasTranscript(orgID, conversationID string) bool {
 			"conversation", conversationID, "error", err)
 		return true
 	}
-	return len(rows) > 0
+	return conversationOpened(rows)
 }
 
 // parkAfterLaunchExhaustion puts a conversation whose runtime would not start
@@ -1939,7 +1951,7 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversati
 // that fixes it. "Send a message to retry" is deliberately absent: a message
 // would wake the conversation into this same refusal until somebody picks.
 func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) {
-	if br == nil || s.conversationHasTranscript(orgID, conv.ID) {
+	if br == nil || s.conversationStarted(orgID, conv.ID) {
 		dispatchLog.Warn("claim refused: the model this conversation would run on is not enabled for its team; parking",
 			"conversation", conv.ID, "team", conv.TeamID, "error", cause)
 		s.parkWithStopNote(orgID, conv, domain.ParkReasonModelNotEnabled,

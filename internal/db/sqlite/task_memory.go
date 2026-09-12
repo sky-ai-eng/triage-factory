@@ -146,14 +146,16 @@ func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]do
 }
 
 // taskMemorySelect is the shared projection + FROM every conversation_memory
-// read starts from: the memory row itself, plus the two facts about the
-// producing conversation that let a reader name the memory after the work it
-// records (its blueprint step index and the prompt it ran) rather than after a
-// row id. Both joins are LEFT so a row whose conversation or prompt is gone
-// still comes back — it loses its legible name, never its content.
+// read starts from: the memory row itself, plus the three facts about the
+// producing conversation a reader needs and the memory row does not carry —
+// the task it ran on, which splits an entity's memories into this task's and
+// the rest, and the step index plus prompt name that let the memory be named
+// after the work it records rather than after a row id. Both joins are LEFT so
+// a row whose conversation or prompt is gone still comes back — it loses its
+// legible name, never its content.
 const taskMemorySelect = `
 	SELECT rm.id, rm.conversation_id, rm.blueprint_run_id, rm.agent_content, rm.source, rm.created_at,
-	       c.blueprint_step_index, p.name
+	       c.task_id, c.blueprint_step_index, p.name
 	FROM conversation_memory rm
 	LEFT JOIN conversations c ON c.id = rm.conversation_id
 	LEFT JOIN prompts p ON p.id = c.prompt_id
@@ -167,6 +169,7 @@ const taskMemorySelect = `
 // restriction sqliteClaimReturningColumns (conversation.go) exists for.
 const taskMemoryRowColumns = `
 	id, conversation_id, blueprint_run_id, agent_content, source, created_at,
+	(SELECT c.task_id FROM conversations c WHERE c.id = conversation_memory.conversation_id),
 	(SELECT c.blueprint_step_index FROM conversations c WHERE c.id = conversation_memory.conversation_id),
 	(SELECT p.name FROM conversations c JOIN prompts p ON p.id = c.prompt_id WHERE c.id = conversation_memory.conversation_id)
 `
@@ -176,18 +179,19 @@ const taskMemoryRowColumns = `
 // per-conversation point read, and the single-row write's RETURNING.
 func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, error) {
 	var m domain.TaskMemory
-	var blueprintRunID, agentContent, promptName sql.NullString
+	var blueprintRunID, agentContent, taskID, promptName sql.NullString
 	var source string
 	var stepIndex sql.NullInt64
 	var createdAt time.Time
 	if err := row.Scan(&m.ID, &m.ConversationID, &blueprintRunID, &agentContent, &source, &createdAt,
-		&stepIndex, &promptName); err != nil {
+		&taskID, &stepIndex, &promptName); err != nil {
 		return domain.TaskMemory{}, err
 	}
 	m.BlueprintRunID = blueprintRunID.String
 	m.Content = agentContent.String
 	m.Source = domain.MemorySource(source)
 	m.CreatedAt = createdAt
+	m.TaskID = taskID.String
 	if stepIndex.Valid {
 		idx := int(stepIndex.Int64)
 		m.StepIndex = &idx

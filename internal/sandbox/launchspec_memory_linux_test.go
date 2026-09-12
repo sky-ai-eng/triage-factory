@@ -13,10 +13,10 @@ import (
 func stageMemoryFixture(t *testing.T, conversationID string) string {
 	t.Helper()
 	dir := TrustedMemorySourcePath(conversationID)
-	if err := os.MkdirAll(filepath.Join(dir, "this-run"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "this-task"), 0o755); err != nil {
 		t.Fatalf("stage memory fixture: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "this-run", "01-triage.md"), []byte("what step 1 decided\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "this-task", "01-triage.md"), []byte("what step 1 decided\n"), 0o644); err != nil {
 		t.Fatalf("write staged memory: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })

@@ -548,7 +548,7 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	return s.wakeParked(ctx, orgID, conv, userID)
 }
 
-// pendingUserInput builds the one row every input to a conversation takes: an
+// pendingUserInput builds the one row an input to a conversation takes: an
 // undelivered plain user message on its own transcript. That shape is not
 // cosmetic — it is the entire definition of the pending-input queue, matched by
 // ConversationPendingInputStore's `role='user' AND subtype=” AND delivered=false`
@@ -556,18 +556,11 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 // undelivered user rows cannot exist on the shared messages table, because
 // a conversation can legitimately queue several).
 //
-// Both producers build the row here — a user's follow-up (queueFollowUp) and a
-// delegation's opening turn (mintOpeningTurn) — so the queue cannot end up with
-// two definitions of what it holds.
-//
-// What they do NOT share is the door they write through, and that difference is
-// deliberate rather than leftover. A follow-up arrives on the control plane
-// where no engagement exists yet, so it writes under the sending user's
-// synthetic claims and RLS is the gate. An opening turn is written by the
-// executor's own loop, a detached goroutine with no request claims at all,
-// where the claim fence is the gate instead (see nativeTranscript). Forcing one
-// call site would mean giving up the fence on one side or inventing claims on
-// the other; sharing the row is the part that was actually duplicated.
+// A conversation's opening rows are deliberately not this shape: they are
+// delivered, and each carries a subtype (see mintOpeningRows). The queue is
+// what a person is still waiting to have read; an opening is context the first
+// call assembles, and writing it here would have every re-claim replay it as
+// new input.
 func pendingUserInput(conversationID, userID, text string) *domain.Message {
 	pending := false
 	return &domain.Message{

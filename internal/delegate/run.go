@@ -368,18 +368,18 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		}
 	}
 
-	// Prior memory for THIS launch: this workflow run's earlier steps under
-	// this-run/, prior separate runs under history/. Rendered on every launch,
-	// warm tree or cold — only the target moves, into a staging dir the launch
-	// mounts read-only when the agent is jailed. This is the blueprint handoff, so
-	// a step that cannot get it starts from nothing.
+	// Prior memory for THIS launch: the task's own earlier conversations under
+	// this-task/, the entity's other tasks under history/. Rendered on every
+	// launch, warm tree or cold — only the target moves, into a staging dir the
+	// launch mounts read-only when the agent is jailed. This is the blueprint
+	// handoff, so a step that cannot get it starts from nothing.
 	//
 	// It is a DB read and a tree copy that can run large, and the last thing
 	// between a rehydrated workspace and the agent starting — so one span
 	// covers the on-disk context the agent will read.
 	stagingCtx, stagingSpan := tracer.Start(ctx, "engagement.stage_context")
 	memoryDir, memoryOwned := entityMemoryTarget(&cfg, conversationID, claudeCwd, owned)
-	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, cfg.blueprintRunID, memoryOwned)
+	materializeEntityMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, task.ID, memoryOwned)
 
 	// The team knowledge base, copied into ./_tfac/knowledge/: the task team's
 	// own two roots plus every other team's published one, resolved from

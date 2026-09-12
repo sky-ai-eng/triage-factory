@@ -121,13 +121,18 @@ func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.drive {
-				pending := false
+				// What a driven conversation carries: the task-context row its
+				// own mint wrote. A claim-time notice or a queued follow-up
+				// would not do — those precede an opening rather than being
+				// one, which is why the gate reads this subtype.
+				delivered := true
 				if _, err := s.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
 					ConversationID: "r-mem",
 					UserID:         runmode.LocalDefaultUserID,
 					Role:           "user",
-					Content:        "go",
-					Delivered:      &pending,
+					Subtype:        domain.MessageSubtypeInjectionTaskContext,
+					Content:        "<task_context>x</task_context>",
+					Delivered:      &delivered,
 				}); err != nil {
 					t.Fatalf("seed transcript: %v", err)
 				}
@@ -149,16 +154,19 @@ func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
 	}
 }
 
-// TestMintOpeningTurn_QueuesThePendingInputShape pins the half of the input
-// contract the loop owns. The opening turn is queued as an undelivered plain
-// user row — the same shape a follow-up takes, and the shape
-// ConversationPendingInputStore's predicate is written against — so the engagement's
-// entry really is just its first drain, with no first-call special case.
+// TestMintOpeningTurn_WritesTheMemoriesThenTheTaskContext pins what the native
+// transcript actually opens with: one delivered row per injected memory, oldest
+// first, then the task context under its own subtype.
+//
+// Delivered rather than pending, which is the half of the input contract this
+// end owns: the engine assembles delivered rows on its first call, and an
+// undelivered user row is the pending-input queue — an opening written there
+// would read as input nobody has consumed.
 //
 // It also pins the idempotence the gate exists for: a re-claim of a
-// conversation that has already spoken adds nothing, so a crash between this
-// insert and the first call cannot double the opening.
-func TestMintOpeningTurn_QueuesThePendingInputShape(t *testing.T) {
+// conversation that has already opened adds nothing, so a crash between the
+// mint and the first call cannot double the opening.
+func TestMintOpeningTurn_WritesTheMemoriesThenTheTaskContext(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-open-turn", "", "/tmp/wt-open-turn")
 	claimID := markEngaged(t, database, "r-open-turn")
@@ -166,27 +174,43 @@ func TestMintOpeningTurn_QueuesThePendingInputShape(t *testing.T) {
 	transcript := newNativeTranscript(s, runmode.LocalDefaultOrgID, "r-open-turn", claimID)
 
 	ctx := context.Background()
-	opening := "<task_context>\nPull request owner/repo#7\n</task_context>\n\nfix the failing check"
-	if err := s.mintOpeningTurn(ctx, transcript, runmode.LocalDefaultOrgID, "r-open-turn", runmode.LocalDefaultUserID, opening); err != nil {
+	memories := []domain.TaskMemory{
+		{ID: "mem-older", Content: "what the first conversation tried"},
+		{ID: "mem-newer", Content: "what the second conversation tried"},
+	}
+	taskContext := "<task_context>\nPull request owner/repo#7\n</task_context>"
+	if err := s.mintOpeningTurn(ctx, transcript, runmode.LocalDefaultOrgID, "r-open-turn", runmode.LocalDefaultUserID, memories, taskContext); err != nil {
 		t.Fatalf("mintOpeningTurn: %v", err)
 	}
 
-	rows := pendingRows(t, s, "r-open-turn")
-	if len(rows) != 1 {
-		t.Fatalf("undelivered rows = %d, want the opening turn waiting for the first drain", len(rows))
+	rows := allRows(t, s, "r-open-turn")
+	want := []struct{ subtype, content string }{
+		{domain.MessageSubtypeInjectionMemory, "what the first conversation tried"},
+		{domain.MessageSubtypeInjectionMemory, "what the second conversation tried"},
+		{domain.MessageSubtypeInjectionTaskContext, taskContext},
 	}
-	// The pending-input predicate, spelled out: anything else and the queue's
-	// reads stop seeing a row the loop is relying on.
-	if rows[0].Role != "user" || rows[0].Subtype != "" || rows[0].Content != opening {
-		t.Errorf("opening turn = %+v, want a plain user row carrying the composed mission", rows[0])
+	if len(rows) != len(want) {
+		t.Fatalf("opening rows = %d, want %d: %+v", len(rows), len(want), rows)
+	}
+	for i, w := range want {
+		if rows[i].Role != "user" || rows[i].Subtype != w.subtype || rows[i].Content != w.content {
+			t.Errorf("row %d = {role %q subtype %q content %q}, want a user row {%q, %q}",
+				i, rows[i].Role, rows[i].Subtype, rows[i].Content, w.subtype, w.content)
+		}
+		if rows[i].Delivered == nil || !*rows[i].Delivered {
+			t.Errorf("row %d is undelivered; the opening must not sit in the pending-input queue", i)
+		}
+	}
+	if got := pendingRows(t, s, "r-open-turn"); len(got) != 0 {
+		t.Errorf("undelivered rows = %d, want 0", len(got))
 	}
 
-	// Re-claiming a conversation that has already spoken adds nothing.
-	if err := s.mintOpeningTurn(ctx, transcript, runmode.LocalDefaultOrgID, "r-open-turn", runmode.LocalDefaultUserID, opening); err != nil {
+	// Re-claiming a conversation that has already opened adds nothing.
+	if err := s.mintOpeningTurn(ctx, transcript, runmode.LocalDefaultOrgID, "r-open-turn", runmode.LocalDefaultUserID, memories, taskContext); err != nil {
 		t.Fatalf("second mintOpeningTurn: %v", err)
 	}
-	if got := pendingRows(t, s, "r-open-turn"); len(got) != 1 {
-		t.Errorf("undelivered rows after a re-claim = %d, want 1 — the opening must not double", len(got))
+	if got := allRows(t, s, "r-open-turn"); len(got) != len(want) {
+		t.Errorf("rows after a re-claim = %d, want %d — the opening must not double", len(got), len(want))
 	}
 }
 

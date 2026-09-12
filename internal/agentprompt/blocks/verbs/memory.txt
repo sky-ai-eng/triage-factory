@@ -1,8 +1,8 @@
 <entity_memory>
 Entity memory lives under `_tfac/entity-memory/` in your run root — the absolute path <run_context> names. Reach it by that absolute path, so it resolves whether you are at the run root or inside a materialized worktree subdir.
 
-- `this-run/` holds the memory of earlier steps of YOUR CURRENT workflow run, numbered in the order they ran. Read those first — that is your handoff from the steps before you. (If you're the first or only step, it is empty.)
-- `history/` holds memory from prior, separate runs on this entity, named by date. Skim them for what past attempts tried and ruled out, and build on that rather than starting from scratch.
+- `this-task/` holds the memory of earlier conversations on THIS task, numbered in the order they were recorded. Read those first — that is your handoff from the work before you. (If you're the task's first conversation, it is empty.)
+- `history/` holds memory from the entity's other tasks, named by date. Skim them for what past attempts tried and ruled out, and build on that rather than starting from scratch.
 
 Before finishing, write your own memory to `_tfac/memory.md` in your run root. That one path is the whole contract — write there and we file it where it belongs. This one file serves double duty: the durable record of this run on the entity AND the handoff to whatever comes next — the next step in this workflow, or a future run. Write it now, while you still have full context, so a cheaper later step never has to re-derive your reasoning from the diff. Capture, concisely:
 - What you did and what changed — the state you're leaving behind.

@@ -78,9 +78,15 @@ const (
 // What the orchestrator materializes for the agent to READ lives under
 // _tfac/entity-memory/, split by relevance and named for a human:
 //
-//	this-run/01-triage.md          earlier steps of the current workflow run
-//	this-run/02-implement.md
-//	history/2026-07-20-ci-fix.md   prior, separate runs on this entity
+//	this-task/01-triage.md         earlier conversations on THIS task
+//	this-task/02-implement.md
+//	history/2026-07-20-ci-fix.md   the entity's other tasks
+//	task-context.md                this launch's rendered <task_context>
+//
+// The split is the conversation's task, not its workflow run: a task's
+// conversations are its whole history — a blueprint's steps, a re-delegation
+// after it, a person's own conversation — and a reader wants all of them
+// together, not just the ones that shared a blueprint run.
 //
 // That path is what the AGENT sees. Where those files physically live depends on
 // who owns the run tree: local mode writes them in it, a sandboxed launch stages
@@ -89,7 +95,7 @@ const (
 	scratchDirName       = worktree.ScratchDir
 	agentMemoryFileName  = "memory.md"
 	entityMemoryDirName  = worktree.EntityMemoryDir
-	currentRunDirName    = "this-run"
+	currentTaskDirName   = "this-task"
 	taskContextFileName  = "task-context.md"
 	priorRunsDirName     = "history"
 	memorySlugMaxLen     = 32
@@ -418,23 +424,32 @@ func clearAgentMemoryFile(cwd string, owned repoFiles) {
 	}
 }
 
-// materializePriorMemories renders any existing conversation_memory rows for the
-// entity as individual markdown files under the agent's _tfac/entity-memory/, so
-// a fresh agent invocation sees what previous iterations on the same task have
-// already tried — and so the later steps of one blueprint run read the earlier
-// steps' memory as their handoff.
+// materializeEntityMemories renders the entity's existing conversation_memory
+// rows as individual markdown files under the agent's _tfac/entity-memory/, so
+// a fresh agent invocation sees what earlier work on the same entity already
+// tried. It returns THIS task's share of them, oldest first, so the caller can
+// inject them as opening rows without a second read of the same query.
 //
 // root is the directory the layout is rendered into — the agent's
 // _tfac/entity-memory in local mode, this launch's staging dir under a sandbox.
 // The caller resolves it (entityMemoryTarget); this function is indifferent to
 // which, and to whether the tree it will be read from is still writable.
 //
-// blueprintRunID is the CURRENT run's workflow run. Memory produced under it is
-// this run's own handoff and lands in this-run/, numbered by step so the
-// listing reads in execution order; everything else is history and lands in
-// history/, dated. Both names are chosen here, from what the row already
-// carries — no id an agent could mistype appears in either the tree or the
-// prompt that describes it.
+// taskID is the task this launch is working. Memory produced by the task's own
+// earlier conversations is its handoff and lands in this-task/, numbered in the
+// order those conversations recorded it; everything else is the entity's other
+// tasks and lands in history/, dated. Both names are chosen here, from what the
+// row already carries — no id an agent could mistype appears in either the tree
+// or the prompt that describes it. The numbering is created order rather than
+// blueprint step index because a task outlives one blueprint run: step indices
+// repeat across re-delegations, so ordering by them would interleave two
+// attempts' notes under one sequence.
+//
+// The newest of the this-task set are also injected into the conversation's
+// opening rows (mintOpeningRows), which is why the folder is described to the
+// agent as the ones that did not fit rather than as its handoff to read first.
+// They are still written whole: the injection budget is a bound on the opening
+// turn, not on what the tree holds.
 //
 // Both folders are created unconditionally, even on the very first run when
 // there are no priors: the prompt tells the agent to look in them early, and a
@@ -453,13 +468,13 @@ func clearAgentMemoryFile(cwd string, owned repoFiles) {
 // target: a name that collides with a tracked file yields that file to the
 // repo and skips the prior, rather than overwriting content the agent would
 // then commit.
-func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root, entityID, blueprintRunID string, owned repoFiles) {
-	thisRunDir := filepath.Join(root, currentRunDirName)
+func materializeEntityMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root, entityID, taskID string, owned repoFiles) []domain.TaskMemory {
+	thisTaskDir := filepath.Join(root, currentTaskDirName)
 	historyDir := filepath.Join(root, priorRunsDirName)
-	for _, dir := range []string{thisRunDir, historyDir} {
+	for _, dir := range []string{thisTaskDir, historyDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			delegateLog.Warn("create entity-memory dir failed", "path", dir, "error", err)
-			return
+			return nil
 		}
 	}
 
@@ -470,44 +485,31 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root
 	memories, err := taskMemory.GetMemoriesForEntitySystem(context.Background(), orgID, entityID, teamID)
 	if err != nil {
 		delegateLog.Warn("load prior memories for entity failed", "entity", entityID, "error", err)
-		return
+		return nil
 	}
 	if len(memories) == 0 {
-		return
+		return nil
 	}
 
-	var thisRun, history []domain.TaskMemory
+	// The rows arrive oldest-first, which is the order the task's
+	// conversations recorded them and the order both folders read in.
+	var thisTask, history []domain.TaskMemory
 	for _, m := range memories {
-		if blueprintRunID != "" && m.BlueprintRunID == blueprintRunID {
-			thisRun = append(thisRun, m)
+		if taskID != "" && m.TaskID == taskID {
+			thisTask = append(thisTask, m)
 			continue
 		}
 		history = append(history, m)
 	}
-	// The rows arrive oldest-first, which is already step order for a workflow
-	// run that ran its steps in sequence. Sorting on the recorded step index
-	// makes that explicit and survives a step whose memory landed out of
-	// created_at order; a row with no index keeps its arrival position.
-	sort.SliceStable(thisRun, func(i, j int) bool {
-		a, b := thisRun[i].StepIndex, thisRun[j].StepIndex
-		if a == nil || b == nil {
-			return false
-		}
-		return *a < *b
-	})
 
 	written := 0
 	used := map[string]bool{}
-	for i, m := range thisRun {
-		ordinal := i + 1
-		if m.StepIndex != nil {
-			ordinal = *m.StepIndex + 1
-		}
-		name := uniqueMemoryFileName(used, fmt.Sprintf("%02d", ordinal), memorySlug(m.PromptName))
-		if owned.owns(entityMemoryDirName, currentRunDirName, name) {
+	for i, m := range thisTask {
+		name := uniqueMemoryFileName(used, fmt.Sprintf("%02d", i+1), memorySlug(m.PromptName))
+		if owned.owns(entityMemoryDirName, currentTaskDirName, name) {
 			continue
 		}
-		if writeMemoryFile(filepath.Join(thisRunDir, name), m.Content) {
+		if writeMemoryFile(filepath.Join(thisTaskDir, name), m.Content) {
 			written++
 		}
 	}
@@ -524,6 +526,7 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root
 	if written > 0 {
 		delegateLog.Info("materialized prior memories for entity", "count", written, "entity", entityID)
 	}
+	return thisTask
 }
 
 // writeTaskContextFile retains this launch's rendered <task_context> as a file
@@ -535,12 +538,6 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root
 // and a summary is the model's restatement, which is the right posture for
 // externally-authored text but loses the PR number the agent needs an hour
 // later. The file is the original, addressed by a path rather than re-sent.
-//
-// TODO(TFAC-992): name this path in the memory blocks. No block text points at
-// it yet, so the file is written and currently unreachable unless the agent
-// happens to list the directory — the retention exists from the moment the pin
-// is deleted, and the sentence that sends a compacted run to it lands with that
-// ticket's block-text pass on both runtimes.
 //
 // root is entityMemoryTarget's answer, which is why the file sits one directory
 // inside the memory tree rather than beside it in _tfac/: on a warm, handed-off
