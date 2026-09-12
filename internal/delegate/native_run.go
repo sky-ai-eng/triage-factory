@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -125,14 +124,20 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	mirror = s.newMemoryMirror(orgID, conversationID, cfg.blueprintRunID, task.EntityID, claudeCwd, priorMemory)
 	stagingSpan.End()
 
-	// Composed before the jail is launched, so the fallible half fails the claim
-	// without having cost a sandbox. The system prompt is the same for every
-	// native run; everything about this one rides the opening turn.
-	opening, err := s.buildNativeOpeningTurn(ctx, task, mission, cfg, knowledge)
-	if err != nil {
-		return launchFailed(fmt.Errorf("compose opening turn: %w", err))
-	}
-	systemPrompt := nativeSystemPrompt(cfg.appendSysPrompt != "")
+	// Composed before the jail is launched, because the task context is written
+	// into the memory tree the launch is about to mount read-only. Block 1 is the
+	// same for every native run; everything about this one is block 2 and the
+	// opening row.
+	launchText := s.buildNativeLaunchText(ctx, task, mission, cfg, knowledge)
+	systemPrompt := nativeSystemPrompt()
+
+	// The task context's retention. Nothing is pinned through a compaction, so
+	// the row carrying these bytes is summarized like any other, and this file is
+	// what an agent whose summary lost a PR number reads instead. It lands in the
+	// memory tree rather than beside it: that is the one per-launch location
+	// still writable on a warm step, where the run tree itself belongs to the
+	// sandbox identity.
+	writeTaskContextFile(memoryDir, launchText.taskContext, memoryOwned)
 
 	// The stop is read before the phase write, so a run stopped during
 	// bring-up parks here without ever asking the fence — the refusal below is
@@ -175,7 +180,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	delegateLog.Info("native agent loop starting", "conversation", conversationID, "cwd", claudeCwd, "model", model)
 
 	transcript := newNativeTranscript(s, orgID, conversationID, cfg.claimID)
-	if err := s.mintOpeningTurn(ctx, transcript, orgID, conversationID, creatorUserID, opening); err != nil {
+	if err := s.mintOpeningTurn(ctx, transcript, orgID, conversationID, creatorUserID, launchText.taskContext); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "conversation", conversationID, "claim", cfg.claimID)
 			return engagementDisposition{fenced: true}
@@ -212,14 +217,12 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		ConversationID: conversationID,
 		Model:          model,
 		SystemPrompt:   systemPrompt,
+		SystemAddendum: launchText.systemBlock,
 		HasBlueprint:   true,
 		// Derived from the very ceiling this jail was launched under, not from
 		// a constant that could drift from it.
-		BashMemBudgetMB: nativeBashMemBudgetMB(agentproc.ClaimMemoryLimitMB()),
-		UserID:          creatorUserID,
-		// A delegation's opening turn is the control-plane-minted mission:
-		// compaction pins it instead of re-injecting the first message.
-		MissionAnchored:     true,
+		BashMemBudgetMB:     nativeBashMemBudgetMB(agentproc.ClaimMemoryLimitMB()),
+		UserID:              creatorUserID,
 		ColdCompactionModel: coldModel,
 		Workspace:           cfg.workspace,
 		ExecutorChanged:     s.executorChangedSince(ctx, orgID, conversationID, cfg.claimID, cfg.workspace),
@@ -260,19 +263,27 @@ func (s *Spawner) executorChangedSince(ctx context.Context, orgID, conversationI
 	return prior != "" && prior != self
 }
 
-// mintOpeningTurn queues the delegation's opening turn — the mission and the
-// task context it is about — when the conversation has no transcript yet.
+// mintOpeningTurn queues the delegation's opening turn — the task context the
+// run is about — when the conversation has no transcript yet.
 //
 // It is written pending, like every other input, so the engagement's entry
 // is just its first drain — there is no first-call special case anywhere in
-// the engine. Gating on an empty transcript makes it idempotent: a re-claim
-// of a conversation that has already spoken adds nothing, and a crash
-// between this insert and the first call leaves the row for the next claim
-// to drain rather than losing the opening.
+// the engine. The engagement's first drain is a bare one, so the row keeps the
+// blank subtype it was written with. Gating on an empty transcript makes it
+// idempotent: a re-claim of a conversation that has already spoken adds
+// nothing, and a crash between this insert and the first call leaves the row
+// for the next claim to drain rather than losing the opening.
 //
-// One row, not several: the mission and the context it is about are one
-// statement of what to do. Compaction pins either shape — the anchored span is
-// every leading row before the first assistant turn — so either would work.
+// What the run was asked to do is not here: the mission is a system block, so
+// it is re-sent on every call and a compaction can never summarize it away.
+// This row can be, and its bytes are on disk for the agent to re-read.
+//
+// TODO(TFAC-992): mint this row with subtype injection:task-context. It carries
+// the blank subtype of an ordinary human turn today, so compaction reads it as
+// the conversation's original request and copies externally-authored text into
+// every result row — the re-injection agentloop.originalRequest is written to
+// give a person's opening ask, not a control-plane-minted one. That ticket also
+// moves the three gates that count rows here onto the same subtype.
 func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Transcript, orgID, conversationID, creatorUserID, opening string) error {
 	rows, err := transcript.ListForAssembly(ctx, orgID, conversationID)
 	if err != nil {
@@ -285,30 +296,38 @@ func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Tran
 	return err
 }
 
-// nativeSystemPrompt is the run's whole system prompt: the composed framework
-// blocks, plus the handoff addendum when a later step follows this one.
+// nativeSystemPrompt is the shared half of the run's system prompt: the
+// composed framework blocks and nothing else.
 //
-// Nothing about the particular run is in it. The task context renders PR
-// titles, commit subjects and issue bodies — text an outsider can write, which
-// is why it carries untrusted markers — and text sitting inside the agent's own
-// instructions reads as instruction. It rides the opening turn instead, which
-// also leaves this prompt identical for every run with the same spec and step
-// position, so the cached prefix reaches the end of the instructions.
-func nativeSystemPrompt(nonTerminalStep bool) string {
-	if nonTerminalStep {
-		return agentprompt.BuildNonTerminalStep(nativeSpec())
-	}
+// Nothing about the particular run is in it, including the handoff addendum a
+// non-terminal step carries — that is per step, so it rides the conversation's
+// own block instead. What is left is identical for every native run against the
+// same spec, which is what lets it be block 1, the one the cache breakpoint is
+// stamped on and every conversation in the org reads.
+func nativeSystemPrompt() string {
 	return agentprompt.Build(nativeSpec())
 }
 
-// buildNativeOpeningTurn resolves this run's inputs and composes the
-// conversation's first user message. The fallible resolutions live here; the
-// composition itself is composeNativeOpeningTurn.
-func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, mission string, cfg runConfig, knowledge string) (string, error) {
-	selfBin, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("resolve own binary path: %w", err)
-	}
+// nativeLaunchText is the two pieces of composed text one native engagement
+// needs, split by the channel each belongs in: TF's own words go in the
+// conversation's system block, the externally-authored task context goes in a
+// user row.
+type nativeLaunchText struct {
+	// systemBlock is block 2 — the run's facts, its verb reference, its
+	// mission and its step addendum, sent behind block 1's cache breakpoint.
+	systemBlock string
+	// taskContext is the opening user row: the rendered <task_context>, and
+	// the same bytes the launch retains as a file.
+	taskContext string
+}
+
+// buildNativeLaunchText resolves this run's inputs and composes both halves.
+// The compositions themselves are composeConversationSystemBlock and
+// composeNativeOpeningTurn; what lives here is the reads they need.
+//
+// Nothing in it fails: the one read it makes degrades to a context block with
+// no event fields, exactly as it did when this was the whole opening turn.
+func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, mission string, cfg runConfig, knowledge string) nativeLaunchText {
 	metadataJSON, err := s.events.GetMetadataSystem(context.WithoutCancel(ctx), cfg.orgID, task.PrimaryEventID)
 	if err != nil {
 		delegateLog.Warn("load event metadata for task failed; the task context will carry no event fields",
@@ -316,28 +335,33 @@ func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, 
 		metadataJSON = ""
 	}
 	artifacts := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
-	return composeNativeOpeningTurn(task, metadataJSON, cfg.prSkeleton, artifacts, mission,
-		agentproc.AgentVisibleBinary(selfBin), s.resolveBranchTemplate(ctx, task), knowledge), nil
-}
 
-// composeNativeOpeningTurn assembles what the loop says first: run context,
-// task context, then the mission — the instruction last, after the external
-// material it is about.
-//
-// The mission is composed on its own, so externally-authored text is never run
-// through resolveCLIPath. That ordering is a security property, not a style
-// choice; buildPrompt does the same on the SDK path.
-//
-// The native blocks name the in-jail paths and the `tfac` applet outright, so
-// the run context carries only the branch convention and this run's staged
-// knowledge — the two facts that differ per team and per run, and the ones
-// those blocks cannot state for themselves.
-func composeNativeOpeningTurn(task domain.Task, metadataJSON, skeleton string, artifacts []domain.Artifact, mission, binaryPath, branchTemplate, knowledge string) string {
-	return joinSections(
-		runContext("", "", branchTemplate, "", knowledge),
-		BuildTaskContext(task, metadataJSON, skeleton, artifacts),
-		resolveCLIPath(mission, binaryPath),
-	)
+	// The handoff addendum is this step's, not this spec's, so it rides block 2
+	// rather than the shared prompt. appendSysPrompt is the same signal the SDK
+	// path hands its harness — set exactly when a later step follows this one.
+	nonTerminal := ""
+	if cfg.appendSysPrompt != "" {
+		nonTerminal = agentprompt.NonTerminalCompletion(nativeSpec())
+	}
+
+	// The native blocks name the in-jail paths and the `tfac` applet outright,
+	// so the run context carries only the branch convention and this run's
+	// staged knowledge — the two facts that differ per team and per run, and
+	// the ones those blocks cannot state for themselves.
+	return nativeLaunchText{
+		systemBlock: composeConversationSystemBlock(
+			mission,
+			runContext("", "", s.resolveBranchTemplate(ctx, task), "", knowledge),
+			cfg.toolsRef,
+			nonTerminal,
+		),
+		// The task context is the one section that stays a transcript row.
+		// It is built entirely from external data — PR titles, commit
+		// subjects, issue bodies — which is why it carries untrusted markers,
+		// and text sitting inside the agent's own instructions reads as
+		// instruction however it is marked.
+		taskContext: BuildTaskContext(task, metadataJSON, cfg.prSkeleton, artifacts),
+	}
 }
 
 // nativeSpec is the prompt selector for every native engagement.

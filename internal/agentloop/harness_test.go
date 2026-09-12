@@ -483,8 +483,6 @@ func testParams() Params {
 		Model:          "claude-sonnet-4-5",
 		SystemPrompt:   "system",
 		HasBlueprint:   true,
-		// A delegation opens with a minted mission; compaction pins it.
-		MissionAnchored: true,
 	}
 }
 
