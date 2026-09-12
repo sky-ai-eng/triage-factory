@@ -256,8 +256,8 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		TaskMemory: newTaskMemoryStore(app, admin),
 		// MemoryAttempts is admin-only: the brain's memory provisioner writes
 		// it from a background goroutine with no JWT-claims context, and the
-		// org-scoped RLS policy gates the app-pool task read (tf_app holds
-		// SELECT alone).
+		// org-scoped RLS policy gates the app-pool reads (tf_app holds SELECT
+		// alone).
 		MemoryAttempts: newMemoryAttemptStore(admin),
 		// ConversationWorktrees wires both pools: app for cmd/exec workspace
 		// callers (a separate cmd/exec auth pass owns the

@@ -39,9 +39,11 @@ CREATE TABLE conversation_memory_attempts (
     window_rows_sent  INTEGER NOT NULL DEFAULT 0
 );
 
--- The newest-attempt read.
+-- The newest-attempt read, including its id tiebreaker: two attempts on one
+-- conversation can share a started_at, so the read orders by (started_at DESC,
+-- id DESC) and the index carries both or every tie costs a sort.
 CREATE INDEX idx_conversation_memory_attempts_conversation
-    ON conversation_memory_attempts(conversation_id, started_at DESC);
+    ON conversation_memory_attempts(conversation_id, started_at DESC, id DESC);
 
 -- +goose Down
 SELECT 'down not supported';

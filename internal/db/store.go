@@ -184,7 +184,8 @@ type Stores struct {
 	// which is what separates "nothing was owed" from "generation failed".
 	// Admin pool in Postgres: the writer is the brain's memory provisioner, a
 	// background goroutine with no JWT-claims context, and tf_app holds SELECT
-	// alone while tf_system holds nothing at all.
+	// alone while tf_system holds nothing at all (an executor never touches
+	// this table).
 	MemoryAttempts MemoryAttemptStore
 
 	// ConversationWorktrees owns the conversation_worktrees table — one row per

@@ -11,12 +11,12 @@ import (
 )
 
 // memoryAttemptStore is the Postgres impl of db.MemoryAttemptStore. Wired
-// against the ADMIN pool in postgres.New: the writer is the brain's background
-// memory provisioner, a boot-launched goroutine with no JWT-claims context, so
-// an app-pool write under the conversation_memory_attempts_all RLS policy
-// would be rejected — and tf_app holds SELECT alone anyway. The org-scoped
-// policy gates the app-pool task read; org_id stays bound in every statement
-// as defense in depth.
+// against the ADMIN pool in postgres.New: the writer is the brain's memory
+// provisioner, a boot-launched goroutine with no JWT-claims context, so an
+// app-pool write under the conversation_memory_attempts_all RLS policy would
+// be rejected — and tf_app holds SELECT alone anyway. That org-scoped policy
+// is what gates the app-pool reads; org_id stays bound in every statement as
+// defense in depth.
 type memoryAttemptStore struct{ admin queryer }
 
 func newMemoryAttemptStore(admin queryer) db.MemoryAttemptStore {
@@ -27,9 +27,11 @@ var _ db.MemoryAttemptStore = (*memoryAttemptStore)(nil)
 
 // pgMemoryAttemptColumns is the canonical projection of a
 // conversation_memory_attempts row, in the order db.ScanMemoryAttempt reads
-// them. The point read SELECTs it and both writes RETURN it, so the write shape
-// cannot drift from the read shape.
-const pgMemoryAttemptColumns = `id, org_id, conversation_id, started_at, completed_at,
+// them. The point read SELECTs it and both writes RETURN it, so the write
+// shape cannot drift from the read shape. uuids are cast to text so the scan
+// targets stay plain strings, matching pgConversationColumns.
+const pgMemoryAttemptColumns = `id::text, org_id::text, conversation_id::text,
+	started_at, completed_at,
 	COALESCE(outcome, ''), COALESCE(error_kind, ''), COALESCE(error_message, ''),
 	COALESCE(system_llm_run_id::text, ''), window_rows_total, window_rows_sent`
 

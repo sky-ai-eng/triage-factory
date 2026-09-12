@@ -9,11 +9,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// ErrNoSuchMemoryAttempt means a close-out named no OPEN attempt in this org —
-// either the id matches nothing, or the attempt it names was already completed.
-// Deliberately one error for both: the CAS exists so an attempt is closed out
-// exactly once, and a second closer needs to stop either way rather than learn
-// which of the two happened.
+// ErrNoSuchMemoryAttempt means a close-out named no OPEN attempt in this
+// org — either the id matches nothing, or the attempt it names was already
+// completed. Deliberately one error for both: the CAS exists so an attempt
+// is closed out exactly once, and a second closer needs to stop either way
+// rather than learn which of the two happened.
 var ErrNoSuchMemoryAttempt = errors.New("db: no open memory attempt with that id in this org")
 
 // MemoryAttemptStore owns the conversation_memory_attempts table — the ledger
@@ -22,15 +22,16 @@ var ErrNoSuchMemoryAttempt = errors.New("db: no open memory attempt with that id
 // was owed, or something was owed and generation failed. A reader who cannot
 // tell those apart either retries forever or gives up silently.
 //
-// Admin-pool-only in Postgres, hence the `...System` suffix on every method:
-// the writer is the brain's memory provisioner, a background goroutine with no
-// JWT-claims context, and the org-scoped RLS policy gates the app-pool reads
-// (tf_app holds SELECT alone). org_id is bound by argument on every call as
-// defense in depth. SQLite is N=1 and unscoped.
+// Admin-pool-only in Postgres, hence the `...System` suffix on every
+// method: the writer is the brain's memory provisioner, a background
+// goroutine with no JWT-claims context, and the org-scoped RLS policy gates
+// the app-pool reads (tf_app holds SELECT alone). org_id is bound by
+// argument on every call as defense in depth. SQLite is N=1 and unscoped.
 //
-// The provisioner is a sibling change and is not wired yet, so today the only
-// callers are the conformance suites — the ledger lands ahead of its writer so
-// that work and the task read can proceed in parallel.
+// The provisioner is a sibling change and is not wired yet, so today the
+// only callers are the conformance suites. The ledger lands ahead of its
+// writer deliberately, so that work and the read over these rows can
+// proceed in parallel.
 type MemoryAttemptStore interface {
 	// BeginAttemptSystem opens an attempt on conversationID: one INSERT with
 	// started_at = now and every verdict column NULL. Returns the stored row,
@@ -95,8 +96,8 @@ func ValidateMemoryAttemptVerdict(outcome domain.MemoryAttemptOutcome, errKind d
 // nothing in it is dialect-specific: both backends COALESCE the four nullable
 // text columns to the empty string in their own projection, so what reaches
 // here is the same eleven values in the same order. The projections themselves
-// stay beside their SQL — Postgres casts a uuid column to text, SQLite has no
-// cast to make.
+// stay beside their SQL — Postgres casts its uuid columns to text, SQLite has
+// no cast to make.
 //
 // CompletedAt is the one pointer: nil is "still running, or a brain that died
 // before closing out", which is a different thing from any timestamp.

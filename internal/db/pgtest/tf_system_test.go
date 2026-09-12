@@ -57,16 +57,17 @@ func TestTfSystem_DDLDenied(t *testing.T) {
 }
 
 // TestTfSystem_OffSurfaceReadDenied pins that tables entirely outside the
-// executor's enumerated surface must be unreachable, even for a plain
-// SELECT that would return zero rows: sso_connections (SSO config is a
-// control-plane-only concern) and org_secrets (an executor never holds
-// TF_SECRET_ENCRYPTION_KEY at all as of TFAC-614 — its per-run credential
-// material arrives pre-resolved via sealed claim_credentials bundles
-// instead, so the org_secrets grant this ticket originally shipped is
-// dead weight and was removed; this pins that it stays removed), and
-// conversation_memory_attempts (the memory-generation ledger is written by the
-// brain on the control plane and read by the task read — an executor has no
-// business in it at all).
+// executor's enumerated surface are unreachable, even for a plain SELECT
+// that would return zero rows. Three of them, for three reasons:
+// sso_connections is control-plane configuration; org_secrets holds
+// ciphertext an executor could not read anyway, since it never holds
+// TF_SECRET_ENCRYPTION_KEY — its per-run credential material arrives
+// pre-resolved as sealed claim_credentials bundles; and
+// conversation_memory_attempts is written by the brain on the control plane
+// and read only on the app pool.
+//
+// A grant on any of them would be invisible in production — nothing on the
+// executor selects from them — so it would sit until something did.
 func TestTfSystem_OffSurfaceReadDenied(t *testing.T) {
 	h := Shared(t)
 

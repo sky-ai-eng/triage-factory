@@ -819,7 +819,9 @@ CREATE TABLE public.conversation_memory_entities (
 --
 -- Brain-written on the admin pool; the app pool only ever reads it, so tf_app
 -- holds SELECT alone and tf_system nothing at all (an executor never touches
--- this table).
+-- this table). The index below carries the newest-attempt read's whole ORDER
+-- BY, id tiebreaker included: two attempts on one conversation can share a
+-- started_at, so without it every tie costs a sort.
 CREATE TABLE public.conversation_memory_attempts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -1582,7 +1584,7 @@ CREATE INDEX idx_conversation_memory_conversation ON public.conversation_memory 
 CREATE INDEX idx_conversation_memory_entities_entity ON public.conversation_memory_entities USING btree (org_id, entity_id);
 
 
-CREATE INDEX idx_conversation_memory_attempts_conversation ON public.conversation_memory_attempts USING btree (conversation_id, started_at DESC);
+CREATE INDEX idx_conversation_memory_attempts_conversation ON public.conversation_memory_attempts USING btree (conversation_id, started_at DESC, id DESC);
 
 
 CREATE INDEX idx_messages_conversation ON public.messages USING btree (conversation_id);

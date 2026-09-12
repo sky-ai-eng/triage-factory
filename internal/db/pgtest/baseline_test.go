@@ -28,9 +28,8 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"prompts", "events_catalog", "entities", "entity_links", "events",
 		"event_handlers", "tasks", "task_events", "conversations", "claims", "artifacts",
 		"messages", "claim_credentials", "conversation_memory", "conversation_memory_entities",
-		// conversation_memory_attempts: the memory-generation attempt ledger,
-		// which separates "no memory was owed" from "one was owed and
-		// generation failed".
+		// conversation_memory_attempts: the ledger that separates "no memory
+		// was owed" from "one was owed and generation failed".
 		"conversation_memory_attempts",
 		"pending_firings", "conversation_worktrees",
 		"swipe_events", "poller_state", "repositories",
@@ -1498,11 +1497,11 @@ func TestGooseDBVersionLockdown(t *testing.T) {
 }
 
 // TestConversationMemoryAttemptsGrants — the memory-generation ledger is
-// brain-written and app-read, so tf_app holds SELECT and nothing else. A write
-// grant here would not break anything visibly: the only app-pool caller is the
-// task read, so an excess INSERT/UPDATE/DELETE would sit unused until someone
-// wrote a handler against it and put the provisioner's ledger under a
-// request's control. Pinned rather than trusted for exactly that reason.
+// written by the brain on the admin pool and only ever read on the app
+// pool, so tf_app holds SELECT and nothing else. An excess write grant
+// would break nothing visibly: it would sit unused until something wrote
+// against it and put the ledger under a request's control. Pinned rather
+// than trusted for exactly that reason.
 func TestConversationMemoryAttemptsGrants(t *testing.T) {
 	h := Shared(t)
 

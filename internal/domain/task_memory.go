@@ -138,9 +138,9 @@ func IsMemoryAttemptErrorKind(kind string) bool {
 // once and a second closer is told so rather than overwriting the first.
 //
 // The window counters record how much of the transcript the attempt actually
-// fed the model — WindowRowsTotal is what the conversation had, WindowRowsSent
-// what fit the budget — so a thin memory can be read as a truncated window
-// rather than as a model that had nothing to say.
+// fed the model — WindowRowsTotal is what the conversation had, and
+// WindowRowsSent what fit the budget — so a thin memory can be read as a
+// truncated window rather than as a model that had nothing to say.
 type MemoryAttempt struct {
 	ID             string
 	OrgID          string
