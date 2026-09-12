@@ -99,7 +99,7 @@ func TestTaskFacets_CountsTheLane(t *testing.T) {
 	}
 
 	// An empty lane is an empty cut, not a null one.
-	empty := postTaskFacets(t, s, map[string]any{"statuses": []string{"in_review"}})
+	empty := postTaskFacets(t, s, map[string]any{"statuses": []string{"dismissed"}})
 	if empty.EventTypes == nil || len(empty.EventTypes) != 0 {
 		t.Errorf("empty lane event_types = %v, want []", empty.EventTypes)
 	}

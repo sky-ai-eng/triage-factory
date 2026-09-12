@@ -335,7 +335,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if err := stores.Tasks.RecordEventSystem(ctx, orgID, taskID, evtID, "injected"); err != nil {
 			t.Errorf("Tasks.RecordEventSystem: %v", err)
 		}
-		if _, err := stores.Tasks.SetStatusSystem(ctx, orgID, taskID, "in_review"); err != nil {
+		if _, err := stores.Tasks.SetStatusSystem(ctx, orgID, taskID, "in_progress"); err != nil {
 			t.Errorf("Tasks.SetStatusSystem: %v", err)
 		}
 		if _, err := stores.Tasks.CloseSystem(ctx, orgID, taskID, "run_completed", ""); err != nil {

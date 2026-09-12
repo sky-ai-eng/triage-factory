@@ -61,19 +61,19 @@ type AgentClaimStamp struct {
 
 // TaskListStatusClaimed is the one member of the list vocabulary that is not
 // a lifecycle status: it names the claim axis instead — a task at
-// status='queued' that someone (a user or the bot) has taken. The board's
-// Claimed column is exactly that set, and it can't be spelled with a
-// lifecycle status because a claim doesn't change one. It stays scoped to
-// status='queued' so a claimed task that advanced to in_progress/in_review
-// renders in its own column rather than twice.
+// status='queued' that someone (a user or the bot) has taken. "Queued and
+// held by someone" is a question a headless caller can legitimately ask, and
+// it can't be spelled with a lifecycle status because a claim doesn't change
+// one. It stays scoped to status='queued' so a claimed task that advanced to
+// in_progress renders in its own column rather than twice.
 const TaskListStatusClaimed = "claimed"
 
 // TaskListStatuses is the full vocabulary TaskListFilter.Statuses accepts:
-// the six lifecycle statuses the tasks CHECK constraint enforces, plus the
+// the five lifecycle statuses the tasks CHECK constraint enforces, plus the
 // derived "claimed". A value outside it is a caller fault, not an empty
 // result — the HTTP layer rejects it before the store is reached.
 var TaskListStatuses = []string{
-	"queued", "in_progress", "in_review", "done", "dismissed", "snoozed",
+	"queued", "in_progress", "done", "dismissed", "snoozed",
 	TaskListStatusClaimed,
 }
 
@@ -153,8 +153,8 @@ type TaskListFilter struct {
 // OrdersByAttention reports whether List's order leads with the attention tier
 // — whose move is it: a conversation parked on a human first, then a failed
 // one, then work in flight, then work already concluded. It answers yes for
-// the two lanes whose reader is asking that question (in_progress, in_review)
-// and for the unfiltered read that contains them.
+// the one lane whose reader is asking that question (in_progress) and for the
+// unfiltered read that contains it.
 //
 // This is a COST gate, and only that. The tier costs a correlated subquery per
 // row, which a lane whose rows would all tie at the same tier should not pay:
@@ -172,7 +172,7 @@ func (f TaskListFilter) OrdersByAttention() bool {
 	if len(f.Statuses) == 0 {
 		return true
 	}
-	return slices.Contains(f.Statuses, "in_progress") || slices.Contains(f.Statuses, "in_review")
+	return slices.Contains(f.Statuses, "in_progress")
 }
 
 // The task-list sort vocabulary: the keys a reader may order a lane by, and
@@ -495,8 +495,8 @@ type TaskStore interface {
 	// AdvanceStatusForUser flips a user-claimed task's lifecycle
 	// status forward (board manual transitions). Guards:
 	//   - task must be claimed by userID
-	//   - current status must be one of {queued, in_progress, in_review}
-	//   - newStatus must be one of {in_progress, in_review}
+	//   - current status must be one of {queued, in_progress}
+	//   - newStatus must be in_progress
 	// Refuses all other shapes — terminal transitions (done /
 	// dismissed) go through Close + handleTaskPatch, requeue clears the
 	// claim entirely, and bot-claimed tasks transition via

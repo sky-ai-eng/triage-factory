@@ -1005,7 +1005,7 @@ func setTaskStatus(ctx context.Context, q queryer, orgID, taskID, status string)
 }
 
 func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string) (bool, error) {
-	if newStatus != "in_progress" && newStatus != "in_review" {
+	if newStatus != "in_progress" {
 		return false, nil
 	}
 	res, err := s.q.ExecContext(ctx, `
@@ -1014,7 +1014,7 @@ func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, use
 		 WHERE org_id = $2
 		   AND id = $3
 		   AND claimed_by_user_id = $4
-		   AND status IN ('queued', 'in_progress', 'in_review')
+		   AND status IN ('queued', 'in_progress')
 	`, newStatus, orgID, taskID, userID)
 	if err != nil {
 		return false, err

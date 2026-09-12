@@ -40,8 +40,8 @@ var _ db.SwipeStore = (*swipeStore)(nil)
 func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int, snoozeUntil *time.Time) (string, bool, error) {
 	// See sqlite/swipes.go for the full rationale. Summary: claim +
 	// delegate + reassign (TFAC-561) are responsibility-only and MUST
-	// NOT touch the lifecycle status (or in_progress / in_review tasks
-	// lose their stage during takeover/delegate/reassign via the
+	// NOT touch the lifecycle status (or an in_progress task loses its
+	// stage during takeover/delegate/reassign via the
 	// assignee picker). Terminal swipes (dismiss / complete) write
 	// status + closed_at + close_reason. Snooze writes the caller's
 	// wake time; the task PATCH's snooze arm goes through SnoozeTask.
@@ -76,8 +76,8 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			return err
 		}
 		if newStatus == "" {
-			// claim / delegate: preserve in_progress / in_review
-			// across takeover, but flip 'snoozed' → 'queued' so the
+			// claim / delegate: preserve in_progress across
+			// takeover, but flip 'snoozed' → 'queued' so the
 			// "snoozed ↔ unclaimed" invariant holds when a
 			// path bypasses the claim helpers. See SQLite mirror for
 			// the full rationale.

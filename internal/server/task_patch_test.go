@@ -11,11 +11,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // TestTaskPatchStage_RejectsBotClaimedTask pins the guard rule for the manual
-// user transition: only a task the CALLER holds may move through Claimed →
-// In Progress → In Review. A bot-claimed task is placed by the spawner when
+// user transition: only a task the CALLER holds may move from Claimed to
+// In Progress. A bot-claimed task is placed by the spawner when
 // its delegation is minted (see internal/delegate/spawner.go
 // placeTaskInProgress); allowing the user to flip it by hand would race the
 // conversation lifecycle.
@@ -66,7 +67,6 @@ func TestTaskPatch_RejectsEveryMutationOnATerminalTask(t *testing.T) {
 	for _, seeded := range []string{"done", "dismissed"} {
 		for _, body := range []map[string]any{
 			{"status": "in_progress"},
-			{"status": "in_review"},
 			{"status": "done"},
 			{"status": "dismissed"},
 			{"snooze_until": "2999-01-01T00:00:00Z"},
@@ -151,14 +151,16 @@ func readTaskClose(t *testing.T, database *sql.DB, taskID string) (closedAt, clo
 // requeue/undo territory — a bare status write would leave the claim stamped
 // and the agent's artifacts stranded — and 'snoozed' is what setting
 // snooze_until means, so accepting it as a status would be a second spelling
-// that can't carry the wake time the row needs.
+// that can't carry the wake time the row needs. 'in_review' is an ex-status:
+// it left the vocabulary, so it is refused on the same terms as any word the
+// board never had.
 func TestTaskPatch_RejectsUnwritableStatuses(t *testing.T) {
 	s := newTestServer(t)
 	taskID := seedLifecycleTask(t, s.db, "bad-target", lifecycleTaskOpts{
 		claimedByUserID: runmode.LocalDefaultUserID,
 	})
 
-	for _, badStatus := range []any{"queued", "snoozed", "claimed", "wat", "", 7, nil} {
+	for _, badStatus := range []any{"queued", "snoozed", "claimed", "in_review", "wat", "", 7, nil} {
 		t.Run(statusName(badStatus), func(t *testing.T) {
 			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
 				map[string]any{"status": badStatus})
@@ -294,24 +296,26 @@ func TestTaskPatchStage_HappyPath_QueuedToInProgress(t *testing.T) {
 	}
 }
 
-// TestTaskPatchStage_HappyPath_InProgressToInReview is the second forward
-// step. Backward (in_review → in_progress) is allowed by the same store method
-// — the caller picks a sane next state — and is implicitly covered by the seed
-// using status='in_progress'.
-func TestTaskPatchStage_HappyPath_InProgressToInReview(t *testing.T) {
+// TestTaskPatchStage_RefusesInReview covers the value that used to be the
+// second forward step. The refusal names the field, because a caller sending
+// a status the board no longer has needs to be told which field was wrong —
+// and it must not land on a task the caller does hold the claim to, which is
+// the shape a stale client sends.
+func TestTaskPatchStage_RefusesInReview(t *testing.T) {
 	s := newTestServer(t)
-	taskID := seedLifecycleTask(t, s.db, "happy-ir", lifecycleTaskOpts{
+	taskID := seedLifecycleTask(t, s.db, "refuse-ir", lifecycleTaskOpts{
 		claimedByUserID: runmode.LocalDefaultUserID,
 		status:          "in_progress",
 	})
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
 		map[string]any{"status": "in_review"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	if got := readTaskStatus(t, s.db, taskID); got != "in_review" {
-		t.Errorf("task.status = %q, want %q", got, "in_review")
+	assertFirstError(t, rec, httpx.ReasonInvalidField, "status")
+	if got := readTaskStatus(t, s.db, taskID); got != "in_progress" {
+		t.Errorf("task.status = %q, want the seeded in_progress (a refusal writes nothing)", got)
 	}
 }
 

@@ -47,7 +47,7 @@ export interface PagedList<T> {
  *  `POST /api/<resource>/list` surface.
  *
  *  It deliberately does not fetch on mount or on a filter change: which reads
- *  happen when is the page's business (the board fires five columns at once
+ *  happen when is the page's business (the board fires four columns at once
  *  and enriches the result; the triage deck refetches after a swipe), and a
  *  hook that owned that schedule would need every caller to memoize a body
  *  object just to avoid a fetch loop. `load` and `loadMore` are stable across

@@ -456,7 +456,7 @@ func TestTaskList_UnusablePageTokenIsA400(t *testing.T) {
 // nothing: an empty items list (not null), no token, zero total.
 func TestTaskList_EmptyResult(t *testing.T) {
 	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/list", map[string]any{"statuses": []string{"in_review"}})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/list", map[string]any{"statuses": []string{"dismissed"}})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -488,6 +488,16 @@ func TestTaskList_StrictBody(t *testing.T) {
 		{
 			name:       "unknown status",
 			body:       map[string]any{"statuses": []string{"queued", "bogus"}},
+			wantReason: "INVALID_FIELD",
+			wantField:  "statuses",
+		},
+		{
+			// An ex-status is an unknown one: 'in_review' left the
+			// vocabulary, so a stale client asking for that lane is told
+			// which field is wrong rather than handed an empty page it
+			// would read as "nothing in review".
+			name:       "retired status",
+			body:       map[string]any{"statuses": []string{"in_review"}},
 			wantReason: "INVALID_FIELD",
 			wantField:  "statuses",
 		},

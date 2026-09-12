@@ -91,8 +91,9 @@ const sqliteTaskRuleOrderJoin = `
 	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 
 // sqliteTaskAttentionTier orders the OPEN rows of a lane by whose move it is —
-// the first preference term on the In Progress and In Review lanes, so the card
-// waiting on a human is on page one rather than wherever its priority put it.
+// the first preference term on the In Progress lane, and on the unfiltered read
+// that contains it, so the card waiting on a human is on page one rather than
+// wherever its priority put it.
 // It is a subquery and no join, so it is absent from the count query by
 // construction; the page projects it as well as orders by it, because a keyset
 // cursor resumes from the tuple's values and this is one of them.
@@ -1044,7 +1045,7 @@ func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, use
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	if newStatus != "in_progress" && newStatus != "in_review" {
+	if newStatus != "in_progress" {
 		return false, nil
 	}
 	res, err := s.q.ExecContext(ctx, `
@@ -1052,7 +1053,7 @@ func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, use
 		   SET status = ?
 		 WHERE id = ?
 		   AND claimed_by_user_id = ?
-		   AND status IN ('queued', 'in_progress', 'in_review')
+		   AND status IN ('queued', 'in_progress')
 	`, newStatus, taskID, userID)
 	if err != nil {
 		return false, err

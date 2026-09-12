@@ -442,26 +442,20 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 
 	// The derived "claimed" member of the list vocabulary is scoped to
 	// status='queued' so the Board's Claimed column doesn't double-render a
-	// user-claimed task that's also in In Progress or In Review. Distinct
-	// from the broader "any non-terminal user-claimed task" set.
-	t.Run("List_claimed_excludes_in_progress_and_in_review", func(t *testing.T) {
+	// user-claimed task that's also in In Progress. Distinct from the broader
+	// "any non-terminal user-claimed task" set.
+	t.Run("List_claimed_excludes_in_progress", func(t *testing.T) {
 		s, orgID, _, _, userID, seed, _ := mk(t)
 		_, _, queuedID := seed(t, "bs-claimed-q")
 		_, _, ipID := seed(t, "bs-claimed-ip")
-		_, _, irID := seed(t, "bs-claimed-ir")
 
-		// Claim all three.
-		for _, id := range []string{queuedID, ipID, irID} {
+		for _, id := range []string{queuedID, ipID} {
 			if ok, err := s.ClaimQueuedForUser(ctx, orgID, id, userID); err != nil || !ok {
 				t.Fatalf("claim %s: ok=%v err=%v", id, ok, err)
 			}
 		}
-		// Advance two of them.
 		if ok, err := s.AdvanceStatusForUser(ctx, orgID, ipID, userID, "in_progress"); err != nil || !ok {
 			t.Fatalf("advance ip: ok=%v err=%v", ok, err)
-		}
-		if ok, err := s.AdvanceStatusForUser(ctx, orgID, irID, userID, "in_review"); err != nil || !ok {
-			t.Fatalf("advance ir: ok=%v err=%v", ok, err)
 		}
 
 		claimed, _, err := s.List(ctx, orgID, claimedFilter(), db.ListOpts{Limit: 50})
@@ -477,9 +471,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		if seen[ipID] {
 			t.Errorf("Claimed projection contained an in_progress task %s; would double-render with In Progress column", ipID)
-		}
-		if seen[irID] {
-			t.Errorf("Claimed projection contained an in_review task %s; would double-render with In Review column", irID)
 		}
 	})
 
@@ -956,15 +947,11 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if got.Status != "in_progress" {
 			t.Errorf("status=%q, want in_progress", got.Status)
 		}
-		// Backward transition (in_progress → in_review then back to
-		// in_progress) is also allowed — the guard only checks the
-		// current status is in the active set, not that newStatus is
-		// strictly forward.
-		if ok2, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_review"); err != nil || !ok2 {
-			t.Fatalf("Advance → in_review: ok=%v err=%v", ok2, err)
-		}
+		// Idempotent: the guard checks the current status is in the active
+		// set, so a task already in_progress advances again rather than
+		// tripping a "strictly forward" rule it doesn't have.
 		if ok2, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress"); err != nil || !ok2 {
-			t.Fatalf("Advance back → in_progress: ok=%v err=%v", ok2, err)
+			t.Fatalf("Advance in_progress → in_progress: ok=%v err=%v", ok2, err)
 		}
 	})
 
@@ -1030,14 +1017,34 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
 			t.Fatalf("claim: ok=%v err=%v", ok, err)
 		}
-		for _, bad := range []string{"done", "dismissed", "queued", "snoozed", "wat"} {
+		// in_review is in the list because it WAS a target: the value left
+		// the vocabulary, and a store that still accepted it would write a
+		// status the CHECK constraint no longer admits.
+		for _, bad := range []string{"done", "dismissed", "queued", "snoozed", "in_review", "wat"} {
 			ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, bad)
 			if err != nil {
 				t.Errorf("to=%q: unexpected err: %v", bad, err)
 			}
 			if ok {
-				t.Errorf("to=%q: AdvanceStatusForUser returned ok=true; should only accept in_progress/in_review", bad)
+				t.Errorf("to=%q: AdvanceStatusForUser returned ok=true; should only accept in_progress", bad)
 			}
+		}
+	})
+
+	// The status CHECK is the backstop behind every guarded helper: a write
+	// path that skipped one — SetStatus is the unguarded one — must not be
+	// able to put a retired value back on the board. in_review left the
+	// vocabulary, so the constraint is what makes that unwritable rather
+	// than merely unwritten.
+	t.Run("SetStatus_refuses_the_retired_in_review_value", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		_, _, taskID := seed(t, "check-in-review")
+		if _, err := s.SetStatus(ctx, orgID, taskID, "in_review"); err == nil {
+			t.Error("SetStatus(in_review) succeeded; the tasks status CHECK must refuse it")
+		}
+		got, _ := s.Get(ctx, orgID, taskID)
+		if got.Status != "queued" {
+			t.Errorf("status=%q, want queued (a refused write must not land)", got.Status)
 		}
 	})
 
@@ -1302,16 +1309,16 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			what, got, err := "Tasks.SetStatus", domain.Task{}, error(nil)
 			if sys {
 				what = "Tasks.SetStatusSystem"
-				got, err = s.SetStatusSystem(ctx, orgID, taskID, "in_review")
+				got, err = s.SetStatusSystem(ctx, orgID, taskID, "in_progress")
 			} else {
-				got, err = s.SetStatus(ctx, orgID, taskID, "in_review")
+				got, err = s.SetStatus(ctx, orgID, taskID, "in_progress")
 			}
 			if err != nil {
 				t.Fatalf("%s: %v", what, err)
 			}
 			AssertWriteReturnedStoredRow(t, what, got, bareRead(taskID))
-			if got.Status != "in_review" {
-				t.Errorf("%s returned status=%q, want in_review", what, got.Status)
+			if got.Status != "in_progress" {
+				t.Errorf("%s returned status=%q, want in_progress", what, got.Status)
 			}
 		}
 
@@ -1458,7 +1465,7 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		s, orgID, _, _, _, seed, _ := mk(t)
 		seed(t, "empty-a")
 		// A lane nothing has reached yet: the seeder mints queued rows.
-		ids, total := listIDs(t, s, orgID, db.TaskListFilter{Statuses: []string{"in_review"}}, db.ListOpts{Limit: 50})
+		ids, total := listIDs(t, s, orgID, db.TaskListFilter{Statuses: []string{"dismissed"}}, db.ListOpts{Limit: 50})
 		if len(ids) != 0 || total != 0 {
 			t.Errorf("empty lane returned %d ids / total %d, want 0 / 0", len(ids), total)
 		}
@@ -1888,7 +1895,7 @@ func runTaskFacetConformance(ctx context.Context, t *testing.T, mk TaskStoreFact
 
 		// A lane nothing has reached is an empty answer, not a nil one — the
 		// same shape every other list read in the package returns.
-		empty, err := s.FacetEventTypes(ctx, orgID, db.TaskListFilter{Statuses: []string{"in_review"}})
+		empty, err := s.FacetEventTypes(ctx, orgID, db.TaskListFilter{Statuses: []string{"dismissed"}})
 		if err != nil {
 			t.Fatalf("FacetEventTypes on an empty lane: %v", err)
 		}

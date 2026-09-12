@@ -24,9 +24,10 @@ export interface JiraProjectConfig {
   key: string
   pickup: JiraStatusRuleValue
   in_progress: JiraStatusRuleValue
-  // Optional: the status naming work that awaits human review. No Jira status
-  // is ever read back into TF's in-review board column, so this is a write
-  // target only and an empty rule is a complete configuration.
+  // Optional: the status naming work that awaits human review. It has no
+  // counterpart on the TF board — "awaiting a human" is a fact about a run,
+  // carried on the card frame and the attention order, not a lane — so this is
+  // a write target only and an empty rule is a complete configuration.
   in_review: JiraStatusRuleValue
   done: JiraStatusRuleValue
 }

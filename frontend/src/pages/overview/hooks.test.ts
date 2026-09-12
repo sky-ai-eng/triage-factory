@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
-import { useConversationSets, useTranscriptTick } from './hooks'
+import { useConversationSets, useTasksIndex, useTranscriptTick } from './hooks'
 import { ACTIVE_STATUSES } from '../../lib/conversationStatus'
-import type { Message, WSEvent } from '../../types'
-import { jsonBody } from '../../test/apiResponse'
+import type { Message, Task, WSEvent } from '../../types'
+import { jsonBody, listBody } from '../../test/apiResponse'
 
 // The ticks arrive through the singleton websocket, and the REAL useWebSocket
 // runs here: its stable-subscription + latest-ref behavior is what guarantees
@@ -50,16 +50,30 @@ function row(over: Partial<Message>): WSEvent {
   return { type: 'message', conversation_id: 'c1', data }
 }
 
+/** The task rows the join reads back, keyed into the index by id. */
+const TASK_ROWS = [
+  { id: 't-a', source: 'github', source_id: 'acme/api#761', title: 'a', status: 'queued' },
+  { id: 't-b', source: 'jira', source_id: 'SKY-412', title: 'b', status: 'in_progress' },
+] as Task[]
+
 let bodies: Array<Record<string, unknown>> = []
+/** Every read's address, index-aligned with `bodies`. */
+let paths: string[] = []
 
 beforeEach(() => {
   vi.useFakeTimers()
   bodies = []
+  paths = []
   vi.stubGlobal('WebSocket', FakeWebSocket)
   vi.stubGlobal(
     'fetch',
-    vi.fn((_input: unknown, init?: RequestInit) => {
+    vi.fn((input: unknown, init?: RequestInit) => {
+      const path = String(input)
+      paths.push(path)
       bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      if (path.startsWith('/api/tasks/list')) {
+        return Promise.resolve({ ok: true, ...listBody(TASK_ROWS) })
+      }
       return Promise.resolve({ ok: true, ...jsonBody({ runs: {}, total_count: 0 }) })
     }),
   )
@@ -175,5 +189,20 @@ describe('useConversationSets', () => {
     await settle()
     expect(needsBodies()).toHaveLength(2)
     expect(runningBodies()).toHaveLength(2)
+  })
+})
+
+describe('useTasksIndex', () => {
+  it('joins over the statuses a task can carry a conversation in', async () => {
+    const { result } = renderHook(() => useTasksIndex('t1', 0))
+    await settle()
+
+    const tasksRead = bodies[paths.findIndex((p) => p.startsWith('/api/tasks/list'))]
+    // 'in_review' left the vocabulary, and 'claimed' is a subset of 'queued'
+    // that would hide a queued task holding a carried artifact — the join asks
+    // for the three lanes that can answer instead.
+    expect(tasksRead.statuses).toEqual(['queued', 'in_progress', 'done'])
+    expect(result.current?.get('t-a')?.title).toBe('a')
+    expect(result.current?.get('t-b')?.title).toBe('b')
   })
 })
