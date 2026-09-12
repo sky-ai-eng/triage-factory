@@ -565,7 +565,7 @@ func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, c
 	return out, rows.Err()
 }
 
-func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, backoff time.Duration, limit int) ([]domain.MemoryOwed, error) {
+func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID string, backoff time.Duration, limit int) ([]domain.MemoryOwed, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -582,17 +582,24 @@ func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, backoff ti
 	// attempt that never completed is excluded by nothing but its age — which
 	// is how a brain that died mid-generation stops holding its conversation
 	// hostage.
+	//
+	// The org arm is inside the predicate rather than applied to the result,
+	// so a one-org scan's LIMIT counts that org's rows. It is written as a
+	// nullable parameter compared against the row so one statement serves
+	// both scopes — a second query text would be the same SQL twice, with two
+	// chances to disagree about what is owed.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT owed.org_id::text, owed.id::text, owed.task_id::text,
 		       (t.status NOT IN ('done', 'dismissed')) AS task_open
 		FROM conversations owed, tasks t
 		WHERE `+taskMemoryOwedRowSQL("t.org_id", "t.id")+`
+		  AND ($1::uuid IS NULL OR owed.org_id = $1::uuid)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM conversation_memory_attempts att
-		      WHERE att.conversation_id = owed.id AND att.started_at > $1)
+		      WHERE att.conversation_id = owed.id AND att.started_at > $2)
 		ORDER BY task_open DESC, owed.ended_at ASC, owed.id ASC
-		LIMIT $2
-	`, time.Now().UTC().Add(-backoff), limit)
+		LIMIT $3
+	`, nullIfEmpty(orgID), time.Now().UTC().Add(-backoff), limit)
 	if err != nil {
 		return nil, err
 	}

@@ -4719,9 +4719,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	//
 	// ListMemoryOwedSystem is the completion path behind the doorbell: every
 	// conversation that ended without leaving a memory, minus the ones
-	// something tried recently enough to still be waiting on. Nothing about it
-	// is per-org — the caller is the brain, which serves every tenant on the
-	// pod — so each row carries the org it belongs to.
+	// something tried recently enough to still be waiting on. The caller is the
+	// brain, which serves every tenant on the pod, so each row carries the org
+	// it belongs to and the scan is fleet-wide unless an org is named.
 
 	t.Run("ListMemoryOwed_SelectsEndedRowsWithNoMemoryAndSkipsTheRest", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
@@ -4740,7 +4740,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		seed.SetConversationMemory(t, settled, "what I tried", domain.MemorySourceAgent)
 
-		owed, err := store.ListMemoryOwedSystem(ctx, time.Minute, 100)
+		owed, err := store.ListMemoryOwedSystem(ctx, "", time.Minute, 100)
 		if err != nil {
 			t.Fatalf("ListMemoryOwedSystem: %v", err)
 		}
@@ -4751,6 +4751,38 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if owed[0].OrgID != orgID || owed[0].TaskID != taskID || !owed[0].TaskOpen {
 			t.Errorf("owed row = %+v, want org %s task %s open", owed[0], orgID, taskID)
+		}
+	})
+
+	// The org scope narrows the scan, and it has to do so in the read: the page
+	// is capped, so an org's rows picked out of a fleet-wide page are not that
+	// org's page. This is what the doorbell a configuration save rings asks
+	// for, and what the backstop sweep asks for by leaving it empty.
+	t.Run("ListMemoryOwed_ScopesToOneOrgWhenAsked", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "completed")
+		if _, err := store.EndConversationSystem(ctx, orgID, conversationID, domain.EndedRequeued); err != nil {
+			t.Fatalf("end: %v", err)
+		}
+
+		scoped, err := store.ListMemoryOwedSystem(ctx, orgID, time.Minute, 100)
+		if err != nil {
+			t.Fatalf("ListMemoryOwedSystem(org): %v", err)
+		}
+		if ids := memoryOwedIDs(scoped); len(ids) != 1 || ids[0] != conversationID {
+			t.Errorf("owed for %s = %v, want [%s]", orgID, ids, conversationID)
+		}
+
+		// Another tenant's doorbell. The id need not name a real org — the
+		// point is that a scope nobody in this page belongs to returns nobody,
+		// rather than the page the fleet-wide scan would have produced.
+		elsewhere, err := store.ListMemoryOwedSystem(ctx, uuid.NewString(), time.Minute, 100)
+		if err != nil {
+			t.Fatalf("ListMemoryOwedSystem(other org): %v", err)
+		}
+		if ids := memoryOwedIDs(elsewhere); len(ids) != 0 {
+			t.Errorf("owed for another org = %v, want none", ids)
 		}
 	})
 
@@ -4766,7 +4798,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		seed.SetConversationMemory(t, conversationID, NullMemorySentinel, domain.MemorySourceNone)
 
-		owed, err := store.ListMemoryOwedSystem(ctx, time.Minute, 100)
+		owed, err := store.ListMemoryOwedSystem(ctx, "", time.Minute, 100)
 		if err != nil {
 			t.Fatalf("ListMemoryOwedSystem: %v", err)
 		}
@@ -4878,14 +4910,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if owed := mustListMemoryOwed(t, store, ctx); len(owed) != 3 {
 			t.Fatalf("owed = %d rows, want 3", len(owed))
 		}
-		capped, err := store.ListMemoryOwedSystem(ctx, time.Minute, 2)
+		capped, err := store.ListMemoryOwedSystem(ctx, "", time.Minute, 2)
 		if err != nil {
 			t.Fatalf("ListMemoryOwedSystem(limit=2): %v", err)
 		}
 		if len(capped) != 2 {
 			t.Errorf("owed = %d rows at limit 2, want 2 — the rest ride the next tick", len(capped))
 		}
-		none, err := store.ListMemoryOwedSystem(ctx, time.Minute, 0)
+		none, err := store.ListMemoryOwedSystem(ctx, "", time.Minute, 0)
 		if err != nil {
 			t.Fatalf("ListMemoryOwedSystem(limit=0): %v", err)
 		}
@@ -4915,7 +4947,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 // a page big enough for any fixture here.
 func mustListMemoryOwed(t *testing.T, store db.ConversationStore, ctx context.Context) []domain.MemoryOwed {
 	t.Helper()
-	owed, err := store.ListMemoryOwedSystem(ctx, time.Minute, 100)
+	owed, err := store.ListMemoryOwedSystem(ctx, "", time.Minute, 100)
 	if err != nil {
 		t.Fatalf("ListMemoryOwedSystem: %v", err)
 	}

@@ -41,6 +41,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/lease"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
+	"github.com/sky-ai-eng/triage-factory/internal/memoryprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/modelprobe"
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
@@ -201,6 +202,14 @@ type App struct {
 	// stopped alongside the rest of the brain in startBrain/stopBrain,
 	// nil-checked the same way a.reaperStore is.
 	credProvisioner *credprovision.Manager
+
+	// memoryProvisioner generates the memory a conversation owes when it
+	// ended without its agent having written one — the thing that clears the
+	// task's memory_pending state and lets its next conversation open.
+	// Non-nil for every brain-capable role in BOTH modes
+	// (buildMemoryProvisioner), swept alongside the rest of the brain in
+	// startBrain/stopBrain, and nil-checked the same way a.reaperStore is.
+	memoryProvisioner *memoryprovision.Manager
 
 	// metricsAddr is the resolved /metrics bind address telemetry.Init
 	// returned at boot ("" = metrics disabled) — kept so Run can start the
@@ -388,6 +397,10 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	if err = a.buildCredProvisioner(); err != nil {
 		return nil, err
 	}
+	// The memory provisioner (brain-capable roles in BOTH modes, unlike the
+	// credential one above). After buildRunCredentials and buildServer, whose
+	// recorder / credential seams and websocket hub it holds.
+	a.buildMemoryProvisioner()
 	// The background-brain lease elector (TFAC-583) — control role in
 	// multi mode only. Local (role=all) never elects (startBrain runs
 	// directly, unconditionally, from Run); an executor is never

@@ -6,6 +6,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/memoryprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
@@ -142,6 +143,14 @@ func (a *App) startBrain(term int64) {
 		refreshInterval, refreshAfter = credprovision.RefreshCadenceForTTL(a.llmResolver.TTL())
 	}
 	go credprovision.RunRefreshSweep(brainCtx, a.credProvisioner, refreshInterval, refreshAfter)
+	// Memory provisioner sweep: settles the memory every conversation that
+	// ended without its agent's own file still owes. Started with the brain in
+	// BOTH modes — local is always the brain, and an ending there owes a memory
+	// exactly as one in a fleet does — and stopped by brainCtx, which cancels
+	// any attempt in flight so a demoted holder is provably done generating
+	// before its successor starts. That attempt's row keeps completed_at NULL:
+	// abandonment is derived from started_at, never stamped.
+	go memoryprovision.RunSweep(brainCtx, a.memoryProvisioner, memoryprovision.DefaultSweepInterval)
 	// Shipped-defaults sync: bring every provisioned team's UNMODIFIED
 	// copies of the shipped prompts/blueprints up to the current
 	// compile-time content. Leader-only (this is the brain), idempotent, and
