@@ -527,7 +527,7 @@ func classifyFailureKind(err error) domain.ConversationFailureKind {
 }
 
 // failConversation records the infra-failure terminal for a run: guarded status flip,
-// a failure row on the transcript, breaker + broadcast + snapshot cleanup.
+// a failure row on the transcript, the boundary stamp, breaker + broadcast.
 //
 // claimID names the engagement doing the failing, when there is one in scope
 // — every path that reached the agent has it. The terminal then goes through

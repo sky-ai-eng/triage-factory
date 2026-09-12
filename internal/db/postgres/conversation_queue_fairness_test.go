@@ -15,40 +15,44 @@ import (
 )
 
 // fairnessFixture is one org's ready-to-enqueue conversation-queue fixture: a
-// blueprint + task + prompt every conversation enqueued under that org hangs
-// off, plus the org's creator user id. Each conversation gets its own
-// blueprint_run — see enqueue.
+// blueprint + prompt every conversation enqueued under that org hangs off,
+// plus the org's creator user id. Each conversation gets its own task and its
+// own blueprint_run — see enqueue.
 type fairnessFixture struct {
-	orgID, userID          string
-	bpID, taskID, promptID string
-	h                      *pgtest.Harness
+	orgID, userID  string
+	bpID, promptID string
+	h              *pgtest.Harness
 }
 
 func newFairnessFixture(t *testing.T, h *pgtest.Harness) fairnessFixture {
 	t.Helper()
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+	brID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 	return fairnessFixture{
 		orgID: orgID, userID: userID,
-		bpID: pgBlueprintIDOfRun(t, h, brID), taskID: taskID, promptID: promptID, h: h,
+		bpID: pgBlueprintIDOfRun(t, h, brID), promptID: promptID, h: h,
 	}
 }
 
 // enqueue stages one queued conversation under the fixture, optionally
 // stamped with a preferred executor. Returns the conversation id.
 //
-// One blueprint_run per conversation, each on step 0: fairness is about many
-// conversations competing for slots at the same instant, and a blueprint only
-// ever offers the one step its current_step_index names — sibling steps of a
-// single blueprint are queued in sequence, never together.
+// One task and one blueprint_run per conversation, each on step 0: fairness is
+// about many conversations competing for slots at the same instant, and
+// neither unit offers two at once. A blueprint drives only the step its
+// current_step_index names, and a task drives only its live conversation —
+// the workspace is one per task, so a second conversation on one is a second
+// agent in one git tree. Both are the real firing model anyway: one delegation
+// is one blueprint_run on one task.
 func (f *fairnessFixture) enqueue(t *testing.T, stores db.Stores, preferred string) string {
 	t.Helper()
 	conversationID := uuid.New().String()
 	step0 := 0
+	taskID := seedPgTask(t, f.h, f.orgID, f.userID)
 	if _, err := stores.ConversationQueue.EnqueueConversation(context.Background(), f.orgID, domain.Conversation{
-		ID: conversationID, TaskID: f.taskID, PromptID: f.promptID, Model: "m",
+		ID: conversationID, TaskID: taskID, PromptID: f.promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: f.userID,
-		BlueprintRunID:      seedPgBlueprintRunOn(t, f.h, f.orgID, f.userID, f.bpID, f.taskID),
+		BlueprintRunID:      seedPgBlueprintRunOn(t, f.h, f.orgID, f.userID, f.bpID, taskID),
 		BlueprintStepIndex:  &step0,
 		PreferredExecutorID: preferred,
 	}); err != nil {

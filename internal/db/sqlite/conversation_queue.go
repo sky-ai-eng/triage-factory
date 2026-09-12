@@ -86,13 +86,27 @@ const eligibleForDrivingSQL = needsDrivingSQL
 // is not filtered out by the join itself. The rest — why a called-off
 // blueprint drives nothing and is checked on both of its columns, why
 // a blueprint drives only the one conversation its `current_step_index`
-// names whatever its status, and why a task still owing a memory drives
-// nothing at all — is the Postgres twin's; this is the same predicate in the
-// other dialect.
+// names whatever its status, why only the task's live conversation is
+// drivable at all, and why a task still owing a memory drives nothing — is
+// the Postgres twin's; this is the same predicate in the other dialect.
 var blueprintDrivableSQL = `((r.blueprint_run_id IS NULL
 	    OR (br.cancel_requested = 0 AND br.status <> 'cancelled'
 	        AND r.blueprint_step_index = br.current_step_index))
+	   AND (r.task_id IS NULL OR r.id = ` + taskLiveConversationSQL("r.org_id", "r.task_id") + `)
 	   AND (r.task_id IS NULL OR NOT ` + taskMemoryPendingSQL("r.org_id", "r.task_id") + `))`
+
+// taskLiveConversationSQL is the Postgres twin's predicate in the other
+// dialect — see internal/db/postgres/conversation_queue.go for why the task's
+// live conversation is its newest non-ended top-level row, why the boundary
+// rather than the status decides it, and why subagent rows are excluded. Same
+// words, same index (idx_conversations_task_open).
+func taskLiveConversationSQL(orgExpr, taskExpr string) string {
+	return `(SELECT live.id FROM conversations live
+		WHERE live.org_id = ` + orgExpr + ` AND live.task_id = ` + taskExpr + `
+		  AND live.ended_at IS NULL AND live.parent_conversation_id IS NULL
+		ORDER BY live.started_at DESC, live.id DESC
+		LIMIT 1)`
+}
 
 // handedBackOutcomesSQL / episodeAttemptsSQL count the claim being minted
 // within the conversation's CURRENT queue episode — the run of consecutive

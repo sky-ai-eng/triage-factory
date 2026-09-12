@@ -1,11 +1,18 @@
-// Workspace-snapshot retention reaper. Every parked or concluded run carries a
-// durable workspace blob (the cold-resume backstop). Resume value decays fast —
-// week-old WIP against a moved-on main is rarely worth rehydrating — so the
-// blobs are bounded by a retention TTL: the reaper enumerates the snapshot-
-// bearing states whose parked/terminal timestamp predates the TTL and drops
-// their snapshots. It enumerates from the DB (the blob store has no List), keyed
-// by blueprint_run_id, and only reaps a key once ALL of that blueprint's
-// snapshot-bearing runs are past the TTL — blueprint steps share one blob.
+// Workspace-snapshot retention reaper. A park or a clean terminal snapshots
+// the conversation's workspace to a durable blob — the cold-resume backstop —
+// keyed by the task, so a task's conversations share one tree and one blob.
+// Resume value decays fast — week-old WIP against a moved-on main is rarely
+// worth rehydrating — so the blobs are bounded by a retention TTL: the reaper
+// enumerates the keys whose last activity predates the TTL and drops their
+// snapshots, from the DB rather than the store (the blob store has no List),
+// and only once ALL of that task's conversations are past the TTL.
+//
+// The enumeration is every top-level conversation on the task, not only the
+// states that write a snapshot: a key is collectable on its idleness alone,
+// whatever states its conversations reached. This sweep is the only thing that
+// drops a blob on age, so a state it left out would be a key nothing ever came
+// back for — and dropping a key that has no blob is a no-op, so the wider set
+// costs nothing.
 //
 // One TTL, deliberately: a finished run's blob is kept exactly as long as a
 // parked one's. Splitting them is a governance decision (run origin, team
@@ -82,9 +89,8 @@ func (s *Spawner) RunSnapshotReaper(ctx context.Context, interval time.Duration)
 	}
 }
 
-// ReapExpiredSnapshots drops the durable workspace snapshot of every
-// blueprint_run all of whose snapshot-bearing runs (parked `open` / any
-// `completed` terminal) parked or concluded before the retention TTL.
+// ReapExpiredSnapshots drops the durable workspace snapshot of every task all
+// of whose top-level conversations last went idle before the retention TTL.
 // Enumerates the reapable keys from the DB (the blob store has no List) and
 // discards each via the idempotent discardWorkspaceSnapshot, so a key already
 // gone is a no-op.

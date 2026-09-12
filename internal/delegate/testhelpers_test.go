@@ -104,6 +104,26 @@ func seedConversation(t *testing.T, database *sql.DB, conversationID, sessionID,
 	})
 }
 
+// ageConversationMint pushes a fixture conversation's mint stamps back by
+// `age` (a SQLite modifier like "-30 days"), so that a row staged as parked or
+// concluded at that moment is a row that could actually exist. started_at is
+// the mint and queued_at the episode it began, and nothing on a conversation
+// predates them — a fixture that ages only the terminal leaves the mint at
+// `now`, which is a conversation that concluded before it started.
+//
+// It matters because the workspace sweeps read the NEWEST stamp a row carries:
+// against such a fixture the mint is the newest, so the row reads as busy and
+// the aged terminal the fixture meant to stage is never what decides.
+func ageConversationMint(t *testing.T, database *sql.DB, conversationID, age string) {
+	t.Helper()
+	if _, err := database.Exec(
+		`UPDATE conversations SET started_at=datetime('now',?), queued_at=datetime('now',?) WHERE id=?`,
+		age, age, conversationID,
+	); err != nil {
+		t.Fatalf("age mint of %s: %v", conversationID, err)
+	}
+}
+
 // settleConversationBlueprint puts a seedConversation fixture's blueprint into a terminal state —
 // what the reactor writes once it has read a step's terminal, and the missing
 // half of any fixture that stages a `completed` conversation by hand. Without

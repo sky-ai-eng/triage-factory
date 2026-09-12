@@ -224,15 +224,19 @@ func TestConversationQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+	brID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 	bpID := pgBlueprintIDOfRun(t, h, brID)
 
-	// N runs queued at once = N blueprint_runs, each on its own step 0.
+	// N runs queued at once = N tasks, each with one blueprint_run on its own
+	// step 0. Neither unit offers two conversations at once — a blueprint
+	// drives the step its pointer names, a task drives its live conversation —
+	// so N simultaneously claimable conversations means N of each.
 	const n = 40
 	want := make(map[string]bool, n)
 	for i := 0; i < n; i++ {
 		conversationID := uuid.New().String()
 		step0 := 0
+		taskID := seedPgTask(t, h, orgID, userID)
 		if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 			ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 			TriggerType: "manual", CreatorUserID: userID,
@@ -1019,8 +1023,14 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 					t.Fatalf("EnqueueConversation: %v", err)
 				}
 				// The dialect stamps its own runtime at mint; rewrite it so
-				// one backend covers both engines.
-				pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET runtime = $2 WHERE id = $1`, convID, runtime)
+				// one backend covers both engines. started_at is stamped in
+				// the same pass, one second apart per mint: the task clause
+				// picks the task's NEWEST un-ended conversation, and a suite
+				// that staged its rows inside one clock tick would be asking
+				// the id tiebreak — a random uuid — which one that is.
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE conversations SET runtime = $2, started_at = now() + make_interval(secs => $3) WHERE id = $1`,
+					convID, runtime, float64(idx))
 				return convID
 			},
 			EnqueueUnindexed: func(t *testing.T) error {

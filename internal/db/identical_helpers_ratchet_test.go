@@ -29,14 +29,22 @@ import (
 // casts, RLS parameters, and driver NULL scanning are deliberately out of
 // scope for sharing.
 //
-// That last rule is why the taskMemory*SQL fragment builders are listed below
-// rather than hoisted: they compose SQL text, and they are identical today
-// only because the predicate they spell happens to need no placeholder, cast
-// or json guard yet. Sharing them would mean undoing the abstraction the first
-// time one dialect needs its own spelling — the same reason Tier B stays
-// duplicated. What must NOT drift is the predicate's meaning, and that is
-// pinned where it belongs: the dual-dialect conformance suites assert both
-// backends answer alike.
+// That last rule is why the task*SQL and workspaceKey*SQL fragment builders
+// are listed below rather than hoisted: they compose SQL text, and they are
+// identical today only because the predicate they spell happens to need no
+// placeholder, cast or json guard yet. Sharing them would mean undoing the
+// abstraction the first time one dialect needs its own spelling — the same
+// reason Tier B stays duplicated. What must NOT drift is the predicate's
+// meaning, and that is pinned where it belongs: the dual-dialect conformance
+// suites assert both backends answer alike.
+//
+// The workspaceKey*SQL family is the case in evidence, and it is why the pair
+// below was ratcheted rather than shared on the strength of being identical: a
+// third member, workspaceKeyIdleSinceSQL, is NOT listed because it already
+// needs its own spelling — SQLite wraps every timestamp in datetime() to
+// normalize the mixed on-disk formats a bare MAX would order lexically. Two
+// members of one family matching while the third cannot is the shape this rule
+// describes, not a coincidence to hoist.
 
 // identicalHelperRatchet is the SHRINKING section. Every name is a top-level
 // helper whose complete func declaration (excluding its doc comment) is
@@ -89,9 +97,12 @@ var identicalHelperRatchet = []string{
 	"scanTeamSettings",
 	"scanWrittenEntity",
 	"splitRepoSlug",
+	"taskLiveConversationSQL",
 	"taskMemoryAttemptSQL",
 	"taskMemoryOwedRowSQL",
 	"taskMemoryPendingSQL",
+	"workspaceKeyMembersSQL",
+	"workspaceKeyUnclaimedSQL",
 }
 
 func TestRatchet_IdenticalDialectHelpersStayConverged(t *testing.T) {
