@@ -980,6 +980,13 @@ CREATE TABLE public.conversations (
     -- Placement affinity computed at enqueue and cleared on requeue; advisory,
     -- so no FK to instances.
     preferred_executor_id text,
+    -- The boundary stamp: when this conversation stopped being its task's live
+    -- one, and why (domain.EndedReason). Both NULL while it is live, and they
+    -- move together. Orthogonal to status — an ended conversation may be
+    -- completed, failed or parked open; what ended it is the task moving on.
+    -- App-validated, no CHECK (the type/origin pattern).
+    ended_at timestamp with time zone,
+    ended_reason text,
     CONSTRAINT conversations_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT conversations_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT conversations_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
@@ -3128,6 +3135,10 @@ CREATE INDEX idx_conversations_org_team         ON public.conversations (org_id,
 -- partial on the NULL arm of the needs-driving predicate. The other arm (a
 -- parked 'open' conversation woken by input) is served by idx_messages_undelivered.
 CREATE INDEX idx_conversations_needs_driving ON public.conversations (started_at, id) WHERE (status IS NULL);
+-- The boundary anti-join: "the task's conversations that have already ended".
+-- Partial on the stamped arm because a live task has none of them and the
+-- reads that consult it are asking which rows to exclude.
+CREATE INDEX idx_conversations_task_ended ON public.conversations (task_id) WHERE (ended_at IS NOT NULL);
 -- Placement tier-1 claim: an executor pulling its own preferred queued runs,
 -- ordered by started_at, id. Global-oldest uses idx_conversations_needs_driving.
 CREATE INDEX idx_conversations_queued_preferred ON public.conversations (preferred_executor_id, started_at, id) WHERE (status IS NULL);

@@ -269,12 +269,23 @@ func RunConversationReturnedRowConformance(t *testing.T, mk ConversationReturned
 // two is evidence the shared helper works under RLS, which is what this
 // suite is actually checking.
 //
-// What's left — SetSession, SetWorktreePath — are the two conversations-row
+// What's left — SetSession, SetWorktreePath, and the two boundary doors
+// (EndConversation, EndConversationsForTask) — are the conversations-row
 // methods with a plain, app-pool-doored form that touch nothing else: their
 // RETURNING has to satisfy the SELECT policy for the row it hands back, and a
 // policy that admits the write but not the read-back yields zero rows from a
 // statement that updated one. See AssertWriteReturnedStoredRow's doc for the
 // failure this wiring exists to catch.
+//
+// EndConversationsForTask is the only one that stamps MANY rows, and it is
+// here for a sharper version of the same reason: each returned row clears the
+// SELECT policy on its own, so a policy narrower than the UPDATE's silently
+// shortens the slice a caller broadcasts from instead of failing. Every
+// conversation this door can reach is team-visible by construction — a task
+// is team-scoped and conversations denormalize team_id and visibility='team'
+// from it at the single mint — so the tier that matters here is the team one,
+// where UPDATE (user_can_write_team) is strictly tighter than SELECT
+// (user_in_team).
 type ConversationAppPoolFactory func(t *testing.T) (store db.ConversationStore, orgID, userID string, seed ConversationSeeder)
 
 // RunConversationAppPoolReturnedRowConformance is
@@ -298,6 +309,48 @@ func RunConversationAppPoolReturnedRowConformance(t *testing.T, mk ConversationA
 		t.Fatalf("SetWorktreePath: %v", err)
 	}
 	AssertWriteReturnedStoredRow(t, "SetWorktreePath", *conv, readConv)
+
+	// The boundary doors get their own task: ending a conversation is not
+	// undoable, and the writes above would otherwise be asserting against a
+	// row a later call in the same suite had moved on from.
+	ent := seed.Entity(t, "app-pool-boundary")
+	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+	single := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+	ended, err := store.EndConversation(ctx, orgID, single, domain.EndedTakenOver)
+	if err != nil {
+		t.Fatalf("EndConversation: %v", err)
+	}
+	// The door answers (nil, nil) for a row that is already ended OR that this
+	// caller cannot see, so under RLS a hidden row reads exactly like a miss —
+	// which is the failure this wiring exists to catch, and why nil is fatal
+	// here rather than a dereference panic three lines down.
+	if ended == nil {
+		t.Fatal("EndConversation returned nil for a live conversation the caller may write")
+	}
+	AssertWriteReturnedStoredRow(t, "EndConversation", *ended, func() (*domain.Conversation, error) {
+		return store.Get(ctx, orgID, single)
+	})
+
+	// Two more on the same task, plus the one just ended — so this also pins
+	// that the ended_at IS NULL guard still holds under RLS rather than the
+	// policy being what excluded the third row.
+	first := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+	second := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+	stamped, err := store.EndConversationsForTask(ctx, orgID, taskID, domain.EndedRequeued)
+	if err != nil {
+		t.Fatalf("EndConversationsForTask: %v", err)
+	}
+	if len(stamped) != 2 {
+		t.Fatalf("EndConversationsForTask returned %d rows, want the 2 still-live ones (%s, %s)",
+			len(stamped), first, second)
+	}
+	for _, c := range stamped {
+		AssertWriteReturnedStoredRow(t, "EndConversationsForTask "+c.ID, c, func() (*domain.Conversation, error) {
+			return store.Get(ctx, orgID, c.ID)
+		})
+	}
 }
 
 // findMessageByID is the point read SettleCompactionRequestForClaimSystem's
