@@ -137,6 +137,13 @@ type ConversationSeeder struct {
 	// has to be able to stage all three states plus the no-row case.
 	SetSnapshotState func(t *testing.T, blueprintRunID, state string)
 
+	// SetParentConversation raw-updates a conversation's
+	// parent_conversation_id, making it a subagent row of the named spawner.
+	// Nothing mints one in production yet — the column is the reserved
+	// subagent link — so the boundary tests, which must prove the task's
+	// stamp skips it, have no other way to stage one.
+	SetParentConversation func(t *testing.T, conversationID, parentConversationID string)
+
 	// SetBlueprintRunStatus raw-updates a blueprint_run's status, WITHOUT
 	// touching its child conversations (a plain UPDATE, not
 	// BlueprintStore.MarkRunStatus, which now cascades a terminal flip onto
@@ -3163,6 +3170,235 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ids, _ = store.ActiveIDsForTask(ctx, orgID, taskID)
 		if len(ids) != 1 || ids[0] != runningConversation {
 			t.Errorf("ActiveIDs = %v, want [%s]", ids, runningConversation)
+		}
+	})
+
+	// --- Boundaries ---
+	//
+	// A task owns its conversations, and ended_at/ended_reason record the
+	// moment one stopped being the live one. The stamp is about the task
+	// moving on, so none of these assertions is conditioned on status.
+
+	t.Run("EndConversationsForTask_StampsEveryNonEndedTopLevelRowWhateverItsStatus", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "end-all")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+		// One per rung of the status ladder the stamp is NOT conditioned on:
+		// mid-flight, parked, cleanly concluded, failed. The `completed` row
+		// is the one a conditioned predicate would miss — a requeued task's
+		// abort row is exactly what the boundary has to end.
+		live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		parked := seedConversationForTaskTest(t, orgID, taskID, "open", seed)
+		concluded := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+		failed := seedConversationForTaskTest(t, orgID, taskID, "failed", seed)
+
+		before := time.Now().UTC().Add(-time.Second)
+		stamped, err := store.EndConversationsForTask(ctx, orgID, taskID, domain.EndedRequeued)
+		if err != nil {
+			t.Fatalf("EndConversationsForTask: %v", err)
+		}
+		want := map[string]struct{}{live: {}, parked: {}, concluded: {}, failed: {}}
+		if len(stamped) != len(want) {
+			t.Fatalf("stamped %d rows, want %d — the boundary is the task moving on, not a status filter", len(stamped), len(want))
+		}
+		for _, c := range stamped {
+			if _, ok := want[c.ID]; !ok {
+				t.Errorf("stamped an unexpected conversation %s", c.ID)
+			}
+			if c.EndedReason != domain.EndedRequeued {
+				t.Errorf("%s ended_reason = %q, want requeued", c.ID, c.EndedReason)
+			}
+			if c.EndedAt == nil || c.EndedAt.Before(before) {
+				t.Errorf("%s ended_at = %v, want a stamp from this call", c.ID, c.EndedAt)
+			}
+			// The returned row IS the stored row, laterals and all — nobody
+			// should re-read to broadcast what the write handed back.
+			AssertWriteReturnedStoredRow(t, "EndConversationsForTask "+c.ID, c, func() (*domain.Conversation, error) {
+				return store.Get(ctx, orgID, c.ID)
+			})
+		}
+	})
+
+	t.Run("EndConversationsForTask_SkipsSubagentAndAlreadyEndedRows", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "end-skip")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+		topLevel := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		subagent := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		seed.SetParentConversation(t, subagent, topLevel)
+
+		// Already ended, by a different boundary: the first one is the one
+		// that happened, and a later sweep must not overwrite it.
+		earlier := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+		if _, err := store.EndConversation(ctx, orgID, earlier, domain.EndedStepAdvanced); err != nil {
+			t.Fatalf("seed an already-ended row: %v", err)
+		}
+		endedFirst, err := store.Get(ctx, orgID, earlier)
+		if err != nil || endedFirst == nil {
+			t.Fatalf("Get the already-ended row: err=%v got=%v", err, endedFirst)
+		}
+
+		stamped, err := store.EndConversationsForTask(ctx, orgID, taskID, domain.EndedRequeued)
+		if err != nil {
+			t.Fatalf("EndConversationsForTask: %v", err)
+		}
+		if len(stamped) != 1 || stamped[0].ID != topLevel {
+			ids := make([]string, len(stamped))
+			for i, c := range stamped {
+				ids[i] = c.ID
+			}
+			t.Fatalf("stamped %v, want only the top-level row %s — a subagent ends with its spawner and "+
+				"an already-ended row keeps its own boundary", ids, topLevel)
+		}
+		sub, err := store.Get(ctx, orgID, subagent)
+		if err != nil || sub == nil {
+			t.Fatalf("Get subagent: err=%v got=%v", err, sub)
+		}
+		if sub.EndedAt != nil {
+			t.Errorf("subagent ended_at = %v, want NULL — it is not part of the task's boundary accounting", sub.EndedAt)
+		}
+		again, err := store.Get(ctx, orgID, earlier)
+		if err != nil || again == nil {
+			t.Fatalf("Get the already-ended row again: err=%v got=%v", err, again)
+		}
+		if again.EndedReason != domain.EndedStepAdvanced || !again.EndedAt.Equal(*endedFirst.EndedAt) {
+			t.Errorf("already-ended row moved to (%v, %q), want its original (%v, step_advanced)",
+				again.EndedAt, again.EndedReason, endedFirst.EndedAt)
+		}
+	})
+
+	t.Run("EndConversation_StampsOnceAndAnswersNilOnAMiss", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+
+		stamped, err := store.EndConversation(ctx, orgID, conversationID, domain.EndedTakenOver)
+		if err != nil {
+			t.Fatalf("EndConversation: %v", err)
+		}
+		if stamped == nil {
+			t.Fatal("EndConversation returned nil for a live conversation")
+		}
+		if stamped.EndedReason != domain.EndedTakenOver || stamped.EndedAt == nil {
+			t.Errorf("stamped (%v, %q), want a stamp with reason taken_over", stamped.EndedAt, stamped.EndedReason)
+		}
+		AssertWriteReturnedStoredRow(t, "EndConversation", *stamped, func() (*domain.Conversation, error) {
+			return store.Get(ctx, orgID, conversationID)
+		})
+
+		// Already ended and never existed are the same answer: not live for
+		// this caller to end, which is not a fault to report.
+		second, err := store.EndConversation(ctx, orgID, conversationID, domain.EndedFailed)
+		if err != nil || second != nil {
+			t.Errorf("re-ending = (%v, %v), want (nil, nil)", second, err)
+		}
+		missing, err := store.EndConversation(ctx, orgID, uuid.NewString(), domain.EndedFailed)
+		if err != nil || missing != nil {
+			t.Errorf("ending an unknown id = (%v, %v), want (nil, nil)", missing, err)
+		}
+	})
+
+	t.Run("EndDoors_RefuseAReasonOutsideTheVocabulary", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "end-bad-reason")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		conversationID := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+
+		// The empty string included: a stamp is never "ended for no reason",
+		// and nothing may write a word a reader cannot map back.
+		for _, reason := range []domain.EndedReason{"", "task_closed", "Requeued", "whatever"} {
+			if _, err := store.EndConversation(ctx, orgID, conversationID, reason); !errors.Is(err, db.ErrInvalidEndedReason) {
+				t.Errorf("EndConversation(%q) err = %v, want ErrInvalidEndedReason", reason, err)
+			}
+			if _, err := store.EndConversationsForTask(ctx, orgID, taskID, reason); !errors.Is(err, db.ErrInvalidEndedReason) {
+				t.Errorf("EndConversationsForTask(%q) err = %v, want ErrInvalidEndedReason", reason, err)
+			}
+		}
+		got, err := store.Get(ctx, orgID, conversationID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.EndedAt != nil || got.EndedReason != "" {
+			t.Errorf("a refused stamp still wrote (%v, %q)", got.EndedAt, got.EndedReason)
+		}
+	})
+
+	// Derived from the vocabulary, so a reason added in Go but never taught to
+	// a store fails on both backends rather than silently storing a value one
+	// dialect's door refuses.
+	t.Run("EndConversation_RoundTripsEveryEndedReason", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		for _, reason := range domain.AllEndedReasons() {
+			conversationID := seedConversationForTest(t, orgID, seed, "running")
+			if _, err := store.EndConversation(ctx, orgID, conversationID, reason); err != nil {
+				t.Fatalf("end with %q: %v", reason, err)
+			}
+			got, err := store.Get(ctx, orgID, conversationID)
+			if err != nil || got == nil {
+				t.Fatalf("Get after ending with %q: err=%v got=%v", reason, err, got)
+			}
+			if got.EndedReason != reason {
+				t.Errorf("ended_reason = %q, want %q", got.EndedReason, reason)
+			}
+		}
+	})
+
+	// Task end is NOT a boundary, decided against the spec's first draft: a
+	// done task's last step stays resumable for follow-ups, and a manual
+	// conversation on a task an event closed under it is parked by the stop
+	// rather than ended. So the close doors stamp nothing, and this is the
+	// assertion that keeps a future close path from quietly growing a stamp.
+	t.Run("EndedAtStaysNullOnAFreshConversation", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "completed")
+		got, err := store.Get(ctx, orgID, conversationID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.EndedAt != nil || got.EndedReason != "" {
+			t.Errorf("a conversation nothing ended reads (%v, %q), want NULL/empty", got.EndedAt, got.EndedReason)
+		}
+	})
+
+	// The admin-pool twins the claimless stampers use — the blueprint
+	// reactor's step advance, the failure path, the team archive. Same write,
+	// same guard; only the pool differs, and SQLite's two arms collapse.
+	t.Run("EndDoorsSystem_MirrorTheirAppPoolTwins", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "end-system")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		one := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		two := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+
+		stamped, err := store.EndConversationSystem(ctx, orgID, one, domain.EndedStepAdvanced)
+		if err != nil || stamped == nil {
+			t.Fatalf("EndConversationSystem: err=%v got=%v", err, stamped)
+		}
+		if stamped.EndedReason != domain.EndedStepAdvanced {
+			t.Errorf("ended_reason = %q, want step_advanced", stamped.EndedReason)
+		}
+
+		rest, err := store.EndConversationsForTaskSystem(ctx, orgID, taskID, domain.EndedTeamArchived)
+		if err != nil {
+			t.Fatalf("EndConversationsForTaskSystem: %v", err)
+		}
+		if len(rest) != 1 || rest[0].ID != two {
+			t.Fatalf("EndConversationsForTaskSystem stamped %d rows, want only the still-live %s", len(rest), two)
+		}
+		if rest[0].EndedReason != domain.EndedTeamArchived {
+			t.Errorf("ended_reason = %q, want team_archived", rest[0].EndedReason)
 		}
 	})
 

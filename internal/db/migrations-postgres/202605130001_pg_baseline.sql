@@ -805,6 +805,46 @@ CREATE TABLE public.conversation_memory_entities (
 );
 
 
+-- One row per try at generating a memory for a conversation that ended owing
+-- one. The memory row alone cannot tell "nothing was owed" from "something was
+-- owed and generation failed", and a reader who cannot tell those apart either
+-- retries forever or gives up silently — this ledger is what separates them.
+--
+-- completed_at is NULL while the attempt runs, and stays NULL for an attempt
+-- whose brain died before it could close out: nothing rewrites it later,
+-- because a row that never completed is the honest record of a brain that
+-- stopped. outcome is NULL exactly then; error_kind and error_message are NULL
+-- unless the outcome is 'failed'. All three are app-validated with no CHECK
+-- (the type/origin pattern), and error_message is TF's own wording of the
+-- failure, never an upstream response body.
+--
+-- system_llm_run_id is nullable and ON DELETE SET NULL: the spend-ledger insert
+-- is best-effort, so the writer binds the id through a subselect and a dangling
+-- one stores NULL rather than failing the attempt's own record. The window
+-- counters say how much of the transcript the attempt fed the model, so a thin
+-- memory reads as a truncated window rather than as a model with nothing to
+-- say.
+--
+-- Brain-written on the admin pool; the app pool only ever reads it, so tf_app
+-- holds SELECT alone and tf_system nothing at all (an executor never touches
+-- this table). The index below carries the newest-attempt read's whole ORDER
+-- BY, id tiebreaker included: two attempts on one conversation can share a
+-- started_at, so without it every tie costs a sort.
+CREATE TABLE public.conversation_memory_attempts (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id uuid NOT NULL,
+    conversation_id uuid NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    outcome text,
+    error_kind text,
+    error_message text,
+    system_llm_run_id uuid,
+    window_rows_total integer DEFAULT 0 NOT NULL,
+    window_rows_sent integer DEFAULT 0 NOT NULL
+);
+
+
 -- The transcript canon: one row per neutral (OpenAI-shaped) API message, owned
 -- by exactly one conversation. Assembly is a pure function of these rows.
 CREATE TABLE public.messages (
@@ -948,6 +988,13 @@ CREATE TABLE public.conversations (
     -- Placement affinity computed at enqueue and cleared on requeue; advisory,
     -- so no FK to instances.
     preferred_executor_id text,
+    -- The boundary stamp: when this conversation stopped being its task's live
+    -- one, and why (domain.EndedReason). Both NULL while it is live, and they
+    -- move together. Orthogonal to status — an ended conversation may be
+    -- completed, failed or parked open; what ended it is the task moving on.
+    -- App-validated, no CHECK (the type/origin pattern).
+    ended_at timestamp with time zone,
+    ended_reason text,
     CONSTRAINT conversations_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT conversations_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT conversations_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
@@ -1342,6 +1389,10 @@ ALTER TABLE ONLY public.conversation_memory_entities
     ADD CONSTRAINT conversation_memory_entities_pkey PRIMARY KEY (conversation_id, entity_id);
 
 
+ALTER TABLE ONLY public.conversation_memory_attempts
+    ADD CONSTRAINT conversation_memory_attempts_pkey PRIMARY KEY (id);
+
+
 ALTER TABLE ONLY public.messages
     ADD CONSTRAINT messages_pkey PRIMARY KEY (id);
 
@@ -1540,6 +1591,9 @@ CREATE INDEX idx_conversation_memory_conversation ON public.conversation_memory 
 
 
 CREATE INDEX idx_conversation_memory_entities_entity ON public.conversation_memory_entities USING btree (org_id, entity_id);
+
+
+CREATE INDEX idx_conversation_memory_attempts_conversation ON public.conversation_memory_attempts USING btree (conversation_id, started_at DESC, id DESC);
 
 
 CREATE INDEX idx_messages_conversation ON public.messages USING btree (conversation_id);
@@ -1877,6 +1931,20 @@ ALTER TABLE ONLY public.conversation_memory
 
 ALTER TABLE ONLY public.conversation_memory
     ADD CONSTRAINT conversation_memory_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+
+
+ALTER TABLE ONLY public.conversation_memory_attempts
+    ADD CONSTRAINT conversation_memory_attempts_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+
+ALTER TABLE ONLY public.conversation_memory_attempts
+    ADD CONSTRAINT conversation_memory_attempts_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+
+
+-- Single-column, unlike the composite FKs above: system_llm_runs' primary key
+-- is its id alone, and the attempt's own org_id FK already pins the tenant.
+ALTER TABLE ONLY public.conversation_memory_attempts
+    ADD CONSTRAINT conversation_memory_attempts_system_llm_run_id_fkey FOREIGN KEY (system_llm_run_id) REFERENCES public.system_llm_runs(id) ON DELETE SET NULL;
 
 
 ALTER TABLE ONLY public.conversation_memory_entities
@@ -2333,6 +2401,16 @@ CREATE POLICY conversation_memory_entities_all ON public.conversation_memory_ent
   WHERE (r.id = conversation_memory_entities.conversation_id))));
 
 
+ALTER TABLE public.conversation_memory_attempts ENABLE ROW LEVEL SECURITY;
+
+
+-- Org-scoped like system_llm_runs_all rather than reached through the
+-- conversation the way its two neighbours are: the brain writes these on the
+-- admin pool (BYPASSRLS), and every app-pool caller is a read scoped to an org
+-- the reader already belongs to. tf_app exercises SELECT alone.
+CREATE POLICY conversation_memory_attempts_all ON public.conversation_memory_attempts USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+
 ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
 
 
@@ -2740,6 +2818,16 @@ GRANT ALL ON TABLE public.conversation_memory_entities TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.conversation_memory_entities TO tf_app;
 
 
+GRANT ALL ON TABLE public.conversation_memory_attempts TO postgres;
+GRANT ALL ON TABLE public.conversation_memory_attempts TO anon;
+GRANT ALL ON TABLE public.conversation_memory_attempts TO authenticated;
+GRANT ALL ON TABLE public.conversation_memory_attempts TO service_role;
+-- SELECT only, deliberately: the ledger is written by the brain on the admin
+-- pool and only ever read on the app pool. tf_system is granted nothing at all
+-- — an executor never touches this table.
+GRANT SELECT ON TABLE public.conversation_memory_attempts TO tf_app;
+
+
 GRANT ALL ON TABLE public.messages TO postgres;
 GRANT ALL ON TABLE public.messages TO anon;
 GRANT ALL ON TABLE public.messages TO authenticated;
@@ -3045,6 +3133,10 @@ CREATE INDEX idx_conversations_org_team         ON public.conversations (org_id,
 -- partial on the NULL arm of the needs-driving predicate. The other arm (a
 -- parked 'open' conversation woken by input) is served by idx_messages_undelivered.
 CREATE INDEX idx_conversations_needs_driving ON public.conversations (started_at, id) WHERE (status IS NULL);
+-- The boundary anti-join: "the task's conversations that have already ended".
+-- Partial on the stamped arm because a live task has none of them and the
+-- reads that consult it are asking which rows to exclude.
+CREATE INDEX idx_conversations_task_ended ON public.conversations (task_id) WHERE (ended_at IS NOT NULL);
 -- Placement tier-1 claim: an executor pulling its own preferred queued runs,
 -- ordered by started_at, id. Global-oldest uses idx_conversations_needs_driving.
 CREATE INDEX idx_conversations_queued_preferred ON public.conversations (preferred_executor_id, started_at, id) WHERE (status IS NULL);

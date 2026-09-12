@@ -20,12 +20,13 @@ import (
 // satisfy the SELECT policy for the row it hands back, so a policy that
 // admits the write but not the read-back yields zero rows from a statement
 // that updated one. See dbtest.ConversationAppPoolFactory for why this suite
-// covers only SetSession/SetWorktreePath, not their sibling Complete (which
-// has a plain door too, but also touches the admin-only claims table before
-// its own flip — RunConversationReturnedRowConformance, on the admin pool,
-// covers Complete/CompleteSystem/CompleteForClaimSystem instead). Every
-// claims-row write always routes through the admin pool, so RLS has nothing
-// to narrow there either.
+// covers SetSession/SetWorktreePath and the two boundary doors, but not their
+// sibling Complete (which has a plain door too, but also touches the
+// admin-only claims table before its own flip —
+// RunConversationReturnedRowConformance, on the admin pool, covers
+// Complete/CompleteSystem/CompleteForClaimSystem instead). Every claims-row
+// write always routes through the admin pool, so RLS has nothing to narrow
+// there either.
 func TestConversationStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

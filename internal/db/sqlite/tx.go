@@ -85,6 +85,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		PendingFirings:           newPendingFiringsStore(tx),
 		Events:                   newEventStore(tx, tx),
 		TaskMemory:               newTaskMemoryStore(tx, tx),
+		MemoryAttempts:           newMemoryAttemptStore(tx),
 		ConversationWorktrees:    newConversationWorktreeStore(tx, tx),
 		Orgs:                     newOrgsStore(tx, tx),
 		OrgMemberships:           newOrgMembershipsStore(),

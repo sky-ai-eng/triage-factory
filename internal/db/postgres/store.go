@@ -254,6 +254,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// EXISTS subquery against conversations; admin bypasses RLS, and
 		// org_id stays in every WHERE clause as defense in depth.
 		TaskMemory: newTaskMemoryStore(app, admin),
+		// MemoryAttempts is admin-only: the brain's memory provisioner writes
+		// it from a background goroutine with no JWT-claims context, and the
+		// org-scoped RLS policy gates the app-pool reads (tf_app holds SELECT
+		// alone).
+		MemoryAttempts: newMemoryAttemptStore(admin),
 		// ConversationWorktrees wires both pools: app for cmd/exec workspace
 		// callers (a separate cmd/exec auth pass owns the
 		// synthetic-claims wrap) and admin for the delegate spawner
@@ -495,6 +500,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		PendingFirings:        newPendingFiringsStore(tx),
 		Events:                newEventStore(tx, tx),
 		TaskMemory:            newTaskMemoryStore(tx, tx),
+		MemoryAttempts:        newMemoryAttemptStore(tx),
 		ConversationWorktrees: newConversationWorktreeStore(tx, tx),
 		Orgs:                  newOrgsStore(tx, tx),
 		OrgMemberships:        newOrgMembershipsStore(tx, tx),

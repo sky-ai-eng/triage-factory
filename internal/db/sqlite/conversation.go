@@ -554,6 +554,76 @@ func (s *conversationStore) MarkFailedIfActive(ctx context.Context, orgID, conve
 	return flipped, err
 }
 
+// --- Boundaries ---
+
+func (s *conversationStore) EndConversationsForTask(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if !domain.IsEndedReason(string(reason)) {
+		return nil, fmt.Errorf("%w: %q", db.ErrInvalidEndedReason, reason)
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		UPDATE conversations SET ended_at = ?, ended_reason = ?
+		WHERE task_id = ?
+		  AND ended_at IS NULL AND parent_conversation_id IS NULL
+		RETURNING `+sqliteConversationReturningColumns, time.Now().UTC(), string(reason), taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Conversation
+	for rows.Next() {
+		var c domain.Conversation
+		if err := scanConversation(rows, &c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// SQLite does not honor ORDER BY on RETURNING — the same restriction
+	// flushPendingInput sorts around — so the read's order (started_at DESC,
+	// id, matching ListForTask and the Postgres twin) is restored here.
+	slices.SortFunc(out, func(a, b domain.Conversation) int {
+		if c := b.StartedAt.Compare(a.StartedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return out, nil
+}
+
+func (s *conversationStore) EndConversation(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if !domain.IsEndedReason(string(reason)) {
+		return nil, fmt.Errorf("%w: %q", db.ErrInvalidEndedReason, reason)
+	}
+	row := s.q.QueryRowContext(ctx, `
+		UPDATE conversations SET ended_at = ?, ended_reason = ?
+		WHERE id = ? AND ended_at IS NULL
+		RETURNING `+sqliteConversationReturningColumns, time.Now().UTC(), string(reason), conversationID)
+	r, err := scanConversationReturning(row)
+	// The guard declining and the id naming nothing are one answer here: the
+	// conversation is not live for this caller to end, and a boundary that
+	// already happened is not a fault to report.
+	if errors.Is(err, db.ErrNoSuchConversation) {
+		return nil, nil
+	}
+	return r, err
+}
+
+func (s *conversationStore) EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	return s.EndConversationsForTask(ctx, orgID, taskID, reason)
+}
+
+func (s *conversationStore) EndConversationSystem(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
+	return s.EndConversation(ctx, orgID, conversationID, reason)
+}
+
 // --- Queries ---
 
 // sqliteConversationColumns is the SELECT list scanned into a domain.Conversation
@@ -596,7 +666,8 @@ const sqliteConversationColumns = `
 	(SELECT COALESCE(SUM(m.cache_read_tokens), 0)     FROM messages m WHERE m.conversation_id = r.id) AS cache_read_tokens,
 	(SELECT COALESCE(SUM(m.cache_creation_tokens), 0) FROM messages m WHERE m.conversation_id = r.id) AS cache_creation_tokens,
 	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
-	COALESCE(a.display_name, '') AS actor_agent_name
+	COALESCE(a.display_name, '') AS actor_agent_name,
+	r.ended_at, COALESCE(r.ended_reason, '')
 `
 
 // sqliteDisplayStatusSQL is the wire status: the SQLite mirror of the
@@ -714,7 +785,8 @@ const sqliteConversationReturningColumns = `
 	(SELECT COALESCE(SUM(m.cache_creation_tokens), 0) FROM messages m WHERE m.conversation_id = conversations.id) AS cache_creation_tokens,
 	(NULLIF(TRIM((SELECT rm.agent_content FROM conversation_memory rm WHERE rm.conversation_id = conversations.id),
 	              ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
-	COALESCE((SELECT a.display_name FROM agents a WHERE a.id = conversations.actor_agent_id), '') AS actor_agent_name
+	COALESCE((SELECT a.display_name FROM agents a WHERE a.id = conversations.actor_agent_id), '') AS actor_agent_name,
+	ended_at, COALESCE(ended_reason, '')
 `
 
 // sqliteReturningDisplayStatusSQL is sqliteDisplayStatusSQL rewritten against
@@ -2191,26 +2263,28 @@ type conversationScanner interface {
 
 // scanConversation scans sqliteConversationColumns into r.
 func scanConversation(sc conversationScanner, r *domain.Conversation) error {
-	var queuedAt, completedAt sql.NullTime
+	var queuedAt, completedAt, endedAt sql.NullTime
 	var claimedAt sql.NullString
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var parkReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
+	var endedReason string
 
 	if err := sc.Scan(
 		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &parkReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
-		&r.MemoryMissing, &r.ActorAgentName,
+		&r.MemoryMissing, &r.ActorAgentName, &endedAt, &endedReason,
 	); err != nil {
 		return err
 	}
-	return finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
+	r.EndedReason = domain.EndedReason(endedReason)
+	return finalizeConversation(r, queuedAt, claimedAt, completedAt, endedAt, costUSD, durationMs, numTurns, blueprintStep,
 		model, parkReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
 }
 
-func finalizeConversation(r *domain.Conversation, queuedAt sql.NullTime, claimedAt sql.NullString, completedAt sql.NullTime, costUSD sql.NullFloat64,
+func finalizeConversation(r *domain.Conversation, queuedAt sql.NullTime, claimedAt sql.NullString, completedAt, endedAt sql.NullTime, costUSD sql.NullFloat64,
 	durationMs, numTurns, blueprintStep sql.NullInt64,
 	model, parkReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID sql.NullString) error {
 	r.Model = model.String
@@ -2246,6 +2320,9 @@ func finalizeConversation(r *domain.Conversation, queuedAt sql.NullTime, claimed
 	}
 	if completedAt.Valid {
 		r.CompletedAt = &completedAt.Time
+	}
+	if endedAt.Valid {
+		r.EndedAt = &endedAt.Time
 	}
 	if costUSD.Valid {
 		r.TotalCostUSD = &costUSD.Float64
