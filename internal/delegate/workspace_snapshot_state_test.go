@@ -176,6 +176,7 @@ func TestReapExpiredSnapshots_DropsStateWithTheBlob(t *testing.T) {
 		conversationID); err != nil {
 		t.Fatalf("age the conversation: %v", err)
 	}
+	ageConversationMint(t, database, conversationID, "-20 days")
 	putTestSnapshot(t, s, wsKey)
 	if err := s.workspaceSnapshots.BeginSnapshotSystem(ctx, runmode.LocalDefaultOrgID, wsKey, "claim-reaped"); err != nil {
 		t.Fatalf("begin: %v", err)

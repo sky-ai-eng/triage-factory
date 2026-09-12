@@ -187,6 +187,7 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-20 days') WHERE id=?`, oldConversationID); err != nil {
 		t.Fatalf("age old run: %v", err)
 	}
+	ageConversationMint(t, database, oldConversationID, "-20 days")
 	putTestSnapshot(t, s, oldKey)
 
 	seedConversation(t, database, "r-fresh", "sess-fresh", "/tmp/wt-fresh")
@@ -202,29 +203,32 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 	assertSnapshotPresent(t, s, freshKey, true) // within the TTL → kept
 }
 
-// TestListReapableSnapshotKeys_CoversEveryCompletedExcludesFailedAndInTTL pins
-// the query rules against the widened write policy: a past-TTL completed run is
-// eligible whatever its outcome (abort AND finish — the finish case is the one
-// the old outcome='abort' filter silently omitted, leaving its blob forever), a
-// past-TTL failed run is excluded (it never had a blob to age out), and a
-// within-TTL open run is not yet eligible.
-func TestListReapableSnapshotKeys_CoversEveryCompletedExcludesFailedAndInTTL(t *testing.T) {
+// TestListReapableSnapshotKeys_CoversEveryTerminalAndExcludesInTTL pins the
+// query rules: a past-TTL key is eligible whatever state its conversation
+// reached and whatever its outcome (completed+abort, completed+finish, and
+// `failed` — retention is the only sweep that drops a blob on age, so a state
+// it declined would be a key nothing ever came back for), and a within-TTL
+// open key is not yet eligible.
+func TestListReapableSnapshotKeys_CoversEveryTerminalAndExcludesInTTL(t *testing.T) {
 	s, database, abortConversationID, _ := setupAdvanceFixture(t, "reap-rules")
 	abortKey := taskIDForConversation(t, database, abortConversationID)
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, abortConversationID); err != nil {
 		t.Fatalf("age abort run: %v", err)
 	}
+	ageConversationMint(t, database, abortConversationID, "-30 days")
 
 	seedConversation(t, database, "r-fin2", "s", "/tmp/wt")
 	finishKey := taskIDForConversation(t, database, "r-fin2")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish', completed_at=datetime('now','-30 days') WHERE id='r-fin2'`); err != nil {
 		t.Fatalf("finish run: %v", err)
 	}
+	ageConversationMint(t, database, "r-fin2", "-30 days")
 	seedConversation(t, database, "r-failed2", "s", "/tmp/wt")
 	failedKey := taskIDForConversation(t, database, "r-failed2")
 	if _, err := database.Exec(`UPDATE conversations SET status='failed', completed_at=datetime('now','-30 days') WHERE id='r-failed2'`); err != nil {
 		t.Fatalf("failed run: %v", err)
 	}
+	ageConversationMint(t, database, "r-failed2", "-30 days")
 	seedConversation(t, database, "r-open2", "s", "/tmp/wt")
 	openKey := taskIDForConversation(t, database, "r-open2")
 	if _, err := database.Exec(`UPDATE conversations SET status='open', completed_at=NULL, started_at=datetime('now') WHERE id='r-open2'`); err != nil {
@@ -239,8 +243,8 @@ func TestListReapableSnapshotKeys_CoversEveryCompletedExcludesFailedAndInTTL(t *
 	if !keysContain(keys, finishKey) {
 		t.Errorf("past-TTL completed+finish key %s not reapable; its snapshot would leak forever", finishKey)
 	}
-	if keysContain(keys, failedKey) {
-		t.Errorf("failed key %s is reapable; failed runs carry no snapshot to age out", failedKey)
+	if !keysContain(keys, failedKey) {
+		t.Errorf("past-TTL failed key %s not reapable; nothing else collects a blob on age, so its snapshot would leak forever", failedKey)
 	}
 	if keysContain(keys, openKey) {
 		t.Errorf("within-TTL open key %s is reapable; the TTL has not elapsed", openKey)
@@ -262,6 +266,7 @@ func TestListReapableSnapshotKeys_SharedTaskNeedsAllPastTTL(t *testing.T) {
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, conversationID1); err != nil {
 		t.Fatalf("age step 1: %v", err)
 	}
+	ageConversationMint(t, database, conversationID1, "-30 days")
 	// A second step on the SAME blueprint_run, also completed+abort but fresh.
 	addStepConversation(t, database, bpr, taskID, "run2-shared", 1, "running")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='run2-shared'`); err != nil {
@@ -325,6 +330,150 @@ func TestListReapableSnapshotKeys_OpenRunKeysOffParkedAt(t *testing.T) {
 	}
 	if !keysContain(reapKeys(t, s, cutoff), taskID) {
 		t.Errorf("open run parked 30 days ago not reaped; want reapable past the TTL")
+	}
+}
+
+// TestListReapableSnapshotKeys_NewestFailedConversationHoldsTheKey: a task's
+// conversations share one blob, so the newest of them decides when it may go —
+// including a `failed` one. The fixture is the shape that makes that matter: an
+// aged completed step plus a fresh failure. Aging by the completed step alone
+// would drop the blob of a task that failed an hour ago.
+func TestListReapableSnapshotKeys_NewestFailedConversationHoldsTheKey(t *testing.T) {
+	s, database, step1, taskID := setupAdvanceFixture(t, "reap-failed-newest")
+	bpr := blueprintRunIDForConversation(t, database, step1)
+	cutoff := time.Now().Add(-14 * 24 * time.Hour)
+
+	if _, err := database.Exec(
+		`UPDATE conversations SET status='completed', outcome='continue', completed_at=datetime('now','-30 days') WHERE id=?`, step1,
+	); err != nil {
+		t.Fatalf("age step 1: %v", err)
+	}
+	ageConversationMint(t, database, step1, "-30 days")
+	addStepConversation(t, database, bpr, taskID, "step-failed", 1, "running")
+	if _, err := database.Exec(
+		`UPDATE conversations SET status='failed', failure_kind=?, completed_at=datetime('now','-1 hours') WHERE id='step-failed'`,
+		string(domain.ConversationFailureExecutorLost),
+	); err != nil {
+		t.Fatalf("fail step 2: %v", err)
+	}
+	ageConversationMint(t, database, "step-failed", "-1 hours")
+
+	if keysContain(reapKeys(t, s, cutoff), taskID) {
+		t.Errorf("task %s reaped while its newest conversation failed an hour ago; that blob is the tree its next conversation starts in", taskID)
+	}
+
+	// Age the failure past the TTL and the whole key goes — which is what
+	// makes retention, rather than the failure itself, the collector.
+	if _, err := database.Exec(`UPDATE conversations SET completed_at=datetime('now','-30 days') WHERE id='step-failed'`); err != nil {
+		t.Fatalf("age the failure: %v", err)
+	}
+	ageConversationMint(t, database, "step-failed", "-30 days")
+	if !keysContain(reapKeys(t, s, cutoff), taskID) {
+		t.Errorf("task %s whose every conversation is past the TTL is not reapable; its blob would leak forever", taskID)
+	}
+}
+
+// TestListReapableSnapshotKeys_EndedAtParticipatesInTheAgeRule: a conversation
+// the task moved on from without parking or concluding — a queued one a
+// boundary superseded — carries its last activity in ended_at and nowhere
+// else. Reading its started_at instead would age the key from the mint of work
+// that never ran.
+func TestListReapableSnapshotKeys_EndedAtParticipatesInTheAgeRule(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "reap-ended-at")
+	cutoff := time.Now().Add(-14 * 24 * time.Hour)
+
+	if _, err := database.Exec(`
+		UPDATE conversations
+		SET status=NULL, parked_at=NULL, completed_at=NULL,
+		    started_at=datetime('now','-30 days'), ended_at=datetime('now','-1 hours'), ended_reason=?
+		WHERE id=?`, string(domain.EndedRequeued), conversationID,
+	); err != nil {
+		t.Fatalf("seed superseded queued conversation: %v", err)
+	}
+	if keysContain(reapKeys(t, s, cutoff), taskID) {
+		t.Errorf("task %s reaped on the started_at of a conversation that ended an hour ago; ended_at is its last activity", taskID)
+	}
+
+	if _, err := database.Exec(`UPDATE conversations SET ended_at=datetime('now','-30 days') WHERE id=?`, conversationID); err != nil {
+		t.Fatalf("age the boundary: %v", err)
+	}
+	if !keysContain(reapKeys(t, s, cutoff), taskID) {
+		t.Errorf("task %s whose boundary is 30 days old is not reapable", taskID)
+	}
+}
+
+// TestListReapableSnapshotKeys_InFlightConversationHoldsTheKey: an engagement
+// in flight is the one case where the blob under it is wanted right now — it
+// is what the engagement rehydrated from, and nothing re-writes it until the
+// conversation parks. So a live claim anywhere on the task withholds the whole
+// key, however long ago its other conversations went quiet.
+func TestListReapableSnapshotKeys_InFlightConversationHoldsTheKey(t *testing.T) {
+	s, database, parked, taskID := setupAdvanceFixture(t, "reap-in-flight")
+	ctx := context.Background()
+	cutoff := time.Now().Add(-14 * 24 * time.Hour)
+
+	if _, err := database.Exec(
+		`UPDATE conversations SET status='open', parked_at=datetime('now','-30 days'), completed_at=NULL WHERE id=?`, parked,
+	); err != nil {
+		t.Fatalf("age the park: %v", err)
+	}
+	ageConversationMint(t, database, parked, "-30 days")
+	addStepConversation(t, database, blueprintRunIDForConversation(t, database, parked), taskID, "step-live", 1, "running")
+	// The engagement's own row is aged too, so the age rule alone would let
+	// the key go: the claim is the only thing left holding it.
+	if _, err := database.Exec(
+		`UPDATE conversations SET started_at=datetime('now','-30 days'), queued_at=datetime('now','-30 days') WHERE id='step-live'`,
+	); err != nil {
+		t.Fatalf("age the engagement's row: %v", err)
+	}
+	if _, err := s.conversations.SetExecutorSystem(ctx, runmode.LocalDefaultOrgID, "step-live", "exec-live", 1); err != nil {
+		t.Fatalf("mint claim: %v", err)
+	}
+
+	if keysContain(reapKeys(t, s, cutoff), taskID) {
+		t.Errorf("task %s reaped while a conversation on it is mid-engagement; the blob under a running agent is the one thing retention must not take", taskID)
+	}
+
+	// Release and settle it past the TTL and the key is reapable — the
+	// engagement was the only thing holding it.
+	if _, err := s.conversations.SetExecutorSystem(ctx, runmode.LocalDefaultOrgID, "step-live", "", 0); err != nil {
+		t.Fatalf("release claim: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish', completed_at=datetime('now','-30 days') WHERE id='step-live'`); err != nil {
+		t.Fatalf("settle the engagement: %v", err)
+	}
+	if !keysContain(reapKeys(t, s, cutoff), taskID) {
+		t.Errorf("task %s not reapable once every conversation is past the TTL", taskID)
+	}
+}
+
+// TestListReapableSnapshotKeys_ResumedParkKeysOffTheRequeue: a resume clears
+// parked_at and re-stamps queued_at, but started_at still holds the original
+// mint — so for a month-old park a user just resumed, started_at is the one
+// stamp on the row that says nothing true about its idleness. The blob it is
+// about to rehydrate from is the one retention must not take.
+func TestListReapableSnapshotKeys_ResumedParkKeysOffTheRequeue(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "reap-resumed")
+	ctx := context.Background()
+	cutoff := time.Now().Add(-14 * 24 * time.Hour)
+
+	// Minted and parked a month ago: past the TTL as it stands.
+	if _, err := database.Exec(`
+		UPDATE conversations
+		SET status='open', started_at=datetime('now','-30 days'), parked_at=datetime('now','-30 days'), completed_at=NULL
+		WHERE id=?`, conversationID,
+	); err != nil {
+		t.Fatalf("seed month-old park: %v", err)
+	}
+	if !keysContain(reapKeys(t, s, cutoff), taskID) {
+		t.Fatalf("month-old park %s is not reapable; the fixture has not staged the precondition", taskID)
+	}
+
+	if ok, err := s.conversations.MarkQueuedForResume(ctx, runmode.LocalDefaultOrgID, conversationID); err != nil || !ok {
+		t.Fatalf("MarkQueuedForResume: ok=%v err=%v", ok, err)
+	}
+	if keysContain(reapKeys(t, s, cutoff), taskID) {
+		t.Errorf("task %s stayed reapable after its park was resumed; the blob would be dropped under the engagement rehydrating from it", taskID)
 	}
 }
 

@@ -228,6 +228,14 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 				t.Fatalf("backdate queued_at of %s: %v", conversationID, err)
 			}
 		},
+		BackdateCompletedAt: func(t *testing.T, conversationID string, age time.Duration) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE conversations SET completed_at = now() - make_interval(secs => $2) WHERE id = $1`,
+				conversationID, age.Seconds()); err != nil {
+				t.Fatalf("backdate completed_at of %s: %v", conversationID, err)
+			}
+		},
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
 			t.Helper()
 			rows, err := conn.Query(`
