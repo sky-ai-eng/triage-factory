@@ -906,6 +906,60 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, f
 	return n > 0, err
 }
 
+// --- Boundaries ---
+
+func (s *conversationStore) EndConversationsForTask(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	return endConversationsForTask(ctx, s.q, orgID, taskID, reason)
+}
+
+func (s *conversationStore) EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	return endConversationsForTask(ctx, s.admin, orgID, taskID, reason)
+}
+
+func (s *conversationStore) EndConversation(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
+	return endConversation(ctx, s.q, orgID, conversationID, reason)
+}
+
+func (s *conversationStore) EndConversationSystem(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
+	return endConversation(ctx, s.admin, orgID, conversationID, reason)
+}
+
+func endConversationsForTask(ctx context.Context, q queryer, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	if !domain.IsEndedReason(string(reason)) {
+		return nil, fmt.Errorf("%w: %q", db.ErrInvalidEndedReason, reason)
+	}
+	if !isValidUUID(taskID) {
+		return nil, nil
+	}
+	return writeConversationsReturning(ctx, q, `
+		UPDATE conversations SET ended_at = $1, ended_reason = $2
+		WHERE org_id = $3 AND task_id = $4
+		  AND ended_at IS NULL AND parent_conversation_id IS NULL
+		RETURNING *
+	`, time.Now().UTC(), string(reason), orgID, taskID)
+}
+
+func endConversation(ctx context.Context, q queryer, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
+	if !domain.IsEndedReason(string(reason)) {
+		return nil, fmt.Errorf("%w: %q", db.ErrInvalidEndedReason, reason)
+	}
+	if !isValidUUID(conversationID) {
+		return nil, nil
+	}
+	r, err := writeConversationReturning(ctx, q, `
+		UPDATE conversations SET ended_at = $1, ended_reason = $2
+		WHERE org_id = $3 AND id = $4 AND ended_at IS NULL
+		RETURNING *
+	`, time.Now().UTC(), string(reason), orgID, conversationID)
+	// The guard declining and the id naming nothing are one answer here: the
+	// conversation is not live for this caller to end, and a boundary that
+	// already happened is not a fault to report.
+	if errors.Is(err, db.ErrNoSuchConversation) {
+		return nil, nil
+	}
+	return r, err
+}
+
 // --- Queries ---
 
 // pgConversationColumns is the SELECT list scanned into a domain.Conversation
@@ -937,7 +991,8 @@ const pgConversationColumns = `
 	r.blueprint_run_id, r.blueprint_step_index,
 	msum.input_tokens, msum.output_tokens, msum.cache_read_tokens, msum.cache_creation_tokens,
 	(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing,
-	COALESCE(a.display_name, '') AS actor_agent_name
+	COALESCE(a.display_name, '') AS actor_agent_name,
+	r.ended_at, COALESCE(r.ended_reason, '')
 `
 
 // pgDisplayStatusSQL is the wire status: a four-rung ladder over state that
@@ -1145,6 +1200,43 @@ func writeConversationReturning(ctx context.Context, q queryer, writeSQL string,
 		return nil, err
 	}
 	return &res, nil
+}
+
+// writeConversationsReturning is writeConversationReturning for a write that
+// touches MANY rows: same data-modifying CTE, same re-join through the point
+// read's projection, same single statement — only the cardinality differs, so
+// the caller gets every stamped row already shaped like a Get.
+//
+// The order is the outer SELECT's, not the UPDATE's: a RETURNING clause has no
+// order of its own, and a caller broadcasting per row wants the one
+// ListForTask uses. Same soundness caveat as the single-row twin — exactly one
+// data-modifying CTE, nothing else in the statement reading this one's write.
+//
+// writeSQL must itself end in `RETURNING *`.
+func writeConversationsReturning(ctx context.Context, q queryer, writeSQL string, args ...any) ([]domain.Conversation, error) {
+	rows, err := q.QueryContext(ctx, `
+		WITH updated AS (`+writeSQL+`)
+		SELECT `+pgConversationColumns+`
+		FROM updated r
+		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
+		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
+		`+conversationClaimLateral+`
+		`+conversationLedgerLateral+`
+		ORDER BY r.started_at DESC, r.id
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Conversation
+	for rows.Next() {
+		var c domain.Conversation
+		if err := scanConversation(rows, &c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 func (s *conversationStore) Get(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error) {
@@ -2190,29 +2282,30 @@ type conversationScanner interface {
 // destinations for whatever a caller appended to that list — the list read's
 // queue position, today — in the order it appended them.
 func scanConversation(sc conversationScanner, r *domain.Conversation, extra ...any) error {
-	var queuedAt, claimedAt, completedAt sql.NullTime
+	var queuedAt, claimedAt, completedAt, endedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var blueprintRunID sql.NullString
-	var failureKind, parkReason string
+	var failureKind, parkReason, endedReason string
 
 	dest := []any{
 		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &parkReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
-		&r.MemoryMissing, &r.ActorAgentName,
+		&r.MemoryMissing, &r.ActorAgentName, &endedAt, &endedReason,
 	}
 	if err := sc.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
 	r.FailureKind = domain.ConversationFailureKind(failureKind)
 	r.ParkReason = domain.ParkReason(parkReason)
-	finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
+	r.EndedReason = domain.EndedReason(endedReason)
+	finalizeConversation(r, queuedAt, claimedAt, completedAt, endedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
 	return nil
 }
 
-func finalizeConversation(r *domain.Conversation, queuedAt, claimedAt, completedAt sql.NullTime, costUSD sql.NullFloat64, durationMs, numTurns, blueprintStep sql.NullInt64, blueprintRunID sql.NullString) {
+func finalizeConversation(r *domain.Conversation, queuedAt, claimedAt, completedAt, endedAt sql.NullTime, costUSD sql.NullFloat64, durationMs, numTurns, blueprintStep sql.NullInt64, blueprintRunID sql.NullString) {
 	if blueprintRunID.Valid {
 		r.BlueprintRunID = blueprintRunID.String
 	}
@@ -2228,6 +2321,9 @@ func finalizeConversation(r *domain.Conversation, queuedAt, claimedAt, completed
 	}
 	if completedAt.Valid {
 		r.CompletedAt = &completedAt.Time
+	}
+	if endedAt.Valid {
+		r.EndedAt = &endedAt.Time
 	}
 	if costUSD.Valid {
 		r.TotalCostUSD = &costUSD.Float64

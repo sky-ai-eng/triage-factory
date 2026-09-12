@@ -324,6 +324,12 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 				t.Fatalf("seed workspace snapshot state: %v", err)
 			}
 		},
+		SetParentConversation: func(t *testing.T, conversationID, parentConversationID string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE conversations SET parent_conversation_id = ? WHERE id = ?`, parentConversationID, conversationID); err != nil {
+				t.Fatalf("set parent_conversation_id: %v", err)
+			}
+		},
 		SetBlueprintRunStatus: func(t *testing.T, blueprintRunID, status string) {
 			t.Helper()
 			// Raw UPDATE — must NOT cascade onto child conversations (unlike

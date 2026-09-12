@@ -115,6 +115,85 @@ const (
 	ConversationTypeInteractive = "interactive"
 )
 
+// EndedReason is WHY a conversation stopped being its task's live one — the
+// closed list of boundaries the task context model defines. A task owns its
+// conversations, and each of these is a moment the task moved on: the work
+// went back to the queue, a person took it over, a fresh delegation opened, a
+// blueprint advanced past this step, the owning team was archived, or the
+// engagement failed.
+//
+// It is a fact about the conversation's place in the task, not about how the
+// transcript finished. A `completed` row ends just as a `running` one does
+// when its task is requeued — ended_at says the row is no longer the live
+// conversation, and no status implies it.
+//
+// Distinct from ParkReason, which says what stopped a conversation that can
+// still be woken, and from ConversationFailureKind, which classifies an
+// infrastructure failure. Nothing resumes an ended conversation.
+//
+// There is deliberately no reason for a task being completed or dismissed:
+// task end is not a boundary. A done task's last step stays resumable for
+// follow-ups, and a manual conversation on a task an event closed under it is
+// parked by the stop rather than ended — an auto-close is a contract outside
+// TF's control and can land mid-engagement.
+//
+// Empty === SQL NULL: still live, or ended before the column existed. There
+// is no backfill, because a conversation that ended before this shipped ended
+// for a reason nothing recorded and a guessed one is a wrong answer printed
+// to a person later.
+type EndedReason string
+
+const (
+	// EndedRequeued — the task was returned to the queue (a requeue, or the
+	// undo of a disposition). The next claimant starts a new conversation.
+	EndedRequeued EndedReason = "requeued"
+	// EndedDelegated — the task was handed to a new delegation. Stamped
+	// before the new conversation is minted, so a task never has two live
+	// conversations at once.
+	EndedDelegated EndedReason = "delegated"
+	// EndedTakenOver — a person claimed a task an agent held. A user-to-user
+	// handoff is not a boundary; only the agent-to-human transition is.
+	EndedTakenOver EndedReason = "taken_over"
+	// EndedStepAdvanced — the blueprint moved to step N+1, so step N's
+	// conversation is superseded rather than merely finished.
+	EndedStepAdvanced EndedReason = "step_advanced"
+	// EndedTeamArchived — the owning team was archived, so nothing will pick
+	// this conversation up again whatever state it stopped in.
+	EndedTeamArchived EndedReason = "team_archived"
+	// EndedFailed — the engagement failed. The one reason that is also a
+	// statement about the transcript, and it is a boundary because a failed
+	// conversation is not resumed: the task gets a new one.
+	EndedFailed EndedReason = "failed"
+)
+
+// AllEndedReasons returns the ended_reason vocabulary. Same discipline as
+// AllParkReasons: SQL cannot import a Go const, so the dual-dialect
+// conformance suite derives its coverage from this set and a reason added
+// here but never taught to a store fails on both backends.
+func AllEndedReasons() []EndedReason {
+	return []EndedReason{
+		EndedRequeued,
+		EndedDelegated,
+		EndedTakenOver,
+		EndedStepAdvanced,
+		EndedTeamArchived,
+		EndedFailed,
+	}
+}
+
+// IsEndedReason reports whether reason names a boundary. Closed-world, like
+// IsParkReason: the empty string and anything unrecognized are NOT ended
+// reasons, which is what lets the store doors refuse a stamp rather than
+// write a word nothing can read back.
+func IsEndedReason(reason string) bool {
+	switch EndedReason(reason) {
+	case EndedRequeued, EndedDelegated, EndedTakenOver,
+		EndedStepAdvanced, EndedTeamArchived, EndedFailed:
+		return true
+	}
+	return false
+}
+
 // InjectionSubtype values discriminate a `role=user` row the system wrote
 // on the agent's behalf from one a human typed. Assembly reads them (a
 // steer row renders inside a keep-working envelope); display reads them to
@@ -248,7 +327,21 @@ type Conversation struct {
 	// ParkReason vocabulary, see the type. Empty === SQL NULL: never parked,
 	// or resumed since (a resume clears it, so a conversation that went on to
 	// conclude doesn't still name the stop it was picked back up from).
-	ParkReason    ParkReason
+	ParkReason ParkReason
+
+	// EndedAt / EndedReason are the boundary stamp: WHEN this conversation
+	// stopped being its task's live one, and WHY (the closed EndedReason
+	// vocabulary — see the type). Both nil/empty === SQL NULL while the
+	// conversation is live, and they move together: a row never carries one
+	// without the other.
+	//
+	// Orthogonal to Status. An ended conversation may be `completed`,
+	// `failed` or parked `open` — what ended it is the task moving on, not
+	// the transcript finishing — so a reader asking "is this still the task's
+	// conversation" reads EndedAt and nothing else.
+	EndedAt     *time.Time
+	EndedReason EndedReason
+
 	WorktreePath  string
 	ResultSummary string
 

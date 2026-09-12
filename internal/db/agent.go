@@ -18,6 +18,13 @@ var ErrNoSuchConversation = errors.New("no conversation with that id in this org
 // settlement, keyed on its own row id within the conversation) named no row.
 var ErrNoSuchMessage = errors.New("no message with that id on that conversation")
 
+// ErrInvalidEndedReason means a boundary stamp named something outside the
+// domain.EndedReason vocabulary. Validated at the store door in both dialects
+// rather than by a CHECK, the house pattern for an open-set-in-SQL /
+// closed-set-in-Go column: the write is refused rather than storing a word
+// nothing can read back.
+var ErrInvalidEndedReason = errors.New("db: not an ended_reason (see domain.AllEndedReasons)")
+
 //go:generate go run github.com/vektra/mockery/v2 --name=ConversationStore --output=./mocks --case=underscore --with-expecter
 
 // Park is why a conversation is being parked `open` — the sole input to
@@ -391,6 +398,43 @@ type ConversationStore interface {
 	// failureKind is the machine-readable failure discriminator
 	// (domain.ConversationFailureKind vocabulary); "" → NULL (unclassified).
 	MarkFailedIfActive(ctx context.Context, orgID, conversationID, failureKind string) (bool, error)
+
+	// --- Boundaries ---
+	//
+	// A task owns its conversations, and a boundary is the moment one stops
+	// being the task's live one: the work went back to the queue, a person
+	// took it over, a fresh delegation opened, a blueprint advanced past this
+	// step, the team was archived, the engagement failed. These two doors are
+	// the only writers of ended_at / ended_reason.
+	//
+	// reason is validated against domain.IsEndedReason before anything is
+	// written; ErrInvalidEndedReason otherwise, both dialects.
+	//
+	// Neither door publishes anything. The caller broadcasts what it stamped
+	// (which is why the rows come back), and the memory doorbell that rides a
+	// boundary is an app-level callback, never a store side effect.
+
+	// EndConversationsForTask stamps every non-ended TOP-LEVEL conversation on
+	// the task, whatever its status: a `completed` abort row on a requeued
+	// task ends too, because the boundary is the task moving on and is not
+	// conditioned on how any transcript finished. Already-ended rows are left
+	// exactly as they are — the first boundary is the one that happened.
+	//
+	// parent_conversation_id IS NULL keeps a future subagent row out of the
+	// task's boundary accounting: a subagent ends with its spawner, and
+	// stamping it would make the task look like it had ended N conversations.
+	//
+	// Returns the rows it stamped, in the read's own order (started_at DESC,
+	// id), each projected exactly as Get projects it — so a caller broadcasts
+	// a conversation_update per row without re-reading. An empty slice means
+	// the task had nothing live, which is an answer, not an error.
+	EndConversationsForTask(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error)
+
+	// EndConversation stamps one conversation, under the same ended_at IS NULL
+	// guard. nil (with a nil error) when the id names no row in the org OR the
+	// row has already ended: already-ended is an answer, not a miss, so a
+	// caller stamping down an enumerated list races nothing by re-asking.
+	EndConversation(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error)
 
 	// --- Queries ---
 
@@ -790,6 +834,16 @@ type ConversationStore interface {
 	SetWorktreePathSystem(ctx context.Context, orgID, conversationID, path string) (*domain.Conversation, error)
 
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, conversationID, failureKind string) (bool, error)
+
+	// EndConversationsForTaskSystem / EndConversationSystem are the boundary
+	// doors' admin-pool twins — see the app-pool pair for the predicate, the
+	// return shape and the miss semantics. The claimless stampers need them:
+	// the blueprint reactor's step advance, the failure path and the team
+	// archive all run with no JWT claims in scope, and the archive's caller
+	// may not even be a member of the team whose conversations it is ending.
+	EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error)
+	EndConversationSystem(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error)
+
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 
 	// --- Claim-fenced engagement writes ---
