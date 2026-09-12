@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -259,5 +260,61 @@ func TestComplete_NoRunIDLeavesTheIDToTheStore(t *testing.T) {
 	}
 	if fs.rows[0].ID != "" {
 		t.Errorf("row ID = %q, want empty so the store generates one", fs.rows[0].ID)
+	}
+}
+
+// TestTruncateResultText covers the cut itself, in runes rather than bytes:
+// a refusal can be any text at all, and a byte-wise cut would land mid
+// character and garble the last one. The multi-byte cases are the whole
+// reason this counts rather than slices.
+func TestTruncateResultText(t *testing.T) {
+	const marker = "… (truncated)"
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "short ascii passes through",
+			in:   "Prompt is too long",
+			want: "Prompt is too long",
+		},
+		{
+			name: "exactly at the limit is not cut",
+			in:   strings.Repeat("x", resultTextLimit),
+			want: strings.Repeat("x", resultTextLimit),
+		},
+		{
+			name: "one past the limit is cut",
+			in:   strings.Repeat("x", resultTextLimit+1),
+			want: strings.Repeat("x", resultTextLimit) + marker,
+		},
+		{
+			// Long in bytes, short in runes — the case the byte-length fast
+			// path must not decide on its own.
+			name: "multi-byte under the rune limit passes through whole",
+			in:   strings.Repeat("é", resultTextLimit-1),
+			want: strings.Repeat("é", resultTextLimit-1),
+		},
+		{
+			name: "multi-byte over the rune limit cuts on a boundary",
+			in:   strings.Repeat("日", resultTextLimit*2),
+			want: strings.Repeat("日", resultTextLimit) + marker,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateResultText(tc.in)
+			if got != tc.want {
+				t.Errorf("kept %d runes, want %d",
+					utf8.RuneCountInString(strings.TrimSuffix(got, marker)),
+					utf8.RuneCountInString(strings.TrimSuffix(tc.want, marker)))
+			}
+			if !utf8.ValidString(got) {
+				t.Error("cut produced invalid UTF-8 — a rune was split")
+			}
+		})
 	}
 }

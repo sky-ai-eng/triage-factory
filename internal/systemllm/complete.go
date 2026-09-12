@@ -213,13 +213,25 @@ const resultTextLimit = 500
 
 // truncateResultText bounds s and says so when it cuts, so a reader never
 // mistakes a clipped message for the whole of what the runtime said.
+//
+// Counted in runes, not bytes, so the cut never lands mid-character and
+// garbles the last one. Ranging a string walks it rune-wise and yields each
+// one's byte offset, so the scan stops at the limit and copies only what it
+// keeps — converting to []rune first would allocate against the whole
+// refusal, which is precisely the input this exists to not hold onto.
 func truncateResultText(s string) string {
+	// A byte length within the limit is a rune count within it too, so the
+	// ordinary case does not scan at all.
 	if len(s) <= resultTextLimit {
 		return s
 	}
-	r := []rune(s)
-	if len(r) <= resultTextLimit {
-		return s
+	count := 0
+	for i := range s {
+		if count == resultTextLimit {
+			return s[:i] + "… (truncated)"
+		}
+		count++
 	}
-	return string(r[:resultTextLimit]) + "… (truncated)"
+	// Long in bytes, short in runes: multi-byte text under the limit.
+	return s
 }
