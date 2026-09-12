@@ -96,3 +96,18 @@ func TestNativeMemoryBlock_NamesTheRetainedTaskContext(t *testing.T) {
 		t.Errorf("the native prompt does not name the retained task context at %q; a compacted run has no way back to it", want)
 	}
 }
+
+// TestSDKMemoryBlock_NamesTheRetainedTaskContext is the same tie on the other
+// runtime, and it is a tie the SDK block only earns from the commit its launch
+// started writing the file: the block is literal, so a path it names that
+// nothing writes is a re-read the agent is sent to make and cannot.
+//
+// The path is run-root-relative here where the native block's is absolute —
+// that runtime's blocks name in-jail paths outright, while this one defers to
+// the run root <run_context> states.
+func TestSDKMemoryBlock_NamesTheRetainedTaskContext(t *testing.T) {
+	want := worktree.ScratchDir + "/" + worktree.EntityMemoryDir + "/" + taskContextFileName
+	if composed := agentprompt.Build(machinistSpec()); !strings.Contains(composed, want) {
+		t.Errorf("the SDK prompt does not name the retained task context at %q; a compacted run has no way back to it", want)
+	}
+}
