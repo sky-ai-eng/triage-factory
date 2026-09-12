@@ -1,11 +1,11 @@
-// Workspace-snapshot retention reaper. Every parked or concluded run carries a
-// durable workspace blob (the cold-resume backstop). Resume value decays fast —
-// week-old WIP against a moved-on main is rarely worth rehydrating — so the
-// blobs are bounded by a retention TTL: the reaper enumerates the keys whose
-// last activity predates the TTL and drops their snapshots. It enumerates from
-// the DB (the blob store has no List), keyed by the task, and only reaps a key
-// once ALL of that task's conversations are past the TTL — a task's
-// conversations share one tree and one blob.
+// Workspace-snapshot retention reaper. A park or a clean terminal snapshots
+// the conversation's workspace to a durable blob — the cold-resume backstop —
+// keyed by the task, so a task's conversations share one tree and one blob.
+// Resume value decays fast — week-old WIP against a moved-on main is rarely
+// worth rehydrating — so the blobs are bounded by a retention TTL: the reaper
+// enumerates the keys whose last activity predates the TTL and drops their
+// snapshots, from the DB rather than the store (the blob store has no List),
+// and only once ALL of that task's conversations are past the TTL.
 //
 // The enumeration is every top-level conversation on the task, not only the
 // states that write a snapshot: a key is collectable on its idleness alone,
