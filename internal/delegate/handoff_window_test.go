@@ -80,10 +80,12 @@ func TestFollowUp_ConcludedStepOfARunningBlueprintIsRefused(t *testing.T) {
 		t.Errorf("current_step_index = %d, want 1", br.CurrentStepIndex)
 	}
 
-	// Past the advance the answer changes to the permanent one: step 0 is
-	// behind the blueprint for good, and the moved-past refusal takes over.
-	if ok, reason := s.ResumabilityFor(ctx, org, loadConversation(t, s, step0ConversationID)); ok || reason != ResumeBlockedBlueprintConcluded {
-		t.Errorf("after the advance: ResumabilityFor = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedBlueprintConcluded)
+	// Past the advance the answer changes to the permanent one, and it is the
+	// boundary rather than the blueprint that says so: the advance stamped step
+	// 0 `step_advanced`, which is both more specific than "the blueprint moved
+	// past this step" and true whatever the blueprint does next.
+	if ok, reason := s.ResumabilityFor(ctx, org, loadConversation(t, s, step0ConversationID)); ok || reason != ResumeBlockedEndedStepAdvanced {
+		t.Errorf("after the advance: ResumabilityFor = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedEndedStepAdvanced)
 	}
 }
 

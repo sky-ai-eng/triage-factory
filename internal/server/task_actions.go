@@ -98,18 +98,50 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jiraUserClient, ok := s.selfClaim(w, r, orgID, userID, id, req.HesitationMs)
+	jiraUserClient, landing, ok := s.selfClaim(w, r, orgID, userID, id, req.HesitationMs)
 	if !ok {
 		return
 	}
 	// Taking a task onto a human's plate takes it off the agent's: stop any
 	// in-flight run and resolve every unresolved artifact the task holds.
-	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, delegate.StopCauseTaskDispositioned)
+	//
+	// Only the takeover is a boundary, and the landing is what says so. A
+	// claim from unclaimed and an idempotent re-claim move the task off
+	// nobody: there is no conversation the task stops being about, and
+	// stamping one would record a handoff that never happened. (A prior
+	// requeue has already ended whatever it ended, and the door's guard keeps
+	// the reason that actually applied.)
+	cleanupCtx := context.WithoutCancel(r.Context())
+	stopCause := delegate.StopCauseTaskDispositioned
+	if landing == claimLandingFromAgent {
+		stopCause = delegate.StopCauseTaskTakenOver
+	}
+	s.teardownTaskConversations(cleanupCtx, orgID, userID, id, stopCause)
+	if landing == claimLandingFromAgent {
+		s.endTaskConversations(cleanupCtx, orgID, userID, id, domain.EndedTakenOver)
+	}
 	if jiraUserClient != nil {
 		s.syncJiraClaim(r, orgID, userID, id, jiraUserClient)
 	}
 	s.writeTaskResource(w, r, orgID, userID, id)
 }
+
+// claimLanding names which of selfClaim's three accept paths a claim took. It
+// exists because the caller's cleanup differs by path and cannot re-derive it:
+// after the claim lands, the task's columns read the same whether a person
+// took it from the agent or picked it up from the queue, and only the first is
+// a boundary on the task's conversations.
+type claimLanding int
+
+const (
+	// claimLandingIdempotent — the caller already owned it; nothing moved.
+	claimLandingIdempotent claimLanding = iota
+	// claimLandingFromUnclaimed — picked up from the queue. Nobody was
+	// working it, so nothing is handed over.
+	claimLandingFromUnclaimed
+	// claimLandingFromAgent — the takeover: a person took work the agent held.
+	claimLandingFromAgent
+)
 
 // selfClaim is the claim route's no-target arm: a race-safe transition to the
 // caller's ownership with three accept paths (idempotent same-user, takeover
@@ -117,9 +149,9 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 // → 409). For a Jira-backed task it resolves the acting user's Jira client up
 // front so a user with no connected Jira is refused BEFORE the claim lands
 // (acting as the bot here would mis-assign the ticket to the service account).
-// Returns the resolved Jira client (nil for GitHub tasks) and ok=false when it
-// already wrote an error response.
-func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, hesitationMs int) (*jira.Client, bool) {
+// Returns the resolved Jira client (nil for GitHub tasks), which accept path
+// landed, and ok=false when it already wrote an error response.
+func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, hesitationMs int) (*jira.Client, claimLanding, bool) {
 	var task *domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -127,11 +159,11 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
-		return nil, false
+		return nil, claimLandingIdempotent, false
 	}
 	if task == nil {
 		notFound(w, "task")
-		return nil, false
+		return nil, claimLandingIdempotent, false
 	}
 	// Terminal-status refusal: claim transitions on done/dismissed rows are
 	// meaningless. RecordSwipe refuses them too, so this is the answer the
@@ -139,7 +171,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 	// about the task rather than a silently unaudited claim.
 	if isTerminalTaskStatus(task.Status) {
 		writeTaskTerminal(w, "claim")
-		return nil, false
+		return nil, claimLandingIdempotent, false
 	}
 
 	// A Jira-backed claim assigns the ticket to the claiming user and
@@ -154,16 +186,16 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 				Reason:  httpx.ReasonNotConfigured,
 				Message: "connect your Jira to act on tickets",
 			})
-			return nil, false
+			return nil, claimLandingIdempotent, false
 		}
 		if jerr != nil {
 			internalError(w, "tasks", jerr)
-			return nil, false
+			return nil, claimLandingIdempotent, false
 		}
 		jiraUserClient = c
 	}
 
-	claimChanged := false
+	landing := claimLandingIdempotent
 	switch {
 	case task.ClaimedByUserID == userID:
 		// Idempotent: same user already owns it.
@@ -172,7 +204,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			Reason:  httpx.ReasonConflict,
 			Message: "task is already claimed by another user",
 		})
-		return nil, false
+		return nil, claimLandingIdempotent, false
 	case task.ClaimedByAgentID != "":
 		var claimOK bool
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -184,15 +216,15 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 				Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
 			})
-			return nil, false
+			return nil, claimLandingIdempotent, false
 		}
 		if !claimOK {
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason: httpx.ReasonConflict, Message: "claim race lost; refetch task and retry",
 			})
-			return nil, false
+			return nil, claimLandingIdempotent, false
 		}
-		claimChanged = true
+		landing = claimLandingFromAgent
 	default:
 		var claimOK bool
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -204,15 +236,15 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 				Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
 			})
-			return nil, false
+			return nil, claimLandingIdempotent, false
 		}
 		if !claimOK {
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason: httpx.ReasonConflict, Message: "claim race lost; refetch task and retry",
 			})
-			return nil, false
+			return nil, claimLandingIdempotent, false
 		}
-		claimChanged = true
+		landing = claimLandingFromUnclaimed
 	}
 
 	// Audit post-mutation, best-effort: the claim helpers already cleared
@@ -231,7 +263,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		taskActionLog.Warn("audit write did not land for claim, claim mutation already did",
 			"task", id, "refused", swipeErr == nil, "error", swipeErr)
 	}
-	if claimChanged {
+	if landing != claimLandingIdempotent {
 		s.ws.Broadcast(websocket.Event{
 			Type:  "task_claimed",
 			OrgID: orgID,
@@ -242,7 +274,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			},
 		})
 	}
-	return jiraUserClient, true
+	return jiraUserClient, landing, true
 }
 
 // reassignClaim is the claim route's target_user_id arm: the user↔user
@@ -454,7 +486,14 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 	// Re-delegating is still a handoff off whatever was in flight: stop the
 	// running conversation and resolve the task's unresolved artifacts before
 	// the new run starts.
-	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, delegate.StopCauseTaskDispositioned)
+	//
+	// The boundary is stamped here and not after triggerDelegation, and the
+	// order is the invariant: step 0 of the new delegation must never be
+	// minted onto a task whose prior conversation is still un-ended, or the
+	// task momentarily has two live ones and nothing can say which it is about.
+	cleanupCtx := context.WithoutCancel(r.Context())
+	s.teardownTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDelegated)
+	s.endTaskConversations(cleanupCtx, orgID, userID, id, domain.EndedDelegated)
 
 	response := map[string]any{"status": newStatus}
 	if s.spawner != nil {
@@ -623,6 +662,49 @@ func (s *Server) stopTaskConversations(ctx context.Context, orgID, userID, taskI
 		if err := s.spawner.StopConversationAndCancelBlueprint(orgID, conversationID, userID, cause); err != nil {
 			taskActionLog.Warn("stop conversation failed", "conversation", conversationID, "task", taskID, "error", err)
 		}
+	}
+}
+
+// endTaskConversations stamps the task's boundary: every conversation still
+// live on the task stops being the one the task is about, with the reason it
+// stopped being it. One door for the three gestures that move a task off
+// whoever was working it (requeue/undo, takeover, delegate), because the row
+// they each write is identical and only the reason differs.
+//
+// It runs behind teardownTaskConversations, never instead of it: the stop ends
+// the PROCESS and this ends the CONVERSATION, and a stop that failed (a dead
+// executor, a lost signal) must still leave a row that says the task moved on.
+// Which is also why it is unconditional on status — a conversation that
+// concluded on its own an hour ago is just as much not this task's live one.
+//
+// Best-effort and logged, like every other step of these teardowns: the task
+// has already flipped by the time this runs, and failing the response would
+// misreport a change that landed.
+func (s *Server) endTaskConversations(ctx context.Context, orgID, userID, taskID string, reason domain.EndedReason) {
+	var ended []domain.Conversation
+	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var e error
+		ended, e = tx.Conversations.EndConversationsForTask(ctx, orgID, taskID, reason)
+		return e
+	}); err != nil {
+		taskActionLog.Error("stamp the task boundary on its conversations failed",
+			"task", taskID, "ended_reason", string(reason), "error", err)
+		return
+	}
+	// One conversation_update per stamped row. The rows carry no new status —
+	// what changed is whether a follow-up can land — so this is an
+	// invalidation signal: a run station holding one of them refetches and
+	// finds the composer disabled with the rung that refused it.
+	if s.ws == nil {
+		return
+	}
+	for i := range ended {
+		s.ws.Broadcast(websocket.Event{
+			Type:           "conversation_update",
+			OrgID:          orgID,
+			ConversationID: ended[i].ID,
+			Data:           map[string]any{"status": ended[i].Status},
+		})
 	}
 }
 

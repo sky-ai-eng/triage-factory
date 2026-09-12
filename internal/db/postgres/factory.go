@@ -131,12 +131,11 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 // setup sub-states ride that claim's phase). Mirrors the X-button window in
 // AgentCard. Duplicated in sqlite/factory.go; intentional per-backend copy.
 func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string) ([]domain.FactoryActiveConversation, error) {
-	// memory_missing derivation: the agent has not produced
-	// its memory file iff no conversation_memory row exists, OR the row's
-	// agent_content is NULL/whitespace. BTRIM with the whitespace set
-	// collapses tabs, newlines, and carriage returns onto the same
-	// NULL signal so legacy empty/whitespace rows match the canonical
-	// "missing" condition.
+	// memory_missing derivation: the agent has not produced its memory file
+	// iff the conversation has no conversation_memory row whose source is
+	// `agent`. Same predicate the conversation read uses (pgConversationColumns
+	// carries the reasoning) — the belt and the run station answer the same
+	// question about the same row, so they resolve it the same way.
 	query := `
 		SELECT
 			r.id, r.task_id, r.prompt_id,
@@ -147,7 +146,7 @@ func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string
 			(SELECT SUM(cl.num_turns)::bigint FROM claims cl WHERE cl.conversation_id = r.id),
 			COALESCE(r.park_reason, ''), COALESCE(r.worktree_path, ''),
 			COALESCE(r.result_summary, ''), COALESCE(r.sdk_session_id, ''),
-			(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing,
+			(rm.source IS DISTINCT FROM 'agent') AS memory_missing,
 			r.trigger_type, COALESCE(r.trigger_id::text, ''),
 			COALESCE(r.actor_agent_id::text, ''),
 			COALESCE(a.display_name, ''),

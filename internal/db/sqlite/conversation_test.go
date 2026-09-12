@@ -338,25 +338,19 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 				t.Fatalf("set blueprint_run status: %v", err)
 			}
 		},
-		SetConversationMemory: func(t *testing.T, conversationID, content string) {
+		SetConversationMemory: func(t *testing.T, conversationID, content string, source domain.MemorySource) {
 			t.Helper()
 			memID := uuid.New().String()
-			if content == dbtest.NullMemorySentinel {
-				if _, err := conn.Exec(`
-					INSERT INTO conversation_memory (id, conversation_id, agent_content, source) VALUES (?, ?, NULL, 'none')
-				`, memID, conversationID); err != nil {
-					t.Fatalf("seed null memory: %v", err)
-				}
-				return
+			var agentContent any
+			if content != dbtest.NullMemorySentinel {
+				agentContent = content
 			}
-			// Raw SQL, deliberately: the empty and whitespace-only shapes the
-			// memory_missing derivation has to trim are ones the store door
-			// refuses under source='agent', and this seeder's subject is the
-			// derivation, not the door.
+			// Raw SQL, deliberately: this seeder's subject is the
+			// memory_missing derivation, not the store door's validation.
 			if _, err := conn.Exec(`
-				INSERT INTO conversation_memory (id, conversation_id, agent_content, source) VALUES (?, ?, ?, 'agent')
-			`, memID, conversationID, content); err != nil {
-				t.Fatalf("seed memory: %v", err)
+				INSERT INTO conversation_memory (id, conversation_id, agent_content, source) VALUES (?, ?, ?, ?)
+			`, memID, conversationID, agentContent, string(source)); err != nil {
+				t.Fatalf("seed memory (source=%s): %v", source, err)
 			}
 		},
 		SeedRawMessage: func(t *testing.T, conversationID, column, rawJSON string) int64 {

@@ -228,14 +228,24 @@ func TestReapDeadExecutors_TerminalFailsExecutorLostPastAttemptBudget(t *testing
 		t.Fatalf("counts = %+v, want {Failed:1}", counts)
 	}
 
-	var status, failureKind string
+	var status, failureKind, endedReason string
+	var ended bool
 	if err := h.AdminDB.QueryRowContext(ctx,
-		`SELECT status, COALESCE(failure_kind, '') FROM conversations WHERE id = $1`, fx.conversationID,
-	).Scan(&status, &failureKind); err != nil {
+		`SELECT status, COALESCE(failure_kind, ''), ended_at IS NOT NULL, COALESCE(ended_reason, '')
+		   FROM conversations WHERE id = $1`, fx.conversationID,
+	).Scan(&status, &failureKind, &ended, &endedReason); err != nil {
 		t.Fatalf("read back conversation: %v", err)
 	}
 	if status != "failed" || failureKind != string(domain.ConversationFailureExecutorLost) {
 		t.Errorf("conversation (status=%q failure_kind=%q), want (failed, executor_lost)", status, failureKind)
+	}
+	// The boundary rides the same statement. Without it the reaped
+	// conversation stays resumable and owes its memory to nobody — and the
+	// brain is the only thing left that can say so for a run whose executor
+	// is gone.
+	if !ended || endedReason != string(domain.EndedFailed) {
+		t.Errorf("conversation boundary = (ended=%v, reason=%q), want a stamp with reason %q",
+			ended, endedReason, domain.EndedFailed)
 	}
 
 	var brStatus string

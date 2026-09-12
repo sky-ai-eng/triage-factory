@@ -359,9 +359,14 @@ type Conversation struct {
 	// (ConversationFailureKind vocabulary) for a status='failed' conversation —
 	// see the type's doc. Empty string === SQL NULL: non-failed conversations,
 	// legacy failed rows, and failures nothing classified.
-	FailureKind   ConversationFailureKind
-	SessionID     string // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
-	MemoryMissing bool   // true if the pre-complete memory-file gate was exhausted without the agent writing a memory file
+	FailureKind ConversationFailureKind
+	SessionID   string // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
+	// MemoryMissing — the agent did not write its own memory: the conversation
+	// has no conversation_memory row whose Source is MemorySourceAgent. A
+	// generated row (the provisioner standing in) and a `none` row (a run that
+	// concluded with nothing to say) both leave it true, because the question
+	// is about the agent and not about whether a row exists.
+	MemoryMissing bool
 	TriggerType   string // "manual" | "event" (matches conversations.trigger_type / blueprint_runs.trigger_type vocabulary)
 	TriggerID     string // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step's conversation so the llm_spend view can attribute autonomous spend by rule (TFAC-478); empty/NULL for manual conversations
 

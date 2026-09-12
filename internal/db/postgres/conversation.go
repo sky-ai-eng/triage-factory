@@ -974,6 +974,15 @@ func endConversation(ctx context.Context, q queryer, orgID, conversationID strin
 // the ledger-derived accounting (cost + tokens) from the `msum` lateral
 // (see conversationClaimLateral / conversationLedgerLateral). Status is the derived display
 // ladder (pgDisplayStatusSQL) rather than the stored column.
+//
+// memory_missing asks one question — did the AGENT write its own memory? — so
+// it reads the row's source and nothing else. IS DISTINCT FROM covers both
+// ways of answering no in one predicate: no conversation_memory row at all
+// (the LEFT JOIN yields NULL), and a row somebody else wrote. A `generated`
+// row is the provisioner standing in for an agent that never wrote, and a
+// `none` row is a run that concluded with nothing to say; neither is the
+// agent, so neither clears the flag. The store door holds agent_content NULL
+// exactly when source is `none`, which is why content is not consulted here.
 const pgConversationColumns = `
 	r.id, COALESCE(r.task_id::text, ''), COALESCE(r.runtime, ''), ` + pgDisplayStatusSQL + `, COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
 	msum.total_cost_usd, cl.duration_ms, cl.num_turns,
@@ -990,7 +999,7 @@ const pgConversationColumns = `
 	cl.attempts,
 	r.blueprint_run_id, r.blueprint_step_index,
 	msum.input_tokens, msum.output_tokens, msum.cache_read_tokens, msum.cache_creation_tokens,
-	(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing,
+	(rm.source IS DISTINCT FROM 'agent') AS memory_missing,
 	COALESCE(a.display_name, '') AS actor_agent_name,
 	r.ended_at, COALESCE(r.ended_reason, '')
 `

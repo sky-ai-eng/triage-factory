@@ -103,7 +103,38 @@ const (
 	// not reacted yet. The one rung about TIMING rather than about the
 	// conversation: a beat later the answer changes.
 	ResumeBlockedStepHandedOff = "step_handed_off"
+	// The boundary rungs: the task moved on and this conversation is no longer
+	// the one it is about. One per domain.EndedReason rather than a single
+	// "ended", because the six are what a person is actually told and they
+	// send them different places — a requeued task is picked up by whoever
+	// claims it next, a taken-over one by the person holding it, an archived
+	// team's work by nobody. Permanent, and asked before every rung below:
+	// unlike a missing workspace or a concluded blueprint, an ended
+	// conversation is refused whatever its status, so no other rung's question
+	// is worth asking first.
+	ResumeBlockedEndedRequeued     = "ended_requeued"
+	ResumeBlockedEndedDelegated    = "ended_delegated"
+	ResumeBlockedEndedTakenOver    = "ended_taken_over"
+	ResumeBlockedEndedStepAdvanced = "ended_step_advanced"
+	ResumeBlockedEndedTeamArchived = "ended_team_archived"
+	ResumeBlockedEndedFailed       = "ended_failed"
 )
+
+// endedFollowUpBlock is the boundary rung for one conversation: the rung named
+// for the reason it ended, or "" while it is still its task's live one.
+//
+// Derived from the stored reason rather than switched over, so a reason added
+// to the vocabulary reaches the ladder without a second place to teach — the
+// wire name is the reason with the prefix, which is also what the frontend's
+// gloss keys on. An unstamped ended_at cannot happen (the store doors write
+// both columns or neither), and a reason this build does not know still
+// refuses: the fallthrough is blockedFollowUpError's generic arm.
+func endedFollowUpBlock(conv *domain.Conversation) string {
+	if conv.EndedAt == nil {
+		return ""
+	}
+	return "ended_" + string(conv.EndedReason)
+}
 
 // resumableState reports whether a run with no warm process can be woken by a
 // follow-up message. Two stored states qualify, and between them they are every
@@ -120,7 +151,8 @@ const (
 // not have to know that this predicate has stopped caring.
 //
 // `failed` is the exclusion: the infrastructure under the run died, so there is
-// no coherent workspace to rehydrate — failConversation drops whatever blob it had.
+// no coherent workspace to rehydrate. It is also an ended conversation, which
+// the rung above this one refuses first and for a reason a person can read.
 // Runs never park for approval; a terminal run that left an unresolved artifact
 // (draft PR / ready review) resumes through this same path plus the feedback
 // ledger, not through a parked status.
@@ -553,6 +585,14 @@ func drainsUndeliveredInput(conv domain.Conversation) bool {
 // reaches walks the refusal ladder, and one that is not resting there takes a
 // message only if something is already draining its queue.
 func (s *Spawner) followUpBlock(ctx context.Context, orgID string, conv *domain.Conversation) string {
+	// The boundary first: a conversation its task has moved past takes no
+	// message whatever its status, so this is asked ahead of the
+	// resting/draining split below — a `completed` row on a requeued task
+	// looks perfectly resumable from status alone, and a `queued` one is
+	// draining a queue whose engagement the boundary just ended.
+	if block := endedFollowUpBlock(conv); block != "" {
+		return block
+	}
 	if !resumableState(conv.Status, conv.Outcome) {
 		if drainsUndeliveredInput(*conv) {
 			return ""
@@ -586,6 +626,12 @@ func blockedFollowUpError(block string) error {
 		return ErrBlueprintCancelled
 	case ResumeBlockedStepHandedOff:
 		return ErrStepHandedOff
+	case ResumeBlockedEndedRequeued, ResumeBlockedEndedDelegated, ResumeBlockedEndedTakenOver,
+		ResumeBlockedEndedStepAdvanced, ResumeBlockedEndedTeamArchived, ResumeBlockedEndedFailed:
+		// One error for all six. The rung is what carries WHICH boundary, and
+		// it reaches the client on the run read; the error only has to settle
+		// the status, and every boundary settles it the same way.
+		return ErrConversationEnded
 	default:
 		return ErrConversationNotSteerable
 	}

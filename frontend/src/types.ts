@@ -322,10 +322,17 @@ export interface Conversation {
   // resume_blocked_reason names the rung that refused, present only when
   // resumable is false: 'workspace_expired' | 'blueprint_concluded' |
   // 'blueprint_cancelled' | 'session_missing' | 'worktree_missing' |
-  // 'model_missing' | 'not_steerable' (internal/delegate's ResumeBlocked*
-  // constants). Open-world by design — an unrecognized reason renders as the
-  // generic "can't be resumed" copy.
+  // 'model_missing' | 'not_steerable' | one 'ended_*' per boundary
+  // (internal/delegate's ResumeBlocked* constants). Open-world by design — an
+  // unrecognized reason renders as the generic "can't be resumed" copy.
   resume_blocked_reason?: string
+  // The boundary: when this conversation stopped being its task's live one,
+  // and why — one of 'requeued' | 'delegated' | 'taken_over' |
+  // 'step_advanced' | 'team_archived' | 'failed' (internal/domain's
+  // EndedReason). Both keys are absent while it is open, and they travel
+  // together: the stamp writes both or neither.
+  ended_at?: string
+  ended_reason?: string
 }
 
 // ArtifactKind is the closed set of artifact discriminators the backend emits

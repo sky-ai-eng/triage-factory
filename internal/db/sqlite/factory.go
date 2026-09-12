@@ -115,18 +115,12 @@ func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string
 		return nil, err
 	}
 	// memory_missing is derived from a LEFT JOIN to conversation_memory rather
-	// than read off a column on conversations: "the agent has not
-	// produced its memory file" === "no conversation_memory row exists, OR the
-	// row's agent_content is NULL/whitespace." NULLIF(TRIM(...), '')
-	// collapses both empty strings (legacy carry-over from before
-	// this was normalized) and whitespace-only writes onto the
-	// same NULL signal, so a single condition covers all three forms
-	// of noncompliance.
-	//
-	// The denormalized memory_missing column this replaces drifted
-	// from ground truth whenever a memory row was written outside the
-	// spawner's gate; the JOIN keeps the projection honest by
-	// construction.
+	// than read off a column on conversations: "the agent has not produced its
+	// memory file" === "no conversation_memory row whose source is `agent`",
+	// which covers both a conversation with no row and one whose row somebody
+	// else wrote. Same predicate the conversation read uses
+	// (sqliteConversationColumns, and pgConversationColumns for the reasoning),
+	// so the belt and the run station cannot disagree about one row.
 	query := `
 		SELECT
 			r.id, r.task_id, COALESCE(r.prompt_id, ''),
@@ -137,7 +131,7 @@ func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string
 			(SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = r.id),
 			COALESCE(r.park_reason, ''), COALESCE(r.worktree_path, ''),
 			COALESCE(r.result_summary, ''), COALESCE(r.sdk_session_id, ''),
-			(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
+			(COALESCE(rm.source, '') <> 'agent') AS memory_missing,
 			r.trigger_type, COALESCE(r.trigger_id, ''),
 			COALESCE(r.actor_agent_id, ''),
 			COALESCE(a.display_name, ''),

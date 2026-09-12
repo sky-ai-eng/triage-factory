@@ -69,6 +69,22 @@ var ErrConversationConcluded = errors.New("resume: this conversation can no long
 // event that ended it.
 var ErrBlueprintCancelled = errors.New("resume: this conversation can no longer be continued — the workflow it belonged to was cancelled")
 
+// ErrConversationEnded is returned when a conversation's task has moved past
+// it: requeued, re-delegated, taken over by a person, advanced to the next
+// blueprint step, archived with its team, or failed. The conversation is no
+// longer the one its task is about, so nothing will ever drive it again and a
+// message would sit undelivered forever.
+//
+// One sentinel for all six boundaries, because they settle the HTTP answer
+// identically (409: the state moved, re-read it) and the rung the run read
+// carries is what says which boundary it was. The message stays general for
+// the same reason — the words specific to a requeue or a takeover belong on
+// the surface that knows which one, and the frontend's gloss keys on the rung.
+//
+// Distinct from ErrBlueprintCancelled, which is about the machinery under a
+// conversation being called off while the conversation itself was never ended.
+var ErrConversationEnded = errors.New("send: this conversation has ended — its task has moved on, and a new conversation carries the work")
+
 // ErrStepHandedOff is returned when a conversation concluded as a step of a
 // blueprint that has not reacted to that terminal yet.
 //

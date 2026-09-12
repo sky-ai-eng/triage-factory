@@ -248,6 +248,21 @@ export function resumeBlockedCopy(conversation: Conversation): string {
       return 'This run didn’t record the state a resume needs, so it can’t be continued.'
     case 'model_not_enabled':
       return 'This run’s model is no longer one this team can pick — choose one from the team’s enabled models in Settings, then continue.'
+    // The boundary rungs. Each says the same thing — this conversation is no
+    // longer the one its task is about — and then the part that differs: who
+    // or what carries the work now, since that is what the reader does next.
+    case 'ended_requeued':
+      return 'This task was returned to the queue; the next claimant starts a new conversation.'
+    case 'ended_delegated':
+      return 'This task was handed to a new delegation, which carries the work now.'
+    case 'ended_taken_over':
+      return 'Someone took this task over, so this run is finished. Follow up with them.'
+    case 'ended_step_advanced':
+      return 'This step is done and the workflow has moved on — follow up on its latest step.'
+    case 'ended_team_archived':
+      return 'The team that owned this work was archived, so nothing will pick it back up.'
+    case 'ended_failed':
+      return 'This run failed, so it can’t be continued. Delegate the task again to start fresh.'
     default:
       return 'This conversation can’t take a follow-up.'
   }
