@@ -10,7 +10,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // TestWorkspaceSnapshotStore_Postgres runs the shared conformance suite against
@@ -26,14 +25,14 @@ func TestWorkspaceSnapshotStore_Postgres(t *testing.T) {
 		h.Reset(t)
 		orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "alice")
 		seed := dbtest.WorkspaceSnapshotSeeder{
-			BlueprintRun: func(t *testing.T, suffix string) string {
+			Task: func(t *testing.T, _ string) string {
 				t.Helper()
-				return seedPgBlueprintRunForSnapshot(t, h, orgID, userID, suffix)
+				return seedPgTask(t, h, orgID, userID)
 			},
-			DeleteBlueprintRun: func(t *testing.T, blueprintRunID string) {
+			DeleteTask: func(t *testing.T, taskID string) {
 				t.Helper()
-				if _, err := h.AdminDB.Exec(`DELETE FROM blueprint_runs WHERE id = $1`, blueprintRunID); err != nil {
-					t.Fatalf("delete blueprint_run: %v", err)
+				if _, err := h.AdminDB.Exec(`DELETE FROM tasks WHERE id = $1`, taskID); err != nil {
+					t.Fatalf("delete task: %v", err)
 				}
 			},
 		}
@@ -42,7 +41,7 @@ func TestWorkspaceSnapshotStore_Postgres(t *testing.T) {
 }
 
 // TestWorkspaceSnapshotStore_Postgres_OrgScoped pins org_id defense-in-depth:
-// the snapshot key is (org, blueprint_run), so a read or a write scoped to
+// the snapshot key is (org, task), so a read or a write scoped to
 // another org must not reach this org's row even on the BYPASSRLS admin pool.
 func TestWorkspaceSnapshotStore_Postgres_OrgScoped(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -52,52 +51,27 @@ func TestWorkspaceSnapshotStore_Postgres_OrgScoped(t *testing.T) {
 
 	orgA, userA, _ := pgtest.SeedOrgWithUser(t, h, "alice")
 	otherOrg, _, _ := pgtest.SeedOrgWithUser(t, h, "bob")
-	br := seedPgBlueprintRunForSnapshot(t, h, orgA, userA, "scoped")
+	task := seedPgTask(t, h, orgA, userA)
 	claimID := uuid.New().String()
 
-	if err := stores.WorkspaceSnapshots.BeginSnapshotSystem(ctx, orgA, br, claimID); err != nil {
+	if err := stores.WorkspaceSnapshots.BeginSnapshotSystem(ctx, orgA, task, claimID); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	got, err := stores.WorkspaceSnapshots.GetSnapshotStateSystem(ctx, otherOrg, br)
+	got, err := stores.WorkspaceSnapshots.GetSnapshotStateSystem(ctx, otherOrg, task)
 	if err != nil {
 		t.Fatalf("get under another org: %v", err)
 	}
 	if got != nil {
 		t.Errorf("read under another org returned %+v, want nil", got)
 	}
-	if err := stores.WorkspaceSnapshots.DeleteSnapshotStateSystem(ctx, otherOrg, br); err != nil {
+	if err := stores.WorkspaceSnapshots.DeleteSnapshotStateSystem(ctx, otherOrg, task); err != nil {
 		t.Fatalf("delete under another org: %v", err)
 	}
-	still, err := stores.WorkspaceSnapshots.GetSnapshotStateSystem(ctx, orgA, br)
+	still, err := stores.WorkspaceSnapshots.GetSnapshotStateSystem(ctx, orgA, task)
 	if err != nil {
 		t.Fatalf("get after the other org's delete: %v", err)
 	}
 	if still == nil {
 		t.Error("another org's delete dropped this org's snapshot state")
 	}
-}
-
-// seedPgBlueprintRunForSnapshot mints the entity + event + task + blueprint
-// chain a blueprint_runs row needs and returns the run id — the other half of
-// the snapshot key.
-func seedPgBlueprintRunForSnapshot(t *testing.T, h *pgtest.Harness, orgID, userID, suffix string) string {
-	t.Helper()
-	ctx := context.Background()
-	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-
-	blueprintID := "blueprint-snap-" + suffix + "-" + uuid.New().String()[:8]
-	stepPromptID := "step-snap-" + suffix + "-" + uuid.New().String()[:8]
-	seedPgBlueprint(t, h, orgID, userID, blueprintID)
-	seedPgPrompt(t, h, orgID, userID, stepPromptID)
-	taskID := seedPgTask(t, h, orgID, userID)
-
-	br, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
-		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
-		WorktreePath: "/tmp/wt-snap-" + suffix,
-		StepPlan:     []domain.BlueprintPlanStep{{StepIndex: 0, PromptID: stepPromptID, PromptName: "S", PromptBody: "b", Source: "user"}},
-	})
-	if err != nil {
-		t.Fatalf("seed blueprint_run: %v", err)
-	}
-	return br.ID
 }

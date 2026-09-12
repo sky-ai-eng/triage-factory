@@ -71,7 +71,7 @@ func (a *App) dispatchCtl(payload string) {
 		if a.spawner != nil {
 			a.spawner.HandleCtlNotification(payload)
 		}
-	case "trigger", "pollsoon", "cred_request", "sources_changed":
+	case "trigger", "pollsoon", "cred_request", "sources_changed", "memory_owed":
 		var msg ctlbus.Message
 		if err := json.Unmarshal([]byte(payload), &msg); err != nil {
 			appLog.Warn("tf_ctl: malformed relay message; dropping", "error", err)

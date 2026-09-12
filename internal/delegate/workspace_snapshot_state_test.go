@@ -23,18 +23,18 @@ func TestSnapshotWorkspace_SuccessRecordsWritten(t *testing.T) {
 	setupGitTestEnv(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "snapstate-written")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
+	wsKey := taskIDForConversation(t, database, conversationID)
 
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "work in progress")
 
 	const claimID = "claim-writer"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, claimID, wt, "", domain.ConversationRuntimeNative); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, claimID, wt, "", domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
-	assertSnapshotPresent(t, s, bpr, true)
-	assertSnapshotState(t, s, bpr, domain.WorkspaceSnapshotWritten, claimID)
+	assertSnapshotPresent(t, s, wsKey, true)
+	assertSnapshotState(t, s, wsKey, domain.WorkspaceSnapshotWritten, claimID)
 }
 
 // TestSnapshotWorkspace_PutFailureRecordsFailed: the upload fails, and the
@@ -48,17 +48,17 @@ func TestSnapshotWorkspace_PutFailureRecordsFailed(t *testing.T) {
 	wireBlobStore(t, s)
 	putErr := errors.New("object store unreachable")
 	s.SetStorage(failingPutStorage{Storage: s.Storage(), err: putErr})
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
+	wsKey := taskIDForConversation(t, database, conversationID)
 
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "work in progress")
 
 	const claimID = "claim-doomed"
-	err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, claimID, wt, "", domain.ConversationRuntimeNative)
+	err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, claimID, wt, "", domain.ConversationRuntimeNative)
 	if !errors.Is(err, putErr) {
 		t.Fatalf("snapshotWorkspace error = %v, want the Put failure", err)
 	}
-	assertSnapshotState(t, s, bpr, domain.WorkspaceSnapshotFailed, claimID)
+	assertSnapshotState(t, s, wsKey, domain.WorkspaceSnapshotFailed, claimID)
 }
 
 // TestSnapshotWorkspace_SupersededWriterSkipsPut is the stale-clobber guard: a
@@ -71,7 +71,7 @@ func TestSnapshotWorkspace_SupersededWriterSkipsPut(t *testing.T) {
 	setupGitTestEnv(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "snapstate-superseded")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
+	wsKey := taskIDForConversation(t, database, conversationID)
 
 	const (
 		oldClaim       = "claim-displaced"
@@ -84,25 +84,25 @@ func TestSnapshotWorkspace_SupersededWriterSkipsPut(t *testing.T) {
 	real := s.workspaceSnapshots
 	s.workspaceSnapshots = takeoverSnapshotStore{WorkspaceSnapshotStore: real, afterBegin: func() {
 		ctx := context.Background()
-		if err := real.BeginSnapshotSystem(ctx, runmode.LocalDefaultOrgID, bpr, successorClaim); err != nil {
+		if err := real.BeginSnapshotSystem(ctx, runmode.LocalDefaultOrgID, wsKey, successorClaim); err != nil {
 			t.Errorf("successor begin: %v", err)
 		}
-		putTestSnapshotBytes(t, s, bpr, successorBlob)
+		putTestSnapshotBytes(t, s, wsKey, successorBlob)
 	}}
 
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "the displaced engagement's older work")
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, oldClaim, wt, "", domain.ConversationRuntimeNative); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, oldClaim, wt, "", domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("a superseded snapshot is not a failure: %v", err)
 	}
 
-	if got := readSnapshotBlob(t, s, bpr); got != successorBlob {
+	if got := readSnapshotBlob(t, s, wsKey); got != successorBlob {
 		t.Errorf("blob = %q, want the successor's bytes %q — the displaced engagement overwrote a newer snapshot", got, successorBlob)
 	}
 	// The row stays the successor's, still pending: the displaced writer's CAS
 	// matches nothing, so it cannot close out someone else's write either.
-	assertSnapshotState(t, s, bpr, domain.WorkspaceSnapshotPending, successorClaim)
+	assertSnapshotState(t, s, wsKey, domain.WorkspaceSnapshotPending, successorClaim)
 }
 
 // TestSnapshotWorkspace_NoClaimRecordsNothing: a claimless caller (a manual
@@ -114,16 +114,16 @@ func TestSnapshotWorkspace_NoClaimRecordsNothing(t *testing.T) {
 	setupGitTestEnv(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "snapstate-claimless")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
+	wsKey := taskIDForConversation(t, database, conversationID)
 
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "work in progress")
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", wt, "", domain.ConversationRuntimeNative); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, "", wt, "", domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
-	assertSnapshotPresent(t, s, bpr, true)
-	if got := snapshotState(t, s, bpr); got != nil {
+	assertSnapshotPresent(t, s, wsKey, true)
+	if got := snapshotState(t, s, wsKey); got != nil {
 		t.Errorf("state = %+v, want none for a claimless write", got)
 	}
 }
@@ -138,7 +138,7 @@ func TestParkConversationOpen_FencedTeardownRecordsWrittenState(t *testing.T) {
 	setupGitTestEnv(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "snapstate-fenced")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
+	wsKey := taskIDForConversation(t, database, conversationID)
 	s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
 
 	wt := t.TempDir()
@@ -149,7 +149,7 @@ func TestParkConversationOpen_FencedTeardownRecordsWrittenState(t *testing.T) {
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: conversationID,
 		claudeCwd:      wt,
-		namespace:      bpr,
+		namespace:      wsKey,
 		triggerType:    "event",
 		claimID:        claimID,
 		reason:         db.ParkStopped("user_cancelled", "Cancelled by user"),
@@ -157,8 +157,8 @@ func TestParkConversationOpen_FencedTeardownRecordsWrittenState(t *testing.T) {
 	if !fenced {
 		t.Fatal("the teardown did not report the fence trip")
 	}
-	assertSnapshotPresent(t, s, bpr, true)
-	assertSnapshotState(t, s, bpr, domain.WorkspaceSnapshotWritten, claimID)
+	assertSnapshotPresent(t, s, wsKey, true)
+	assertSnapshotState(t, s, wsKey, domain.WorkspaceSnapshotWritten, claimID)
 }
 
 // TestReapExpiredSnapshots_DropsStateWithTheBlob: the retention sweep takes the
@@ -169,25 +169,25 @@ func TestReapExpiredSnapshots_DropsStateWithTheBlob(t *testing.T) {
 	ctx := context.Background()
 	s, database, conversationID, _ := setupAdvanceFixture(t, "snapstate-reap")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
+	wsKey := taskIDForConversation(t, database, conversationID)
 
 	if _, err := database.Exec(
 		`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-20 days') WHERE id=?`,
 		conversationID); err != nil {
 		t.Fatalf("age the conversation: %v", err)
 	}
-	putTestSnapshot(t, s, bpr)
-	if err := s.workspaceSnapshots.BeginSnapshotSystem(ctx, runmode.LocalDefaultOrgID, bpr, "claim-reaped"); err != nil {
+	putTestSnapshot(t, s, wsKey)
+	if err := s.workspaceSnapshots.BeginSnapshotSystem(ctx, runmode.LocalDefaultOrgID, wsKey, "claim-reaped"); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if _, err := s.workspaceSnapshots.FinishSnapshotSystem(ctx, runmode.LocalDefaultOrgID, bpr, "claim-reaped", true); err != nil {
+	if _, err := s.workspaceSnapshots.FinishSnapshotSystem(ctx, runmode.LocalDefaultOrgID, wsKey, "claim-reaped", true); err != nil {
 		t.Fatalf("finish: %v", err)
 	}
 
 	s.ReapExpiredSnapshots(ctx)
 
-	assertSnapshotPresent(t, s, bpr, false)
-	if got := snapshotState(t, s, bpr); got != nil {
+	assertSnapshotPresent(t, s, wsKey, false)
+	if got := snapshotState(t, s, wsKey); got != nil {
 		t.Errorf("state survived the reap: %+v", got)
 	}
 }
@@ -209,8 +209,8 @@ type takeoverSnapshotStore struct {
 	afterBegin func()
 }
 
-func (t takeoverSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID, blueprintRunID, claimID string) error {
-	if err := t.WorkspaceSnapshotStore.BeginSnapshotSystem(ctx, orgID, blueprintRunID, claimID); err != nil {
+func (t takeoverSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID, taskID, claimID string) error {
+	if err := t.WorkspaceSnapshotStore.BeginSnapshotSystem(ctx, orgID, taskID, claimID); err != nil {
 		return err
 	}
 	if t.afterBegin != nil {

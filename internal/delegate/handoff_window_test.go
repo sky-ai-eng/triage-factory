@@ -244,7 +244,7 @@ func TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot(t *testing.T
 		t.Errorf("stored status = %q, want none — the follow-up re-queued the row", st)
 	}
 
-	members := snapshotMembers(t, blobs, snapshotKey(org, "seedbpr-"+conversationID))
+	members := snapshotMembers(t, blobs, snapshotKey(org, taskID))
 	for _, want := range []string{snapSession, snapScratchPrefix + "notes/build.log"} {
 		if !members[want] {
 			t.Errorf("snapshot member %q missing; the resume this follow-up queued would rehydrate an incomplete workspace (members: %v)", want, members)

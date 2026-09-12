@@ -32,7 +32,7 @@ import (
 // conversation-signal doorbells, and TFAC-614's cred_request doorbell —
 // payloads are discriminated by their JSON "kind" field (see
 // internal/app/ctl.go), so Message kinds must stay disjoint from theirs
-// ("kick", "new", "ack", "cred_request").
+// ("kick", "new", "ack", "cred_request", "memory_owed").
 const Channel = "tf_ctl"
 
 // Message is the relay payload. Kind selects which field group applies:
@@ -46,6 +46,15 @@ const Channel = "tf_ctl"
 // event-source policy for the org and re-due that source's poll. Lossy like the
 // rest, and bounded by the router gate's own short TTL — a dropped message
 // costs at most one TTL of events still routing for a paused source.
+// "memory_owed" uses OrgID plus an OPTIONAL ConversationID: a boundary that just
+// ended a conversation without its agent having written a memory, nudging the
+// brain's memory provisioner (internal/memoryprovision) to settle the debt now
+// instead of at the next backstop sweep. The id names the one conversation to
+// settle; empty means "re-sweep this org, ignoring the attempt backoff", which
+// is what a save of the background-jobs model or an LLM credential publishes —
+// the setting those attempts failed on may have just been fixed. Lossy like the
+// rest, and this one says so loudest: a dropped message costs one sweep
+// interval, never a lost memory.
 type Message struct {
 	Kind           string `json:"kind"`
 	Manager        string `json:"manager,omitempty"`

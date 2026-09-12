@@ -53,10 +53,10 @@ func MemoryStagingBase() string {
 // component must be a real directory; see validateWorktreeAndMounts.)
 //
 // Keyed on the run id — a blueprint step's own conversation id, distinct per
-// step — not the blueprint run id the steps share. That is the whole mechanism:
-// each step mounts a tree materialized for IT, which is what lets step N read
-// step N-1's handoff while a stale tree from an earlier step can never be
-// mounted in its place.
+// step — not the workspace key the conversations sharing a tree have in common.
+// That is the whole mechanism: each step mounts a tree materialized for IT,
+// which is what lets step N read step N-1's handoff while a stale tree from an
+// earlier step can never be mounted in its place.
 func TrustedMemorySourcePath(conversationID string) string {
 	return filepath.Join(MemoryStagingBase(), conversationID)
 }

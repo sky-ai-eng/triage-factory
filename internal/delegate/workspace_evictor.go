@@ -160,7 +160,7 @@ func (s *Spawner) EvictIdleWorkspaces(ctx context.Context, after time.Duration) 
 // on. Rewriting the column would instead have to invent a value for "the tree
 // used to be here".
 func (s *Spawner) evictWorkspace(ctx context.Context, key domain.EvictableWorkspace) int {
-	keyID := memoryNamespace(key.BlueprintRunID)
+	keyID := workspaceKey(key.TaskID)
 	local := localRunTrees(keyID, key.WorktreePaths)
 	if len(local) == 0 {
 		return 0 // another executor's tree (or already gone) — nothing here to reclaim
@@ -201,7 +201,7 @@ func (s *Spawner) evictWorkspace(ctx context.Context, key domain.EvictableWorksp
 	// This answers for the directories about to be removed because
 	// localRunTrees kept only the trees this key names: "no engagement on
 	// keyID" and "nobody is in these directories" are the same statement.
-	busy, err := s.conversations.HasActiveClaimForBlueprintRunSystem(ctx, key.OrgID, key.BlueprintRunID)
+	busy, err := s.conversations.HasActiveClaimForTaskSystem(ctx, key.OrgID, key.TaskID)
 	if err != nil {
 		delegateLog.Warn("workspace evictor: active-claim re-check failed; keeping the warm tree",
 			"org", key.OrgID, "key_id", keyID, "error", err)

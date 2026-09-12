@@ -893,7 +893,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 			extraTools = s.collectExtraTools(p.AllowedTools)
 		}
 	}
-	namespace := memoryNamespace(blueprintRunID)
+	namespace := workspaceKey(task.ID)
 
 	// Per-run cancel handle, mirroring dispatchClaimedConversation's own — a
 	// Cancel() arriving in the narrow window before this registers falls
@@ -1281,8 +1281,15 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		// completion gate wrote it in the terminal this reactor is reacting to.
 		// Best-effort: an unstamped step is a row the provisioner sweeps later,
 		// while refusing to advance would strand the blueprint.
-		if _, err := s.conversations.EndConversationSystem(ctx, orgID, stepConversation.ID, domain.EndedStepAdvanced); err != nil {
+		ended, err := s.conversations.EndConversationSystem(ctx, orgID, stepConversation.ID, domain.EndedStepAdvanced)
+		if err != nil {
 			dispatchLog.Warn("stamp the step-advance boundary on the concluded step failed", "conversation", stepConversation.ID, "blueprint_run", br.ID, "error", err)
+		} else if ended != nil {
+			// The doorbell, before the enqueue below rather than after it: the
+			// next step is held out of the claim gate until this one's memory
+			// lands, so the sooner the brain starts generating the shorter the
+			// blueprint's own pause between steps.
+			s.kickMemoryOwed(orgID, ended.ID)
 		}
 		if err := s.enqueueBlueprintStep(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), nextModel, triggerType, br.TriggerID, creatorUserID, br.ActorAgentID); err != nil {
 			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
@@ -1440,8 +1447,8 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 // one thing: each shape's construction is specific (a GitHub PR run fetches
 // its pull request and lands on its head ref; a Jira or Slack run lands a bare
 // run root the agent populates itself), and a second implementation would be a
-// second definition of what a first launch produces. The setups key by br.ID,
-// so the tree lands at the path the blueprint's steps share.
+// second definition of what a first launch produces. The setups key by
+// task.ID, so the tree lands at the path every conversation on the task shares.
 //
 // Only the path is taken from the result — the caller has already
 // reconstructed the rest of the step's config from the task.
@@ -1452,11 +1459,11 @@ func (s *Spawner) freshStepWorkspace(ctx context.Context, orgID string, br *doma
 	)
 	switch task.EntitySource {
 	case "github":
-		cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh, sidecar, localGit)
+		cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, workspaceKey(task.ID), conv.CreatorUserID, task, gh, sidecar, localGit)
 	case "jira":
-		cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh)
+		cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, workspaceKey(task.ID), conv.CreatorUserID, task, gh)
 	case "slack":
-		cfg, err = s.setupSlack(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh)
+		cfg, err = s.setupSlack(ctx, orgID, conv.ID, conv.ClaimID, workspaceKey(task.ID), conv.CreatorUserID, task, gh)
 	default:
 		return "", fmt.Errorf("unsupported task source: %s", task.EntitySource)
 	}
@@ -1482,16 +1489,17 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 			cfg runConfig
 			err error
 		)
-		// The run-root is blueprint-scoped (shared across steps, rebuilt under the
-		// same key on rehydrate), so setup keys it by br.ID; conv.ID stays the
-		// per-run identity for the worktree_path / conversation_worktrees records.
+		// The run-root is task-scoped (shared across every conversation on the
+		// task, rebuilt under the same key on rehydrate), so setup keys it by
+		// workspaceKey(task.ID); conv.ID stays the per-conversation identity for
+		// the worktree_path / conversation_worktrees records.
 		switch task.EntitySource {
 		case "github":
-			cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh, sidecar, localGit)
+			cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, workspaceKey(task.ID), conv.CreatorUserID, task, gh, sidecar, localGit)
 		case "jira":
-			cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh)
+			cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, workspaceKey(task.ID), conv.CreatorUserID, task, gh)
 		case "slack":
-			cfg, err = s.setupSlack(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh)
+			cfg, err = s.setupSlack(ctx, orgID, conv.ID, conv.ClaimID, workspaceKey(task.ID), conv.CreatorUserID, task, gh)
 		default:
 			err = fmt.Errorf("unsupported task source: %s", task.EntitySource)
 		}
@@ -1511,10 +1519,10 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 
 	// Later step (or crash re-claim): reconstruct config + ensure the shared
 	// worktree exists. ensureWorkspace warm-returns the on-disk path or cold-
-	// rebuilds it from the snapshot keyed by the blueprint_run id.
+	// rebuilds it from the snapshot keyed by the task id.
 	// ClaimID travels with it: the rehydrate inside ensureWorkspace re-stamps
 	// worktree_path, and that stamp is a fenced engagement write.
-	convForWS := &domain.Conversation{ID: conv.ID, ClaimID: conv.ClaimID, WorktreePath: br.WorktreePath, BlueprintRunID: br.ID}
+	convForWS := &domain.Conversation{ID: conv.ID, ClaimID: conv.ClaimID, TaskID: task.ID, WorktreePath: br.WorktreePath, BlueprintRunID: br.ID}
 	cfg := runConfig{orgID: orgID}
 	switch task.EntitySource {
 	case "github":
@@ -1895,7 +1903,16 @@ func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversatio
 	if err != nil {
 		dispatchLog.Warn("mark orphaned conversation failed", "conversation", conv.ID, "error", err)
 	}
-	if _, err := s.conversations.EndConversationSystem(bgCtx, orgID, conv.ID, domain.EndedFailed); err != nil {
+	ended, err := s.conversations.EndConversationSystem(bgCtx, orgID, conv.ID, domain.EndedFailed)
+	if err != nil {
 		dispatchLog.Warn("stamp the failure boundary on the orphaned conversation failed", "conversation", conv.ID, "error", err)
+		return
+	}
+	// A conversation failed here failed BEFORE its agent ran, so it owes the
+	// memory that says so — the empty row, generated from a transcript with no
+	// assistant turn in it. Rung for the row this call stamped; a nil one had
+	// already ended and its debt belongs to that boundary.
+	if ended != nil {
+		s.kickMemoryOwed(orgID, ended.ID)
 	}
 }

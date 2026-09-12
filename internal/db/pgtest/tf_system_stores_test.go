@@ -61,7 +61,7 @@ func TestTfSystem_InstanceStatStoreConformance(t *testing.T) {
 // begins and closes out every snapshot, its resume path reads the state back,
 // and its retention reaper deletes it — so the whole surface is on this role's
 // path and none of it has another pod whose success could stand in for it.
-// Seeding stays on AdminDB: staging a blueprint run is fixture setup, not the
+// Seeding stays on AdminDB: staging a task is fixture setup, not the
 // flow under test, and tf_system holds no INSERT on those tables by design.
 func TestTfSystem_WorkspaceSnapshotStoreConformance(t *testing.T) {
 	h := Shared(t)
@@ -70,15 +70,14 @@ func TestTfSystem_WorkspaceSnapshotStoreConformance(t *testing.T) {
 		h.Reset(t)
 		orgID, userID, _ := SeedOrgWithUser(t, h, "snapshot-executor-org")
 		seed := dbtest.WorkspaceSnapshotSeeder{
-			BlueprintRun: func(t *testing.T, suffix string) string {
+			Task: func(t *testing.T, suffix string) string {
 				t.Helper()
 				entityID := seedEntity(t, h, orgID, "github", "octo/repo#"+suffix)
-				taskID := seedTask(t, h, orgID, userID, entityID, "github:pr:opened")
-				return seedBlueprintRun(t, h, orgID, userID, taskID)
+				return seedTask(t, h, orgID, userID, entityID, "github:pr:opened")
 			},
-			DeleteBlueprintRun: func(t *testing.T, blueprintRunID string) {
+			DeleteTask: func(t *testing.T, taskID string) {
 				t.Helper()
-				MustExec(t, h.AdminDB, `DELETE FROM blueprint_runs WHERE id = $1`, blueprintRunID)
+				MustExec(t, h.AdminDB, `DELETE FROM tasks WHERE id = $1`, taskID)
 			},
 		}
 		// The store bundle whose admin half is tf_system — the shape a

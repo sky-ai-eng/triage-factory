@@ -44,6 +44,15 @@ type settingsHandler struct {
 	// construction site in routes() hands this handler the one method rather
 	// than a back-reference to the whole server.
 	kickJira func(r *http.Request, orgID string)
+	// kickMemoryBacklog rings the org-wide memory doorbell after this handler
+	// binds an LLM credential: a generation that failed because the org's
+	// background-jobs model resolved to nothing may succeed now, and the
+	// doorbell's org form re-sweeps that backlog instead of letting each owed
+	// conversation age out of the attempt backoff one at a time. One argument,
+	// because these handlers structurally have no conversation to name — what
+	// they changed is the whole org's ability to generate at all. Wired from
+	// routes() like kickJira.
+	kickMemoryBacklog func(orgID string)
 }
 
 // bedrockRoleResolver is the slice of internal/llmcred the Bedrock role-setup

@@ -36,7 +36,7 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 	if conv := loadConversation(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "continue" {
 		t.Fatalf("conv = {status:%q outcome:%q}, want {completed continue}", conv.Status, conv.Outcome)
 	}
-	assertSnapshotPresent(t, s, bpr, true)
+	assertSnapshotPresent(t, s, taskID, true)
 }
 
 // TestProcessCompletion_PlainAbortWritesSnapshot: a plain abort (completed +
@@ -60,7 +60,7 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	if conv := loadConversation(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "abort" {
 		t.Fatalf("conv = {status:%q outcome:%q}, want {completed abort}", conv.Status, conv.Outcome)
 	}
-	assertSnapshotPresent(t, s, bpr, true)
+	assertSnapshotPresent(t, s, taskID, true)
 }
 
 // TestProcessCompletion_CleanFinishWritesSnapshot is the case the write policy
@@ -83,7 +83,7 @@ func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 	if conv := loadConversation(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "finish" {
 		t.Fatalf("conv = {status:%q outcome:%q}, want {completed finish}", conv.Status, conv.Outcome)
 	}
-	assertSnapshotPresent(t, s, bpr, true)
+	assertSnapshotPresent(t, s, taskID, true)
 }
 
 // TestProcessCompletion_FailedWritesNoSnapshot is the contrast that keeps the
@@ -104,7 +104,7 @@ func TestProcessCompletion_FailedWritesNoSnapshot(t *testing.T) {
 	if conv := loadConversation(t, s, conversationID); conv.Status != "failed" {
 		t.Fatalf("conv status = %q, want failed", conv.Status)
 	}
-	assertSnapshotPresent(t, s, bpr, false)
+	assertSnapshotPresent(t, s, taskID, false)
 }
 
 // TestTerminateBlueprint_AbortRetainsSnapshot: an aborted blueprint keeps its
@@ -115,12 +115,12 @@ func TestTerminateBlueprint_AbortRetainsSnapshot(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-abort-keep")
 	wireBlobStore(t, s)
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
-	putTestSnapshot(t, s, bpr)
+	putTestSnapshot(t, s, taskID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
 		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
 
-	assertSnapshotPresent(t, s, bpr, true)
+	assertSnapshotPresent(t, s, taskID, true)
 }
 
 // TestTerminateBlueprint_CancelRetainsSnapshot: a cancelled blueprint keeps its
@@ -133,12 +133,12 @@ func TestTerminateBlueprint_CancelRetainsSnapshot(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-cancel-keep")
 	wireBlobStore(t, s)
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
-	putTestSnapshot(t, s, bpr)
+	putTestSnapshot(t, s, taskID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
 		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCancelled, "cancelled", nil, true)
 
-	assertSnapshotPresent(t, s, bpr, true)
+	assertSnapshotPresent(t, s, taskID, true)
 }
 
 // TestTerminateBlueprint_CompletedRetainsSnapshot: a cleanly completed blueprint
@@ -150,12 +150,12 @@ func TestTerminateBlueprint_CompletedRetainsSnapshot(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-finish-keep")
 	wireBlobStore(t, s)
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
-	putTestSnapshot(t, s, bpr)
+	putTestSnapshot(t, s, taskID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
 		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
 
-	assertSnapshotPresent(t, s, bpr, true)
+	assertSnapshotPresent(t, s, taskID, true)
 }
 
 // TestTerminateBlueprint_FailedDiscardsSnapshot: `failed` is the one terminal
@@ -167,12 +167,12 @@ func TestTerminateBlueprint_FailedDiscardsSnapshot(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-failed-drop")
 	wireBlobStore(t, s)
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
-	putTestSnapshot(t, s, bpr)
+	putTestSnapshot(t, s, taskID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
 		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusFailed, "crashed", nil, true)
 
-	assertSnapshotPresent(t, s, bpr, false)
+	assertSnapshotPresent(t, s, taskID, false)
 }
 
 // TestReapExpiredSnapshots_DropsExpiredKeepsFresh is the end-to-end retention
@@ -183,23 +183,23 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 	s, database, oldConversationID, _ := setupAdvanceFixture(t, "reap-old")
 	wireBlobStore(t, s)
 
-	oldBpr := blueprintRunIDForConversation(t, database, oldConversationID)
+	oldKey := taskIDForConversation(t, database, oldConversationID)
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-20 days') WHERE id=?`, oldConversationID); err != nil {
 		t.Fatalf("age old run: %v", err)
 	}
-	putTestSnapshot(t, s, oldBpr)
+	putTestSnapshot(t, s, oldKey)
 
 	seedConversation(t, database, "r-fresh", "sess-fresh", "/tmp/wt-fresh")
-	freshBpr := blueprintRunIDForConversation(t, database, "r-fresh")
+	freshKey := taskIDForConversation(t, database, "r-fresh")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='r-fresh'`); err != nil {
 		t.Fatalf("complete fresh run: %v", err)
 	}
-	putTestSnapshot(t, s, freshBpr)
+	putTestSnapshot(t, s, freshKey)
 
 	s.ReapExpiredSnapshots(context.Background())
 
-	assertSnapshotPresent(t, s, oldBpr, false)  // parked past the TTL → reaped
-	assertSnapshotPresent(t, s, freshBpr, true) // within the TTL → kept
+	assertSnapshotPresent(t, s, oldKey, false)  // parked past the TTL → reaped
+	assertSnapshotPresent(t, s, freshKey, true) // within the TTL → kept
 }
 
 // TestListReapableSnapshotKeys_CoversEveryCompletedExcludesFailedAndInTTL pins
@@ -210,40 +210,40 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 // within-TTL open run is not yet eligible.
 func TestListReapableSnapshotKeys_CoversEveryCompletedExcludesFailedAndInTTL(t *testing.T) {
 	s, database, abortConversationID, _ := setupAdvanceFixture(t, "reap-rules")
-	abortBpr := blueprintRunIDForConversation(t, database, abortConversationID)
+	abortKey := taskIDForConversation(t, database, abortConversationID)
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, abortConversationID); err != nil {
 		t.Fatalf("age abort run: %v", err)
 	}
 
 	seedConversation(t, database, "r-fin2", "s", "/tmp/wt")
-	finishBpr := blueprintRunIDForConversation(t, database, "r-fin2")
+	finishKey := taskIDForConversation(t, database, "r-fin2")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish', completed_at=datetime('now','-30 days') WHERE id='r-fin2'`); err != nil {
 		t.Fatalf("finish run: %v", err)
 	}
 	seedConversation(t, database, "r-failed2", "s", "/tmp/wt")
-	failedBpr := blueprintRunIDForConversation(t, database, "r-failed2")
+	failedKey := taskIDForConversation(t, database, "r-failed2")
 	if _, err := database.Exec(`UPDATE conversations SET status='failed', completed_at=datetime('now','-30 days') WHERE id='r-failed2'`); err != nil {
 		t.Fatalf("failed run: %v", err)
 	}
 	seedConversation(t, database, "r-open2", "s", "/tmp/wt")
-	openBpr := blueprintRunIDForConversation(t, database, "r-open2")
+	openKey := taskIDForConversation(t, database, "r-open2")
 	if _, err := database.Exec(`UPDATE conversations SET status='open', completed_at=NULL, started_at=datetime('now') WHERE id='r-open2'`); err != nil {
 		t.Fatalf("open run: %v", err)
 	}
 
 	cutoff := time.Now().Add(-14 * 24 * time.Hour)
 	keys := reapKeys(t, s, cutoff)
-	if !keysContain(keys, abortBpr) {
-		t.Errorf("past-TTL completed+abort key %s not reapable", abortBpr)
+	if !keysContain(keys, abortKey) {
+		t.Errorf("past-TTL completed+abort key %s not reapable", abortKey)
 	}
-	if !keysContain(keys, finishBpr) {
-		t.Errorf("past-TTL completed+finish key %s not reapable; its snapshot would leak forever", finishBpr)
+	if !keysContain(keys, finishKey) {
+		t.Errorf("past-TTL completed+finish key %s not reapable; its snapshot would leak forever", finishKey)
 	}
-	if keysContain(keys, failedBpr) {
-		t.Errorf("failed key %s is reapable; failed runs carry no snapshot to age out", failedBpr)
+	if keysContain(keys, failedKey) {
+		t.Errorf("failed key %s is reapable; failed runs carry no snapshot to age out", failedKey)
 	}
-	if keysContain(keys, openBpr) {
-		t.Errorf("within-TTL open key %s is reapable; the TTL has not elapsed", openBpr)
+	if keysContain(keys, openKey) {
+		t.Errorf("within-TTL open key %s is reapable; the TTL has not elapsed", openKey)
 	}
 	for _, k := range keys {
 		if k.OrgID != runmode.LocalDefaultOrgID {
@@ -252,11 +252,11 @@ func TestListReapableSnapshotKeys_CoversEveryCompletedExcludesFailedAndInTTL(t *
 	}
 }
 
-// TestListReapableSnapshotKeys_SharedBlueprintNeedsAllPastTTL pins the shared-key
-// rule: blueprint steps share one snapshot blob, so a blueprint whose runs span
-// the TTL boundary (one old, one fresh) is NOT reaped until every resumable run
-// is past the TTL.
-func TestListReapableSnapshotKeys_SharedBlueprintNeedsAllPastTTL(t *testing.T) {
+// TestListReapableSnapshotKeys_SharedTaskNeedsAllPastTTL pins the shared-key
+// rule: a task's conversations share one snapshot blob, so a task whose
+// conversations span the TTL boundary (one old, one fresh) is NOT reaped until
+// every resumable one is past the TTL.
+func TestListReapableSnapshotKeys_SharedTaskNeedsAllPastTTL(t *testing.T) {
 	s, database, conversationID1, taskID := setupAdvanceFixture(t, "reap-shared")
 	bpr := blueprintRunIDForConversation(t, database, conversationID1)
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, conversationID1); err != nil {
@@ -274,8 +274,8 @@ func TestListReapableSnapshotKeys_SharedBlueprintNeedsAllPastTTL(t *testing.T) {
 		t.Fatalf("ListReapableSnapshotKeysSystem: %v", err)
 	}
 	for _, k := range keys {
-		if k.BlueprintRunID == bpr {
-			t.Errorf("shared blueprint %s reaped while a step is still within the TTL", bpr)
+		if k.TaskID == taskID {
+			t.Errorf("shared task %s reaped while one of its conversations is still within the TTL", taskID)
 		}
 	}
 }
@@ -308,23 +308,22 @@ func TestParkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
 // parked_at, not the never-resetting started_at); once the park itself ages past
 // the TTL it becomes reapable.
 func TestListReapableSnapshotKeys_OpenRunKeysOffParkedAt(t *testing.T) {
-	s, database, conversationID, _ := setupAdvanceFixture(t, "reap-parked")
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "reap-parked")
 	cutoff := time.Now().Add(-14 * 24 * time.Hour)
 
 	// Started 30 days ago, last re-parked just now → must survive.
 	if _, err := database.Exec(`UPDATE conversations SET status='open', started_at=datetime('now','-30 days'), parked_at=datetime('now') WHERE id=?`, conversationID); err != nil {
 		t.Fatalf("seed recently-parked open run: %v", err)
 	}
-	if keysContain(reapKeys(t, s, cutoff), bpr) {
-		t.Errorf("recently re-parked open run %s reaped on its old started_at; retention must key off parked_at", bpr)
+	if keysContain(reapKeys(t, s, cutoff), taskID) {
+		t.Errorf("recently re-parked open run %s reaped on its old started_at; retention must key off parked_at", taskID)
 	}
 
 	// Age the park past the TTL → now reapable.
 	if _, err := database.Exec(`UPDATE conversations SET parked_at=datetime('now','-30 days') WHERE id=?`, conversationID); err != nil {
 		t.Fatalf("age park: %v", err)
 	}
-	if !keysContain(reapKeys(t, s, cutoff), bpr) {
+	if !keysContain(reapKeys(t, s, cutoff), taskID) {
 		t.Errorf("open run parked 30 days ago not reaped; want reapable past the TTL")
 	}
 }
@@ -349,9 +348,9 @@ func reapKeys(t *testing.T, s *Spawner, cutoff time.Time) []domain.SnapshotReapK
 	return keys
 }
 
-func keysContain(keys []domain.SnapshotReapKey, blueprintRunID string) bool {
+func keysContain(keys []domain.SnapshotReapKey, taskID string) bool {
 	for _, k := range keys {
-		if k.BlueprintRunID == blueprintRunID {
+		if k.TaskID == taskID {
 			return true
 		}
 	}

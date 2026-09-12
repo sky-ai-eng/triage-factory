@@ -24,14 +24,14 @@ func TestWorkspaceSnapshotStore_SQLite(t *testing.T) {
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 		seed := dbtest.WorkspaceSnapshotSeeder{
-			BlueprintRun: func(t *testing.T, suffix string) string {
+			Task: func(t *testing.T, suffix string) string {
 				t.Helper()
-				return seedBlueprintRunForConversation(t, conn, seedSQLiteTaskForSnapshot(t, conn, suffix))
+				return seedSQLiteTaskForSnapshot(t, conn, suffix)
 			},
-			DeleteBlueprintRun: func(t *testing.T, blueprintRunID string) {
+			DeleteTask: func(t *testing.T, taskID string) {
 				t.Helper()
-				if _, err := conn.Exec(`DELETE FROM blueprint_runs WHERE id = ?`, blueprintRunID); err != nil {
-					t.Fatalf("delete blueprint_run: %v", err)
+				if _, err := conn.Exec(`DELETE FROM tasks WHERE id = ?`, taskID); err != nil {
+					t.Fatalf("delete task: %v", err)
 				}
 			},
 		}
@@ -46,23 +46,23 @@ func TestWorkspaceSnapshotStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 	const badOrg = "11111111-1111-1111-1111-111111111111"
 
-	if err := stores.WorkspaceSnapshots.BeginSnapshotSystem(ctx, badOrg, "br", "claim"); err == nil {
+	if err := stores.WorkspaceSnapshots.BeginSnapshotSystem(ctx, badOrg, "t1", "claim"); err == nil {
 		t.Error("BeginSnapshotSystem(non-local org) should error")
 	}
-	if _, err := stores.WorkspaceSnapshots.FinishSnapshotSystem(ctx, badOrg, "br", "claim", true); err == nil {
+	if _, err := stores.WorkspaceSnapshots.FinishSnapshotSystem(ctx, badOrg, "t1", "claim", true); err == nil {
 		t.Error("FinishSnapshotSystem(non-local org) should error")
 	}
-	if _, err := stores.WorkspaceSnapshots.GetSnapshotStateSystem(ctx, badOrg, "br"); err == nil {
+	if _, err := stores.WorkspaceSnapshots.GetSnapshotStateSystem(ctx, badOrg, "t1"); err == nil {
 		t.Error("GetSnapshotStateSystem(non-local org) should error")
 	}
-	if err := stores.WorkspaceSnapshots.DeleteSnapshotStateSystem(ctx, badOrg, "br"); err == nil {
+	if err := stores.WorkspaceSnapshots.DeleteSnapshotStateSystem(ctx, badOrg, "t1"); err == nil {
 		t.Error("DeleteSnapshotStateSystem(non-local org) should error")
 	}
 }
 
-// seedSQLiteTaskForSnapshot seeds the entity + event + task chain a
-// blueprint_runs row needs (its task_id is NOT NULL and FK'd). Mirrors the
-// worktree/task-memory fixtures so these store tests read as siblings.
+// seedSQLiteTaskForSnapshot seeds the entity + event + task chain the snapshot
+// key points at. Mirrors the worktree/task-memory fixtures so these store
+// tests read as siblings.
 func seedSQLiteTaskForSnapshot(t *testing.T, conn *sql.DB, suffix string) string {
 	t.Helper()
 	now := time.Now().UTC()

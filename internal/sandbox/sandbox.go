@@ -20,12 +20,12 @@ type Config struct {
 	// (UUID, "live-smoke", anything). Same ConversationID → same fragment.
 	ConversationID string
 
-	// MemoryNamespace is the run's blueprint run id — its second legitimate
+	// WorkspaceKey is the run's task id — its second legitimate
 	// run-tree key. A cold rehydrate rebuilds the worktree at
-	// RunTreeRoot(memoryNamespace) rather than RunTreeRoot(ConversationID), so the
-	// launch-time worktree pin (worktreeScope) accepts either. Empty for a run
-	// with no blueprint, where ConversationID is the only key.
-	MemoryNamespace string
+	// RunTreeRoot(WorkspaceKey) rather than RunTreeRoot(ConversationID), so the
+	// launch-time worktree pin (worktreeScope) accepts either. Empty for a
+	// taskless run, where ConversationID is the only key.
+	WorkspaceKey string
 
 	// Worktree is the host path bind-mounted at /work inside the
 	// sandbox. Caller MUST have created and chowned it to UID

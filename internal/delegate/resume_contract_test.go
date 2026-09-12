@@ -35,8 +35,9 @@ type stepFixture struct {
 // there). Every later row starts with no path at all, which is exactly the
 // state a claim of it has to fix.
 //
-// The blueprint_run id is "bpr-"+suffix, so a caller that needs the workspace
-// path the cold rehydrate will rebuild at can derive it before seeding.
+// The blueprint_run id is "bpr-"+suffix. A caller that needs the workspace path
+// the cold rehydrate will rebuild at seeds first and reads it off the fixture's
+// task — the tree is keyed by the task, whose id the seeder mints.
 func seedStepFixture(t *testing.T, source, suffix string, steps int, sharedWT string) stepFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -122,6 +123,19 @@ func seedStepFixture(t *testing.T, source, suffix string, steps int, sharedWT st
 		task:            *task,
 		brID:            brID,
 		conversationIDs: conversationIDs,
+	}
+}
+
+// stampSharedWorktree re-points the blueprint_run and step 0 at path, for a
+// caller whose path is only knowable once the fixture has minted its task —
+// the workspace key, and so the directory a cold rehydrate rebuilds at.
+func (f stepFixture) stampSharedWorktree(t *testing.T, path string) {
+	t.Helper()
+	if _, err := f.database.Exec(`UPDATE blueprint_runs SET worktree_path = ? WHERE id = ?`, path, f.brID); err != nil {
+		t.Fatalf("stamp the blueprint's shared worktree: %v", err)
+	}
+	if _, err := f.database.Exec(`UPDATE conversations SET worktree_path = ? WHERE id = ?`, path, f.conversationIDs[0]); err != nil {
+		t.Fatalf("stamp step 0's worktree: %v", err)
 	}
 }
 
@@ -265,16 +279,17 @@ func TestBuildStepConfig_ColdRehydrateStampsTheTreeTheSessionRunsIn(t *testing.T
 			if tc.staleMoved {
 				suffix = "cold-moved"
 			}
-			// The rebuild target is derived from the blueprint_run id, which
-			// seedStepFixture composes deterministically.
-			rebuilt := worktree.RunRoot("bpr-" + suffix)
+			// The rebuild target is the task's run root — the workspace key —
+			// so it is only knowable once the fixture has minted the task.
+			f := seedStepFixture(t, "jira", suffix, 2, "")
+			rebuilt := worktree.RunRoot(f.task.ID)
 			t.Cleanup(func() { _ = os.RemoveAll(rebuilt) })
 
 			stale := rebuilt
 			if tc.staleMoved {
 				stale = filepath.Join(t.TempDir(), "elsewhere")
 			}
-			f := seedStepFixture(t, "jira", suffix, 2, stale)
+			f.stampSharedWorktree(t, stale)
 
 			blobs, err := storage.New()
 			if err != nil {
@@ -282,11 +297,11 @@ func TestBuildStepConfig_ColdRehydrateStampsTheTreeTheSessionRunsIn(t *testing.T
 			}
 			f.s.SetStorage(blobs)
 
-			// Capture a workspace under the blueprint's key, then lose it — the
+			// Capture a workspace under the task's key, then lose it — the
 			// host-loss shape a cold rehydrate exists for.
 			src := filepath.Join(t.TempDir(), "workspace")
 			writeFile(t, filepath.Join(src, "_tfac", "notes.txt"), "scratch survived")
-			if err := f.s.snapshotWorkspace(ctx, org, f.brID, f.brID, "", src, "", domain.ConversationRuntimeSDK); err != nil {
+			if err := f.s.snapshotWorkspace(ctx, org, f.conversationIDs[0], f.task.ID, "", src, "", domain.ConversationRuntimeSDK); err != nil {
 				t.Fatalf("snapshotWorkspace: %v", err)
 			}
 			if err := os.RemoveAll(src); err != nil {

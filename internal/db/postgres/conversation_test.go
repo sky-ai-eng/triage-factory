@@ -354,16 +354,16 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 			}
 			return brID
 		},
-		SetSnapshotState: func(t *testing.T, blueprintRunID, state string) {
+		SetSnapshotState: func(t *testing.T, taskID, state string) {
 			t.Helper()
 			// Which engagement wrote the blob is not what the eviction
 			// enumeration reads, so a fixed writer is enough — it just has to
 			// be a real uuid for the column.
 			if _, err := conn.Exec(`
-				INSERT INTO workspace_snapshots (org_id, blueprint_run_id, state, writer_claim_id)
+				INSERT INTO workspace_snapshots (org_id, task_id, state, writer_claim_id)
 				VALUES ($1, $2, $3, '11111111-1111-4111-8111-111111111111')
-				ON CONFLICT (org_id, blueprint_run_id) DO UPDATE SET state = excluded.state
-			`, orgID, blueprintRunID, state); err != nil {
+				ON CONFLICT (org_id, task_id) DO UPDATE SET state = excluded.state
+			`, orgID, taskID, state); err != nil {
 				t.Fatalf("seed workspace snapshot state: %v", err)
 			}
 		},

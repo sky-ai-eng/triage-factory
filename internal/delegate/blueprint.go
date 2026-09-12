@@ -174,7 +174,7 @@ func (s *Spawner) terminateBlueprint(
 	// steps' run memory (durable in conversation_memory) and decide what to do next.
 
 	if !skipCleanup {
-		s.runBlueprintWorktreeCleanup(blueprintRunID, cfg)
+		s.runBlueprintWorktreeCleanup(blueprintRunID, workspaceKey(taskID), cfg)
 	}
 
 	// Reclaim any staging dir still held for this blueprint — the step skill and
@@ -203,10 +203,10 @@ func (s *Spawner) terminateBlueprint(
 	// expires rather than a workspace that is gone. `failed` still discards
 	// immediately: the infrastructure under the run died, so there is nothing
 	// coherent to resume onto, and any blob is from an earlier step's park.
-	// Keyed by blueprint_run_id (the shared workspace's key); idempotent, so the
-	// discard is a no-op for a blueprint that never snapshotted.
+	// Keyed by the task (the shared workspace's key); idempotent, so the
+	// discard is a no-op for a task that never snapshotted.
 	if status == domain.BlueprintRunStatusFailed {
-		s.discardWorkspaceSnapshot(bgCtx, orgID, blueprintRunID)
+		s.discardWorkspaceSnapshot(bgCtx, orgID, workspaceKey(taskID))
 	}
 
 	// Drain the task's queue exactly once for the blueprint (independent of
@@ -243,24 +243,31 @@ func (s *Spawner) reclaimBlueprintStepStaging(ctx context.Context, orgID, bluepr
 
 // runBlueprintWorktreeCleanup performs the cleanup runAgent would have done
 // per-step, except now once for the whole blueprint.
-func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConfig) {
+//
+// Two ids, because two different things are named: blueprintRunID is the
+// blueprint whose step conversations are enumerated (and what the logs say),
+// while wsKey is the workspace key — the task's, shared by every conversation
+// that ever ran in the tree. They are not interchangeable: RemoveRunRoot
+// derives the directory from the key it is handed, so the blueprint's id there
+// would sweep a path nothing ever built.
+func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID, wsKey string, cfg runConfig) {
 	if cfg.hasWT {
-		if err := worktree.RemoveAt(cfg.wtPath, blueprintRunID); err != nil {
+		if err := worktree.RemoveAt(cfg.wtPath, wsKey); err != nil {
 			blueprintLog.Warn("worktree remove failed", "blueprint_run", blueprintRunID, "error", err)
 			return
 		}
 		if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
 			// The eager PR worktree's per-run branch is namespaced by the id
 			// CreateForPR ran under — the worktree-dir basename, which is the
-			// blueprint run id (the run-root's key). filepath.Base derives it from
-			// the path so this stays correct regardless of the key.
+			// run-root's key. filepath.Base derives it from the path so this
+			// stays correct regardless of the key.
 			worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.prNumber, filepath.Base(cfg.wtPath))
 		}
 	} else if cfg.runRoot != "" {
 		// Jira blueprints materialize worktrees lazily via `workspace add`, which
 		// keys conversation_worktrees rows AND the on-disk run-root (runDir) by each
 		// *step's* conversation_id (the agent's TRIAGE_FACTORY_CONVERSATION_ID), not the
-		// blueprint_run_id. Iterate every step conversation so we find + remove their
+		// workspace key. Iterate every step conversation so we find + remove their
 		// worktrees and their run-root dirs.
 		stepConversations, err := s.blueprints.ConversationsForBlueprintSystem(context.Background(), cfg.orgID, blueprintRunID)
 		if err != nil {
@@ -295,11 +302,11 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 		// dir — RemoveClaudeProjectDir resolves the cwd via EvalSymlinks and
 		// silently no-ops once the dir is gone.
 		worktree.RemoveClaudeProjectDir(cfg.wtPath)
-		// The run-root is keyed by the blueprint run id (setup and the cold
-		// rehydrate both build it there), and every `workspace add` checkout
-		// nests under it, so one removal reclaims the whole tree — the per-step
+		// The run-root is keyed by the task (setup and the cold rehydrate both
+		// build it there), and every `workspace add` checkout nests under it, so
+		// one removal reclaims the whole tree — the per-step
 		// conversation_worktrees rows and their PR config were already reclaimed above.
-		worktree.RemoveRunRoot(blueprintRunID)
+		worktree.RemoveRunRoot(wsKey)
 		return
 	}
 	worktree.RemoveClaudeProjectDir(cfg.wtPath)
@@ -594,7 +601,7 @@ func (s *Spawner) finalizeCancelledBlueprintRun(ctx context.Context, orgID strin
 	if task, _ := s.tasks.GetSystem(ctx, orgID, cr.TaskID); task != nil && task.EntitySource == "github" {
 		cfg.hasWT = true
 	}
-	s.runBlueprintWorktreeCleanup(cr.ID, cfg)
+	s.runBlueprintWorktreeCleanup(cr.ID, workspaceKey(cr.TaskID), cfg)
 }
 
 // markBlueprintRunStatusAsUser writes a blueprint_run status transition under

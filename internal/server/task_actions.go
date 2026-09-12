@@ -691,6 +691,18 @@ func (s *Server) endTaskConversations(ctx context.Context, orgID, userID, taskID
 			"task", taskID, "ended_reason", string(reason), "error", err)
 		return
 	}
+	// The memory doorbell, once per stamped row and before the broadcast: each
+	// of these conversations may have ended without its agent having written
+	// its memory, and the task's next delegation does not open until every one
+	// of them has a row. Rung first, so the generation is already under way by
+	// the time the station that refetches asks why its composer is disabled.
+	//
+	// Only the rows this call stamped — an already-ended conversation comes
+	// back from neither door, and its debt (if it still has one) was rung for
+	// by the boundary that actually ended it.
+	for i := range ended {
+		s.kickMemoryOwed(orgID, ended[i].ID)
+	}
 	// One conversation_update per stamped row. The rows carry no new status —
 	// what changed is whether a follow-up can land — so this is an
 	// invalidation signal: a run station holding one of them refetches and

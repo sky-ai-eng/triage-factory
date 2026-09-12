@@ -31,6 +31,12 @@ type teamsHandler struct {
 	// credential change. May be nil before startup finishes; the archive
 	// handler guards.
 	spawner func() *delegate.Spawner
+	// memoryOwed rings the memory doorbell for a conversation the archive
+	// cascade just ended. The relay callbacks live on the Server, so the single
+	// construction site in routes() hands this handler the one method rather
+	// than a back-reference to the whole server — the same shape settingsHandler
+	// takes kickJira in.
+	memoryOwed func(orgID, conversationID string)
 }
 
 // teamJSON is the one wire shape for a team: the list rows, the single read,

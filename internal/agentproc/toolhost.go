@@ -39,9 +39,9 @@ type ToolHostOptions struct {
 	// ConversationID is the conversation id — the sandbox container id, the run-tree
 	// key, and what the socket directory is named after.
 	ConversationID string
-	// MemoryNamespace is the blueprint run id, the run tree's second
+	// WorkspaceKey is the task id, the run tree's second
 	// legitimate key (a cold rehydrate rebuilds under it).
-	MemoryNamespace string
+	WorkspaceKey string
 	// Worktree is the host path bind-mounted at /work and the working
 	// directory every tool call resolves against.
 	Worktree string
@@ -307,14 +307,14 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (_ *ToolHostJail,
 	}
 
 	run, sb, err := sandbox.Wrap(ctx, sandbox.Config{
-		ConversationID:  opts.ConversationID,
-		MemoryNamespace: opts.MemoryNamespace,
-		Worktree:        opts.Worktree,
-		Argv:            argv,
-		Env:             env,
-		ExtraMounts:     mounts,
-		Network:         opts.PrebuiltNetwork,
-		MemoryLimitMB:   memoryLimitOrDefault(opts.MemoryLimitMB),
+		ConversationID: opts.ConversationID,
+		WorkspaceKey:   opts.WorkspaceKey,
+		Worktree:       opts.Worktree,
+		Argv:           argv,
+		Env:            env,
+		ExtraMounts:    mounts,
+		Network:        opts.PrebuiltNetwork,
+		MemoryLimitMB:  memoryLimitOrDefault(opts.MemoryLimitMB),
 	})
 	if err != nil {
 		_ = jail.Close()

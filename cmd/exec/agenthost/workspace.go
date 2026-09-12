@@ -51,8 +51,8 @@ var (
 // The host root is the run's recorded worktree_path — the directory the agent
 // process was started in (and, in multi mode, the one bind-mounted at /work).
 // That beats re-deriving worktree.RunRoot(conversationID): after a cold rehydrate the
-// run root is rebuilt keyed by the run's memory namespace (the blueprint run
-// id), so the conversationID-derived path and the actual cwd diverge — worktree_path is
+// run root is rebuilt keyed by the run's workspace key (the task id), so the
+// conversationID-derived path and the actual cwd diverge — worktree_path is
 // the value the resume path maintains. The derivation is only the fallback for
 // a run whose worktree_path write failed at setup.
 func (c *LocalClient) WorkspaceRoots(ctx context.Context) (hostRoot, agentRoot string, err error) {

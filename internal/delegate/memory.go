@@ -39,20 +39,18 @@ import (
 // it.
 const maxCompletionRetries = 3
 
-// memoryNamespace is the key that groups everything one workflow run's steps
-// share: the run tree on disk, its workspace snapshot blob, and — as the value
-// materializePriorMemories compares against — which prior memories belong to
-// the current run rather than to history. It is the blueprint_run_id the
-// conversation belongs to. Every conversation is a blueprint step now (a
-// single prompt is a 1-step blueprint), so there is no conversation-id
-// fallback — the value is always the blueprint_run_id.
+// workspaceKey is the key that groups everything the conversations of one task
+// share: the run tree on disk and its workspace snapshot blob. It is the task
+// id, so a second delegation on a task continues in the tree the first one
+// left rather than cloning a fresh checkout under a key nothing else looks
+// under.
 //
 // It stays a named function over an identity return because the name is what
-// tells a call site which of the two ids in scope keys the workspace: a
-// conversation id reads as an equally plausible argument and silently keys a
-// tree nothing else will look under.
-func memoryNamespace(blueprintRunID string) string {
-	return blueprintRunID
+// tells a call site which of the several ids in scope keys the workspace: a
+// conversation id or a blueprint run id reads as an equally plausible argument
+// and silently keys a tree nothing else will look under.
+func workspaceKey(taskID string) string {
+	return taskID
 }
 
 // memoryFileState distinguishes the reasons readAgentMemoryFile returns no

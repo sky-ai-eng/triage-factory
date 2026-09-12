@@ -196,7 +196,7 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	sb.ContainerID = containerID
 	run, err := runLauncher.LaunchRun(ctx, LaunchParams{
 		ConversationID:  cfg.ConversationID,
-		MemoryNamespace: cfg.MemoryNamespace,
+		WorkspaceKey:    cfg.WorkspaceKey,
 		ContainerID:     containerID,
 		Rootfs:          rootfsSel,
 		Env:             stringsToEnvVars(specCfg.Env),

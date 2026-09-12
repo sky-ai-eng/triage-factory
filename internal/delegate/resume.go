@@ -239,7 +239,7 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *
 	if blobs == nil {
 		return true
 	}
-	keyID := memoryNamespace(conv.BlueprintRunID)
+	keyID := workspaceKey(conv.TaskID)
 	ok, err := blobs.Exists(ctx, snapshotKey(orgID, keyID))
 	if err != nil {
 		delegateLog.Warn("resume: snapshot existence check failed", "conversation", conv.ID, "error", err)
@@ -300,12 +300,12 @@ type ResumeOptions struct {
 	// would be rejected on resume.
 	ExtraAllowedTools string
 
-	// Namespace is the run's workspace namespace — its blueprint_run_id (see
-	// memoryNamespace). Exported to the resumed subprocess as
-	// TRIAGE_FACTORY_BLUEPRINT_RUN_ID so per-run scratch paths resolve to the
-	// same place they did on the initial invocation. Required for the resume to
-	// stay consistent with the initial env; callers capture it from the run
-	// (dispatchResumeClaim → conv.BlueprintRunID).
+	// Namespace is the run's workspace key — its task id (see workspaceKey).
+	// Exported to the resumed subprocess as TRIAGE_FACTORY_WORKSPACE_KEY so the
+	// scratch paths resolve to the same place they did on the initial
+	// invocation. Required for the resume to stay consistent with the initial
+	// env; callers capture it from the conversation (dispatchResumeClaim →
+	// conv.TaskID).
 	Namespace string
 
 	// TeamID is the conversation's owning team. Resolves the presence-gated
@@ -432,12 +432,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cwd,
 		agenthost.RunURLEnvVar + "=" + runURL,
 	}
-	// Mirror runAgent's namespace export so a resumed agent resolves the per-run
+	// Mirror runAgent's workspace-key export so a resumed agent resolves the
 	// scratch paths its prompts name to the same place the initial invocation did.
 	if opts.Namespace == "" {
 		return nil, fmt.Errorf("resume: missing namespace (caller must pass the workspace namespace captured at run start)")
 	}
-	extraEnv = append(extraEnv, "TRIAGE_FACTORY_BLUEPRINT_RUN_ID="+opts.Namespace)
+	extraEnv = append(extraEnv, "TRIAGE_FACTORY_WORKSPACE_KEY="+opts.Namespace)
 	// Preserve the initial run's GitHub repo context so gh subcommands
 	// in the resumed session keep their implicit --repo default. Without
 	// this, a resumed run on a GitHub task could suddenly fail any gh
@@ -514,12 +514,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 			Extras:  opts.ExtraAllowedTools,
 			GH:      ghChannel != nil,
 		}),
-		ExtraEnv:        extraEnv,
-		TraceID:         conversationID,
-		MemoryNamespace: opts.Namespace,
-		OrgID:           orgID,
-		Secrets:         s.getRunSecrets(),
-		LLMResolver:     s.llmResolverForConversation(orgID, conversationID),
+		ExtraEnv:     extraEnv,
+		TraceID:      conversationID,
+		WorkspaceKey: opts.Namespace,
+		OrgID:        orgID,
+		Secrets:      s.getRunSecrets(),
+		LLMResolver:  s.llmResolverForConversation(orgID, conversationID),
 		// This turn's own engagement pays for this turn's jail.
 		ClaimID:              opts.claimID,
 		RecordSandboxActuals: s.recordSandboxActuals,

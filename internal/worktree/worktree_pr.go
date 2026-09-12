@@ -386,9 +386,9 @@ func rollbackPRSetupLocked(ctx context.Context, bareDir, wtDir, rootKey string, 
 
 // prLocalBranch returns the bare-local branch name a PR checkout attaches in
 // the shared bare. Namespaced by rootKey — the same key the worktree dir is
-// named after, which is the blueprint run id for a delegated run (so one
-// blueprint's steps share the branch, as they share the tree) and the
-// conversation's own id where there is no blueprint. The namespace exists so
+// named after, which is the task id for a delegated run (so a task's
+// conversations share the branch, as they share the tree) and the
+// conversation's own id for a run with no task. The namespace exists so
 // two concurrent runs reviewing the SAME PR (sharing one bare) never share a
 // branch ref — git refuses to fetch into, or `worktree add`, a local branch
 // already checked out in another live worktree of the same bare, so a

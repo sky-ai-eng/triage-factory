@@ -54,6 +54,36 @@ func (a *App) sourcesChanged(orgID, kind string) {
 	a.publishCtl(ctlbus.Message{Kind: "sources_changed", OrgID: orgID, Source: kind})
 }
 
+// memoryOwed relays the memory doorbell the way sourcesChanged relays a
+// pause/resume: a conversation just ended without its agent having written a
+// memory, so the brain's provisioner should settle that debt now rather than at
+// its next backstop sweep.
+//
+// Its callers are the widest of any relay's — every boundary stamper, which
+// means request handlers on whichever control pod the load balancer picked AND
+// the spawner on an executor, where isBrainHolder() is false by construction.
+// An empty conversationID is the org-wide form (a configuration save that may
+// have fixed what the last attempts failed on); an empty orgID names nothing to
+// settle and would widen a targeted nudge into a fleet-wide sweep, so it is
+// refused rather than relayed.
+//
+// Lossy by contract like the rest, and this one can afford it better than most:
+// a dropped message costs one sweep interval (memoryprovision.DefaultSweepInterval),
+// never a lost memory — the sweep reads the debt from the same rows the doorbell
+// is about.
+func (a *App) memoryOwed(orgID, conversationID string) {
+	if orgID == "" {
+		return
+	}
+	if a.isBrainHolder() {
+		// Nudge is itself fire-and-forget and bounded, so this does not need
+		// the goroutine the cred_request dispatch below wraps its call in.
+		a.memoryProvisioner.Nudge(orgID, conversationID)
+		return
+	}
+	a.publishCtl(ctlbus.Message{Kind: "memory_owed", OrgID: orgID, ConversationID: conversationID})
+}
+
 // applySourcesChanged is the brain-side effect of a pause/resume: drop the
 // router's cached policy for the org, and re-due the source's poll so a resumed
 // source restarts on the next wake instead of after a full interval. PollSoon
@@ -158,6 +188,14 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 				}
 			}()
 		}
+	case "memory_owed":
+		// nil at TF_ROLE=executor and on any role that builds no brain
+		// objects; Nudge is nil-safe anyway, and an executor cannot reach
+		// this branch at all (the holder gate above). No goroutine here:
+		// unlike ProvisionForConversation above, Nudge already detaches its
+		// own bounded context, so calling it from the LISTEN read loop is
+		// the non-blocking send every branch in this switch has to be.
+		a.memoryProvisioner.Nudge(msg.OrgID, msg.ConversationID)
 	default:
 		appLog.Warn("tf_ctl: unknown relay message kind", "kind", msg.Kind)
 	}
