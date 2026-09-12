@@ -111,6 +111,40 @@ func TestSDK_LiveSmoke_Interactive(t *testing.T) {
 	}
 }
 
+// TestSDK_LiveSmoke_InteractiveOpeningBlocks sends the opening turn as block
+// content rather than a string and asks the model to read one block back: the
+// end-to-end proof that Go's blocks payload survives the wrapper, the SDK and
+// the API as the message's content. Gated like TestSDK_LiveSmoke.
+func TestSDK_LiveSmoke_InteractiveOpeningBlocks(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	sink := newLiveSink()
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd: t.TempDir(),
+		OpeningBlocks: []ContentBlock{
+			{Type: "text", Text: "MARKER-ALPHA: ZEBRAFISH"},
+			{Type: "text", Text: "Reply with exactly the word that follows MARKER-ALPHA's colon in the first block, and nothing else."},
+		},
+		Model:   "haiku",
+		TraceID: "live-opening-blocks",
+	}, sink, denyAllPermissions)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	defer func() { _ = lr.Close() }()
+
+	reply := sink.waitAssistant(t, 60*time.Second)
+	t.Logf("opening-blocks turn: %q", reply.Content)
+	if !strings.Contains(reply.Content, "ZEBRAFISH") {
+		t.Errorf("assistant reply = %q; the model did not read the first block back, so the blocks did not arrive as content", reply.Content)
+	}
+}
+
 // TestSDK_LiveSmoke_InteractiveInterrupt asserts interrupt() lands: the
 // in-flight turn ends with an error_during_execution result. Mirrors
 // spike/takeover/01-interrupt-live.mjs.

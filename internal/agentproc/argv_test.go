@@ -2,6 +2,7 @@ package agentproc
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -28,21 +29,27 @@ func TestBuildArgs_InitialInvocation(t *testing.T) {
 
 func TestBuildArgs_Interactive(t *testing.T) {
 	got := BuildArgs(RunOptions{
-		Interactive:  true,
-		Message:      "this is sent over stdin, not argv",
-		Model:        "sonnet-4-6",
-		AllowedTools: "Read,Write",
-		MaxTurns:     50,
+		Interactive:   true,
+		Message:       "this is sent over stdin, not argv",
+		OpeningBlocks: []ContentBlock{{Type: "text", Text: "this block is sent over stdin too"}},
+		Model:         "sonnet-4-6",
+		AllowedTools:  "Read,Write",
+		MaxTurns:      50,
 	})
 
 	// Streaming-input mode must request the stream-json input format and
-	// must NOT carry the one-shot -p prompt (the initial message goes
-	// over stdin once the wrapper signals ready).
+	// must NOT carry the one-shot -p prompt (the opening message goes
+	// over stdin once the wrapper signals ready, in either spelling).
 	if slices.Contains(got, "-p") {
 		t.Errorf("interactive argv must omit -p: %v", got)
 	}
 	if slices.Contains(got, "this is sent over stdin, not argv") {
 		t.Errorf("interactive argv must omit Message: %v", got)
+	}
+	for _, arg := range got {
+		if strings.Contains(arg, "this block is sent over stdin too") {
+			t.Errorf("interactive argv must omit OpeningBlocks: %v", got)
+		}
 	}
 	ifIdx := slices.Index(got, "--input-format")
 	if ifIdx < 0 {
