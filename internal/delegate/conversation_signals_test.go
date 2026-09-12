@@ -136,7 +136,9 @@ func (f *fakeInstanceStore) SetDraining(context.Context, string, bool) (bool, er
 	return false, nil
 }
 
-// taskIDForConversation reads the task_id a seedConversation fixture's conversation row belongs to.
+// taskIDForConversation reads the task_id a seedConversation fixture's
+// conversation row belongs to — which is also its workspace key, so the tests
+// that stage a snapshot blob or a run tree name it through this.
 func taskIDForConversation(t *testing.T, database *sql.DB, conversationID string) string {
 	t.Helper()
 	var taskID string

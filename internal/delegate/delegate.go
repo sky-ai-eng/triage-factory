@@ -704,7 +704,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	} else if localGit != nil {
 		cloneAuth = localGit.cloneAuth(upstreamCloneURL)
 	}
-	// rootKey (the blueprint run id), not this step's conversation id, keys the
+	// rootKey (the task id), not this conversation's own id, keys the
 	// worktree dir + its per-run push config — the PR worktree IS the shared
 	// run-root, and a cold rehydrate rebuilds it under the same key.
 	// CleanupPRConfig reclaims via filepath.Base(wtPath), so it follows this
@@ -819,9 +819,9 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 // the run-root IS the agent's session cwd, which is the load-bearing
 // invariant for resume.
 func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID, rootKey, creatorUserID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
-	// The run-root is a blueprint-run resource — shared across every step and
-	// rebuilt under the same key on a cold rehydrate — so it is keyed by rootKey
-	// (the blueprint run id), not this step's conversation id. conversationID
+	// The run-root is a task resource — shared by every conversation on the task
+	// and rebuilt under the same key on a cold rehydrate — so it is keyed by
+	// rootKey (the task id), not this conversation's own id. conversationID
 	// still stamps the per-conversation worktree_path record below.
 	runRoot, err := worktree.MakeRunRoot(rootKey)
 	if err != nil {
@@ -856,8 +856,8 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID,
 //     arm's GH+Jira composition. No registered reference is not an error:
 //     the conversation still works with base tools.
 func (s *Spawner) setupSlack(ctx context.Context, orgID, conversationID, claimID, rootKey, creatorUserID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
-	// Keyed by rootKey (the blueprint run id), not this step's conversation id
-	// — the run-root is blueprint-scoped and cold-rehydrates under the same key.
+	// Keyed by rootKey (the task id), not this conversation's own id — the
+	// run-root is task-scoped and cold-rehydrates under the same key.
 	// See setupJira.
 	runRoot, err := worktree.MakeRunRoot(rootKey)
 	if err != nil {

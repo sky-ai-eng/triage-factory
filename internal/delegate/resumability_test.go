@@ -206,7 +206,7 @@ func TestParkConversationOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "half-finished work")
-	namespace := blueprintRunIDForConversation(t, database, conversationID)
+	namespace := taskIDForConversation(t, database, conversationID)
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = stub
 
@@ -312,7 +312,7 @@ func TestParkConversationOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
 
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "half-finished work")
-	namespace := blueprintRunIDForConversation(t, database, conversationID)
+	namespace := taskIDForConversation(t, database, conversationID)
 	s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
 
 	fenced := s.parkConversationOpen(context.Background(), liveParkContext{

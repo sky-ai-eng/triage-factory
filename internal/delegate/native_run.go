@@ -52,7 +52,7 @@ const toolHostDialTimeout = 60 * time.Second
 // launchErr for the dispatcher to retry; only the loop itself writes terminals.
 func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model, triggerType, creatorUserID string) engagementDisposition {
 	orgID := cfg.orgID
-	namespace := memoryNamespace(cfg.blueprintRunID)
+	namespace := workspaceKey(task.ID)
 	claudeCwd := cfg.wtPath
 
 	// The mirror this engagement files its memory file through, built below
@@ -146,7 +146,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 
 	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
 		ConversationID:       conversationID,
-		MemoryNamespace:      namespace,
+		WorkspaceKey:         namespace,
 		Worktree:             claudeCwd,
 		ExtraEnv:             s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID),
 		PrebuiltNetwork:      cfg.sidecar.runNetwork(),
@@ -398,7 +398,7 @@ func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, conversationID, nam
 	env := []string{
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
 		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot,
-		"TRIAGE_FACTORY_BLUEPRINT_RUN_ID=" + namespace,
+		"TRIAGE_FACTORY_WORKSPACE_KEY=" + namespace,
 	}
 	if cfg.owner != "" && cfg.repo != "" {
 		env = append(env, "TRIAGE_FACTORY_REPO="+cfg.owner+"/"+cfg.repo)

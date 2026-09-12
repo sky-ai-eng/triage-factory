@@ -50,7 +50,7 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 	marker := filepath.Join(wtPath, "_tfac", "notes", "warm-marker.txt")
 	writeFile(t, marker, "warm")
 
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
 	got, prov, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace (warm): %v", err)
@@ -120,7 +120,7 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	gitT(t, bareDir, "worktree", "prune")
 	gitT(t, bareDir, "branch", "-D", "feature")
 
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
 	got, prov, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
@@ -178,7 +178,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptBearingSnapshotIsResumable(t *testin
 		t.Fatalf("rm worktree: %v", err)
 	}
 
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID, SessionID: sessionID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID, SessionID: sessionID}
 	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
@@ -213,7 +213,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testin
 		t.Fatalf("rm worktree: %v", err)
 	}
 
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID, SessionID: sessionID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID, SessionID: sessionID}
 	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
@@ -304,7 +304,7 @@ func TestEnsureWorkspace_ColdPath_TruncatedZstdErrors(t *testing.T) {
 	// Cold path: the warm worktree is absent, so the resume can only come from
 	// the (now corrupt) blob — which must surface as an error.
 	wtDir := worktree.RunRoot(conversationID)
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: filepath.Join(t.TempDir(), "gone"), BlueprintRunID: conversationID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: filepath.Join(t.TempDir(), "gone"), TaskID: conversationID}
 	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, nil); err == nil {
 		t.Fatal("ensureWorkspace accepted a truncated zstd checksum; want an integrity error")
 	}
@@ -336,7 +336,7 @@ func TestEnsureWorkspace_ColdPath_LegacyGzipSnapshot(t *testing.T) {
 	}
 
 	wtDir := worktree.RunRoot(conversationID)
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtDir, BlueprintRunID: conversationID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtDir, TaskID: conversationID}
 	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, nil)
 	if err != nil {
 		t.Fatalf("rehydrate legacy gzip snapshot: %v", err)
@@ -416,7 +416,7 @@ func TestEnsureWorkspace_ColdPath_NoCILogsNoticeWithoutOmittedLogs(t *testing.T)
 	}
 
 	wtDir := worktree.RunRoot(conversationID)
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtDir, BlueprintRunID: conversationID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtDir, TaskID: conversationID}
 	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
@@ -469,7 +469,7 @@ func TestEnsureWorkspace_ColdPath_PreExclusionSnapshotRestoresItsCILogs(t *testi
 	}
 
 	wtDir := worktree.RunRoot(conversationID)
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtDir, BlueprintRunID: conversationID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtDir, TaskID: conversationID}
 	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, nil)
 	if err != nil {
 		t.Fatalf("rehydrate pre-exclusion snapshot: %v", err)
@@ -629,7 +629,7 @@ func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
 	gitT(t, bareDir, "worktree", "prune")
 	gitT(t, bareDir, "branch", "-D", "feature")
 
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
 	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace (detached): %v", err)
@@ -678,7 +678,7 @@ func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
 	gitT(t, bareDir, "worktree", "prune")
 	gitT(t, bareDir, "branch", "-D", "feature")
 
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
 	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace (never-pushed branch): %v", err)
@@ -707,11 +707,10 @@ func TestEnsureWorkspace_ColdPath_NoSnapshotErrors(t *testing.T) {
 }
 
 // TestFailRun_LeavesTheWorkspaceSnapshotToItsOwner: a failure does not delete
-// the blueprint's workspace blob. Every snapshot is keyed by blueprint_run_id
-// (memoryNamespace is the only thing that names one), and the blueprint's own
-// teardown owns that key — a delete from the conversation's failure would
-// either miss (a key nothing writes) or take a workspace out from under a
-// blueprint the failure has not ended.
+// the task's workspace blob. Every snapshot is keyed by the task
+// (workspaceKey is the only thing that names one), and the blueprint's own
+// teardown owns that key — a delete from the conversation's failure would take
+// the workspace out from under work the failure has not ended.
 func TestFailRun_LeavesTheWorkspaceSnapshotToItsOwner(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "failrun-discard")
@@ -722,7 +721,7 @@ func TestFailRun_LeavesTheWorkspaceSnapshotToItsOwner(t *testing.T) {
 	s.SetStorage(blobs)
 
 	ctx := context.Background()
-	key := snapshotKey(runmode.LocalDefaultOrgID, blueprintRunIDForConversation(t, database, conversationID))
+	key := snapshotKey(runmode.LocalDefaultOrgID, taskIDForConversation(t, database, conversationID))
 	if err := blobs.Put(ctx, key, strings.NewReader("snapshot")); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
@@ -732,7 +731,7 @@ func TestFailRun_LeavesTheWorkspaceSnapshotToItsOwner(t *testing.T) {
 	s.failConversation(runmode.LocalDefaultOrgID, conversationID, taskID, "", "event", "", "boom", domain.ConversationFailureUnclassified)
 
 	if ok, _ := blobs.Exists(ctx, key); !ok {
-		t.Error("failConversation deleted the blueprint's workspace snapshot; terminateBlueprint owns that blob")
+		t.Error("failConversation deleted the task's workspace snapshot; terminateBlueprint owns that blob")
 	}
 }
 

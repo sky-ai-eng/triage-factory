@@ -112,7 +112,7 @@ func TestValidateLaunchParams_RejectsSkillsMountWithoutConversationID(t *testing
 	p := validParams()
 	stageSkillsFixture(t, p.ConversationID)
 	base := SkillStagingBase()
-	p.MemoryNamespace = p.ConversationID // keeps the worktree scope check satisfied
+	p.WorkspaceKey = p.ConversationID // keeps the worktree scope check satisfied
 	p.ConversationID = ""
 	if err := ValidateLaunchParams(withSkillsMount(p, base, "ro")); err == nil {
 		t.Fatal("accepted a skills mount of the shared staging base with no run id; want rejection")

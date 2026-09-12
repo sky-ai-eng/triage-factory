@@ -23,17 +23,17 @@ const (
 )
 
 // WorkspaceSnapshotState is one workspace_snapshots row: the lifecycle of the
-// blob under one snapshot key — (OrgID, BlueprintRunID), because a blueprint's
-// steps share one workspace tree and one blob.
+// blob under one snapshot key — (OrgID, TaskID), because a task's
+// conversations share one workspace tree and one blob.
 //
 // WriterClaimID is the engagement that owns the write. It answers two
 // questions: whether waiting for a pending write is worthwhile (resolve the
 // claim's executor and ask whether it is still alive), and whether a writer
 // about to upload has been superseded by a newer engagement that took the key.
 type WorkspaceSnapshotState struct {
-	OrgID          string
-	BlueprintRunID string
-	State          string
-	WriterClaimID  string
-	UpdatedAt      time.Time
+	OrgID         string
+	TaskID        string
+	State         string
+	WriterClaimID string
+	UpdatedAt     time.Time
 }

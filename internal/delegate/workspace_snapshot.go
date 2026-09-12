@@ -136,17 +136,22 @@ type snapshotManifest struct {
 }
 
 // snapshotKey is the storage key for a parked workspace's snapshot blob. keyID
-// is the blueprint_run_id — every run is a blueprint step now, so every step of
-// one blueprint shares the one workspace blob. It is exactly the value
-// memoryNamespace yields and the value the on-disk worktree directory is named
-// after, so the key, the namespace, and the dir name stay in lockstep.
+// is the task id — every conversation on a task works in the one tree and
+// shares the one workspace blob. It is exactly the value workspaceKey yields
+// and the value the on-disk worktree directory is named after, so the key, the
+// workspace key, and the dir name stay in lockstep.
 //
-// The "workspace.tar" leaf is the bare tar's name; the blob is compressed inside
+// The snapshotBlobLeaf is the bare tar's name; the blob is compressed inside
 // it. Keeping the leaf avoids a dual-key dance at every discard/delete site for
 // zero benefit — nothing reads the key's extension to decide the format.
 func snapshotKey(orgID, keyID string) string {
-	return orgID + "/" + keyID + "/workspace.tar"
+	return orgID + "/" + keyID + "/" + snapshotBlobLeaf
 }
+
+// snapshotBlobLeaf is the last segment of every snapshot key. Named because
+// the boot re-key reads a key back apart (snapshotKeyID) and the two spellings
+// have to agree or it recognizes none of the blobs it is there to move.
+const snapshotBlobLeaf = "workspace.tar"
 
 // snapshotWorkspace writes a parked run's non-recoverable workspace state — the
 // git delta, the ephemeral _tfac subdirs, and the Claude session transcript
@@ -744,7 +749,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	// time the agent runs in it. Under the lock the sweep either goes first
 	// (this resolution then cold-rehydrates, which is correct and merely
 	// slower) or finds this engagement's claim on its re-check and declines.
-	keyID := memoryNamespace(conv.BlueprintRunID)
+	keyID := workspaceKey(conv.TaskID)
 	unlock := s.workspaceLocks.lock(workspaceLockKey(orgID, keyID))
 	defer unlock()
 
@@ -1013,16 +1018,16 @@ func snapshotReader(r io.Reader) (io.ReadCloser, string, error) {
 // a caller outside the package that terminates a blueprint's work by a route of
 // its own rather than through terminateBlueprint. Idempotent and nil-safe.
 //
-// It takes the blueprint run id, not a conversation id: the snapshot key is the
-// memory namespace (see snapshotKey), so a conversation id names a blob that
+// It takes the task id, not a conversation id: the snapshot key is the
+// workspace key (see snapshotKey), so a conversation id names a blob that
 // was never written and the discard silently does nothing.
-func (s *Spawner) DiscardWorkspaceSnapshot(orgID, blueprintRunID string) {
-	s.discardWorkspaceSnapshot(context.Background(), orgID, blueprintRunID)
+func (s *Spawner) DiscardWorkspaceSnapshot(orgID, taskID string) {
+	s.discardWorkspaceSnapshot(context.Background(), orgID, taskID)
 }
 
 // discardWorkspaceSnapshot deletes a parked workspace's snapshot blob once the
-// run/blueprint it belonged to reaches a terminal state, so durable storage
-// doesn't accumulate orphans. keyID is memoryNamespace(blueprintRunID).
+// work it belonged to reaches a terminal state, so durable storage
+// doesn't accumulate orphans. keyID is workspaceKey(taskID).
 // Idempotent — Delete on a missing key is a no-op — so terminal paths call it
 // unconditionally without first checking whether a snapshot was ever written.
 //

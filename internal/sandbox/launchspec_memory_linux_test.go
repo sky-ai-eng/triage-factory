@@ -113,7 +113,7 @@ func TestValidateLaunchParams_RejectsMemoryMountWithoutConversationID(t *testing
 	p := validParams()
 	stageMemoryFixture(t, p.ConversationID)
 	base := MemoryStagingBase()
-	p.MemoryNamespace = p.ConversationID // keeps the worktree scope check satisfied
+	p.WorkspaceKey = p.ConversationID // keeps the worktree scope check satisfied
 	p.ConversationID = ""
 	if err := ValidateLaunchParams(withMemoryMount(p, base, "ro")); err == nil {
 		t.Fatal("accepted a memory mount of the shared staging base with no run id; want rejection")

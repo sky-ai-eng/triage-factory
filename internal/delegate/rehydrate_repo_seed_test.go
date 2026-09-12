@@ -67,7 +67,7 @@ func TestDispatchResumeClaim_SeedsRepoWithoutIssueSuffix(t *testing.T) {
 			// no longer on disk, with a durable snapshot so the follow-up is
 			// accepted at enqueue and the claim cold-rehydrates.
 			wireBlobStore(t, s)
-			putTestSnapshot(t, s, blueprintRunIDForConversation(t, database, conversationID))
+			putTestSnapshot(t, s, taskIDForConversation(t, database, conversationID))
 			if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path=? WHERE id=?`,
 				filepath.Join(t.TempDir(), "reclaimed"), conversationID); err != nil {
 				t.Fatalf("park open with a reclaimed worktree: %v", err)

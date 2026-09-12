@@ -44,7 +44,7 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	// executor before it treats the persist as coming.
 	killedClaim := markEngaged(t, database, conversationID)
 	stageInstance(t, database, "test-engagement", time.Now())
-	namespace := blueprintRunIDForConversation(t, database, conversationID)
+	namespace := taskIDForConversation(t, database, conversationID)
 
 	// The engagement: a real worktree with uncommitted work, and a cancel
 	// handle registered as a live run's is, so the stop verb finds a local
@@ -130,7 +130,7 @@ func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
 	}
-	namespace := blueprintRunIDForConversation(t, database, conversationID)
+	namespace := taskIDForConversation(t, database, conversationID)
 
 	var statusAtUpload string
 	var stateAtUpload *domain.WorkspaceSnapshotState
@@ -177,7 +177,7 @@ func TestParkConversationOpen_RetriesALostLifecycleOpen(t *testing.T) {
 	setupGitTestEnv(t)
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "park-lost-open")
 	wireBlobStore(t, s)
-	namespace := blueprintRunIDForConversation(t, database, conversationID)
+	namespace := taskIDForConversation(t, database, conversationID)
 	flaky := &flakyBeginSnapshotStore{WorkspaceSnapshotStore: s.workspaceSnapshots, failFirst: true}
 	s.workspaceSnapshots = flaky
 
@@ -216,7 +216,7 @@ func TestAwaitSnapshotBlob_TakesABlobThatAlreadyLanded(t *testing.T) {
 	s, database, conversationID, _ := setupAdvanceFixture(t, "wait-already-landed")
 	wireBlobStore(t, s)
 	s.snapshotWaitPollInterval = 5 * time.Millisecond
-	namespace := blueprintRunIDForConversation(t, database, conversationID)
+	namespace := taskIDForConversation(t, database, conversationID)
 
 	// The state the crash leaves behind: pending forever, its writer gone
 	// (no claim row at all, so the liveness read answers "not coming"), and
@@ -295,7 +295,7 @@ func TestWorkspaceRecoverable_LadderBelowTheBlob(t *testing.T) {
 					t.Fatalf("storage.New: %v", err)
 				}
 				s.SetStorage(blobs)
-				namespace := blueprintRunIDForConversation(t, database, conversationID)
+				namespace := taskIDForConversation(t, database, conversationID)
 				if tc.state != "" {
 					const writerClaim = "b1b2c3d4-0000-4000-8000-000000000001"
 					seedSnapshotState(t, s, namespace, writerClaim, tc.state)
@@ -342,7 +342,7 @@ func TestEnsureWorkspace_WaitsOutAnInFlightPersist(t *testing.T) {
 	wireBlobStore(t, s)
 	s.snapshotWaitPollInterval = 5 * time.Millisecond
 	s.SetSnapshotWaitTimeout(10 * time.Second)
-	namespace := blueprintRunIDForConversation(t, database, conversationID)
+	namespace := taskIDForConversation(t, database, conversationID)
 	markNative(t, database, conversationID)
 
 	const writerClaim = "claim-slow-writer"
@@ -367,7 +367,7 @@ func TestEnsureWorkspace_WaitsOutAnInFlightPersist(t *testing.T) {
 	})
 
 	conv := &domain.Conversation{
-		ID: conversationID, BlueprintRunID: namespace, Runtime: domain.ConversationRuntimeNative,
+		ID: conversationID, TaskID: namespace, Runtime: domain.ConversationRuntimeNative,
 		WorktreePath: filepath.Join(t.TempDir(), "swept-away"),
 	}
 	got, prov, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, failingFreshBuilder(t))
@@ -395,7 +395,7 @@ func TestEnsureWorkspace_FallsBackWhenTheWriterIsGone(t *testing.T) {
 			s, database, conversationID, _ := setupAdvanceFixture(t, "wait-dead-"+runtime)
 			wireBlobStore(t, s)
 			s.snapshotWaitPollInterval = 5 * time.Millisecond
-			namespace := blueprintRunIDForConversation(t, database, conversationID)
+			namespace := taskIDForConversation(t, database, conversationID)
 
 			const writerClaim = "claim-dead-writer"
 			seedSnapshotState(t, s, namespace, writerClaim, domain.WorkspaceSnapshotPending)
@@ -409,7 +409,7 @@ func TestEnsureWorkspace_FallsBackWhenTheWriterIsGone(t *testing.T) {
 				convRuntime = domain.ConversationRuntimeSDK
 			}
 			conv := &domain.Conversation{
-				ID: conversationID, BlueprintRunID: namespace, Runtime: convRuntime,
+				ID: conversationID, TaskID: namespace, Runtime: convRuntime,
 				WorktreePath: filepath.Join(t.TempDir(), "swept-away"),
 			}
 			freshDir := t.TempDir()
@@ -464,7 +464,7 @@ func TestEnsureWorkspace_HonorsTheWaitCap(t *testing.T) {
 	wireBlobStore(t, s)
 	s.snapshotWaitPollInterval = 5 * time.Millisecond
 	s.SetSnapshotWaitTimeout(50 * time.Millisecond)
-	namespace := blueprintRunIDForConversation(t, database, conversationID)
+	namespace := taskIDForConversation(t, database, conversationID)
 
 	const writerClaim = "claim-hung-writer"
 	seedSnapshotState(t, s, namespace, writerClaim, domain.WorkspaceSnapshotPending)
@@ -472,7 +472,7 @@ func TestEnsureWorkspace_HonorsTheWaitCap(t *testing.T) {
 	stageInstance(t, database, "exec-hung", time.Now())
 
 	conv := &domain.Conversation{
-		ID: conversationID, BlueprintRunID: namespace, Runtime: domain.ConversationRuntimeNative,
+		ID: conversationID, TaskID: namespace, Runtime: domain.ConversationRuntimeNative,
 		WorktreePath: filepath.Join(t.TempDir(), "swept-away"),
 	}
 	freshDir := t.TempDir()

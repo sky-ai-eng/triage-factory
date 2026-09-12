@@ -502,10 +502,10 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 // TTL rather than orphaned behind a blueprint stranded 'running' forever.
 func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, conversationID, _ := setupAdvanceFixture(t, "open-strand")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "open-strand")
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	wireBlobStore(t, s)
-	putTestSnapshot(t, s, bpr) // garbage blob: passes Exists, fails rehydrate
+	putTestSnapshot(t, s, taskID) // garbage blob: passes Exists, fails rehydrate
 	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-open-strand' WHERE id=?`, conversationID); err != nil {
 		t.Fatalf("park open: %v", err)
 	}
@@ -524,7 +524,7 @@ func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 		if bpStatus != "running" {
 			t.Fatalf("blueprint_run moved to %q on attempt %d; a runtime that never started moves no blueprint", bpStatus, i+1)
 		}
-		assertSnapshotPresent(t, s, bpr, true)
+		assertSnapshotPresent(t, s, taskID, true)
 	}
 
 	if st := storedStatus(t, database, conversationID); st != domain.StatusOpen {

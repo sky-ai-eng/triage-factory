@@ -26,22 +26,22 @@ func newWorkspaceSnapshotStore(q queryer) db.WorkspaceSnapshotStore {
 
 var _ db.WorkspaceSnapshotStore = (*workspaceSnapshotStore)(nil)
 
-func (s *workspaceSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID, blueprintRunID, claimID string) error {
+func (s *workspaceSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID, taskID, claimID string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO workspace_snapshots (org_id, blueprint_run_id, state, writer_claim_id, updated_at)
+		INSERT INTO workspace_snapshots (org_id, task_id, state, writer_claim_id, updated_at)
 		VALUES (?, ?, 'pending', ?, ?)
-		ON CONFLICT(org_id, blueprint_run_id) DO UPDATE SET
+		ON CONFLICT(org_id, task_id) DO UPDATE SET
 			state           = excluded.state,
 			writer_claim_id = excluded.writer_claim_id,
 			updated_at      = excluded.updated_at
-	`, orgID, blueprintRunID, claimID, time.Now().UTC())
+	`, orgID, taskID, claimID, time.Now().UTC())
 	return err
 }
 
-func (s *workspaceSnapshotStore) FinishSnapshotSystem(ctx context.Context, orgID, blueprintRunID, claimID string, ok bool) (bool, error) {
+func (s *workspaceSnapshotStore) FinishSnapshotSystem(ctx context.Context, orgID, taskID, claimID string, ok bool) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
@@ -52,8 +52,8 @@ func (s *workspaceSnapshotStore) FinishSnapshotSystem(ctx context.Context, orgID
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE workspace_snapshots
 		SET state = ?, updated_at = ?
-		WHERE org_id = ? AND blueprint_run_id = ? AND writer_claim_id = ? AND state = 'pending'
-	`, state, time.Now().UTC(), orgID, blueprintRunID, claimID)
+		WHERE org_id = ? AND task_id = ? AND writer_claim_id = ? AND state = 'pending'
+	`, state, time.Now().UTC(), orgID, taskID, claimID)
 	if err != nil {
 		return false, err
 	}
@@ -64,16 +64,16 @@ func (s *workspaceSnapshotStore) FinishSnapshotSystem(ctx context.Context, orgID
 	return n > 0, nil
 }
 
-func (s *workspaceSnapshotStore) GetSnapshotStateSystem(ctx context.Context, orgID, blueprintRunID string) (*domain.WorkspaceSnapshotState, error) {
+func (s *workspaceSnapshotStore) GetSnapshotStateSystem(ctx context.Context, orgID, taskID string) (*domain.WorkspaceSnapshotState, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	var st domain.WorkspaceSnapshotState
 	err := s.q.QueryRowContext(ctx, `
-		SELECT org_id, blueprint_run_id, state, writer_claim_id, updated_at
+		SELECT org_id, task_id, state, writer_claim_id, updated_at
 		FROM workspace_snapshots
-		WHERE org_id = ? AND blueprint_run_id = ?
-	`, orgID, blueprintRunID).Scan(&st.OrgID, &st.BlueprintRunID, &st.State, &st.WriterClaimID, &st.UpdatedAt)
+		WHERE org_id = ? AND task_id = ?
+	`, orgID, taskID).Scan(&st.OrgID, &st.TaskID, &st.State, &st.WriterClaimID, &st.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -83,12 +83,12 @@ func (s *workspaceSnapshotStore) GetSnapshotStateSystem(ctx context.Context, org
 	return &st, nil
 }
 
-func (s *workspaceSnapshotStore) DeleteSnapshotStateSystem(ctx context.Context, orgID, blueprintRunID string) error {
+func (s *workspaceSnapshotStore) DeleteSnapshotStateSystem(ctx context.Context, orgID, taskID string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
 	_, err := s.q.ExecContext(ctx, `
-		DELETE FROM workspace_snapshots WHERE org_id = ? AND blueprint_run_id = ?
-	`, orgID, blueprintRunID)
+		DELETE FROM workspace_snapshots WHERE org_id = ? AND task_id = ?
+	`, orgID, taskID)
 	return err
 }

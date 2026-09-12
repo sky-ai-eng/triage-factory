@@ -49,23 +49,23 @@ type WorkspaceSnapshotStore interface {
 	// Called before the capture starts, so that "a persist is owed" is
 	// durable before a waiter could ever observe the conversation as
 	// resumable-with-no-blob.
-	BeginSnapshotSystem(ctx context.Context, orgID, blueprintRunID, claimID string) error
+	BeginSnapshotSystem(ctx context.Context, orgID, taskID, claimID string) error
 
 	// FinishSnapshotSystem closes out claimID's write: a CAS that flips
 	// 'pending' to 'written' (ok) or 'failed' (not ok) only while
 	// writer_claim_id is still claimID. matched=false means zero rows moved
 	// — a successor re-owned the key (or the row is already terminal) — and
 	// the caller treats that as superseded, not as an error.
-	FinishSnapshotSystem(ctx context.Context, orgID, blueprintRunID, claimID string, ok bool) (matched bool, err error)
+	FinishSnapshotSystem(ctx context.Context, orgID, taskID, claimID string, ok bool) (matched bool, err error)
 
 	// GetSnapshotStateSystem reads one key's lifecycle row, or (nil, nil)
 	// when no snapshot lifecycle has ever started for it.
-	GetSnapshotStateSystem(ctx context.Context, orgID, blueprintRunID string) (*domain.WorkspaceSnapshotState, error)
+	GetSnapshotStateSystem(ctx context.Context, orgID, taskID string) (*domain.WorkspaceSnapshotState, error)
 
 	// DeleteSnapshotStateSystem drops the key's lifecycle row. Paired with
 	// the blob delete at terminal cleanup and in the retention reaper, so a
 	// reaped snapshot reads as "no lifecycle" rather than as a `written` row
 	// pointing at a blob that is gone. Idempotent — deleting a row that
 	// isn't there is a no-op, not an error.
-	DeleteSnapshotStateSystem(ctx context.Context, orgID, blueprintRunID string) error
+	DeleteSnapshotStateSystem(ctx context.Context, orgID, taskID string) error
 }

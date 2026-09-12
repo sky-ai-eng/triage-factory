@@ -1105,11 +1105,11 @@ type ConversationStore interface {
 	// JWT claims.
 	LastAgentActivityAtSystem(ctx context.Context, orgID, conversationID string) (at time.Time, ok bool, err error)
 
-	// ListReapableSnapshotKeysSystem returns the (org, blueprint_run_id) of
-	// every blueprint_run all of whose snapshot-bearing conversations — parked `open` or
+	// ListReapableSnapshotKeysSystem returns the (org, task_id) of
+	// every task all of whose snapshot-bearing conversations — parked `open` or
 	// any `completed` terminal, matching what the write side snapshots — last
 	// parked or concluded before cutoff. These are the workspace snapshot keys
-	// the retention reaper may safely drop. A blueprint_run with any such
+	// the retention reaper may safely drop. A task with any such
 	// conversation still within the TTL is omitted (its shared blob is still
 	// wanted). The timestamp is COALESCE(parked_at, completed_at, started_at):
 	// parked_at tracks an open conversation's last park (stamped by MarkOpen,
@@ -1130,11 +1130,11 @@ type ConversationStore interface {
 	//
 	//   - Every snapshot-bearing conversation on the key (parked `open` /
 	//     `completed`) last parked or concluded before cutoff, grouped by
-	//     (org_id, blueprint_run_id) exactly as ListReapableSnapshotKeysSystem
-	//     groups — a blueprint's steps share one tree.
-	//   - No conversation on the key holds an active claim. Steps share the
-	//     tree, so a sibling step's live engagement is working in the very
-	//     directory this would delete.
+	//     (org_id, task_id) exactly as ListReapableSnapshotKeysSystem
+	//     groups — a task's conversations share one tree.
+	//   - No conversation on the key holds an active claim. They share the
+	//     tree, so a sibling conversation's live engagement is working in the
+	//     very directory this would delete.
 	//   - The key's workspace_snapshots row says `written`. A tree whose
 	//     snapshot is pending, failed, or absent is the ONLY copy of the
 	//     agent's uncommitted work, and the caller confirms the blob itself
@@ -1178,8 +1178,8 @@ type ConversationStore interface {
 	// belongs to.
 	ListMemoryOwedSystem(ctx context.Context, orgID string, backoff time.Duration, limit int) ([]domain.MemoryOwed, error)
 
-	// HasActiveClaimForBlueprintRunSystem reports whether any conversation
-	// under blueprintRunID has a live claim — i.e. whether an executor is
+	// HasActiveClaimForTaskSystem reports whether any conversation
+	// on taskID has a live claim — i.e. whether an executor is
 	// engaged on the shared workspace tree right now.
 	//
 	// It exists for the re-check the eviction sweep takes immediately before
@@ -1187,5 +1187,5 @@ type ConversationStore interface {
 	// paths hold: the enumeration above is a snapshot of a moment, and a
 	// dispatcher in the same process can claim a conversation on the key in
 	// between. Admin pool, for the same claims-less caller.
-	HasActiveClaimForBlueprintRunSystem(ctx context.Context, orgID, blueprintRunID string) (bool, error)
+	HasActiveClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
 }

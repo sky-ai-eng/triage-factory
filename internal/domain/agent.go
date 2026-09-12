@@ -490,29 +490,29 @@ type Conversation struct {
 }
 
 // SnapshotReapKey identifies a parked workspace snapshot eligible for retention
-// reaping: the owning org and the blueprint_run_id (which is the snapshot key
-// id — every conversation is a blueprint step, so one blueprint_run shares one workspace
-// blob). The retention reaper enumerates these from the DB and discards each.
+// reaping: the owning org and the task id, which is the snapshot key id — a
+// task's conversations share one workspace tree and one blob. The retention
+// reaper enumerates these from the DB and discards each.
 type SnapshotReapKey struct {
-	OrgID          string
-	BlueprintRunID string
+	OrgID  string
+	TaskID string
 }
 
 // EvictableWorkspace is one snapshot key whose warm workspace tree may be
 // reclaimed from the executor holding it: every conversation sharing the key is
 // at rest, none is claimed, the key aged past the eviction TTL, and the durable
 // snapshot is recorded written. WorktreePaths are the distinct non-empty
-// worktree_path values those conversations recorded — normally one, since a
-// blueprint's steps share a tree, but a key resumed on a host with a different
-// $TMPDIR records a second.
+// worktree_path values those conversations recorded — normally one, since the
+// task's conversations share a tree, but a key resumed on a host with a
+// different $TMPDIR records a second.
 //
 // The paths are candidates, not facts about this machine: the enumerating pod
 // is not necessarily the pod holding the tree, so a caller stats each one
 // itself and evicts only what is actually here.
 type EvictableWorkspace struct {
-	OrgID          string
-	BlueprintRunID string
-	WorktreePaths  []string
+	OrgID         string
+	TaskID        string
+	WorktreePaths []string
 }
 
 // ModelSynthetic is the model id the agent runtime stamps on an assistant

@@ -206,7 +206,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			orgID:          orgID,
 			conversationID: conversationID,
 			taskID:         task.ID,
-			namespace:      memoryNamespace(cfg.blueprintRunID),
+			namespace:      workspaceKey(task.ID),
 			claudeCwd:      cfg.wtPath,
 			triggerType:    triggerType,
 			creatorUserID:  creatorUserID,
@@ -331,11 +331,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		worktree.RemoveClaudeProjectDir(claudeCwd)
 	}()
 
-	// The namespace groups this run with its blueprint siblings — the run tree,
-	// the workspace snapshot, and which prior memories count as this run's own
-	// handoff rather than history. Exported below so per-run scratch paths the
-	// prompts name (the review passes' shared drop point) resolve deterministically.
-	namespace := memoryNamespace(cfg.blueprintRunID)
+	// The workspace key groups this run with every other conversation on its
+	// task — the run tree and the workspace snapshot. Exported below so the
+	// scratch paths the prompts name (the review passes' shared drop point)
+	// resolve deterministically for every conversation working in this tree.
+	namespace := workspaceKey(task.ID)
 
 	// Whether this tree is still ours decides what MAY be written in it, not what
 	// the agent gets. Once a launch has handed the tree to the sandbox uid — a warm
@@ -465,11 +465,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
 		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference the absolute _tfac/memory.md path that resolves regardless of which worktree the agent has cd'd into.
 		agenthost.RunURLEnvVar + "=" + publishedRunURL,
-		// The workflow run this step belongs to. Non-absolute, so it passes
-		// through translateEnvForSandbox unchanged. Prompts that share a drop
-		// point across the steps of one run (the parallel review passes) name
-		// their directory through this.
-		"TRIAGE_FACTORY_BLUEPRINT_RUN_ID=" + namespace,
+		// The key of the workspace this run works in. Non-absolute, so it
+		// passes through translateEnvForSandbox unchanged. Prompts that share a
+		// drop point across the conversations working in one tree (the parallel
+		// review passes) name their directory through this.
+		"TRIAGE_FACTORY_WORKSPACE_KEY=" + namespace,
 	}
 	// Set TRIAGE_FACTORY_REPO when the run has a resolved GitHub repo context
 	// (GitHub PR runs only) so gh subcommands can default to the right target
@@ -593,13 +593,13 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			Extras:  cfg.extraAllowedTools,
 			GH:      ghChannel != nil,
 		}),
-		ExtraEnv:        extraEnv,
-		TraceID:         conversationID,
-		MemoryNamespace: namespace,
-		SystemPrompt:    cfg.appendSysPrompt,
-		OrgID:           orgID,
-		Secrets:         s.getRunSecrets(),
-		LLMResolver:     s.llmResolverForConversation(orgID, conversationID),
+		ExtraEnv:     extraEnv,
+		TraceID:      conversationID,
+		WorkspaceKey: namespace,
+		SystemPrompt: cfg.appendSysPrompt,
+		OrgID:        orgID,
+		Secrets:      s.getRunSecrets(),
+		LLMResolver:  s.llmResolverForConversation(orgID, conversationID),
 		// Measured sandbox cost lands on the engagement that paid for it, at
 		// teardown. Empty claim id (a path with no claimed run in scope)
 		// records nothing.
@@ -765,10 +765,10 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 //
 // blueprintRunID is the run's blueprint run (cfg.blueprintRunID for an initial
 // run, the resumed run's blueprint_run_id for a resume). It's the authoritative
-// source for the memory namespace and for whether this is a blueprint step —
-// threaded in by the caller, which already holds it, rather than re-fetched, so
-// a DB hiccup can't silently mis-namespace the memory or mis-route the task
-// close.
+// source for whether this is a blueprint step and which one — threaded in by
+// the caller, which already holds it, rather than re-fetched, so a DB hiccup
+// can't silently mis-route the task close. The workspace key is the task's,
+// taken off the task this frame already has.
 //
 // mirror is the engagement's memory mirror — the same one its tool rows filed
 // through. The final check here is what catches a conclusion turn that wrote
@@ -818,11 +818,11 @@ func (s *Spawner) processCompletion(
 		span.End()
 	}()
 
-	// The namespace keys this run's workspace (tree + snapshot) among its
-	// blueprint siblings. Derived from the caller-supplied blueprint_run_id —
-	// no DB fetch, so it can't silently fall back to the wrong key on a
+	// The key of the workspace (tree + snapshot) this run shares with every
+	// other conversation on its task. Derived from the task the caller already
+	// holds — no DB fetch, so it can't silently fall back to the wrong key on a
 	// transient read error.
-	namespace := memoryNamespace(blueprintRunID)
+	namespace := workspaceKey(task.ID)
 
 	// Classify the turn-end up front. A no-conclusion turn (prose / nothing) is
 	// NOT a termination — the run is open. Park it open (snapshot for the
@@ -1037,9 +1037,9 @@ func (s *Spawner) processCompletion(
 		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s failed: %s", shortConversationID(conversationID), truncateToastMsg(resultSummary, 160)))
 	}
 
-	// Workspace-snapshot cleanup is owned by terminateBlueprint, keyed by
-	// blueprint_run_id (the shared workspace's key) — every run is a blueprint
-	// step now, so there is no standalone conversation-id-keyed snapshot to drop here. A
-	// parked run keeps its snapshot for the eventual resume.
+	// Workspace-snapshot cleanup is owned by terminateBlueprint, keyed by the
+	// task (the shared workspace's key) — there is no conversation-id-keyed
+	// snapshot to drop here. A parked run keeps its snapshot for the eventual
+	// resume.
 	return parked, false
 }

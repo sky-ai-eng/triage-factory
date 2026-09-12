@@ -391,9 +391,9 @@ func runDir(rootKey string) string {
 // rootKey is a key, not a conversation id, and this family takes no view on
 // which id a caller keys its tree by — it only requires that the caller uses
 // the same one for the make, the derive, and the remove. The orchestrator keys
-// every delegated run's tree by the blueprint run id (the memory namespace), so
-// one blueprint's steps share a root; the in-jail agent host derives the same
-// path from its conversation id only as the fallback for a run whose recorded
+// every delegated run's tree by the task id (its workspace key), so a task's
+// conversations share a root; the in-jail agent host derives the same path
+// from its conversation id only as the fallback for a run whose recorded
 // worktree_path is missing, which is exactly where the two diverge (see
 // cmd/exec/agenthost's WorkspaceRoots).
 func RunRoot(rootKey string) string {

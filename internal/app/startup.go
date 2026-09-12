@@ -21,8 +21,9 @@ import (
 
 // runStartupTasks performs the one-time boot side effects, in order:
 // register the clone-result callback (before any clone can fire), sweep
-// orphaned worktrees, and (local only) import skill files. All of this runs
-// before the background workers and the first poll.
+// orphaned worktrees, move the workspace snapshot blobs onto the task key,
+// and (local only) import skill files. All of this runs before the background
+// workers and the first poll.
 func (a *App) runStartupTasks(ctx context.Context) {
 	// Materialize the TF-controlled git hooks dir (F2, TFAC-456) before any
 	// run can spawn, in both modes, so core.hooksPath always resolves to a
@@ -50,6 +51,15 @@ func (a *App) runStartupTasks(ctx context.Context) {
 	}
 	a.cleanupWorktrees(ctx)
 	if a.local() {
+		// The workspace key widened from the blueprint run to the task, and a
+		// migration re-keyed the lifecycle rows. The blobs those rows describe
+		// live in the object store, where no migration reaches, so they are
+		// moved here — once, idempotently, and only in local mode, since multi
+		// is unreleased and has no deployed blobs. Runs after the worktree
+		// sweep for no ordering reason beyond reading in the order boot does.
+		if a.spawner != nil {
+			a.spawner.RekeyWorkspaceBlobsToTask(ctx, runmode.LocalDefaultOrgID)
+		}
 		a.importLocalSkills(ctx)
 	}
 }
