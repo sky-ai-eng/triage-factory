@@ -2,6 +2,7 @@ package systemllm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -64,6 +65,22 @@ type CompleteOptions struct {
 	// model is what decides which credential a system job resolves.
 	LLMResolver func(ctx context.Context, orgID, model string) (map[string]string, error)
 
+	// RunID, when non-empty, is the id the system_llm_runs row this call
+	// records is inserted with, in place of the one the store would generate.
+	// Empty keeps the generated id, which is what a caller that only spends
+	// wants.
+	//
+	// It exists because recording is fire-and-forget by design — Record and
+	// RecordDirect return nothing and swallow their own failures, so
+	// accounting can never break the job it is accounting for — which leaves
+	// no way at all to learn a generated id. A caller whose own rows have to
+	// name the ledger row therefore mints the id itself and hands it in here.
+	//
+	// Both dialects honor a supplied id (Postgres requires it parse as a
+	// uuid). It is not an idempotency key — that is the row's trace_id, taken
+	// from the subprocess session or the API response id rather than here.
+	RunID string
+
 	// Metadata is optional per-job context (e.g. {"batch_size": 10}),
 	// threaded through to the system_llm_runs row.
 	Metadata map[string]any
@@ -75,6 +92,23 @@ type CompleteOptions struct {
 type CompleteResult struct {
 	Text string
 }
+
+// ErrResultIsError reports that the local (subprocess) path captured a
+// terminal result the agent runtime itself flagged as an error. The runtime's
+// own client-side refusals arrive this way — an over-long prompt is a result
+// event with subtype "success" and is_error set — and agentproc.Run returns
+// no error for one, because a captured terminal result is a complete
+// invocation as far as it is concerned.
+//
+// It is not complete as far as a caller is concerned: the text is the
+// refusal, not the answer that was asked for. Without this, a caller parses
+// the refusal as its own output format and reports whatever that parse
+// happens to say, which describes the wrong failure.
+//
+// The wrapped text is the runtime's own explanation, bounded — it is the only
+// diagnostic there is. The ledger row is still written and still flagged
+// is_error: the call spent tokens either way.
+var ErrResultIsError = errors.New("systemllm: the agent runtime returned an error result")
 
 // Complete runs one toolless, single-turn system-job completion, recording
 // its cost/tokens into system_llm_runs either way. In local mode it's
@@ -150,6 +184,7 @@ func (r *Recorder) completeLocal(ctx context.Context, opts CompleteOptions) (*Co
 		Job:       opts.Job,
 		Model:     opts.Model,
 		StartedAt: startedAt,
+		RunID:     opts.RunID,
 		Metadata:  opts.Metadata,
 	}, outcome, usage)
 	if err != nil {
@@ -162,5 +197,29 @@ func (r *Recorder) completeLocal(ctx context.Context, opts CompleteOptions) (*Co
 	if outcome == nil || outcome.Result == nil {
 		return nil, fmt.Errorf("agent: no terminal result event")
 	}
+	// Recorded above before this returns, so the flagged row lands whether or
+	// not the caller ever sees the text.
+	if outcome.Result.IsError {
+		return nil, fmt.Errorf("%w: %s", ErrResultIsError, truncateResultText(outcome.Result.Result))
+	}
 	return &CompleteResult{Text: outcome.Result.Result}, nil
+}
+
+// resultTextLimit bounds the result text ErrResultIsError carries. The string
+// is whatever the runtime chose to say and nothing constrains its length — an
+// over-long-prompt refusal can quote back what it refused — so it is cut here
+// rather than at whichever caller's log line it eventually lands in.
+const resultTextLimit = 500
+
+// truncateResultText bounds s and says so when it cuts, so a reader never
+// mistakes a clipped message for the whole of what the runtime said.
+func truncateResultText(s string) string {
+	if len(s) <= resultTextLimit {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= resultTextLimit {
+		return s
+	}
+	return string(r[:resultTextLimit]) + "… (truncated)"
 }

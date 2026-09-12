@@ -202,6 +202,7 @@ func (r *Recorder) recordDirectCall(ctx context.Context, opts CompleteOptions, s
 		Job:       opts.Job,
 		Model:     opts.Model,
 		StartedAt: startedAt,
+		RunID:     opts.RunID,
 		Metadata:  opts.Metadata,
 	}, traceID, usage, costUSD, durationMs, callErr != nil)
 }
