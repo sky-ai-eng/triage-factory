@@ -616,8 +616,15 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	// the unfenced path — a successor's conversation is not this engagement's
 	// to end. Best-effort: the terminal above is the load-bearing write, and a
 	// failed stamp must not turn a recorded failure into an error.
-	if _, err := s.conversations.EndConversationSystem(bgCtx, orgID, conversationID, domain.EndedFailed); err != nil {
-		delegateLog.Warn("stamp the failure boundary on the conversation failed", "conversation", conversationID, "error", err)
+	ended, endErr := s.conversations.EndConversationSystem(bgCtx, orgID, conversationID, domain.EndedFailed)
+	if endErr != nil {
+		delegateLog.Warn("stamp the failure boundary on the conversation failed", "conversation", conversationID, "error", endErr)
+	} else if ended != nil {
+		// The memory this failure owes: the agent may have died anywhere
+		// between "before its first tool call" and "one write short of its
+		// file", and only the transcript says which. Rung for the row this
+		// call stamped.
+		s.kickMemoryOwed(orgID, ended.ID)
 	}
 
 	s.updateBreakerCounter(taskID, triggerType, "failed")

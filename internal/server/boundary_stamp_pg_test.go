@@ -126,3 +126,54 @@ func TestTaskReassign_StampsNothing(t *testing.T) {
 			conversationID, ended, reason)
 	}
 }
+
+// TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped: an
+// archived team's runs are the clearest case for generating a memory from the
+// transcript — nobody is going back to write one by hand — so each stamp rings.
+//
+// Once per stamped row and no more: the loop re-asks the door per conversation,
+// and a row that had already ended comes back nil, with whatever it owes rung
+// for by the boundary that actually ended it.
+func TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped(t *testing.T) {
+	r := newTeamArchiveRig(t)
+	d := &doorbell{}
+	r.th.memoryOwed = d.ring
+
+	seed := func(status any) string {
+		t.Helper()
+		id := uuid.New().String()
+		pgtest.MustExec(t, r.h.AdminDB, `
+			INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility,
+			                           type, origin, trigger_type, status)
+			VALUES ($1, $2, $3, $4, 'team', 'delegation', 'interactive', 'manual', $5)
+		`, id, r.orgID, r.owner, r.teamID, status)
+		return id
+	}
+	midFlight := seed(nil)
+	parked := seed("open")
+	seed("completed") // terminal: never enumerated, so never stamped and never rung
+
+	rec := httptest.NewRecorder()
+	r.th.handleTeamArchive(rec, r.req(http.MethodPost, "/api/teams/"+r.teamID+"/archive", r.owner, r.teamID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	got := d.taken()
+	want := map[string]bool{midFlight: true, parked: true}
+	if len(got) != len(want) {
+		t.Fatalf("rang %d times for %d stamped conversations: %v", len(got), len(want), got)
+	}
+	for _, ring := range got {
+		if ring[0] != r.orgID {
+			t.Errorf("rang for org %q, want %q", ring[0], r.orgID)
+		}
+		if !want[ring[1]] {
+			t.Errorf("rang for %s, which the archive did not stamp", ring[1])
+		}
+		delete(want, ring[1])
+	}
+	for id := range want {
+		t.Errorf("archive stamped %s without ringing for it", id)
+	}
+}

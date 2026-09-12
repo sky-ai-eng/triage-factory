@@ -150,6 +150,14 @@ func (a *App) startBrain(term int64) {
 	// any attempt in flight so a demoted holder is provably done generating
 	// before its successor starts. That attempt's row keeps completed_at NULL:
 	// abandonment is derived from started_at, never stamped.
+	//
+	// It is also the reaper's doorbell, and deliberately its only one. Every
+	// other boundary stamper rings memoryOwed because it runs in a DIFFERENT
+	// process from the brain — a request handler on whichever control pod took
+	// the PATCH, an executor's failure — and the relay is what crosses that
+	// gap. The reaper runs right here, on a longer tick than this sweep, so a
+	// conversation it fails is picked up within one interval regardless; a
+	// doorbell would buy it nothing and cost it a fleet-wide re-sweep per tick.
 	go memoryprovision.RunSweep(brainCtx, a.memoryProvisioner, memoryprovision.DefaultSweepInterval)
 	// Shipped-defaults sync: bring every provisioned team's UNMODIFIED
 	// copies of the shipped prompts/blueprints up to the current

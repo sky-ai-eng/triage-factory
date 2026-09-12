@@ -1275,8 +1275,15 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		// completion gate wrote it in the terminal this reactor is reacting to.
 		// Best-effort: an unstamped step is a row the provisioner sweeps later,
 		// while refusing to advance would strand the blueprint.
-		if _, err := s.conversations.EndConversationSystem(ctx, orgID, stepConversation.ID, domain.EndedStepAdvanced); err != nil {
+		ended, err := s.conversations.EndConversationSystem(ctx, orgID, stepConversation.ID, domain.EndedStepAdvanced)
+		if err != nil {
 			dispatchLog.Warn("stamp the step-advance boundary on the concluded step failed", "conversation", stepConversation.ID, "blueprint_run", br.ID, "error", err)
+		} else if ended != nil {
+			// The doorbell, before the enqueue below rather than after it: the
+			// next step is held out of the claim gate until this one's memory
+			// lands, so the sooner the brain starts generating the shorter the
+			// blueprint's own pause between steps.
+			s.kickMemoryOwed(orgID, ended.ID)
 		}
 		if err := s.enqueueBlueprintStep(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), nextModel, triggerType, br.TriggerID, creatorUserID, br.ActorAgentID); err != nil {
 			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
@@ -1860,7 +1867,16 @@ func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversatio
 	if err != nil {
 		dispatchLog.Warn("mark orphaned conversation failed", "conversation", conv.ID, "error", err)
 	}
-	if _, err := s.conversations.EndConversationSystem(bgCtx, orgID, conv.ID, domain.EndedFailed); err != nil {
+	ended, err := s.conversations.EndConversationSystem(bgCtx, orgID, conv.ID, domain.EndedFailed)
+	if err != nil {
 		dispatchLog.Warn("stamp the failure boundary on the orphaned conversation failed", "conversation", conv.ID, "error", err)
+		return
+	}
+	// A conversation failed here failed BEFORE its agent ran, so it owes the
+	// memory that says so — the empty row, generated from a transcript with no
+	// assistant turn in it. Rung for the row this call stamped; a nil one had
+	// already ended and its debt belongs to that boundary.
+	if ended != nil {
+		s.kickMemoryOwed(orgID, ended.ID)
 	}
 }

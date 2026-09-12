@@ -199,8 +199,18 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 	// archived team holding conversations nobody ended.
 	stampCtx := context.WithoutCancel(r.Context())
 	for _, conversationID := range conversationIDs {
-		if _, eErr := th.allStores.Conversations.EndConversationSystem(stampCtx, orgID, conversationID, domain.EndedTeamArchived); eErr != nil {
+		ended, eErr := th.allStores.Conversations.EndConversationSystem(stampCtx, orgID, conversationID, domain.EndedTeamArchived)
+		if eErr != nil {
 			teamsLog.Warn("archive: stamp the team-archive boundary failed", "team", teamID, "conversation", conversationID, "error", eErr)
+			continue
+		}
+		// The memory doorbell, for the rows this loop actually stamped: a nil
+		// row is one that had already ended, and whatever it owes was rung for
+		// by the boundary that ended it. An archived team's runs are the
+		// clearest case for generating from the transcript — nobody is going
+		// back to write the memory by hand.
+		if ended != nil && th.memoryOwed != nil {
+			th.memoryOwed(orgID, ended.ID)
 		}
 	}
 

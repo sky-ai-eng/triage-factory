@@ -167,6 +167,7 @@ func (se *settingsHandler) handleAnthropicPut(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	se.kickMemoryBacklog(orgID)
 	writeJSON(w, http.StatusOK, llmCredentialResponse{Status: "connected", Cleared: []string{}})
 }
 
@@ -553,6 +554,12 @@ func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, o
 		return
 	}
 
+	// The org-wide memory doorbell, for all three Bedrock shapes at once —
+	// they differ in what they store, not in what a bind means for a memory
+	// generation that had no provider to reach. After the commit: a nudge the
+	// transaction then rolled back would re-run a backlog against the same
+	// missing credential.
+	se.kickMemoryBacklog(orgID)
 	writeJSON(w, http.StatusOK, llmCredentialResponse{Status: "connected", Cleared: nonNil(cleared)})
 }
 

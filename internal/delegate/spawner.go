@@ -329,6 +329,17 @@ type Spawner struct {
 	dispatchWake   chan struct{}  // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
 	drainer        QueueDrainer   // nil-safe; set post-construction via SetQueueDrainer
 	eventPublisher EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors run status/activity onto the bus (TFAC-592)
+	// memoryOwed is the doorbell every boundary this spawner stamps rings:
+	// the conversation may have ended without its agent having written its
+	// memory, and the brain is what generates the one it owes. Nil-safe; set
+	// post-construction via SetOnMemoryOwed. Read through kickMemoryOwed
+	// under mu, like drainer beside it.
+	//
+	// It relays rather than calling: the spawner runs on an executor, which is
+	// never the brain, so this reaches the holder over tf_ctl. Which is also
+	// why a nil one is survivable — the doorbell only shortens the wait, and
+	// the brain's backstop sweep settles the debt either way.
+	memoryOwed func(orgID, conversationID string)
 
 	// procs holds the live agent process handle for each run currently
 	// executing as a LiveRun, keyed by run id. It survives across HTTP
@@ -640,6 +651,33 @@ func (s *Spawner) SetQueueDrainer(d QueueDrainer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.drainer = d
+}
+
+// SetOnMemoryOwed wires the memory doorbell. Post-construction, same pattern
+// as SetQueueDrainer; nil (the default, and every test) leaves each boundary
+// stamping its row and ringing nothing, which costs the brain's sweep one
+// interval and nothing else.
+func (s *Spawner) SetOnMemoryOwed(fn func(orgID, conversationID string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.memoryOwed = fn
+}
+
+// kickMemoryOwed rings the doorbell for a conversation this spawner just
+// ended. The single call site shape for every boundary here, so no stamper has
+// to remember the lock or the nil check.
+//
+// Synchronous: the callback is one pg_notify off an executor, or a nil-safe
+// nudge on the brain — neither worth a goroutine per boundary, and the
+// generation it asks for is the provisioner's own detached work.
+func (s *Spawner) kickMemoryOwed(orgID, conversationID string) {
+	s.mu.Lock()
+	fn := s.memoryOwed
+	s.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(orgID, conversationID)
 }
 
 // SetPresenceChecker wires the multi-mode fleet-wide presence check
