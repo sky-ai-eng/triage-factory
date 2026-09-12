@@ -41,8 +41,8 @@ type parkFleet struct {
 	x, y, control *Spawner
 	blobs         storage.Storage
 	gate          *gatedPutStorage
-	// wtPath is the run tree, keyed by the blueprint run id — one tree for
-	// every step of the blueprint, and the snapshot key.
+	// wtPath is the run tree, keyed by the task id — one tree for every
+	// conversation on the task, and the snapshot key.
 	wtPath, owner, repo, keyID string
 	// goroutines counts what the fixture has running on a scenario's behalf.
 	// A scenario starts none of its own: go through spawn, or the thing you
@@ -67,8 +67,8 @@ func seedParkFleet(t *testing.T) *parkFleet {
 	h.Reset(t)
 	fx := seedFleetFixture(t, h)
 
-	wtPath, owner, repo := setupTestWorktree(t, fx.brID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, fx.brID) })
+	wtPath, owner, repo := setupTestWorktree(t, fx.taskID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, fx.taskID) })
 	// The agent's remembered work: an uncommitted edit (the patch member) and
 	// scratch under _tfac (the tar members). Both have to come back from the
 	// blob for a cold resume to be the same conversation.
@@ -108,7 +108,7 @@ func seedParkFleet(t *testing.T) *parkFleet {
 	f := &parkFleet{
 		fleetFixture: fx, h: h, x: x, y: y, control: control,
 		blobs: blobs, gate: gate,
-		wtPath: wtPath, owner: owner, repo: repo, keyID: fx.brID,
+		wtPath: wtPath, owner: owner, repo: repo, keyID: fx.taskID,
 	}
 	t.Cleanup(func() { waitOrFail(t, &f.goroutines, "the fixture's own goroutines") })
 	return f
@@ -387,11 +387,11 @@ func (f *parkFleet) awaitUpload(t *testing.T) {
 func (f *parkFleet) ensureOn(t *testing.T, s *Spawner, conv *domain.Conversation, fresh freshWorkspaceBuilder) (string, domain.WorkspaceProvenance, error) {
 	t.Helper()
 	return s.ensureWorkspace(context.Background(), f.orgID, &domain.Conversation{
-		ID:             f.conversationID,
-		ClaimID:        conv.ClaimID,
-		WorktreePath:   f.storedWorktreePath(t),
-		BlueprintRunID: f.keyID,
-		Runtime:        conv.Runtime,
+		ID:           f.conversationID,
+		ClaimID:      conv.ClaimID,
+		WorktreePath: f.storedWorktreePath(t),
+		TaskID:       f.keyID,
+		Runtime:      conv.Runtime,
 	}, gitSeed{owner: f.owner, repo: f.repo}, fresh)
 }
 

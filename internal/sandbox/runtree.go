@@ -36,11 +36,11 @@ const (
 // (see worktreeScope).
 //
 // rootKey is the tree's key, not a conversation id: a delegated run's tree is
-// keyed by its memory namespace (the blueprint run id), so a blueprint's steps
-// share one root and a resumed step rebuilds at the same path. Both keys reach
-// this package — the launch pins the worktree by namespace while Config.ConversationID
-// stays the conversation — which is why worktreeScope accepts either and this
-// parameter claims neither.
+// keyed by its workspace key (the task id), so a task's conversations share one
+// root and a resumed one rebuilds at the same path. Both keys reach this
+// package — the launch pins the worktree by workspace key while
+// Config.ConversationID stays the conversation — which is why worktreeScope
+// accepts either and this parameter claims neither.
 func RunTreeRoot(rootKey string) string {
 	return filepath.Join(os.TempDir(), runTreeBasename, rootKey)
 }

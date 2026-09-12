@@ -83,7 +83,7 @@ func TestSandboxEnvAllowlistCoversEveryProducer(t *testing.T) {
 	add([]string{
 		"TRIAGE_FACTORY_CONVERSATION_ID=x",
 		"TRIAGE_FACTORY_CONVERSATION_ROOT=/work",
-		"TRIAGE_FACTORY_BLUEPRINT_RUN_ID=x",
+		"TRIAGE_FACTORY_WORKSPACE_KEY=x",
 		"TRIAGE_FACTORY_REPO=o/r",
 		"TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER=Co-authored-by: X <x@y>",
 	})

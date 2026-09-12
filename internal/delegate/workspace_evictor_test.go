@@ -66,13 +66,13 @@ func TestEvictIdleWorkspaces_EvictedTreeResumesByRehydrate(t *testing.T) {
 	wireBlobStore(t, s)
 	ctx := context.Background()
 
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-	wtPath, owner, repo := setupTestWorktree(t, bpr)
+	wsKey := taskIDForConversation(t, database, conversationID)
+	wtPath, owner, repo := setupTestWorktree(t, wsKey)
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "scratch.md"), "agent scratch")
-	if err := s.snapshotWorkspace(ctx, runmode.LocalDefaultOrgID, conversationID, bpr, "", wtPath, "", domain.ConversationRuntimeNative); err != nil {
+	if err := s.snapshotWorkspace(ctx, runmode.LocalDefaultOrgID, conversationID, wsKey, "", wtPath, "", domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
-	seedSnapshotState(t, s, bpr, evictWriterClaim, domain.WorkspaceSnapshotWritten)
+	seedSnapshotState(t, s, wsKey, evictWriterClaim, domain.WorkspaceSnapshotWritten)
 	parkAged(t, database, conversationID, wtPath, "-2 hours")
 
 	s.EvictIdleWorkspaces(ctx, time.Hour)
@@ -86,7 +86,7 @@ func TestEvictIdleWorkspaces_EvictedTreeResumesByRehydrate(t *testing.T) {
 		t.Errorf("worktree_path = %q, want it left at %q — the stale path is the contract the cold path reads", got, wtPath)
 	}
 
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: bpr}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: wsKey}
 	got, prov, err := s.ensureWorkspace(ctx, runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace after eviction: %v", err)
@@ -107,7 +107,7 @@ func TestEvictIdleWorkspaces_RemovesThroughThePrivilegedSeam(t *testing.T) {
 	isolateRunNamespace(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "evict-seam")
 	wireBlobStore(t, s)
-	bpr, wtPath := seedEvictableTree(t, s, database, conversationID)
+	wsKey, wtPath := seedEvictableTree(t, s, database, conversationID)
 
 	type removal struct{ path, rootKey string }
 	var removals []removal
@@ -118,8 +118,8 @@ func TestEvictIdleWorkspaces_RemovesThroughThePrivilegedSeam(t *testing.T) {
 
 	s.EvictIdleWorkspaces(context.Background(), time.Hour)
 
-	if len(removals) != 1 || removals[0].path != wtPath || removals[0].rootKey != bpr {
-		t.Fatalf("removals = %+v, want exactly one through the privileged seam at %s keyed by %s", removals, wtPath, bpr)
+	if len(removals) != 1 || removals[0].path != wtPath || removals[0].rootKey != wsKey {
+		t.Fatalf("removals = %+v, want exactly one through the privileged seam at %s keyed by %s", removals, wtPath, wsKey)
 	}
 }
 
@@ -145,13 +145,13 @@ func TestEvictIdleWorkspaces_RefusesWithoutAVerifiedSnapshot(t *testing.T) {
 			wireBlobStore(t, s)
 			ctx := context.Background()
 
-			bpr := blueprintRunIDForConversation(t, database, conversationID)
-			wtPath := makeRunTree(t, bpr)
+			wsKey := taskIDForConversation(t, database, conversationID)
+			wtPath := makeRunTree(t, wsKey)
 			if tc.blob {
-				putTestSnapshot(t, s, bpr)
+				putTestSnapshot(t, s, wsKey)
 			}
 			if tc.state != "" {
-				seedSnapshotState(t, s, bpr, evictWriterClaim, tc.state)
+				seedSnapshotState(t, s, wsKey, evictWriterClaim, tc.state)
 			}
 			parkAged(t, database, conversationID, wtPath, "-2 hours")
 
@@ -164,17 +164,17 @@ func TestEvictIdleWorkspaces_RefusesWithoutAVerifiedSnapshot(t *testing.T) {
 	}
 }
 
-// TestEvictIdleWorkspaces_RefusesWhileASiblingStepIsClaimed: a blueprint's steps
-// share one tree, so a step parked past the TTL says nothing about whether
-// anyone is using the directory — the live sibling is working in it.
+// TestEvictIdleWorkspaces_RefusesWhileASiblingStepIsClaimed: a task's
+// conversations share one tree, so one parked past the TTL says nothing about
+// whether anyone is using the directory — the live sibling is working in it.
 func TestEvictIdleWorkspaces_RefusesWhileASiblingStepIsClaimed(t *testing.T) {
 	isolateRunNamespace(t)
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "evict-sibling")
 	wireBlobStore(t, s)
 	ctx := context.Background()
 
-	bpr, wtPath := seedEvictableTree(t, s, database, conversationID)
-	addStepConversation(t, database, bpr, taskID, "step-live", 1, "running")
+	_, wtPath := seedEvictableTree(t, s, database, conversationID)
+	addStepConversation(t, database, blueprintRunIDForConversation(t, database, conversationID), taskID, "step-live", 1, "running")
 	if _, err := s.conversations.SetExecutorSystem(ctx, runmode.LocalDefaultOrgID, "step-live", "exec-live", 1); err != nil {
 		t.Fatalf("mint sibling claim: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestEvictIdleWorkspaces_RefusesWhileASiblingStepIsClaimed(t *testing.T) {
 	}
 	s.EvictIdleWorkspaces(ctx, time.Hour)
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
-		t.Fatalf("tree %s survived once every step was at rest and unclaimed (stat err %v)", wtPath, err)
+		t.Fatalf("tree %s survived once every conversation was at rest and unclaimed (stat err %v)", wtPath, err)
 	}
 }
 
@@ -225,13 +225,13 @@ func TestEvictIdleWorkspaces_RefusesAPathOutsideTheRunNamespace(t *testing.T) {
 	wireBlobStore(t, s)
 	ctx := context.Background()
 
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
+	wsKey := taskIDForConversation(t, database, conversationID)
 	foreign := filepath.Join(t.TempDir(), "someones-checkout")
 	if err := os.MkdirAll(foreign, 0o755); err != nil {
 		t.Fatalf("mkdir foreign tree: %v", err)
 	}
-	putTestSnapshot(t, s, bpr)
-	seedSnapshotState(t, s, bpr, evictWriterClaim, domain.WorkspaceSnapshotWritten)
+	putTestSnapshot(t, s, wsKey)
+	seedSnapshotState(t, s, wsKey, evictWriterClaim, domain.WorkspaceSnapshotWritten)
 	parkAged(t, database, conversationID, foreign, "-2 hours")
 
 	var removed []string
@@ -262,13 +262,13 @@ func TestEvictIdleWorkspaces_RefusesAnotherKeysRunTree(t *testing.T) {
 	wireBlobStore(t, s)
 	ctx := context.Background()
 
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
+	wsKey := taskIDForConversation(t, database, conversationID)
 	// A run tree in the right namespace, under someone else's key.
 	otherKey := "0f8f1b1c-0000-4000-8000-00000000beef"
 	otherTree := makeRunTree(t, otherKey)
 
-	putTestSnapshot(t, s, bpr)
-	seedSnapshotState(t, s, bpr, evictWriterClaim, domain.WorkspaceSnapshotWritten)
+	putTestSnapshot(t, s, wsKey)
+	seedSnapshotState(t, s, wsKey, evictWriterClaim, domain.WorkspaceSnapshotWritten)
 	parkAged(t, database, conversationID, otherTree, "-2 hours")
 
 	var removed []string
@@ -280,7 +280,7 @@ func TestEvictIdleWorkspaces_RefusesAnotherKeysRunTree(t *testing.T) {
 	s.EvictIdleWorkspaces(ctx, time.Hour)
 
 	if len(removed) != 0 {
-		t.Fatalf("evictor removed %v; the recorded path is %s's tree, not %s's, so nothing this sweep checked applies to it", removed, otherKey, bpr)
+		t.Fatalf("evictor removed %v; the recorded path is %s's tree, not %s's, so nothing this sweep checked applies to it", removed, otherKey, wsKey)
 	}
 	if _, err := os.Stat(otherTree); err != nil {
 		t.Fatalf("another key's workspace %s was deleted: %v", otherTree, err)
@@ -333,14 +333,14 @@ func restoreRemoveSeam(t *testing.T, fn func(path, rootKey string) error) {
 // seedEvictableTree stages the fully evictable shape — a real directory under
 // the run namespace, a present blob, a `written` state row, and a park two
 // hours old — so each test above varies exactly one thing away from it.
-func seedEvictableTree(t *testing.T, s *Spawner, database *sql.DB, conversationID string) (blueprintRunID, wtPath string) {
+func seedEvictableTree(t *testing.T, s *Spawner, database *sql.DB, conversationID string) (wsKey, wtPath string) {
 	t.Helper()
-	blueprintRunID = blueprintRunIDForConversation(t, database, conversationID)
-	wtPath = makeRunTree(t, blueprintRunID)
-	putTestSnapshot(t, s, blueprintRunID)
-	seedSnapshotState(t, s, blueprintRunID, evictWriterClaim, domain.WorkspaceSnapshotWritten)
+	wsKey = taskIDForConversation(t, database, conversationID)
+	wtPath = makeRunTree(t, wsKey)
+	putTestSnapshot(t, s, wsKey)
+	seedSnapshotState(t, s, wsKey, evictWriterClaim, domain.WorkspaceSnapshotWritten)
 	parkAged(t, database, conversationID, wtPath, "-2 hours")
-	return blueprintRunID, wtPath
+	return wsKey, wtPath
 }
 
 // makeRunTree creates a directory where a run tree for keyID would live, with

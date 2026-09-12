@@ -12,19 +12,19 @@ import (
 // RunWorkspaceSnapshotStoreConformance. Returns:
 //   - the wired WorkspaceSnapshotStore impl,
 //   - the orgID to pass to every call,
-//   - a WorkspaceSnapshotSeeder for the blueprint_runs FK the key points at
+//   - a WorkspaceSnapshotSeeder for the tasks FK the key points at
 //     (backends build that chain differently).
 type WorkspaceSnapshotStoreFactory func(t *testing.T) (store db.WorkspaceSnapshotStore, orgID string, seed WorkspaceSnapshotSeeder)
 
 // WorkspaceSnapshotSeeder stages the rows the store doesn't own.
 type WorkspaceSnapshotSeeder struct {
-	// BlueprintRun inserts a blueprint_runs row and returns its id — the
-	// snapshot key's other half. suffix discriminates per-subtest seeds.
-	BlueprintRun func(t *testing.T, suffix string) (blueprintRunID string)
+	// Task inserts a tasks row and returns its id — the snapshot key's other
+	// half. suffix discriminates per-subtest seeds.
+	Task func(t *testing.T, suffix string) (taskID string)
 
-	// DeleteBlueprintRun removes the blueprint_runs row, so the cascade
-	// subtest can prove a purged run takes its snapshot state with it.
-	DeleteBlueprintRun func(t *testing.T, blueprintRunID string)
+	// DeleteTask removes the tasks row, so the cascade subtest can prove a
+	// purged task takes its snapshot state with it.
+	DeleteTask func(t *testing.T, taskID string)
 }
 
 // Claim ids the suite writes as writers. Real uuids because the Postgres
@@ -40,16 +40,16 @@ const (
 // hold: the begin/finish/get/delete round-trip in both terminal directions,
 // the completion CAS refusing a writer a successor has displaced, the
 // unconditional takeover that displaces it, per-key isolation, and the FK
-// cascade that keeps a purged blueprint run from leaving lifecycle behind.
+// cascade that keeps a purged task from leaving lifecycle behind.
 func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
 
 	t.Run("no_row_until_a_snapshot_begins", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		br := seed.BlueprintRun(t, "silent")
+		task := seed.Task(t, "silent")
 
-		got, err := store.GetSnapshotStateSystem(ctx, orgID, br)
+		got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
 		if err != nil {
 			t.Fatalf("get before begin: %v", err)
 		}
@@ -60,12 +60,12 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 
 	t.Run("begin_then_finish_ok_records_written", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		br := seed.BlueprintRun(t, "written")
+		task := seed.Task(t, "written")
 
-		if err := store.BeginSnapshotSystem(ctx, orgID, br, snapshotWriterA); err != nil {
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, snapshotWriterA); err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		pending, err := store.GetSnapshotStateSystem(ctx, orgID, br)
+		pending, err := store.GetSnapshotStateSystem(ctx, orgID, task)
 		if err != nil {
 			t.Fatalf("get after begin: %v", err)
 		}
@@ -78,21 +78,21 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 		if pending.WriterClaimID != snapshotWriterA {
 			t.Errorf("writer after begin = %q, want %q", pending.WriterClaimID, snapshotWriterA)
 		}
-		if pending.OrgID != orgID || pending.BlueprintRunID != br {
-			t.Errorf("key round-trip = (%q, %q), want (%q, %q)", pending.OrgID, pending.BlueprintRunID, orgID, br)
+		if pending.OrgID != orgID || pending.TaskID != task {
+			t.Errorf("key round-trip = (%q, %q), want (%q, %q)", pending.OrgID, pending.TaskID, orgID, task)
 		}
 		if pending.UpdatedAt.IsZero() {
 			t.Error("updated_at is zero — a waiter reads it to decide how long a pending write has been owed")
 		}
 
-		matched, err := store.FinishSnapshotSystem(ctx, orgID, br, snapshotWriterA, true)
+		matched, err := store.FinishSnapshotSystem(ctx, orgID, task, snapshotWriterA, true)
 		if err != nil {
 			t.Fatalf("finish: %v", err)
 		}
 		if !matched {
 			t.Fatal("finish by the row's own writer did not match")
 		}
-		done, err := store.GetSnapshotStateSystem(ctx, orgID, br)
+		done, err := store.GetSnapshotStateSystem(ctx, orgID, task)
 		if err != nil {
 			t.Fatalf("get after finish: %v", err)
 		}
@@ -109,19 +109,19 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 
 	t.Run("finish_not_ok_records_failed", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		br := seed.BlueprintRun(t, "failed")
+		task := seed.Task(t, "failed")
 
-		if err := store.BeginSnapshotSystem(ctx, orgID, br, snapshotWriterA); err != nil {
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, snapshotWriterA); err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		matched, err := store.FinishSnapshotSystem(ctx, orgID, br, snapshotWriterA, false)
+		matched, err := store.FinishSnapshotSystem(ctx, orgID, task, snapshotWriterA, false)
 		if err != nil {
 			t.Fatalf("finish(failed): %v", err)
 		}
 		if !matched {
 			t.Fatal("finish(failed) by the row's own writer did not match")
 		}
-		got, err := store.GetSnapshotStateSystem(ctx, orgID, br)
+		got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
 		if err != nil {
 			t.Fatalf("get: %v", err)
 		}
@@ -132,23 +132,23 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 
 	t.Run("finish_cas_refuses_a_superseded_writer", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		br := seed.BlueprintRun(t, "superseded")
+		task := seed.Task(t, "superseded")
 
-		if err := store.BeginSnapshotSystem(ctx, orgID, br, snapshotWriterA); err != nil {
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, snapshotWriterA); err != nil {
 			t.Fatalf("begin A: %v", err)
 		}
-		if err := store.BeginSnapshotSystem(ctx, orgID, br, snapshotWriterB); err != nil {
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, snapshotWriterB); err != nil {
 			t.Fatalf("begin B (takeover): %v", err)
 		}
 
-		matched, err := store.FinishSnapshotSystem(ctx, orgID, br, snapshotWriterA, true)
+		matched, err := store.FinishSnapshotSystem(ctx, orgID, task, snapshotWriterA, true)
 		if err != nil {
 			t.Fatalf("finish A: %v", err)
 		}
 		if matched {
 			t.Fatal("A's finish matched after B took the key over — the CAS is what tells a stale writer it was superseded")
 		}
-		got, err := store.GetSnapshotStateSystem(ctx, orgID, br)
+		got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
 		if err != nil {
 			t.Fatalf("get: %v", err)
 		}
@@ -157,7 +157,7 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 		}
 
 		// And B, who owns the key, still closes it out normally.
-		matched, err = store.FinishSnapshotSystem(ctx, orgID, br, snapshotWriterB, true)
+		matched, err = store.FinishSnapshotSystem(ctx, orgID, task, snapshotWriterB, true)
 		if err != nil {
 			t.Fatalf("finish B: %v", err)
 		}
@@ -168,21 +168,21 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 
 	t.Run("begin_takes_over_a_terminal_row", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		br := seed.BlueprintRun(t, "takeover")
+		task := seed.Task(t, "takeover")
 
-		if err := store.BeginSnapshotSystem(ctx, orgID, br, snapshotWriterA); err != nil {
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, snapshotWriterA); err != nil {
 			t.Fatalf("begin A: %v", err)
 		}
-		if _, err := store.FinishSnapshotSystem(ctx, orgID, br, snapshotWriterA, true); err != nil {
+		if _, err := store.FinishSnapshotSystem(ctx, orgID, task, snapshotWriterA, true); err != nil {
 			t.Fatalf("finish A: %v", err)
 		}
-		// A later engagement parking the same blueprint starts a new
+		// A later engagement parking the same task starts a new
 		// lifecycle on the same key: unconditional, so a written row is not a
 		// tombstone that blocks the next snapshot.
-		if err := store.BeginSnapshotSystem(ctx, orgID, br, snapshotWriterC); err != nil {
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, snapshotWriterC); err != nil {
 			t.Fatalf("begin C: %v", err)
 		}
-		got, err := store.GetSnapshotStateSystem(ctx, orgID, br)
+		got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
 		if err != nil {
 			t.Fatalf("get: %v", err)
 		}
@@ -193,22 +193,22 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 
 	t.Run("finish_is_not_reentrant", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		br := seed.BlueprintRun(t, "reentrant")
+		task := seed.Task(t, "reentrant")
 
-		if err := store.BeginSnapshotSystem(ctx, orgID, br, snapshotWriterA); err != nil {
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, snapshotWriterA); err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		if _, err := store.FinishSnapshotSystem(ctx, orgID, br, snapshotWriterA, true); err != nil {
+		if _, err := store.FinishSnapshotSystem(ctx, orgID, task, snapshotWriterA, true); err != nil {
 			t.Fatalf("first finish: %v", err)
 		}
-		matched, err := store.FinishSnapshotSystem(ctx, orgID, br, snapshotWriterA, false)
+		matched, err := store.FinishSnapshotSystem(ctx, orgID, task, snapshotWriterA, false)
 		if err != nil {
 			t.Fatalf("second finish: %v", err)
 		}
 		if matched {
 			t.Fatal("a second finish matched — the CAS is guarded on pending, so a terminal row is closed")
 		}
-		got, err := store.GetSnapshotStateSystem(ctx, orgID, br)
+		got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
 		if err != nil {
 			t.Fatalf("get: %v", err)
 		}
@@ -219,8 +219,8 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 
 	t.Run("keys_are_independent", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		first := seed.BlueprintRun(t, "iso-first")
-		second := seed.BlueprintRun(t, "iso-second")
+		first := seed.Task(t, "iso-first")
+		second := seed.Task(t, "iso-second")
 
 		if err := store.BeginSnapshotSystem(ctx, orgID, first, snapshotWriterA); err != nil {
 			t.Fatalf("begin first: %v", err)
@@ -243,44 +243,44 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 
 	t.Run("delete_removes_the_row_and_is_idempotent", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		br := seed.BlueprintRun(t, "delete")
+		task := seed.Task(t, "delete")
 
-		if err := store.BeginSnapshotSystem(ctx, orgID, br, snapshotWriterA); err != nil {
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, snapshotWriterA); err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		if _, err := store.FinishSnapshotSystem(ctx, orgID, br, snapshotWriterA, true); err != nil {
+		if _, err := store.FinishSnapshotSystem(ctx, orgID, task, snapshotWriterA, true); err != nil {
 			t.Fatalf("finish: %v", err)
 		}
-		if err := store.DeleteSnapshotStateSystem(ctx, orgID, br); err != nil {
+		if err := store.DeleteSnapshotStateSystem(ctx, orgID, task); err != nil {
 			t.Fatalf("delete: %v", err)
 		}
-		got, err := store.GetSnapshotStateSystem(ctx, orgID, br)
+		got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
 		if err != nil {
 			t.Fatalf("get after delete: %v", err)
 		}
 		if got != nil {
 			t.Fatalf("row survived the delete: %+v — a reaped snapshot must read as 'no lifecycle', not as written-pointing-at-nothing", got)
 		}
-		if err := store.DeleteSnapshotStateSystem(ctx, orgID, br); err != nil {
+		if err := store.DeleteSnapshotStateSystem(ctx, orgID, task); err != nil {
 			t.Fatalf("second delete should be a no-op: %v", err)
 		}
 	})
 
-	t.Run("purging_the_blueprint_run_cascades", func(t *testing.T) {
+	t.Run("purging_the_task_cascades", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		br := seed.BlueprintRun(t, "cascade")
+		task := seed.Task(t, "cascade")
 
-		if err := store.BeginSnapshotSystem(ctx, orgID, br, snapshotWriterA); err != nil {
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, snapshotWriterA); err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		seed.DeleteBlueprintRun(t, br)
+		seed.DeleteTask(t, task)
 
-		got, err := store.GetSnapshotStateSystem(ctx, orgID, br)
+		got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
 		if err != nil {
 			t.Fatalf("get after purge: %v", err)
 		}
 		if got != nil {
-			t.Fatalf("state outlived its blueprint run: %+v", got)
+			t.Fatalf("state outlived its task: %+v", got)
 		}
 	})
 }

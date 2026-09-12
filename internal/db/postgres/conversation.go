@@ -474,7 +474,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 
 func (s *conversationStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {
 	// Snapshot-bearing conversations (parked `open` / any `completed` terminal)
-	// grouped by their shared snapshot key (org, blueprint_run_id); a key is
+	// grouped by their shared snapshot key (org, task_id); a key is
 	// reapable once its newest such conversation last parked or concluded before
 	// the cutoff. The timestamp is COALESCE(parked_at, completed_at,
 	// started_at): parked_at for an open conversation (re-stamped each park, so
@@ -482,10 +482,10 @@ func (s *conversationStore) ListReapableSnapshotKeysSystem(ctx context.Context, 
 	// fallback. Admin pool — the retention sweep is a tenant-spanning system
 	// job with no JWT claims.
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT org_id, blueprint_run_id
+		SELECT org_id, task_id
 		FROM conversations
 		WHERE status IN ('open', 'completed')
-		GROUP BY org_id, blueprint_run_id
+		GROUP BY org_id, task_id
 		HAVING MAX(COALESCE(parked_at, completed_at, started_at)) < $1
 	`, cutoff)
 	if err != nil {
@@ -495,7 +495,7 @@ func (s *conversationStore) ListReapableSnapshotKeysSystem(ctx context.Context, 
 	var keys []domain.SnapshotReapKey
 	for rows.Next() {
 		var k domain.SnapshotReapKey
-		if err := rows.Scan(&k.OrgID, &k.BlueprintRunID); err != nil {
+		if err := rows.Scan(&k.OrgID, &k.TaskID); err != nil {
 			return nil, err
 		}
 		keys = append(keys, k)
@@ -510,19 +510,19 @@ func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, c
 	// rather than the original. The correlated MAX is the retention sweep's
 	// timestamp rule verbatim (parked_at for an open conversation, re-stamped
 	// each park; completed_at for a terminal; started_at a legacy fallback),
-	// scoped to the key so a blueprint's steps age as one. The NOT EXISTS is
-	// the shared-tree rule: any live claim anywhere under the key means an
+	// scoped to the key so a task's conversations age as one. The NOT EXISTS
+	// is the shared-tree rule: any live claim anywhere under the key means an
 	// engagement is working in the directory this enumerates for deletion.
 	//
-	// DISTINCT over the paths: the steps of one blueprint each record the
-	// shared tree on their own row, so the same path arrives once per step.
+	// DISTINCT over the paths: the conversations sharing one tree each record
+	// it on their own row, so the same path arrives once per conversation.
 	// Admin pool — the sweep is a tenant-spanning system job with no JWT
 	// claims.
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT DISTINCT c.org_id, c.blueprint_run_id, c.worktree_path
+		SELECT DISTINCT c.org_id, c.task_id, c.worktree_path
 		FROM conversations c
 		JOIN workspace_snapshots ws
-		  ON ws.org_id = c.org_id AND ws.blueprint_run_id = c.blueprint_run_id
+		  ON ws.org_id = c.org_id AND ws.task_id = c.task_id
 		WHERE ws.state = 'written'
 		  AND c.status IN ('open', 'completed')
 		  AND COALESCE(c.worktree_path, '') <> ''
@@ -530,16 +530,16 @@ func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, c
 		        SELECT MAX(COALESCE(aged.parked_at, aged.completed_at, aged.started_at))
 		        FROM conversations aged
 		        WHERE aged.org_id = c.org_id
-		          AND aged.blueprint_run_id = c.blueprint_run_id
+		          AND aged.task_id = c.task_id
 		          AND aged.status IN ('open', 'completed')
 		      ) < $1
 		  AND NOT EXISTS (
 		        SELECT 1
 		        FROM conversations sib
 		        JOIN claims cl ON cl.conversation_id = sib.id AND cl.released_at IS NULL
-		        WHERE sib.org_id = c.org_id AND sib.blueprint_run_id = c.blueprint_run_id
+		        WHERE sib.org_id = c.org_id AND sib.task_id = c.task_id
 		      )
-		ORDER BY c.org_id, c.blueprint_run_id, c.worktree_path
+		ORDER BY c.org_id, c.task_id, c.worktree_path
 	`, cutoff)
 	if err != nil {
 		return nil, err
@@ -547,19 +547,19 @@ func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, c
 	defer rows.Close()
 	var out []domain.EvictableWorkspace
 	for rows.Next() {
-		var orgID, blueprintRunID, path string
-		if err := rows.Scan(&orgID, &blueprintRunID, &path); err != nil {
+		var orgID, taskID, path string
+		if err := rows.Scan(&orgID, &taskID, &path); err != nil {
 			return nil, err
 		}
 		// The ORDER BY groups a key's paths adjacently, so one pass folds them.
-		if n := len(out); n > 0 && out[n-1].OrgID == orgID && out[n-1].BlueprintRunID == blueprintRunID {
+		if n := len(out); n > 0 && out[n-1].OrgID == orgID && out[n-1].TaskID == taskID {
 			out[n-1].WorktreePaths = append(out[n-1].WorktreePaths, path)
 			continue
 		}
 		out = append(out, domain.EvictableWorkspace{
-			OrgID:          orgID,
-			BlueprintRunID: blueprintRunID,
-			WorktreePaths:  []string{path},
+			OrgID:         orgID,
+			TaskID:        taskID,
+			WorktreePaths: []string{path},
 		})
 	}
 	return out, rows.Err()
@@ -615,8 +615,8 @@ func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID stri
 	return out, rows.Err()
 }
 
-func (s *conversationStore) HasActiveClaimForBlueprintRunSystem(ctx context.Context, orgID, blueprintRunID string) (bool, error) {
-	if !isValidUUID(blueprintRunID) {
+func (s *conversationStore) HasActiveClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
+	if !isValidUUID(taskID) {
 		return false, nil
 	}
 	var exists bool
@@ -625,9 +625,9 @@ func (s *conversationStore) HasActiveClaimForBlueprintRunSystem(ctx context.Cont
 			SELECT 1
 			FROM conversations c
 			JOIN claims cl ON cl.conversation_id = c.id AND cl.released_at IS NULL
-			WHERE c.org_id = $1 AND c.blueprint_run_id = $2
+			WHERE c.org_id = $1 AND c.task_id = $2
 		)
-	`, orgID, blueprintRunID).Scan(&exists)
+	`, orgID, taskID).Scan(&exists)
 	if err != nil {
 		return false, err
 	}

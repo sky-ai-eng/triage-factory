@@ -164,11 +164,11 @@ type RunOptions struct {
 	// system jobs) and on the local/direct path, which measures nothing.
 	RecordSandboxActuals func(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error
 
-	// MemoryNamespace is the run's blueprint run id, passed to the sandbox as
+	// WorkspaceKey is the run's task id, passed to the sandbox as
 	// the second run-tree key its worktree pin accepts (a cold-rehydrated
-	// worktree lives at RunTreeRoot(memoryNamespace), not RunTreeRoot(TraceID)).
-	// Empty for a run with no blueprint, or for callers with no rehydrate path.
-	MemoryNamespace string
+	// worktree lives at RunTreeRoot(WorkspaceKey), not RunTreeRoot(TraceID)).
+	// Empty for a taskless run, or for callers with no rehydrate path.
+	WorkspaceKey string
 
 	// OrgID scopes credential resolution for this invocation. In
 	// multi mode the runner resolves the org's configured Anthropic /

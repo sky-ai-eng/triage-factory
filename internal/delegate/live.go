@@ -60,7 +60,7 @@ type liveParkContext struct {
 	orgID          string
 	conversationID string
 	taskID         string
-	namespace      string // blueprint_run_id — the snapshot/worktree key
+	namespace      string // task id — the snapshot/worktree key
 	claudeCwd      string
 	triggerType    string
 	creatorUserID  string

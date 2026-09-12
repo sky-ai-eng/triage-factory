@@ -43,6 +43,27 @@ func TestConversationStore_SQLite_ReturnedRow(t *testing.T) {
 	})
 }
 
+// TestConversationStore_SQLite_HasActiveClaimForTaskRejectsNonLocalOrg pins the
+// assertLocalOrg guard on the one org-scoped read here that owns its SQL rather
+// than delegating to a checked non-System twin. The guard matters for its
+// caller: the eviction sweep reads this immediately before a privileged tree
+// removal, and without it a non-local org answers a confident `false` off the
+// org_id predicate — "nobody is in that tree" for a question nobody should have
+// asked — where the error routes to the keep-the-warm-tree arm instead.
+func TestConversationStore_SQLite_HasActiveClaimForTaskRejectsNonLocalOrg(t *testing.T) {
+	conn := newSQLiteForConversationTest(t)
+	stores := sqlitestore.New(conn)
+	const bogusOrg = "11111111-1111-1111-1111-111111111111"
+
+	if _, err := stores.Conversations.HasActiveClaimForTaskSystem(t.Context(), bogusOrg, "t1"); err == nil {
+		t.Error("HasActiveClaimForTaskSystem(non-local org) returned no error; a false here licenses a tree removal")
+	}
+	// And the local org still answers normally rather than tripping the guard.
+	if _, err := stores.Conversations.HasActiveClaimForTaskSystem(t.Context(), runmode.LocalDefaultOrgID, "t1"); err != nil {
+		t.Errorf("HasActiveClaimForTaskSystem(local org) = %v, want no error", err)
+	}
+}
+
 // newSQLiteForConversationTest opens an in-memory DB, bootstraps the
 // schema, and seeds the local default agent + the conformance
 // prompt. Returned connection is t.Cleanup-closed.
@@ -352,17 +373,17 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 			}
 			return brID
 		},
-		SetSnapshotState: func(t *testing.T, blueprintRunID, state string) {
+		SetSnapshotState: func(t *testing.T, taskID, state string) {
 			t.Helper()
 			// The writer is a real uuid because the Postgres column is one —
 			// the shared suite exists to catch exactly that kind of drift —
 			// and which engagement wrote the blob is not what the eviction
 			// enumeration reads, so a fixed value is enough.
 			if _, err := conn.Exec(`
-				INSERT INTO workspace_snapshots (org_id, blueprint_run_id, state, writer_claim_id)
+				INSERT INTO workspace_snapshots (org_id, task_id, state, writer_claim_id)
 				VALUES (?, ?, ?, '11111111-1111-4111-8111-111111111111')
-				ON CONFLICT (org_id, blueprint_run_id) DO UPDATE SET state = excluded.state
-			`, runmode.LocalDefaultOrgID, blueprintRunID, state); err != nil {
+				ON CONFLICT (org_id, task_id) DO UPDATE SET state = excluded.state
+			`, runmode.LocalDefaultOrgID, taskID, state); err != nil {
 				t.Fatalf("seed workspace snapshot state: %v", err)
 			}
 		},

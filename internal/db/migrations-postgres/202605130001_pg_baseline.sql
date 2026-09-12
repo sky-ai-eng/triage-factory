@@ -5310,9 +5310,15 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.conversation_permissions TO tf_syst
 -- guard: a writer re-reads it before uploading and the completion CAS keys on
 -- it, so a displaced writer cannot close out a write it no longer owns. No FK
 -- on it — a claim's fate must not decide whether the blob's state is knowable.
+--
+-- The key is the task: every conversation on a task works in one tree and
+-- snapshots to one blob, so a re-delegation continues where the last one
+-- stopped instead of cloning fresh. The cascade is the task's, which is what
+-- keeps a purged task from leaving a lifecycle row pointing at a blob nothing
+-- will ever ask for again.
 CREATE TABLE public.workspace_snapshots (
     org_id uuid NOT NULL,
-    blueprint_run_id uuid NOT NULL,
+    task_id uuid NOT NULL,
     state text NOT NULL,
     writer_claim_id uuid NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -5320,10 +5326,10 @@ CREATE TABLE public.workspace_snapshots (
 );
 
 ALTER TABLE ONLY public.workspace_snapshots
-    ADD CONSTRAINT workspace_snapshots_pkey PRIMARY KEY (org_id, blueprint_run_id);
+    ADD CONSTRAINT workspace_snapshots_pkey PRIMARY KEY (org_id, task_id);
 
 ALTER TABLE ONLY public.workspace_snapshots
-    ADD CONSTRAINT workspace_snapshots_blueprint_run_id_org_id_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT workspace_snapshots_task_id_org_id_fkey FOREIGN KEY (task_id, org_id) REFERENCES public.tasks(id, org_id) ON DELETE CASCADE;
 
 -- Admin-pool only, like claim_credentials: every caller is an executor-side
 -- teardown or a system sweep, so RLS is on with no policy and no app grant.

@@ -101,7 +101,7 @@ func (s *Spawner) ReapExpiredSnapshots(ctx context.Context) {
 		return
 	}
 	for _, k := range keys {
-		s.discardWorkspaceSnapshot(ctx, k.OrgID, k.BlueprintRunID)
+		s.discardWorkspaceSnapshot(ctx, k.OrgID, k.TaskID)
 	}
 	if len(keys) > 0 {
 		delegateLog.Info("snapshot reaper: discarded expired workspace snapshots", "count", len(keys))

@@ -256,7 +256,7 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 	gitT(t, bareDir, "worktree", "prune")
 
 	runmode.SetForTest(t, runmode.ModeMulti)
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
 	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)

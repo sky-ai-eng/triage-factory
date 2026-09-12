@@ -22,7 +22,7 @@ import (
 func TestBuildSandboxEnv_NoGitConfig(t *testing.T) {
 	for _, extra := range [][]string{
 		nil,
-		{"TRIAGE_FACTORY_CONVERSATION_ID=r1", "TRIAGE_FACTORY_BLUEPRINT_RUN_ID=r1"},
+		{"TRIAGE_FACTORY_CONVERSATION_ID=r1", "TRIAGE_FACTORY_WORKSPACE_KEY=r1"},
 	} {
 		for _, kv := range buildSandboxEnv(extra) {
 			if strings.HasPrefix(kv, "GIT_CONFIG_") {

@@ -236,7 +236,7 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	// Run-scoped metadata (delegate/resume ExtraEnv + the git-hooks bin).
 	"TRIAGE_FACTORY_CONVERSATION_ID":      {},
 	"TRIAGE_FACTORY_CONVERSATION_ROOT":    {},
-	"TRIAGE_FACTORY_BLUEPRINT_RUN_ID":     {},
+	"TRIAGE_FACTORY_WORKSPACE_KEY":        {},
 	"TRIAGE_FACTORY_REPO":                 {},
 	"TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER": {},
 	"TRIAGE_FACTORY_BIN":                  {},
@@ -412,7 +412,7 @@ func cidrsOverlap(a, b *net.IPNet) bool {
 
 // validateOpaqueID rejects an id that is empty, over-long, or carries path
 // structure. It takes no view on which id it is handed — callers pass a
-// conversation id, a container id, or a memory namespace, and name it in
+// conversation id, a container id, or a workspace key, and name it in
 // kind. These ids seed the bundle dir prefix, the netns name, and the cgroup
 // name; a path-shaped id must never be able to redirect any of those.
 func validateOpaqueID(kind, id string) error {
@@ -498,11 +498,11 @@ func ValidateLaunchParams(p LaunchParams) error {
 			return err
 		}
 	}
-	// The memory namespace (blueprint run id) is the run's second legitimate
+	// The workspace key (the task id) is the run's second legitimate
 	// run-tree key — see worktreeScope. Optional, but path-shape it when present
 	// so it can't smuggle a traversal into the RunTreeRoot join.
-	if p.MemoryNamespace != "" {
-		if err := validateOpaqueID("memory namespace", p.MemoryNamespace); err != nil {
+	if p.WorkspaceKey != "" {
+		if err := validateOpaqueID("workspace key", p.WorkspaceKey); err != nil {
 			return err
 		}
 	}
@@ -533,7 +533,7 @@ func ValidateLaunchParams(p LaunchParams) error {
 	// own agenthost socket, or the same org scope as the worktree — see
 	// worktreeScope's doc for the internal-consistency ceiling this enforces
 	// (and does not: a credential-free broker cannot authenticate an org).
-	if err := validateWorktreeAndMounts(p.ConversationID, p.MemoryNamespace, p.Worktree, p.Mounts); err != nil {
+	if err := validateWorktreeAndMounts(p.ConversationID, p.WorkspaceKey, p.Worktree, p.Mounts); err != nil {
 		return err
 	}
 	if err := validateNetnsPath(p.ConversationID, p.NetnsPath); err != nil {
@@ -675,8 +675,8 @@ func realPath(p string) (string, error) {
 //     runs materialize (or park) their whole working tree under
 //     os.TempDir()/triagefactory-runs/<key>. The key is one of the run's OWN
 //     two lifetime keys: its run id on the first launch (MakeRunRoot(conversationID)),
-//     or its memory namespace — the blueprint run id — after a cold rehydrate
-//     rebuilds the tree at RunRoot(namespace) (internal/delegate's snapshot
+//     or its workspace key — the task id — after a cold rehydrate
+//     rebuilds the tree at RunRoot(workspaceKey) (internal/delegate's snapshot
 //     restore). Either of this run's keys is accepted; a THIRD run's tree is
 //     not. These runs are org-blind by construction (the tree doesn't outlive
 //     the run), so hasScope is false and no OTHER mount may claim an org scope
@@ -689,16 +689,16 @@ func realPath(p string) (string, error) {
 // Anything else — an arbitrary host path, a worktree one level too
 // shallow to name an org, a symlink-clean but out-of-tree path — is
 // rejected outright.
-func worktreeScope(conversationID, memoryNamespace, worktree string) (orgPrefix string, hasScope bool, err error) {
+func worktreeScope(conversationID, workspaceKey, worktree string) (orgPrefix string, hasScope bool, err error) {
 	realWorktree, err := realPath(worktree)
 	if err != nil {
 		return "", false, fmt.Errorf("sandbox: worktree %q: %w", worktree, err)
 	}
 	// Either of the run's own two lifetime keys is a legitimate ephemeral tree:
-	// its run id (first launch) or its memory namespace / blueprint run id (a
-	// tree rebuilt by a cold rehydrate). Matching either short-circuits with
-	// hasScope=false — no org scope for an org-blind tree.
-	for _, key := range [2]string{conversationID, memoryNamespace} {
+	// its run id (first launch) or its workspace key (a tree rebuilt by a cold
+	// rehydrate). Matching either short-circuits with hasScope=false — no org
+	// scope for an org-blind tree.
+	for _, key := range [2]string{conversationID, workspaceKey} {
 		if key == "" {
 			continue
 		}
@@ -756,8 +756,8 @@ func worktreeScope(conversationID, memoryNamespace, worktree string) (orgPrefix 
 //     worktreeScope derived from Worktree. If Worktree carried no org
 //     scope (the delegated-task-run shape), NO mount may fall in this
 //     bucket at all — there is no legitimate one for that shape.
-func validateWorktreeAndMounts(conversationID, memoryNamespace, worktree string, mounts []Mount) error {
-	orgPrefix, hasScope, err := worktreeScope(conversationID, memoryNamespace, worktree)
+func validateWorktreeAndMounts(conversationID, workspaceKey, worktree string, mounts []Mount) error {
+	orgPrefix, hasScope, err := worktreeScope(conversationID, workspaceKey, worktree)
 	if err != nil {
 		return err
 	}
