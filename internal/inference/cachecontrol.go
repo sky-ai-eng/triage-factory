@@ -5,7 +5,7 @@ import "github.com/maximhq/bifrost/core/schemas"
 // cache_control policy v1. Two breakpoints, and this package is their only
 // writer:
 //
-//   - the system-prompt breakpoint (withSystemCacheBreakpoint), on the last
+//   - the system-prompt breakpoint (withSystemCacheBreakpoint), on the FIRST
 //     block of the system message, caches the stable system+tools prefix;
 //   - the moving conversation breakpoint (applyMovingCacheBreakpoint), on the
 //     last block of the final message, caches everything up to the newest turn.
@@ -32,19 +32,44 @@ func applyMovingCacheBreakpoint(msgs []schemas.ChatMessage) {
 	stampLastBlock(&msgs[len(msgs)-1])
 }
 
-// withSystemCacheBreakpoint returns a system ChatMessage carrying the given
-// prompt with the ephemeral marker on its last block, so Anthropic caches the
-// system+tools prefix. An empty prompt yields a zero message the caller drops.
-func withSystemCacheBreakpoint(systemPrompt string) schemas.ChatMessage {
-	if systemPrompt == "" {
+// withSystemCacheBreakpoint returns the system ChatMessage for one call: the
+// shared prompt, then the per-conversation addendum when there is one, with
+// the ephemeral marker on the FIRST block. An empty addendum yields a single
+// block; two empty strings yield a zero message the caller drops.
+//
+// The marker's position is the point of the split. Block 1 is byte-identical
+// across every conversation on the same model and tool schemas, so the entry
+// written at its end is the one they all read; block 2 is this conversation's
+// alone. Stamping the last block instead would put the only system entry after
+// the per-conversation bytes, and the shared entry would never be written.
+//
+// Block 2 gets no marker of its own. A write happens only at a breakpoint, and
+// the moving conversation breakpoint already writes an entry covering block 2
+// on the first turn; every later turn's lookback finds it. A marker here would
+// write an entry at a position only this conversation can match, which its own
+// later turns already beat with a longer one.
+func withSystemCacheBreakpoint(systemPrompt, addendum string) schemas.ChatMessage {
+	texts := make([]string, 0, 2)
+	for _, s := range []string{systemPrompt, addendum} {
+		if s != "" {
+			texts = append(texts, s)
+		}
+	}
+	if len(texts) == 0 {
 		return schemas.ChatMessage{}
 	}
-	msg := schemas.ChatMessage{
-		Role:    schemas.ChatMessageRoleSystem,
-		Content: &schemas.ChatMessageContent{ContentStr: &systemPrompt},
+	blocks := make([]schemas.ChatContentBlock, len(texts))
+	for i := range texts {
+		blocks[i] = schemas.ChatContentBlock{
+			Type: schemas.ChatContentBlockTypeText,
+			Text: &texts[i],
+		}
 	}
-	stampLastBlock(&msg)
-	return msg
+	blocks[0].CacheControl = ephemeralCacheControl()
+	return schemas.ChatMessage{
+		Role:    schemas.ChatMessageRoleSystem,
+		Content: &schemas.ChatMessageContent{ContentBlocks: blocks},
+	}
 }
 
 // stampLastBlock puts the ephemeral marker on a message's last content block,

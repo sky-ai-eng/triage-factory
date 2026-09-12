@@ -206,13 +206,16 @@ func TestWire_CacheControlPlacement(t *testing.T) {
 		Rows:         toolConversationRows(),
 	})
 
-	// System prefix breakpoint: the system content's last block is cached.
+	// System prefix breakpoint: with no addendum the system message is one
+	// block and it carries the marker.
 	if areq.System == nil {
 		t.Fatal("expected a system prompt on the wire")
 	}
-	sysBlocks := areq.System.ContentBlocks
-	if len(sysBlocks) == 0 || sysBlocks[len(sysBlocks)-1].CacheControl == nil {
-		t.Fatalf("system prompt's last block must carry a cache breakpoint, got %+v", areq.System)
+	if got := len(areq.System.ContentBlocks); got != 1 {
+		t.Fatalf("system message has %d blocks, want 1 with no addendum", got)
+	}
+	if areq.System.ContentBlocks[0].CacheControl == nil {
+		t.Fatalf("the sole system block must carry a cache breakpoint, got %+v", areq.System)
 	}
 
 	// Moving breakpoint: the final message's last block is cached, and no
@@ -228,6 +231,71 @@ func TestWire_CacheControlPlacement(t *testing.T) {
 				t.Fatalf("interior message %d must not carry a cache breakpoint", i)
 			}
 		}
+	}
+}
+
+// TestWire_SystemAddendumIsASecondBlockBehindTheBreakpoint is the golden for
+// the split system prompt: two text blocks in order, and the marker on the
+// FIRST — the shared one. Its position is the assertion. On the last block the
+// only system cache entry would sit after this conversation's own bytes and
+// the entry every other conversation reads would never be written.
+func TestWire_SystemAddendumIsASecondBlockBehindTheBreakpoint(t *testing.T) {
+	const (
+		shared   = "You are a triage agent."
+		perConvo = "<run_context>\nrun root: /work\n</run_context>"
+	)
+	areq := toAnthropic(t, Request{
+		Provider: ProviderAnthropic, Model: "claude-sonnet-4-20250514",
+		SystemPrompt: shared, SystemAddendum: perConvo,
+		Rows: toolConversationRows(),
+	})
+
+	if areq.System == nil {
+		t.Fatal("expected a system prompt on the wire")
+	}
+	blocks := areq.System.ContentBlocks
+	if len(blocks) != 2 {
+		t.Fatalf("system message has %d blocks, want 2 (shared, addendum): %+v", len(blocks), areq.System)
+	}
+	for i, want := range []string{shared, perConvo} {
+		if blocks[i].Text == nil {
+			t.Fatalf("system block %d carries no text", i)
+		}
+		if *blocks[i].Text != want {
+			t.Fatalf("system block %d is %q, want %q", i, *blocks[i].Text, want)
+		}
+	}
+	if blocks[0].CacheControl == nil {
+		t.Fatal("block 1 (the shared prompt) must carry the ephemeral marker")
+	}
+	if blocks[1].CacheControl != nil {
+		t.Fatalf("block 2 (the addendum) must carry no marker of its own, got %+v", blocks[1].CacheControl)
+	}
+}
+
+// TestWire_NoAddendumKeepsTheSingleSystemBlock pins the empty-addendum case:
+// one text block holding exactly the prompt, with the marker on it. A caller
+// with nothing per-conversation to say must not pay a second block for it.
+func TestWire_NoAddendumKeepsTheSingleSystemBlock(t *testing.T) {
+	const shared = "You are a triage agent."
+	areq := toAnthropic(t, Request{
+		Provider: ProviderAnthropic, Model: "claude-sonnet-4-20250514",
+		SystemPrompt: shared,
+		Rows:         toolConversationRows(),
+	})
+
+	if areq.System == nil || areq.System.ContentStr != nil {
+		t.Fatalf("system must reach the wire as content blocks, got %+v", areq.System)
+	}
+	blocks := areq.System.ContentBlocks
+	if len(blocks) != 1 {
+		t.Fatalf("system message has %d blocks, want exactly 1: %+v", len(blocks), blocks)
+	}
+	if blocks[0].Text == nil || *blocks[0].Text != shared {
+		t.Fatalf("the sole system block is %v, want %q", blocks[0].Text, shared)
+	}
+	if blocks[0].CacheControl == nil {
+		t.Fatal("the sole system block must carry the ephemeral marker")
 	}
 }
 
