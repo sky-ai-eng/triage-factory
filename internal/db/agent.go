@@ -152,8 +152,9 @@ type PRCoherenceTargetQuery struct {
 // Returned-row shapes. The lifecycle writes below split by which
 // table they land on, and the split decides what each returns:
 //
-//   - conversations writes (Complete, SetSession, SetWorktreePath and their
-//     System/ForClaimSystem twins) return (*domain.Conversation, error),
+//   - conversations writes (Complete, SetSession, SetWorktreePath,
+//     SetSystemBlockForClaimSystem and their System/ForClaimSystem twins)
+//     return (*domain.Conversation, error),
 //     sharing Get's column list and scanner. A miss (no row with that id in
 //     the org) is ErrNoSuchConversation — reachable only on the unfenced
 //     doors; a ForClaimSystem call that passes the claim fence always lands
@@ -871,6 +872,16 @@ type ConversationStore interface {
 	// Return shape and miss semantics match SetWorktreePath.
 	SetWorktreePathSystem(ctx context.Context, orgID, conversationID, path string) (*domain.Conversation, error)
 
+	// SystemBlockSystem reads back what SetSystemBlockForClaimSystem stored —
+	// the only read of that column, on the resume path.
+	//
+	// Its own narrow read rather than a column on the conversation projection:
+	// the value is kilobytes of composed prompt text that exactly one code path
+	// wants, and the projection it would join is the one every list, dashboard
+	// and belt read goes through. ErrNoSuchConversation if conversationID names
+	// no row in the org; the empty string is a stored value (see the write).
+	SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error)
+
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, conversationID, failureKind string) (bool, error)
 
 	// EndConversationsForTaskSystem / EndConversationSystem are the boundary
@@ -982,6 +993,27 @@ type ConversationStore interface {
 	//
 	// Return shape matches SetSessionForClaimSystem.
 	SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) (*domain.Conversation, error)
+
+	// SetSystemBlockForClaimSystem records the system append this engagement
+	// launched the SDK harness with — conversations.system_block, the
+	// conversation's own block: the run's facts, its verb reference, its
+	// mission and its step addendum, exactly as composed. The framework blocks
+	// in front of it are not stored; agentprompt.Build reproduces them from a
+	// fixed spec.
+	//
+	// A resume coordinate, and fenced for the reason the other two are. The
+	// harness takes its append once, at launch, so a resumed turn is handed
+	// this string back; a zombie engagement's late write would hand the
+	// successor's next turn the mission the zombie was launched with. There is
+	// no unfenced door because there is no claimless writer: only the
+	// engagement that composes the append knows it.
+	//
+	// The empty string is a value, not a clear — every section of the block is
+	// optional, so a conversation with nothing to say in any of them stores
+	// nothing and resumes on the framework blocks alone.
+	//
+	// Return shape matches SetSessionForClaimSystem.
+	SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (*domain.Conversation, error)
 
 	// MarkDeliveredForClaimSystem is the engagement's drain flush: the
 	// pending rows it folded into an assembly are only its to consume while

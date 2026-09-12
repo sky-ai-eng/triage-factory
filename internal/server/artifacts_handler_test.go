@@ -278,6 +278,83 @@ func TestArtifactApprove(t *testing.T) {
 	assertAgentMemoryUntouched(t, srv, conversationID)
 }
 
+// TestArtifactApprove_ClosesOnlyWhileTheTaskIsStillTheRunsToClose pins the
+// terminal-on-last guards from the request side: approving the last unresolved
+// artifact on a task still bot-claimed by its newest run closes it, and the
+// same approval on a task that has moved on does not. Artifacts carry across
+// requeue, claim and re-delegation, so an approval can land on a carried PR
+// long after the run that opened it stopped being what the task is about —
+// and closing then would take it to done under whoever holds it today.
+//
+// Every arm shares one fixture, so the control proves the closure fires here
+// and each other arm isolates what stops it. Both guards earn their place: a
+// handover clears the agent claim without minting a run, a re-delegation mints
+// a run without clearing the claim.
+func TestArtifactApprove_ClosesOnlyWhileTheTaskIsStillTheRunsToClose(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		moveOn   func(t *testing.T, srv *Server, taskID string)
+		wantDone bool
+	}{
+		{
+			name:     "still_the_bots_and_still_its_newest_run",
+			moveOn:   func(*testing.T, *Server, string) {},
+			wantDone: true,
+		},
+		{
+			name: "a_human_took_the_task_over",
+			moveOn: func(t *testing.T, srv *Server, taskID string) {
+				execSQL(t, srv.db, `UPDATE tasks SET claimed_by_agent_id = NULL, claimed_by_user_id = ? WHERE id = ?`,
+					runmode.LocalDefaultUserID, taskID)
+			},
+		},
+		{
+			name: "a_later_delegation_superseded_the_run",
+			moveOn: func(t *testing.T, srv *Server, taskID string) {
+				seedBlueprintRunSQLite(t, srv.db, taskID)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keyring.MockInit()
+			srv := newTestServer(t)
+			mux := newAppAPIMux()
+			mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "node_id": "PR_node", "state": "open", "draft": true, "title": "Proposed title", "body": "Proposed body"})
+			})
+			mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"markPullRequestReadyForReview": map[string]any{"pullRequest": map[string]any{"isDraft": false}}}})
+			})
+			stub := httptest.NewServer(mux)
+			t.Cleanup(stub.Close)
+			seedApp(t, srv, stub, acmeInstall())
+
+			artID, _, taskID := seedDraftPRArtifactWithConversation(t, srv, "aptc", "acme", "api", 42)
+			// The run that opened the PR finished clean — without that there is
+			// nothing to close on and every arm would agree for the wrong reason.
+			execSQL(t, srv.db, `UPDATE blueprint_runs SET status = 'completed' WHERE task_id = ?`, taskID)
+			tc.moveOn(t, srv, taskID)
+
+			rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			// The approval itself lands whatever the task did — only the
+			// closure is guarded.
+			if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePROpen {
+				t.Fatalf("artifact state = %q, want open", got)
+			}
+			var taskStatus string
+			if err := srv.db.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&taskStatus); err != nil {
+				t.Fatalf("read task: %v", err)
+			}
+			if done := taskStatus == "done"; done != tc.wantDone {
+				t.Errorf("task.status = %q (done = %v), want done = %v", taskStatus, done, tc.wantDone)
+			}
+		})
+	}
+}
+
 // TestArtifactAbandon_ClosesDraftPR pins the "Return to queue" path: requeueing
 // a task whose conversation opened a draft PR closes that PR on GitHub (ClosePR
 // → state closed) and flips its artifact to closed. The pushed branch is
@@ -770,6 +847,10 @@ func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner,
 	t.Helper()
 	conversationID = seedSteerConversation(t, s.db, suffix, "completed")
 	taskID = fixtureUUID("t_" + suffix)
+	// The fixture's premise is a delegated run that opened a draft PR, so its
+	// task is bot-claimed — the state the terminal-on-last closing hooks
+	// require before a resolution may close anything.
+	execSQL(t, s.db, `UPDATE tasks SET claimed_by_agent_id = ? WHERE id = ?`, runmode.LocalDefaultAgentID, taskID)
 	// The conversation's own memory, as its completion gate would have filed it
 	// — what assertAgentMemoryUntouched checks the approval paths leave alone.
 	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "agent self-report", domain.MemorySourceAgent); err != nil {

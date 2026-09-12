@@ -1,0 +1,221 @@
+package delegate
+
+import (
+	"context"
+	"database/sql"
+	"strings"
+	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// launchBlock is the block 2 a GitHub PR step's launch composes — the same four
+// sections runAgent hands composeConversationSystemBlock, with the mission
+// caller-supplied so a test can watch a particular one survive.
+func launchBlock(mission string) string {
+	return composeConversationSystemBlock(
+		mission,
+		runContext("Repository: owner/repo\nPR: #7", "/work", "tfac/SKY-9", "https://tf.example/runs/r-1", ""),
+		agentprompt.GitHubToolsReference(),
+		agentprompt.NonTerminalCompletion(machinistSpec()),
+	)
+}
+
+// TestResumeAppend_IsTheLaunchAppendByteForByte is what this leaf is for. The
+// SDK harness is handed its append once and replays only the session transcript
+// afterwards, so a woken turn has to be handed the same string again — not one
+// that agrees with it, the same one.
+//
+// The launch stores block 2 and the resume reads it back; both then reach the
+// wire through sdkSystemPrompt, so the bytes are equal by construction rather
+// than by two composers being kept in step.
+func TestResumeAppend_IsTheLaunchAppendByteForByte(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-append", "sess-append", "/tmp/wt-append")
+	claimID := markEngaged(t, database, "r-append")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+
+	block := launchBlock("review the pull request and leave a summary")
+	launchAppend := sdkSystemPrompt(block, "/bin/tf")
+	if fenced := s.persistSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-append", claimID, block); fenced {
+		t.Fatal("persistSystemBlock reported the fence on a live claim")
+	}
+
+	resumeAppend := sdkSystemPrompt(
+		s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-append"), "/bin/tf")
+	if resumeAppend != launchAppend {
+		t.Errorf("the resume's append is not the launch's;\ngot:\n%s\n\nwant:\n%s", resumeAppend, launchAppend)
+	}
+	// Named explicitly rather than left to the byte comparison: the three things
+	// a resumed turn used to lose are the framework blocks, the mission and the
+	// step addendum, and a composer that dropped all three would still make the
+	// line above pass.
+	if !strings.HasPrefix(resumeAppend, frameworkBlocks(t)) {
+		t.Error("the resumed turn does not lead with the framework blocks")
+	}
+	if !strings.Contains(resumeAppend, "review the pull request and leave a summary") {
+		t.Error("the resumed turn carries no mission")
+	}
+	if !strings.Contains(resumeAppend, "You are one step inside a multi-step blueprint") {
+		t.Error("the resumed turn dropped the non-terminal step's addendum")
+	}
+}
+
+// TestResumeAppend_IsTheLaunchedMissionNotTodaysPromptRow is why the block is a
+// stored value rather than a recomposition. A prompt row is the org's to edit,
+// and a conversation parked for a week would otherwise wake under whatever it
+// says now — a mission nobody gave that conversation.
+func TestResumeAppend_IsTheLaunchedMissionNotTodaysPromptRow(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-edited", "sess-edited", "/tmp/wt-edited")
+	claimID := markEngaged(t, database, "r-edited")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+
+	const launched = "review the pull request and leave a summary"
+	if fenced := s.persistSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-edited", claimID, launchBlock(launched)); fenced {
+		t.Fatal("persistSystemBlock reported the fence on a live claim")
+	}
+
+	// The org rewrites the step's prompt while the conversation is parked.
+	const edited = "close the pull request without reading it"
+	if _, err := s.prompts.Update(ctx, runmode.LocalDefaultOrgID, "test-prompt", "T", edited, ""); err != nil {
+		t.Fatalf("edit the step prompt: %v", err)
+	}
+	if p, err := s.prompts.GetSystem(ctx, runmode.LocalDefaultOrgID, "test-prompt"); err != nil || p == nil || p.Body != edited {
+		t.Fatalf("the fixture's prompt edit did not land: %v %+v", err, p)
+	}
+
+	woke := sdkSystemPrompt(s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-edited"), "/bin/tf")
+	if !strings.Contains(woke, launched) {
+		t.Error("the resumed turn lost the mission its launch was given")
+	}
+	if strings.Contains(woke, edited) {
+		t.Error("the resumed turn picked up a mission edited after the launch")
+	}
+}
+
+// TestPersistSystemBlock_RefusedOnceTheEngagementIsFencedOut: the append is a
+// resume coordinate, so it takes the fence the other three take. A zombie whose
+// launch composed late must not leave its own mission on a row a successor is
+// driving — the successor's next wake would replay it.
+func TestPersistSystemBlock_RefusedOnceTheEngagementIsFencedOut(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-fenced", "sess-fenced", "/tmp/wt-fenced")
+	zombie := markEngaged(t, database, "r-fenced")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+
+	if fenced := s.persistSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-fenced", zombie, launchBlock("the launched mission")); fenced {
+		t.Fatal("persistSystemBlock reported the fence on a live claim")
+	}
+	if _, err := database.Exec(
+		`UPDATE claims SET released_at = CURRENT_TIMESTAMP, outcome = 'requeued' WHERE id = ?`, zombie); err != nil {
+		t.Fatalf("release the claim: %v", err)
+	}
+
+	if fenced := s.persistSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-fenced", zombie, launchBlock("the zombie's mission")); !fenced {
+		t.Error("a released claim's system-block write was accepted; the successor's next wake would replay it")
+	}
+	got := s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-fenced")
+	if !strings.Contains(got, "the launched mission") || strings.Contains(got, "the zombie's mission") {
+		t.Errorf("the row moved under the fence;\n%s", got)
+	}
+}
+
+// TestLaunchedSystemBlock_DegradesToTheFrameworkBlocksAlone covers the two rows
+// that answer with nothing: one whose block really was empty, and one this
+// process cannot read. Neither refuses the turn — the agent keeps its session
+// and loses the mission for it, which is what every SDK resume did before the
+// column existed.
+func TestLaunchedSystemBlock_DegradesToTheFrameworkBlocksAlone(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-empty", "sess-empty", "/tmp/wt-empty")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+
+	for _, conversationID := range []string{"r-empty", "r-does-not-exist"} {
+		if got := s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, conversationID); got != "" {
+			t.Errorf("%s: launchedSystemBlock = %q, want the empty block", conversationID, got)
+		}
+		if got := sdkSystemPrompt("", "/bin/tf"); got != frameworkBlocks(t) {
+			t.Errorf("%s: an empty block must compose the framework blocks alone;\n%s", conversationID, got)
+		}
+	}
+}
+
+// TestResumeSystemBlockRead_WritesNothing is the opening-rows gate from this
+// side. A resume mints no opening and delivers only the queued follow-up, so
+// the one thing this leaf adds to that path — a read of the launch's block —
+// must leave both the transcript and the queue exactly as it found them.
+func TestResumeSystemBlockRead_WritesNothing(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-readonly", "sess-readonly", "/tmp/wt-readonly")
+	claimID := markEngaged(t, database, "r-readonly")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+	sink := newConversationSink(s, runmode.LocalDefaultOrgID, "r-readonly", claimID, "event", runmode.LocalDefaultUserID)
+
+	if _, err := s.openingTurnBlocks(ctx, sink, runmode.LocalDefaultOrgID, "r-readonly",
+		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext); err != nil {
+		t.Fatalf("openingTurnBlocks: %v", err)
+	}
+	if fenced := s.persistSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-readonly", claimID, launchBlock("the launched mission")); fenced {
+		t.Fatal("persistSystemBlock reported the fence on a live claim")
+	}
+	if _, err := s.conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID,
+		pendingUserInput("r-readonly", runmode.LocalDefaultUserID, "also update the README")); err != nil {
+		t.Fatalf("queue the follow-up: %v", err)
+	}
+	before := len(allRows(t, s, "r-readonly"))
+
+	if got := s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-readonly"); !strings.Contains(got, "the launched mission") {
+		t.Fatalf("launchedSystemBlock = %q", got)
+	}
+
+	if got := len(allRows(t, s, "r-readonly")); got != before {
+		t.Errorf("rows after the resume's read = %d, want %d — a resume mints nothing", got, before)
+	}
+	pending := pendingRows(t, s, "r-readonly")
+	if len(pending) != 1 || pending[0].Content != "also update the README" {
+		t.Errorf("pending input = %+v, want the follow-up alone — that is all the resume delivers", pending)
+	}
+}
+
+// TestNativeLaunch_ComposesTheSameBlockAndStoresNothing is the native half,
+// stated so it stays true. Both engines compose block 2 through one composer,
+// but only the SDK has to remember it: the native loop puts its block on
+// Params.SystemAddendum, which rides every request, so a native conversation's
+// row stays empty and a resumed native turn is unaffected by any of this.
+func TestNativeLaunch_ComposesTheSameBlockAndStoresNothing(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-native", "", "/tmp/wt-native")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+
+	task, err := s.tasks.GetSystem(ctx, runmode.LocalDefaultOrgID, taskIDOf(t, database, "r-native"))
+	if err != nil || task == nil {
+		t.Fatalf("load the fixture task: %v", err)
+	}
+	cfg := runConfig{orgID: runmode.LocalDefaultOrgID, teamID: runmode.LocalDefaultTeamID, toolsRef: agentprompt.GitHubToolsReference()}
+	launch := s.buildNativeLaunchText(ctx, *task, "review the pull request", cfg, "")
+
+	if !strings.Contains(launch.systemBlock, "review the pull request") {
+		t.Errorf("the native launch composed no mission into its block;\n%s", launch.systemBlock)
+	}
+	if got := s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-native"); got != "" {
+		t.Errorf("a native launch stored a system block (%q); its addendum rides every request and nothing should read a row for it", got)
+	}
+}
+
+// taskIDOf reads the task a fixture conversation was seeded against.
+func taskIDOf(t *testing.T, database *sql.DB, conversationID string) string {
+	t.Helper()
+	var taskID string
+	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, conversationID).Scan(&taskID); err != nil {
+		t.Fatalf("read task_id for %s: %v", conversationID, err)
+	}
+	return taskID
+}

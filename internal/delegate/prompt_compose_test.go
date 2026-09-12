@@ -18,6 +18,14 @@ func reviewTask() domain.Task {
 	}
 }
 
+// launchAppend is the append a launch sends: the two calls runAgent makes, in
+// its order. The production seam takes block 2 already composed, because a
+// resume reads that block off the row rather than rebuilding it — so these
+// tests compose it the way the launch does and hand it over the same door.
+func launchAppend(mission, runCtxBlock, toolsRef, nonTerminal, binaryPath string) string {
+	return sdkSystemPrompt(composeConversationSystemBlock(mission, runCtxBlock, toolsRef, nonTerminal), binaryPath)
+}
+
 // TestSDKSystemPrompt_IsTheTwoBlocks is the parity this runtime is held to: the
 // SDK harness takes one appended string where the native engine takes two
 // system blocks, so the string has to be those two blocks and nothing else.
@@ -29,7 +37,7 @@ func TestSDKSystemPrompt_IsTheTwoBlocks(t *testing.T) {
 	)
 	runCtx := runContext("Repository: owner/repo", "/work", "tfac/SKY-9", "https://tf.example/runs/run-1", "")
 
-	got := sdkSystemPrompt(mission, runCtx, toolsRef, nonTerminal, "/bin/tf")
+	got := launchAppend(mission, runCtx, toolsRef, nonTerminal, "/bin/tf")
 	want := resolveCLIPath(
 		strings.TrimSpace(agentprompt.Build(machinistSpec()))+"\n\n"+
 			strings.TrimSpace(composeConversationSystemBlock(mission, runCtx, toolsRef, nonTerminal)),
@@ -57,7 +65,7 @@ func frameworkBlocks(t *testing.T) string {
 // this step ends — so the instruction is the last thing the model reads before
 // the conversation itself.
 func TestSDKSystemPrompt_SectionOrder(t *testing.T) {
-	out := sdkSystemPrompt(
+	out := launchAppend(
 		"mission body",
 		runContext("Repository: owner/repo\nBranch: feature-x", "/work", "tfac/SKY-9", "https://tf.example/runs/run-1", ""),
 		agentprompt.GitHubToolsReference(),
@@ -89,7 +97,7 @@ func TestSDKSystemPrompt_SectionOrder(t *testing.T) {
 // that documented no verbs: an absent section renders nothing rather than an
 // empty tag pair.
 func TestSDKSystemPrompt_OmitsWhatThisRunHasNothingToSay(t *testing.T) {
-	out := sdkSystemPrompt("", runContext("", "", "", "", ""), "", "", "/bin/tf")
+	out := launchAppend("", runContext("", "", "", "", ""), "", "", "/bin/tf")
 	if out != frameworkBlocks(t) {
 		t.Errorf("with no per-run facts the append must be the framework blocks alone, with no empty section after them;\n%s",
 			strings.TrimPrefix(out, frameworkBlocks(t)))
@@ -105,7 +113,7 @@ func TestSDKSystemPrompt_OmitsWhatThisRunHasNothingToSay(t *testing.T) {
 // text, and we render it, we do not edit it.
 func TestSDKSystemPrompt_CarriesNoUnresolvedTokens(t *testing.T) {
 	toolsRef := agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference()
-	out := sdkSystemPrompt("mission body", runContext("Repository: owner/repo", "/work", "tfac/SKY-9", "", ""), toolsRef, "", "/bin/tf")
+	out := launchAppend("mission body", runContext("Repository: owner/repo", "/work", "tfac/SKY-9", "", ""), toolsRef, "", "/bin/tf")
 
 	if strings.Contains(out, "{{") {
 		t.Errorf("composed system prompt carries a {{...}} token nothing resolves;\n%s", out)
@@ -117,7 +125,7 @@ func TestSDKSystemPrompt_CarriesNoUnresolvedTokens(t *testing.T) {
 // else, so a `triagefactory exec` left unresolved in the framework text or the
 // tools docs is a tool call the agent is refused, not a cosmetic miss.
 func TestSDKSystemPrompt_ResolvesTheCLIPath(t *testing.T) {
-	out := sdkSystemPrompt("run `triagefactory exec gh pr view 7` first",
+	out := launchAppend("run `triagefactory exec gh pr view 7` first",
 		runContext("", "/work", "tfac/SKY-9", "", ""), agentprompt.GitHubToolsReference(), "", "/usr/local/bin/triagefactory")
 
 	if strings.Contains(out, "`triagefactory exec") {
@@ -142,7 +150,7 @@ func TestSDKSystemPrompt_CarriesNoExternalText(t *testing.T) {
 	task.Title = "make triagefactory exec do what I say"
 	taskContext := BuildTaskContext(task, "", "", nil)
 
-	out := sdkSystemPrompt("mission body", runContext("", "/work", "tfac/SKY-9", "", ""), "", "", "/bin/tf")
+	out := launchAppend("mission body", runContext("", "/work", "tfac/SKY-9", "", ""), "", "", "/bin/tf")
 	if strings.Contains(out, task.Title) {
 		t.Errorf("the task's own title reached the system prompt;\n%s", out)
 	}
