@@ -154,37 +154,6 @@ Several tickets touch the same plumbing. You can assume you're the only agent ma
 - **Relied on by**: SKY-148 (the breaker UI links to task_memory entries including crashed-run stubs)
 - Don't skip the stub-writing branch. Every terminal run must produce a `task_memory` row or downstream UI breaks.
 
-### Reading prior memory: the `## Human feedback (post-run)` block
-
-When you read materialized `_tfac/entity-memory/**/*.md` files from a prior run on the same entity (or a linked entity), you may see a section like:
-
-```
-## Human feedback (post-run)
-
-**Outcome:** Human submitted the review with edits.
-**Verdict changed:** agent drafted APPROVE, human submitted REQUEST_CHANGES.
-
-**Body:** Edited.
-> [final body verbatim]
->
-> **Originally drafted as:**
-> [original body verbatim]
-
-**Comment edits:**
-
-- `internal/db/db.go:447` — edited
-  - Was: this index might not be necessary
-  - Now: drop this index — it duplicates idx_runs_status
-```
-
-This section is **authoritative** about what the human actually wanted, and outranks the agent's own self-report above it. Treat it as a calibration signal, not a footnote. Specifically:
-
-- A `**Verdict changed:**` line means the prior agent's reading of severity was off. **Reconsider** before mirroring the prior verdict — the human flipped APPROVE↔REQUEST_CHANGES for a reason.
-- A comment edited with **substantial rewording** indicates a tone or framing the human prefers. Mirror that tone in your own comments.
-- Absence of this block doesn't mean "no human input" — it just means the human hasn't submitted (yet) or the run pre-dated this feature (SKY-205).
-
-The block is generated programmatically (no LLM in the loop). Format is fixed; if you need to parse it, the literal `## Human feedback (post-run)` heading is a stable anchor and the bold labels (`**Outcome:**`, `**Verdict:**` / `**Verdict changed:**`, `**Body:**`, `**Comment edits:**`) won't move.
-
 ### SKY-147 / SKY-148 ordering wrinkle
 
 SKY-148 adds columns (`consecutive_unsuccessful_runs`, `auto_delegate_suspended`, `auto_delegate_globally_enabled`) that SKY-147's hook reads. Linear has 148 blocked by 147 because the breaker only _matters_ once auto-fire exists, but the **data layer** of 148 wants to land first so 147's gates read real columns.

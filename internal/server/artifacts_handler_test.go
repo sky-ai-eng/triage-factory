@@ -273,13 +273,9 @@ func TestArtifactApprove(t *testing.T) {
 	if convStatus != "completed" {
 		t.Errorf("conversation status = %q, want completed", convStatus)
 	}
-	var human string
-	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {
-		t.Fatalf("read conversation_memory: %v", err)
-	}
-	if !strings.Contains(human, "as drafted") {
-		t.Errorf("human_content = %q, want the 'as drafted' verdict (proposed==final)", human)
-	}
+	// Approval writes no memory: the conversation's row is the agent's own
+	// account of what it tried, and a verdict about an artifact is not that.
+	assertAgentMemoryUntouched(t, srv, conversationID)
 }
 
 // TestArtifactAbandon_ClosesDraftPR pins the "Return to queue" path: requeueing
@@ -773,9 +769,9 @@ func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner,
 	t.Helper()
 	conversationID = seedSteerConversation(t, s.db, suffix, "completed")
 	taskID = fixtureUUID("t_" + suffix)
-	// conversation_memory row so the human-verdict UPDATE has a target (the termination
-	// upsert guarantees this in production).
-	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
+	// The conversation's own memory, as its completion gate would have filed it
+	// — what assertAgentMemoryUntouched checks the approval paths leave alone.
+	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "agent self-report", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	a := domain.NewPullRequestArtifact(owner+"/"+repo, number, "PR_node", "feature/x", "main",
@@ -790,6 +786,25 @@ func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner,
 	return stored.ID, conversationID, taskID
 }
 
+// assertAgentMemoryUntouched checks that the conversation still holds exactly
+// the memory its completion gate filed. Every artifact verb below runs it: a
+// conversation_memory row is the agent's own account of what it tried, and no
+// human verdict about an artifact is written into it — the artifact row carries
+// its own state, and a resolution reaches the agent as artifact feedback.
+func assertAgentMemoryUntouched(t *testing.T, s *Server, conversationID string) {
+	t.Helper()
+	mem, err := sqlitestore.New(s.db).TaskMemory.GetForConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	if err != nil {
+		t.Fatalf("GetForConversationSystem: %v", err)
+	}
+	if mem == nil {
+		t.Fatalf("no conversation_memory row for %s", conversationID)
+	}
+	if mem.Source != domain.MemorySourceAgent || mem.Content != "agent self-report" {
+		t.Errorf("memory = (Source=%q, Content=%q), want the agent's own row untouched", mem.Source, mem.Content)
+	}
+}
+
 // seedClaimedPRApprovalFixture builds a claimed task (the shape /requeue
 // expects) whose completed conversation opened a draft PR. Returns (taskID,
 // conversationID, artifactID).
@@ -802,7 +817,7 @@ func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, n
 	execSQL(t, s.db, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id) VALUES ('00000000-0000-4000-8000-000000000023', 'e_ab', ?, 'ev_ab', 'queued', ?)`, eventType, runmode.LocalDefaultAgentID)
 	brID := seedBlueprintRunSQLite(t, s.db, "00000000-0000-4000-8000-000000000023")
 	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES ('r_ab', '00000000-0000-4000-8000-000000000023', 'p_ab', 'completed', 'manual', ?, 0)`, brID)
-	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_ab", "e_ab", "", "agent self-report"); err != nil {
+	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_ab", "", "agent self-report", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	a := domain.NewPullRequestArtifact(owner+"/"+repo, number, "PR_node", "feature/x", "main",
@@ -879,7 +894,7 @@ func newRejectStub(t *testing.T, srv *Server, live map[string]any, node string, 
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 	stores := sqlitestore.New(srv.db)
-	srv.SetReconciler(reconcile.NewReconciler(srv.ghResolver, stores.Artifacts, stores.TaskMemory, nil))
+	srv.SetReconciler(reconcile.NewReconciler(srv.ghResolver, stores.Artifacts, nil))
 	return rs
 }
 
@@ -969,15 +984,7 @@ func TestArtifactReject_PR(t *testing.T) {
 		t.Errorf("pr_closed audit rows = %d, want 1", len(closedActs))
 	}
 
-	var human string
-	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {
-		t.Fatalf("read human_content: %v", err)
-	}
-	for _, want := range []string{"rejected", "feature/x", "Proposed title", "> Proposed body"} {
-		if !strings.Contains(human, want) {
-			t.Errorf("human_content %q lacks %q", human, want)
-		}
-	}
+	assertAgentMemoryUntouched(t, srv, conversationID)
 
 	var convStatus string
 	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
@@ -1032,13 +1039,7 @@ func TestArtifactReject_BranchAlreadyGone_ReconcilesAnd409(t *testing.T) {
 			t.Errorf("no %s audit row may claim a write this verb did not make; got %d", action, len(acts))
 		}
 	}
-	var human string
-	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {
-		t.Fatalf("read human_content: %v", err)
-	}
-	if !strings.Contains(human, "closed without merging on GitHub") || strings.Contains(human, "rejected") {
-		t.Errorf("human_content %q should carry the reconciler's outcome, not a rejection verdict", human)
-	}
+	assertAgentMemoryUntouched(t, srv, conversationID)
 }
 
 // TestArtifactReject_ResolvedOnGitHub409 pins the live-state guard: a draft

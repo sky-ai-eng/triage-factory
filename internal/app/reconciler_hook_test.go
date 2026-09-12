@@ -45,7 +45,7 @@ func TestHookReconcilerToSpawner_BrainWiresTheClosure(t *testing.T) {
 	a := &App{
 		plan:           planForRole(runmode.RoleControl),
 		spawner:        spawnerForHookTest(t),
-		reconcilerCore: reconcile.NewReconciler(nil, nil, nil, nil),
+		reconcilerCore: reconcile.NewReconciler(nil, nil, nil),
 	}
 	a.hookReconcilerToSpawner()
 	if !a.reconcilerCore.HasPullRequestResolvedHook() {

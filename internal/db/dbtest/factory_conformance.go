@@ -77,7 +77,7 @@ type FactorySeeder struct {
 	// for memory_missing. To insert a row with NULL agent_content,
 	// pass a sentinel (we use "<NULL>" by convention — the seeder
 	// implementation maps it to NULL).
-	SetConversationMemory func(t *testing.T, conversationID, entityID, content string)
+	SetConversationMemory func(t *testing.T, conversationID, content string)
 }
 
 // nullSentinel is the content string callers pass to SetConversationMemory
@@ -243,10 +243,10 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		conversationPopulated := seed.Conversation(t, taskID, "running")
 		conversationTerminal := seed.Conversation(t, taskID, "completed") // must NOT appear
 
-		seed.SetConversationMemory(t, conversationNullContent, ent, nullSentinel)
-		seed.SetConversationMemory(t, conversationEmptyContent, ent, "")
-		seed.SetConversationMemory(t, conversationWhitespace, ent, "  \t\n ")
-		seed.SetConversationMemory(t, conversationPopulated, ent, "agent wrote real reasoning")
+		seed.SetConversationMemory(t, conversationNullContent, nullSentinel)
+		seed.SetConversationMemory(t, conversationEmptyContent, "")
+		seed.SetConversationMemory(t, conversationWhitespace, "  \t\n ")
+		seed.SetConversationMemory(t, conversationPopulated, "agent wrote real reasoning")
 
 		convs, err := store.ActiveConversations(ctx, orgID)
 		if err != nil {

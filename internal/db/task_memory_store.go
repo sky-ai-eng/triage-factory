@@ -2,130 +2,127 @@ package db
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 //go:generate go run github.com/vektra/mockery/v2 --name=TaskMemoryStore --output=./mocks --case=underscore --with-expecter
 
+// ErrInvalidMemorySource means an UpsertAgentMemory(System) call named a source
+// outside domain.AllMemorySources(), or one that disagrees with its content:
+// non-empty content requires 'agent' or 'generated', empty content requires
+// 'none'. Refused rather than canonicalized — a caller that cannot say which of
+// the two it is holding has a bug the store must not paper over, and the
+// invariant "agent_content IS NULL exactly when source = 'none'" is the whole
+// reason every entity read can filter on the content column alone.
+var ErrInvalidMemorySource = errors.New("db: memory source does not match its content")
+
+// ValidateMemorySource is the store door both dialects call before writing a
+// conversation_memory row. Whitespace-only content counts as empty: it is what
+// an agent that opened the file and wrote nothing leaves behind.
+func ValidateMemorySource(content string, source domain.MemorySource) error {
+	if !domain.IsMemorySource(string(source)) {
+		return fmt.Errorf("%w: %q is not a memory source", ErrInvalidMemorySource, source)
+	}
+	if strings.TrimSpace(content) == "" {
+		if source != domain.MemorySourceNone {
+			return fmt.Errorf("%w: empty content requires source %q, got %q", ErrInvalidMemorySource, domain.MemorySourceNone, source)
+		}
+		return nil
+	}
+	if source == domain.MemorySourceNone {
+		return fmt.Errorf("%w: source %q requires empty content", ErrInvalidMemorySource, domain.MemorySourceNone)
+	}
+	return nil
+}
+
 // TaskMemoryStore is the per-resource store for the conversation_memory table —
-// the durable agent-side narrative + the human's post-run verdict for
-// every conversation on every task. Lifted out of the pre-D2 package-level
-// functions in internal/db/task_memory.go so multi-mode Postgres
-// callers route through $N placeholders + explicit org_id + the
-// dual-pool admin/app split.
+// the durable agent-side narrative for every conversation on every task.
+// Lifted out of the pre-D2 package-level functions in
+// internal/db/task_memory.go so multi-mode Postgres callers route through $N
+// placeholders + explicit org_id + the dual-pool admin/app split.
 //
 // Method naming follows the dual-pool convention introduced with
 // UsersStore / EntityStore / EventStore:
 //
-//   - Plain methods (UpsertAgentMemory, UpdateConversationMemoryHumanContent,
-//     GetMemoriesForEntity) run on the app pool in Postgres
-//     (RLS-active). Callers are request-handler equivalents (review
-//     submit, PR submit, swipe-discard cleanup, factory read-back)
-//     and must be inside WithTx in multi-mode so JWT claims (org_id,
-//     sub) are set for RLS evaluation.
-//   - `...System` methods (UpsertAgentMemorySystem,
-//     UpdateConversationMemoryHumanContentSystem, GetMemoriesForEntitySystem,
-//     RecordEntityTouchSystem, CountMemoriesForEntitySystem) run on the
-//     admin pool (BYPASSRLS). The consumers are background goroutines
-//     without a JWT-claims context — the delegate spawner's
-//     post-completion gate teardown, the artifact reconciler's post-run
-//     outcome capture, and the engagement-start materializer all fire
-//     from a goroutine with no request scope. org_id stays bound in the
-//     INSERT/SELECT/UPDATE as defense in depth.
+//   - Plain methods (UpsertAgentMemory, GetMemoriesForEntity) run on the app
+//     pool in Postgres (RLS-active). Callers are request-handler equivalents
+//     and must be inside WithTx in multi-mode so JWT claims (org_id, sub) are
+//     set for RLS evaluation.
+//   - `...System` methods (UpsertAgentMemorySystem, GetForConversationSystem,
+//     GetMemoriesForEntitySystem, RecordEntityTouchSystem,
+//     CountMemoriesForEntitySystem) run on the admin pool (BYPASSRLS). The
+//     consumers are background goroutines without a JWT-claims context — the
+//     delegate spawner's post-completion gate teardown and the
+//     engagement-start materializer both fire from a goroutine with no request
+//     scope. org_id stays bound in the INSERT/SELECT/UPDATE as defense in
+//     depth.
 //
 // The precedent (e.g. EventStore's missing app-side GetMetadata) is to omit
 // a System (or plain) variant until a real caller arrives rather than add
-// one speculatively — RecordEntityTouchSystem and CountMemoriesForEntitySystem
-// are the deliberate exception: they're the conversation_memory_entities
-// foundation TFAC-622 lands ahead of their production callers, which
-// arrive with the sibling touch-capture (TFAC-623) and memory-load
-// (TFAC-624) tickets. Until then they're exercised only by tests and the
-// tf_system grant conformance suite.
+// one speculatively.
 //
 // SQLite collapses both pools onto the single connection. The
 // `...System` methods are thin wrappers around their non-System
 // counterparts; assertLocalOrg gates every entry point.
 type TaskMemoryStore interface {
-	// UpsertAgentMemory writes the agent-side memory row for a conversation.
-	// Empty / whitespace-only content canonicalizes to SQL NULL on
-	// the way in so downstream consumers (factory's memory_missing
-	// derivation) get a single truth condition for "agent didn't
-	// comply with the gate."
+	// UpsertAgentMemory writes the memory row for a conversation.
+	//
+	// source says who wrote content and is validated at the door against it
+	// (ValidateMemorySource): non-empty content requires
+	// domain.MemorySourceAgent or MemorySourceGenerated, empty / whitespace-only
+	// content requires MemorySourceNone. Never canonicalized — a mismatch is
+	// ErrInvalidMemorySource and nothing is written. Empty content still lands
+	// as SQL NULL, which is what lets every entity read filter a 'none' row out
+	// on the content column alone.
 	//
 	// blueprintRunID is the conversation's blueprint run (denormalized from
-	// the conversation, like entityID); pass empty for a standalone
-	// conversation, where it canonicalizes to SQL NULL. It groups one
-	// blueprint run's memory so the materializer can fold each step's file
-	// into a shared namespace folder.
+	// the conversation); pass empty for a standalone conversation, where it
+	// canonicalizes to SQL NULL. It groups one blueprint run's memory so the
+	// materializer can fold each step's file into a shared namespace folder.
 	//
 	// Idempotent on (conversation_id) via ON CONFLICT — re-running the gate
-	// after a retry overwrites agent_content but preserves the row's
-	// id, created_at, and any human_content the user has already
-	// attached.
+	// after a retry overwrites agent_content, source and blueprint_run_id but
+	// preserves the row's id and created_at. The conflict arm replacing source
+	// is what lets an agent's own conclusion overwrite a generated stand-in.
 	//
 	// Returns the stored row, sourced from RETURNING on the write statement
 	// itself — including the producing conversation's naming facts
 	// (StepIndex, PromptName) a caller would otherwise have to re-read
 	// GetMemoriesForEntity(System) to see, projected through the same join.
-	UpsertAgentMemory(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error)
+	UpsertAgentMemory(ctx context.Context, orgID, conversationID, blueprintRunID, content string, source domain.MemorySource) (domain.TaskMemory, error)
 
 	// UpsertAgentMemorySystem is the admin-pool variant for the
 	// delegate spawner's post-completion gate teardown. Fires inside
 	// the runAgent goroutine, which has no JWT-claims context, so the
-	// write routes around RLS via BYPASSRLS. Same idempotency +
-	// NULL-on-empty contract and returned row as the non-System variant.
-	UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error)
+	// write routes around RLS via BYPASSRLS. Same validation, idempotency and
+	// returned row as the non-System variant.
+	UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, blueprintRunID, content string, source domain.MemorySource) (domain.TaskMemory, error)
 
-	// UpdateConversationMemoryHumanContent records the human's verdict on a
-	// conversation's agent draft into the conversation_memory row keyed by
-	// conversationID. The gate-teardown upsert at termination guarantees
-	// the row exists by the time the human writes a verdict, so this is a
-	// plain UPDATE with no INSERT-or-UPDATE branching.
+	// GetForConversationSystem returns the conversation's own memory row,
+	// including a source='none' row — the one read that sees what the entity
+	// reads deliberately hide. It answers "has this conversation settled what
+	// it remembered", which is a different question from "is there anything
+	// here worth materializing", and a caller asking it must be told about the
+	// row that says "nothing". nil when no row exists.
 	//
-	// Empty / whitespace-only content canonicalizes to NULL, matching
-	// UpsertAgentMemory's agent_content handling.
-	//
-	// Returns the stored row on a hit, sourced from RETURNING on the write
-	// statement itself. A missing row is a nil row with a nil error — an
-	// answer, not an error — logged and not fatal: the only way a
-	// conversationID with no row reaches here is a non-agent review path or a
-	// cleanup race, and failing the response after GitHub already accepted
-	// the review would be worse than the missed memory write.
-	//
-	// App pool only — every caller (reviews handler, artifact-PR approve
-	// handler, swipe-discard cleanup) runs under request claims.
-	UpdateConversationMemoryHumanContent(ctx context.Context, orgID, conversationID, content string) (*domain.TaskMemory, error)
-
-	// UpdateConversationMemoryHumanContentSystem is the admin-pool (BYPASSRLS) variant
-	// of UpdateConversationMemoryHumanContent for the artifact reconciler (TFAC-464 β),
-	// which has no JWT-claims context. It overwrites human_content with the
-	// conversation's post-run outcome — how its artifacts resolved on GitHub
-	// (merged/closed/deleted/submitted) vs. what the agent drafted — so the
-	// next agent on the entity reads the final state.
-	//
-	// Overwrite, not append: human_content is the single "how reality diverged
-	// from your draft" slot, and the terminal outcome is its most authoritative
-	// version, superseding any approval-time account. The reconciler composes
-	// the note over the conversation's WHOLE artifact set each time one
-	// resolves, so a branch-then-PR conversation accumulates correctly without
-	// an append and a repeated cycle is idempotent. Same empty→NULL,
-	// missing-row-is-a-nil-answer, and returned-row contract as the app-pool
-	// variant. org_id stays bound as defense in depth; SQLite collapses onto
-	// the one connection.
-	UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) (*domain.TaskMemory, error)
+	// Admin pool: the consumers are background goroutines with no JWT-claims
+	// context. org_id stays bound as defense in depth.
+	GetForConversationSystem(ctx context.Context, orgID, conversationID string) (*domain.TaskMemory, error)
 
 	// GetMemoriesForEntity returns every conversation_memory row reachable for
 	// this entity through conversation_memory_entities — the conversation
 	// touched, produced for, or was primarily about this entity — oldest
-	// first. The returned TaskMemory.Content is materialized from
-	// agent_content + human_content via the stable separator format
-	// the next agent's prompt context parses. Each row carries its
-	// BlueprintRunID so the materializer can tell this blueprint run's
-	// own steps from prior separate conversations, plus the producing
-	// conversation's step index and prompt name so it can name the
-	// materialized file after the work it records rather than after a
-	// row id.
+	// first. Rows with no agent_content (source='none') are excluded: they
+	// record that nothing was remembered, and materializing one would hand the
+	// next agent an empty file to read. Each row carries its BlueprintRunID so
+	// the materializer can tell this blueprint run's own steps from prior
+	// separate conversations, plus the producing conversation's step index and
+	// prompt name so it can name the materialized file after the work it
+	// records rather than after a row id.
 	GetMemoriesForEntity(ctx context.Context, orgID, entityID string) ([]domain.TaskMemory, error)
 
 	// GetMemoriesForEntitySystem mirrors GetMemoriesForEntity but
@@ -180,6 +177,8 @@ type TaskMemoryStore interface {
 
 	// CountMemoriesForEntitySystem returns the number of conversation_memory
 	// rows reachable for entityID through conversation_memory_entities, under
-	// the same team-visibility filter as GetMemoriesForEntitySystem.
+	// the same team-visibility filter and the same "has content" filter as
+	// GetMemoriesForEntitySystem — it counts what a reader would get, not what
+	// the table holds.
 	CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) (int, error)
 }

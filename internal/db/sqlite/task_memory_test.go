@@ -38,6 +38,7 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 				t.Helper()
 				return roleForSQLiteJoinRow(t, conn, conversationID, entityID)
 			},
+			TeamID: runmode.LocalDefaultTeamID,
 		}
 		return stores.TaskMemory, runmode.LocalDefaultOrgID, seed
 	})
@@ -65,6 +66,7 @@ func TestTaskMemoryStore_SQLite_ReturnedRowConformance(t *testing.T) {
 				t.Helper()
 				return roleForSQLiteJoinRow(t, conn, conversationID, entityID)
 			},
+			TeamID: runmode.LocalDefaultTeamID,
 		}
 		return stores.TaskMemory, runmode.LocalDefaultOrgID, seed
 	})
@@ -98,14 +100,14 @@ func TestTaskMemoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 
 	const badOrg = "11111111-1111-1111-1111-111111111111"
-	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, badOrg, "r", "e", "", "x"); err == nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, badOrg, "r", "", "x", domain.MemorySourceAgent); err == nil {
 		t.Error("UpsertAgentMemory(non-local org) should error")
 	}
-	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, badOrg, "r", "e", "", "x"); err == nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, badOrg, "r", "", "x", domain.MemorySourceAgent); err == nil {
 		t.Error("UpsertAgentMemorySystem(non-local org) should error")
 	}
-	if _, err := stores.TaskMemory.UpdateConversationMemoryHumanContent(ctx, badOrg, "r", "x"); err == nil {
-		t.Error("UpdateConversationMemoryHumanContent(non-local org) should error")
+	if _, err := stores.TaskMemory.GetForConversationSystem(ctx, badOrg, "r"); err == nil {
+		t.Error("GetForConversationSystem(non-local org) should error")
 	}
 	if _, err := stores.TaskMemory.GetMemoriesForEntity(ctx, badOrg, "e"); err == nil {
 		t.Error("GetMemoriesForEntity(non-local org) should error")
@@ -131,7 +133,7 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 	ctx := context.Background()
 
 	conv1, entityID := seedSQLiteConversationForTaskMemory(t, conn, "count-1")
-	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv1, entityID, "", "first"); err != nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv1, "", "first", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, conv1, entityID, domain.MemoryRolePrimary); err != nil {
@@ -145,7 +147,7 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 	}
 
 	conv2, _ := seedSQLiteConversationForTaskMemory(t, conn, "count-2")
-	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv2, entityID, "", "second"); err != nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv2, "", "second", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, conv2, entityID, domain.MemoryRoleTouched); err != nil {
@@ -164,54 +166,6 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 		t.Fatalf("CountMemoriesForEntitySystem: %v", err)
 	} else if n != 0 {
 		t.Errorf("Count for unrelated entity = %d, want 0", n)
-	}
-}
-
-// TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows pins the
-// migration's backfill statement directly: a conversation_memory row inserted
-// with NO corresponding conversation_memory_entities row (simulating a
-// pre-migration row) gets exactly one 'primary' join row once the
-// backfill INSERT runs, and the entity-scoped read then returns it —
-// the read-path switch's result-identical claim for pre-existing data.
-func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
-	conn := openSQLiteForTest(t)
-	stores := sqlitestore.New(conn)
-	ctx := context.Background()
-
-	conversationID, entityID := seedSQLiteConversationForTaskMemory(t, conn, "backfill")
-	now := time.Now().UTC()
-	if _, err := conn.Exec(
-		`INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content, created_at) VALUES (?, ?, ?, 'pre-migration note', ?)`,
-		uuid.New().String(), conversationID, entityID, now,
-	); err != nil {
-		t.Fatalf("seed pre-migration conversation_memory row: %v", err)
-	}
-
-	// No join row exists yet — the read path finds nothing.
-	if mems, err := stores.TaskMemory.GetMemoriesForEntity(ctx, runmode.LocalDefaultOrgID, entityID); err != nil {
-		t.Fatalf("GetMemoriesForEntity (pre-backfill): %v", err)
-	} else if len(mems) != 0 {
-		t.Fatalf("GetMemoriesForEntity (pre-backfill) = %+v, want empty", mems)
-	}
-
-	// The exact backfill statement from the migration.
-	if _, err := conn.Exec(`
-		INSERT OR IGNORE INTO conversation_memory_entities (org_id, conversation_id, entity_id, role, created_at)
-		SELECT org_id, conversation_id, entity_id, 'primary', created_at FROM conversation_memory
-	`); err != nil {
-		t.Fatalf("run backfill: %v", err)
-	}
-
-	if role := roleForSQLiteJoinRow(t, conn, conversationID, entityID); role != domain.MemoryRolePrimary {
-		t.Errorf("backfilled role = %q, want %q", role, domain.MemoryRolePrimary)
-	}
-
-	mems, err := stores.TaskMemory.GetMemoriesForEntity(ctx, runmode.LocalDefaultOrgID, entityID)
-	if err != nil {
-		t.Fatalf("GetMemoriesForEntity (post-backfill): %v", err)
-	}
-	if len(mems) != 1 || mems[0].Content != "pre-migration note" {
-		t.Errorf("GetMemoriesForEntity (post-backfill) = %+v, want the pre-migration row", mems)
 	}
 }
 

@@ -128,187 +128,6 @@ func TestBranchRefOf(t *testing.T) {
 	}
 }
 
-func TestIsTerminalState(t *testing.T) {
-	terminal := []struct{ kind, state string }{
-		{domain.ArtifactKindPullRequest, domain.ArtifactStatePRMerged},
-		{domain.ArtifactKindPullRequest, domain.ArtifactStatePRClosed},
-		{domain.ArtifactKindReview, domain.ArtifactStateReviewSubmitted},
-		{domain.ArtifactKindReview, domain.ArtifactStateReviewDismissed},
-		{domain.ArtifactKindBranch, domain.ArtifactStateBranchDeleted},
-	}
-	for _, c := range terminal {
-		if !isTerminalState(c.kind, c.state) {
-			t.Errorf("isTerminalState(%s,%s) = false, want true", c.kind, c.state)
-		}
-	}
-	nonTerminal := []struct{ kind, state string }{
-		{domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen},
-		{domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft},
-		{domain.ArtifactKindReview, domain.ArtifactStateReviewPending},
-		{domain.ArtifactKindBranch, domain.ArtifactStateBranchPushed},
-	}
-	for _, c := range nonTerminal {
-		if isTerminalState(c.kind, c.state) {
-			t.Errorf("isTerminalState(%s,%s) = true, want false", c.kind, c.state)
-		}
-	}
-}
-
-func TestFormatTitleBodyDelta(t *testing.T) {
-	// Unchanged → empty (the caller renders "shipped as you drafted them").
-	if got := formatTitleBodyDelta("T", "B", "T", "B"); got != "" {
-		t.Errorf("unchanged delta = %q, want empty", got)
-	}
-	// Title only.
-	got := formatTitleBodyDelta("draft title", "B", "shipped title", "B")
-	if !strings.Contains(got, "Title") || !strings.Contains(got, "shipped title") || !strings.Contains(got, "draft title") {
-		t.Errorf("title delta = %q, want both shipped + drafted titles", got)
-	}
-	if strings.Contains(got, "Description") {
-		t.Errorf("unchanged body should not appear: %q", got)
-	}
-	// Body only → the shipped body is quoted.
-	got = formatTitleBodyDelta("T", "old body", "T", "new body line1\nline2")
-	if !strings.Contains(got, "Description") || !strings.Contains(got, "> new body line1") || !strings.Contains(got, "> line2") {
-		t.Errorf("body delta = %q, want the final body blockquoted", got)
-	}
-}
-
-func TestDescribeArtifactOutcome_Dispositions(t *testing.T) {
-	// The non-merged terminal kinds render disposition text without touching the
-	// resolver, so a zero-value Reconciler is enough.
-	rc := &Reconciler{}
-	cases := []struct {
-		art  domain.Artifact
-		want string
-	}{
-		{domain.Artifact{Kind: domain.ArtifactKindPullRequest, Target: "octo/repo#1", State: domain.ArtifactStatePRClosed}, "closed without merging"},
-		{domain.Artifact{Kind: domain.ArtifactKindReview, Target: "octo/repo#2", State: domain.ArtifactStateReviewSubmitted}, "submitted"},
-		{domain.Artifact{Kind: domain.ArtifactKindReview, Target: "octo/repo#3", State: domain.ArtifactStateReviewDismissed}, "dismissed"},
-		{domain.Artifact{Kind: domain.ArtifactKindBranch, Target: "octo/repo", ExternalID: "refs/heads/feat", State: domain.ArtifactStateBranchDeleted}, "deleted"},
-		// Non-terminal → no block.
-		{domain.Artifact{Kind: domain.ArtifactKindPullRequest, Target: "octo/repo#4", State: domain.ArtifactStatePROpen}, ""},
-	}
-	for _, c := range cases {
-		got := rc.describeArtifactOutcome(context.Background(), "org", c.art)
-		if c.want == "" {
-			if got != "" {
-				t.Errorf("describeArtifactOutcome(%s) = %q, want empty", c.art.State, got)
-			}
-			continue
-		}
-		if !strings.Contains(got, c.want) {
-			t.Errorf("describeArtifactOutcome(%s) = %q, want to contain %q", c.art.State, got, c.want)
-		}
-	}
-	// Branch block names the branch (not the ref) and the repo.
-	br := domain.Artifact{Kind: domain.ArtifactKindBranch, Target: "octo/repo", ExternalID: "refs/heads/feat", State: domain.ArtifactStateBranchDeleted}
-	if got := rc.describeArtifactOutcome(context.Background(), "org", br); !strings.Contains(got, "`feat`") || !strings.Contains(got, "`octo/repo`") {
-		t.Errorf("branch block = %q, want to name `feat` in `octo/repo`", got)
-	}
-}
-
-func TestVerdictMatches(t *testing.T) {
-	// Draft event vocab (APPROVE) normalizes to GitHub state vocab (APPROVED).
-	for _, c := range []struct {
-		event, state string
-		want         bool
-	}{
-		{"APPROVE", "APPROVED", true},
-		{"REQUEST_CHANGES", "CHANGES_REQUESTED", true},
-		{"COMMENT", "COMMENTED", true},
-		{"APPROVE", "CHANGES_REQUESTED", false},
-	} {
-		if got := verdictMatches(c.event, c.state); got != c.want {
-			t.Errorf("verdictMatches(%q,%q) = %v, want %v", c.event, c.state, got, c.want)
-		}
-	}
-}
-
-func TestFormatReviewDelta(t *testing.T) {
-	line5, line7 := 5, 7
-
-	// With a draft: verdict change, body edit, a per-comment edit, and an add.
-	proposed := domain.ReviewArtifactProposed{
-		Body:  "draft summary",
-		Event: "COMMENT",
-		Comments: []domain.ReviewArtifactComment{
-			{ID: "PRRC_1", Path: "a.go", Line: &line5, Body: "draft comment"},
-		},
-	}
-	final := github.SubmittedReview{
-		State: "CHANGES_REQUESTED",
-		Body:  "final summary",
-		Comments: []github.PendingReviewComment{
-			{ID: "PRRC_1", Path: "a.go", Line: &line5, Body: "final comment"},
-			{ID: "PRRC_2", Path: "b.go", Line: &line7, Body: "new thing"},
-		},
-	}
-	got := formatReviewDelta(proposed, final)
-	for _, want := range []string{
-		"Verdict shipped as changes requested",
-		"Body was edited",
-		"`a.go:5` — edited before submit",
-		"final comment",
-		"`b.go:7` — added before submit",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("review delta missing %q; got:\n%s", want, got)
-		}
-	}
-
-	// A dropped comment.
-	dropped := formatReviewDelta(
-		domain.ReviewArtifactProposed{Event: "COMMENT", Comments: []domain.ReviewArtifactComment{{ID: "PRRC_9", Path: "c.go", Line: &line5, Body: "gone"}}},
-		github.SubmittedReview{State: "COMMENTED"},
-	)
-	if !strings.Contains(dropped, "`c.go:5` — dropped before submit") {
-		t.Errorf("dropped-comment delta = %q", dropped)
-	}
-
-	// No draft (Proposed empty) → record the final content instead of a diff. The
-	// comment has no current-diff anchor (nil line) → "(outdated)", not ":0".
-	noDraft := formatReviewDelta(domain.ReviewArtifactProposed{}, github.SubmittedReview{
-		State:    "APPROVED",
-		Comments: []github.PendingReviewComment{{ID: "X", Path: "a.go", Line: nil, Body: "looks good"}},
-	})
-	if !strings.Contains(noDraft, "Verdict: approved") || !strings.Contains(noDraft, "`a.go` (outdated) — looks good") {
-		t.Errorf("no-draft final-review record = %q", noDraft)
-	}
-}
-
-func TestCommentLoc(t *testing.T) {
-	if got := commentLoc("a.go", 5); got != "`a.go:5`" {
-		t.Errorf("anchored = %q, want `a.go:5`", got)
-	}
-	// A line of 0 (GitHub's null line for an unanchored/outdated comment) reads
-	// as "(outdated)", not a meaningless ":0".
-	if got := commentLoc("a.go", 0); got != "`a.go` (outdated)" {
-		t.Errorf("outdated = %q, want `a.go` (outdated)", got)
-	}
-}
-
-func TestWriteBlockquote(t *testing.T) {
-	var b strings.Builder
-	// Empty body writes nothing (no stray "> " line).
-	writeBlockquote(&b, "")
-	if b.String() != "" {
-		t.Errorf("empty = %q, want \"\"", b.String())
-	}
-	// Trailing newline doesn't emit a trailing "> " line.
-	b.Reset()
-	writeBlockquote(&b, "line1\nline2\n")
-	if got := b.String(); got != "> line1\n> line2\n" {
-		t.Errorf("trailing newline = %q", got)
-	}
-	// CRLF normalizes (no stray \r at line ends).
-	b.Reset()
-	writeBlockquote(&b, "a\r\nb")
-	if got := b.String(); got != "> a\n> b\n" {
-		t.Errorf("CRLF = %q", got)
-	}
-}
-
 // --- integration: Reconcile end-to-end against a stub GitHub + real SQLite ---
 
 // stubGH is a canned GitHub endpoint for RefreshPRs (GraphQL nodes query),
@@ -474,7 +293,7 @@ func (f *fakeResolver) ClientFor(_ context.Context, _, target string) (*github.C
 	return f.client, nil
 }
 
-func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID, content string), func(a domain.Artifact)) {
+func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID string), func(a domain.Artifact)) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
@@ -489,21 +308,12 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
-	seedConversation := func(entityID, conversationID, content string) {
+	seedConversation := func(entityID, conversationID string) {
 		if _, err := conn.Exec(`INSERT INTO entities (id, source, source_id, kind) VALUES (?, 'github', ?, 'pull_request')`, entityID, entityID); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
 		if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'completed')`, conversationID); err != nil {
 			t.Fatalf("seed conversation: %v", err)
-		}
-		if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conversationID, entityID, "", content); err != nil {
-			t.Fatalf("seed memory: %v", err)
-		}
-		// The primary join row a real conversation's completion will carry once
-		// the run-end attach ticket (TFAC-625) lands — GetMemoriesForEntity's
-		// join-based read (TFAC-622) needs it to find anything.
-		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, conversationID, entityID, domain.MemoryRolePrimary); err != nil {
-			t.Fatalf("seed join row: %v", err)
 		}
 	}
 	seedArt := func(a domain.Artifact) {
@@ -516,35 +326,16 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID
 	return stores, seedConversation, seedArt
 }
 
-// getConversationMemory finds the memory row belonging to conversationID via
-// GetMemoriesForEntity — reads are join-based (conversation_memory_entities),
-// so there is no direct by-conversation point read to call instead.
-func getConversationMemory(t *testing.T, stores db.Stores, ctx context.Context, orgID, entityID, conversationID string) *domain.TaskMemory {
-	t.Helper()
-	mems, err := stores.TaskMemory.GetMemoriesForEntity(ctx, orgID, entityID)
-	if err != nil {
-		t.Fatalf("GetMemoriesForEntity: %v", err)
-	}
-	for i := range mems {
-		if mems[i].ConversationID == conversationID {
-			return &mems[i]
-		}
-	}
-	return nil
-}
-
-// TestReconcile_TransitionsAndFinalMemory is the headline end-to-end: a draft PR
-// that merged and a pushed branch that was deleted reflect their new state; the
-// conversation's outcome memory is ONE composed note covering both (proving
-// multi-artifact conversations accumulate, not clobber), with the merged PR
-// diffed against the agent's draft; and a terminal artifact already in the set
-// is never re-queried. A review-draft artifact is seeded too and must stay
-// pending — reviews are staged TF-side and never reconciled (TFAC-494 §8).
-func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
+// TestReconcile_Transitions is the headline end-to-end: a draft PR that merged
+// and a pushed branch that was deleted reflect their new state, and a terminal
+// artifact already in the set is never re-queried. A review-draft artifact is
+// seeded too and must stay pending — reviews are staged TF-side and never
+// reconciled (TFAC-494 §8).
+func TestReconcile_Transitions(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
 	const conversationID = "11111111-1111-1111-1111-111111111111"
-	seedConversation("ent-1", conversationID, "agent narrative")
+	seedConversation("ent-1", conversationID)
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 1, "PR_1", "feat", "main", "https://github.com/octo/repo/pull/1", "t", "b", true)
 	prArt.ConversationID = conversationID
@@ -567,11 +358,9 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 			"PR_1": prNodeJSON("PR_1", 1, "MERGED", false, true),
 		},
 		branches: map[string]bool{"octo/repo/feature": false}, // gone
-		// PR_1 shipped with an edited title vs the agent's draft ("t"/"b").
-		prFinal: map[int][2]string{1: {"shipped title", "b"}},
 	}
 	res := &fakeResolver{client: newStubClient(t, stub)}
-	rc := NewReconciler(res, stores.Artifacts, stores.TaskMemory, nil)
+	rc := NewReconciler(res, stores.Artifacts, nil)
 
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
@@ -587,30 +376,6 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 	if stub.prCalls["PR_9"] {
 		t.Error("terminal merged PR (PR_9) was re-queried; it should be excluded from the non-terminal set")
 	}
-
-	// ONE composed note covering all three artifacts, after the agent narrative
-	// (which is untouched). Overwrite, not append — but composed over the
-	// conversation's whole set, so nothing is clobbered.
-	mem := getConversationMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-1", conversationID)
-	if mem == nil {
-		t.Fatalf("getConversationMemory: nil")
-	}
-	if !strings.HasPrefix(mem.Content, "agent narrative") {
-		t.Errorf("agent narrative was trampled: %q", mem.Content)
-	}
-	for _, want := range []string{"was merged on GitHub", "was deleted on GitHub"} {
-		if !strings.Contains(mem.Content, want) {
-			t.Errorf("composed outcome missing %q; got:\n%s", want, mem.Content)
-		}
-	}
-	// The review draft was never reconciled, so it contributes no outcome note.
-	if strings.Contains(mem.Content, "was submitted on GitHub") {
-		t.Errorf("a TF-side review draft must not produce a reconcile note; got:\n%s", mem.Content)
-	}
-	// The merged PR carries the title delta vs the agent's draft.
-	if !strings.Contains(mem.Content, "shipped title") {
-		t.Errorf("merged-PR title delta missing; got:\n%s", mem.Content)
-	}
 }
 
 // TestReconcile_PRClosed pins the close-without-merging terminal branch. A
@@ -620,7 +385,7 @@ func TestReconcile_PRClosed(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
 	const conversationID = "22222222-2222-2222-2222-222222222222"
-	seedConversation("ent-2", conversationID, "narrative")
+	seedConversation("ent-2", conversationID)
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 3, "PR_3", "x", "main", "u", "t", "b", false)
 	prArt.ConversationID = conversationID
@@ -632,7 +397,7 @@ func TestReconcile_PRClosed(t *testing.T) {
 	stub := &stubGH{prs: map[string]string{
 		"PR_3": prNodeJSON("PR_3", 3, "CLOSED", false, false),
 	}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, nil)
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}
@@ -644,22 +409,14 @@ func TestReconcile_PRClosed(t *testing.T) {
 	}
 	// The review draft is never reconciled — it stays pending.
 	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewPending)
-
-	// The note covers the PR disposition; the un-reconciled review contributes none.
-	mem := getConversationMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-2", conversationID)
-	if mem == nil || !strings.Contains(mem.Content, "closed without merging") {
-		t.Errorf("composed note missing the PR disposition; got: %v", mem)
-	}
 }
 
 // TestReconcile_NoOpWhenUnchanged pins that an open PR still open, a pending
-// review still private, and a present branch all stay put — and a still-pending
-// review writes no memory note (no terminal transition).
+// review still private, and a present branch all stay put.
 func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
-	ctx := context.Background()
 	const conversationID = "33333333-3333-3333-3333-333333333333"
-	seedConversation("ent-3", conversationID, "narrative")
+	seedConversation("ent-3", conversationID)
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 5, "PR_5", "x", "main", "u", "t", "b", false) // open
 	prArt.ConversationID = conversationID
@@ -687,11 +444,6 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 	assertState(t, stores, runmode.LocalDefaultOrgID, prArt.DedupKey, domain.ArtifactStatePROpen)
 	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewPending)
 	assertState(t, stores, runmode.LocalDefaultOrgID, branchArt.DedupKey, domain.ArtifactStateBranchPushed)
-
-	mem := getConversationMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-3", conversationID)
-	if mem != nil && strings.Contains(mem.Content, "Post-run outcome") {
-		t.Errorf("no terminal transition, but a post-run outcome note was written: %q", mem.Content)
-	}
 }
 
 // TestReconcile_DraftMarkedReadyRunsTheResolvedHook pins resolution from any
@@ -702,14 +454,14 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 func TestReconcile_DraftMarkedReadyRunsTheResolvedHook(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
 	const conversationID = "77777777-7777-7777-7777-777777777777"
-	seedConversation("ent-7", conversationID, "narrative")
+	seedConversation("ent-7", conversationID)
 
 	draft := domain.NewPullRequestArtifact("octo/repo", 7, "PR_7", "x", "main", "u", "t", "b", true)
 	draft.ConversationID = conversationID
 	seedArt(draft)
 
 	stub := &stubGH{prs: map[string]string{"PR_7": prNodeJSON("PR_7", 7, "OPEN", false, false)}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, nil)
 	var (
 		mu       sync.Mutex
 		resolved []string
@@ -741,14 +493,14 @@ func TestReconcile_DraftMarkedReadyRunsTheResolvedHook(t *testing.T) {
 func TestReconcile_OpenNeverReturnsToDraft(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
 	const conversationID = "88888888-8888-8888-8888-888888888888"
-	seedConversation("ent-8", conversationID, "narrative")
+	seedConversation("ent-8", conversationID)
 
 	open := domain.NewPullRequestArtifact("octo/repo", 8, "PR_8", "x", "main", "u", "t", "b", false)
 	open.ConversationID = conversationID
 	seedArt(open)
 
 	stub := &stubGH{prs: map[string]string{"PR_8": prNodeJSON("PR_8", 8, "OPEN", true, false)}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, nil)
 	hookRan := false
 	rc.SetPullRequestResolvedHook(func(context.Context, string, string) { hookRan = true })
 
@@ -775,7 +527,7 @@ func TestReconcile_OpenNeverReturnsToDraft(t *testing.T) {
 func TestReconcile_UnknownBranchNotDeleted(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
 	const conversationID = "44444444-4444-4444-4444-444444444444"
-	seedConversation("ent-4", conversationID, "narrative")
+	seedConversation("ent-4", conversationID)
 	branchArt, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/maybe", "sha", true)
 	branchArt.ConversationID = conversationID
 	seedArt(branchArt)
@@ -799,8 +551,8 @@ func TestReconcile_SingleConversationScope(t *testing.T) {
 	ctx := context.Background()
 	const convA = "55555555-5555-5555-5555-555555555555"
 	const convB = "66666666-6666-6666-6666-666666666666"
-	seedConversation("ent-a", convA, "a")
-	seedConversation("ent-b", convB, "b")
+	seedConversation("ent-a", convA)
+	seedConversation("ent-b", convB)
 
 	prA := domain.NewPullRequestArtifact("octo/repo", 7, "PR_7", "x", "main", "u", "t", "b", false)
 	prA.ConversationID = convA
@@ -814,7 +566,7 @@ func TestReconcile_SingleConversationScope(t *testing.T) {
 		"PR_7": prNodeJSON("PR_7", 7, "MERGED", false, true),
 		"PR_8": prNodeJSON("PR_8", 8, "MERGED", false, true),
 	}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, nil)
 
 	convAArts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, convA)
 	if err != nil {
@@ -835,52 +587,6 @@ func TestReconcile_SingleConversationScope(t *testing.T) {
 	}
 }
 
-// TestReconcile_OutcomeSupersedesVerdict pins the overwrite semantics: a
-// conversation approved through TF carries a human verdict in human_content;
-// when its PR later merges on GitHub, the reconciler's outcome note OVERWRITES
-// that verdict (the final state is the authoritative divergence account), while
-// the agent's own narrative is untouched.
-func TestReconcile_OutcomeSupersedesVerdict(t *testing.T) {
-	stores, seedConversation, seedArt := reconcileTestStores(t)
-	ctx := context.Background()
-	const conversationID = "77777777-7777-7777-7777-777777777777"
-	seedConversation("ent-7", conversationID, "agent narrative")
-	// Approval-time verdict already recorded.
-	if _, err := stores.TaskMemory.UpdateConversationMemoryHumanContent(ctx, runmode.LocalDefaultOrgID, conversationID, "Human approved with a tweaked body."); err != nil {
-		t.Fatalf("seed verdict: %v", err)
-	}
-
-	prArt := domain.NewPullRequestArtifact("octo/repo", 10, "PR_10", "x", "main", "u", "draft title", "draft body", false)
-	prArt.ConversationID = conversationID
-	seedArt(prArt)
-
-	stub := &stubGH{
-		prs:     map[string]string{"PR_10": prNodeJSON("PR_10", 10, "MERGED", false, true)},
-		prFinal: map[int][2]string{10: {"shipped title", "shipped body"}},
-	}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
-	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
-		t.Fatalf("ReconcileOrg: %v", err)
-	}
-
-	mem := getConversationMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-7", conversationID)
-	if mem == nil {
-		t.Fatalf("getConversationMemory: nil")
-	}
-	if strings.Contains(mem.Content, "Human approved with a tweaked body.") {
-		t.Errorf("the approval verdict should have been superseded by the outcome note; got:\n%s", mem.Content)
-	}
-	if !strings.HasPrefix(mem.Content, "agent narrative") {
-		t.Errorf("agent narrative was trampled: %q", mem.Content)
-	}
-	// The outcome carries the real shipped-vs-drafted delta.
-	for _, want := range []string{"was merged on GitHub", "shipped title", "shipped body"} {
-		if !strings.Contains(mem.Content, want) {
-			t.Errorf("outcome missing %q; got:\n%s", want, mem.Content)
-		}
-	}
-}
-
 // TestRunner_SuppressesCancelErrorOnShutdown pins that a cycle in flight when
 // Stop() cancels the context does NOT log an error: the cancel propagates out
 // through a DB call as context.Canceled, and the runner's ctx.Err() guard treats
@@ -892,7 +598,7 @@ func TestRunner_SuppressesCancelErrorOnShutdown(t *testing.T) {
 	t.Cleanup(func() { reconcileLog = prev })
 
 	stores, _, _ := reconcileTestStores(t)
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Artifacts, stores.TaskMemory, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Artifacts, nil)
 	r := NewRunner(rc, runmode.LocalDefaultOrgID)
 
 	// An already-cancelled ctx makes the cycle's first DB call (ListNonTerminalBySystem)
@@ -932,32 +638,29 @@ func (h *recLogger) records() []slog.Record {
 
 // TestReconcile_WriteBackSurvivesCallerCancel pins the durability fix: if the
 // caller's ctx is cancelled (Tier-2 client disconnect / Tier-1 shutdown) once
-// the apply phase begins, the state transition AND its composed memory note both
-// still land. A terminal artifact drops out of both tiers' working sets, so a
-// note skipped here would never be re-written — the write-back must detach.
+// the apply phase begins, the state transition still lands. A terminal artifact
+// drops out of both tiers' working sets, so a write skipped here would never be
+// re-attempted — the write-back must detach.
 func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
 	const conversationID = "99999999-9999-9999-9999-999999999991"
-	seedConversation("ent-9", conversationID, "narrative")
+	seedConversation("ent-9", conversationID)
 	prArt := domain.NewPullRequestArtifact("octo/repo", 12, "PR_12", "x", "main", "u", "t", "b", false)
 	prArt.ConversationID = conversationID
 	seedArt(prArt)
 
-	stub := &stubGH{
-		prs:     map[string]string{"PR_12": prNodeJSON("PR_12", 12, "MERGED", false, true)},
-		prFinal: map[int][2]string{12: {"t", "b"}}, // shipped as drafted
-	}
+	stub := &stubGH{prs: map[string]string{"PR_12": prNodeJSON("PR_12", 12, "MERGED", false, true)}}
 	// The fetch (GraphQL POST) now observes ctx (TFAC-475 made it cancellable),
 	// so it must succeed BEFORE the cancel: cancelAfterFetchRT lets the fetch
 	// complete on the live ctx, buffers its body, then cancels the caller ctx —
 	// reconcile then enters the apply phase with ctx already cancelled, where the
-	// write-back (state + memory) runs on context.WithoutCancel(ctx) and must
-	// still land. A server-side cancel would race the client's own response read.
+	// write-back runs on context.WithoutCancel(ctx) and must still land. A
+	// server-side cancel would race the client's own response read.
 	srv := newStubServer(t, stub)
 	ctx, cancel := context.WithCancel(context.Background())
 	client := github.NewClientWithHTTPClient(srv.URL, "test-token",
 		&http.Client{Transport: &cancelAfterFetchRT{t: t, base: http.DefaultTransport, cancel: cancel}})
-	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.TaskMemory, nil)
+	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, nil)
 
 	arts, err := stores.Artifacts.ListByConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
@@ -971,10 +674,6 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 	}
 
 	assertState(t, stores, runmode.LocalDefaultOrgID, prArt.DedupKey, domain.ArtifactStatePRMerged)
-	mem := getConversationMemory(t, stores, context.Background(), runmode.LocalDefaultOrgID, "ent-9", conversationID)
-	if mem == nil || !strings.Contains(mem.Content, "was merged on GitHub") {
-		t.Errorf("memory note was dropped on a cancelled caller ctx — the write-back must detach; got: %v", mem)
-	}
 }
 
 // --- helpers ---
@@ -984,7 +683,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 // test wants the count via the org-wide path.
 func reconcileSet(t *testing.T, stores db.Stores, res clientResolver, orgID string) ([]domain.Artifact, error) {
 	t.Helper()
-	rc := NewReconciler(res, stores.Artifacts, stores.TaskMemory, nil)
+	rc := NewReconciler(res, stores.Artifacts, nil)
 	arts, err := stores.Artifacts.ListNonTerminalBySystem(context.Background(), orgID)
 	if err != nil {
 		return nil, err
@@ -1070,7 +769,7 @@ func prArtifactFor(t *testing.T, stores db.Stores, repoPath string, number int) 
 // to the pushing conversation.
 func TestBackstop_RecordsPRFromBranchMatch(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
-	seedConversation("octo/repo#5", "conv-1", "memory")
+	seedConversation("octo/repo#5", "conv-1")
 
 	br, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feature-x", "sha1", true)
 	if !ok {
@@ -1086,7 +785,7 @@ func TestBackstop_RecordsPRFromBranchMatch(t *testing.T) {
 
 	prsJSON := `[{"number":5,"node_id":"PR_5","title":"My PR","html_url":"https://github.com/octo/repo/pull/5",` +
 		`"state":"open","draft":false,"head":{"ref":"feature-x","sha":"sha1"},"base":{"ref":"main"}}]`
-	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, stores.TaskMemory, nil)
+	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, nil)
 
 	if err := rc.BackfillPRArtifactsForBranches(context.Background(), runmode.LocalDefaultOrgID, nil); err != nil {
 		t.Fatalf("backstop: %v", err)
@@ -1109,7 +808,7 @@ func TestBackstop_RecordsPRFromBranchMatch(t *testing.T) {
 // writer advanced.
 func TestBackstop_Idempotent(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
-	seedConversation("octo/repo#5", "conv-1", "memory")
+	seedConversation("octo/repo#5", "conv-1")
 
 	br, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feature-x", "sha1", true)
 	if !ok {
@@ -1127,7 +826,7 @@ func TestBackstop_Idempotent(t *testing.T) {
 
 	prsJSON := `[{"number":5,"node_id":"PR_5","title":"My PR","html_url":"https://github.com/octo/repo/pull/5",` +
 		`"state":"open","draft":false,"head":{"ref":"feature-x","sha":"sha1"},"base":{"ref":"main"}}]`
-	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, stores.TaskMemory, nil)
+	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, nil)
 
 	// A merged PR drops out of the non-terminal set, so run twice to prove the
 	// insert-if-absent write neither duplicates nor resurrects it.

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,15 +13,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// humanFeedbackHeader marks the start of the human verdict in
-// materialized memory. Stable so the next agent's prompt context can
-// parse the boundary regardless of which conversation wrote which half.
-const humanFeedbackHeader = "## Human feedback (post-run)\n\n"
-
-// humanFeedbackSeparator is the divider rendered when both halves of
-// a memory row are populated.
-const humanFeedbackSeparator = "\n\n---\n" + humanFeedbackHeader
-
 // taskMemoryStore is the Postgres impl of db.TaskMemoryStore. SQL is
 // written fresh against D3's schema: $N placeholders, explicit org_id
 // bind (the column is NOT NULL with no default), and org_id in every
@@ -30,10 +20,9 @@ const humanFeedbackSeparator = "\n\n---\n" + humanFeedbackHeader
 //
 // Holds two pools:
 //
-//   - q: app pool (tf_app, RLS-active). Request-handler equivalents
-//     (review submit, PR submit, swipe-discard cleanup) route here.
-//     RLS policy conversation_memory_all (an EXISTS subquery against conversations)
-//     gates the statement; the caller must be inside WithTx so
+//   - q: app pool (tf_app, RLS-active). Request-handler equivalents route
+//     here. RLS policy conversation_memory_all (an EXISTS subquery against
+//     conversations) gates the statement; the caller must be inside WithTx so
 //     request.jwt.claims is set.
 //
 //   - admin: admin pool (supabase_admin, BYPASSRLS). The delegate
@@ -52,35 +41,37 @@ func newTaskMemoryStore(q, admin queryer) db.TaskMemoryStore {
 
 var _ db.TaskMemoryStore = (*taskMemoryStore)(nil)
 
-func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error) {
-	return upsertAgentMemory(ctx, s.q, orgID, conversationID, entityID, blueprintRunID, content)
+func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, conversationID, blueprintRunID, content string, source domain.MemorySource) (domain.TaskMemory, error) {
+	return upsertAgentMemory(ctx, s.q, orgID, conversationID, blueprintRunID, content, source)
 }
 
-func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error) {
-	return upsertAgentMemory(ctx, s.admin, orgID, conversationID, entityID, blueprintRunID, content)
+func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, blueprintRunID, content string, source domain.MemorySource) (domain.TaskMemory, error) {
+	return upsertAgentMemory(ctx, s.admin, orgID, conversationID, blueprintRunID, content, source)
 }
 
 // upsertAgentMemory is the shared body for the app- and admin-pool
 // variants. ON CONFLICT(conversation_id) is supported on both Postgres and
-// SQLite given the UNIQUE(conversation_id) constraint; the OVERWRITE only
-// touches agent_content so any already-attached human_content stays
-// intact across retries.
+// SQLite given the UNIQUE(conversation_id) constraint; the overwrite replaces
+// agent_content, source and blueprint_run_id together, which is what lets an
+// agent's own conclusion supersede a generated stand-in.
 //
 // created_at is bound from Go-side time.Now() rather than the schema
 // DEFAULT now() so multi-conversation bursts within the same Postgres tx
 // don't tie on the tx-start timestamp — matches the EventStore pattern.
-// Empty / whitespace-only content canonicalizes to SQL NULL so
-// downstream consumers (factory's memory_missing derivation) see a
-// single truth condition for "agent didn't comply with the gate."
+// Empty / whitespace-only content lands as SQL NULL, the shape
+// db.ValidateMemorySource has already tied to source = 'none'.
 //
 // The write is wrapped in a data-modifying CTE and re-projected through
 // taskMemoryWrittenSelect so RETURNING hands back the same shape
 // GetMemoriesForEntity does (including the producing conversation's naming
 // facts) rather than a bare conversation_memory row — matching
 // updateConversationReturning's pattern in conversation.go.
-func upsertAgentMemory(ctx context.Context, q queryer, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error) {
+func upsertAgentMemory(ctx context.Context, q queryer, orgID, conversationID, blueprintRunID, content string, source domain.MemorySource) (domain.TaskMemory, error) {
+	if err := db.ValidateMemorySource(content, source); err != nil {
+		return domain.TaskMemory{}, err
+	}
 	var agentContent any
-	if strings.TrimSpace(content) != "" {
+	if source != domain.MemorySourceNone {
 		agentContent = content
 	}
 	var blueprintRun any
@@ -89,56 +80,32 @@ func upsertAgentMemory(ctx context.Context, q queryer, orgID, conversationID, en
 	}
 	mem, err := scanTaskMemory(q.QueryRowContext(ctx, `
 		WITH written AS (
-			INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, blueprint_run_id, agent_content, created_at)
+			INSERT INTO conversation_memory (id, org_id, conversation_id, blueprint_run_id, agent_content, source, created_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (conversation_id) DO UPDATE SET agent_content = EXCLUDED.agent_content, blueprint_run_id = EXCLUDED.blueprint_run_id
+			ON CONFLICT (conversation_id) DO UPDATE SET agent_content = EXCLUDED.agent_content, source = EXCLUDED.source, blueprint_run_id = EXCLUDED.blueprint_run_id
 			RETURNING *
 		)
 	`+taskMemoryWrittenSelect,
-		uuid.New().String(), orgID, conversationID, entityID, blueprintRun, agentContent, time.Now().UTC()))
+		uuid.New().String(), orgID, conversationID, blueprintRun, agentContent, string(source), time.Now().UTC()))
 	if err != nil {
 		return domain.TaskMemory{}, fmt.Errorf("upsert conversation_memory: %w", err)
 	}
 	return mem, nil
 }
 
-func (s *taskMemoryStore) UpdateConversationMemoryHumanContent(ctx context.Context, orgID, conversationID, content string) (*domain.TaskMemory, error) {
-	return updateConversationMemoryHumanContent(ctx, s.q, orgID, conversationID, content)
-}
-
-// UpdateConversationMemoryHumanContentSystem overwrites human_content on the admin pool
-// (BYPASSRLS) for the artifact reconciler, which has no JWT-claims context. Same
-// body as the app-pool variant, different pool. See the interface doc + TFAC-464.
-func (s *taskMemoryStore) UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) (*domain.TaskMemory, error) {
-	return updateConversationMemoryHumanContent(ctx, s.admin, orgID, conversationID, content)
-}
-
-// updateConversationMemoryHumanContent is the shared body for the app- and
-// admin-pool variants: a plain overwrite of human_content (empty/whitespace →
-// NULL). RETURNING (via the same written-CTE re-projection upsertAgentMemory
-// uses) answers "did this land" and "what does the row say now" in one
-// statement: zero rows back means the WHERE guard matched nothing, which is a
-// nil row and a nil error — an answer, not an error, matching
-// EntityStore.Close's guard-declined shape — logged and not fatal per the
-// interface doc.
-func updateConversationMemoryHumanContent(ctx context.Context, q queryer, orgID, conversationID, content string) (*domain.TaskMemory, error) {
-	var humanContent any
-	if strings.TrimSpace(content) != "" {
-		humanContent = content
-	}
-	mem, err := scanTaskMemory(q.QueryRowContext(ctx, `
-		WITH written AS (
-			UPDATE conversation_memory SET human_content = $1 WHERE org_id = $2 AND conversation_id = $3
-			RETURNING *
-		)
-	`+taskMemoryWrittenSelect,
-		humanContent, orgID, conversationID))
+// GetForConversationSystem is the one read that does NOT filter on
+// agent_content: a 'none' row is the answer to "did this conversation settle
+// what it remembered", and hiding it would make an unanswered conversation
+// indistinguishable from one that answered "nothing".
+func (s *taskMemoryStore) GetForConversationSystem(ctx context.Context, orgID, conversationID string) (*domain.TaskMemory, error) {
+	mem, err := scanTaskMemory(s.admin.QueryRowContext(ctx, taskMemorySelect+`
+		WHERE rm.org_id = $1 AND rm.conversation_id = $2
+	`, orgID, conversationID))
 	if errors.Is(err, sql.ErrNoRows) {
-		memoryLog.Warn("no conversation_memory row; human_content not recorded", "conversation_id", conversationID)
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("update conversation_memory human_content: %w", err)
+		return nil, fmt.Errorf("get conversation_memory for conversation: %w", err)
 	}
 	return &mem, nil
 }
@@ -159,6 +126,7 @@ func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID,
 func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string) ([]domain.TaskMemory, error) {
 	rows, err := q.QueryContext(ctx, taskMemorySelect+`
 		WHERE rm.org_id = $1
+		  AND rm.agent_content IS NOT NULL
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		ORDER BY rm.created_at ASC
 	`, orgID, entityID)
@@ -195,6 +163,7 @@ func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, 
 	}
 	rows, err := s.admin.QueryContext(ctx, taskMemorySelectTeamScoped+`
 		WHERE rm.org_id = $1
+		  AND rm.agent_content IS NOT NULL
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		  AND (c.visibility = 'org' OR (c.visibility = 'team' AND c.team_id = NULLIF($3, '')::uuid))
 		ORDER BY rm.created_at DESC
@@ -224,6 +193,7 @@ func reverseTaskMemories(mems []domain.TaskMemory) {
 func getMemoriesForEntityTeamScoped(ctx context.Context, q queryer, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
 	rows, err := q.QueryContext(ctx, taskMemorySelectTeamScoped+`
 		WHERE rm.org_id = $1
+		  AND rm.agent_content IS NOT NULL
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		  AND (c.visibility = 'org' OR (c.visibility = 'team' AND c.team_id = NULLIF($3, '')::uuid))
 		ORDER BY rm.created_at ASC
@@ -243,11 +213,11 @@ func getMemoriesForEntityTeamScoped(ctx context.Context, q queryer, orgID, entit
 // Every read SELECTs it and every write RETURNs it (via taskMemoryWrittenSelect,
 // re-applying the same join over the write's own output row), so the write
 // shape cannot drift from the read shape.
-const taskMemoryColumns = `rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at,
+const taskMemoryColumns = `rm.id, rm.conversation_id, rm.blueprint_run_id, rm.agent_content, rm.source, rm.created_at,
 	       c.blueprint_step_index, p.name`
 
 // taskMemorySelect / taskMemorySelectTeamScoped are the SELECT + FROM the
-// entity reads start from. They differ only in how the conversation is
+// reads start from. They differ only in how the conversation is
 // reached — the app-pool read leaves visibility to RLS and LEFT JOINs, the
 // admin-pool reads hand-roll the team filter off an INNER JOIN. The prompts
 // arm is LEFT in both: a memory row whose prompt is gone still comes back,
@@ -269,9 +239,8 @@ const taskMemorySelectTeamScoped = `
 // taskMemoryWrittenSelect re-projects a write's `written` CTE output —
 // aliased rm to match taskMemoryColumns' rm.-prefixed columns — through the
 // same join to the producing conversation + prompt every read uses, so
-// UpsertAgentMemory(System) and UpdateConversationMemoryHumanContent(System)
-// hand back the identical shape GetMemoriesForEntity(System) would show for
-// the same row.
+// UpsertAgentMemory(System) hands back the identical shape
+// GetMemoriesForEntity(System) would show for the same row.
 const taskMemoryWrittenSelect = `
 	SELECT ` + taskMemoryColumns + `
 	FROM written rm
@@ -280,19 +249,21 @@ const taskMemoryWrittenSelect = `
 `
 
 // scanTaskMemory decodes one row in taskMemoryColumns order — shared by the
-// multi-row entity reads (via scanTaskMemories) and the single-row writes'
-// RETURNING.
+// multi-row entity reads (via scanTaskMemories), the per-conversation point
+// read, and the single-row write's RETURNING.
 func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, error) {
 	var m domain.TaskMemory
-	var blueprintRunID, agentContent, humanContent, promptName sql.NullString
+	var blueprintRunID, agentContent, promptName sql.NullString
+	var source string
 	var stepIndex sql.NullInt64
 	var createdAt time.Time
-	if err := row.Scan(&m.ID, &m.ConversationID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt,
+	if err := row.Scan(&m.ID, &m.ConversationID, &blueprintRunID, &agentContent, &source, &createdAt,
 		&stepIndex, &promptName); err != nil {
 		return domain.TaskMemory{}, err
 	}
 	m.BlueprintRunID = blueprintRunID.String
-	m.Content = materializeMemory(agentContent.String, humanContent.String)
+	m.Content = agentContent.String
+	m.Source = domain.MemorySource(source)
 	m.CreatedAt = createdAt
 	if stepIndex.Valid {
 		idx := int(stepIndex.Int64)
@@ -302,8 +273,8 @@ func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, err
 	return m, nil
 }
 
-// scanTaskMemories drains a conversation_memory result set into materialized
-// TaskMemory rows, one scanTaskMemory call per row.
+// scanTaskMemories drains a conversation_memory result set into TaskMemory
+// rows, one scanTaskMemory call per row.
 func scanTaskMemories(rows *sql.Rows) ([]domain.TaskMemory, error) {
 	var out []domain.TaskMemory
 	for rows.Next() {
@@ -340,26 +311,9 @@ func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgI
 		FROM conversation_memory rm
 		JOIN conversations c ON c.id = rm.conversation_id AND c.org_id = rm.org_id
 		WHERE rm.org_id = $1
+		  AND rm.agent_content IS NOT NULL
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		  AND (c.visibility = 'org' OR (c.visibility = 'team' AND c.team_id = NULLIF($3, '')::uuid))
 	`, orgID, entityID, teamID).Scan(&n)
 	return n, err
-}
-
-// materializeMemory composes the agent's narrative and the human's
-// verdict into a single Content string the next agent reads. The
-// separator format is stable — the next agent's prompt context parses
-// it as a boundary, so any change here needs a matching update to the
-// briefing docs that teach agents how to read prior memory.
-func materializeMemory(agentContent, humanContent string) string {
-	hasAgent := strings.TrimSpace(agentContent) != ""
-	hasHuman := strings.TrimSpace(humanContent) != ""
-	switch {
-	case hasAgent && hasHuman:
-		return agentContent + humanFeedbackSeparator + humanContent
-	case hasHuman:
-		return humanFeedbackHeader + humanContent
-	default:
-		return agentContent
-	}
 }

@@ -462,7 +462,7 @@ func (s *entityStore) RekeyOrMergeSystem(ctx context.Context, orgID, id, newSour
 			return err
 		}
 		for _, stmt := range []string{
-			`UPDATE tasks SET entity_id=? WHERE entity_id=?`, `UPDATE events SET entity_id=? WHERE entity_id=?`, `UPDATE event_queue SET entity_id=? WHERE entity_id=?`, `UPDATE pending_firings SET entity_id=? WHERE entity_id=?`, `UPDATE conversation_memory SET entity_id=? WHERE entity_id=?`,
+			`UPDATE tasks SET entity_id=? WHERE entity_id=?`, `UPDATE events SET entity_id=? WHERE entity_id=?`, `UPDATE event_queue SET entity_id=? WHERE entity_id=?`, `UPDATE pending_firings SET entity_id=? WHERE entity_id=?`,
 		} {
 			if _, err := q.ExecContext(ctx, stmt, survivor, id); err != nil {
 				return err

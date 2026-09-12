@@ -7,5 +7,4 @@ var (
 	dashboardLog   = logging.Component("dashboard")
 	dbPgLog        = logging.Component("db/pg")
 	promptStatsLog = logging.Component("prompt_stats")
-	memoryLog      = logging.Component("memory")
 )

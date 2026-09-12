@@ -37,13 +37,11 @@ type clientResolver interface {
 // Reconciler mirrors artifacts against live GitHub state. One instance is
 // shared between Tier 1 (the background Manager/Runner) and Tier 2 (the
 // conversation-scoped refresh endpoint): both call Reconcile with a set of
-// non-terminal artifacts. Writes route through the admin pool (UpsertSystem /
-// UpdateConversationMemoryHumanContentSystem) — the reconciler has no JWT-claims context
-// in either tier.
+// non-terminal artifacts. Writes route through the admin pool (UpsertSystem) —
+// the reconciler has no JWT-claims context in either tier.
 type Reconciler struct {
 	resolver  clientResolver
 	artifacts db.ArtifactStore
-	memory    db.TaskMemoryStore
 	ws        *websocket.Hub // nil-safe: broadcasts are skipped when unset (tests)
 	// prResolved runs after a pull request's draft → open transition commits.
 	// nil skips it (tests, and the window before the spawner is wired).
@@ -60,8 +58,8 @@ type PullRequestResolvedHook func(ctx context.Context, orgID, conversationID str
 
 // NewReconciler builds the shared reconciler. ws may be nil (broadcasts become
 // no-ops); the store + resolver are required.
-func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, memory db.TaskMemoryStore, ws *websocket.Hub) *Reconciler {
-	return &Reconciler{resolver: resolver, artifacts: artifacts, memory: memory, ws: ws}
+func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, ws *websocket.Hub) *Reconciler {
+	return &Reconciler{resolver: resolver, artifacts: artifacts, ws: ws}
 }
 
 // SetPullRequestResolvedHook installs the closure a draft → open transition
@@ -266,26 +264,21 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		}
 	}
 
-	// Pass 3 — apply each transition, then recompute conversation memory once
-	// per conversation that had a TERMINAL transition this cycle. The memory
-	// recompute is deferred out of the per-artifact loop and composed over the
-	// conversation's whole artifact set (recordConversationOutcome) so a
-	// conversation that produced several artifacts — commonly a branch AND a
-	// PR — accumulates one outcome rather than each terminal write clobbering
-	// the last.
+	// Pass 3 — apply each transition, then run the draft-resolved closure once
+	// per conversation whose draft pull request left the approval column this
+	// cycle.
 	//
 	// The write-back runs on a detached ctx (the fetches above stayed
 	// cancellable). A terminal artifact drops out of BOTH tiers' non-terminal
 	// working sets the moment applyTransition commits it, so if a client
 	// disconnect (Tier-2) or shutdown (Tier-1) cancelled the state write's
-	// follow-up memory note, no later cycle would re-process it — the note would
-	// be lost, not self-corrected. Detaching keeps the state + memory writes
-	// atomic w.r.t. the caller's lifecycle, mirroring the approval handlers'
-	// post-action bookkeeping; the github http.Client's own 30s timeout still
-	// bounds each call.
+	// follow-up, no later cycle would re-process it — the closure would be
+	// skipped, not self-corrected. Detaching keeps the state write and its
+	// follow-up atomic w.r.t. the caller's lifecycle, mirroring the approval
+	// handlers' post-action bookkeeping; the github http.Client's own 30s
+	// timeout still bounds each call.
 	writeCtx := context.WithoutCancel(ctx)
 	var transitioned []domain.Artifact
-	terminalConversations := map[string]bool{}
 	resolvedConversations := map[string]bool{}
 	for _, a := range arts {
 		newState, ok := nextState(a, snapshots, branchExists)
@@ -299,15 +292,9 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 			continue
 		}
 		transitioned = append(transitioned, updated)
-		if a.ConversationID != "" && isTerminalState(a.Kind, newState) {
-			terminalConversations[a.ConversationID] = true
-		}
 		if a.ConversationID != "" && isDraftResolved(a, newState) {
 			resolvedConversations[a.ConversationID] = true
 		}
-	}
-	for conversationID := range terminalConversations {
-		rc.recordConversationOutcome(writeCtx, orgID, conversationID)
 	}
 	// After every write in the cycle has landed, so the closure's unresolved
 	// check reads this cycle's transitions rather than racing them.
@@ -324,19 +311,15 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 // merged as a draft, or closed unopened. Each ends the approval the draft was
 // waiting on, and each is a route the approval click cannot have taken (the
 // click flips the row itself, so the reconciler never sees that one as a
-// transition). A review resolving is not here: a submitted review is terminal
-// and the outcome note covers it; the approval column reads reviews through
-// the same predicate, but nothing marks one ready out of band.
+// transition). A review resolving is not here: the approval column reads
+// reviews through the same predicate, but nothing marks one ready out of band.
 func isDraftResolved(a domain.Artifact, newState string) bool {
 	return a.Kind == domain.ArtifactKindPullRequest && a.State == domain.ArtifactStatePRDraft &&
 		newState != domain.ArtifactStatePRDraft
 }
 
 // applyTransition writes the new state (admin pool) and broadcasts the change.
-// Memory capture is deferred to recordConversationOutcome (a per-conversation
-// recompute) so a conversation with several artifacts gets one composed outcome,
-// not one clobbering write per artifact. Best-effort WS: a dropped broadcast
-// must not undo the transition.
+// Best-effort WS: a dropped broadcast must not undo the transition.
 func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domain.Artifact, newState string) (domain.Artifact, error) {
 	next := a
 	next.State = newState
@@ -354,28 +337,6 @@ func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domai
 	reconcileLog.Info("artifact reconciled",
 		"org", orgID, "artifact", a.ID, "kind", a.Kind, "from", a.State, "to", newState)
 	return updated, nil
-}
-
-// recordConversationOutcome recomputes a conversation's final-outcome memory
-// note over its WHOLE artifact set and OVERWRITES human_content with it. Called
-// once per conversation that had a terminal transition this cycle, after the
-// artifact writes commit (so it reads the fresh terminal states). Composing over
-// the full set — not just this cycle's transitions — is what lets a
-// branch-then-PR conversation accumulate without an append: every resolution
-// recomputes the complete picture, which is also why a repeated or concurrent
-// cycle is idempotent (same set → same note). The
-// overwrite supersedes any approval-time verdict by design; the terminal state
-// is the authoritative account of how reality diverged from the agent's draft.
-// Best-effort — the external state already moved, so a failed note must not
-// undo the transition.
-func (rc *Reconciler) recordConversationOutcome(ctx context.Context, orgID, conversationID string) {
-	note := rc.composeConversationOutcome(ctx, orgID, conversationID)
-	if note == "" {
-		return
-	}
-	if _, err := rc.memory.UpdateConversationMemoryHumanContentSystem(ctx, orgID, conversationID, note); err != nil {
-		reconcileLog.Warn("record conversation outcome memory failed", "org", orgID, "conversation", conversationID, "error", err)
-	}
 }
 
 // broadcast pushes the transition to the frontend as a dedicated artifact_updated
@@ -495,322 +456,6 @@ func reviewState(snap domain.PRSnapshot, reviewID string) (string, bool) {
 	return "", false
 }
 
-// isTerminalState reports whether (kind, state) is a terminal lifecycle position
-// — the transitions that warrant a final-outcome memory note. Branch deleted, PR
-// merged/closed, review submitted/dismissed.
-func isTerminalState(kind, state string) bool {
-	switch kind {
-	case domain.ArtifactKindPullRequest:
-		return state == domain.ArtifactStatePRMerged || state == domain.ArtifactStatePRClosed
-	case domain.ArtifactKindReview:
-		return state == domain.ArtifactStateReviewSubmitted || state == domain.ArtifactStateReviewDismissed
-	case domain.ArtifactKindBranch:
-		return state == domain.ArtifactStateBranchDeleted
-	}
-	return false
-}
-
-// outcomeNoteHeader prefaces the composed final-outcome memory note — the
-// framing the next agent reads the per-artifact outcome blocks under. The note
-// text itself says "run" deliberately: it is agent-facing prose, and "run" is
-// the legible word for the engagement whose work resolved.
-const outcomeNoteHeader = "**Post-run outcome** — how your work resolved on GitHub versus what you drafted:\n\n"
-
-// composeConversationOutcome builds the conversation's final-outcome memory note
-// from every TERMINAL artifact it produced. It reads the conversation's whole
-// artifact set (admin pool — the reconciler has no claims), so the note is the
-// complete picture regardless of which cycle each artifact resolved in. Returns
-// "" when nothing is terminal yet (still in flight — no outcome to report),
-// which recordConversationOutcome treats as "don't touch the row."
-func (rc *Reconciler) composeConversationOutcome(ctx context.Context, orgID, conversationID string) string {
-	arts, err := rc.artifacts.ListByConversationSystem(ctx, orgID, conversationID)
-	if err != nil {
-		reconcileLog.Warn("list conversation artifacts for outcome note failed", "org", orgID, "conversation", conversationID, "error", err)
-		return ""
-	}
-	var blocks []string
-	for _, a := range arts {
-		if block := rc.describeArtifactOutcome(ctx, orgID, a); block != "" {
-			blocks = append(blocks, block)
-		}
-	}
-	if len(blocks) == 0 {
-		return ""
-	}
-	return outcomeNoteHeader + strings.Join(blocks, "\n\n")
-}
-
-// describeArtifactOutcome renders one terminal artifact's outcome block, or ""
-// when the artifact isn't terminal (still in flight — nothing final to report).
-// A merged PR is diffed against the agent's authored draft (Proposed) so the
-// note carries how the shipped title/description differs; every other terminal
-// kind renders its disposition.
-func (rc *Reconciler) describeArtifactOutcome(ctx context.Context, orgID string, a domain.Artifact) string {
-	switch {
-	case a.Kind == domain.ArtifactKindPullRequest && a.State == domain.ArtifactStatePRMerged:
-		return rc.describeMergedPR(ctx, orgID, a)
-	case a.Kind == domain.ArtifactKindPullRequest && a.State == domain.ArtifactStatePRClosed:
-		return fmt.Sprintf("`%s` was closed without merging on GitHub.", a.Target)
-	case a.Kind == domain.ArtifactKindReview && a.State == domain.ArtifactStateReviewSubmitted:
-		return rc.describeResolvedReview(ctx, orgID, a, "submitted")
-	case a.Kind == domain.ArtifactKindReview && a.State == domain.ArtifactStateReviewDismissed:
-		return rc.describeResolvedReview(ctx, orgID, a, "dismissed")
-	case a.Kind == domain.ArtifactKindBranch && a.State == domain.ArtifactStateBranchDeleted:
-		return fmt.Sprintf("Branch `%s` in `%s` was deleted on GitHub.", branchName(a.ExternalID), a.Target)
-	}
-	return ""
-}
-
-// describeMergedPR reports a merged PR and diffs the SHIPPED title/body (read
-// live via GetPRBasic) against the agent's authored draft (Proposed), so the
-// note tells the next agent how the merged result differs from what it wrote.
-// A fetch/parse failure degrades to the bare disposition rather than dropping
-// the line.
-//
-// This captures the title/description divergence — the cheap delta that
-// subsumes the approval-time verdict (same fields, more final). The deeper code
-// divergence — commits that landed on top of the agent's — is a follow-up that
-// needs a base..head diff against the authored head SHA.
-func (rc *Reconciler) describeMergedPR(ctx context.Context, orgID string, a domain.Artifact) string {
-	base := fmt.Sprintf("`%s` was merged on GitHub.", a.Target)
-	owner, repo, number, ok := domain.ParsePRTarget(a.Target)
-	if !ok {
-		return base
-	}
-	client, err := rc.resolver.ClientFor(ctx, orgID, owner)
-	if err != nil {
-		return base
-	}
-	pr, err := client.GetPRBasic(ctx, owner, repo, number)
-	if err != nil || pr == nil {
-		return base
-	}
-	d, _ := domain.ParsePRArtifactDetails(a.DetailsJSON)
-	delta := formatTitleBodyDelta(d.Proposed.Title, d.Proposed.Body, pr.Title, pr.Body)
-	if delta == "" {
-		return base + " Its title and description shipped as you drafted them."
-	}
-	return base + "\n" + delta
-}
-
-// formatTitleBodyDelta renders how a PR's shipped title/body differs from the
-// agent's draft, or "" when both are unchanged. Only changed fields appear; the
-// shipped body is quoted in full (it's the current truth the next agent acts on).
-func formatTitleBodyDelta(draftTitle, draftBody, finalTitle, finalBody string) string {
-	var b strings.Builder
-	if draftTitle != finalTitle {
-		fmt.Fprintf(&b, "- **Title** shipped as %q (you drafted %q).\n", finalTitle, draftTitle)
-	}
-	if draftBody != finalBody {
-		b.WriteString("- **Description** was edited before it shipped. Final:\n\n")
-		writeBlockquote(&b, finalBody)
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// writeBlockquote prefixes each line of text with "> " for a markdown
-// blockquote. CRLF-normalizes (GitHub web/Windows clients deliver "\r\n") and
-// trims trailing newlines first, so an empty or trailing-newline body doesn't
-// emit a stray "> " line; an empty body writes nothing.
-func writeBlockquote(b *strings.Builder, text string) {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "")
-	text = strings.TrimRight(text, "\n")
-	if text == "" {
-		return
-	}
-	for _, line := range strings.Split(text, "\n") {
-		b.WriteString("> ")
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
-}
-
-// describeResolvedReview reports a review that resolved on GitHub (submitted or
-// dismissed) and diffs what landed against the agent's authored draft (the
-// artifact's Proposed snapshot), fetching the final review by its node id. A
-// fetch/parse failure degrades to the bare disposition rather than dropping the
-// line. The framing is the reconciler's ("resolved on GitHub"), distinct from
-// the approval path's human-action framing — a different actor resolved it.
-func (rc *Reconciler) describeResolvedReview(ctx context.Context, orgID string, a domain.Artifact, disposition string) string {
-	base := fmt.Sprintf("Your review on `%s` was %s on GitHub.", a.Target, disposition)
-	owner, _, _, ok := domain.ParsePRTarget(a.Target)
-	if !ok || a.ExternalID == "" {
-		return base
-	}
-	client, err := rc.resolver.ClientFor(ctx, orgID, owner)
-	if err != nil {
-		return base
-	}
-	final, err := client.GetReview(ctx, a.ExternalID)
-	if err != nil || final == nil {
-		return base
-	}
-	d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
-	if body := formatReviewDelta(d.Proposed, *final); body != "" {
-		return base + "\n" + body
-	}
-	return base
-}
-
-// formatReviewDelta renders how a resolved review differs from the agent's
-// drafted review. With no agent draft to diff against (the review was submitted
-// before TF finalized it, so Proposed is empty) it records the final review
-// content instead, so the next agent still sees what was reviewed. Returns ""
-// only when there's a draft and nothing changed — the bare disposition suffices.
-func formatReviewDelta(proposed domain.ReviewArtifactProposed, final github.SubmittedReview) string {
-	hasDraft := len(proposed.Comments) > 0 || strings.TrimSpace(proposed.Body) != "" || proposed.Event != ""
-	if !hasDraft {
-		return formatFinalReview(final)
-	}
-	return formatReviewDiff(proposed, final)
-}
-
-// formatFinalReview records a resolved review's content verbatim — used when
-// there's no agent draft to diff against.
-func formatFinalReview(final github.SubmittedReview) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Verdict: %s.", reviewVerdict(final.State))
-	if body := strings.TrimSpace(final.Body); body != "" {
-		b.WriteString("\n\n")
-		writeBlockquote(&b, body)
-	}
-	for _, c := range final.Comments {
-		_, clean := domain.ParseSeverityBadge(c.Body)
-		fmt.Fprintf(&b, "\n- %s — %s", commentLoc(c.Path, derefLine(c.Line)), inlineComment(clean))
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// formatReviewDiff renders the difference between the agent's drafted review and
-// what landed: a changed verdict, an edited body, and per-comment edits/drops/
-// adds (joined by GraphQL node id, severity badges stripped so the diff is
-// prose). Returns "" when nothing changed.
-func formatReviewDiff(proposed domain.ReviewArtifactProposed, final github.SubmittedReview) string {
-	var b strings.Builder
-
-	if proposed.Event != "" && !verdictMatches(proposed.Event, final.State) {
-		fmt.Fprintf(&b, "Verdict shipped as %s (you drafted %s).\n", reviewVerdict(final.State), strings.ToLower(proposed.Event))
-	}
-	if strings.TrimSpace(proposed.Body) != strings.TrimSpace(final.Body) {
-		b.WriteString("Body was edited before it shipped. Final:\n\n")
-		writeBlockquote(&b, final.Body)
-		b.WriteByte('\n')
-	}
-	for _, line := range diffReviewComments(proposed.Comments, final.Comments) {
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// diffReviewComments classifies the agent's drafted comments against the final
-// set by GraphQL node id — the same join the approval-time editor uses — into
-// dropped / edited / added bullet lines. Unchanged comments are omitted.
-func diffReviewComments(proposed []domain.ReviewArtifactComment, final []github.PendingReviewComment) []string {
-	type cmt struct {
-		path, body string
-		line       int
-	}
-	pm, pOrder := map[string]cmt{}, []string{}
-	for _, p := range proposed {
-		if p.ID == "" {
-			continue
-		}
-		_, clean := domain.ParseSeverityBadge(p.Body)
-		if _, seen := pm[p.ID]; !seen {
-			pOrder = append(pOrder, p.ID)
-		}
-		pm[p.ID] = cmt{p.Path, clean, derefLine(p.Line)}
-	}
-	fm := map[string]cmt{}
-	var fOrder []string
-	for _, f := range final {
-		if f.ID == "" {
-			continue
-		}
-		_, clean := domain.ParseSeverityBadge(f.Body)
-		if _, seen := fm[f.ID]; !seen {
-			fOrder = append(fOrder, f.ID)
-		}
-		fm[f.ID] = cmt{f.Path, clean, derefLine(f.Line)}
-	}
-
-	var out []string
-	for _, id := range pOrder {
-		p := pm[id]
-		f, ok := fm[id]
-		switch {
-		case !ok:
-			out = append(out, fmt.Sprintf("- %s — dropped before submit (you wrote: %s)", commentLoc(p.path, p.line), inlineComment(p.body)))
-		case p.body != f.body:
-			out = append(out, fmt.Sprintf("- %s — edited before submit. Final: %s (you wrote: %s)", commentLoc(p.path, p.line), inlineComment(f.body), inlineComment(p.body)))
-		}
-	}
-	for _, id := range fOrder {
-		if _, drafted := pm[id]; drafted {
-			continue
-		}
-		f := fm[id]
-		out = append(out, fmt.Sprintf("- %s — added before submit: %s", commentLoc(f.path, f.line), inlineComment(f.body)))
-	}
-	return out
-}
-
-// commentLoc renders an inline comment's location. A line of 0 — GitHub returns
-// a null line for a comment no longer anchored on the current diff — reads as
-// "(outdated)" rather than a meaningless ":0".
-func commentLoc(path string, line int) string {
-	if line <= 0 {
-		return fmt.Sprintf("`%s` (outdated)", path)
-	}
-	return fmt.Sprintf("`%s:%d`", path, line)
-}
-
-// reviewVerdict maps a GitHub review state to friendly prose.
-func reviewVerdict(state string) string {
-	switch strings.ToUpper(state) {
-	case "APPROVED":
-		return "approved"
-	case "CHANGES_REQUESTED":
-		return "changes requested"
-	case "COMMENTED":
-		return "comment"
-	case "DISMISSED":
-		return "dismissed"
-	default:
-		return strings.ToLower(state)
-	}
-}
-
-// verdictMatches reports whether the agent's drafted review event (APPROVE /
-// REQUEST_CHANGES / COMMENT) equals the final GitHub review state (which uses a
-// past-tense vocabulary), normalizing across the two.
-func verdictMatches(draftEvent, finalState string) bool {
-	norm := map[string]string{"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED", "COMMENT": "COMMENTED"}
-	want, ok := norm[strings.ToUpper(draftEvent)]
-	if !ok {
-		want = strings.ToUpper(draftEvent)
-	}
-	return want == strings.ToUpper(finalState)
-}
-
-// inlineComment collapses a comment body to a single trimmed line for prose use.
-func inlineComment(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", " ")
-	s = strings.ReplaceAll(s, "\n", " ")
-	return strings.TrimSpace(s)
-}
-
-// derefLine returns the pointed-to line, or 0 for a comment with no anchor on
-// the current diff (GitHub returns null line for an outdated comment).
-func derefLine(p *int) int {
-	if p == nil {
-		return 0
-	}
-	return *p
-}
-
 // --- coordinate helpers ---
 
 // prOwner extracts the repo owner from a PR/review artifact target
@@ -833,15 +478,6 @@ func branchRefOf(a domain.Artifact) (github.BranchRef, bool) {
 		return github.BranchRef{}, false
 	}
 	return github.BranchRef{Owner: parts[0], Repo: parts[1], Branch: branch}, true
-}
-
-// branchName strips the refs/heads/ prefix for human-facing copy; returns the
-// input unchanged if it isn't a branch ref.
-func branchName(ref string) string {
-	if b, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
-		return b
-	}
-	return ref
 }
 
 func addNodeID(m map[string]map[string]bool, owner, id string) {

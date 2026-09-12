@@ -332,20 +332,24 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 				t.Fatalf("set blueprint_run status: %v", err)
 			}
 		},
-		SetConversationMemory: func(t *testing.T, conversationID, entityID, content string) {
+		SetConversationMemory: func(t *testing.T, conversationID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
-					INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content) VALUES (?, ?, ?, NULL)
-				`, memID, conversationID, entityID); err != nil {
+					INSERT INTO conversation_memory (id, conversation_id, agent_content, source) VALUES (?, ?, NULL, 'none')
+				`, memID, conversationID); err != nil {
 					t.Fatalf("seed null memory: %v", err)
 				}
 				return
 			}
+			// Raw SQL, deliberately: the empty and whitespace-only shapes the
+			// memory_missing derivation has to trim are ones the store door
+			// refuses under source='agent', and this seeder's subject is the
+			// derivation, not the door.
 			if _, err := conn.Exec(`
-				INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content) VALUES (?, ?, ?, ?)
-			`, memID, conversationID, entityID, content); err != nil {
+				INSERT INTO conversation_memory (id, conversation_id, agent_content, source) VALUES (?, ?, ?, 'agent')
+			`, memID, conversationID, content); err != nil {
 				t.Fatalf("seed memory: %v", err)
 			}
 		},

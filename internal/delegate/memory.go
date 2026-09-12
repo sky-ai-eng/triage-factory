@@ -51,12 +51,11 @@ func memoryNamespace(blueprintRunID string) string {
 	return blueprintRunID
 }
 
-// memoryFileState distinguishes the three reasons readAgentMemoryFile
-// returns no usable content. They all map to the same DB signal
-// (UpsertAgentMemory normalizes empty/whitespace to NULL agent_content
-// === "agent didn't comply with the gate"), but each carries different
-// diagnostic value when something looks wrong post-run, so the gate
-// teardown logs them distinctly.
+// memoryFileState distinguishes the reasons readAgentMemoryFile returns no
+// usable content. They all mean the same thing to the gate — no
+// conversation_memory row is written, so the conversation reads as one whose
+// agent never wrote — but each carries different diagnostic value when
+// something looks wrong post-run, so the gate teardown logs them distinctly.
 type memoryFileState int
 
 const (
@@ -96,11 +95,10 @@ const (
 
 // readAgentMemoryFile returns the agent-written ./_tfac/memory.md content
 // along with a state classification. The content string is empty for every
-// non-Present state — callers pass it straight to UpsertAgentMemory either way,
-// but inspect the state to log distinctly rather than collapsing every
-// form of noncompliance to the same line. Read errors that aren't a
-// missing file are logged at the read site so they aren't lost when
-// the caller picks a higher-level message.
+// non-Present state — only Present is worth filing, and the state is what
+// callers log so every form of noncompliance doesn't collapse to the same
+// line. Read errors that aren't a missing file are logged at the read site so
+// they aren't lost when the caller picks a higher-level message.
 func readAgentMemoryFile(cwd string) (string, memoryFileState) {
 	path := agentMemoryFilePath(cwd)
 	data, err := os.ReadFile(path)
@@ -187,8 +185,8 @@ func (f *memoryFingerprint) covers(content string) bool {
 
 // readConversationMemory returns what THIS run wrote at the fixed path. Content identical
 // to what the run inherited is not this run's work: it reads as "wrote nothing",
-// so the conversation_memory row lands with agent_content NULL rather than
-// adopting a predecessor's narrative.
+// so no conversation_memory row is written rather than one adopting a
+// predecessor's narrative as this conversation's own.
 //
 // prior is nil on every path with no inherited file to distrust — a resume,
 // whose own file is its work, and a fresh tree.
@@ -243,9 +241,9 @@ func scanRepoFiles(ctx context.Context, cwd string) repoFiles {
 // path when a fresh run starts in the tree. The steps of one blueprint run share
 // a worktree and every step writes the same filename, so a step that terminates
 // without writing must not have its predecessor's memory ingested as its own —
-// row presence means "this run terminated", agent_content means "THIS run wrote
-// it". Called only when the run is starting a new conversation in the tree: a
-// resumed run's own file is its work, not a leftover.
+// a source='agent' row is a claim that THIS conversation wrote it. Called only
+// when the run is starting a new conversation in the tree: a resumed run's own
+// file is its work, not a leftover.
 //
 // A repo-owned path is left alone: the collision costs this run's memory
 // attribution, which is worth strictly less than the user's committed file.
@@ -503,9 +501,10 @@ func isSlugChar(r rune) bool {
 // has already landed, so a join-row failure is logged and skipped, never
 // aborts completion.
 //
-// The primary attach is unconditional, exactly like the upsert — the task's
-// entity carries the run's memory even when the agent wrote no file
-// (agent_content NULL). On the produced side, FindOrCreate (not lookup-only)
+// The primary attach is unconditional even though the upsert is not — the join
+// row is what a later memory write on this conversation becomes reachable
+// through, and writing it costs nothing when there is no memory yet. On the
+// produced side, FindOrCreate (not lookup-only)
 // is deliberate: a PR the run just opened may not have been polled yet, so the
 // attach mints the create-minimal stub the poller/enrichment path later fills
 // (the artifact URL links it out). A repo-level artifact target (a branch

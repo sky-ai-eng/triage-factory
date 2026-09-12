@@ -17,9 +17,8 @@ import (
 
 // The memory-load tests drive LocalClient.MemoryLoad — the single seam the
 // multi daemon dispatches through — against a real SQLite store bundle. A
-// hit composes each entry with the human-feedback separator, honors the limit
-// (most recent N), and records a durable touch; a miss mints nothing and
-// touches nothing.
+// hit returns each memory's content, honors the limit (most recent N), and
+// records a durable touch; a miss mints nothing and touches nothing.
 
 // memBase is a fixed clock so the seeded memories' created_at ordering (and
 // therefore the "most recent N" tail) is deterministic — Date.now() is banned
@@ -28,22 +27,16 @@ var memBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // seedAuthoringMemory inserts one prior conversation + its
 // conversation_memory row + the conversation_memory_entities join row on
-// entityID, with explicit content and created_at so the read's composition
-// and ordering are pinned. role is the join row's classification
-// (primary/produced/touched). human "" leaves human_content NULL
-// (agent-only composition).
-func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, conversationID, agent, human string, createdAt time.Time, role string) {
+// entityID, with explicit content and created_at so the read's ordering is
+// pinned. role is the join row's classification (primary/produced/touched).
+func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, conversationID, agent string, createdAt time.Time, role string) {
 	t.Helper()
 	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, conversationID); err != nil {
 		t.Fatalf("seed authoring conversation: %v", err)
 	}
-	var humanVal any
-	if human != "" {
-		humanVal = human
-	}
 	if _, err := conn.Exec(
-		`INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content, human_content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		uuid.New().String(), conversationID, entityID, agent, humanVal, createdAt,
+		`INSERT INTO conversation_memory (id, conversation_id, agent_content, source, created_at) VALUES (?, ?, ?, 'agent', ?)`,
+		uuid.New().String(), conversationID, agent, createdAt,
 	); err != nil {
 		t.Fatalf("seed conversation_memory: %v", err)
 	}
@@ -68,19 +61,18 @@ func seedEntity(t *testing.T, stores db.Stores, orgID, source, sourceID, title s
 
 // TestLocalClient_MemoryLoad_HitComposesAndLimits pins the hit path: the entity
 // resolves, Count is the pre-limit total, Memories is the most recent N (tail of
-// the ASC store order) composed with the human-feedback separator where present,
-// and a durable 'touched' row lands for the reading conversation.
+// the ASC store order), and a durable 'touched' row lands for the reading
+// conversation.
 func TestLocalClient_MemoryLoad_HitComposesAndLimits(t *testing.T) {
 	conn, stores, info, client := newGithubRecordingClientConn(t, "http://unused", true)
 	ctx := context.Background()
 
 	entityID := seedEntity(t, stores, runmode.LocalDefaultOrgID, "github", "octo/repo#7", "A PR")
-	// Three prior conversations, oldest→newest. The newest carries human feedback so the
-	// composition separator is exercised; the tail (limit 2) drops the oldest.
-	seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, uuid.New().String(), "oldest agent note", "", memBase, domain.MemoryRolePrimary)
-	seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, uuid.New().String(), "middle agent note", "", memBase.Add(time.Hour), domain.MemoryRolePrimary)
+	// Three prior conversations, oldest→newest; the tail (limit 2) drops the oldest.
+	seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, uuid.New().String(), "oldest agent note", memBase, domain.MemoryRolePrimary)
+	seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, uuid.New().String(), "middle agent note", memBase.Add(time.Hour), domain.MemoryRolePrimary)
 	newestConv := uuid.New().String()
-	seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, newestConv, "newest agent note", "human verdict", memBase.Add(2*time.Hour), domain.MemoryRolePrimary)
+	seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, newestConv, "newest agent note", memBase.Add(2*time.Hour), domain.MemoryRolePrimary)
 
 	res, err := client.MemoryLoad(ctx, "github", "octo/repo#7", 2)
 	if err != nil {
@@ -109,11 +101,8 @@ func TestLocalClient_MemoryLoad_HitComposesAndLimits(t *testing.T) {
 	if newest.ConversationID != newestConv {
 		t.Errorf("Memories[1].ConversationID = %q, want the newest conversation %q", newest.ConversationID, newestConv)
 	}
-	if !strings.Contains(newest.Content, "## Human feedback (post-run)") {
-		t.Errorf("newest Content = %q, want it composed with the human-feedback separator", newest.Content)
-	}
-	if !strings.Contains(newest.Content, "newest agent note") || !strings.Contains(newest.Content, "human verdict") {
-		t.Errorf("newest Content = %q, want both halves present", newest.Content)
+	if newest.Content != "newest agent note" {
+		t.Errorf("newest Content = %q, want the agent's own note verbatim", newest.Content)
 	}
 
 	// Loading IS an address: the reading conversation gets a durable touch on the
@@ -189,7 +178,7 @@ func TestLocalClient_MemoryLoad_NonPositiveLimit_DefaultsBounded(t *testing.T) {
 	const total = 25
 	for i := 0; i < total; i++ {
 		content := "m" + string(rune('A'+i)) // mA, mB, … distinct + ordered by seed time
-		seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, uuid.New().String(), content, "", memBase.Add(time.Duration(i)*time.Hour), domain.MemoryRolePrimary)
+		seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, uuid.New().String(), content, memBase.Add(time.Duration(i)*time.Hour), domain.MemoryRolePrimary)
 	}
 
 	for _, limit := range []int{0, -5} {
@@ -227,7 +216,7 @@ func TestServer_MemoryLoad_RoundTrip(t *testing.T) {
 		t.Fatalf("seed reader conversation: %v", err)
 	}
 	entityID := seedEntity(t, stores, orgID, "jira", "SKY-123", "A ticket")
-	seedAuthoringMemory(t, conn, orgID, entityID, uuid.New().String(), "prior narrative", "", memBase, domain.MemoryRolePrimary)
+	seedAuthoringMemory(t, conn, orgID, entityID, uuid.New().String(), "prior narrative", memBase, domain.MemoryRolePrimary)
 
 	info := ConversationInfo{OrgID: orgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: readerConv, IsEventTriggered: true}
 	sockPath := tempSocket(t)
@@ -277,7 +266,7 @@ func TestRelayRuntime_MemoryLoad_RoundTrips(t *testing.T) {
 	ctx := context.Background()
 
 	entityID := seedEntity(t, stores, info.OrgID, "github", "octo/repo#7", "A PR")
-	seedAuthoringMemory(t, conn, info.OrgID, entityID, uuid.New().String(), "prior narrative", "", memBase, domain.MemoryRolePrimary)
+	seedAuthoringMemory(t, conn, info.OrgID, entityID, uuid.New().String(), "prior narrative", memBase, domain.MemoryRolePrimary)
 
 	res, err := rt.MemoryLoad(ctx, "github", "octo/repo#7", 20)
 	if err != nil {

@@ -509,7 +509,7 @@ func (s *entityStore) RekeyOrMergeSystem(ctx context.Context, orgID, id, newSour
 		if _, err := q.ExecContext(ctx, `UPDATE blueprint_runs SET cancel_requested=true WHERE org_id=$1 AND status='running' AND cancel_requested=false AND id IN (SELECT c.blueprint_run_id FROM conversations c JOIN tasks t ON t.id=c.task_id WHERE t.org_id=$1 AND t.entity_id=$2 AND t.close_reason='duplicate_entity_merged' AND c.blueprint_run_id IS NOT NULL AND (c.status IS NULL OR c.status NOT IN ('completed','failed')))`, orgID, id); err != nil {
 			return err
 		}
-		for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "conversation_memory"} {
+		for _, table := range []string{"tasks", "events", "event_queue", "pending_firings"} {
 			if _, err := q.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET entity_id=$1 WHERE org_id=$2 AND entity_id=$3`, table), survivor, orgID, id); err != nil {
 				return err
 			}

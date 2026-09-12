@@ -16,8 +16,9 @@ import (
 // The load-bearing assertions are not "UPDATE works". A row referencing an
 // entity that the merge fails to repoint meets one of two fates when the
 // variant is deleted, and neither is acceptable: under the four NO ACTION
-// foreign keys (events, event_queue, tasks, conversation_memory) the DELETE
-// raises and the migration takes the process down at boot; under the three
+// foreign keys (events, event_queue, tasks, conversation_memory — the last as
+// the schema stood when the merge ran) the DELETE raises and the migration
+// takes the process down at boot; under the three
 // CASCADE ones (pending_firings, conversation_memory_entities, entity_links)
 // the row is silently destroyed. Only the first kind announces itself, so all
 // seven referencing columns are seeded below — the CASCADE ones would
@@ -211,8 +212,12 @@ func TestMigrate_MergesDuplicateJiraEntities(t *testing.T) {
 	if got := scalar(`SELECT entity_id FROM pending_firings WHERE task_id = 't-move'`); got != "surv" {
 		t.Errorf("pending firing entity_id = %q, want surv", got)
 	}
-	if got := scalar(`SELECT entity_id FROM conversation_memory WHERE id = 'mem-var'`); got != "surv" {
-		t.Errorf("memory entity_id = %q, want surv", got)
+	// The memory row survives. Its own entity_id was the repoint target when
+	// the merge ran; a later migration drops that column in favour of the
+	// conversation_memory_entities link asserted below, so what is checkable at
+	// head is that the variant's DELETE did not take the row with it.
+	if n := count(`SELECT COUNT(*) FROM conversation_memory WHERE id = 'mem-var'`); n != 1 {
+		t.Errorf("conversation_memory rows for the variant's conversation = %d, want 1 — the merge must not destroy memory", n)
 	}
 
 	// tasks: the non-colliding one moves and stays on the board, the

@@ -30,7 +30,7 @@ func seedReviewArtifactWithConversation(t *testing.T, s *Server, suffix, owner, 
 	t.Helper()
 	conversationID = seedSteerConversation(t, s.db, suffix, "completed")
 	taskID = fixtureUUID("t_" + suffix)
-	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
+	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "agent self-report", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	line := 3
@@ -186,13 +186,10 @@ func TestReviewArtifactApprove(t *testing.T) {
 	if convStatus != "completed" {
 		t.Errorf("conversation status = %q, want completed", convStatus)
 	}
-	var human string
-	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {
-		t.Fatalf("read conversation_memory: %v", err)
-	}
-	if !strings.Contains(human, "as drafted") {
-		t.Errorf("human_content = %q, want the 'as drafted' verdict (proposed==final)", human)
-	}
+	// Submitting a review writes no memory: the conversation's row is the
+	// agent's own account of what it tried, and a verdict about an artifact is
+	// not that.
+	assertAgentMemoryUntouched(t, srv, conversationID)
 }
 
 // TestReviewArtifactApprove_NonPending_409 pins the state guard: a stale/double
