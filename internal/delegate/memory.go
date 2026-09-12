@@ -22,6 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/memoryentities"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -646,59 +647,10 @@ func isSlugChar(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
 }
 
-// attachConversationMemoryEntities makes a terminated run's memory reachable from every
-// entity the run materially engaged: the primary (task) entity, plus every
-// entity it produced (derived from the run's artifacts). Touched entities are
-// recorded durably at verb time by the exec funnel; role precedence in
-// RecordEntityTouchSystem (primary > produced > touched) converges all three
-// sets, so this needs no ordering care against those mid-run writes — a
-// touched row upgrades to produced here, and the primary entity ends primary
-// even if it was also touched or produced.
-//
-// Best-effort and non-fatal throughout: it runs after the conversation_memory upsert
-// has already landed, so a join-row failure is logged and skipped, never
-// aborts completion.
-//
-// The primary attach is unconditional even though the upsert is not — the join
-// row is what a later memory write on this conversation becomes reachable
-// through, and writing it costs nothing when there is no memory yet. On the
-// produced side, FindOrCreate (not lookup-only)
-// is deliberate: a PR the run just opened may not have been polled yet, so the
-// attach mints the create-minimal stub the poller/enrichment path later fills
-// (the artifact URL links it out). A repo-level artifact target (a branch
-// push, or owner/repo with no '#N') maps to no entity and is skipped.
+// attachConversationMemoryEntities makes a terminated conversation's memory reachable
+// from every entity it materially engaged. The rule itself lives in
+// internal/memoryentities, where it is reachable by anything that writes a
+// conversation's memory row; this is the spawner's stores bound to it.
 func (s *Spawner) attachConversationMemoryEntities(ctx context.Context, orgID, conversationID, primaryEntityID string) {
-	if s.taskMemory == nil {
-		return
-	}
-	// primary — the task's entity always carries the conversation's memory.
-	if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, primaryEntityID, domain.MemoryRolePrimary); err != nil {
-		delegateLog.Warn("attach primary entity to conversation memory failed", "conversation", conversationID, "entity", primaryEntityID, "error", err)
-	}
-
-	if s.artifacts == nil || s.entities == nil {
-		return
-	}
-	// produced — every external object the run created/mutated, resolved from
-	// its artifacts. A listing failure leaves the upsert + primary row intact.
-	arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, conversationID)
-	if err != nil {
-		delegateLog.Warn("list artifacts for produced-entity attach failed", "conversation", conversationID, "error", err)
-		return
-	}
-	for _, a := range arts {
-		source, sourceID, kind, ok := domain.EntityRefForExternal(a.Provider, a.Target)
-		if !ok {
-			continue
-		}
-		ent, _, err := s.entities.FindOrCreateSystem(ctx, orgID, source, sourceID, kind, "", a.URL)
-		if err != nil || ent == nil {
-			delegateLog.Warn("resolve produced entity for conversation memory failed",
-				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)
-			continue
-		}
-		if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, ent.ID, domain.MemoryRoleProduced); err != nil {
-			delegateLog.Warn("attach produced entity to conversation memory failed", "conversation", conversationID, "entity", ent.ID, "error", err)
-		}
-	}
+	memoryentities.Attach(ctx, s.taskMemory, s.artifacts, s.entities, orgID, conversationID, primaryEntityID)
 }
