@@ -193,9 +193,40 @@ func TestEvictIdleWorkspaces_RefusesWhileASiblingStepIsClaimed(t *testing.T) {
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', completed_at=datetime('now','-2 hours') WHERE id='step-live'`); err != nil {
 		t.Fatalf("settle sibling: %v", err)
 	}
+	ageConversationMint(t, database, "step-live", "-2 hours")
 	s.EvictIdleWorkspaces(ctx, time.Hour)
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
 		t.Fatalf("tree %s survived once every conversation was at rest and unclaimed (stat err %v)", wtPath, err)
+	}
+}
+
+// TestEvictIdleWorkspaces_EvictsATaskWhoseConversationFailed: the tree a
+// failure left behind is a warm tree like any other — the blob is written,
+// nothing is claimed on it, and it aged past the window — so the sweep
+// reclaims it. Enumerating only the states that write a snapshot would leave
+// this one on the executor's disk until a restart, which is the accumulation
+// the sweep exists to stop.
+func TestEvictIdleWorkspaces_EvictsATaskWhoseConversationFailed(t *testing.T) {
+	isolateRunNamespace(t)
+	s, database, conversationID, _ := setupAdvanceFixture(t, "evict-failed")
+	wireBlobStore(t, s)
+
+	wsKey := taskIDForConversation(t, database, conversationID)
+	wtPath := makeRunTree(t, wsKey)
+	putTestSnapshot(t, s, wsKey)
+	seedSnapshotState(t, s, wsKey, evictWriterClaim, domain.WorkspaceSnapshotWritten)
+	if _, err := database.Exec(
+		`UPDATE conversations SET status='failed', failure_kind=?, worktree_path=?, parked_at=NULL, completed_at=datetime('now','-2 hours') WHERE id=?`,
+		string(domain.ConversationFailureExecutorLost), wtPath, conversationID,
+	); err != nil {
+		t.Fatalf("fail the conversation: %v", err)
+	}
+	ageConversationMint(t, database, conversationID, "-2 hours")
+
+	s.EvictIdleWorkspaces(context.Background(), time.Hour)
+
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatalf("tree %s survived a failed task past the idle window (stat err %v); a resume rehydrates from the blob", wtPath, err)
 	}
 }
 
@@ -384,6 +415,7 @@ func parkAged(t *testing.T, database *sql.DB, conversationID, wtPath, age string
 	); err != nil {
 		t.Fatalf("park conversation: %v", err)
 	}
+	ageConversationMint(t, database, conversationID, age)
 }
 
 func worktreePathOf(t *testing.T, database *sql.DB, conversationID string) string {

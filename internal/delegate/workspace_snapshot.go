@@ -20,12 +20,15 @@
 // that safe — see parkConversationOpen for the ordering and workspace_wait.go
 // for the resume that reads it.
 //
-// The write policy and the retention sweep move together, always, and the
-// sweep is the only thing that drops a blob: no terminal discards one, because
-// the key is the task and a blueprint reaching its end is not the task
-// reaching its own. So a state that can hold a blob and is outside
-// ListReapableSnapshotKeysSystem's set leaks it forever, and a state inside it
-// that something still wants is reaped out from under that want.
+// The write policy and the retention sweep move together, always — and the
+// sweep is the wider of the two on purpose: it enumerates every top-level
+// conversation on the key (ListReapableSnapshotKeysSystem) rather than the
+// states listed above, so a blob can never end up in a state the only thing
+// that collects it does not look at. It is also the ONLY thing that drops a
+// blob: no terminal discards one, because the key is the task and a blueprint
+// reaching its end is not the task reaching its own. What the two must keep
+// agreeing on is the key itself: both address the task, and a write under any
+// other key would put blobs where retention never looks.
 
 package delegate
 

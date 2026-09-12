@@ -106,6 +106,13 @@ type Params struct {
 	Model        string
 	SystemPrompt string
 
+	// SystemAddendum is this conversation's own system text, sent as a
+	// second system block behind SystemPrompt's cache breakpoint. The driver
+	// composes it, for the same reason it composes SystemPrompt: the loop
+	// never writes prompt text it did not receive. Empty sends a
+	// single-block system message.
+	SystemAddendum string
+
 	// HasBlueprint registers the flow-control tool. True for a delegation,
 	// where the conversation executes a blueprint against a task; false for
 	// a conversation with a human in it, which has no blueprint to stop and
@@ -679,7 +686,7 @@ func (e *Engine) configureToolHost(params Params) {
 // call. The warm compaction arm calls it too, and that shared construction
 // IS the request-invariance contract: the summarize call differs from the
 // call the loop would otherwise make by its appended request row and by
-// nothing else — same system prompt, same tools in the same order, same
+// nothing else — same system blocks, same tools in the same order, same
 // (absent) tool_choice, same model, same effort. Changing any of those
 // forfeits the cached prefix; only the forced-shape call, which has already
 // forfeited it, builds a request any other way.
@@ -692,13 +699,14 @@ func (e *Engine) configureToolHost(params Params) {
 // both.
 func (e *Engine) buildRequest(params Params, provider schemas.ModelProvider, rows []domain.Message, maxTokens int) inference.Request {
 	return inference.Request{
-		Provider:     provider,
-		Model:        params.Model,
-		SystemPrompt: params.SystemPrompt,
-		Rows:         rows,
-		Tools:        e.toolSchemas(params),
-		Effort:       params.Effort,
-		MaxTokens:    maxTokens,
+		Provider:       provider,
+		Model:          params.Model,
+		SystemPrompt:   params.SystemPrompt,
+		SystemAddendum: params.SystemAddendum,
+		Rows:           rows,
+		Tools:          e.toolSchemas(params),
+		Effort:         params.Effort,
+		MaxTokens:      maxTokens,
 	}
 }
 

@@ -200,13 +200,10 @@ func (s *Spawner) terminateBlueprint(
 	// to start somewhere. A failure especially — the infrastructure under the
 	// run died, which says nothing about the tree it died in.
 	//
-	// Retention is what collects them instead, and the two move together by
-	// design — see workspace_snapshot.go's write-policy note.
-	//
-	// TODO(TFAC-986): the reaper still enumerates only `open` and `completed`
-	// conversations, so a task whose last conversation is `failed` holds its
-	// blob past the TTL. Widening that set is what makes retention the
-	// collector this no longer is.
+	// Retention is what collects them instead, on the task's idleness rather
+	// than on any conversation's outcome — which is what makes keeping a
+	// failed step's blob safe rather than a leak. See workspace_snapshot.go's
+	// write-policy note for the pair.
 
 	// Drain the task's queue exactly once for the blueprint (independent of
 	// how many steps ran).

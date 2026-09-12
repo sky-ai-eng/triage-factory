@@ -85,14 +85,22 @@ func (c *Client) Close() {
 
 // Request is one native-loop provider call. Rows are the conversation's stored
 // messages, assembled here into the wire context; SystemPrompt and Tools form
-// the cacheable prefix; Effort is the single reasoning knob bifrost maps per
-// model (budget tokens on 4.x, adaptive on 5+).
+// the cacheable prefix and SystemAddendum rides behind it; Effort is the
+// single reasoning knob bifrost maps per model (budget tokens on 4.x,
+// adaptive on 5+).
 type Request struct {
 	Provider     schemas.ModelProvider
 	Model        string
 	SystemPrompt string
 	Rows         []domain.Message
 	Tools        []schemas.ChatTool
+
+	// SystemAddendum is this conversation's own system text — the sections
+	// that differ per run. It is sent as a second system block after
+	// SystemPrompt, behind that block's cache breakpoint, so appending it
+	// never ends the prefix every conversation on the same model and tools
+	// shares. Empty sends one block.
+	SystemAddendum string
 
 	// Effort is the reasoning effort ("minimal" | "low" | "medium" | "high" |
 	// "none"). Empty leaves reasoning at the provider default.
@@ -241,7 +249,7 @@ func buildChatRequest(req Request) (*schemas.BifrostChatRequest, error) {
 	}
 
 	input := make([]schemas.ChatMessage, 0, len(assembled)+1)
-	if sys := withSystemCacheBreakpoint(req.SystemPrompt); sys.Role != "" {
+	if sys := withSystemCacheBreakpoint(req.SystemPrompt, req.SystemAddendum); sys.Role != "" {
 		input = append(input, sys)
 	}
 	input = append(input, assembled...)

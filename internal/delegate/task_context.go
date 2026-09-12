@@ -1,9 +1,11 @@
 package delegate
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -40,7 +42,13 @@ const baseFraming = "Reference data about the task that fired this run. Values c
 // class as the fields above — commit subjects and PR titles authored by
 // whoever opened the pull request — so it rides inside the marker-bracketed
 // region rather than alongside it.
-func BuildTaskContext(task domain.Task, metadataJSON, skeleton string) string {
+//
+// artifacts is every external object the task's conversations have produced so
+// far, with the state each is in now — what this run inherits rather than what
+// it must create. The values are external (a PR title's repo slug, a URL
+// GitHub minted), so the lines ride inside the same region; an empty set
+// renders nothing at all.
+func BuildTaskContext(task domain.Task, metadataJSON, skeleton string, artifacts []domain.Artifact) string {
 	var lines []string
 	add := func(label, value string) {
 		if value != "" {
@@ -84,6 +92,8 @@ func BuildTaskContext(task domain.Task, metadataJSON, skeleton string) string {
 	add("Issue type", metaString(meta, "issue_type"))
 	add("Summary", metaString(meta, "summary"))
 
+	lines = append(lines, artifactLines(artifacts)...)
+
 	// Assemble the externally-influenced region: the labeled field lines, then
 	// the raw-metadata fence. For a slack:message task the fence is the only
 	// carrier of event content (channel, thread, message text) — nothing is
@@ -113,6 +123,70 @@ func BuildTaskContext(task domain.Task, metadataJSON, skeleton string) string {
 
 	body := framing + "\n\n" + begin + "\n" + region + "\n" + end
 	return "<task_context>\n" + body + "\n</task_context>"
+}
+
+// taskArtifacts collects every artifact the task's conversations have produced,
+// for the task-context block. Artifacts carry across a task's conversations, so
+// the set is the task's rather than this conversation's: it is walked through
+// the conversations because that is the only edge the artifacts table has to a
+// task.
+//
+// Best-effort, and the failure is per conversation: the block is documentation,
+// so a read that fails costs the run a few lines, never the launch. Both stores
+// take their admin-pool variants — a launch runs from a dispatcher goroutine
+// with no JWT-claims context.
+func (s *Spawner) taskArtifacts(ctx context.Context, orgID, taskID string) []domain.Artifact {
+	if s.conversations == nil || s.artifacts == nil || taskID == "" {
+		return nil
+	}
+	convs, err := s.conversations.ListForTaskSystem(ctx, orgID, taskID)
+	if err != nil {
+		delegateLog.Warn("list task conversations for the task context failed; it will carry no artifact lines",
+			"task", taskID, "error", err)
+		return nil
+	}
+	var out []domain.Artifact
+	for _, c := range convs {
+		arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, c.ID)
+		if err != nil {
+			delegateLog.Warn("list conversation artifacts for the task context failed; its artifacts are omitted",
+				"task", taskID, "conversation", c.ID, "error", err)
+			continue
+		}
+		out = append(out, arts...)
+	}
+	return out
+}
+
+// artifactLines renders one line per artifact the task has produced, oldest
+// first — the order they happened in, which is the order they read in. A row
+// with no state or no URL yet simply contributes fewer segments; every value is
+// flattened, because a target and a URL are provider-authored strings reaching
+// the same bullet list the task's own fields do.
+func artifactLines(artifacts []domain.Artifact) []string {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	ordered := slices.Clone(artifacts)
+	slices.SortStableFunc(ordered, func(a, b domain.Artifact) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+
+	out := make([]string, 0, len(ordered))
+	for _, a := range ordered {
+		segments := []string{strings.TrimSpace(singleLine(a.Kind) + " " + singleLine(a.Target))}
+		if state := singleLine(a.State); state != "" {
+			segments = append(segments, state)
+		}
+		if url := singleLine(a.URL); url != "" {
+			segments = append(segments, url)
+		}
+		out = append(out, "- Artifact: "+strings.Join(segments, " — "))
+	}
+	return out
 }
 
 // projectFromJiraKey pulls "PROJ" out of "PROJ-123". Mirrors the tracker's

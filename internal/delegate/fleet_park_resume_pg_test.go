@@ -856,7 +856,17 @@ func TestFleet_Eviction_RoundTripsTheUncommittedDelta(t *testing.T) {
 	}
 	f.parkIdle(t, f.x, first, f.wtPath)
 	f.assertState(t, domain.WorkspaceSnapshotWritten, first.ClaimID)
-	pgtest.MustExec(t, f.h.AdminDB, `UPDATE conversations SET parked_at = now() - interval '7 hours' WHERE id = $1`, f.conversationID)
+	// Parked seven hours ago, mint included. The key's idle-since is the
+	// MAXIMUM of every stamp its conversations carry, so backdating parked_at
+	// alone leaves a queued_at and started_at from this second speaking for the
+	// key — and the tree stays warm for a reason that is not what this case is
+	// about.
+	pgtest.MustExec(t, f.h.AdminDB, `
+		UPDATE conversations
+		SET parked_at  = now() - interval '7 hours',
+		    started_at = now() - interval '7 hours',
+		    queued_at  = now() - interval '7 hours'
+		WHERE id = $1`, f.conversationID)
 
 	const after = 6 * time.Hour
 	treePresent := func() bool { _, err := os.Stat(f.wtPath); return err == nil }
@@ -895,19 +905,18 @@ func TestFleet_Eviction_RoundTripsTheUncommittedDelta(t *testing.T) {
 		t.Fatal("evicted a tree a sibling engagement is working in")
 	}
 	pgtest.MustExec(t, f.h.AdminDB, `UPDATE claims SET released_at = now(), outcome = 'parked' WHERE id = $1`, siblingClaim)
-	pgtest.MustExec(t, f.h.AdminDB, `UPDATE conversations SET status = 'completed', completed_at = now() - interval '7 hours' WHERE id = $1`, sibling)
-	// The sibling is a prop for the guard above, and it has to leave the
-	// task's way once it has served: a task drives its live conversation,
-	// which is its newest un-ended one, so an un-ended sibling would hold the
-	// resume below out of the queue. Its boundary comes with the memory that
-	// boundary owes, the pair the reactor writes when a task moves on.
-	if _, err := f.stores.Conversations.EndConversationSystem(context.Background(), f.orgID, sibling, domain.EndedRequeued); err != nil {
-		t.Fatalf("end the sibling step: %v", err)
-	}
-	if _, err := f.stores.TaskMemory.UpsertAgentMemorySystem(context.Background(), f.orgID, sibling, "", "", domain.MemorySourceNone); err != nil {
-		t.Fatalf("file the sibling's memory: %v", err)
-	}
-
+	// Concluded seven hours ago, mint included. The key's idle-since is the
+	// MAXIMUM of every stamp its conversations carry, so a sibling staged with
+	// an aged completion but a mint from this second reads as activity now and
+	// holds the whole key warm — the tree below would never be evictable, and
+	// for a reason that has nothing to do with what this case is about.
+	pgtest.MustExec(t, f.h.AdminDB, `
+		UPDATE conversations
+		SET status = 'completed',
+		    completed_at = now() - interval '7 hours',
+		    started_at   = now() - interval '7 hours',
+		    queued_at    = now() - interval '7 hours'
+		WHERE id = $1`, sibling)
 	// Nothing in the way: the tree goes, the blob stays.
 	f.x.EvictIdleWorkspaces(context.Background(), after)
 	if treePresent() {
@@ -918,6 +927,22 @@ func TestFleet_Eviction_RoundTripsTheUncommittedDelta(t *testing.T) {
 	}
 	if got := f.storedWorktreePath(t); got != f.wtPath {
 		t.Errorf("worktree_path after eviction = %q, want the recorded path %q left in place", got, f.wtPath)
+	}
+
+	// The sibling is a prop, and it has to leave the task's way before the
+	// resume: a task drives its live conversation, which is its newest un-ended
+	// one, so an un-ended sibling would hold the follow-up below out of the
+	// queue. Its boundary comes with the memory that boundary owes, the pair
+	// the reactor writes when a task moves on.
+	//
+	// After the eviction, not before. ended_at is one of the stamps the key's
+	// idle-since takes the maximum of, so stamping it here would make the task
+	// look active this second and hold its own tree warm.
+	if _, err := f.stores.Conversations.EndConversationSystem(context.Background(), f.orgID, sibling, domain.EndedRequeued); err != nil {
+		t.Fatalf("end the sibling step: %v", err)
+	}
+	if _, err := f.stores.TaskMemory.UpsertAgentMemorySystem(context.Background(), f.orgID, sibling, "", "", domain.MemorySourceNone); err != nil {
+		t.Fatalf("file the sibling's memory: %v", err)
 	}
 
 	if err := f.followUp("pick it back up"); err != nil {

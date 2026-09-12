@@ -74,8 +74,8 @@ type CleanupOptions struct {
 	// the worktree dir), a matching entry here skips removal of both.
 	//
 	// Keys are worktree directory names — i.e. filepath.Base(worktree_path),
-	// which is the conversation id for a standalone conversation and the blueprint_run_id for a
-	// blueprint's shared worktree. A swept (un-preserved) parked workspace
+	// which is the run tree's root key: the task id, since a task's
+	// conversations share one tree. A swept (un-preserved) parked workspace
 	// still resumes via snapshot rehydrate, so this is the fast path, not a
 	// correctness gate. Ignored for any dir not present here.
 	PreserveWorktreeFor map[string]bool
@@ -157,13 +157,15 @@ func CleanupWithOptions(opts CleanupOptions) {
 // owned by construction and never chowned to a sandbox identity — that is the
 // entire point of staging outside the run tree.
 //
-// preserve is the caller's warm-worktree keep set, keyed by worktree directory
-// name (a conversation id for a standalone conversation, the blueprint_run_id for a blueprint's
-// shared tree). Staging dirs are keyed by the step's own conversation id, so
-// only the standalone shape ever matches — enough to keep the sweep from
-// fighting a preserved run, and moot for the blueprint shape today because the
-// only mode that stages at all (multi) passes no preserve set, so its parked
-// worktrees are swept here regardless and rehydrate from snapshot.
+// preserve is the caller's warm-worktree keep set, consulted by staging dir
+// name just as the run-tree sweep above consults it by tree name. The two
+// namespaces differ today — a staging dir is named for its step's
+// conversation, a preserved key is the run tree's basename, i.e. the task id —
+// so a match is not expected; the check is honored anyway, because the keep
+// set is the caller's answer about what is still in use and this sweep is not
+// the place to decide it knows better. Moot in the only mode that stages at
+// all: multi passes no preserve set, so its parked worktrees are swept here
+// regardless and rehydrate from snapshot.
 func sweepOrphanedStagingDirs(preserve map[string]bool) {
 	for _, base := range []string{sandbox.SkillStagingBase(), sandbox.MemoryStagingBase()} {
 		entries, err := os.ReadDir(base)

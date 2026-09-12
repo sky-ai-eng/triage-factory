@@ -446,7 +446,8 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	branchTemplate := s.resolveBranchTemplate(context.WithoutCancel(ctx), task)
 	runURL := s.runURLFor(orgID, conversationID)
 	publishedRunURL := s.publishedRunURLFor(orgID, conversationID)
-	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, mission, cfg.scope, cfg.toolsRef, agentBin, agentRunRoot, branchTemplate, runURL, knowledge)
+	artifacts := s.taskArtifacts(context.WithoutCancel(ctx), orgID, task.ID)
+	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, artifacts, mission, cfg.scope, cfg.toolsRef, agentBin, agentRunRoot, branchTemplate, runURL, knowledge)
 
 	// The stop is read before the phase write, so a run stopped during
 	// bring-up parks here without ever asking the fence — the refusal below is
