@@ -1368,3 +1368,36 @@ func TestIsTransient_NumericCodesMatchAsTokens(t *testing.T) {
 		}
 	}
 }
+
+// TestRun_SystemAddendumReachesEveryProviderCall pins the threading: the
+// driver's per-conversation system block must arrive on the request beside the
+// shared prompt, on every call the engagement makes. A dropped addendum is
+// silent — the model simply runs without its mission — so it is asserted at
+// the one place that proves it left the loop.
+func TestRun_SystemAddendumReachesEveryProviderCall(t *testing.T) {
+	tr := newMemTranscript(pendingUser("do the thing"))
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{calls: []domain.ToolCall{{ID: "t1", Name: "bash", Input: map[string]any{"command": "ls"}}}},
+		{text: "Done."},
+	}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+
+	params := testParams()
+	params.SystemAddendum = "<run_context>\nrun root: /work\n</run_context>"
+
+	if got := e.Run(context.Background(), params); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
+	}
+
+	if len(p.requests) < 2 {
+		t.Fatalf("expected at least 2 provider calls, got %d", len(p.requests))
+	}
+	for i, req := range p.requests {
+		if req.SystemPrompt != params.SystemPrompt {
+			t.Errorf("call %d: system prompt = %q, want %q", i, req.SystemPrompt, params.SystemPrompt)
+		}
+		if req.SystemAddendum != params.SystemAddendum {
+			t.Errorf("call %d: system addendum = %q, want %q", i, req.SystemAddendum, params.SystemAddendum)
+		}
+	}
+}
