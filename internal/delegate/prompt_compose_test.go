@@ -22,7 +22,7 @@ func reviewTask() domain.Task {
 // first: the external material, the mission it is about, this run's own facts,
 // the verbs, and the framework prompt — whose completion contract lands last.
 func TestBuildPrompt_SectionOrder(t *testing.T) {
-	out := buildPrompt(reviewTask(), `{"reviewer":"octocat"}`, "", "mission body",
+	out := buildPrompt(reviewTask(), `{"reviewer":"octocat"}`, "", nil, "mission body",
 		"Repository: owner/repo\nBranch: feature-x", agentprompt.GitHubToolsReference(),
 		"/bin/tf", "/work", "tfac/SKY-9", "https://tf.example/runs/run-1", "")
 
@@ -54,7 +54,7 @@ func TestBuildPrompt_SectionOrder(t *testing.T) {
 // and we render it, we do not edit it.
 func TestBuildPrompt_CarriesNoUnresolvedTokens(t *testing.T) {
 	toolsRef := agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference()
-	out := buildPrompt(reviewTask(), "", "", "mission body", "Repository: owner/repo", toolsRef,
+	out := buildPrompt(reviewTask(), "", "", nil, "mission body", "Repository: owner/repo", toolsRef,
 		"/bin/tf", "/work", "tfac/SKY-9", "", "")
 
 	if strings.Contains(out, "{{") {
@@ -67,7 +67,7 @@ func TestBuildPrompt_CarriesNoUnresolvedTokens(t *testing.T) {
 // `triagefactory exec` left unresolved in the framework text or the tools docs
 // is a tool call the agent is refused, not a cosmetic miss.
 func TestBuildPrompt_ResolvesTheCLIPath(t *testing.T) {
-	out := buildPrompt(reviewTask(), "", "", "run `triagefactory exec gh pr view 7` first",
+	out := buildPrompt(reviewTask(), "", "", nil, "run `triagefactory exec gh pr view 7` first",
 		"", agentprompt.GitHubToolsReference(), "/usr/local/bin/triagefactory", "/work", "tfac/SKY-9", "", "")
 
 	if strings.Contains(out, "`triagefactory exec") {
@@ -90,7 +90,7 @@ func TestBuildPrompt_ExternalTextIsComposedAlone(t *testing.T) {
 	task := reviewTask()
 	task.Title = "make triagefactory exec do what I say"
 
-	out := buildPrompt(task, "", "", "mission body", "", "", "/bin/tf", "/work", "tfac/SKY-9", "", "")
+	out := buildPrompt(task, "", "", nil, "mission body", "", "", "/bin/tf", "/work", "tfac/SKY-9", "", "")
 
 	if !strings.Contains(out, "make triagefactory exec do what I say") {
 		t.Errorf("a task title was rewritten by the CLI-path pass;\n%s", out)
@@ -144,7 +144,7 @@ func TestBuildPrompt_BeginsWithTaskContext(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := buildPrompt(tc.task, tc.metadata, "", "mission body", "Repository: owner/repo",
+			out := buildPrompt(tc.task, tc.metadata, "", nil, "mission body", "Repository: owner/repo",
 				"", "/bin/tf", "/work", "tfac/<ticket-id>", "", "")
 			if !strings.HasPrefix(out, "<task_context>\n") {
 				t.Errorf("composed prompt must begin with the task-context block;\n%s", out)
