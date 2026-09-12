@@ -132,8 +132,10 @@ func (s *Spawner) terminateBlueprint(
 		// finalization closes the task ONLY when no artifact remains unresolved; a
 		// blueprint that completed with an open draft PR / ready review leaves the
 		// task open, surfaced in the derived approval column, until the last
-		// artifact is resolved (the last resolution closes it).
-		if s.blueprintHasUnresolvedArtifacts(bgCtx, orgID, blueprintRunID) {
+		// artifact is resolved (the last resolution closes it). Unresolved is
+		// asked of the TASK, not of this blueprint: a draft PR carried in from
+		// an earlier engagement is unresolved work whichever run just finished.
+		if s.taskHasUnresolvedArtifacts(bgCtx, orgID, taskID) {
 			// Leave the task open and place it in the approval column. Don't close.
 			s.placeTaskInApprovalColumn(bgCtx, orgID, taskID)
 		} else {
@@ -727,14 +729,20 @@ func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conver
 	}
 }
 
-// blueprintHasUnresolvedArtifacts reports whether any step run of the blueprint
-// produced an artifact still awaiting human resolution (a draft PR or a ready
-// pending review — domain.HasUnresolvedArtifacts). This is the derived signal
-// that decides whether a completed blueprint closes its task (none unresolved)
-// or leaves it open in the approval column (≥1 unresolved). It loads the
-// blueprint's step runs, then delegates to conversationsHaveUnresolvedArtifacts. Runs from
-// a detached goroutine with no request claims, so it reads via the admin-pool
-// `...System` readers.
+// taskHasUnresolvedArtifacts reports whether any conversation on the task holds
+// an artifact still awaiting human resolution (a draft PR or a ready pending
+// review — domain.HasUnresolvedArtifacts). This is the derived signal that
+// decides whether a completed blueprint closes its task (none unresolved) or
+// leaves it open in the approval column (≥1 unresolved). It loads the task's
+// conversations, then delegates to conversationsHaveUnresolvedArtifacts. Runs
+// from a detached goroutine with no request claims, so it reads via the
+// admin-pool `...System` readers.
+//
+// The scope is the task rather than the run that just finished, because
+// artifacts outlive the engagement that produced them: a task requeued or
+// re-delegated with a draft PR still open carries that PR into its next run,
+// and asking only the newest blueprint's own steps would call the task
+// resolved with the draft still sitting on GitHub.
 //
 // Fails OPEN: any read error returns true. Closing a task that still has an
 // unresolved artifact would silently drop the approval workflow (and is hard to
@@ -744,15 +752,15 @@ func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conver
 //
 // The unwired-store / empty-id guard below is NOT a read error and does not
 // trigger fail-open: a nil artifact store (a test fixture without artifact
-// tracking) or an empty blueprint id means there are no artifacts to be
-// unresolved, so it returns false.
-func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, blueprintRunID string) bool {
-	if s.artifacts == nil || s.blueprints == nil || blueprintRunID == "" {
+// tracking) or an empty task id means there are no artifacts to be unresolved,
+// so it returns false.
+func (s *Spawner) taskHasUnresolvedArtifacts(ctx context.Context, orgID, taskID string) bool {
+	if s.artifacts == nil || s.conversations == nil || taskID == "" {
 		return false
 	}
-	convs, err := s.blueprints.ConversationsForBlueprintSystem(ctx, orgID, blueprintRunID)
+	convs, err := s.conversations.ListForTaskSystem(ctx, orgID, taskID)
 	if err != nil {
-		blueprintLog.Warn("list step conversations for unresolved-artifact check failed; treating as unresolved (fail open)", "blueprint_run", blueprintRunID, "error", err)
+		blueprintLog.Warn("list task conversations for unresolved-artifact check failed; treating as unresolved (fail open)", "task", taskID, "error", err)
 		return true
 	}
 	return s.conversationsHaveUnresolvedArtifacts(ctx, orgID, convs)
@@ -768,6 +776,15 @@ func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, bl
 // this blueprint's steps — still holds an unresolved artifact. Anything else is
 // a no-op: an aborted or failed blueprint keeps its task open for a human, and
 // a sibling draft keeps the approval column honest.
+//
+// It also stands down on a task that has moved past this run: one no agent
+// holds any more, or one whose newest blueprint run is not this one. An
+// artifact outlives the engagement that produced it, so a resolution can land
+// on a task somebody has since self-claimed or re-delegated, and closing on it
+// would take the task to done under whoever holds it now. Both conditions
+// earn their place — a re-delegation leaves the task bot-claimed and only the
+// run id separates the engagements, while a self-claim clears the agent id
+// without minting a run at all.
 //
 // Fails CLOSED on a read error, like the rest of this family: leaving a task
 // open spuriously is recoverable by a human, closing one with a draft still
@@ -787,12 +804,23 @@ func (s *Spawner) CloseTaskIfTerminalAndResolved(ctx context.Context, orgID, con
 	if br == nil || br.TaskID == "" || br.Status != domain.BlueprintRunStatusCompleted {
 		return
 	}
-	convs, err := s.conversations.ListForTaskSystem(ctx, orgID, br.TaskID)
+	task, err := s.tasks.GetSystem(ctx, orgID, br.TaskID)
 	if err != nil {
-		blueprintLog.Warn("terminal-on-last close: list task conversations failed; leaving task open (fail closed)", "task", br.TaskID, "error", err)
+		blueprintLog.Warn("terminal-on-last close: task read failed; leaving task open (fail closed)", "task", br.TaskID, "error", err)
 		return
 	}
-	if s.conversationsHaveUnresolvedArtifacts(ctx, orgID, convs) {
+	if task == nil || task.ClaimedByAgentID == "" {
+		return
+	}
+	isNewest, err := s.blueprints.IsNewestRunForTaskSystem(ctx, orgID, br.TaskID, br.ID)
+	if err != nil {
+		blueprintLog.Warn("terminal-on-last close: newest-run check failed; leaving task open (fail closed)", "task", br.TaskID, "error", err)
+		return
+	}
+	if !isNewest {
+		return
+	}
+	if s.taskHasUnresolvedArtifacts(ctx, orgID, br.TaskID) {
 		return
 	}
 	// CloseSystem's WHERE is state-guarded, so a task the approval click (or a
@@ -806,21 +834,22 @@ func (s *Spawner) CloseTaskIfTerminalAndResolved(ctx context.Context, orgID, con
 	s.broadcastTaskUpdate(orgID, br.TaskID, "done")
 }
 
-// conversationsHaveUnresolvedArtifacts reports whether any of the given runs produced an
-// unresolved artifact, reading each run's artifacts via the admin-pool reader.
-// Split out so a caller that already holds the run set (recomputeTaskBoardColumn)
-// reuses it without re-loading. Fails OPEN like blueprintHasUnresolvedArtifacts:
-// a per-run read error returns true rather than risk under-reporting. The read is
-// one query per run; the run set is a single blueprint_run's steps, so it is
-// bounded by step count, not blueprint history.
+// conversationsHaveUnresolvedArtifacts reports whether any of the given
+// conversations holds an unresolved artifact, reading each conversation's
+// artifacts via the admin-pool reader. Split out so a caller that already holds
+// the conversation set (recomputeTaskBoardColumn, over a blueprint's steps)
+// reuses it without re-loading. Fails OPEN like taskHasUnresolvedArtifacts: a
+// per-conversation read error returns true rather than risk under-reporting.
+// One query per conversation, so the cost is the caller's set — a blueprint's
+// steps, or a task's whole conversation history — never org-wide.
 func (s *Spawner) conversationsHaveUnresolvedArtifacts(ctx context.Context, orgID string, convs []domain.Conversation) bool {
 	if s.artifacts == nil {
 		return false
 	}
-	for _, r := range convs {
-		arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, r.ID)
+	for _, conv := range convs {
+		arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, conv.ID)
 		if err != nil {
-			blueprintLog.Warn("list artifacts for unresolved check failed; treating as unresolved (fail open)", "step_conversation", r.ID, "error", err)
+			blueprintLog.Warn("list artifacts for unresolved check failed; treating as unresolved (fail open)", "conversation", conv.ID, "error", err)
 			return true
 		}
 		if domain.HasUnresolvedArtifacts(arts) {

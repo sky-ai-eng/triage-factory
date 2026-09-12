@@ -884,6 +884,36 @@ func (s *blueprintStore) ActiveRunForTaskSystem(ctx context.Context, orgID, task
 	return s.GetRun(ctx, orgID, id)
 }
 
+// IsNewestRunForTask has no RLS to read past — N=1, one connection, every row
+// visible — so it asks the question directly.
+func (s *blueprintStore) IsNewestRunForTask(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var isNewest bool
+	err := s.q.QueryRowContext(ctx, `
+		SELECT NOT EXISTS (
+			SELECT 1 FROM blueprint_runs other
+			WHERE other.task_id = self.task_id
+			  AND (other.started_at > self.started_at
+			       OR (other.started_at = self.started_at AND other.id > self.id))
+		)
+		FROM blueprint_runs self
+		WHERE self.id = ? AND self.task_id = ?
+	`, blueprintRunID, taskID).Scan(&isNewest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return isNewest, nil
+}
+
+func (s *blueprintStore) IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error) {
+	return s.IsNewestRunForTask(ctx, orgID, taskID, blueprintRunID)
+}
+
 func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

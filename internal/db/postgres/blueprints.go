@@ -939,6 +939,32 @@ func (s *blueprintStore) ActiveRunForTaskSystem(ctx context.Context, orgID, task
 	return getBlueprintRun(ctx, s.admin, orgID, id)
 }
 
+func (s *blueprintStore) IsNewestRunForTask(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error) {
+	return isNewestRunForTask(ctx, s.app, orgID, taskID, blueprintRunID)
+}
+
+func (s *blueprintStore) IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error) {
+	return isNewestRunForTask(ctx, s.admin, orgID, taskID, blueprintRunID)
+}
+
+// isNewestRunForTask goes through tf.blueprint_run_is_newest_for_task on both
+// pools rather than querying blueprint_runs directly. On the app pool that is
+// the whole point — the SELECT policy hides another user's manual run, so a
+// direct query would report a superseded run as the newest. On the admin pool
+// it changes nothing but keeps one definition of the ordering.
+func isNewestRunForTask(ctx context.Context, q queryer, orgID, taskID, blueprintRunID string) (bool, error) {
+	if !isValidUUID(taskID) || !isValidUUID(blueprintRunID) {
+		return false, nil
+	}
+	var isNewest bool
+	if err := q.QueryRowContext(ctx,
+		`SELECT tf.blueprint_run_is_newest_for_task($1, $2, $3)`,
+		blueprintRunID, taskID, orgID).Scan(&isNewest); err != nil {
+		return false, err
+	}
+	return isNewest, nil
+}
+
 func blueprintRunArgs(br domain.BlueprintRun) (triggerID, abortReason, completedAt any) {
 	if br.TriggerID != "" {
 		triggerID = br.TriggerID

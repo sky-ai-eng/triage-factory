@@ -568,6 +568,29 @@ type BlueprintStore interface {
 	// (recomputeTaskBoardColumn) reads it to place a task with live work.
 	ActiveRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error)
 
+	// IsNewestRunForTask reports whether blueprintRunID is the task's most
+	// recent blueprint_run: nothing on the task started after it, whatever
+	// either one's status. Ties on started_at break on id so the order is
+	// total — SQLite stamps started_at to the second, and two runs minted
+	// inside one second must still have a newest. A run that no row answers
+	// to, or one belonging to some other task, is false.
+	//
+	// The terminal-on-last closing hooks ask it of the run behind a
+	// just-resolved artifact, to find out whether that run is still the
+	// engagement the task is about. A task's artifacts outlive the run that
+	// produced them, so a resolution can arrive against a superseded run — one
+	// the task was requeued or re-claimed away from — and closing on it would
+	// yank the task to done under whoever holds it now.
+	//
+	// A predicate rather than a getter for the newest run, because the honest
+	// answer is not always the caller's to see: blueprint_runs_select is
+	// creator-scoped for manual runs, so a task re-delegated by a DIFFERENT
+	// user has a superseding run the resolving caller cannot read. Postgres
+	// answers both pools through tf.blueprint_run_is_newest_for_task, which
+	// reads past that policy and hands back only the yes/no — enough to stop
+	// the close, nothing about whose work superseded it.
+	IsNewestRunForTask(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error)
+
 	// GetRun returns a blueprint run by id, or (nil, nil) when not found.
 	GetRun(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)
 
@@ -659,4 +682,5 @@ type BlueprintStore interface {
 	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 	ConversationsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 	ActiveStepConversationIDsSystem(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
+	IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error)
 }

@@ -34,6 +34,16 @@ func newDelegateTestDB(t *testing.T) *sql.DB {
 	return database
 }
 
+// nextEngagementStartedAt is the started_at expression every fixture that
+// stages a task's next blueprint_run inserts with: one second after the task's
+// latest engagement, or now for its first. CURRENT_TIMESTAMP alone would not
+// do — SQLite stamps it to the second, so two runs a fixture mints back to back
+// tie, and "the task's newest run" (Blueprints.IsNewestRunForTask, which the
+// terminal-on-last closing hooks read) would fall through to the id tiebreaker
+// and answer whichever id happens to sort higher. The sequence a fixture is
+// staging is the point of it, so it stamps the sequence.
+const nextEngagementStartedAt = `COALESCE((SELECT datetime(MAX(started_at), '+1 second') FROM blueprint_runs WHERE task_id = ?), CURRENT_TIMESTAMP)`
+
 // seedConversationBlueprint mints a blueprint + blueprint_run for taskID and returns
 // the blueprint_run id, so run fixtures can satisfy
 // conversations.blueprint_run_id NOT NULL. The suffix keeps ids unique +
@@ -57,8 +67,9 @@ func seedConversationBlueprint(t *testing.T, database *sql.DB, suffix, taskID st
 	}
 	brID := "seedbpr-" + suffix
 	if _, err := database.Exec(
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path, step_plan) VALUES (?, ?, ?, 'manual', ?, '[]')`,
-		brID, bpID, taskID, "/tmp/wt-"+brID); err != nil {
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path, step_plan, started_at)
+		 VALUES (?, ?, ?, 'manual', ?, '[]', `+nextEngagementStartedAt+`)`,
+		brID, bpID, taskID, "/tmp/wt-"+brID, taskID); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}
 	return brID
