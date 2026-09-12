@@ -132,8 +132,8 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	systemPrompt := nativeSystemPrompt()
 
 	// The task context's retention. Nothing is pinned through a compaction, so
-	// the row carrying these bytes is summarized like any other and an agent
-	// whose summary lost a PR number re-reads the original here. It lands in the
+	// the row carrying these bytes is summarized like any other, and this file is
+	// what an agent whose summary lost a PR number reads instead. It lands in the
 	// memory tree rather than beside it: that is the one per-launch location
 	// still writable on a warm step, where the run tree itself belongs to the
 	// sandbox identity.
@@ -277,6 +277,13 @@ func (s *Spawner) executorChangedSince(ctx context.Context, orgID, conversationI
 // What the run was asked to do is not here: the mission is a system block, so
 // it is re-sent on every call and a compaction can never summarize it away.
 // This row can be, and its bytes are on disk for the agent to re-read.
+//
+// TODO(TFAC-992): mint this row with subtype injection:task-context. It carries
+// the blank subtype of an ordinary human turn today, so compaction reads it as
+// the conversation's original request and copies externally-authored text into
+// every result row — the re-injection agentloop.originalRequest is written to
+// give a person's opening ask, not a control-plane-minted one. That ticket also
+// moves the three gates that count rows here onto the same subtype.
 func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Transcript, orgID, conversationID, creatorUserID, opening string) error {
 	rows, err := transcript.ListForAssembly(ctx, orgID, conversationID)
 	if err != nil {

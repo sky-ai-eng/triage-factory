@@ -724,6 +724,30 @@ func TestOriginalRequest_SkipsWhatTheControlPlaneMinted(t *testing.T) {
 	}
 }
 
+// TestOriginalRequest_IsNeverQueuedInput keeps input the model has not been
+// shown out of the result row. The rows a compaction sees are the whole
+// assembly window, undelivered ones included — and a queued row survives the
+// commit as live input ordered after the summary, so copying it in here would
+// both misreport it as what the conversation was for and hand the model the
+// same text twice.
+func TestOriginalRequest_IsNeverQueuedInput(t *testing.T) {
+	queued := []domain.Message{
+		{ID: 1, Role: "user", Subtype: domain.MessageSubtypeInjectionNudge, Content: "a notice the loop wrote", Delivered: boolPtr(true)},
+		{ID: 2, Role: "assistant", Content: "working"},
+		{ID: 3, Role: "user", Content: "one more thing while you are in there", Delivered: boolPtr(false)},
+	}
+	if got, ok := originalRequest(queued); ok {
+		t.Errorf("originalRequest = %q, want none — the only blank-subtype row is queued input the model has not read", got)
+	}
+
+	// Delivered, and it is the answer.
+	delivered := append([]domain.Message(nil), queued...)
+	delivered[2].Delivered = boolPtr(true)
+	if got, ok := originalRequest(delivered); !ok || got != "one more thing while you are in there" {
+		t.Errorf("originalRequest = %q (ok=%v), want the row once the model has actually seen it", got, ok)
+	}
+}
+
 // TestOriginalRequest_IsNeverASteer keeps a mid-run aside out of every window
 // that follows. A steer is a human row, but it is something said to a
 // conversation already under way — re-injecting one would make the last thing

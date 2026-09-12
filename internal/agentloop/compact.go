@@ -420,9 +420,10 @@ func extractSummary(text string) (string, bool) {
 // statement of purpose was one human message can never lose it to a summary
 // that happened not to restate it: that message is carried verbatim right here.
 //
-// A conversation that has no such message gets no such block. A delegation is
-// the case: its instruction is in the system prompt, re-sent every turn, so
-// there is nothing here to rescue.
+// A conversation that has no such message gets no such block — a delegation is
+// meant to be that case, since its instruction is in the system prompt and
+// re-sent every turn, and originalRequest below says what still has to change
+// for that to be true of the row it opens with.
 func composeResultRow(params Params, rows []domain.Message, summary string) *domain.Message {
 	var b strings.Builder
 	b.WriteString(compactionPreamble)
@@ -446,16 +447,24 @@ func composeResultRow(params Params, rows []domain.Message, summary string) *dom
 // content is retained on the inactive row either way, so the cut loses nothing
 // recoverable.
 //
-// A blank subtype is the whole test, narrower than IsHumanInput deliberately.
-// A steer is a human row too, but it is something said to a conversation
-// already under way, so admitting one would let a mid-run aside be re-injected
-// into every window afterwards as the thing the conversation was for. And a
-// row the control plane minted carries a subtype of its own, which is what
-// keeps a delegation's opening — externally-authored task context — out of
-// here structurally rather than by a flag the caller has to set correctly.
+// Two conditions, and each rules out a different way of picking the wrong row.
+//
+// A blank subtype, narrower than IsHumanInput deliberately: a steer is a human
+// row too, but it is something said to a conversation already under way, so
+// admitting one would let a mid-run aside be re-injected into every window
+// afterwards as the thing the conversation was for. The same test is what a
+// control-plane-minted opening is meant to fail, by carrying a subtype of its
+// own rather than by a flag each caller has to set correctly.
+//
+// And delivered, because the rows here are the whole assembly window,
+// undelivered ones included (Transcript.ListForAssembly). A queued row is input
+// the model has not been shown yet; it survives the compaction as live input
+// ordered after the result row, so copying it in here would both put words in
+// the conversation's mouth that were never its request and show the model the
+// same text twice.
 func originalRequest(rows []domain.Message) (string, bool) {
 	for _, r := range rows {
-		if r.Role != "user" || r.Subtype != "" {
+		if r.Role != "user" || r.Subtype != "" || !isDelivered(r) {
 			continue
 		}
 		text := r.Content
