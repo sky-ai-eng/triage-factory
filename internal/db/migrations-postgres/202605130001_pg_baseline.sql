@@ -793,9 +793,10 @@ CREATE TABLE public.conversation_memory (
 );
 
 
--- Lets one conversation_memory row reach every entity the run touched, not just
--- the denormalized entity_id above. Keyed on conversation_id because touches are
--- recorded mid-run, before the conversation_memory row exists. role is free text.
+-- How a conversation_memory row is reached from an entity, and the only way:
+-- one join row per entity the conversation touched, produced for, or was
+-- primarily about. Keyed on conversation_id because touches are recorded
+-- mid-run, before the conversation_memory row exists. role is free text.
 CREATE TABLE public.conversation_memory_entities (
     org_id uuid NOT NULL,
     conversation_id uuid NOT NULL,

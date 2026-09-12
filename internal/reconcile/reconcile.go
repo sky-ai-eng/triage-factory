@@ -186,10 +186,10 @@ func (rc *Reconciler) BackfillPRArtifactsForBranches(ctx context.Context, orgID 
 
 // Reconcile refreshes each artifact in arts against live GitHub and applies any
 // state transition: PR draft/open/merged/closed, review submitted/dismissed,
-// branch deleted. On a TERMINAL transition it appends a final-outcome note to
-// the producing conversation's memory (β) and broadcasts the change over the WS
-// hub (as artifact_updated on the owning conversation, so the conversation
-// view's artifact-derived surface refreshes). Returns the artifacts that
+// branch deleted. Each transition broadcasts over the WS hub (as
+// artifact_updated on the owning conversation, so the conversation view's
+// artifact-derived surface refreshes), and a draft pull request leaving the
+// approval column runs the resolved hook. Returns the artifacts that
 // transitioned, carrying their new state.
 //
 // Best-effort per artifact: a single GitHub or write failure is logged and

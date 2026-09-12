@@ -456,8 +456,8 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		return
 	}
 	submittedEvent := res.Event
-	// Record the event we submitted so a later reader — and the
-	// proposed-vs-final diff below — sees what was sent.
+	// Record the event we submitted so a later reader sees what was sent: the
+	// staged value is what the human asked for, this is what GitHub took.
 	details.ReviewEvent = submittedEvent
 
 	// Step 1: stamp the submitted review's id + URL onto the claimed artifact (a

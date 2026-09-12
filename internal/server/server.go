@@ -46,7 +46,6 @@ type Server struct {
 	tasks            db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
 	repos            db.RepositoryStore      // repositories CRUD for repos/settings handlers
 	events           db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
-	taskMemory       db.TaskMemoryStore      // conversation_memory writes (human verdict capture on review/PR submit, task-disposition cleanup)
 	secrets          db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
 	teams            db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, prompts)
 	orgs             db.OrgsStore            // per-org settings: GitHub/Jira base URLs, poll intervals, clone protocol
@@ -463,7 +462,6 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		tasks:              stores.Tasks,
 		repos:              stores.Repos,
 		events:             stores.Events,
-		taskMemory:         stores.TaskMemory,
 		secrets:            stores.Secrets,
 		teams:              stores.Teams,
 		orgs:               stores.Orgs,

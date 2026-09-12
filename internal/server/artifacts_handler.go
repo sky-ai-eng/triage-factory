@@ -588,9 +588,9 @@ func liveStateWord(live *ghclient.PRView) string {
 
 // reconcileArtifactOutOfBand runs the Tier-2 reconcile over the artifact's
 // conversation — the same working set the refresh route drives — so a row a
-// resolve verb found stale on GitHub catches up now: state, memory outcome,
-// terminal-on-last task closure, and the artifact_updated broadcast that makes
-// the overlay refetch. Best-effort and detached from the request: the 409 the
+// resolve verb found stale on GitHub catches up now: state, terminal-on-last
+// task closure, and the artifact_updated broadcast that makes the overlay
+// refetch. Best-effort and detached from the request: the 409 the
 // caller is about to send is correct whether or not this lands, and the next
 // reconcile pass repairs a miss.
 func (ah *artifactsHandler) reconcileArtifactOutOfBand(r *http.Request, orgID, userID string, art *domain.Artifact) {
@@ -672,12 +672,12 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		return
 	}
 
-	// Parse the artifact details for the proposed (agent-draft) baseline the
-	// human-verdict memory diffs against. A parse failure is non-fatal: we still
-	// promote the PR and only skip the verdict diff.
+	// Parse the artifact details so the flip below can carry the row's own
+	// snapshot and resolution forward. A parse failure is non-fatal: the PR is
+	// still promoted, and the flip writes what it can from the live read.
 	details, derr := domain.ParsePRArtifactDetails(art.DetailsJSON)
 	if derr != nil {
-		artifactsLog.Warn("PR artifact details unparseable; promoting from live PR and skipping the verdict diff", "artifact", art.ID, "error", derr)
+		artifactsLog.Warn("PR artifact details unparseable; promoting from the live PR", "artifact", art.ID, "error", derr)
 	}
 
 	// Read the content being promoted from the LIVE PR, never the cached
