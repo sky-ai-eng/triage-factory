@@ -426,3 +426,43 @@ func TestTaskStore_SQLite_MarkEventInjectedSystem(t *testing.T) {
 		}
 	})
 }
+
+// TestTaskStore_SQLite_MemoryPendingConformance runs the shared memory-pending
+// conformance against the SQLite task read. The harness takes the whole store
+// bundle: the flag is derived from conversations, conversation_memory and the
+// attempt ledger, none of which TaskStore owns.
+func TestTaskStore_SQLite_MemoryPendingConformance(t *testing.T) {
+	dbtest.RunTaskMemoryPendingConformance(t, func(t *testing.T) dbtest.TaskMemoryPendingHarness {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		promptID := "mem-pending-prompt"
+		insertPromptForBlueprintTest(t, conn, domain.Prompt{
+			ID: promptID, Name: "Memory Pending", Body: "b", Source: "user",
+		})
+		return dbtest.TaskMemoryPendingHarness{
+			Stores: sqlitestore.New(conn),
+			OrgID:  runmode.LocalDefaultOrgID,
+			Task: func(t *testing.T, suffix string) string {
+				t.Helper()
+				_, _, taskID := seedSQLiteTaskChain(t, conn, "mem-"+suffix)
+				return taskID
+			},
+			Conversation: func(t *testing.T, taskID, suffix string) string {
+				t.Helper()
+				convID := uuid.New().String()
+				stepIdx := 0
+				insertConversationForTest(t, conn, domain.Conversation{
+					ID: convID, TaskID: taskID, PromptID: promptID, Model: "m",
+					TriggerType:    "manual",
+					BlueprintRunID: seedBlueprintRunForConversation(t, conn, taskID),
+					// Every conversations row carries a blueprint parent (a
+					// single prompt is a one-step blueprint), so the step
+					// index has to name a position even though nothing here
+					// dispatches.
+					BlueprintStepIndex: &stepIdx,
+				})
+				return convID
+			},
+		}
+	})
+}

@@ -76,6 +76,27 @@ type Task struct {
 	// waiting — it rises as follow-ups land while a conversation is in flight.
 	SlackMessageCount int `json:"slack_message_count,omitempty"`
 
+	// MemoryPending says a conversation on this task ended without leaving a
+	// memory behind, and nothing has filed one for it yet. Derived on every
+	// read from the conversations/conversation_memory pair — there is no
+	// column, because the answer changes when a memory row lands and nothing
+	// would be there to clear a flag.
+	//
+	// It is a gate, not a decoration: the dispatcher's claim scan reads the
+	// same predicate and will not claim this task's next delegation while it
+	// holds, so the next conversation cannot open without the handoff the
+	// ended one owes. Nothing but delegation opens a conversation on a task
+	// today, and delegation mints a queued step the claim gate holds. Any
+	// future route that opens one directly must refuse with 409
+	// MEMORY_PENDING while this is set rather than quietly racing the
+	// provisioner.
+	MemoryPending bool `json:"memory_pending"`
+	// MemoryAttempt is the newest attempt at the memory MemoryPending is
+	// waiting on, or nil when none has run yet (and always nil when the task
+	// is not pending). It is what turns an unexplained wait into a readable
+	// one: a failed attempt names what stopped it.
+	MemoryAttempt *MemoryAttemptSummary `json:"memory_attempt,omitempty"`
+
 	// The ordering values a task list orders on that live on no column the
 	// task read otherwise carries: the sort_order of the lowest-numbered
 	// enabled rule covering this event type, the display name of whoever holds

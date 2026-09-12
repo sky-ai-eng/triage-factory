@@ -943,6 +943,14 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 					t.Fatalf("set seq: %v", err)
 				}
 			},
+			SetParentConversation: func(t *testing.T, convID, parentConvID string) {
+				t.Helper()
+				if _, err := conn.Exec(
+					`UPDATE conversations SET parent_conversation_id = ? WHERE id = ?`, parentConvID, convID,
+				); err != nil {
+					t.Fatalf("set parent_conversation_id: %v", err)
+				}
+			},
 			CollapseClaimTimestamps: func(t *testing.T, convID string) {
 				t.Helper()
 				if _, err := conn.Exec(`

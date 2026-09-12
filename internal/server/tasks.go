@@ -71,6 +71,43 @@ type taskJSON struct {
 	// frontend only surfaces it when the viewer belongs to ≥2 teams.
 	// TODO: board row color-coding consumes this.
 	TeamID string `json:"team_id,omitempty"`
+	// MemoryPending says a conversation on this task ended without leaving
+	// the memory its successor is owed, and the dispatcher will not claim the
+	// task's next delegation until one exists. Not omitempty: false is a real
+	// answer about the task, and a flag that vanishes when false reads as one
+	// the server failed to compute.
+	MemoryPending bool `json:"memory_pending"`
+	// MemoryAttempt is the newest try at that memory — absent when none has
+	// run yet, which is the ordinary case for a wait that has just begun.
+	MemoryAttempt *memoryAttemptJSON `json:"memory_attempt,omitempty"`
+}
+
+// memoryAttemptJSON is the wire shape of the newest memory-generation attempt
+// on a pending task: what came of it, why it stopped, and when it started. Its
+// own type rather than domain.MemoryAttemptSummary on the wire, so the
+// timestamp is rendered the way every other timestamp on this response is (a
+// formatted string, not a marshalled time.Time) and the domain struct stays
+// free to grow a field the API has not decided to publish.
+type memoryAttemptJSON struct {
+	// Outcome is empty while the attempt is still running.
+	Outcome string `json:"outcome,omitempty"`
+	// ErrorKind and ErrorMessage are set exactly when the outcome is `failed`.
+	// The message is TF's own wording, never an upstream response body.
+	ErrorKind    string `json:"error_kind,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+	StartedAt    string `json:"started_at"`
+}
+
+func memoryAttemptToJSON(a *domain.MemoryAttemptSummary) *memoryAttemptJSON {
+	if a == nil {
+		return nil
+	}
+	return &memoryAttemptJSON{
+		Outcome:      string(a.Outcome),
+		ErrorKind:    string(a.ErrorKind),
+		ErrorMessage: a.ErrorMessage,
+		StartedAt:    a.StartedAt.Format(time.RFC3339),
+	}
 }
 
 func taskToJSON(t domain.Task) taskJSON {
@@ -103,6 +140,8 @@ func taskToJSON(t domain.Task) taskJSON {
 		ClaimedByAgentID:    t.ClaimedByAgentID,
 		ClaimedByUserID:     t.ClaimedByUserID,
 		TeamID:              teamIDString(t.TeamID),
+		MemoryPending:       t.MemoryPending,
+		MemoryAttempt:       memoryAttemptToJSON(t.MemoryAttempt),
 	}
 }
 

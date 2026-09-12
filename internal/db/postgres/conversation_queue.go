@@ -225,9 +225,26 @@ const eligibleForDrivingSQL = needsDrivingSQL
 // conversations. That matters: this is the hot claim scan. A NULL step index
 // compares NULL and is not drivable — a step that never recorded its position
 // cannot prove it holds the workspace, and EnqueueConversation refuses to mint one.
-const blueprintDrivableSQL = `(r.blueprint_run_id IS NULL
+//
+// The second clause is the memory gate, and it is about the task rather than
+// the blueprint: a task holding a conversation that ended owing a memory
+// drives nothing until that memory exists. Otherwise a requeue-then-delegate
+// opens the next conversation without the handoff the ended one still owes,
+// and no later write can put it back — the opening turn is composed once. A
+// conversation with no task cannot owe one, hence the NULL arm.
+//
+// Its Go far-side mirror, delegate.blueprintDrivableForClaim, deliberately
+// does NOT re-check this: the only way a task becomes pending after the scan
+// is a new boundary on it, and every boundary stops the very conversation the
+// scan just claimed.
+//
+// TODO(TFAC-991): nothing generates the owed memory yet, so a task that
+// reaches this state stays gated until the memory provisioner lands and
+// starts filing rows for the conversations this predicate waits on.
+var blueprintDrivableSQL = `((r.blueprint_run_id IS NULL
 	    OR (br.cancel_requested = false AND br.status <> 'cancelled'
-	        AND r.blueprint_step_index = br.current_step_index))`
+	        AND r.blueprint_step_index = br.current_step_index))
+	   AND (r.task_id IS NULL OR NOT ` + taskMemoryPendingSQL("r.org_id", "r.task_id") + `))`
 
 // conversationQueueClaimSelect is the candidate CTE's projection —
 // everything the dispatcher needs to branch on and drive the claimed

@@ -294,6 +294,12 @@ func (s *Spawner) modelFollowUpBlock(ctx context.Context, orgID string, conv *do
 // A nil blueprint is drivable: a conversation with no blueprint parent
 // (interactive, reserved) is not this gate's business, matching the SQL's
 // LEFT JOIN.
+//
+// The SQL gate's other half — the task's unmet memory — has no mirror here,
+// deliberately. The only way a task becomes memory-pending after the scan is a
+// new boundary on it, and every boundary stops the very conversation this
+// claim is for, so re-asking would only ever refuse a claim that is already
+// being torn down.
 func blueprintDrivableForClaim(br *domain.BlueprintRun, stepIndex *int) bool {
 	if br == nil {
 		return true

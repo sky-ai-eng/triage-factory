@@ -190,6 +190,39 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 				t.Fatalf("backdate started_at of %s: %v", conversationID, err)
 			}
 		},
+		BackdateEndedAt: func(t *testing.T, conversationID string, age time.Duration) {
+			t.Helper()
+			// A bound time.Time, matching byte-for-byte what EndConversation
+			// writes under _time_format=sqlite — a backdated row has to stay
+			// comparable with the ones the store stamped.
+			if _, err := conn.Exec(
+				`UPDATE conversations SET ended_at = ? WHERE id = ?`,
+				time.Now().UTC().Add(-age), conversationID); err != nil {
+				t.Fatalf("backdate ended_at of %s: %v", conversationID, err)
+			}
+		},
+		MemoryAttempt: func(t *testing.T, conversationID string, age time.Duration) string {
+			t.Helper()
+			// Raw SQL rather than MemoryAttemptStore.BeginAttemptSystem: the
+			// store stamps started_at itself, and the age is the whole point.
+			// completed_at is left NULL — the abandoned shape. started_at is
+			// bound as a time.Time so it renders the way the sweep's own
+			// cutoff bind does.
+			id := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO conversation_memory_attempts (id, org_id, conversation_id, started_at)
+				VALUES (?, ?, ?, ?)
+			`, id, runmode.LocalDefaultOrgID, conversationID, time.Now().UTC().Add(-age)); err != nil {
+				t.Fatalf("seed memory attempt on %s: %v", conversationID, err)
+			}
+			return id
+		},
+		SetTaskStatus: func(t *testing.T, taskID, status string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID); err != nil {
+				t.Fatalf("set task %s status: %v", taskID, err)
+			}
+		},
 		BackdateQueuedAt: func(t *testing.T, conversationID string, age time.Duration) {
 			t.Helper()
 			if _, err := conn.Exec(

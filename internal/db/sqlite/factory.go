@@ -175,7 +175,9 @@ func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string
 		if err := rows.Scan(append(convTargets, ts.targets(&t)...)...); err != nil {
 			return nil, err
 		}
-		ts.finalize(&t)
+		if err := ts.finalize(&t); err != nil {
+			return nil, err
+		}
 		if completedAt.Valid {
 			r.CompletedAt = &completedAt.Time
 		}

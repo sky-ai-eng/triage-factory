@@ -1503,11 +1503,42 @@ func (s *taskStore) CountConsecutiveFailedConversations(ctx context.Context, org
 
 // --- Internal helpers ---
 
+// taskMemoryOwedRowSQL / taskMemoryPendingSQL / taskMemoryAttemptSQL are the
+// Postgres twins' predicate in the other dialect — see internal/db/postgres/
+// tasks.go for what "owing" means, why the subagent rows are excluded, and why
+// the attempt is the newest one on the newest owing conversation. Same words,
+// same index (idx_conversations_task_ended), and the same two readers: this
+// file's task read and the claim scan in conversation_queue.go.
+func taskMemoryOwedRowSQL(orgExpr, taskExpr string) string {
+	return `owed.org_id = ` + orgExpr + ` AND owed.task_id = ` + taskExpr + `
+		  AND owed.ended_at IS NOT NULL AND owed.parent_conversation_id IS NULL
+		  AND NOT EXISTS (
+		      SELECT 1 FROM conversation_memory mem
+		      WHERE mem.conversation_id = owed.id)`
+}
+
+func taskMemoryPendingSQL(orgExpr, taskExpr string) string {
+	return `EXISTS (SELECT 1 FROM conversations owed WHERE ` + taskMemoryOwedRowSQL(orgExpr, taskExpr) + `)`
+}
+
+func taskMemoryAttemptSQL(orgExpr, taskExpr, col string) string {
+	return `(SELECT att.` + col + `
+		FROM conversation_memory_attempts att
+		JOIN conversations owed ON owed.id = att.conversation_id
+		WHERE ` + taskMemoryOwedRowSQL(orgExpr, taskExpr) + `
+		ORDER BY owed.ended_at DESC, owed.id DESC, att.started_at DESC, att.id DESC
+		LIMIT 1)`
+}
+
 // sqliteTaskColumnsWithEntity is the canonical column list for every
 // task query that feeds scanTask. Lives on TaskStore because it owns
-// the surface; ScoreStore's UnscoredTasks references this constant via
+// the surface; ScoreStore's UnscoredTasks references this via
 // the same-package import.
-const sqliteTaskColumnsWithEntity = `
+//
+// A var rather than a const because the memory-pending tail is built from the
+// shared predicate helpers above — the point of which is that the claim scan
+// and this list cannot disagree about what "pending" means.
+var sqliteTaskColumnsWithEntity = `
 	t.id, t.entity_id, t.event_type, t.dedup_key, t.primary_event_id,
 	t.team_id,
 	t.status, t.priority_score, t.ai_summary, t.autonomy_suitability,
@@ -1537,7 +1568,16 @@ const sqliteTaskColumnsWithEntity = `
 			WHERE ev.event_type = 'slack:message' AND ev.entity_id = t.entity_id
 		)
 		ELSE 0
-	END`
+	END,
+	-- The memory the task is still waiting on, and the newest try at
+	-- producing it. The attempt columns are NULL whenever memory_pending is
+	-- false, by construction rather than by a guard: they read the same owing
+	-- conversation the flag does, and there is none.
+	` + taskMemoryPendingSQL("t.org_id", "t.id") + `,
+	COALESCE(` + taskMemoryAttemptSQL("t.org_id", "t.id", "outcome") + `, ''),
+	COALESCE(` + taskMemoryAttemptSQL("t.org_id", "t.id", "error_kind") + `, ''),
+	COALESCE(` + taskMemoryAttemptSQL("t.org_id", "t.id", "error_message") + `, ''),
+	` + taskMemoryAttemptSQL("t.org_id", "t.id", "started_at")
 
 // sqliteTaskListProjection is the SELECT list and the scan targets for one
 // List page: the canonical columns every task read projects, plus this order's
@@ -1586,6 +1626,18 @@ type taskScanState struct {
 	closeReason, closeEventType        sql.NullString
 	snoozeUntil, closedAt              sql.NullTime
 	claimedByAgentID, claimedByUserID  sql.NullString
+
+	// The memory-pending tail. memoryAttemptStartedAt is the one nullable of
+	// the four: its validity IS "an attempt exists", which is why the three
+	// text columns can be COALESCEd to empty in SQL without losing the
+	// difference between a running attempt (no outcome yet) and no attempt at
+	// all. It scans as text and parses via parseDBDatetime — a DATETIME
+	// column loses its declared type inside a scalar subselect, the same
+	// detour claimed_at takes on the conversation read.
+	memoryAttemptOutcome      string
+	memoryAttemptErrorKind    string
+	memoryAttemptErrorMessage string
+	memoryAttemptStartedAt    sql.NullString
 }
 
 // bareTargets is the scan-target list for sqliteTaskBareColumns — the
@@ -1607,6 +1659,9 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 	return append(s.bareTargets(t),
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
 		&t.OpenSubtaskCount, &t.SlackMessageCount,
+		&t.MemoryPending,
+		&s.memoryAttemptOutcome, &s.memoryAttemptErrorKind,
+		&s.memoryAttemptErrorMessage, &s.memoryAttemptStartedAt,
 	)
 }
 
@@ -1621,7 +1676,10 @@ func (s *taskScanState) listTargets(t *domain.Task, extras []func(*domain.Task) 
 	return out
 }
 
-func (s *taskScanState) finalize(t *domain.Task) {
+// finalize moves the NullX intermediates onto the task. It returns an error
+// for the one value it has to parse rather than merely copy: the memory
+// attempt's start, which arrives as text (see the field's note).
+func (s *taskScanState) finalize(t *domain.Task) error {
 	if s.teamID.Valid {
 		v := s.teamID.String
 		t.TeamID = &v
@@ -1648,6 +1706,19 @@ func (s *taskScanState) finalize(t *domain.Task) {
 	}
 	t.ClaimedByAgentID = s.claimedByAgentID.String
 	t.ClaimedByUserID = s.claimedByUserID.String
+	if s.memoryAttemptStartedAt.Valid {
+		startedAt, err := parseDBDatetime(s.memoryAttemptStartedAt.String)
+		if err != nil {
+			return fmt.Errorf("parse memory attempt started_at %q: %w", s.memoryAttemptStartedAt.String, err)
+		}
+		t.MemoryAttempt = &domain.MemoryAttemptSummary{
+			Outcome:      domain.MemoryAttemptOutcome(s.memoryAttemptOutcome),
+			ErrorKind:    domain.MemoryAttemptErrorKind(s.memoryAttemptErrorKind),
+			ErrorMessage: s.memoryAttemptErrorMessage,
+			StartedAt:    startedAt.UTC(),
+		}
+	}
+	return nil
 }
 
 func scanTaskFields(rows *sql.Rows, t *domain.Task) error {
@@ -1655,8 +1726,7 @@ func scanTaskFields(rows *sql.Rows, t *domain.Task) error {
 	if err := rows.Scan(s.targets(t)...); err != nil {
 		return err
 	}
-	s.finalize(t)
-	return nil
+	return s.finalize(t)
 }
 
 func scanTaskFromRow(row *sql.Row, t *domain.Task) error {
@@ -1664,8 +1734,7 @@ func scanTaskFromRow(row *sql.Row, t *domain.Task) error {
 	if err := row.Scan(s.targets(t)...); err != nil {
 		return err
 	}
-	s.finalize(t)
-	return nil
+	return s.finalize(t)
 }
 
 // scanTaskBareRow decodes a sqliteTaskBareColumns row — an id-keyed write's
@@ -1680,7 +1749,9 @@ func scanTaskBareRow(row *sql.Row, t *domain.Task) (domain.Task, error) {
 		}
 		return domain.Task{}, err
 	}
-	s.finalize(t)
+	if err := s.finalize(t); err != nil {
+		return domain.Task{}, err
+	}
 	return *t, nil
 }
 
@@ -1700,7 +1771,9 @@ func queryListedTasksCtx(ctx context.Context, q queryer, extras []func(*domain.T
 		if err := rows.Scan(st.listTargets(&t, extras)...); err != nil {
 			return nil, err
 		}
-		st.finalize(&t)
+		if err := st.finalize(&t); err != nil {
+			return nil, err
+		}
 		tasks = append(tasks, t)
 	}
 	return tasks, rows.Err()

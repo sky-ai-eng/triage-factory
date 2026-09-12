@@ -207,3 +207,48 @@ type MemoryAttempt struct {
 	WindowRowsTotal int
 	WindowRowsSent  int
 }
+
+// MemoryAttemptSummary is what a task read carries about the memory its
+// pending conversation is still owed: the newest attempt on the owing
+// conversation, or nil when no attempt has run yet. It is the four columns a
+// person needs to read the wait — what came of it, why it stopped, and when it
+// started — rather than the whole ledger row, whose window counters and spend
+// link are the provisioner's bookkeeping and belong to nothing on a card.
+//
+// Nil is two situations wearing one face, deliberately: the task is not
+// pending at all, or it is pending and nothing has tried yet. A reader tells
+// them apart by Task.MemoryPending, which is the flag the wait is actually
+// about.
+type MemoryAttemptSummary struct {
+	// Outcome is empty for an attempt still running (or one whose brain died
+	// before closing it out) — the same absence MemoryAttempt.Outcome carries.
+	Outcome MemoryAttemptOutcome
+	// ErrorKind is set exactly when Outcome is MemoryAttemptFailed.
+	ErrorKind MemoryAttemptErrorKind
+	// ErrorMessage is TF's own wording of the failure, never an upstream
+	// response body.
+	ErrorMessage string
+	StartedAt    time.Time
+}
+
+// MemoryOwed is one conversation the memory provisioner still owes a memory
+// for: it ended, nothing filed a conversation_memory row for it, and no
+// attempt has run recently enough to still be in the backoff.
+//
+// TaskOpen is the sweep's ordering key rather than a fact about the memory: an
+// owed memory on an open task is blocking a person's next delegation, and one
+// on a task that is done or dismissed is only completing the record. The sweep
+// takes the blocking ones first.
+type MemoryOwed struct {
+	OrgID          string
+	ConversationID string
+	// TaskID is the conversation's task, and is never empty: the sweep joins
+	// tasks rather than outer-joining them, so a conversation that names no
+	// task is not enumerated at all. That is the honest scope of the debt —
+	// a memory is the handoff to the task's NEXT conversation, and a
+	// conversation with no task has nobody to hand off to. A conversation
+	// type that owes a memory to something other than a task would need its
+	// own reading of "owed", not a nullable column here.
+	TaskID   string
+	TaskOpen bool
+}

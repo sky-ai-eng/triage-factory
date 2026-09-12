@@ -63,6 +63,14 @@ type ClaimPredicateHarness struct {
 	// projection — what the wire actually carries.
 	DisplayStatus func(t *testing.T, convID string) string
 
+	// SetParentConversation raw-updates a conversation's
+	// parent_conversation_id, making it a subagent row of the named spawner.
+	// Nothing mints one in production yet — the column is the reserved
+	// subagent link — so the memory gate's "a subagent's boundary is not the
+	// task's" arm has no other way to stage one. Optional: a harness that
+	// leaves it nil skips that subtest.
+	SetParentConversation func(t *testing.T, convID, parentConvID string)
+
 	// CollapseClaimTimestamps rewrites every one of a conversation's claim
 	// timestamps to a single identical value — the worst case a coarse clock
 	// could produce, which no production writer reaches (they all bind a
@@ -631,5 +639,72 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			t.Errorf("park_reason = %q after the claim un-parked it, want cleared — "+
 				"the row is mid-flight, so it is not parked for any reason", got.ParkReason)
 		}
+	})
+
+	// The memory gate. A conversation that ended without leaving a memory
+	// behind owes one, and until it exists the task's NEXT delegation is not
+	// claimed: the opening turn is composed once, so a conversation that opens
+	// without the handoff never gets it. Nothing about the queue changes —
+	// the row sits there drivable in every other respect — which is exactly
+	// what makes this testable as a gate rather than as a mint refusal.
+	t.Run("AQueuedStepOnATaskStillOwingAMemoryIsNotClaimed", func(t *testing.T) {
+		h := mk(t)
+		owing := h.EnqueueDelegation(t, "sdk")
+		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, owing, domain.EndedRequeued); err != nil {
+			t.Fatalf("end the owing conversation: %v", err)
+		}
+		// The next step, minted the way the reactor mints one: the pointer
+		// moves first, so this is the only conversation the blueprint gate
+		// admits. Everything below is the memory gate alone.
+		next := h.EnqueueDelegation(t, "sdk")
+		mustNotClaim(t, h)
+
+		// The memory lands. A `none` row counts: what the gate waits on is
+		// the question being SETTLED, and "nothing was remembered" settles it
+		// — otherwise a conversation with nothing to say would block its task
+		// forever.
+		if _, err := h.Stores.TaskMemory.UpsertAgentMemorySystem(
+			ctx, h.OrgID, owing, "", "", domain.MemorySourceNone,
+		); err != nil {
+			t.Fatalf("file the owed memory: %v", err)
+		}
+		mustClaim(t, h, next)
+	})
+
+	// A conversation that ended and DID leave a memory owes nothing, so its
+	// task's next step is claimed on the first scan. Without this the subtest
+	// above proves only that ending a conversation blocks a task, which is
+	// not the rule.
+	t.Run("AnEndedConversationWithItsMemoryBlocksNothing", func(t *testing.T) {
+		h := mk(t)
+		done := h.EnqueueDelegation(t, "sdk")
+		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, done, domain.EndedStepAdvanced); err != nil {
+			t.Fatalf("end the conversation: %v", err)
+		}
+		if _, err := h.Stores.TaskMemory.UpsertAgentMemorySystem(
+			ctx, h.OrgID, done, "", "what I tried", domain.MemorySourceAgent,
+		); err != nil {
+			t.Fatalf("file the memory: %v", err)
+		}
+		next := h.EnqueueDelegation(t, "sdk")
+		mustClaim(t, h, next)
+	})
+
+	// A subagent row is part of its spawner's engagement, not a conversation
+	// of the task's own, so its boundary owes no handoff and must not hold the
+	// task's queue. The boundary doors skip it for the same reason.
+	t.Run("AnEndedSubagentConversationDoesNotBlockTheTask", func(t *testing.T) {
+		h := mk(t)
+		if h.SetParentConversation == nil {
+			t.Skip("harness cannot stage a subagent row")
+		}
+		parent := h.EnqueueDelegation(t, "sdk")
+		sub := h.EnqueueDelegation(t, "sdk")
+		h.SetParentConversation(t, sub, parent)
+		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, sub, domain.EndedFailed); err != nil {
+			t.Fatalf("end the subagent conversation: %v", err)
+		}
+		next := h.EnqueueDelegation(t, "sdk")
+		mustClaim(t, h, next)
 	})
 }

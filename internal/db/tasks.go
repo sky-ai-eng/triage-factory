@@ -326,6 +326,12 @@ func taskKeyTime(t *time.Time) string {
 // return. This is TeamsStore.Role's shape (PR #935) applied here — the
 // entity fields are the read's join, not the row's, and a write has no view
 // on them. A caller that needs them calls Get.
+//
+// MemoryPending / MemoryAttempt sit on the same side of that line for the
+// same reason: they are derived from the task's conversations on every read,
+// not stored on the row, so a write returns them zeroed. They are also the
+// one pair a write could never speak to honestly — a task's memory debt is
+// settled by the provisioner, not by whatever column the write touched.
 type TaskStore interface {
 	// --- Lookup ---
 

@@ -1441,6 +1441,70 @@ func countConsecutiveFailedConversations(ctx context.Context, q queryer, orgID, 
 
 // --- Internal helpers ---
 
+// taskMemoryOwedRowSQL is the owing-conversation condition, written once and
+// reused by everything that asks whether a task is still waiting on a memory:
+// a top-level conversation on this task that ended, and for which no
+// conversation_memory row was ever filed. The boundary stamp says the
+// conversation stopped; the missing memory row says its agent never wrote one.
+//
+// orgExpr / taskExpr are the asking query's own aliases — `t.org_id`/`t.id` on
+// the task read, `r.org_id`/`r.task_id` on the claim scan — so the two readers
+// share the predicate rather than each spelling it. Both are needed: the org
+// is redundant for correctness (conversations.task_id FKs the composite
+// (id, org_id)) and is bound anyway, as every other statement in this package
+// binds it.
+//
+// parent_conversation_id IS NULL is not noise filtering. A subagent row is
+// part of its spawner's engagement and owes no handoff of its own, which is
+// the same reason the boundary doors skip it when they stamp a task.
+//
+// Served by idx_conversations_task_ended — the (task_id) WHERE ended_at IS NOT
+// NULL partial index, which exists for this read.
+//
+// Under the app pool the two inner relations are RLS-filtered, and they agree:
+// conversation_memory's policy grants exactly what the conversations policy
+// grants for the same row, so a reader can never see the boundary while the
+// memory that settles it is hidden. A reader who can see neither reads "not
+// pending" — which is only reachable for a task whose conversations belong to
+// a team they are not in, and the tasks policies do not show them that task
+// either. The gate the dispatcher enforces runs on the admin pool regardless.
+func taskMemoryOwedRowSQL(orgExpr, taskExpr string) string {
+	return `owed.org_id = ` + orgExpr + ` AND owed.task_id = ` + taskExpr + `
+		  AND owed.ended_at IS NOT NULL AND owed.parent_conversation_id IS NULL
+		  AND NOT EXISTS (
+		      SELECT 1 FROM conversation_memory mem
+		      WHERE mem.conversation_id = owed.id)`
+}
+
+// taskMemoryPendingSQL is the derived `memory_pending`: does this task hold a
+// conversation that ended owing a memory nobody has filed? Two readers ask it
+// — the task read, which shows the wait, and the claim scan, which enforces it
+// by declining to claim the task's next delegation — and they ask it of the
+// same rows in the same words.
+func taskMemoryPendingSQL(orgExpr, taskExpr string) string {
+	return `EXISTS (SELECT 1 FROM conversations owed WHERE ` + taskMemoryOwedRowSQL(orgExpr, taskExpr) + `)`
+}
+
+// taskMemoryAttemptSQL projects one column of the newest attempt on the task's
+// newest owing conversation, NULL when the task owes nothing or when nothing
+// has been attempted yet. The ORDER BY names the whole choice: the most recent
+// boundary is the one a reader is waiting on, and that conversation's latest
+// attempt is what happened last.
+//
+// One correlated subquery per column, rather than one LATERAL: the column list
+// this belongs to is SELECTed by every task query in the package, each with
+// its own FROM clause, and a join injected into each of them is one more
+// chance per query to get the correlation wrong — for a fact that is four
+// narrow columns off a partial index.
+func taskMemoryAttemptSQL(orgExpr, taskExpr, col string) string {
+	return `(SELECT att.` + col + `
+		FROM conversation_memory_attempts att
+		JOIN conversations owed ON owed.id = att.conversation_id
+		WHERE ` + taskMemoryOwedRowSQL(orgExpr, taskExpr) + `
+		ORDER BY owed.ended_at DESC, owed.id DESC, att.started_at DESC, att.id DESC
+		LIMIT 1)`
+}
+
 // pgTaskColumnsWithEntity is the canonical column list for every task
 // query that feeds scanTaskFields. Owned here on TaskStore;
 // ScoreStore.UnscoredTasks references it via the same-package import.
@@ -1450,7 +1514,11 @@ func countConsecutiveFailedConversations(ctx context.Context, q queryer, orgID, 
 //     guard is unnecessary; ->> '...' returns NULL for a missing key
 //     and COALESCE picks the 0 default.
 //   - Time columns are TIMESTAMPTZ; sql.NullTime scans them directly.
-const pgTaskColumnsWithEntity = `
+//
+// A var rather than a const because the memory-pending tail is built from the
+// shared predicate helpers above — the point of which is that the claim scan
+// and this list cannot disagree about what "pending" means.
+var pgTaskColumnsWithEntity = `
 	t.id, t.entity_id, t.event_type, t.dedup_key, t.primary_event_id,
 	t.team_id,
 	t.status, t.priority_score, t.ai_summary, t.autonomy_suitability,
@@ -1474,7 +1542,16 @@ const pgTaskColumnsWithEntity = `
 			  AND ev.entity_id = t.entity_id
 		)
 		ELSE 0
-	END`
+	END,
+	-- The memory the task is still waiting on, and the newest try at
+	-- producing it. The attempt columns are NULL whenever memory_pending is
+	-- false, by construction rather than by a guard: they read the same owing
+	-- conversation the flag does, and there is none.
+	` + taskMemoryPendingSQL("t.org_id", "t.id") + `,
+	COALESCE(` + taskMemoryAttemptSQL("t.org_id", "t.id", "outcome") + `, ''),
+	COALESCE(` + taskMemoryAttemptSQL("t.org_id", "t.id", "error_kind") + `, ''),
+	COALESCE(` + taskMemoryAttemptSQL("t.org_id", "t.id", "error_message") + `, ''),
+	` + taskMemoryAttemptSQL("t.org_id", "t.id", "started_at")
 
 // pgTaskBareColumns is tasks' own columns — no entity join — in the order
 // taskScanState.bareTargets expects. It is the leading, identical prefix of
@@ -1499,6 +1576,16 @@ type taskScanState struct {
 	closeReason, closeEventType        sql.NullString
 	snoozeUntil, closedAt              sql.NullTime
 	claimedByAgentID, claimedByUserID  sql.NullString
+
+	// The memory-pending tail. memoryAttemptStartedAt is the one nullable of
+	// the four: its validity IS "an attempt exists", which is why the three
+	// text columns can be COALESCEd to empty in SQL without losing the
+	// difference between a running attempt (no outcome yet) and no attempt at
+	// all.
+	memoryAttemptOutcome      string
+	memoryAttemptErrorKind    string
+	memoryAttemptErrorMessage string
+	memoryAttemptStartedAt    sql.NullTime
 }
 
 // bareTargets is the scan-target list for pgTaskBareColumns — the
@@ -1520,6 +1607,9 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 	return append(s.bareTargets(t),
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
 		&t.OpenSubtaskCount, &t.SlackMessageCount,
+		&t.MemoryPending,
+		&s.memoryAttemptOutcome, &s.memoryAttemptErrorKind,
+		&s.memoryAttemptErrorMessage, &s.memoryAttemptStartedAt,
 	)
 }
 
@@ -1561,6 +1651,14 @@ func (s *taskScanState) finalize(t *domain.Task) {
 	}
 	t.ClaimedByAgentID = s.claimedByAgentID.String
 	t.ClaimedByUserID = s.claimedByUserID.String
+	if s.memoryAttemptStartedAt.Valid {
+		t.MemoryAttempt = &domain.MemoryAttemptSummary{
+			Outcome:      domain.MemoryAttemptOutcome(s.memoryAttemptOutcome),
+			ErrorKind:    domain.MemoryAttemptErrorKind(s.memoryAttemptErrorKind),
+			ErrorMessage: s.memoryAttemptErrorMessage,
+			StartedAt:    s.memoryAttemptStartedAt.Time.UTC(),
+		}
+	}
 }
 
 func scanTaskFields(rows *sql.Rows, t *domain.Task) error {
