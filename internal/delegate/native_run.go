@@ -315,7 +315,8 @@ func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, 
 			"task", task.ID, "event", task.PrimaryEventID, "error", err)
 		metadataJSON = ""
 	}
-	return composeNativeOpeningTurn(task, metadataJSON, cfg.prSkeleton, mission,
+	artifacts := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
+	return composeNativeOpeningTurn(task, metadataJSON, cfg.prSkeleton, artifacts, mission,
 		agentproc.AgentVisibleBinary(selfBin), s.resolveBranchTemplate(ctx, task), knowledge), nil
 }
 
@@ -331,10 +332,10 @@ func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, 
 // the run context carries only the branch convention and this run's staged
 // knowledge — the two facts that differ per team and per run, and the ones
 // those blocks cannot state for themselves.
-func composeNativeOpeningTurn(task domain.Task, metadataJSON, skeleton, mission, binaryPath, branchTemplate, knowledge string) string {
+func composeNativeOpeningTurn(task domain.Task, metadataJSON, skeleton string, artifacts []domain.Artifact, mission, binaryPath, branchTemplate, knowledge string) string {
 	return joinSections(
 		runContext("", "", branchTemplate, "", knowledge),
-		BuildTaskContext(task, metadataJSON, skeleton),
+		BuildTaskContext(task, metadataJSON, skeleton, artifacts),
 		resolveCLIPath(mission, binaryPath),
 	)
 }

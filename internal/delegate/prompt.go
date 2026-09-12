@@ -173,13 +173,13 @@ func machinistSpec() agentprompt.Spec {
 //
 // metadataJSON is the primary event's metadata blob ("" is fine — the context
 // block just carries no event fields). skeleton is the rendered PR history
-// block, empty for a task with no pull request behind it. knowledge is the
-// manifest of what this launch staged under _tfac/knowledge/, empty when it
-// staged nothing.
-func buildPrompt(task domain.Task, metadataJSON, skeleton, mission, scope, toolsRef, binaryPath, runRoot, branchTemplate, runURL, knowledge string) string {
+// block, empty for a task with no pull request behind it. artifacts is what the
+// task's earlier conversations already produced. knowledge is the manifest of
+// what this launch staged under _tfac/knowledge/, empty when it staged nothing.
+func buildPrompt(task domain.Task, metadataJSON, skeleton string, artifacts []domain.Artifact, mission, scope, toolsRef, binaryPath, runRoot, branchTemplate, runURL, knowledge string) string {
 	cli := func(s string) string { return resolveCLIPath(s, binaryPath) }
 	return joinSections(
-		BuildTaskContext(task, metadataJSON, skeleton),
+		BuildTaskContext(task, metadataJSON, skeleton, artifacts),
 		cli(mission),
 		runContext(scope, runRoot, branchTemplate, runURL, knowledge),
 		cli("<tools>\n"+strings.TrimSpace(toolsRef)+"\n</tools>"),
