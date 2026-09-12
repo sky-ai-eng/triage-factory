@@ -332,12 +332,13 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 	return true, nil
 }
 
-// tryAdditiveInjection folds a firing into its task's already-active auto
-// conversation via the cross-pod-aware injection seam, instead of deferring a
-// second conversation onto pending_firings. conversationID is that
-// conversation's id, resolved by the caller from
-// the firing's own task — so it belongs to that task by construction, with
-// no separate ownership check to make. Returns true when the caller should
+// tryAdditiveInjection folds a firing into its task's live conversation via
+// the cross-pod-aware injection seam, instead of deferring a second
+// conversation onto pending_firings. Whatever minted that conversation — an
+// earlier auto-fire, or a person's own delegation — it is the one the task is
+// about, and the event belongs in front of it. conversationID is its id,
+// resolved by the caller from the firing's own task, so it belongs to that
+// task by construction with no separate ownership check to make. Returns true when the caller should
 // treat the firing as handled; false when the caller must fall through to
 // the normal deferral so the firing is never silently dropped.
 //
