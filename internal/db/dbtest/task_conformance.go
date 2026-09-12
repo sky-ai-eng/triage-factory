@@ -1962,6 +1962,12 @@ type TaskMemoryPendingHarness struct {
 	// (blueprint, prompt, creator) is the seeder's business; the suite only
 	// ever ends it and reads the task back.
 	Conversation func(t *testing.T, taskID, suffix string) (conversationID string)
+
+	// BackdateEndedAt rewrites a conversation's ended_at to `age` ago, on the
+	// backend's own clock. The attempt summary is about the task's NEWEST
+	// unmet debt, so which boundary is newest has to be staged rather than
+	// inferred from how fast two EndConversation calls happen to run.
+	BackdateEndedAt func(t *testing.T, conversationID string, age time.Duration)
 }
 
 // TaskMemoryPendingFactory builds a fresh harness per subtest.
@@ -2131,6 +2137,78 @@ func RunTaskMemoryPendingConformance(t *testing.T, mk TaskMemoryPendingFactory) 
 		// the two read the same owing conversation, and there is no longer one.
 		if got.MemoryAttempt != nil {
 			t.Errorf("memory_attempt = %+v on a task that owes nothing", *got.MemoryAttempt)
+		}
+	})
+
+	// The summary is about the debt that is actually blocking — the task's
+	// NEWEST owing conversation — and about that one alone. An older debt's
+	// attempt standing in for it is worse than no summary: it reads as "this
+	// has been tried and failed" over a conversation nothing has touched, so
+	// a person waits on a retry that was never owed to them.
+	t.Run("TheAttemptSummaryIsTheNewestOwingConversationsAlone", func(t *testing.T) {
+		h := mk(t)
+		if h.BackdateEndedAt == nil {
+			t.Skip("harness cannot stage boundary ages")
+		}
+		taskID := h.Task(t, "newest-debt")
+		older := h.Conversation(t, taskID, "newest-debt-old")
+		newer := h.Conversation(t, taskID, "newest-debt-new")
+		for id, age := range map[string]time.Duration{older: 2 * time.Hour, newer: time.Hour} {
+			if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, id, domain.EndedRequeued); err != nil {
+				t.Fatalf("end %s: %v", id, err)
+			}
+			h.BackdateEndedAt(t, id, age)
+		}
+
+		// Only the OLDER debt has been tried. The newest one has not, and the
+		// honest summary of an untried debt is no summary.
+		oldAttempt, err := h.Stores.MemoryAttempts.BeginAttemptSystem(ctx, h.OrgID, older)
+		if err != nil {
+			t.Fatalf("BeginAttemptSystem on the older debt: %v", err)
+		}
+		got := readBoth(t, h, taskID)
+		if !got.MemoryPending {
+			t.Fatal("memory_pending = false with two unmet debts on the task")
+		}
+		if got.MemoryAttempt != nil {
+			t.Errorf("memory_attempt = %+v, want nil — the newest owing conversation has never been attempted, "+
+				"and an older debt's attempt must not stand in for it", *got.MemoryAttempt)
+		}
+
+		// Now the newest debt is tried too, and afterwards the older debt is
+		// tried AGAIN — so the most recent attempt anywhere on this task
+		// belongs to the older conversation. The summary is still the newest
+		// owing conversation's: it is chosen by which debt is blocking, not by
+		// which attempt happened to run last.
+		newAttempt, err := h.Stores.MemoryAttempts.BeginAttemptSystem(ctx, h.OrgID, newer)
+		if err != nil {
+			t.Fatalf("BeginAttemptSystem on the newer debt: %v", err)
+		}
+		const newerMsg = "the newest debt's own failure"
+		if _, err := h.Stores.MemoryAttempts.CompleteAttemptSystem(ctx, h.OrgID, newAttempt.ID,
+			domain.MemoryAttemptFailed, domain.MemoryAttemptErrTimeout, newerMsg, "", 4, 4); err != nil {
+			t.Fatalf("CompleteAttemptSystem on the newer debt: %v", err)
+		}
+		if _, err := h.Stores.MemoryAttempts.CompleteAttemptSystem(ctx, h.OrgID, oldAttempt.ID,
+			domain.MemoryAttemptFailed, domain.MemoryAttemptErrProviderError, "the older debt's failure", "", 9, 9); err != nil {
+			t.Fatalf("CompleteAttemptSystem on the older debt: %v", err)
+		}
+		retryOld, err := h.Stores.MemoryAttempts.BeginAttemptSystem(ctx, h.OrgID, older)
+		if err != nil {
+			t.Fatalf("BeginAttemptSystem retrying the older debt: %v", err)
+		}
+		if _, err := h.Stores.MemoryAttempts.CompleteAttemptSystem(ctx, h.OrgID, retryOld.ID,
+			domain.MemoryAttemptFailed, domain.MemoryAttemptErrProviderError, "the older debt's retry", "", 9, 9); err != nil {
+			t.Fatalf("CompleteAttemptSystem retrying the older debt: %v", err)
+		}
+
+		got = readBoth(t, h, taskID)
+		if got.MemoryAttempt == nil {
+			t.Fatal("memory_attempt = nil once the newest debt has been attempted")
+		}
+		if got.MemoryAttempt.ErrorMessage != newerMsg {
+			t.Errorf("memory_attempt = %+v, want the newest owing conversation's own attempt (%q) — "+
+				"the newest attempt on the task is the older debt's", *got.MemoryAttempt, newerMsg)
 		}
 	})
 

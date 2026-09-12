@@ -1506,9 +1506,10 @@ func (s *taskStore) CountConsecutiveFailedConversations(ctx context.Context, org
 // taskMemoryOwedRowSQL / taskMemoryPendingSQL / taskMemoryAttemptSQL are the
 // Postgres twins' predicate in the other dialect — see internal/db/postgres/
 // tasks.go for what "owing" means, why the subagent rows are excluded, and why
-// the attempt is the newest one on the newest owing conversation. Same words,
-// same index (idx_conversations_task_ended), and the same two readers: this
-// file's task read and the claim scan in conversation_queue.go.
+// the attempt subquery settles which conversation it speaks for before it
+// reads an attempt rather than ranking the two together. Same words, same
+// index (idx_conversations_task_ended), and the same two readers: this file's
+// task read and the claim scan in conversation_queue.go.
 func taskMemoryOwedRowSQL(orgExpr, taskExpr string) string {
 	return `owed.org_id = ` + orgExpr + ` AND owed.task_id = ` + taskExpr + `
 		  AND owed.ended_at IS NOT NULL AND owed.parent_conversation_id IS NULL
@@ -1524,9 +1525,12 @@ func taskMemoryPendingSQL(orgExpr, taskExpr string) string {
 func taskMemoryAttemptSQL(orgExpr, taskExpr, col string) string {
 	return `(SELECT att.` + col + `
 		FROM conversation_memory_attempts att
-		JOIN conversations owed ON owed.id = att.conversation_id
-		WHERE ` + taskMemoryOwedRowSQL(orgExpr, taskExpr) + `
-		ORDER BY owed.ended_at DESC, owed.id DESC, att.started_at DESC, att.id DESC
+		WHERE att.conversation_id = (
+		    SELECT owed.id FROM conversations owed
+		    WHERE ` + taskMemoryOwedRowSQL(orgExpr, taskExpr) + `
+		    ORDER BY owed.ended_at DESC, owed.id DESC
+		    LIMIT 1)
+		ORDER BY att.started_at DESC, att.id DESC
 		LIMIT 1)`
 }
 

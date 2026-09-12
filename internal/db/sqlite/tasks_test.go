@@ -447,6 +447,17 @@ func TestTaskStore_SQLite_MemoryPendingConformance(t *testing.T) {
 				_, _, taskID := seedSQLiteTaskChain(t, conn, "mem-"+suffix)
 				return taskID
 			},
+			BackdateEndedAt: func(t *testing.T, conversationID string, age time.Duration) {
+				t.Helper()
+				// A bound time.Time, matching byte-for-byte what
+				// EndConversation writes under _time_format=sqlite.
+				if _, err := conn.Exec(
+					`UPDATE conversations SET ended_at = ? WHERE id = ?`,
+					time.Now().UTC().Add(-age), conversationID,
+				); err != nil {
+					t.Fatalf("backdate ended_at of %s: %v", conversationID, err)
+				}
+			},
 			Conversation: func(t *testing.T, taskID, suffix string) string {
 				t.Helper()
 				convID := uuid.New().String()

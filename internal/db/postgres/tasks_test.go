@@ -692,6 +692,12 @@ func TestTaskStore_Postgres_MemoryPendingConformance(t *testing.T) {
 				_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userID, "mem-"+suffix)
 				return taskID
 			},
+			BackdateEndedAt: func(t *testing.T, conversationID string, age time.Duration) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE conversations SET ended_at = now() - make_interval(secs => $2) WHERE id = $1`,
+					conversationID, age.Seconds())
+			},
 			Conversation: func(t *testing.T, taskID, suffix string) string {
 				t.Helper()
 				stepIdx := 0

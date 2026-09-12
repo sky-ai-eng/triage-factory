@@ -1486,10 +1486,17 @@ func taskMemoryPendingSQL(orgExpr, taskExpr string) string {
 }
 
 // taskMemoryAttemptSQL projects one column of the newest attempt on the task's
-// newest owing conversation, NULL when the task owes nothing or when nothing
-// has been attempted yet. The ORDER BY names the whole choice: the most recent
-// boundary is the one a reader is waiting on, and that conversation's latest
-// attempt is what happened last.
+// newest owing conversation — NULL when the task owes nothing, and NULL when
+// the debt that is blocking has never been tried.
+//
+// The nesting is the whole point and is not a join in disguise. Which
+// conversation the summary speaks for is settled FIRST, by boundary alone, and
+// only then is that one conversation's latest attempt read. Choosing both at
+// once — ranking attempts joined to their conversations — silently narrows the
+// field to owing conversations that HAVE attempts, so a task whose newest debt
+// is untried answers with an older debt's attempt instead of with nothing. That
+// reads as "tried, and it failed" over a conversation nothing has touched, and
+// it sends a person to wait for a retry nobody owes them.
 //
 // One correlated subquery per column, rather than one LATERAL: the column list
 // this belongs to is SELECTed by every task query in the package, each with
@@ -1499,9 +1506,12 @@ func taskMemoryPendingSQL(orgExpr, taskExpr string) string {
 func taskMemoryAttemptSQL(orgExpr, taskExpr, col string) string {
 	return `(SELECT att.` + col + `
 		FROM conversation_memory_attempts att
-		JOIN conversations owed ON owed.id = att.conversation_id
-		WHERE ` + taskMemoryOwedRowSQL(orgExpr, taskExpr) + `
-		ORDER BY owed.ended_at DESC, owed.id DESC, att.started_at DESC, att.id DESC
+		WHERE att.conversation_id = (
+		    SELECT owed.id FROM conversations owed
+		    WHERE ` + taskMemoryOwedRowSQL(orgExpr, taskExpr) + `
+		    ORDER BY owed.ended_at DESC, owed.id DESC
+		    LIMIT 1)
+		ORDER BY att.started_at DESC, att.id DESC
 		LIMIT 1)`
 }
 
