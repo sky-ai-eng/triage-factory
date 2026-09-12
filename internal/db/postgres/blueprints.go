@@ -939,34 +939,30 @@ func (s *blueprintStore) ActiveRunForTaskSystem(ctx context.Context, orgID, task
 	return getBlueprintRun(ctx, s.admin, orgID, id)
 }
 
-func (s *blueprintStore) NewestRunForTask(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
-	return newestRunForTask(ctx, s.app, s.GetRun, orgID, taskID)
+func (s *blueprintStore) IsNewestRunForTask(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error) {
+	return isNewestRunForTask(ctx, s.app, orgID, taskID, blueprintRunID)
 }
 
-func (s *blueprintStore) NewestRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
-	return newestRunForTask(ctx, s.admin, s.GetRunSystem, orgID, taskID)
+func (s *blueprintStore) IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error) {
+	return isNewestRunForTask(ctx, s.admin, orgID, taskID, blueprintRunID)
 }
 
-// newestRunForTask reads the id first and hydrates through the pool's own
-// GetRun, so the projection stays the point read's rather than a second column
-// list that can drift from it.
-func newestRunForTask(ctx context.Context, q queryer, getRun func(context.Context, string, string) (*domain.BlueprintRun, error), orgID, taskID string) (*domain.BlueprintRun, error) {
-	if !isValidUUID(taskID) {
-		return nil, nil
+// isNewestRunForTask goes through tf.blueprint_run_is_newest_for_task on both
+// pools rather than querying blueprint_runs directly. On the app pool that is
+// the whole point — the SELECT policy hides another user's manual run, so a
+// direct query would report a superseded run as the newest. On the admin pool
+// it changes nothing but keeps one definition of the ordering.
+func isNewestRunForTask(ctx context.Context, q queryer, orgID, taskID, blueprintRunID string) (bool, error) {
+	if !isValidUUID(taskID) || !isValidUUID(blueprintRunID) {
+		return false, nil
 	}
-	var id string
-	err := q.QueryRowContext(ctx, `
-		SELECT id FROM blueprint_runs
-		WHERE org_id = $1 AND task_id = $2
-		ORDER BY started_at DESC, id DESC LIMIT 1
-	`, orgID, taskID).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+	var isNewest bool
+	if err := q.QueryRowContext(ctx,
+		`SELECT tf.blueprint_run_is_newest_for_task($1, $2, $3)`,
+		blueprintRunID, taskID, orgID).Scan(&isNewest); err != nil {
+		return false, err
 	}
-	if err != nil {
-		return nil, err
-	}
-	return getRun(ctx, orgID, id)
+	return isNewest, nil
 }
 
 func blueprintRunArgs(br domain.BlueprintRun) (triggerID, abortReason, completedAt any) {

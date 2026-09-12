@@ -223,6 +223,48 @@ $$;
 -- +goose StatementEnd
 
 
+-- Answers "is this run the task's newest" past the same creator-scoped
+-- blueprint_runs_select policy, for the terminal-on-last closing hooks: a task
+-- re-delegated by a different user has a newer MANUAL run the resolving caller
+-- cannot see, and a plain query would answer that the superseded run is still
+-- the newest and close the task under the live one. A boolean rather than the
+-- newest run's id, so a caller learns only whether its own run has been
+-- superseded and nothing about whose work superseded it. Ordering breaks a
+-- started_at tie on id so the order is total. With request claims p_org_id must
+-- equal the caller's org; with none (admin pool) that check is skipped. Pinned
+-- search_path blocks definer hijacking; a NULL id, a missing row, or a run on
+-- some other task answers false.
+-- +goose StatementBegin
+CREATE FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_id uuid, p_org_id uuid) RETURNS boolean
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  self_started_at timestamptz;
+BEGIN
+  IF p_id IS NULL OR p_task_id IS NULL THEN
+    RETURN false;
+  END IF;
+  IF tf.current_org_id() IS NOT NULL AND p_org_id <> tf.current_org_id() THEN
+    RAISE EXCEPTION 'blueprint_run_is_newest_for_task: requested org % does not match caller org %', p_org_id, tf.current_org_id();
+  END IF;
+  SELECT br.started_at INTO self_started_at
+    FROM blueprint_runs br
+   WHERE br.id = p_id AND br.org_id = p_org_id AND br.task_id = p_task_id;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  RETURN NOT EXISTS (
+    SELECT 1 FROM blueprint_runs other
+    WHERE other.org_id = p_org_id AND other.task_id = p_task_id
+      AND (other.started_at > self_started_at
+           OR (other.started_at = self_started_at AND other.id > p_id))
+  );
+END;
+$$;
+-- +goose StatementEnd
+
+
 -- +goose StatementBegin
 CREATE FUNCTION tf.user_in_team(target_team uuid) RETURNS boolean
     LANGUAGE sql STABLE SECURITY DEFINER
@@ -2621,6 +2663,10 @@ GRANT ALL ON FUNCTION tf.user_has_org_access(target_org uuid) TO tf_app;
 
 REVOKE ALL ON FUNCTION tf.blueprint_run_is_running(p_id uuid, p_org_id uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.blueprint_run_is_running(p_id uuid, p_org_id uuid) TO tf_app;
+
+
+REVOKE ALL ON FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_id uuid, p_org_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_id uuid, p_org_id uuid) TO tf_app;
 
 
 REVOKE ALL ON FUNCTION tf.user_can_write_team(target_team uuid) FROM PUBLIC;
@@ -5519,6 +5565,10 @@ GRANT SELECT ON TABLE public.placement_overrides TO tf_system;
 GRANT SELECT, UPDATE ON TABLE public.blueprint_runs TO tf_system;
 GRANT SELECT ON TABLE public.blueprints TO tf_system;
 GRANT SELECT ON TABLE public.blueprint_steps TO tf_system;
+-- The terminal-on-last close asks whether the run behind a resolved artifact is
+-- still the task's newest. EXECUTE is the whole grant it needs: the function is
+-- SECURITY DEFINER and reads blueprint_runs as its owner.
+GRANT EXECUTE ON FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_id uuid, p_org_id uuid) TO tf_system;
 -- IncrementUsageSystem bumps a usage counter after resolving the step prompt.
 GRANT SELECT, UPDATE ON TABLE public.prompts TO tf_system;
 GRANT SELECT ON TABLE public.agents TO tf_system;

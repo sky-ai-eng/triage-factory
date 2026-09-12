@@ -74,11 +74,12 @@ func TestBlueprintStore_Postgres_OneActiveRunPerTaskConformance(t *testing.T) {
 	})
 }
 
-// TestBlueprintStore_Postgres_NewestRunForTask runs the shared newest-run suite
-// against the Postgres impl.
-func TestBlueprintStore_Postgres_NewestRunForTask(t *testing.T) {
+// TestBlueprintStore_Postgres_IsNewestRunForTask runs the shared newest-run
+// suite against the Postgres impl, on the admin pool. Its creator-scoped
+// sibling below covers what only a claims-carrying connection can show.
+func TestBlueprintStore_Postgres_IsNewestRunForTask(t *testing.T) {
 	h := pgtest.Shared(t)
-	dbtest.RunNewestRunForTaskConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
+	dbtest.RunIsNewestRunForTaskConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
@@ -88,6 +89,102 @@ func TestBlueprintStore_Postgres_NewestRunForTask(t *testing.T) {
 		return pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).Blueprints,
 			orgID, blueprintID, seedPgTask(t, h, orgID, userID)
 	})
+}
+
+// TestBlueprintStore_Postgres_IsNewestRunForTask_ReadsPastTheCreatorScope is
+// the reason IsNewestRunForTask is a predicate over a SECURITY DEFINER
+// function rather than a plain query for the newest run.
+//
+// blueprint_runs_select is creator-scoped for manual runs. So when Alice's
+// delegation leaves a draft PR, the task is requeued, and BOB re-delegates it,
+// Bob's run is invisible to Alice — and the terminal-on-last close, which runs
+// on the app pool under the claims of whoever resolved the artifact, would ask
+// "is Alice's run still the task's newest?", be told yes by a query that cannot
+// see Bob's, and take the task to done under Bob's live engagement.
+//
+// Only a claims-carrying connection can show this: the conformance suite wires
+// both pools to the admin (BYPASSRLS) connection, where every run is visible
+// and the bug cannot reproduce.
+func TestBlueprintStore_Postgres_IsNewestRunForTask_ReadsPastTheCreatorScope(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	orgID, alice := seedPgOrgForBlueprints(t, h)
+	teamID := seedPgDefaultTeam(t, h, orgID, alice)
+	blueprintID := "bp-creator-scope-" + orgID[:8]
+	seedPgBlueprintInTeam(t, h, orgID, alice, teamID, blueprintID)
+	taskID := seedPgTask(t, h, orgID, alice)
+	bob := seedPgMember(t, h, orgID, "bob", "member")
+
+	// Alice's engagement, finished; then Bob's, live and later. Both MANUAL,
+	// which is what puts them on opposite sides of the SELECT policy — and
+	// seeded at the admin pool so each run carries its real creator rather than
+	// whichever identity the insert ran as.
+	aliceRun, bobRun := uuid.New().String(), uuid.New().String()
+	for _, r := range []struct {
+		id, creator, status string
+		startedAt           string
+	}{
+		{aliceRun, alice, "completed", "now() - interval '1 hour'"},
+		{bobRun, bob, "running", "now()"},
+	} {
+		if _, err := h.AdminDB.Exec(`
+			INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, step_plan, worktree_path, started_at)
+			VALUES ($1, $2, $3, $4, $5, 'manual', $6, '[]'::jsonb, '', `+r.startedAt+`)
+		`, r.id, orgID, r.creator, blueprintID, taskID, r.status); err != nil {
+			t.Fatalf("seed blueprint_run %s: %v", r.id, err)
+		}
+	}
+
+	admin := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).Blueprints
+	if err := h.WithUser(t, alice, orgID, func(tx *sql.Tx) error {
+		store := pgstore.NewForTx(tx, pgtest.SecretKey).Blueprints
+
+		// The premise. If Alice could read Bob's run the rest of this test
+		// would pass on a plain query too, and prove nothing.
+		hidden, err := store.GetRun(ctx, orgID, bobRun)
+		if err != nil {
+			t.Fatalf("GetRun(bob's run) as Alice: %v", err)
+		}
+		if hidden != nil {
+			t.Fatalf("Alice can read Bob's manual run; blueprint_runs_select is no longer creator-scoped and this test needs rewriting")
+		}
+
+		// The fix. Whether a run has been superseded is a fact about the task,
+		// so the answer may not vary with who is asking — the app pool under
+		// Alice's claims must agree with the admin pool on both runs.
+		for _, tc := range []struct {
+			name, runID string
+		}{
+			{"alice's superseded run", aliceRun},
+			{"bob's superseding run", bobRun},
+		} {
+			want, err := admin.IsNewestRunForTaskSystem(ctx, orgID, taskID, tc.runID)
+			if err != nil {
+				t.Fatalf("IsNewestRunForTaskSystem (%s): %v", tc.name, err)
+			}
+			got, err := store.IsNewestRunForTask(ctx, orgID, taskID, tc.runID)
+			if err != nil {
+				t.Fatalf("IsNewestRunForTask (%s): %v", tc.name, err)
+			}
+			if got != want {
+				t.Errorf("IsNewestRunForTask(%s) as Alice = %v, admin pool says %v", tc.name, got, want)
+			}
+		}
+
+		// Spelled out, because this one is the bug: a resolve on the artifact
+		// Alice's run left behind must not find her run current.
+		superseded, err := store.IsNewestRunForTask(ctx, orgID, taskID, aliceRun)
+		if err != nil {
+			t.Fatalf("IsNewestRunForTask (alice's run): %v", err)
+		}
+		if superseded {
+			t.Error("Alice's superseded run reports as the task's newest, so resolving its carried artifact would close the task under Bob's live run")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser: %v", err)
+	}
 }
 
 // TestBlueprintStore_Postgres_DuplicationConformance runs the shared

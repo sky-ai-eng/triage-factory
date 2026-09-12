@@ -884,27 +884,34 @@ func (s *blueprintStore) ActiveRunForTaskSystem(ctx context.Context, orgID, task
 	return s.GetRun(ctx, orgID, id)
 }
 
-func (s *blueprintStore) NewestRunForTask(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
+// IsNewestRunForTask has no RLS to read past — N=1, one connection, every row
+// visible — so it asks the question directly.
+func (s *blueprintStore) IsNewestRunForTask(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return false, err
 	}
-	var id string
+	var isNewest bool
 	err := s.q.QueryRowContext(ctx, `
-		SELECT id FROM blueprint_runs
-		WHERE task_id = ?
-		ORDER BY started_at DESC, id DESC LIMIT 1
-	`, taskID).Scan(&id)
+		SELECT NOT EXISTS (
+			SELECT 1 FROM blueprint_runs other
+			WHERE other.task_id = self.task_id
+			  AND (other.started_at > self.started_at
+			       OR (other.started_at = self.started_at AND other.id > self.id))
+		)
+		FROM blueprint_runs self
+		WHERE self.id = ? AND self.task_id = ?
+	`, blueprintRunID, taskID).Scan(&isNewest)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return false, nil
 	}
 	if err != nil {
-		return nil, err
+		return false, err
 	}
-	return s.GetRun(ctx, orgID, id)
+	return isNewest, nil
 }
 
-func (s *blueprintStore) NewestRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
-	return s.NewestRunForTask(ctx, orgID, taskID)
+func (s *blueprintStore) IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error) {
+	return s.IsNewestRunForTask(ctx, orgID, taskID, blueprintRunID)
 }
 
 func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {

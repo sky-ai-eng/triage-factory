@@ -38,7 +38,7 @@ func newDelegateTestDB(t *testing.T) *sql.DB {
 // stages a task's next blueprint_run inserts with: one second after the task's
 // latest engagement, or now for its first. CURRENT_TIMESTAMP alone would not
 // do — SQLite stamps it to the second, so two runs a fixture mints back to back
-// tie, and "the task's newest run" (Blueprints.NewestRunForTask, which the
+// tie, and "the task's newest run" (Blueprints.IsNewestRunForTask, which the
 // terminal-on-last closing hooks read) would fall through to the id tiebreaker
 // and answer whichever id happens to sort higher. The sequence a fixture is
 // staging is the point of it, so it stamps the sequence.

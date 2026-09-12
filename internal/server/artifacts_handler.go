@@ -1156,11 +1156,11 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 			closeEligible = false
 			return nil
 		}
-		newest, e := tx.Blueprints.NewestRunForTask(ctx, orgID, taskID)
+		isNewest, e := tx.Blueprints.IsNewestRunForTask(ctx, orgID, taskID, br.ID)
 		if e != nil {
-			return fmt.Errorf("newest run for task: %w", e)
+			return fmt.Errorf("is newest run for task: %w", e)
 		}
-		if newest == nil || newest.ID != br.ID {
+		if !isNewest {
 			closeEligible = false
 			return nil
 		}

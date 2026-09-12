@@ -429,6 +429,12 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Blueprints.ActiveRunForTaskSystem(ctx, orgID, taskID); err != nil {
 			t.Errorf("Blueprints.ActiveRunForTaskSystem: %v", err)
 		}
+		// Goes through a SECURITY DEFINER function whose org check keys on
+		// tf.current_org_id(), so the claimless admin pool is the arm that
+		// proves the check skips rather than raising.
+		if _, err := stores.Blueprints.IsNewestRunForTaskSystem(ctx, orgID, taskID, blueprintRunID); err != nil {
+			t.Errorf("Blueprints.IsNewestRunForTaskSystem: %v", err)
+		}
 		if _, err := stores.Blueprints.ConversationsForBlueprintSystem(ctx, orgID, blueprintRunID); err != nil {
 			t.Errorf("Blueprints.ConversationsForBlueprintSystem: %v", err)
 		}

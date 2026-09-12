@@ -311,7 +311,7 @@ func seedBlueprintRunSQLite(t *testing.T, database *sql.DB, taskID string) strin
 	// started_at is stamped one second past the task's latest engagement
 	// rather than left to CURRENT_TIMESTAMP: SQLite stamps that to the second,
 	// so two runs seeded back to back tie, and "the task's newest run"
-	// (Blueprints.NewestRunForTask, which the terminal-on-last closing hooks
+	// (Blueprints.IsNewestRunForTask, which the terminal-on-last closing hooks
 	// read) would fall through to the id tiebreaker instead of the sequence
 	// the fixture is staging.
 	if _, err := database.Exec(

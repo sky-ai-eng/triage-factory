@@ -812,12 +812,12 @@ func (s *Spawner) CloseTaskIfTerminalAndResolved(ctx context.Context, orgID, con
 	if task == nil || task.ClaimedByAgentID == "" {
 		return
 	}
-	newest, err := s.blueprints.NewestRunForTaskSystem(ctx, orgID, br.TaskID)
+	isNewest, err := s.blueprints.IsNewestRunForTaskSystem(ctx, orgID, br.TaskID, br.ID)
 	if err != nil {
-		blueprintLog.Warn("terminal-on-last close: newest-run read failed; leaving task open (fail closed)", "task", br.TaskID, "error", err)
+		blueprintLog.Warn("terminal-on-last close: newest-run check failed; leaving task open (fail closed)", "task", br.TaskID, "error", err)
 		return
 	}
-	if newest == nil || newest.ID != br.ID {
+	if !isNewest {
 		return
 	}
 	if s.taskHasUnresolvedArtifacts(ctx, orgID, br.TaskID) {

@@ -59,10 +59,10 @@ func TestBlueprintStore_SQLite_OneActiveRunPerTask(t *testing.T) {
 	})
 }
 
-// TestBlueprintStore_SQLite_NewestRunForTask runs the shared newest-run suite
+// TestBlueprintStore_SQLite_IsNewestRunForTask runs the shared newest-run suite
 // against the SQLite impl.
-func TestBlueprintStore_SQLite_NewestRunForTask(t *testing.T) {
-	dbtest.RunNewestRunForTaskConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
+func TestBlueprintStore_SQLite_IsNewestRunForTask(t *testing.T) {
+	dbtest.RunIsNewestRunForTaskConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		blueprintID := "bp-newest-" + uuid.New().String()[:8]
