@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.14.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.13.3...v1.14.0) (2026-09-12)
+
+
+### Features
+
+* **agentproc:** the SDK transport learns a block-content opening message (TFAC-980) ([#1084](https://github.com/sky-ai-eng/triage-factory/issues/1084)) ([5771489](https://github.com/sky-ai-eng/triage-factory/commit/5771489b0ed2d33069744e268c02771496937085))
+* **boundaries:** every boundary stamps its reason (TFAC-984) ([#1067](https://github.com/sky-ai-eng/triage-factory/issues/1067)) ([7edbf67](https://github.com/sky-ai-eng/triage-factory/commit/7edbf67a9dc2733741a5137bb6ed2690961b1beb))
+* **db:** conversations gain ended_at/ended_reason and the two doors that stamp them (TFAC-970) ([#1062](https://github.com/sky-ai-eng/triage-factory/issues/1062)) ([0a160d1](https://github.com/sky-ai-eng/triage-factory/commit/0a160d1118af64f54b6eb23cd204a3395bd50a32))
+* **db:** land conversation_memory_attempts in both dialects (TFAC-972) ([#1063](https://github.com/sky-ai-eng/triage-factory/issues/1063)) ([23da671](https://github.com/sky-ai-eng/triage-factory/commit/23da671364ee590c330099e9f5bc3cb53dfbde19))
+* **db:** the store reads memory_pending — the owed list, the task read, the claim gate (TFAC-985) ([#1070](https://github.com/sky-ai-eng/triage-factory/issues/1070)) ([199354a](https://github.com/sky-ai-eng/triage-factory/commit/199354aa28ef764e42260f62fcf4a7c041e01287))
+* **delegate:** a conversation opens with the task's memories as rows and the task context under its own subtype (TFAC-992) ([#1083](https://github.com/sky-ai-eng/triage-factory/issues/1083)) ([12d1718](https://github.com/sky-ai-eng/triage-factory/commit/12d1718aafe685ec54b6e265cff4176ca223a758))
+* **delegate:** mirror the agent's memory file into conversation_memory as it is written (TFAC-983) ([#1066](https://github.com/sky-ai-eng/triage-factory/issues/1066)) ([e6baa44](https://github.com/sky-ai-eng/triage-factory/commit/e6baa44588623e5efdb0bb98607d8e8c587ab54f))
+* **delegate:** one drivable conversation per task, and a clone only when the task has no workspace (TFAC-987) ([#1081](https://github.com/sky-ai-eng/triage-factory/issues/1081)) ([7684d55](https://github.com/sky-ai-eng/triage-factory/commit/7684d5510028b8aa881b0f631d7c53d3a822ca27))
+* **delegate:** the evictor and the reaper collect a task's workspace, whatever state its conversations reached (TFAC-986) ([#1079](https://github.com/sky-ai-eng/triage-factory/issues/1079)) ([ca0e6fc](https://github.com/sky-ai-eng/triage-factory/commit/ca0e6fcf8a761d8d91dca7439580054cd8a181f2))
+* **delegate:** the native mission moves to the second system block and nothing is pinned through compaction (TFAC-988) ([#1082](https://github.com/sky-ai-eng/triage-factory/issues/1082)) ([d20f7ef](https://github.com/sky-ai-eng/triage-factory/commit/d20f7ef79afd94be4a2a20951804e08310dc13ab))
+* **delegate:** the SDK opening turn is the minted rows, and the system append is both blocks (TFAC-994) ([#1087](https://github.com/sky-ai-eng/triage-factory/issues/1087)) ([d89ed9d](https://github.com/sky-ai-eng/triage-factory/commit/d89ed9d01c6980a88bf6263102a99550b99e400d))
+* **delegate:** the task context lists the task's artifacts with their current state (TFAC-979) ([#1080](https://github.com/sky-ai-eng/triage-factory/issues/1080)) ([fdd7bb8](https://github.com/sky-ai-eng/triage-factory/commit/fdd7bb83e1a671a2629aca3de1ee0ff122c71443))
+* **delegate:** the workspace key is the task id (TFAC-975) ([#1075](https://github.com/sky-ai-eng/triage-factory/issues/1075)) ([7fb8f85](https://github.com/sky-ai-eng/triage-factory/commit/7fb8f85f7bbe59701bcfc871fde6f5bda79951fa))
+* **inference:** the system prompt splits into two blocks with the breakpoint on the first (TFAC-977) ([#1077](https://github.com/sky-ai-eng/triage-factory/issues/1077)) ([5724e21](https://github.com/sky-ai-eng/triage-factory/commit/5724e21f6ac3c45f7650257ab98f0d2dc8584c2d))
+* **inference:** the task-memory envelope brackets a run of memory rows (TFAC-978) ([#1078](https://github.com/sky-ai-eng/triage-factory/issues/1078)) ([68743a0](https://github.com/sky-ai-eng/triage-factory/commit/68743a06f0984f0082c874f4752862301b9c417b))
+* **memory:** conversation_memory gains source, loses entity_id and human_content (TFAC-971) ([#1064](https://github.com/sky-ai-eng/triage-factory/issues/1064)) ([65f01b0](https://github.com/sky-ai-eng/triage-factory/commit/65f01b033a301cfe1143578a444c4cf50609dfb9))
+* **memory:** the brain generates the memory a boundary left owing (TFAC-991) ([#1071](https://github.com/sky-ai-eng/triage-factory/issues/1071)) ([d67fe36](https://github.com/sky-ai-eng/triage-factory/commit/d67fe363951be94836fa2768b29db885f599b8df))
+* **memory:** the memory_owed doorbell — every boundary nudges the provisioner (TFAC-993) ([#1073](https://github.com/sky-ai-eng/triage-factory/issues/1073)) ([4667092](https://github.com/sky-ai-eng/triage-factory/commit/466709228811e21cd6f093e18d012b645c22b410))
+* **routing:** one live conversation per task, enforced (TFAC-996) ([#1072](https://github.com/sky-ai-eng/triage-factory/issues/1072)) ([5671813](https://github.com/sky-ai-eng/triage-factory/commit/56718130c1f5ee0666481e4f5a00adb9bfcb663f))
+* **systemllm:** a memory job, a caller-minted ledger id, and an is_error result reported as an error (TFAC-973) ([#1068](https://github.com/sky-ai-eng/triage-factory/issues/1068)) ([d0ae814](https://github.com/sky-ai-eng/triage-factory/commit/d0ae8148925ede9e4f1c1181e3be33fd1365b3bf))
+
+
+### Bug Fixes
+
+* **delegate:** a later conversation in the shared tree earns its own capabilities (TFAC-976) ([#1074](https://github.com/sky-ai-eng/triage-factory/issues/1074)) ([7f034f2](https://github.com/sky-ai-eng/triage-factory/commit/7f034f2e4c32e7a5bb42637c068967f50e44ccf0))
+* **usage:** derive CapRow's prop sync during render, not in an effect ([#1076](https://github.com/sky-ai-eng/triage-factory/issues/1076)) ([102b66a](https://github.com/sky-ai-eng/triage-factory/commit/102b66ac6dd2f845f926fb7083c8355fe2612649))
+
 ## [1.13.3](https://github.com/sky-ai-eng/triage-factory/compare/v1.13.2...v1.13.3) (2026-09-11)
 
 
