@@ -167,7 +167,7 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 	// No session id → the gate can't (and needn't) retry; the staged file plus
 	// a valid continue outcome already satisfy it.
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, "bpr-"+conversationID, "", task,
-		res(`{"outcome":"continue","summary":"did step work"}`), cwd, nil, "", "event", "")
+		res(`{"outcome":"continue","summary":"did step work"}`), cwd, runMirror(s, task, conversationID, blueprintRunID, cwd, nil), "", "event", "")
 
 	// Raw column read rather than a store method: this test is about
 	// processCompletion's write side (file ingestion + blueprint_run_id

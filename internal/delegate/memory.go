@@ -1,4 +1,5 @@
-// Run-memory file reading at termination, and the cross-run task-memory
+// Run-memory file reading — mirrored into conversation_memory as the agent
+// writes it and read once more at termination — and the cross-run task-memory
 // materializer a fresh agent invocation reads as ambient context. (The
 // completion envelope's bounded re-prompt-to-fix lives on the live driver —
 // see live.go.)
@@ -15,7 +16,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -196,6 +199,161 @@ func readConversationMemory(cwd string, prior *memoryFingerprint) (string, memor
 		return "", memoryFileStale
 	}
 	return content, state
+}
+
+// memoryMirror files the agent's memory file into conversation_memory as the
+// agent writes it, instead of only at the engagement's own ending.
+//
+// Without it the file is durable at two moments: the completion gate ingests
+// it, and each workspace snapshot carries it. Between those it exists on one
+// executor's disk and nowhere else — so a conversation a handler ends
+// mid-flight has whatever the agent last wrote on a machine the handler cannot
+// read, and in multi mode it is not even the same pod. Mirroring makes the row
+// track the file: one read per tool call, bounded by the file the agent chose
+// to write.
+//
+// One per engagement, holding exactly what the engagement knows and a later
+// check cannot re-derive: where the tree is, what the file held when this
+// engagement inherited it, and the digest of the content last filed — which is
+// what keeps a run that never touches the file from re-filing the same bytes
+// on every tool call. That digest is an optimization for the mid-run look
+// only; an ending settles unconditionally (see settle).
+//
+// Advisory throughout. A read error, a refused write, a spawner with no memory
+// store: each logs and returns, and the run is untouched. The gates that call
+// check last go on to write exactly what they wrote before.
+type memoryMirror struct {
+	memory         db.TaskMemoryStore
+	orgID          string
+	conversationID string
+	blueprintRunID string
+	// entityID is the task's primary entity — the join row every entity read
+	// reaches this memory through. Empty where the conversation has no task
+	// entity, which files the row and attaches nothing.
+	entityID  string
+	cwd       string
+	inherited *memoryFingerprint
+
+	// mu serializes the filings. Each hook point is single-threaded on its
+	// own, but an ending's final check runs on the goroutine driving the
+	// engagement while the SDK's sink still sits on the process reader's, so
+	// the two can meet on the last tool row of a run.
+	mu    sync.Mutex
+	filed *[sha256.Size]byte
+	// attached records that the primary join row landed. Tracked apart from
+	// filed because the two writes fail independently and the join row does
+	// not depend on the content: it is keyed (conversation, entity), so one
+	// success covers every later filing and a failure has to be retried on a
+	// later look the content digest would otherwise skip entirely.
+	attached bool
+}
+
+// newMemoryMirror builds the mirror for one engagement.
+//
+// inherited is the fingerprint of the file the engagement started with — nil
+// wherever there was nothing to distrust — and is the same value the
+// completion gate has always judged the file against, so the mirror and the
+// gate agree on whose work the file is by construction rather than by two
+// readings of one rule.
+func (s *Spawner) newMemoryMirror(orgID, conversationID, blueprintRunID, entityID, cwd string, inherited *memoryFingerprint) *memoryMirror {
+	return &memoryMirror{
+		memory:         s.taskMemory,
+		orgID:          orgID,
+		conversationID: conversationID,
+		blueprintRunID: blueprintRunID,
+		entityID:       entityID,
+		cwd:            cwd,
+		inherited:      inherited,
+	}
+}
+
+// check is the mid-run look, one per tool call: it files the memory file when
+// the agent has written something new and does nothing when it has not.
+//
+// Nothing is filed for a file that is absent, empty, unreadable, or still
+// byte-for-byte what this engagement inherited — the four answers the
+// completion gate has always refused to ingest — nor for content this mirror
+// has already filed. A nil mirror answers memoryFileMissing, which is the
+// honest reading: a caller with no tree yet has no file this conversation may
+// claim.
+func (m *memoryMirror) check(ctx context.Context) memoryFileState {
+	return m.file(ctx, false)
+}
+
+// settle is the look an ENDING takes — a park, a conclusion, a failure — and
+// it writes whatever the file says even when this mirror filed those exact
+// bytes already.
+//
+// The skip check is in-memory state about what THIS mirror wrote, not a read
+// of the row, so it cannot see a row someone else changed. That someone is
+// real: the memory upsert is keyed by conversation and is not claim-fenced, so
+// a zombie engagement's own ending files into a row its successor now owns.
+// Under the mid-run rule the successor would then never correct it — its
+// digest still matches its own unchanged file — and the conversation would
+// end holding the loser's narrative.
+//
+// Writing unconditionally at the ending is what closes that, and it restores
+// the property the completion gate had before this mirror existed and that is
+// far easier to reason about than any digest rule: at an ending, the row is
+// what the file says. The cost is one redundant upsert per ending.
+func (m *memoryMirror) settle(ctx context.Context) memoryFileState {
+	return m.file(ctx, true)
+}
+
+// file is check and settle's shared body; force is what settle adds.
+func (m *memoryMirror) file(ctx context.Context, force bool) memoryFileState {
+	if m == nil || m.memory == nil {
+		return memoryFileMissing
+	}
+	content, state := readConversationMemory(m.cwd, m.inherited)
+	if state != memoryFilePresent {
+		return state
+	}
+	sum := sha256.Sum256([]byte(content))
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Detached from the caller's cancellation for the reason the gate's own
+	// upsert is: a tool call that resolves as the engagement is stopped still
+	// wrote what it wrote, and this row is the only durable copy of it.
+	bgCtx := context.WithoutCancel(ctx)
+
+	// The content, unless this mirror already filed these exact bytes. An
+	// ending forces it (see settle).
+	if force || m.filed == nil || *m.filed != sum {
+		if _, err := m.memory.UpsertAgentMemorySystem(bgCtx, m.orgID, m.conversationID, m.blueprintRunID, content, domain.MemorySourceAgent); err != nil {
+			delegateLog.Warn("mirror the agent's memory file failed", "conversation", m.conversationID, "error", err)
+			return state
+		}
+		m.filed = &sum
+	}
+
+	// The primary join row, until it lands — an entity read reaches this
+	// memory through it and nowhere else, so a row filed without one is
+	// durable and invisible. Its own flag, not the content's: a failure here
+	// has to be retried on a later look, and every later look sees the same
+	// unchanged file the digest above just skipped. The gate's own
+	// attachConversationMemoryEntities is no backstop for it either — that
+	// runs at a conclusion, and a conversation ended at a boundary never
+	// reaches one.
+	if m.entityID == "" || m.attached {
+		return state
+	}
+	if err := m.memory.RecordEntityTouchSystem(bgCtx, m.orgID, m.conversationID, m.entityID, domain.MemoryRolePrimary); err != nil {
+		delegateLog.Warn("attach primary entity to mirrored conversation memory failed; retrying on this engagement's next look", "conversation", m.conversationID, "entity", m.entityID, "error", err)
+		return state
+	}
+	m.attached = true
+	return state
+}
+
+// afterToolCall is the native loop's AfterToolCall hook: mirror, then hand the
+// outcome back exactly as dispatched. The hook's rewrite power is deliberately
+// unused — the mirror observes the run, it never shapes what the model reads.
+func (m *memoryMirror) afterToolCall(ctx context.Context, _ domain.ToolCall, out agentloop.ToolOutcome) agentloop.ToolOutcome {
+	m.check(ctx)
+	return out
 }
 
 // repoFiles is the set of paths under the scratch dir that belong to the REPO,

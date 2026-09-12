@@ -84,6 +84,12 @@ type liveParkContext struct {
 	// what it structurally is — the SDK and native drivers each build their
 	// own park — rather than re-reading the row.
 	runtime string
+	// mirror is the parking engagement's memory mirror, checked one last time
+	// before the park writes anything. A park is an ending the agent may have
+	// written right up to, and this is the last moment anyone holds its tree.
+	// Nil for a caller with no tree — a cancel during bring-up, a fixture —
+	// where there is nothing to file.
+	mirror *memoryMirror
 }
 
 // liveOutcome is the disposition of one agent invocation, produced
@@ -122,10 +128,15 @@ type liveOutcome struct {
 // liveRunSpec bundles everything runLiveAndDrive needs to spawn, register,
 // drive, and park one live agent invocation.
 type liveRunSpec struct {
-	park        liveParkContext
-	opts        agentproc.RunOptions
-	perms       agentproc.PermissionHandler
-	sink        agentproc.Sink
+	park  liveParkContext
+	opts  agentproc.RunOptions
+	perms agentproc.PermissionHandler
+	sink  agentproc.Sink
+	// mirror files the agent's memory file as it is written: the driver hands
+	// it to the activity sink, which checks it on every tool row. The same
+	// mirror is on park, so the engagement's ending sees whatever the last
+	// tool call did not.
+	mirror      *memoryMirror
 	idleTimeout time.Duration // <=0 disables the idle backstop (the bounded resume)
 }
 
@@ -170,7 +181,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 		default:
 		}
 	}
-	sink := newActivitySink(spec.sink, activity)
+	sink := newActivitySink(spec.sink, activity, spec.mirror)
 
 	lr, err := agentproc.RunInteractive(ctx, spec.opts, sink, spec.perms)
 	if err != nil {
@@ -489,6 +500,22 @@ func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext
 // out, which threw away the one thing a user who just killed a wedged run is
 // likely to want back. A stop is a park with a reason attached.
 func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext, sessionID string) (fenced bool) {
+	// Before anything else this park writes: the agent's memory file, one last
+	// time. A park is an ending it may have written right up to, and the
+	// snapshot below is not a substitute — it puts the file where only an
+	// executor holding this tree can read it, while the row is what a handler
+	// on another pod sees.
+	//
+	// It runs ahead of the flip, so a park the fence goes on to refuse has
+	// filed anyway. That is the point rather than an oversight: the ordinary
+	// refusal here is a cross-pod stop, where control parked the row and
+	// released the claim on the user's behalf and this engagement is the only
+	// thing holding the file. Skipping it there would lose exactly the notes
+	// this mirror exists to keep. The rarer refusal — a successor mid-flight —
+	// is what settle's unconditional write answers: the successor's own ending
+	// re-asserts its file over anything a zombie filed first.
+	park.mirror.settle(ctx)
+
 	// The flip does not wait on the capture, and the durable state record is
 	// what makes that safe. It is opened FIRST — before the flip, never after —
 	// so no observer can see a row that says resumable with neither a blob nor
@@ -621,13 +648,20 @@ func resetIdleTimer(t *time.Timer, d time.Duration) {
 // stream message — the signal that the agent is actively working. The
 // non-blocking bump means a wedged driver never back-pressures the reader
 // goroutine that owns the sink.
+//
+// It is also where the SDK runtime mirrors the agent's memory file, on every
+// tool row the stream produces. The stream is the only place this runtime
+// learns that the agent did something: there is no per-call hook to hang the
+// check on the way the native loop has one, and a tool row IS a resolved tool
+// call (internal/agentproc/stream.go emits one per result).
 type activitySink struct {
 	inner    agentproc.Sink
 	activity chan<- struct{}
+	mirror   *memoryMirror
 }
 
-func newActivitySink(inner agentproc.Sink, activity chan<- struct{}) activitySink {
-	return activitySink{inner: inner, activity: activity}
+func newActivitySink(inner agentproc.Sink, activity chan<- struct{}, mirror *memoryMirror) activitySink {
+	return activitySink{inner: inner, activity: activity, mirror: mirror}
 }
 
 func (a activitySink) OnSession(id string) error {
@@ -637,7 +671,18 @@ func (a activitySink) OnSession(id string) error {
 
 func (a activitySink) OnMessage(m *domain.Message) error {
 	a.bump()
-	return a.inner.OnMessage(m)
+	if err := a.inner.OnMessage(m); err != nil {
+		// The row did not land, so this one is not a moment to file anything.
+		// It matters most for the fence — a refused write means a successor
+		// owns the conversation and this engagement may write nothing more
+		// about it, the memory row included — and costs nothing on the
+		// per-row failures, where the next tool row repeats the check.
+		return err
+	}
+	if m != nil && m.Role == "tool" {
+		a.mirror.check(context.Background())
+	}
+	return nil
 }
 
 func (a activitySink) bump() {

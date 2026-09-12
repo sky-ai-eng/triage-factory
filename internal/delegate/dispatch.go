@@ -1006,6 +1006,13 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 
+	// The mirror for this turn. No inherited fingerprint: a resume continues
+	// this conversation's own work in its own tree, so the file at the fixed
+	// path is its own however many engagements ago it was written. Built here
+	// rather than inside ResumeWithMessage because the exits below own it too
+	// — a resume that never came up still holds a tree with a file in it.
+	mirror := s.newMemoryMirror(orgID, conv.ID, blueprintRunID, task.EntityID, resumeCwd, nil)
+
 	// A resume can only continue the conversation if the Claude session
 	// transcript survived into the rehydrated workspace. When it didn't — the
 	// parking executor snapshotted without it, or nothing restored it (a wiped
@@ -1024,6 +1031,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// the queued message is flushed on the way out — it stays in the
 	// transcript, and there is no successor claim left to deliver it to.
 	if !sessionTranscriptExists(resumeCwd, conv.SessionID) {
+		mirror.settle(stepCtx)
 		s.failEngagement(conv.ID, errors.New("resume: session transcript did not survive"))
 		flushPendingInput()
 		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", userID,
@@ -1062,13 +1070,14 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		sidecar:           sidecar,
 		localGit:          localGit,
 		claimID:           conv.ClaimID,
+		mirror:            mirror,
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
 		// The agent worked in the rehydrated tree before the kill, so this
 		// park snapshots it — the whole point of a stop being a park is that
 		// the work survives the gesture.
 		park := resumeParkContext(orgID, conv, task, userID)
-		park.namespace, park.claudeCwd = namespace, resumeCwd
+		park.namespace, park.claudeCwd, park.mirror = namespace, resumeCwd, mirror
 		if outcome != nil {
 			park.costUSD = outcome.CostUSD
 		}
@@ -1076,17 +1085,17 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 	if rerr != nil {
+		mirror.settle(stepCtx)
 		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", userID, "resume failed: "+rerr.Error(), classifyFailureKind(rerr))
 		return
 	}
 	if outcome.Completion == nil {
+		mirror.settle(stepCtx)
 		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", userID, "resume produced no completion", domain.ConversationFailureNoResult)
 		return
 	}
 
-	// No inherited-memory fingerprint: a resume continues this run's own
-	// conversation in its own tree, so the file at the fixed path is its work.
-	parked, fenced := s.processCompletion(stepCtx, orgID, conv.ID, blueprintRunID, conv.ClaimID, *task, outcome.Completion, resumeCwd, nil, conv.SessionID, "manual", userID)
+	parked, fenced := s.processCompletion(stepCtx, orgID, conv.ID, blueprintRunID, conv.ClaimID, *task, outcome.Completion, resumeCwd, mirror, conv.SessionID, "manual", userID)
 	if fenced {
 		// A successor owns the conversation. Finalizing the blueprint off
 		// this turn's result would terminate a run someone else is driving,

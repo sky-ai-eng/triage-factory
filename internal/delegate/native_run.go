@@ -55,6 +55,12 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	namespace := memoryNamespace(cfg.blueprintRunID)
 	claudeCwd := cfg.wtPath
 
+	// The mirror this engagement files its memory file through, built below
+	// once the inherited fingerprint it judges the file against exists. The
+	// exits declared here capture it by reference; every one of them fires
+	// after that, so none of them sees it nil.
+	var mirror *memoryMirror
+
 	// The park a stop lands on, wherever the stop catches this engagement.
 	stopped := func() engagementDisposition {
 		fenced := s.parkConversationOpen(ctx, liveParkContext{
@@ -68,6 +74,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			claimID:        cfg.claimID,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 			runtime:        domain.ConversationRuntimeNative,
+			mirror:         mirror,
 		}, "")
 		return engagementDisposition{fenced: fenced}
 	}
@@ -115,6 +122,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	}
 
 	priorMemory := s.prepareInheritedMemory(stagingCtx, orgID, conversationID, claudeCwd, owned, handedOff)
+	mirror = s.newMemoryMirror(orgID, conversationID, cfg.blueprintRunID, task.EntityID, claudeCwd, priorMemory)
 	stagingSpan.End()
 
 	// Composed before the jail is launched, so the fallible half fails the claim
@@ -190,7 +198,10 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		Tools:       tools,
 		Guards:      []agentloop.Guard{&spendGuard{spawner: s, orgID: orgID, teamID: cfg.teamID}},
 		Hooks: agentloop.Hooks{
-			BeforeToolCall:      s.ghCommandGate(orgID, conversationID),
+			BeforeToolCall: s.ghCommandGate(orgID, conversationID),
+			// Every tool call is a chance the agent just wrote its memory
+			// file, so every tool call is where the mirror looks.
+			AfterToolCall:       mirror.afterToolCall,
 			ShouldStopAfterTurn: s.artifactContractNudge(orgID, conversationID, task, cfg),
 		},
 		Log: delegateLog,
@@ -215,7 +226,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	})
 
 	return engagementDisposition{
-		fenced: s.recordNativeResult(ctx, orgID, conversationID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, priorMemory),
+		fenced: s.recordNativeResult(ctx, orgID, conversationID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, mirror),
 	}
 }
 
@@ -576,7 +587,7 @@ func (s *Spawner) recordNativeResult(
 	namespace, claudeCwd, triggerType, creatorUserID string,
 	startTime time.Time,
 	result agentloop.Result,
-	priorMemory *memoryFingerprint,
+	mirror *memoryMirror,
 ) (fenced bool) {
 	// A fence trip inside the loop (a transcript insert, a drain flush)
 	// surfaces as the engagement's failure. It is not a failure to record:
@@ -601,9 +612,15 @@ func (s *Spawner) recordNativeResult(
 			claimID:        cfg.claimID,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 			runtime:        domain.ConversationRuntimeNative,
+			mirror:         mirror,
 		}, "")
 
 	case agentloop.ResultFailed:
+		// The failure ends the engagement, and this is the last moment anyone
+		// holds its tree: whatever the agent had written by the time the loop
+		// broke is its account of the work, and a failed conversation is
+		// exactly the one a person will want it from.
+		mirror.settle(ctx)
 		reason := "native agent loop failed"
 		if result.Err != nil {
 			reason = result.Err.Error()
@@ -625,19 +642,17 @@ func (s *Spawner) recordNativeResult(
 			creatorUserID:  creatorUserID,
 			reason:         db.ParkIdle(),
 			runtime:        domain.ConversationRuntimeNative,
+			mirror:         mirror,
 		}, "")
 		return false
 	}
 
-	// Concluded. Record the conversation's memory exactly as processCompletion
-	// does — the agent's own file, filed as source=agent, and no row at all
-	// when it wrote none.
-	agentContent, fileState := readConversationMemory(claudeCwd, priorMemory)
-	if fileState == memoryFilePresent {
-		if _, err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, cfg.blueprintRunID, agentContent, domain.MemorySourceAgent); err != nil {
-			delegateLog.Warn("upsert memory for conversation failed", "conversation", conversationID, "error", err)
-		}
-	} else {
+	// Concluded. One last look at the file, exactly as processCompletion
+	// takes: a final turn that wrote after its last tool call is the whole
+	// reason the mirror is not the only read. No row is written when the agent
+	// wrote none — the state is logged instead, because each shape of "no
+	// file" points somewhere different when a run looks wrong afterwards.
+	if fileState := mirror.settle(ctx); fileState != memoryFilePresent {
 		delegateLog.Debug("no usable memory file at termination (no memory row written)", "conversation", conversationID, "state", fileState)
 	}
 	s.attachConversationMemoryEntities(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID)

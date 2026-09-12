@@ -159,7 +159,7 @@ func TestBlueprintHandoff_MemorySurvivesTheFixedPathClear(t *testing.T) {
 	// Step 1 writes the fixed path and terminates.
 	writeAgentMemory(t, cwd, "step 1 chose approach X because Y")
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, blueprintRunID, "", task,
-		res(`{"outcome":"continue","summary":"did step work"}`), cwd, nil, "", "event", "")
+		res(`{"outcome":"continue","summary":"did step work"}`), cwd, runMirror(s, task, conversationID, blueprintRunID, cwd, nil), "", "event", "")
 
 	// Step 2's run start, in the order runAgent performs it.
 	materializePriorMemories(s.taskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), task.EntityID, blueprintRunID, nil)
