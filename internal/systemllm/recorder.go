@@ -44,6 +44,13 @@ const (
 	// makes for itself. A probe that stayed off the ledger would be the one
 	// charge on the bill with nothing in the product to explain it.
 	JobProbe = "probe"
+	// JobMemory is one memory generation for a conversation that ended
+	// without its agent having written one, reconstructed from the
+	// transcript. Unlike the two background jobs above it is per conversation
+	// rather than per cycle, and the attempt row recording that generation
+	// names the ledger row this job spends — which is why its caller mints
+	// the ledger id itself (Call.RunID) instead of reading one back.
+	JobMemory = "memory"
 )
 
 // Recorder writes one system_llm_runs row per agentproc.Run call. A nil
@@ -76,6 +83,10 @@ type Call struct {
 	Job       string // one of the Job* constants
 	Model     string
 	StartedAt time.Time
+	// RunID, when non-empty, is the id the system_llm_runs row is inserted
+	// with instead of the one the store would generate. See
+	// CompleteOptions.RunID for why a caller mints one.
+	RunID string
 	// Metadata is optional per-job context (e.g. {"batch_size": 10}).
 	// nil/empty serializes to SQL NULL.
 	Metadata map[string]any
@@ -133,12 +144,19 @@ func (r *Recorder) Record(ctx context.Context, c Call, outcome *agentproc.Outcom
 	r.insert(ctx, row, c)
 }
 
-// insert marshals c.Metadata onto row and inserts it, detached from the
-// caller's ctx. Shared by Record (local-mode, agentproc.Outcome-shaped) and
-// RecordDirect (multi-mode, direct-API-shaped) — everything upstream of the
-// row differs between the two call paths, but landing it in the store does
-// not.
+// insert stamps the caller-minted row id, marshals c.Metadata onto row, and
+// inserts it, detached from the caller's ctx. Shared by Record (local-mode,
+// agentproc.Outcome-shaped) and RecordDirect (multi-mode, direct-API-shaped)
+// — everything upstream of the row differs between the two call paths, but
+// landing it in the store does not, and the id is one of the parts that does
+// not: it lives here rather than at either row literal so the two paths
+// cannot come to disagree about whether a supplied id is honored.
 func (r *Recorder) insert(ctx context.Context, row domain.SystemLLMRun, c Call) {
+	// Empty leaves the id to the store, which generates one. Nothing here
+	// reports an id back, so honoring a supplied one is the only way a
+	// caller's own row can name this one.
+	row.ID = c.RunID
+
 	if len(c.Metadata) > 0 {
 		if b, err := json.Marshal(c.Metadata); err != nil {
 			log.Warn("marshal system llm run metadata failed; recording without it", "job", c.Job, "error", err)
