@@ -29,11 +29,11 @@ import (
 // casts, RLS parameters, and driver NULL scanning are deliberately out of
 // scope for sharing.
 //
-// That last rule is why the taskMemory*SQL and workspaceKey*SQL fragment
-// builders are listed below rather than hoisted: they compose SQL text, and
-// they are identical today only because the predicate they spell happens to
-// need no placeholder, cast or json guard yet. Sharing them would mean undoing
-// the abstraction the first time one dialect needs its own spelling — the same
+// That last rule is why the task*SQL and workspaceKey*SQL fragment builders
+// are listed below rather than hoisted: they compose SQL text, and they are
+// identical today only because the predicate they spell happens to need no
+// placeholder, cast or json guard yet. Sharing them would mean undoing the
+// abstraction the first time one dialect needs its own spelling — the same
 // reason Tier B stays duplicated. What must NOT drift is the predicate's
 // meaning, and that is pinned where it belongs: the dual-dialect conformance
 // suites assert both backends answer alike.
@@ -97,6 +97,7 @@ var identicalHelperRatchet = []string{
 	"scanTeamSettings",
 	"scanWrittenEntity",
 	"splitRepoSlug",
+	"taskLiveConversationSQL",
 	"taskMemoryAttemptSQL",
 	"taskMemoryOwedRowSQL",
 	"taskMemoryPendingSQL",

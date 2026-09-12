@@ -890,8 +890,16 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 					t.Fatalf("EnqueueConversation: %v", err)
 				}
 				// The dialect stamps its own runtime at mint; rewrite it so
-				// one backend covers both engines.
-				if _, err := conn.Exec(`UPDATE conversations SET runtime = ? WHERE id = ?`, runtime, convID); err != nil {
+				// one backend covers both engines. started_at is stamped in
+				// the same pass, one second apart per mint: the task clause
+				// picks the task's NEWEST un-ended conversation, and SQLite's
+				// CURRENT_TIMESTAMP resolves to the second, so a suite that
+				// staged its rows inside one tick would be asking the id
+				// tiebreak — a random uuid — which one that is.
+				if _, err := conn.Exec(
+					`UPDATE conversations SET runtime = ?, started_at = datetime('now', ? || ' seconds') WHERE id = ?`,
+					runtime, fmt.Sprintf("%+d", idx), convID,
+				); err != nil {
 					t.Fatalf("set runtime: %v", err)
 				}
 				return convID

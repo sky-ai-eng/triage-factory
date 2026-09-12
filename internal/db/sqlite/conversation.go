@@ -1670,6 +1670,28 @@ func (s *conversationStore) LastAgentActivityAtSystem(ctx context.Context, orgID
 	return at, true, nil
 }
 
+// NewestWorktreePathForTaskSystem is the Postgres twin in the other dialect —
+// the worktree_path of the task's newest top-level conversation that recorded
+// one, "" when none did.
+func (s *conversationStore) NewestWorktreePathForTaskSystem(ctx context.Context, orgID, taskID string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	var path string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT r.worktree_path FROM conversations r
+		WHERE r.task_id = ?
+		  AND r.parent_conversation_id IS NULL
+		  AND COALESCE(r.worktree_path, '') != ''
+		ORDER BY r.started_at DESC, r.id DESC
+		LIMIT 1
+	`, taskID).Scan(&path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return path, err
+}
+
 // ListParkedWorktreePathsSystem returns the worktree dirs the startup sweep must
 // keep warm — parked `open` runs whose owning blueprint_run is still 'running'. A
 // parked run under an already-terminal blueprint_run is NOT resumable (every

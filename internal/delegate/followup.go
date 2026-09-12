@@ -307,14 +307,22 @@ func (s *Spawner) modelFollowUpBlock(ctx context.Context, orgID string, conv *do
 // (interactive, reserved) is not this gate's business, matching the SQL's
 // LEFT JOIN.
 //
-// It mirrors the blueprint clause ONLY. blueprintDrivableSQL's other clause —
-// the task's unmet memory — is not mirrored here, and it rests on the
-// one-live-conversation-per-task rule to be sound: a task becomes
-// memory-pending only when a boundary lands, and a boundary on the
-// conversation being claimed stops that conversation anyway. With a second
-// live conversation on the task there would be a claim in flight that the
-// boundary does not stop, and a memory check here would patch that symptom
-// where the rule is what actually closes it.
+// It mirrors the blueprint clause ONLY, and the name says which: it answers
+// from a blueprint_runs row already in hand, and what the dispatcher re-checks
+// after claiming is the blueprint columns, which can move between the scan and
+// the read.
+//
+// blueprintDrivableSQL's two other clauses are not mirrored here, for the same
+// reason in both cases: each is about the TASK, and both rest on the
+// one-live-conversation-per-task rule to be sound.
+//
+// The task's live conversation — is this row still the newest non-ended one —
+// changes only when a boundary lands, and a boundary on the conversation being
+// claimed stops that conversation anyway. The task's unmet memory is the same
+// shape: a task becomes memory-pending only at a boundary. With a second live
+// conversation on the task there would be a claim in flight that no boundary
+// stops, and a check here would patch that symptom where the rule is what
+// actually closes it.
 func blueprintDrivableForClaim(br *domain.BlueprintRun, stepIndex *int) bool {
 	if br == nil {
 		return true

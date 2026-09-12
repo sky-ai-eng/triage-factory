@@ -24,9 +24,11 @@
 // sweep is the wider of the two on purpose: it enumerates every top-level
 // conversation on the key (ListReapableSnapshotKeysSystem) rather than the
 // states listed above, so a blob can never end up in a state the only thing
-// that collects it does not look at. What the two must keep agreeing on is
-// the key itself: both address the task, and a write under any other key
-// would put blobs where retention never looks.
+// that collects it does not look at. It is also the ONLY thing that drops a
+// blob: no terminal discards one, because the key is the task and a blueprint
+// reaching its end is not the task reaching its own. What the two must keep
+// agreeing on is the key itself: both address the task, and a write under any
+// other key would put blobs where retention never looks.
 
 package delegate
 
@@ -1018,8 +1020,8 @@ func snapshotReader(r io.Reader) (io.ReadCloser, string, error) {
 }
 
 // DiscardWorkspaceSnapshot is the exported seam onto the snapshot discard, for
-// a caller outside the package that terminates a blueprint's work by a route of
-// its own rather than through terminateBlueprint. Idempotent and nil-safe.
+// a caller outside the package that has established a task's workspace is not
+// wanted again. Idempotent and nil-safe.
 //
 // It takes the task id, not a conversation id: the snapshot key is the
 // workspace key (see snapshotKey), so a conversation id names a blob that

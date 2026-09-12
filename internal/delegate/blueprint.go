@@ -173,6 +173,13 @@ func (s *Spawner) terminateBlueprint(
 	// the task done — leave it in the queue so a human can inspect the
 	// steps' run memory (durable in conversation_memory) and decide what to do next.
 
+	// The warm tree goes, and the durable copy stays. That is deliberate and it
+	// is what makes the task's next conversation cheap rather than free: the
+	// snapshot blob is keyed by the task and survives every terminal, so the
+	// next delegation rehydrates the tree at the same path — one cold
+	// rehydrate, the cost a resume on another executor already pays. Keeping
+	// the directory instead would mean a checked-out branch on disk belonging
+	// to a blueprint that has stopped, which the boot reconcile then orphans.
 	if !skipCleanup {
 		s.runBlueprintWorktreeCleanup(blueprintRunID, workspaceKey(taskID), cfg)
 	}
@@ -185,29 +192,18 @@ func (s *Spawner) terminateBlueprint(
 	// sweep is the backstop.
 	s.reclaimBlueprintStepStaging(bgCtx, orgID, blueprintRunID)
 
-	// The durable workspace snapshot outlives every terminal but `failed`. The
-	// worktree above was just cleaned, so for each of them this blob is the only
-	// copy of the work left:
+	// Nothing discards the workspace snapshot here, whatever the terminal. The
+	// blob is keyed by the TASK, and a terminal is the blueprint's end rather
+	// than the task's: a completed blueprint's work is what a follow-up
+	// continues from, a cancelled one is work somebody stopped and is most
+	// likely to want back, and a failed one is a task whose next attempt has
+	// to start somewhere. A failure especially — the infrastructure under the
+	// run died, which says nothing about the tree it died in.
 	//
-	//   - completed: the blueprint did its job and the final step's workspace is
-	//     what a follow-up on that work continues from. Discarding here is what
-	//     made a clean finish the one outcome nobody could come back to.
-	//   - aborted: the completed+abort step run is message-resumable.
-	//   - cancelled: someone stopped this work, and the step parked `open`
-	//     rather than being torn down. Throwing the workspace away at exactly
-	//     the moment a user is most likely to want it back is the behavior this
-	//     retention exists to stop.
-	//
-	// All three are collected by the retention TTL sweep once they age out (it
-	// enumerates `open` and every `completed` run), so the cost is a blob that
-	// expires rather than a workspace that is gone. `failed` still discards
-	// immediately: the infrastructure under the run died, so there is nothing
-	// coherent to resume onto, and any blob is from an earlier step's park.
-	// Keyed by the task (the shared workspace's key); idempotent, so the
-	// discard is a no-op for a task that never snapshotted.
-	if status == domain.BlueprintRunStatusFailed {
-		s.discardWorkspaceSnapshot(bgCtx, orgID, workspaceKey(taskID))
-	}
+	// Retention is what collects them instead, on the task's idleness rather
+	// than on any conversation's outcome — which is what makes keeping a
+	// failed step's blob safe rather than a leak. See workspace_snapshot.go's
+	// write-policy note for the pair.
 
 	// Drain the task's queue exactly once for the blueprint (independent of
 	// how many steps ran).

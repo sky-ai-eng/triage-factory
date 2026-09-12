@@ -1699,6 +1699,30 @@ func (s *conversationStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, t
 	return ids, rows.Err()
 }
 
+// NewestWorktreePathForTaskSystem returns the worktree_path of the task's
+// newest top-level conversation that recorded one — the tree the task's next
+// conversation opens in. "" when none did. Admin pool; see the interface for
+// why a miss is an answer rather than an error.
+func (s *conversationStore) NewestWorktreePathForTaskSystem(ctx context.Context, orgID, taskID string) (string, error) {
+	if !isValidUUID(taskID) {
+		return "", nil
+	}
+	var path string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT r.worktree_path FROM conversations r
+		WHERE r.org_id = $1
+		  AND r.task_id = $2
+		  AND r.parent_conversation_id IS NULL
+		  AND COALESCE(r.worktree_path, '') != ''
+		ORDER BY r.started_at DESC, r.id DESC
+		LIMIT 1
+	`, orgID, taskID).Scan(&path)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return path, err
+}
+
 // ListParkedWorktreePathsSystem returns the worktree dirs the startup sweep
 // must keep warm — parked `open` conversations whose owning blueprint_run is
 // still 'running'. A parked conversation under an already-terminal
