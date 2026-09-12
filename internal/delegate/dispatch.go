@@ -45,6 +45,11 @@ import (
 // outlasts it is not one more retry away.
 const maxClaimAttempts = 5
 
+// ledgerWriteTimeout bounds the conversation_worktrees write a claim makes on
+// its way to starting the agent. Long enough that only a genuinely stuck store
+// hits it, short enough that one does not hold the step behind it.
+const ledgerWriteTimeout = 5 * time.Second
+
 // Default cadences for RunDispatcher, exported so main can tune them and tests
 // can drive the loop fast. The scan is the correctness backstop (a dropped wake
 // only defers a claim to the next tick); the wake channel is the latency nudge.
@@ -1543,8 +1548,15 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// Idempotent on (conversation_id, repo_id, ref), so a re-claim writes
 		// nothing. Log-and-continue: a failure degrades to denied pushes
 		// (a clear 403), never a failed step.
+		//
+		// Detached from the step's cancellation so a shutdown mid-claim still
+		// leaves the row a resumed engagement's pushes resolve through, and
+		// bounded because WithoutCancel drops the parent's deadline along with
+		// it: this write sits inline on the path to starting the agent, so a
+		// store stuck on a lock costs a denied push, never the step's start.
 		if s.conversationWorktrees != nil && owner != "" && repo != "" && prNumber > 0 {
-			if _, _, werr := s.conversationWorktrees.InsertSystem(context.WithoutCancel(ctx), orgID, domain.ConversationWorktree{
+			ledgerCtx, cancelLedger := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
+			if _, _, werr := s.conversationWorktrees.InsertSystem(ledgerCtx, orgID, domain.ConversationWorktree{
 				ConversationID: conv.ID,
 				RepoID:         owner + "/" + repo,
 				Path:           wt,
@@ -1553,6 +1565,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 				dispatchLog.Warn("record shared worktree in conversation_worktrees failed; pushes to this repo will be denied for this conversation",
 					"conversation", conv.ID, "repo", owner+"/"+repo, "error", werr)
 			}
+			cancelLedger()
 		}
 	case "jira":
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)

@@ -4,8 +4,10 @@ import (
 	"context"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -130,5 +132,62 @@ func TestGitAuthorizeDecision_LaterStepMayPushTheSharedTreesBranch(t *testing.T)
 	}
 	if slices.Contains(after.AllowedRefs, "refs/heads/somewhere-else") {
 		t.Errorf("AllowedRefs = %v, want a ref the tree is not on to stay out of it", after.AllowedRefs)
+	}
+}
+
+// blockingWorktreeStore answers InsertSystem only when the context it was
+// handed ends, and reports whether that context carried a deadline. Everything
+// else is unreachable on the claim path.
+type blockingWorktreeStore struct {
+	db.ConversationWorktreeStore
+	hadDeadline chan bool
+}
+
+func (b *blockingWorktreeStore) InsertSystem(ctx context.Context, _ string, _ domain.ConversationWorktree) (bool, string, error) {
+	_, ok := ctx.Deadline()
+	b.hadDeadline <- ok
+	<-ctx.Done()
+	return false, "", ctx.Err()
+}
+
+// TestBuildStepConfig_LedgerWriteDoesNotStallTheStep is the best-effort half of
+// the row, which the log-and-continue alone does not buy: the write is detached
+// from the step's cancellation, and context.WithoutCancel drops the parent's
+// deadline with it. A store wedged on a lock would then hold buildStepConfig
+// open forever — inline, before the agent starts — so the claim owes the write
+// a deadline of its own.
+func TestBuildStepConfig_LedgerWriteDoesNotStallTheStep(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	wt := t.TempDir()
+	f := seedStepFixture(t, "github", "ledger-bound", 2, wt)
+	seedTaskRepoRegistry(t, f)
+
+	blocking := &blockingWorktreeStore{
+		ConversationWorktreeStore: sqlitestore.New(f.database).ConversationWorktrees,
+		hadDeadline:               make(chan bool, 1),
+	}
+	f.s.conversationWorktrees = blocking
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.claimStep(t, f.blueprintRun(t), 1)
+	}()
+
+	select {
+	case ok := <-blocking.hadDeadline:
+		if !ok {
+			t.Fatal("the ledger write got a context with no deadline; a stuck store would hold the step open indefinitely")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the claim never reached the ledger write")
+	}
+
+	// And the step gets past it: the deadline fires, the failure is logged, and
+	// the config comes back.
+	select {
+	case <-done:
+	case <-time.After(ledgerWriteTimeout + 30*time.Second):
+		t.Fatal("buildStepConfig did not return after the ledger write's deadline elapsed")
 	}
 }
