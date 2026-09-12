@@ -1167,6 +1167,17 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		go s.onJiraChanged(orgID)
 	}
 
+	// A background-jobs model this org did not have is the setting every
+	// memory generation that failed `no_model` was waiting on, so the save is
+	// the moment to re-run them — the org-wide doorbell, which sweeps the
+	// backlog ignoring the attempt backoff rather than letting each owed
+	// conversation age out of it one at a time. Mirrors the scorer's own
+	// config-save trigger, and is computed from what this save CHANGED so a
+	// re-send of the stored value rings nothing.
+	if orgSet.BackgroundJobsModel != "" && orgSet.BackgroundJobsModel != prevOrgSet.BackgroundJobsModel {
+		s.kickMemoryOwed(orgID, "")
+	}
+
 	resp, ok := s.readOrgSettings(w, r, orgID, userID, &orgSet)
 	if !ok {
 		return

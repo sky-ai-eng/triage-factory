@@ -245,6 +245,12 @@ func (a *App) buildExecution() error {
 	// subscriber (ExtensionAPI.Bus()) can observe run lifecycle — the
 	// bus is built in buildInfra, which runs before buildExecution.
 	a.spawner.SetEventPublisher(a.bus)
+	// The memory doorbell every boundary this spawner stamps rings. Wired on
+	// every role that has a spawner, not just the brain-capable ones: an
+	// executor is exactly the process whose failures and step advances the
+	// brain would otherwise only learn about from its next sweep, and
+	// memoryOwed relays over tf_ctl for it.
+	a.spawner.SetOnMemoryOwed(a.memoryOwed)
 	// Replace the constructor's random per-boot uuid with the persistent
 	// instance-registry identity registerInstance minted above —
 	// claims.executor_id on claimed rows must equal the registry id, and

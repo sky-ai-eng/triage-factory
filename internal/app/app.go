@@ -546,6 +546,10 @@ func (a *App) wire() {
 		a.srv.SetOnGitHubChanged(a.reloader.onGitHubChanged)
 		a.srv.SetOnJiraChanged(a.reloader.onJiraChanged)
 		a.srv.SetOnSourcesChanged(a.sourcesChanged)
+		// The boundaries the server itself stamps (requeue/undo, takeover,
+		// delegate, team archive) and the configuration saves that may have
+		// fixed what a failed generation was waiting on.
+		a.srv.SetOnMemoryOwed(a.memoryOwed)
 	}
 }
 

@@ -38,11 +38,25 @@ func RunSweep(ctx context.Context, mgr *Manager, interval time.Duration) {
 // background-jobs model or an LLM credential the re-kick for every task that
 // setting left waiting, rather than a wait for the backoff to age out.
 //
+// An empty orgID is refused, and that is load-bearing rather than defensive:
+// sweep treats an empty org as EVERY org, so a doorbell that reached it would
+// turn one notification into a fleet-wide pass with the backoff disabled —
+// amplifying a single malformed relay message into every tenant's backlog. No
+// caller here ever legitimately wants that; the ticker's fleet-wide scope calls
+// sweep directly. Refused at the CONSUMER, for the same reason
+// ai.Manager.Trigger refuses its own empty org: a relay dispatch hands on
+// whatever arrived on the wire, so the door that knows what an empty value
+// would mean is the one that has to say no.
+//
 // Fire-and-forget, and bounded: the caller is a relay dispatch that must not
 // block on a model call, and must not be able to leak a goroutine per
 // notification either.
 func (m *Manager) Nudge(orgID, conversationID string) {
 	if m == nil {
+		return
+	}
+	if orgID == "" {
+		log.Warn("memory doorbell: empty org; dropping the nudge", "conversation", conversationID)
 		return
 	}
 	go func() {

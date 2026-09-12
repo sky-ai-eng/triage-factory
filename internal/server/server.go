@@ -182,7 +182,20 @@ type Server struct {
 	// resumed polled source is re-dued so it starts again on the next wake
 	// rather than after a full interval. Nil until SetOnSourcesChanged runs.
 	onSourcesChanged func(orgID, kind string)
-	scorerTrigger    func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
+	// onMemoryOwed fires after a boundary this server stamped ends a
+	// conversation, so the brain settles the memory it may owe now rather than
+	// at the next backstop sweep. It carries the conversation because that is
+	// what is owed against; the empty-id form is the org-wide re-kick a
+	// configuration save publishes, when the setting the last attempts failed
+	// on may have just been fixed.
+	//
+	// The callback relays — in process when this pod runs the brain, over
+	// tf_ctl otherwise — so a handler served by a standby control pod reaches
+	// the holder that actually generates. Nil until SetOnMemoryOwed runs, and
+	// nil is survivable: the doorbell only ever shortens the wait, it is never
+	// the thing that makes the memory land.
+	onMemoryOwed  func(orgID, conversationID string)
+	scorerTrigger func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
 	// profilerTrigger kicks the per-org repo-profiling manager. force=true
 	// bypasses the 3-day TTL — the explicit "Re-profile" button and a
 	// repo-set change both want an immediate re-profile rather than waiting
@@ -800,10 +813,11 @@ func (s *Server) routes() {
 	// there is no endpoint to set it explicitly. POST /api/teams is the
 	// org-admin "add team" affordance (multi-only; 404 in local).
 	th := &teamsHandler{
-		tx:        s.tx,
-		az:        s.az,
-		allStores: s.allStores,
-		spawner:   func() *delegate.Spawner { return s.spawner },
+		tx:         s.tx,
+		az:         s.az,
+		allStores:  s.allStores,
+		spawner:    func() *delegate.Spawner { return s.spawner },
+		memoryOwed: s.kickMemoryOwed,
 	}
 	s.apiMutating("POST /api/teams/list", th.handleTeamsList)
 	s.apiMutating("POST /api/teams", th.handleTeamCreate)
@@ -1112,8 +1126,9 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/github/repos/refresh", s.handleGitHubReposRefresh)
 	se := &settingsHandler{
 		tx: s.tx, az: s.az,
-		bedrockRole: func() bedrockRoleResolver { return s.bedrockRole },
-		kickJira:    s.kickJiraChanged,
+		bedrockRole:       func() bedrockRoleResolver { return s.bedrockRole },
+		kickJira:          s.kickJiraChanged,
+		kickMemoryBacklog: func(orgID string) { s.kickMemoryOwed(orgID, "") },
 	}
 	s.apiMutating("POST /api/github/preflight-ssh", se.handleGitHubPreflightSSH)
 	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
@@ -1682,6 +1697,26 @@ func (s *Server) SetOnGitHubChanged(fn func(orgID string)) {
 // See the field.
 func (s *Server) SetOnSourcesChanged(fn func(orgID, kind string)) {
 	s.onSourcesChanged = fn
+}
+
+// SetOnMemoryOwed registers the memory doorbell. See the field.
+func (s *Server) SetOnMemoryOwed(fn func(orgID, conversationID string)) {
+	s.onMemoryOwed = fn
+}
+
+// kickMemoryOwed rings the doorbell for one ended conversation, or — with an
+// empty id — for the whole org. The single call site shape for every stamper in
+// this package and for the configuration saves, so a caller never has to
+// remember the nil check.
+//
+// Synchronous: the relay is a nil-safe channel nudge on the brain and one
+// pg_notify off it, neither of which is worth a goroutine per boundary. The
+// generation it triggers is the provisioner's own detached work.
+func (s *Server) kickMemoryOwed(orgID, conversationID string) {
+	if s.onMemoryOwed == nil {
+		return
+	}
+	s.onMemoryOwed(orgID, conversationID)
 }
 
 // SetOnJiraChanged registers a callback for Jira config changes. This restarts
