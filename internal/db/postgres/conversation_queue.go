@@ -233,10 +233,19 @@ const eligibleForDrivingSQL = needsDrivingSQL
 // and no later write can put it back — the opening turn is composed once. A
 // conversation with no task cannot owe one, hence the NULL arm.
 //
-// Its Go far-side mirror, delegate.blueprintDrivableForClaim, deliberately
-// does NOT re-check this: the only way a task becomes pending after the scan
-// is a new boundary on it, and every boundary stops the very conversation the
-// scan just claimed.
+// This gate is the ONLY place the memory rule is enforced, and it is
+// re-applied on every claim. delegate.blueprintDrivableForClaim — the Go
+// predicate the dispatcher re-checks with after claiming — mirrors the
+// blueprint clause alone, and the limit of that is worth stating rather than
+// glossing. For a task holding ONE conversation the omission is sound: a task
+// becomes pending only when a boundary lands, and a boundary on the
+// conversation being claimed stops that conversation anyway. A task may hold
+// two at once, though — blueprint_runs_one_active_auto_run_per_task
+// serializes only event-triggered running runs, so a manual run alongside one
+// is legal — and there one conversation's pre-agent failure stamps its
+// boundary after the other was already claimed, so that claim runs with the
+// debt unpaid. This gate closes the window for every LATER claim, not for the
+// one already in flight.
 //
 // TODO(TFAC-991): nothing generates the owed memory yet, so a task that
 // reaches this state stays gated until the memory provisioner lands and
