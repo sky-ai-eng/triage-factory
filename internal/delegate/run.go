@@ -168,12 +168,23 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// a sidecar, not a reason to hold the run open.
 	var parked bool
 
+	// The mirror this engagement files its memory file through, built below
+	// once the inherited fingerprint it judges the file against exists. The
+	// exits declared here capture it by reference; every one of them is
+	// reached after that, so none of them sees it nil.
+	var mirror *memoryMirror
+
 	// fail records this run's infra-failure terminal and folds a fence trip
 	// into the same disposition every other fenced exit takes: nothing
 	// written, and the workspace left on disk for whoever owns the
 	// conversation now (see the mid-stream trip below for why deleting it is
 	// the worse mistake). Returns what runAgent returns.
 	fail := func(msg string, kind domain.ConversationFailureKind) bool {
+		// The last moment this engagement holds its tree. Whatever the agent
+		// had written by the time the run broke is its account of the work,
+		// and a failed conversation is exactly the one a person will want it
+		// from.
+		mirror.check(ctx)
 		if !s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, creatorUserID, msg, kind) {
 			return false
 		}
@@ -203,6 +214,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 			runtime:        domain.ConversationRuntimeSDK,
 			costUSD:        costUSD,
+			mirror:         mirror,
 		}, sessionID)
 		parked = true
 		return fenced
@@ -398,6 +410,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// this run's work.
 		priorMemory = fingerprintAgentMemoryFile(claudeCwd)
 	}
+	mirror = s.newMemoryMirror(orgID, conversationID, cfg.blueprintRunID, task.EntityID, claudeCwd, priorMemory)
 
 	stagingSpan.End()
 
@@ -660,10 +673,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 				creatorUserID:  creatorUserID,
 				claimID:        cfg.claimID,
 				runtime:        domain.ConversationRuntimeSDK,
+				mirror:         mirror,
 			},
 			opts:        baseOpts,
 			perms:       perms,
 			sink:        sink,
+			mirror:      mirror,
 			idleTimeout: s.idleTimeout(),
 		})
 	} else {
@@ -714,7 +729,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	}
 
 	if out.result != nil {
-		parked, fenced = s.processCompletion(ctx, orgID, conversationID, cfg.blueprintRunID, cfg.claimID, task, out.result, claudeCwd, priorMemory, out.sessionID, triggerType, creatorUserID)
+		parked, fenced = s.processCompletion(ctx, orgID, conversationID, cfg.blueprintRunID, cfg.claimID, task, out.result, claudeCwd, mirror, out.sessionID, triggerType, creatorUserID)
 		return fenced
 	}
 
@@ -755,10 +770,10 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // a DB hiccup can't silently mis-namespace the memory or mis-route the task
 // close.
 //
-// priorMemory digests the memory file this invocation INHERITED at the fixed
-// write path, so content the agent never wrote is not ingested as its work. nil
-// on a resume (whose own file is its work) and wherever there was nothing to
-// inherit, which is the ordinary case.
+// mirror is the engagement's memory mirror — the same one its tool rows filed
+// through. The final check here is what catches a conclusion turn that wrote
+// the file after its last tool call, and it carries the inherited fingerprint
+// that keeps content the agent never wrote from being ingested as its work.
 //
 // Returns parked: true when the run ended dormant (open) rather than terminal,
 // so runAgent's cleanup defers keep the worktree + session JSONL on disk as the
@@ -780,7 +795,7 @@ func (s *Spawner) processCompletion(
 	task domain.Task,
 	completion *agentproc.Result,
 	claudeCwd string,
-	priorMemory *memoryFingerprint,
+	mirror *memoryMirror,
 	sessionID, triggerType, creatorUserID string,
 ) (parked, fenced bool) {
 	// The engagement's terminal, as a punctual span linked back to the setup
@@ -834,24 +849,19 @@ func (s *Spawner) processCompletion(
 			reason:         db.ParkIdle(),
 			runtime:        domain.ConversationRuntimeSDK,
 			costUSD:        completion.CostUSD,
+			mirror:         mirror,
 		}, sessionID)
 		return true, fencedOut
 	}
 
-	// The agent's own memory file, filed as source=agent when it wrote one.
-	// Nothing is written otherwise: the row's source would have to claim the
-	// conversation settled on remembering nothing, and this gate only knows
-	// that no file reached it. blueprint_run_id is denormalized onto the row so
-	// the next run's materializer can tell this workflow run's own steps from
-	// history. The per-state logging stays: each shape of "no file" points
-	// somewhere different when a run looks wrong afterwards.
-	agentContent, fileState := readConversationMemory(claudeCwd, priorMemory)
-	if fileState == memoryFilePresent {
-		if _, err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, blueprintRunID, agentContent, domain.MemorySourceAgent); err != nil {
-			delegateLog.Warn("upsert memory for conversation failed", "conversation", conversationID, "error", err)
-		}
-	}
-	switch fileState {
+	// The agent's own memory file, one last time — the mirror has been filing
+	// it all run, and this catches a conclusion turn that wrote after its last
+	// tool call. Nothing is written when there is no usable file: the row's
+	// source would have to claim the conversation settled on remembering
+	// nothing, and this gate only knows that no file reached it. The per-state
+	// logging stays: each shape of "no file" points somewhere different when a
+	// run looks wrong afterwards.
+	switch mirror.check(ctx) {
 	case memoryFileMissing:
 		delegateLog.Debug("memory file missing at termination (no memory row written)", "conversation", conversationID)
 	case memoryFileEmpty:

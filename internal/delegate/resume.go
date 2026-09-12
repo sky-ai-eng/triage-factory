@@ -323,6 +323,12 @@ type ResumeOptions struct {
 	// engagement, and its cost belongs to it). Threaded so teardown can stamp
 	// the turn's measured sandbox cost by id; empty records nothing.
 	claimID string
+
+	// mirror files the agent's memory file as this turn writes it. Built by
+	// the dispatcher rather than here because it outlives the turn: the same
+	// mirror takes the final check at every exit the dispatcher owns, from a
+	// resume that never came up to the completion gate it hands the result to.
+	mirror *memoryMirror
 }
 
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
@@ -551,10 +557,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 				creatorUserID:  creatorUserID,
 				claimID:        opts.claimID,
 				runtime:        domain.ConversationRuntimeSDK,
+				mirror:         opts.mirror,
 			},
 			opts:        baseOpts,
 			perms:       perms,
 			sink:        sink,
+			mirror:      opts.mirror,
 			idleTimeout: 0,
 		})
 	} else {

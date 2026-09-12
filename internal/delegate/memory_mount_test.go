@@ -72,7 +72,7 @@ func TestBlueprintHandoff_WarmStepReadsItsPredecessorFromTheMount(t *testing.T) 
 	// Step 1 writes the fixed path and terminates.
 	writeAgentMemory(t, cwd, "step 1 chose approach X because Y")
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, blueprintRunID, "", task,
-		res(`{"outcome":"continue","summary":"did step work"}`), cwd, nil, "", "event", "")
+		res(`{"outcome":"continue","summary":"did step work"}`), cwd, runMirror(s, task, conversationID, blueprintRunID, cwd, nil), "", "event", "")
 
 	// The launch handed the tree to the sandbox uid; nothing TF-side can write
 	// under it now, memory.md included.
@@ -163,7 +163,7 @@ func TestProcessCompletion_RefusesThePredecessorsMemory(t *testing.T) {
 	}
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, blueprintRunID, "", task,
-		res(`{"outcome":"continue","summary":"did step work"}`), cwd, inherited, "", "event", "")
+		res(`{"outcome":"continue","summary":"did step work"}`), cwd, runMirror(s, task, conversationID, blueprintRunID, cwd, inherited), "", "event", "")
 
 	if got := memoryContentFor(t, s, task.EntityID, conversationID); got != "" {
 		t.Errorf("agent_content = %q, want empty — this step wrote nothing, so its predecessor's narrative must not be adopted", got)
@@ -205,7 +205,7 @@ func TestProcessCompletion_IngestsWhatThisStepWrote(t *testing.T) {
 	}
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, blueprintRunID, "", task,
-		res(`{"outcome":"continue","summary":"did step work"}`), cwd, inherited, "", "event", "")
+		res(`{"outcome":"continue","summary":"did step work"}`), cwd, runMirror(s, task, conversationID, blueprintRunID, cwd, inherited), "", "event", "")
 
 	if got := memoryContentFor(t, s, task.EntityID, conversationID); got != mine {
 		t.Errorf("agent_content = %q, want this step's own narrative", got)
