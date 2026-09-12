@@ -426,9 +426,6 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Blueprints.GetRunSystem(ctx, orgID, blueprintRunID); err != nil {
 			t.Errorf("Blueprints.GetRunSystem: %v", err)
 		}
-		if _, err := stores.Blueprints.ActiveRunForTaskSystem(ctx, orgID, taskID); err != nil {
-			t.Errorf("Blueprints.ActiveRunForTaskSystem: %v", err)
-		}
 		if _, err := stores.Blueprints.ConversationsForBlueprintSystem(ctx, orgID, blueprintRunID); err != nil {
 			t.Errorf("Blueprints.ConversationsForBlueprintSystem: %v", err)
 		}

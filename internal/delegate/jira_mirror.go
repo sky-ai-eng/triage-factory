@@ -1,13 +1,13 @@
-// TFAC-300: board → Jira lifecycle mirror (the system/bot lane).
+// The board → Jira lifecycle mirror (the system/bot lane).
 //
 // When a delegated agent works a Jira-backed task the TF board moves the card
 // into In Progress and, on a clean finish, to Done, but none of that reaches
 // the real Jira ticket — a watcher on Jira (not TF) sees the ticket keep its
 // original assignee and status the whole time. This file mirrors the board
 // moves back onto the ticket under the org's system/bot credential
-// (jira.Resolver.ForSystem, TFAC-34), so the bot-side lifecycle is visible in
-// Jira exactly as the user-claim path already mirrors it for human-claimed
-// tasks (the claim guard in server.handleTaskClaim).
+// (jira.Resolver.ForSystem), so the bot-side lifecycle is visible in Jira
+// exactly as the user-claim path already mirrors it for human-claimed tasks
+// (the claim guard in server.handleTaskClaim).
 //
 // Two chokepoints drive it, and both move the ticket into the InProgress bucket
 // — no board/task hook writes Done anymore (runJiraMirror still has a done mode,

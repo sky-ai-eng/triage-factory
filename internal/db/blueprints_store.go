@@ -563,11 +563,6 @@ type BlueprintStore interface {
 	// Returns the stamped run, or ErrNoSuchBlueprintRun.
 	SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) (domain.BlueprintRun, error)
 
-	// ActiveRunForTaskSystem returns the most recent still-running blueprint_run
-	// for a task, or (nil, nil) when none is active — the question "does this
-	// task have live blueprint work right now?".
-	ActiveRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error)
-
 	// GetRun returns a blueprint run by id, or (nil, nil) when not found.
 	GetRun(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)
 
