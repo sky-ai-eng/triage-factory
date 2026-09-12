@@ -565,6 +565,49 @@ func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, c
 	return out, rows.Err()
 }
 
+func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, backoff time.Duration, limit int) ([]domain.MemoryOwed, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	// The owing condition is taskMemoryOwedRowSQL — the same words the task
+	// read's memory_pending flag and the claim scan's gate are written in, so
+	// the sweep cannot come to a different conclusion about what is owed than
+	// the two readers waiting on it. Correlating it against the tasks row
+	// makes the join: `owed.org_id = t.org_id AND owed.task_id = t.id` is the
+	// join condition, which is why the FROM lists both relations and the WHERE
+	// carries the whole predicate.
+	//
+	// The backoff arm is the sweep's own: an attempt that started inside the
+	// window is either running right now or too recent to repeat, and an
+	// attempt that never completed is excluded by nothing but its age — which
+	// is how a brain that died mid-generation stops holding its conversation
+	// hostage.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT owed.org_id::text, owed.id::text, owed.task_id::text,
+		       (t.status NOT IN ('done', 'dismissed')) AS task_open
+		FROM conversations owed, tasks t
+		WHERE `+taskMemoryOwedRowSQL("t.org_id", "t.id")+`
+		  AND NOT EXISTS (
+		      SELECT 1 FROM conversation_memory_attempts att
+		      WHERE att.conversation_id = owed.id AND att.started_at > $1)
+		ORDER BY task_open DESC, owed.ended_at ASC, owed.id ASC
+		LIMIT $2
+	`, time.Now().UTC().Add(-backoff), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.MemoryOwed
+	for rows.Next() {
+		var o domain.MemoryOwed
+		if err := rows.Scan(&o.OrgID, &o.ConversationID, &o.TaskID, &o.TaskOpen); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
 func (s *conversationStore) HasActiveClaimForBlueprintRunSystem(ctx context.Context, orgID, blueprintRunID string) (bool, error) {
 	if !isValidUUID(blueprintRunID) {
 		return false, nil

@@ -1942,3 +1942,295 @@ func idsOf(tasks []domain.Task) []string {
 	}
 	return out
 }
+
+// TaskMemoryPendingHarness is what a per-backend test file hands to
+// RunTaskMemoryPendingConformance. It takes the whole store bundle rather than
+// TaskStore alone, because the subject is a task field derived from rows three
+// other stores own: the conversation's boundary stamp, the memory row that
+// settles it, and the attempt ledger that explains the wait.
+type TaskMemoryPendingHarness struct {
+	Stores db.Stores
+	OrgID  string
+
+	// Task seeds the entity → event → task chain and returns the task id.
+	// Each call must produce a distinct entity so the dedup index doesn't
+	// collapse independent assertions.
+	Task func(t *testing.T, suffix string) (taskID string)
+
+	// Conversation seeds one top-level conversation on the task and returns
+	// its id. Whatever FK chain the backend's conversations row needs
+	// (blueprint, prompt, creator) is the seeder's business; the suite only
+	// ever ends it and reads the task back.
+	Conversation func(t *testing.T, taskID, suffix string) (conversationID string)
+
+	// BackdateEndedAt rewrites a conversation's ended_at to `age` ago, on the
+	// backend's own clock. The attempt summary is about the task's NEWEST
+	// unmet debt, so which boundary is newest has to be staged rather than
+	// inferred from how fast two EndConversation calls happen to run.
+	BackdateEndedAt func(t *testing.T, conversationID string, age time.Duration)
+}
+
+// TaskMemoryPendingFactory builds a fresh harness per subtest.
+type TaskMemoryPendingFactory func(t *testing.T) TaskMemoryPendingHarness
+
+// RunTaskMemoryPendingConformance is the shared assertion suite for the task
+// read's memory-pending tail — the flag that says a conversation on this task
+// ended without leaving the memory its successor is owed, and the summary of
+// the newest attempt at producing it.
+//
+// Both readers of the flag matter and both are asserted: Get, which is what a
+// card opens on, and List, which is what the board draws. They feed one column
+// list precisely so they cannot disagree, and this is the test that says so.
+func RunTaskMemoryPendingConformance(t *testing.T, mk TaskMemoryPendingFactory) {
+	t.Helper()
+	ctx := context.Background()
+
+	// readBoth reads the task through both doors and fails unless they agree,
+	// returning the row for the caller's own assertions.
+	readBoth := func(t *testing.T, h TaskMemoryPendingHarness, taskID string) domain.Task {
+		t.Helper()
+		got, err := h.Stores.Tasks.Get(ctx, h.OrgID, taskID)
+		if err != nil || got == nil {
+			t.Fatalf("Tasks.Get = (%v, %v)", got, err)
+		}
+		listed, _, err := h.Stores.Tasks.List(ctx, h.OrgID, queueFilter(), db.ListOpts{Limit: 200})
+		if err != nil {
+			t.Fatalf("Tasks.List: %v", err)
+		}
+		var fromList *domain.Task
+		for i := range listed {
+			if listed[i].ID == taskID {
+				fromList = &listed[i]
+				break
+			}
+		}
+		if fromList == nil {
+			t.Fatalf("task %s absent from the queue list — the suite's fixtures must stay queued and unclaimed", taskID)
+		}
+		if fromList.MemoryPending != got.MemoryPending {
+			t.Errorf("List says memory_pending=%v, Get says %v — one column list, two answers",
+				fromList.MemoryPending, got.MemoryPending)
+		}
+		if (fromList.MemoryAttempt == nil) != (got.MemoryAttempt == nil) {
+			t.Errorf("List attempt = %+v, Get attempt = %+v — one column list, two answers",
+				fromList.MemoryAttempt, got.MemoryAttempt)
+		}
+		if fromList.MemoryAttempt != nil && got.MemoryAttempt != nil && *fromList.MemoryAttempt != *got.MemoryAttempt {
+			t.Errorf("List attempt = %+v, Get attempt = %+v", *fromList.MemoryAttempt, *got.MemoryAttempt)
+		}
+		return *got
+	}
+
+	t.Run("ATaskWhoseConversationsAreAllLiveOwesNothing", func(t *testing.T) {
+		h := mk(t)
+		taskID := h.Task(t, "live")
+		h.Conversation(t, taskID, "live")
+
+		got := readBoth(t, h, taskID)
+		if got.MemoryPending {
+			t.Error("memory_pending on a task whose conversation has not ended — nothing is owed until a boundary lands")
+		}
+		if got.MemoryAttempt != nil {
+			t.Errorf("memory_attempt = %+v on a task that owes nothing", *got.MemoryAttempt)
+		}
+	})
+
+	t.Run("AnEndedConversationWithNoMemoryReadsPendingWithNoAttemptYet", func(t *testing.T) {
+		h := mk(t)
+		taskID := h.Task(t, "owing")
+		convID := h.Conversation(t, taskID, "owing")
+		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, convID, domain.EndedRequeued); err != nil {
+			t.Fatalf("EndConversationSystem: %v", err)
+		}
+
+		got := readBoth(t, h, taskID)
+		if !got.MemoryPending {
+			t.Error("memory_pending = false on a task whose conversation ended with no memory row")
+		}
+		// The wait has only just started: nothing has tried yet, and the
+		// summary says so by being absent rather than by carrying an empty
+		// outcome nobody wrote.
+		if got.MemoryAttempt != nil {
+			t.Errorf("memory_attempt = %+v before any attempt ran, want nil", *got.MemoryAttempt)
+		}
+	})
+
+	t.Run("TheAttemptSummaryIsTheNewestAttemptAndTracksItsVerdict", func(t *testing.T) {
+		h := mk(t)
+		taskID := h.Task(t, "attempt")
+		convID := h.Conversation(t, taskID, "attempt")
+		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, convID, domain.EndedFailed); err != nil {
+			t.Fatalf("EndConversationSystem: %v", err)
+		}
+
+		begun, err := h.Stores.MemoryAttempts.BeginAttemptSystem(ctx, h.OrgID, convID)
+		if err != nil {
+			t.Fatalf("BeginAttemptSystem: %v", err)
+		}
+		got := readBoth(t, h, taskID)
+		if got.MemoryAttempt == nil {
+			t.Fatal("memory_attempt = nil while an attempt is running")
+		}
+		// A running attempt carries a start and no verdict — the same absence
+		// the ledger row itself carries, so a reader sees "being tried now".
+		if got.MemoryAttempt.Outcome != "" || got.MemoryAttempt.ErrorKind != "" || got.MemoryAttempt.ErrorMessage != "" {
+			t.Errorf("running attempt reads %+v, want no verdict", *got.MemoryAttempt)
+		}
+		if !got.MemoryAttempt.StartedAt.Round(time.Second).Equal(begun.StartedAt.Round(time.Second)) {
+			t.Errorf("started_at = %v, want the attempt's %v", got.MemoryAttempt.StartedAt, begun.StartedAt)
+		}
+
+		const msg = "the background-jobs model is unset for this org"
+		if _, err := h.Stores.MemoryAttempts.CompleteAttemptSystem(ctx, h.OrgID, begun.ID,
+			domain.MemoryAttemptFailed, domain.MemoryAttemptErrNoModel, msg, "", 12, 0); err != nil {
+			t.Fatalf("CompleteAttemptSystem: %v", err)
+		}
+		got = readBoth(t, h, taskID)
+		if got.MemoryAttempt == nil {
+			t.Fatal("memory_attempt = nil after the attempt was closed out")
+		}
+		if got.MemoryAttempt.Outcome != domain.MemoryAttemptFailed ||
+			got.MemoryAttempt.ErrorKind != domain.MemoryAttemptErrNoModel ||
+			got.MemoryAttempt.ErrorMessage != msg {
+			t.Errorf("attempt reads %+v, want failed/no_model with the store's own wording", *got.MemoryAttempt)
+		}
+		if !got.MemoryPending {
+			t.Error("memory_pending cleared by a FAILED attempt — an attempt is not a memory")
+		}
+
+		// A second attempt is what a reader should now see: the summary is
+		// the newest try, not the first one.
+		second, err := h.Stores.MemoryAttempts.BeginAttemptSystem(ctx, h.OrgID, convID)
+		if err != nil {
+			t.Fatalf("BeginAttemptSystem (second): %v", err)
+		}
+		got = readBoth(t, h, taskID)
+		if got.MemoryAttempt == nil || got.MemoryAttempt.Outcome != "" {
+			t.Errorf("attempt reads %+v after a newer one opened, want the newer running attempt", got.MemoryAttempt)
+		}
+		if !got.MemoryAttempt.StartedAt.Round(time.Second).Equal(second.StartedAt.Round(time.Second)) {
+			t.Errorf("started_at = %v, want the newest attempt's %v", got.MemoryAttempt.StartedAt, second.StartedAt)
+		}
+	})
+
+	t.Run("TheMemoryRowClearsBothTheFlagAndTheAttempt", func(t *testing.T) {
+		h := mk(t)
+		taskID := h.Task(t, "settled")
+		convID := h.Conversation(t, taskID, "settled")
+		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, convID, domain.EndedTakenOver); err != nil {
+			t.Fatalf("EndConversationSystem: %v", err)
+		}
+		if _, err := h.Stores.MemoryAttempts.BeginAttemptSystem(ctx, h.OrgID, convID); err != nil {
+			t.Fatalf("BeginAttemptSystem: %v", err)
+		}
+		if _, err := h.Stores.TaskMemory.UpsertAgentMemorySystem(
+			ctx, h.OrgID, convID, "", "", domain.MemorySourceNone,
+		); err != nil {
+			t.Fatalf("UpsertAgentMemorySystem: %v", err)
+		}
+
+		got := readBoth(t, h, taskID)
+		if got.MemoryPending {
+			t.Error("memory_pending after the memory landed — a `none` row settles the question as surely as a written one")
+		}
+		// The attempt row still exists, and the summary is gone with the debt:
+		// the two read the same owing conversation, and there is no longer one.
+		if got.MemoryAttempt != nil {
+			t.Errorf("memory_attempt = %+v on a task that owes nothing", *got.MemoryAttempt)
+		}
+	})
+
+	// The summary is about the debt that is actually blocking — the task's
+	// NEWEST owing conversation — and about that one alone. An older debt's
+	// attempt standing in for it is worse than no summary: it reads as "this
+	// has been tried and failed" over a conversation nothing has touched, so
+	// a person waits on a retry that was never owed to them.
+	t.Run("TheAttemptSummaryIsTheNewestOwingConversationsAlone", func(t *testing.T) {
+		h := mk(t)
+		if h.BackdateEndedAt == nil {
+			t.Skip("harness cannot stage boundary ages")
+		}
+		taskID := h.Task(t, "newest-debt")
+		older := h.Conversation(t, taskID, "newest-debt-old")
+		newer := h.Conversation(t, taskID, "newest-debt-new")
+		for id, age := range map[string]time.Duration{older: 2 * time.Hour, newer: time.Hour} {
+			if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, id, domain.EndedRequeued); err != nil {
+				t.Fatalf("end %s: %v", id, err)
+			}
+			h.BackdateEndedAt(t, id, age)
+		}
+
+		// Only the OLDER debt has been tried. The newest one has not, and the
+		// honest summary of an untried debt is no summary.
+		oldAttempt, err := h.Stores.MemoryAttempts.BeginAttemptSystem(ctx, h.OrgID, older)
+		if err != nil {
+			t.Fatalf("BeginAttemptSystem on the older debt: %v", err)
+		}
+		got := readBoth(t, h, taskID)
+		if !got.MemoryPending {
+			t.Fatal("memory_pending = false with two unmet debts on the task")
+		}
+		if got.MemoryAttempt != nil {
+			t.Errorf("memory_attempt = %+v, want nil — the newest owing conversation has never been attempted, "+
+				"and an older debt's attempt must not stand in for it", *got.MemoryAttempt)
+		}
+
+		// Now the newest debt is tried too, and afterwards the older debt is
+		// tried AGAIN — so the most recent attempt anywhere on this task
+		// belongs to the older conversation. The summary is still the newest
+		// owing conversation's: it is chosen by which debt is blocking, not by
+		// which attempt happened to run last.
+		newAttempt, err := h.Stores.MemoryAttempts.BeginAttemptSystem(ctx, h.OrgID, newer)
+		if err != nil {
+			t.Fatalf("BeginAttemptSystem on the newer debt: %v", err)
+		}
+		const newerMsg = "the newest debt's own failure"
+		if _, err := h.Stores.MemoryAttempts.CompleteAttemptSystem(ctx, h.OrgID, newAttempt.ID,
+			domain.MemoryAttemptFailed, domain.MemoryAttemptErrTimeout, newerMsg, "", 4, 4); err != nil {
+			t.Fatalf("CompleteAttemptSystem on the newer debt: %v", err)
+		}
+		if _, err := h.Stores.MemoryAttempts.CompleteAttemptSystem(ctx, h.OrgID, oldAttempt.ID,
+			domain.MemoryAttemptFailed, domain.MemoryAttemptErrProviderError, "the older debt's failure", "", 9, 9); err != nil {
+			t.Fatalf("CompleteAttemptSystem on the older debt: %v", err)
+		}
+		retryOld, err := h.Stores.MemoryAttempts.BeginAttemptSystem(ctx, h.OrgID, older)
+		if err != nil {
+			t.Fatalf("BeginAttemptSystem retrying the older debt: %v", err)
+		}
+		if _, err := h.Stores.MemoryAttempts.CompleteAttemptSystem(ctx, h.OrgID, retryOld.ID,
+			domain.MemoryAttemptFailed, domain.MemoryAttemptErrProviderError, "the older debt's retry", "", 9, 9); err != nil {
+			t.Fatalf("CompleteAttemptSystem retrying the older debt: %v", err)
+		}
+
+		got = readBoth(t, h, taskID)
+		if got.MemoryAttempt == nil {
+			t.Fatal("memory_attempt = nil once the newest debt has been attempted")
+		}
+		if got.MemoryAttempt.ErrorMessage != newerMsg {
+			t.Errorf("memory_attempt = %+v, want the newest owing conversation's own attempt (%q) — "+
+				"the newest attempt on the task is the older debt's", *got.MemoryAttempt, newerMsg)
+		}
+	})
+
+	t.Run("OneOwingConversationAmongSettledSiblingsStillReadsPending", func(t *testing.T) {
+		h := mk(t)
+		taskID := h.Task(t, "mixed")
+		settled := h.Conversation(t, taskID, "mixed-a")
+		owing := h.Conversation(t, taskID, "mixed-b")
+		for _, id := range []string{settled, owing} {
+			if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, id, domain.EndedStepAdvanced); err != nil {
+				t.Fatalf("EndConversationSystem %s: %v", id, err)
+			}
+		}
+		if _, err := h.Stores.TaskMemory.UpsertAgentMemorySystem(
+			ctx, h.OrgID, settled, "", "what the first step tried", domain.MemorySourceAgent,
+		); err != nil {
+			t.Fatalf("UpsertAgentMemorySystem: %v", err)
+		}
+
+		got := readBoth(t, h, taskID)
+		if !got.MemoryPending {
+			t.Error("memory_pending = false while one of the task's ended conversations still owes a memory")
+		}
+	})
+}

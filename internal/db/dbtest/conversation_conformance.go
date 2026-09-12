@@ -166,6 +166,27 @@ type ConversationSeeder struct {
 	// this content has to be seedable anyway.
 	SetConversationMemory func(t *testing.T, conversationID, content string, source domain.MemorySource)
 
+	// MemoryAttempt inserts one conversation_memory_attempts row whose
+	// started_at is `age` ago and whose completed_at is NULL — the shape a
+	// brain that died mid-generation leaves behind, and the only shape the
+	// owed-memory sweep's backoff arm reads. MemoryAttemptStore owns the
+	// table and the suite here holds only a ConversationStore, so this is a
+	// seeded precondition rather than a store call; the age is the seeder's
+	// because each backend has its own idea of how a time.Time is stored.
+	MemoryAttempt func(t *testing.T, conversationID string, age time.Duration) string
+
+	// BackdateEndedAt rewrites the conversation's ended_at to `age` ago, on
+	// the backend's own clock, so the sweep's oldest-boundary-first ordering
+	// can be staged unambiguously. EndConversation stamps now() and nothing
+	// writes the column afterwards, so two conversations ended back-to-back
+	// otherwise tie.
+	BackdateEndedAt func(t *testing.T, conversationID string, age time.Duration)
+
+	// SetTaskStatus writes a task's status directly. TaskStore owns the
+	// column; the sweep only reads it, to put the tasks that are blocking
+	// somebody first.
+	SetTaskStatus func(t *testing.T, taskID, status string)
+
 	// SeedRawMessage inserts a messages row with rawJSON written
 	// directly into the given column ("reasoning" or "content_blocks"),
 	// bypassing InsertMessage's json.Marshal. Used to stage
@@ -4665,6 +4686,222 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 		}
 	})
+
+	// --- The owed-memory sweep ---
+	//
+	// ListMemoryOwedSystem is the completion path behind the doorbell: every
+	// conversation that ended without leaving a memory, minus the ones
+	// something tried recently enough to still be waiting on. Nothing about it
+	// is per-org — the caller is the brain, which serves every tenant on the
+	// pod — so each row carries the org it belongs to.
+
+	t.Run("ListMemoryOwed_SelectsEndedRowsWithNoMemoryAndSkipsTheRest", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "owed-select")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+		owing := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+		settled := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+		live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		for _, id := range []string{owing, settled} {
+			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
+				t.Fatalf("end %s: %v", id, err)
+			}
+		}
+		seed.SetConversationMemory(t, settled, "what I tried", domain.MemorySourceAgent)
+
+		owed, err := store.ListMemoryOwedSystem(ctx, time.Minute, 100)
+		if err != nil {
+			t.Fatalf("ListMemoryOwedSystem: %v", err)
+		}
+		ids := memoryOwedIDs(owed)
+		if len(ids) != 1 || ids[0] != owing {
+			t.Fatalf("owed = %v, want exactly [%s] — %s filed its memory and %s never ended",
+				ids, owing, settled, live)
+		}
+		if owed[0].OrgID != orgID || owed[0].TaskID != taskID || !owed[0].TaskOpen {
+			t.Errorf("owed row = %+v, want org %s task %s open", owed[0], orgID, taskID)
+		}
+	})
+
+	// A `none` row settles the question as surely as a written memory: it
+	// records that the conversation had nothing to remember. Sweeping it again
+	// would mean regenerating the same nothing forever.
+	t.Run("ListMemoryOwed_ANoneRowSettlesTheDebt", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "completed")
+		if _, err := store.EndConversationSystem(ctx, orgID, conversationID, domain.EndedFailed); err != nil {
+			t.Fatalf("end: %v", err)
+		}
+		seed.SetConversationMemory(t, conversationID, NullMemorySentinel, domain.MemorySourceNone)
+
+		owed, err := store.ListMemoryOwedSystem(ctx, time.Minute, 100)
+		if err != nil {
+			t.Fatalf("ListMemoryOwedSystem: %v", err)
+		}
+		if ids := memoryOwedIDs(owed); len(ids) != 0 {
+			t.Errorf("owed = %v, want none — a `none` row is an answer", ids)
+		}
+	})
+
+	// The backoff is read off the attempt's own started_at, which is what makes
+	// it survive a brain restart: a fresh process re-derives what is due
+	// instead of retrying everything it has forgotten. Both arms matter — a
+	// recent attempt holds its conversation back, and an old one (completed or
+	// not) lets it through.
+	t.Run("ListMemoryOwed_BackoffHidesARecentAttemptAndAgesOutAnAbandonedOne", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		if seed.MemoryAttempt == nil {
+			t.Skip("harness cannot stage an attempt row")
+		}
+		end := func(suffix string) string {
+			t.Helper()
+			id := seedConversationForTest(t, orgID, seed, "completed")
+			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
+				t.Fatalf("end %s: %v", suffix, err)
+			}
+			return id
+		}
+		// One conversation tried a moment ago — running right now, or too
+		// recent to repeat. One tried long enough ago to be due again, and its
+		// completed_at is still NULL: nothing rewrites it, because a row that
+		// never completed is the honest record of a brain that stopped, so age
+		// is the only thing that can release the conversation.
+		recent := end("recent")
+		abandoned := end("abandoned")
+		seed.MemoryAttempt(t, recent, 5*time.Second)
+		seed.MemoryAttempt(t, abandoned, 10*time.Minute)
+
+		ids := memoryOwedIDs(mustListMemoryOwed(t, store, ctx))
+		if len(ids) != 1 || ids[0] != abandoned {
+			t.Fatalf("owed = %v, want [%s] — a fresh attempt holds its conversation back, an abandoned one ages out",
+				ids, abandoned)
+		}
+
+		// The NEWEST attempt is what the backoff reads: a fresh row alongside
+		// the stale one puts the conversation back inside the window.
+		seed.MemoryAttempt(t, abandoned, time.Second)
+		if ids := memoryOwedIDs(mustListMemoryOwed(t, store, ctx)); len(ids) != 0 {
+			t.Errorf("owed = %v with a fresh attempt beside the stale one, want none", ids)
+		}
+	})
+
+	t.Run("ListMemoryOwed_OrdersOpenTasksFirstThenOldestBoundary", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		if seed.BackdateEndedAt == nil || seed.SetTaskStatus == nil {
+			t.Skip("harness cannot stage boundary ages or task statuses")
+		}
+
+		// Three owing conversations: two on open tasks, one on a task nobody
+		// is waiting on. The closed one ended longest ago, so ordering by age
+		// alone would put it first — which is exactly the answer the open-task
+		// term exists to prevent.
+		newOpen := seedConversationForTest(t, orgID, seed, "completed")
+		oldOpen := seedConversationForTest(t, orgID, seed, "completed")
+		closedTaskConv := seedConversationForTest(t, orgID, seed, "completed")
+		ages := map[string]time.Duration{
+			newOpen:        1 * time.Hour,
+			oldOpen:        6 * time.Hour,
+			closedTaskConv: 24 * time.Hour,
+		}
+		for id, age := range ages {
+			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
+				t.Fatalf("end %s: %v", id, err)
+			}
+			seed.BackdateEndedAt(t, id, age)
+		}
+		closedTask := ""
+		for _, o := range mustListMemoryOwed(t, store, ctx) {
+			if o.ConversationID == closedTaskConv {
+				closedTask = o.TaskID
+			}
+		}
+		if closedTask == "" {
+			t.Fatal("precondition: the closed-task fixture is not owed")
+		}
+		seed.SetTaskStatus(t, closedTask, "done")
+
+		got := memoryOwedIDs(mustListMemoryOwed(t, store, ctx))
+		want := []string{oldOpen, newOpen, closedTaskConv}
+		if !slices.Equal(got, want) {
+			t.Errorf("owed order = %v, want %v — open tasks first (they are blocking somebody), then oldest boundary", got, want)
+		}
+		for _, o := range mustListMemoryOwed(t, store, ctx) {
+			if (o.ConversationID == closedTaskConv) == o.TaskOpen {
+				t.Errorf("row %+v: task_open disagrees with the task's status", o)
+			}
+		}
+	})
+
+	t.Run("ListMemoryOwed_LimitCapsThePageAndZeroAsksForNothing", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		for i := range 3 {
+			id := seedConversationForTest(t, orgID, seed, "completed")
+			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
+				t.Fatalf("end %d: %v", i, err)
+			}
+		}
+		if owed := mustListMemoryOwed(t, store, ctx); len(owed) != 3 {
+			t.Fatalf("owed = %d rows, want 3", len(owed))
+		}
+		capped, err := store.ListMemoryOwedSystem(ctx, time.Minute, 2)
+		if err != nil {
+			t.Fatalf("ListMemoryOwedSystem(limit=2): %v", err)
+		}
+		if len(capped) != 2 {
+			t.Errorf("owed = %d rows at limit 2, want 2 — the rest ride the next tick", len(capped))
+		}
+		none, err := store.ListMemoryOwedSystem(ctx, time.Minute, 0)
+		if err != nil {
+			t.Fatalf("ListMemoryOwedSystem(limit=0): %v", err)
+		}
+		if len(none) != 0 {
+			t.Errorf("owed = %d rows at limit 0, want none", len(none))
+		}
+	})
+
+	// A subagent row belongs to its spawner's engagement, so its boundary owes
+	// no handoff — the same rule that keeps the task's stamp off it.
+	t.Run("ListMemoryOwed_SkipsSubagentRows", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		parent := seedConversationForTest(t, orgID, seed, "running")
+		sub := seedConversationForTest(t, orgID, seed, "completed")
+		seed.SetParentConversation(t, sub, parent)
+		if _, err := store.EndConversationSystem(ctx, orgID, sub, domain.EndedFailed); err != nil {
+			t.Fatalf("end the subagent conversation: %v", err)
+		}
+		if ids := memoryOwedIDs(mustListMemoryOwed(t, store, ctx)); len(ids) != 0 {
+			t.Errorf("owed = %v, want none — a subagent's boundary is its spawner's business", ids)
+		}
+	})
+}
+
+// mustListMemoryOwed runs the sweep read with the suite's standard backoff and
+// a page big enough for any fixture here.
+func mustListMemoryOwed(t *testing.T, store db.ConversationStore, ctx context.Context) []domain.MemoryOwed {
+	t.Helper()
+	owed, err := store.ListMemoryOwedSystem(ctx, time.Minute, 100)
+	if err != nil {
+		t.Fatalf("ListMemoryOwedSystem: %v", err)
+	}
+	return owed
+}
+
+// memoryOwedIDs projects the sweep's answer to conversation ids, preserving
+// order — the ordering IS part of the contract.
+func memoryOwedIDs(owed []domain.MemoryOwed) []string {
+	ids := make([]string, 0, len(owed))
+	for _, o := range owed {
+		ids = append(ids, o.ConversationID)
+	}
+	return ids
 }
 
 // reapKeysContain reports whether the retention sweep's key set names this

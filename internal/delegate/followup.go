@@ -210,6 +210,13 @@ func injectionWillFlush(status, outcome string) bool {
 // gate then declines is the strand this whole seam exists to prevent). Sharing
 // one function is the only way to keep that true through the next edit.
 //
+// The claim gate's memory clause is the one place that identity is qualified:
+// it is not mirrored here, so a wake allowed on a memory-pending task is a
+// wake the claim gate declines. That is a WAIT rather than the permanent
+// strand above — the memory provisioner files the row and the next scan
+// claims it — and deliberately not made stricter here, because refusing a
+// person's follow-up over a debt that clears in seconds is the worse answer.
+//
 // `aborted` needs no arm of its own. A blueprint aborts on the step it was
 // running, and no terminal write moves current_step_index, so the aborting
 // conversation IS the final step and the shared predicate already admits it.
@@ -283,17 +290,37 @@ func (s *Spawner) modelFollowUpBlock(ctx context.Context, orgID string, conv *do
 	return ""
 }
 
-// blueprintDrivableForClaim is the Go mirror of blueprintDrivableSQL: given a
-// blueprint_runs row already in hand, may this conversation be driven?
+// blueprintDrivableForClaim is the Go mirror of blueprintDrivableSQL's
+// BLUEPRINT clause: given a blueprint_runs row already in hand, may this
+// conversation be driven?
 //
-// The claim scan asks the same question in SQL; this asks it again on the far
-// side of the claim, where the window between the scan and the read is
-// non-zero. The two must agree — a claim the dispatcher then refuses to drive
-// is a run that ping-pongs between the queue and a park.
+// Two callers, and they sit on opposite sides of a claim. The dispatcher asks
+// after claiming, where the window between the claim scan and the read is
+// non-zero and the two answers must agree — a claim the dispatcher then
+// refuses to drive is a run that ping-pongs between the queue and a park.
+// blueprintFollowUpBlock asks BEFORE any claim, as a composer-facing
+// prediction about whether a follow-up may wake a parked conversation; the
+// claim it predicts still goes through ClaimNextConversation, which re-applies
+// the whole SQL gate unconditionally.
 //
 // A nil blueprint is drivable: a conversation with no blueprint parent
 // (interactive, reserved) is not this gate's business, matching the SQL's
 // LEFT JOIN.
+//
+// It mirrors the blueprint clause ONLY. blueprintDrivableSQL's other clause —
+// the task's unmet memory — is not mirrored here, and the limit of that is
+// worth stating. For a task holding ONE conversation it is sound: a task
+// becomes memory-pending only when a boundary lands, and a boundary on the
+// conversation being claimed stops that conversation anyway.
+//
+// TODO(TFAC-996): a task can hold two live conversations today — the auto
+// gate and the one-active-auto-run index both match trigger_type='event'
+// only, so a manual conversation sits outside them — and then one
+// conversation's pre-agent failure stamps its boundary after the other was
+// already claimed, so that claim runs without the memory the first owes. The
+// SQL gate closes it for every LATER claim, not the one in flight. Enforcing
+// one live conversation per task restores the premise above; a memory check
+// here would patch the symptom instead.
 func blueprintDrivableForClaim(br *domain.BlueprintRun, stepIndex *int) bool {
 	if br == nil {
 		return true

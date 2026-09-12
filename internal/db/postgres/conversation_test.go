@@ -191,6 +191,35 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 				t.Fatalf("backdate started_at of %s: %v", conversationID, err)
 			}
 		},
+		BackdateEndedAt: func(t *testing.T, conversationID string, age time.Duration) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE conversations SET ended_at = now() - make_interval(secs => $2) WHERE id = $1`,
+				conversationID, age.Seconds()); err != nil {
+				t.Fatalf("backdate ended_at of %s: %v", conversationID, err)
+			}
+		},
+		MemoryAttempt: func(t *testing.T, conversationID string, age time.Duration) string {
+			t.Helper()
+			// Raw SQL rather than MemoryAttemptStore.BeginAttemptSystem: the
+			// store stamps started_at itself, and the age is the whole point.
+			// completed_at is left NULL — the abandoned shape.
+			var id string
+			if err := conn.QueryRow(`
+				INSERT INTO conversation_memory_attempts (org_id, conversation_id, started_at)
+				VALUES ($1, $2, now() - make_interval(secs => $3))
+				RETURNING id::text
+			`, orgID, conversationID, age.Seconds()).Scan(&id); err != nil {
+				t.Fatalf("seed memory attempt on %s: %v", conversationID, err)
+			}
+			return id
+		},
+		SetTaskStatus: func(t *testing.T, taskID, status string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE tasks SET status = $2 WHERE id = $1`, taskID, status); err != nil {
+				t.Fatalf("set task %s status: %v", taskID, err)
+			}
+		},
 		BackdateQueuedAt: func(t *testing.T, conversationID string, age time.Duration) {
 			t.Helper()
 			if _, err := conn.Exec(

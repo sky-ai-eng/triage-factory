@@ -188,6 +188,13 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 	// The active-conversation read resolves the conversation's ID rather than
 	// a bool: a busy gate is the additive-injection path, and folding the new
 	// event into the conversation needs the conversation.
+	//
+	// TODO(TFAC-996): this read matches trigger_type='event' only, so a live
+	// MANUAL conversation on the task does not hold the gate and this mints a
+	// second live conversation beside it. The rule is one per task — the
+	// delegate route enforces it across both trigger types — and dropping the
+	// filter here folds the event into whatever is live instead, which is what
+	// the busy branch below already does.
 	activeConversationID, err := r.conversations.ActiveAutoConversationIDForTaskSystem(ctx, orgID, task.ID)
 	if err != nil {
 		routerLog.Error("task gate active-conversation query failed", "task_id", task.ID, "error", err)

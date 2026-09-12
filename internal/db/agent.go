@@ -1130,6 +1130,31 @@ type ConversationStore interface {
 	// claims, so the admin pool is the right door.
 	ListEvictableWorkspacesSystem(ctx context.Context, cutoff time.Time) ([]domain.EvictableWorkspace, error)
 
+	// ListMemoryOwedSystem enumerates the conversations the memory provisioner
+	// still owes a memory for: a top-level conversation that ended, for which
+	// no conversation_memory row was ever filed, and whose newest attempt (if
+	// any) started longer ago than backoff.
+	//
+	// The backoff is a *read* predicate rather than provisioner state on
+	// purpose. It is spelled against conversation_memory_attempts.started_at,
+	// so it survives a brain restart — a fresh process re-derives which
+	// conversations are due instead of retrying everything it has forgotten —
+	// and an attempt whose brain died mid-generation ages out on its own,
+	// since nothing will ever stamp its completed_at.
+	//
+	// Ordering is what a person waiting would choose: open tasks (status NOT
+	// IN done/dismissed) before closed ones, because an owed memory on an open
+	// task is blocking that task's next delegation while one on a finished
+	// task is only completing the record; then oldest boundary first, so the
+	// longest wait is served first. limit caps the page; a sweep takes the
+	// next page on its next tick rather than draining the world in one pass.
+	//
+	// Reads across tenants with no org scoping, like the retention sweeps it
+	// sits beside: the caller is the brain's provisioner, a boot-launched
+	// goroutine with no JWT claims, so the admin pool is the right door and
+	// each row carries the org it belongs to.
+	ListMemoryOwedSystem(ctx context.Context, backoff time.Duration, limit int) ([]domain.MemoryOwed, error)
+
 	// HasActiveClaimForBlueprintRunSystem reports whether any conversation
 	// under blueprintRunID has a live claim — i.e. whether an executor is
 	// engaged on the shared workspace tree right now.

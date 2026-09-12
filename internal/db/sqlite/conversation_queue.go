@@ -84,13 +84,15 @@ const eligibleForDrivingSQL = needsDrivingSQL
 // blueprintDrivableSQL is the delegation arm's gate, applied over a LEFT
 // JOIN so a conversation with no blueprint parent (interactive, tomorrow)
 // is not filtered out by the join itself. The rest — why a called-off
-// blueprint drives nothing and is checked on both of its columns, and why
+// blueprint drives nothing and is checked on both of its columns, why
 // a blueprint drives only the one conversation its `current_step_index`
-// names, whatever its status — is the Postgres twin's; this is the same
-// predicate in the other dialect.
-const blueprintDrivableSQL = `(r.blueprint_run_id IS NULL
+// names whatever its status, and why a task still owing a memory drives
+// nothing at all — is the Postgres twin's; this is the same predicate in the
+// other dialect.
+var blueprintDrivableSQL = `((r.blueprint_run_id IS NULL
 	    OR (br.cancel_requested = 0 AND br.status <> 'cancelled'
-	        AND r.blueprint_step_index = br.current_step_index))`
+	        AND r.blueprint_step_index = br.current_step_index))
+	   AND (r.task_id IS NULL OR NOT ` + taskMemoryPendingSQL("r.org_id", "r.task_id") + `))`
 
 // handedBackOutcomesSQL / episodeAttemptsSQL count the claim being minted
 // within the conversation's CURRENT queue episode — the run of consecutive

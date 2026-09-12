@@ -664,3 +664,55 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 		t.Fatalf("WithUser: %v", err)
 	}
 }
+
+// TestTaskStore_Postgres_MemoryPendingConformance runs the shared
+// memory-pending conformance against the Postgres task read. The harness takes
+// the whole store bundle: the flag is derived from conversations,
+// conversation_memory and the attempt ledger, none of which TaskStore owns.
+//
+// Both pools are wired to AdminDB for the same reason the suite above does it
+// — the subject is the derivation, and the attempt ledger is admin-pool-only
+// by design (tf_app holds SELECT alone on it).
+func TestTaskStore_Postgres_MemoryPendingConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+
+	dbtest.RunTaskMemoryPendingConformance(t, func(t *testing.T) dbtest.TaskMemoryPendingHarness {
+		t.Helper()
+		h.Reset(t)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		orgID, userID, _ := seedPgOrgUserAgent(t, h)
+		promptID := "mem-pending-" + orgID[:8]
+		seedPgConversationPromptIn(t, h, promptID, orgID, userID)
+
+		return dbtest.TaskMemoryPendingHarness{
+			Stores: stores,
+			OrgID:  orgID,
+			Task: func(t *testing.T, suffix string) string {
+				t.Helper()
+				_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userID, "mem-"+suffix)
+				return taskID
+			},
+			BackdateEndedAt: func(t *testing.T, conversationID string, age time.Duration) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE conversations SET ended_at = now() - make_interval(secs => $2) WHERE id = $1`,
+					conversationID, age.Seconds())
+			},
+			Conversation: func(t *testing.T, taskID, suffix string) string {
+				t.Helper()
+				stepIdx := 0
+				return seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
+					TaskID: taskID, PromptID: promptID, Model: "m",
+					TriggerType:   "manual",
+					CreatorUserID: userID,
+					// Every conversations row carries a blueprint parent (a
+					// single prompt is a one-step blueprint), so the step
+					// index has to name a position even though nothing here
+					// dispatches.
+					BlueprintRunID:     seedPgBlueprintRun(t, h, orgID, userID, taskID),
+					BlueprintStepIndex: &stepIdx,
+				})
+			},
+		}
+	})
+}

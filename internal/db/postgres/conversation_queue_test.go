@@ -1059,6 +1059,11 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 				t.Helper()
 				pgtest.MustExec(t, h.AdminDB, `UPDATE messages SET seq = $2 WHERE id = $1`, msgID, seq)
 			},
+			SetParentConversation: func(t *testing.T, convID, parentConvID string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE conversations SET parent_conversation_id = $2 WHERE id = $1`, convID, parentConvID)
+			},
 			CollapseClaimTimestamps: func(t *testing.T, convID string) {
 				t.Helper()
 				pgtest.MustExec(t, h.AdminDB, `
