@@ -499,9 +499,9 @@ type SnapshotReapKey struct {
 }
 
 // EvictableWorkspace is one snapshot key whose warm workspace tree may be
-// reclaimed from the executor holding it: every conversation sharing the key is
-// at rest, none is claimed, the key aged past the eviction TTL, and the durable
-// snapshot is recorded written. WorktreePaths are the distinct non-empty
+// reclaimed from the executor holding it: every conversation sharing the key
+// last went idle before the eviction cutoff, none of them is claimed, and the
+// durable snapshot is recorded written. WorktreePaths are the distinct non-empty
 // worktree_path values those conversations recorded — normally one, since the
 // task's conversations share a tree, but a key resumed on a host with a
 // different $TMPDIR records a second.

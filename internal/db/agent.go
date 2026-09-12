@@ -526,6 +526,11 @@ type ConversationStore interface {
 	// (worktree dir + session JSONL) as the fast resume path. A swept
 	// entry still resumes via snapshot rehydrate, so this is an
 	// optimization, not a correctness gate.
+	//
+	// The sweep keys off filepath.Base of each path, which is the run tree's
+	// directory name — the workspace key, i.e. the task id. Returning whole
+	// paths rather than keys is what keeps that the caller's business: this
+	// answers with what the rows actually recorded.
 	ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error)
 
 	// HasLiveConversationForTaskSystem mirrors HasLiveConversationForTask
@@ -1105,21 +1110,37 @@ type ConversationStore interface {
 	// JWT claims.
 	LastAgentActivityAtSystem(ctx context.Context, orgID, conversationID string) (at time.Time, ok bool, err error)
 
-	// ListReapableSnapshotKeysSystem returns the (org, task_id) of
-	// every task all of whose snapshot-bearing conversations — parked `open` or
-	// any `completed` terminal, matching what the write side snapshots — last
-	// parked or concluded before cutoff. These are the workspace snapshot keys
-	// the retention reaper may safely drop. A task with any such
-	// conversation still within the TTL is omitted (its shared blob is still
-	// wanted). The timestamp is COALESCE(parked_at, completed_at, started_at):
-	// parked_at tracks an open conversation's last park (stamped by MarkOpen,
-	// cleared by the resume flips, so a repeatedly-resumed long-lived
-	// conversation is keyed off its most recent park rather than its initial
-	// start), completed_at covers the terminals, and started_at is a legacy
-	// fallback. `failed` is absent on purpose — a failed conversation's blob is
-	// dropped at the failure, not aged out. System-wide / no org scoping — the
-	// retention sweep is a maintenance job that spans tenants; the admin pool
-	// is the right door (BYPASSRLS) since the reaper holds no JWT claims.
+	// ListReapableSnapshotKeysSystem returns the (org, task_id) of every task
+	// all of whose top-level conversations last went idle before cutoff and
+	// none of whose conversations is claimed. These are the workspace snapshot
+	// keys the retention reaper may safely drop; a task with any conversation
+	// still within the TTL is omitted, since its conversations share one blob
+	// and one of them still wants it.
+	//
+	// The set is every top-level conversation on the task, not only the ones
+	// whose states write a snapshot: a key is collectable on its idleness
+	// alone, whatever states its conversations reached. This is the only sweep
+	// that drops a blob on age, so a state left out of it is a key nothing
+	// ever comes back for.
+	//
+	// The per-row stamp is COALESCE(parked_at, completed_at, ended_at,
+	// queued_at, started_at), first non-NULL winning: parked_at tracks a
+	// parked conversation's last park (stamped by the park, cleared by the
+	// resume flips, so a repeatedly-resumed long-lived conversation ages from
+	// its most recent park rather than its initial start), completed_at covers
+	// both terminals, ended_at a row the task moved on from without reaching
+	// either, queued_at a row waiting for or inside an engagement (the resume
+	// that cleared parked_at re-stamped it, and started_at still holds the
+	// original mint), and started_at a fresh mint that never queued.
+	//
+	// The claim guard is the same one the eviction enumeration applies, and it
+	// is not redundant with the age rule: an engagement holds the blob open as
+	// the thing it rehydrated from and re-writes it only when it parks, so a
+	// key under a live claim is exactly the key whose blob is wanted now.
+	//
+	// System-wide / no org scoping — the retention sweep is a maintenance job
+	// that spans tenants; the admin pool is the right door (BYPASSRLS) since
+	// the reaper holds no JWT claims.
 	ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error)
 
 	// ListEvictableWorkspacesSystem returns every snapshot key whose warm
@@ -1128,13 +1149,16 @@ type ConversationStore interface {
 	// plus the two things that make deleting a *tree* safe where deleting a
 	// blob is not:
 	//
-	//   - Every snapshot-bearing conversation on the key (parked `open` /
-	//     `completed`) last parked or concluded before cutoff, grouped by
-	//     (org_id, task_id) exactly as ListReapableSnapshotKeysSystem
-	//     groups — a task's conversations share one tree.
+	//   - Every top-level conversation on the key last went idle before
+	//     cutoff, by the same members and the same stamp as
+	//     ListReapableSnapshotKeysSystem — a task's conversations share one
+	//     tree, and the two sweeps bound the same key's two copies, so they
+	//     must not disagree about when it is idle.
 	//   - No conversation on the key holds an active claim. They share the
 	//     tree, so a sibling conversation's live engagement is working in the
-	//     very directory this would delete.
+	//     very directory this would delete. This one counts every
+	//     conversation, not just the top-level ones: a claim held anywhere
+	//     under the key is somebody in the directory.
 	//   - The key's workspace_snapshots row says `written`. A tree whose
 	//     snapshot is pending, failed, or absent is the ONLY copy of the
 	//     agent's uncommitted work, and the caller confirms the blob itself

@@ -472,21 +472,85 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 	return flipped, nil
 }
 
+// workspaceKeyMembersSQL is which conversations a workspace key's lifetime is
+// computed from: every top-level conversation on the task. alias is the
+// conversations relation's alias.
+//
+// Top-level, because a subagent conversation is not an engagement with the
+// tree of its own — it runs inside its spawner's, whose row already carries
+// that activity — and it is the same line the task's boundary stamp draws
+// (endConversationsForTask). Task-bearing, because the key IS the task id: a
+// conversation without one addresses no workspace and belongs to no group.
+//
+// Every status, deliberately. Which states PUT a blob there is the write
+// policy's business; when the key may go is this one's, and tying the second
+// to the first is how a state gets left out of the only sweep that collects
+// on age. So a key is grouped and aged by its conversations' idleness alone,
+// whatever states they reached — a superset of the write policy, and a key
+// with no blob is a no-op to drop.
+func workspaceKeyMembersSQL(alias string) string {
+	return alias + ".task_id IS NOT NULL AND " + alias + ".parent_conversation_id IS NULL"
+}
+
+// workspaceKeyIdleSinceSQL is when a workspace key last saw activity,
+// aggregated over its members: the newest of their last-activity stamps.
+//
+// The per-row stamp is a COALESCE ladder, first non-NULL winning:
+//
+//   - parked_at — a parked conversation, re-stamped each park, so a
+//     repeatedly-resumed one ages from its most recent park rather than its
+//     first start.
+//   - completed_at — either terminal, `failed` included.
+//   - ended_at — a row the task moved on from without reaching either, such
+//     as a queued conversation a boundary superseded.
+//   - queued_at — a row waiting for or inside an engagement. A resume clears
+//     parked_at and re-stamps this, which is the only stamp that then says
+//     anything true about the row: started_at is still the original mint, so
+//     a resumed month-old park would otherwise read as a month idle and have
+//     its blob taken while the engagement rehydrating from it runs.
+//   - started_at — a fresh mint that never went through the queue.
+func workspaceKeyIdleSinceSQL(alias string) string {
+	return "MAX(COALESCE(" + alias + ".parked_at, " + alias + ".completed_at, " +
+		alias + ".ended_at, " + alias + ".queued_at, " + alias + ".started_at))"
+}
+
+// workspaceKeyUnclaimedSQL is the no-live-engagement guard both sweeps apply,
+// correlated on one key's (org, task): no conversation on the task holds an
+// unreleased claim. orgCol/taskCol name the outer relation's columns.
+//
+// It counts every conversation, not just the top-level members the age rule
+// aggregates: a claim held anywhere under the key is somebody engaged on the
+// key's one tree. Correlating on the key rather than the row is what makes it
+// a group filter in the grouped query too — the predicate is constant across a
+// group, so a claimed task loses all its rows rather than just the claimed one.
+func workspaceKeyUnclaimedSQL(orgCol, taskCol string) string {
+	return `NOT EXISTS (
+		        SELECT 1
+		        FROM conversations sib
+		        JOIN claims cl ON cl.conversation_id = sib.id AND cl.released_at IS NULL
+		        WHERE sib.org_id = ` + orgCol + ` AND sib.task_id = ` + taskCol + `
+		      )`
+}
+
 func (s *conversationStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {
-	// Snapshot-bearing conversations (parked `open` / any `completed` terminal)
-	// grouped by their shared snapshot key (org, task_id); a key is
-	// reapable once its newest such conversation last parked or concluded before
-	// the cutoff. The timestamp is COALESCE(parked_at, completed_at,
-	// started_at): parked_at for an open conversation (re-stamped each park, so
-	// resumes don't age it), completed_at for a terminal, started_at a legacy
-	// fallback. Admin pool — the retention sweep is a tenant-spanning system
-	// job with no JWT claims.
+	// Every top-level conversation on the task, grouped by the snapshot key
+	// (org, task_id) they share; a key is reapable once the newest of them
+	// went idle before the cutoff and nothing is engaged on it. All three
+	// predicates are the shared helpers the eviction enumeration below reads
+	// in the same words — the two sweeps bound the same key's two copies, so
+	// they must not come to different conclusions about when it is idle.
+	//
+	// The claim guard matters here for the same reason it does there, one
+	// layer further back: an engagement has the blob open as the thing it
+	// rehydrated from, and it re-snapshots only when it parks. Admin pool —
+	// the retention sweep is a tenant-spanning system job with no JWT claims.
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT org_id, task_id
-		FROM conversations
-		WHERE status IN ('open', 'completed')
-		GROUP BY org_id, task_id
-		HAVING MAX(COALESCE(parked_at, completed_at, started_at)) < $1
+		SELECT c.org_id, c.task_id
+		FROM conversations c
+		WHERE `+workspaceKeyMembersSQL("c")+`
+		  AND `+workspaceKeyUnclaimedSQL("c.org_id", "c.task_id")+`
+		GROUP BY c.org_id, c.task_id
+		HAVING `+workspaceKeyIdleSinceSQL("c")+` < $1
 	`, cutoff)
 	if err != nil {
 		return nil, err
@@ -508,11 +572,11 @@ func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, c
 	// the safety one: only a key whose durable blob is recorded `written` has
 	// a second copy of the agent's work, so only that key's tree is a cache
 	// rather than the original. The correlated MAX is the retention sweep's
-	// timestamp rule verbatim (parked_at for an open conversation, re-stamped
-	// each park; completed_at for a terminal; started_at a legacy fallback),
-	// scoped to the key so a task's conversations age as one. The NOT EXISTS
-	// is the shared-tree rule: any live claim anywhere under the key means an
-	// engagement is working in the directory this enumerates for deletion.
+	// timestamp rule verbatim — the same members, the same stamp — scoped to
+	// the key so a task's conversations age as one. The third is
+	// workspaceKeyUnclaimedSQL, the shared-tree rule: any live claim anywhere
+	// under the key means an engagement is working in the directory this
+	// enumerates for deletion.
 	//
 	// DISTINCT over the paths: the conversations sharing one tree each record
 	// it on their own row, so the same path arrives once per conversation.
@@ -524,21 +588,16 @@ func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, c
 		JOIN workspace_snapshots ws
 		  ON ws.org_id = c.org_id AND ws.task_id = c.task_id
 		WHERE ws.state = 'written'
-		  AND c.status IN ('open', 'completed')
+		  AND `+workspaceKeyMembersSQL("c")+`
 		  AND COALESCE(c.worktree_path, '') <> ''
 		  AND (
-		        SELECT MAX(COALESCE(aged.parked_at, aged.completed_at, aged.started_at))
+		        SELECT `+workspaceKeyIdleSinceSQL("aged")+`
 		        FROM conversations aged
 		        WHERE aged.org_id = c.org_id
 		          AND aged.task_id = c.task_id
-		          AND aged.status IN ('open', 'completed')
+		          AND `+workspaceKeyMembersSQL("aged")+`
 		      ) < $1
-		  AND NOT EXISTS (
-		        SELECT 1
-		        FROM conversations sib
-		        JOIN claims cl ON cl.conversation_id = sib.id AND cl.released_at IS NULL
-		        WHERE sib.org_id = c.org_id AND sib.task_id = c.task_id
-		      )
+		  AND `+workspaceKeyUnclaimedSQL("c.org_id", "c.task_id")+`
 		ORDER BY c.org_id, c.task_id, c.worktree_path
 	`, cutoff)
 	if err != nil {

@@ -1218,23 +1218,60 @@ func (s *conversationStore) ParkOpenSystem(ctx context.Context, orgID, conversat
 	return s.ParkOpen(ctx, orgID, conversationID, park)
 }
 
+// workspaceKeyMembersSQL, workspaceKeyIdleSinceSQL and
+// workspaceKeyUnclaimedSQL are what a workspace key's collectability is
+// computed from — every top-level conversation on the task, the newest of
+// their last-activity stamps, and whether anything is engaged on the key. The
+// Postgres twin carries the reasoning for all three: why a subagent row and a
+// task-less conversation are out of the members, why every status is in
+// (idleness decides a key's collection, not which states wrote its blob), each
+// rung of the COALESCE ladder, and why the claim guard counts wider than the
+// members do.
+//
+// datetime() wraps the stamp here because the column holds mixed on-disk
+// formats (CURRENT_TIMESTAMP text vs Go-bound values), so a raw MAX would
+// order them lexically; the callers bind the cutoff as a canonical UTC string
+// through sqliteCutoff.
+func workspaceKeyMembersSQL(alias string) string {
+	return alias + ".task_id IS NOT NULL AND " + alias + ".parent_conversation_id IS NULL"
+}
+
+func workspaceKeyIdleSinceSQL(alias string) string {
+	return "MAX(datetime(COALESCE(" + alias + ".parked_at, " + alias + ".completed_at, " +
+		alias + ".ended_at, " + alias + ".queued_at, " + alias + ".started_at)))"
+}
+
+func workspaceKeyUnclaimedSQL(orgCol, taskCol string) string {
+	return `NOT EXISTS (
+		        SELECT 1
+		        FROM conversations sib
+		        JOIN claims cl ON cl.conversation_id = sib.id AND cl.released_at IS NULL
+		        WHERE sib.org_id = ` + orgCol + ` AND sib.task_id = ` + taskCol + `
+		      )`
+}
+
+// sqliteCutoff renders a sweep cutoff in the format datetime() compares
+// against, so the two sweeps cannot disagree about what "before the cutoff"
+// means.
+func sqliteCutoff(cutoff time.Time) string {
+	return cutoff.UTC().Format("2006-01-02 15:04:05")
+}
+
 func (s *conversationStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {
-	// Snapshot-bearing runs (parked `open` / any `completed` terminal) grouped by
-	// their shared snapshot key (org, task_id); a key is reapable once
-	// its newest such run last parked or concluded before the cutoff. The
-	// timestamp is COALESCE(parked_at, completed_at, started_at): parked_at for an
-	// open run (re-stamped each park, so resumes don't age it), completed_at for a
-	// terminal, started_at a legacy fallback. datetime()
-	// normalizes the mixed on-disk timestamp formats (CURRENT_TIMESTAMP text vs
-	// Go-bound values) so the MAX is consistent; the cutoff binds as a canonical
-	// UTC string.
+	// Every top-level conversation on the task, grouped by the snapshot key
+	// (org, task_id) they share; a key is reapable once the newest of them
+	// went idle before the cutoff and nothing is engaged on it. The eviction
+	// enumeration below reads the same three predicates — the sweeps bound the
+	// same key's two copies and must not come to different conclusions about
+	// when it is collectable.
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT org_id, task_id
-		FROM conversations
-		WHERE status IN ('open', 'completed')
-		GROUP BY org_id, task_id
-		HAVING MAX(datetime(COALESCE(parked_at, completed_at, started_at))) < datetime(?)
-	`, cutoff.UTC().Format("2006-01-02 15:04:05"))
+		SELECT c.org_id, c.task_id
+		FROM conversations c
+		WHERE `+workspaceKeyMembersSQL("c")+`
+		  AND `+workspaceKeyUnclaimedSQL("c.org_id", "c.task_id")+`
+		GROUP BY c.org_id, c.task_id
+		HAVING `+workspaceKeyIdleSinceSQL("c")+` < datetime(?)
+	`, sqliteCutoff(cutoff))
 	if err != nil {
 		return nil, err
 	}
@@ -1255,15 +1292,11 @@ func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, c
 	// the safety one: only a key whose durable blob is recorded `written` has
 	// a second copy of the agent's work, so only that key's tree is a cache
 	// rather than the original. The correlated MAX is the retention sweep's
-	// timestamp rule verbatim (parked_at for an open conversation, re-stamped
-	// each park; completed_at for a terminal; started_at a legacy fallback),
-	// scoped to the key so a task's conversations age as one. The NOT EXISTS
-	// is the shared-tree rule: any live claim anywhere under the key means an
-	// engagement is working in the directory this enumerates for deletion.
-	//
-	// datetime() normalizes the mixed on-disk timestamp formats
-	// (CURRENT_TIMESTAMP text vs Go-bound values) so the MAX is consistent;
-	// the cutoff binds as a canonical UTC string.
+	// timestamp rule verbatim — the same members, the same stamp — scoped to
+	// the key so a task's conversations age as one. The third is
+	// workspaceKeyUnclaimedSQL, the shared-tree rule: any live claim anywhere
+	// under the key means an engagement is working in the directory this
+	// enumerates for deletion.
 	//
 	// DISTINCT over the paths: the conversations sharing one tree each record
 	// it on their own row, so the same path arrives once per conversation.
@@ -1273,23 +1306,18 @@ func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, c
 		JOIN workspace_snapshots ws
 		  ON ws.org_id = c.org_id AND ws.task_id = c.task_id
 		WHERE ws.state = 'written'
-		  AND c.status IN ('open', 'completed')
+		  AND `+workspaceKeyMembersSQL("c")+`
 		  AND COALESCE(c.worktree_path, '') <> ''
 		  AND (
-		        SELECT MAX(datetime(COALESCE(aged.parked_at, aged.completed_at, aged.started_at)))
+		        SELECT `+workspaceKeyIdleSinceSQL("aged")+`
 		        FROM conversations aged
 		        WHERE aged.org_id = c.org_id
 		          AND aged.task_id = c.task_id
-		          AND aged.status IN ('open', 'completed')
+		          AND `+workspaceKeyMembersSQL("aged")+`
 		      ) < datetime(?)
-		  AND NOT EXISTS (
-		        SELECT 1
-		        FROM conversations sib
-		        JOIN claims cl ON cl.conversation_id = sib.id AND cl.released_at IS NULL
-		        WHERE sib.org_id = c.org_id AND sib.task_id = c.task_id
-		      )
+		  AND `+workspaceKeyUnclaimedSQL("c.org_id", "c.task_id")+`
 		ORDER BY c.org_id, c.task_id, c.worktree_path
-	`, cutoff.UTC().Format("2006-01-02 15:04:05"))
+	`, sqliteCutoff(cutoff))
 	if err != nil {
 		return nil, err
 	}

@@ -2,7 +2,7 @@
 // disk as the warm-resume cache; the other thing that reclaims one is the
 // startup sweep (worktree.CleanupWithOptions), which an executor that stays up
 // for weeks never reaches. Without this sweep such an executor holds a full
-// checkout per parked blueprint run indefinitely, and since disk is what bounds
+// checkout per parked task indefinitely, and since disk is what bounds
 // how many conversations' workspaces one executor can hold, that accumulation
 // quietly costs it the capacity to take new work while its CPU and memory sit
 // idle.
@@ -126,9 +126,9 @@ func (s *Spawner) RunWorkspaceEvictor(ctx context.Context, interval, after time.
 // snapshot key has been idle longer than `after`.
 //
 // Enumeration is DB-first and disk second, deliberately: the database knows
-// which keys are at rest, unclaimed, and durably snapshotted, and the disk
-// knows none of that — walking the runs directory would find directories with
-// no way to tell a parked cache from a live engagement's cwd. So the query
+// which keys are idle, unclaimed, and durably snapshotted, and the disk knows
+// none of that — walking the runs directory would find directories with no way
+// to tell a parked cache from a live engagement's cwd. So the query
 // names the candidates fleet-wide and each executor keeps only the ones its own
 // filesystem actually holds; an executor that never held a key's tree simply
 // stats nothing and moves on.

@@ -1523,6 +1523,115 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// The reaper's set is every top-level conversation on the task, not the
+	// states that write a snapshot — so a task whose conversations all failed
+	// still enumerates. Nothing else drops a blob on age, which makes a state
+	// missing from this query a blob nothing ever comes back for.
+	t.Run("ListReapableSnapshotKeys_FailedConversation", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID, _, taskID := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
+		if ok, err := store.MarkFailedIfActive(ctx, orgID, conversationID, string(domain.ConversationFailureExecutorLost)); err != nil || !ok {
+			t.Fatalf("MarkFailedIfActive: ok=%v err=%v", ok, err)
+		}
+
+		aged, err := store.ListReapableSnapshotKeysSystem(ctx, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Fatalf("ListReapableSnapshotKeysSystem(aged): %v", err)
+		}
+		if !reapKeysContain(aged, taskID) {
+			t.Errorf("task %s whose conversation failed is not reapable past the TTL; its workspace blob would never be collected", taskID)
+		}
+
+		fresh, err := store.ListReapableSnapshotKeysSystem(ctx, time.Now().Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("ListReapableSnapshotKeysSystem(fresh): %v", err)
+		}
+		if reapKeysContain(fresh, taskID) {
+			t.Errorf("just-failed task %s is already reapable; the TTL has not elapsed", taskID)
+		}
+	})
+
+	// The reaper's claim guard, isolated: the cutoff is in the future, so
+	// every conversation on the key has aged out and a live claim is the only
+	// thing that can withhold it. That claim is what the blob is open for —
+	// the engagement rehydrated from it and re-writes it only when it parks.
+	t.Run("ListReapableSnapshotKeys_RefusesWhileAnyConversationIsClaimed", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "reap-claimed")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		bpr := seed.BlueprintRun(t, taskID)
+		mkStep := func() string {
+			return seed.Conversation(t, domain.Conversation{
+				TaskID: taskID, PromptID: conversationTestPrompt(t), Status: "running",
+				Model: "m", BlueprintRunID: bpr,
+			})
+		}
+		parked, live := mkStep(), mkStep()
+		if _, err := store.ParkOpen(ctx, orgID, parked, db.ParkIdle()); err != nil {
+			t.Fatalf("ParkOpen: %v", err)
+		}
+		if _, err := store.SetExecutorSystem(ctx, orgID, live, "exec-reap-live", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+
+		cutoff := time.Now().Add(time.Hour)
+		claimed, err := store.ListReapableSnapshotKeysSystem(ctx, cutoff)
+		if err != nil {
+			t.Fatalf("ListReapableSnapshotKeysSystem(claimed): %v", err)
+		}
+		if reapKeysContain(claimed, taskID) {
+			t.Errorf("task %s is reapable while a sibling conversation holds a live claim; the blob would be dropped under a running agent", taskID)
+		}
+
+		// Release it and the key goes — the claim, not the age, was the gate.
+		if _, err := store.SetExecutorSystem(ctx, orgID, live, "", 0); err != nil {
+			t.Fatalf("release claim: %v", err)
+		}
+		released, err := store.ListReapableSnapshotKeysSystem(ctx, cutoff)
+		if err != nil {
+			t.Fatalf("ListReapableSnapshotKeysSystem(released): %v", err)
+		}
+		if !reapKeysContain(released, taskID) {
+			t.Errorf("task %s is not reapable once nothing is claimed on it", taskID)
+		}
+	})
+
+	// ended_at's rung in the age ladder. A queued conversation a boundary
+	// superseded never parks and never concludes, so ended_at is the only
+	// stamp that records when it stopped mattering; aging the key from its
+	// started_at instead would collect the blob of work that just moved on.
+	t.Run("ListReapableSnapshotKeys_EndedAtParticipatesInTheAgeRule", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID, _, taskID := seedConversationWithBlueprintForTest(t, orgID, seed, "")
+		// Minted and queued two days ago, so only the boundary is recent.
+		seed.BackdateStartedAt(t, conversationID, 48*time.Hour)
+		seed.BackdateQueuedAt(t, conversationID, 48*time.Hour)
+
+		cutoff := time.Now().Add(-time.Hour)
+		before, err := store.ListReapableSnapshotKeysSystem(ctx, cutoff)
+		if err != nil {
+			t.Fatalf("ListReapableSnapshotKeysSystem(before the boundary): %v", err)
+		}
+		if !reapKeysContain(before, taskID) {
+			t.Fatalf("two-day-old queued task %s is not reapable; the fixture has not staged the precondition", taskID)
+		}
+
+		if _, err := store.EndConversationSystem(ctx, orgID, conversationID, domain.EndedRequeued); err != nil {
+			t.Fatalf("EndConversationSystem: %v", err)
+		}
+		after, err := store.ListReapableSnapshotKeysSystem(ctx, cutoff)
+		if err != nil {
+			t.Fatalf("ListReapableSnapshotKeysSystem(after the boundary): %v", err)
+		}
+		if reapKeysContain(after, taskID) {
+			t.Errorf("task %s is reapable on the started_at of a conversation that ended just now; ended_at is what says when it went quiet", taskID)
+		}
+	})
+
 	// Workspace eviction's enumeration. The warm tree is a cache whose only
 	// licence to be deleted is that the durable blob exists, so every arm here
 	// is about refusing rather than finding: the safety gates are the test.
@@ -1626,6 +1735,32 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		has, err = store.HasActiveClaimForTaskSystem(ctx, orgID, taskID)
 		if err != nil || has {
 			t.Fatalf("HasActiveClaimForTaskSystem after release = %v (err %v), want false", has, err)
+		}
+	})
+
+	// The eviction set is the reaper's set: every top-level conversation on
+	// the task, whatever state it reached. A tree a failure left behind is a
+	// cache like any other once the blob is written, and a sweep that skipped
+	// it would leave a full checkout on the executor's disk until a restart.
+	t.Run("ListEvictableWorkspaces_FailedConversationsTree", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID, _, wsTask := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
+		const wtPath = "/tmp/triagefactory-runs/evict-failed"
+		if _, err := store.SetWorktreePathSystem(ctx, orgID, conversationID, wtPath); err != nil {
+			t.Fatalf("SetWorktreePathSystem: %v", err)
+		}
+		if ok, err := store.MarkFailedIfActive(ctx, orgID, conversationID, string(domain.ConversationFailureExecutorLost)); err != nil || !ok {
+			t.Fatalf("MarkFailedIfActive: ok=%v err=%v", ok, err)
+		}
+		seed.SetSnapshotState(t, wsTask, domain.WorkspaceSnapshotWritten)
+
+		got := evictableFor(t, store, ctx, time.Now().Add(time.Hour), wsTask)
+		if got == nil {
+			t.Fatalf("failed key %s with a written snapshot is not evictable; its warm tree would be reclaimed only by a restart", wsTask)
+		}
+		if len(got.WorktreePaths) != 1 || got.WorktreePaths[0] != wtPath {
+			t.Errorf("worktree paths = %v, want [%s]", got.WorktreePaths, wtPath)
 		}
 	})
 

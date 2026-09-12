@@ -199,6 +199,35 @@ func TestEvictIdleWorkspaces_RefusesWhileASiblingStepIsClaimed(t *testing.T) {
 	}
 }
 
+// TestEvictIdleWorkspaces_EvictsATaskWhoseConversationFailed: the tree a
+// failure left behind is a warm tree like any other — the blob is written,
+// nothing is claimed on it, and it aged past the window — so the sweep
+// reclaims it. Enumerating only the states that write a snapshot would leave
+// this one on the executor's disk until a restart, which is the accumulation
+// the sweep exists to stop.
+func TestEvictIdleWorkspaces_EvictsATaskWhoseConversationFailed(t *testing.T) {
+	isolateRunNamespace(t)
+	s, database, conversationID, _ := setupAdvanceFixture(t, "evict-failed")
+	wireBlobStore(t, s)
+
+	wsKey := taskIDForConversation(t, database, conversationID)
+	wtPath := makeRunTree(t, wsKey)
+	putTestSnapshot(t, s, wsKey)
+	seedSnapshotState(t, s, wsKey, evictWriterClaim, domain.WorkspaceSnapshotWritten)
+	if _, err := database.Exec(
+		`UPDATE conversations SET status='failed', failure_kind=?, worktree_path=?, parked_at=NULL, completed_at=datetime('now','-2 hours') WHERE id=?`,
+		string(domain.ConversationFailureExecutorLost), wtPath, conversationID,
+	); err != nil {
+		t.Fatalf("fail the conversation: %v", err)
+	}
+
+	s.EvictIdleWorkspaces(context.Background(), time.Hour)
+
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatalf("tree %s survived a failed task past the idle window (stat err %v); a resume rehydrates from the blob", wtPath, err)
+	}
+}
+
 // TestEvictIdleWorkspaces_RefusesWithinTheIdleWindow: the TTL is the whole
 // distinction between a warm cache and a stale one.
 func TestEvictIdleWorkspaces_RefusesWithinTheIdleWindow(t *testing.T) {
