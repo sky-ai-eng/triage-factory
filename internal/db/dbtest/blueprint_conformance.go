@@ -206,7 +206,15 @@ func RunIsNewestRunForTaskConformance(t *testing.T, mk BlueprintRunWriteFactory)
 		if _, err := store.MarkRunStatusSystem(ctx, orgID, first.ID, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
 			t.Fatalf("settle the first run: %v", err)
 		}
-		time.Sleep(1100 * time.Millisecond) // SQLite's second-granularity timestamps
+		// SQLite stamps started_at to the second, so two runs minted back to
+		// back tie and the id tiebreaker — not the ordering under test — would
+		// decide. A zero nanosecond field is how a backend says it truncated;
+		// Postgres keeps microseconds and waits for nothing. (It can land
+		// exactly on a second boundary and pay the wait, which costs a second
+		// and changes no answer.)
+		if first.StartedAt.Nanosecond() == 0 {
+			time.Sleep(1100 * time.Millisecond)
+		}
 		second, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
 			BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
 		})
