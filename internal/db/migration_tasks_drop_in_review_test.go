@@ -8,7 +8,7 @@ import (
 )
 
 // The migration that retires 'in_review' from the task status vocabulary
-// (202609120007). Two things have to come out of it and neither is "UPDATE
+// (202609120008). Two things have to come out of it and neither is "UPDATE
 // works": a row a deployed build left in the retired status has to land
 // somewhere the board can still render — 'in_progress', where the Jira mirror
 // already put it — and the rebuilt table has to refuse the value afterwards,
@@ -38,7 +38,7 @@ func TestMigrate_DropsInReviewFromTheTaskStatusVocabulary(t *testing.T) {
 	// Stop one version short, so the rows below are staged by a schema that
 	// still accepts 'in_review' — which is the only state this migration is
 	// about.
-	upToErr := goose.UpTo(database, dir, 202609120006)
+	upToErr := goose.UpTo(database, dir, 202609120007)
 	gooseMu.Unlock()
 	if upToErr != nil {
 		t.Fatalf("goose.UpTo previous version: %v", upToErr)
