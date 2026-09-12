@@ -46,8 +46,8 @@ type Delegator interface {
 	// executor (TFAC-585's `inject` conversation_signals kind), or the durable
 	// staged-injection fallback — returning a 4-way outcome. Signature
 	// matches *delegate.Spawner's method exactly. Used by tryAutoDelegate's
-	// additive-event branch to fold a follow-up event into an entity's
-	// already-active auto run instead of deferring a second one:
+	// additive-event branch to fold a follow-up event into the task's live
+	// conversation instead of deferring a second one:
 	// InjectNotDelivered means the firing must fall through to the normal
 	// deferral (no durable row to fall back on); InjectDeliveredRemote
 	// means a live remote executor now owns recording the outcome (the
@@ -87,8 +87,8 @@ type EventPublisher interface {
 //  5. Dedup-creates or bumps tasks
 //  6. Enqueues AI scoring
 //  7. Auto-delegates on matching triggers — fires if the task is idle,
-//     enqueues onto pending_firings if the task already has an active
-//     auto run or earlier queued firings.
+//     folds the event into the task's live conversation if it has one, and
+//     enqueues onto pending_firings when there are earlier queued firings.
 //  8. Runs inline close checks for the event type
 type Router struct {
 	prompts       dbpkg.PromptStore

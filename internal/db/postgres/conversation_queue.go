@@ -895,7 +895,7 @@ func healClaimDesyncs(ctx context.Context, q queryer) (released int, err error) 
 // firing path's mint→enqueue crash window, where the parent committed and its
 // first step never did. With no child there is no claim and no conversation, so
 // every other recovery arm — here, in ResetProcessingConversations, in the leader reaper
-// — joins straight past it while it keeps holding the one-active-auto-run index
+// — joins straight past it while it keeps holding the one-active-run index
 // against its task.
 //
 // Own DB time, and nothing but the parent row to write: no child to park, no

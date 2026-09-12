@@ -774,14 +774,32 @@ func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.
 		RETURNING `+blueprintRunColumns,
 		br.ID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath, abortReason, completedAt, creatorUserID).Scan)
 	if err != nil {
+		if isTaskBusyActiveRun(err) {
+			return domain.BlueprintRun{}, db.ErrTaskBusyActiveRun
+		}
 		return domain.BlueprintRun{}, fmt.Errorf("insert blueprint_run: %w", err)
 	}
 	return stored, nil
 }
 
+// isTaskBusyActiveRun reports whether err is
+// blueprint_runs_one_active_run_per_task refusing an insert: something already
+// holds this task's single live engagement. Both mint doors translate through
+// here so they cannot disagree about which violation is a busy task.
+//
+// The index is partial, and SQLite names the indexed COLUMN rather than the
+// index in that message — which is what tells this apart from the other unique
+// index on the table, the (triggering_event_id, trigger_id) replay fence.
+// modernc's driver exposes no typed error, so the message is the only signal.
+func isTaskBusyActiveRun(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: blueprint_runs.task_id")
+}
+
 // CreateRunIfNotFiredSystem is the event-path fenced insert: ON CONFLICT against
 // the blueprint_runs_event_trigger_fence partial unique index makes a replayed
-// (triggering_event_id, trigger_id) a clean no-op (inserted=false). SQLite has a
+// (triggering_event_id, trigger_id) a clean no-op (inserted=false), and a loss
+// to blueprint_runs_one_active_run_per_task comes back as
+// db.ErrTaskBusyActiveRun — a deferral, not a satisfied replay. SQLite has a
 // single connection, so there is no admin/app split; the contract matches the
 // Postgres impl.
 //
@@ -813,6 +831,9 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
 		`, br.ID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, nullIfEmpty(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath)
 		if err != nil {
+			if isTaskBusyActiveRun(err) {
+				return db.ErrTaskBusyActiveRun
+			}
 			return fmt.Errorf("insert blueprint_run (fenced): %w", err)
 		}
 		n, err := res.RowsAffected()

@@ -22,8 +22,8 @@ import (
 //
 // The per-task firing gate's conversation-shaped half lives on
 // ConversationStore — strict ownership. The router composes the gate from
-// this store's HasPendingForTask + ConversationStore's
-// HasActiveAutoConversationForTask.
+// this store's HasPendingForTask + ConversationStore's live-conversation
+// read.
 type pendingFiringsStore struct{ q queryer }
 
 func newPendingFiringsStore(q queryer) db.PendingFiringsStore {

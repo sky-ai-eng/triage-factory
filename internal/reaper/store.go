@@ -89,7 +89,7 @@ type Store interface {
 	// is the one recovery shape no other arm can reach: every predicate above
 	// joins through conversations, and an orphan minted by a crash between the
 	// firing path's two commits has none — so it is invisible to them, keeps
-	// holding the one-active-auto-run index against its task, and livelocks
+	// holding the one-active-run index against its task, and livelocks
 	// the router's pending-firing drain (the busy gate reads conversations and
 	// sees idle, the index refuses the insert, forever).
 	//

@@ -1090,10 +1090,17 @@ func inListArgs(ids []string) (string, []any) {
 	return strings.Join(placeholders, ", "), args
 }
 
-// HasActiveAutoConversationForTask reports whether any non-terminal trigger_type='event'
-// conversation exists on the task. Manual delegations are excluded. Used by the router's
-// per-task firing gate.
-func (s *conversationStore) HasActiveAutoConversationForTask(ctx context.Context, orgID, taskID string) (bool, error) {
+// liveConversationForTaskSQL is this dialect's one spelling of "the task's
+// live conversation", over the alias `r`: un-ended and non-terminal. See
+// db.ConversationStore for why both clauses are there and why there is one
+// spelling rather than one per door.
+const liveConversationForTaskSQL = `(r.ended_at IS NULL
+		       AND (r.status IS NULL
+		            OR r.status NOT IN (` + conversationTerminalStatusesSQL + `)))`
+
+// HasLiveConversationForTask reports whether the task holds a live
+// conversation, of any trigger type.
+func (s *conversationStore) HasLiveConversationForTask(ctx context.Context, orgID, taskID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
@@ -1101,9 +1108,7 @@ func (s *conversationStore) HasActiveAutoConversationForTask(ctx context.Context
 	err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM conversations r
 		WHERE r.task_id = ?
-		  AND r.trigger_type = 'event'
-		  AND (r.status IS NULL
-		       OR r.status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  AND `+liveConversationForTaskSQL+`
 	`, taskID).Scan(&count)
 	return count > 0, err
 }
@@ -1141,15 +1146,15 @@ func (s *conversationStore) ActiveIDsForTask(ctx context.Context, orgID, taskID 
 // parity with Postgres. The delegate spawner consumes these from
 // its goroutine paths that detach from the request context.
 
-func (s *conversationStore) HasActiveAutoConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
-	return s.HasActiveAutoConversationForTask(ctx, orgID, taskID)
+func (s *conversationStore) HasLiveConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
+	return s.HasLiveConversationForTask(ctx, orgID, taskID)
 }
 
 func (s *conversationStore) ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
 	return s.ActiveIDsForTask(ctx, orgID, taskID)
 }
 
-func (s *conversationStore) ActiveAutoConversationIDForTaskSystem(ctx context.Context, orgID, taskID string) (string, error) {
+func (s *conversationStore) LiveConversationIDForTaskSystem(ctx context.Context, orgID, taskID string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
 	}
@@ -1157,9 +1162,7 @@ func (s *conversationStore) ActiveAutoConversationIDForTaskSystem(ctx context.Co
 	err := s.q.QueryRowContext(ctx, `
 		SELECT r.id FROM conversations r
 		WHERE r.task_id = ?
-		  AND r.trigger_type = 'event'
-		  AND (r.status IS NULL
-		       OR r.status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  AND `+liveConversationForTaskSQL+`
 		ORDER BY r.started_at DESC
 		LIMIT 1
 	`, taskID).Scan(&id)

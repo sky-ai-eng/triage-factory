@@ -289,7 +289,7 @@ type ConversationQueueStore interface {
 	// death between the two leaves a parent nothing drives — and nothing else
 	// recovers it, because every other arm (and the Postgres-only leader
 	// reaper) joins through conversations. Failing frees the
-	// one-active-auto-run index the orphan was holding, so the task's
+	// one-active-run index the orphan was holding, so the task's
 	// already-queued firing intent drains into a fresh, fully-minted
 	// blueprint run instead of retrying against the index forever. Both
 	// dialects: local mode has the same crash window and no reaper.

@@ -165,7 +165,7 @@ func (s *scoreStore) ClearReDeriveOwed(ctx context.Context, orgID string, taskID
 	// Per-id, unwrapped, like MarkScoring's loop: a failure partway leaves
 	// the rest owed, and an owed task is only ever re-evaluated — never
 	// double-fired, since firing sits behind the replay fence and the
-	// one-active-auto-run index.
+	// one-active-run index.
 	for _, id := range taskIDs {
 		if _, err := s.q.ExecContext(ctx, `UPDATE tasks SET rederive_owed = 0 WHERE id = ?`, id); err != nil {
 			return err

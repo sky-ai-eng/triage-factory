@@ -45,6 +45,20 @@ func TestBlueprintStore_SQLite_RunWriteConformance(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_SQLite_OneActiveRunPerTask runs the shared
+// one-running-blueprint_run-per-task suite against the SQLite impl, where the
+// index arrived with the rule rather than the baseline.
+func TestBlueprintStore_SQLite_OneActiveRunPerTask(t *testing.T) {
+	dbtest.RunOneActiveRunPerTaskConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		blueprintID := "bp-oneactive-" + uuid.New().String()[:8]
+		insertBlueprintForTest(t, conn, blueprintID, "One-active fixture")
+		task := seedEntityEventTask(t, conn, "one-active")
+		return sqlitestore.New(conn).Blueprints, runmode.LocalDefaultOrgID, blueprintID, task.ID
+	})
+}
+
 // TestBlueprintStore_SQLite_DuplicationConformance runs the shared
 // DuplicatePrompts deep-copy suite against the SQLite impl. User prompts seed
 // via the store; system prompts (source='system', creator NULL, a system_slug)
@@ -256,9 +270,12 @@ func TestBlueprintStore_SQLite_StepPlanRoundTrip(t *testing.T) {
 		}
 	}
 
-	// An empty plan must satisfy NOT NULL and read back empty, not error.
+	// An empty plan must satisfy NOT NULL and read back empty, not error. Its
+	// own task: one running blueprint_run per task is a schema invariant, and
+	// nothing here is about two runs sharing a task.
+	emptyTask := seedEntityEventTask(t, conn, "stepplan-rt-empty")
 	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "sp-bpr-empty", BlueprintID: "sp-bp", TaskID: task.ID,
+		ID: "sp-bpr-empty", BlueprintID: "sp-bp", TaskID: emptyTask.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-sp-empty",
 	}); err != nil {
@@ -309,8 +326,9 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 	// Fenced event insert (CreateRunIfNotFiredSystem — the auto-fire hot path)
 	// carries the actor too. Needs a real triggering_event_id (the task's event)
 	// and trigger_id (an event_handler) for the fence FKs.
+	eventTask := seedEntityEventTask(t, conn, "actor-rt-event")
 	var eventID string
-	if err := conn.QueryRow(`SELECT primary_event_id FROM tasks WHERE id = ?`, task.ID).Scan(&eventID); err != nil {
+	if err := conn.QueryRow(`SELECT primary_event_id FROM tasks WHERE id = ?`, eventTask.ID).Scan(&eventID); err != nil {
 		t.Fatalf("read task event id: %v", err)
 	}
 	if _, err := conn.Exec(`
@@ -320,7 +338,7 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 		t.Fatalf("seed trigger: %v", err)
 	}
 	if inserted, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, org, domain.BlueprintRun{
-		ID: "actor-bpr-ev", BlueprintID: "actor-bp", TaskID: task.ID,
+		ID: "actor-bpr-ev", BlueprintID: "actor-bp", TaskID: eventTask.ID,
 		TriggerType: domain.BlueprintTriggerEvent, TriggerID: "actor-trig", TriggeringEventID: eventID,
 		Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-actor-ev", ActorAgentID: agentID,
 	}, db.AgentClaimStamp{}); err != nil || !inserted {
@@ -334,9 +352,10 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 		t.Errorf("event (fenced) actor round-trip = %q, want %q", ev.ActorAgentID, agentID)
 	}
 
-	// No actor → empty, not an error.
+	// No actor → empty, not an error. Its own task, like the fenced run above.
+	noneTask := seedEntityEventTask(t, conn, "actor-rt-none")
 	if _, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "actor-bpr-none", BlueprintID: "actor-bp", TaskID: task.ID,
+		ID: "actor-bpr-none", BlueprintID: "actor-bp", TaskID: noneTask.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-actor-none",
 	}); err != nil {
@@ -557,8 +576,9 @@ func TestBlueprintStore_SQLite_StepPlanLengths(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateRun (three steps): %v", err)
 	}
+	oneStepTask := seedEntityEventTask(t, conn, "blueprint-plan-len-one")
 	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "len-bpr-one", BlueprintID: "len-blueprint", TaskID: task.ID,
+		ID: "len-bpr-one", BlueprintID: "len-blueprint", TaskID: oneStepTask.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		StepPlan: plan[:1],
 	}); err != nil {

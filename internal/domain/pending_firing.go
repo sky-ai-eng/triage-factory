@@ -3,9 +3,10 @@ package domain
 import "time"
 
 // PendingFiring is an "intent to delegate" that couldn't run when its
-// triggering event arrived because the entity already had an active auto
-// run. Firings are enqueued by the router's gate and drained in arrival
-// order by the spawner's QueueDrainer hook on auto-run terminal events.
+// triggering event arrived because its task already had firings queued ahead
+// of it. Firings are enqueued by the router's per-task gate and drained in
+// arrival order by the spawner's QueueDrainer hook when one of the task's
+// conversations reaches a terminal, whatever minted it.
 //
 // Lifecycle: pending → draining → (fired | skipped_stale), or draining →
 // pending on a transient-error release. draining is the claiming pop's

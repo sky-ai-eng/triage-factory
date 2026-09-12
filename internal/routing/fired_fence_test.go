@@ -127,9 +127,11 @@ func fenceConversationCount(t *testing.T, database *sql.DB, entityID string) int
 }
 
 // fenceCompleteConversations moves every conversation on the entity to a
-// terminal status, reopening the task's auto-run gate — exactly the
-// boot-recovery window (the first conversation already went terminal) the
-// replay re-fires into.
+// terminal status and settles the blueprint behind it, reopening the task's
+// gate — exactly the boot-recovery window (the first conversation already went
+// terminal) the replay re-fires into. The blueprint half is what production's
+// reactor writes off that terminal, and without it the task's one running
+// blueprint_run would still hold its slot.
 func fenceCompleteConversations(t *testing.T, database *sql.DB, entityID string) {
 	t.Helper()
 	if _, err := database.Exec(`
@@ -137,6 +139,12 @@ func fenceCompleteConversations(t *testing.T, database *sql.DB, entityID string)
 		WHERE task_id IN (SELECT id FROM tasks WHERE entity_id = ?)
 	`, time.Now(), entityID); err != nil {
 		t.Fatalf("complete conversations: %v", err)
+	}
+	if _, err := database.Exec(`
+		UPDATE blueprint_runs SET status = 'completed', completed_at = ?
+		WHERE status = 'running' AND task_id IN (SELECT id FROM tasks WHERE entity_id = ?)
+	`, time.Now(), entityID); err != nil {
+		t.Fatalf("complete blueprint runs: %v", err)
 	}
 }
 

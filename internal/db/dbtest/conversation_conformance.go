@@ -128,6 +128,14 @@ type ConversationSeeder struct {
 	// Each call mints a fresh independent blueprint_run — that matches the
 	// real firing model (one delegation = one blueprint_run) and keeps
 	// multi-conversation-per-task subtests realistic.
+	//
+	// A second call on the same task settles the task's previous run
+	// 'completed' before minting, because one running blueprint_run per task
+	// is a schema invariant (blueprint_runs_one_active_run_per_task). That is
+	// also what a subtest staging a task's history is staging: the task moved
+	// from one engagement to the next, and only the newest is live. A subtest
+	// that needs a specific earlier status sets it with SetBlueprintRunStatus,
+	// which is unguarded.
 	BlueprintRun func(t *testing.T, taskID string) string
 
 	// SetSnapshotState upserts the key's workspace_snapshots row to the given
@@ -3427,12 +3435,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("HasActiveAutoConversationForTask", func(t *testing.T) {
-		// Per-task gate: any non-terminal trigger_type='event' conversation on
-		// the task. Manual delegations are excluded (by design — manual is
-		// decoupled from the auto-queue gate); terminal conversations don't
-		// count either. A sibling task on the same entity is invisible here,
-		// which is the whole point of the unit being the task.
+	t.Run("HasLiveConversationForTask", func(t *testing.T) {
+		// The rule's predicate: a live conversation is un-ended AND
+		// non-terminal, whatever trigger type minted it. A sibling task on the
+		// same entity is invisible here, which is the whole point of the unit
+		// being the task.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "ha-ent")
@@ -3440,51 +3447,67 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
 		// No conversations → false.
-		if has, _ := store.HasActiveAutoConversationForTask(ctx, orgID, taskID); has {
-			t.Error("HasActiveAutoConversationForTask with no conversations: true, want false")
+		if has, _ := store.HasLiveConversationForTask(ctx, orgID, taskID); has {
+			t.Error("HasLiveConversationForTask with no conversations: true, want false")
 		}
 
-		// Manual conversation — must NOT trip the gate.
-		_ = seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		if has, _ := store.HasActiveAutoConversationForTask(ctx, orgID, taskID); has {
-			t.Error("manual conversation tripped the auto gate; gate must be event-only")
+		// A manual conversation holds the gate exactly as an auto one does:
+		// the task has one live conversation and this is it.
+		manualID := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		if has, _ := store.HasLiveConversationForTask(ctx, orgID, taskID); !has {
+			t.Error("a live manual conversation must hold the task's gate")
 		}
 
-		// Add an active event-trigger conversation on the same task — gate flips
-		// true.
+		// A sibling task on the same entity is unaffected — the gate is the
+		// task's, so a busy sibling never blocks it.
+		ev2 := seed.Event(t, ent, domain.EventGitHubPRCICheckFailed)
+		sibling := seed.Task(t, ent, domain.EventGitHubPRCICheckFailed, ev2)
+		if has, _ := store.HasLiveConversationForTask(ctx, orgID, sibling); has {
+			t.Error("a busy sibling task on the same entity closed this task's gate")
+		}
+
+		// Parked `open` still counts: it is wakeable, so it is still the
+		// conversation the task is about.
+		if _, err := store.ParkOpen(ctx, orgID, manualID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil {
+			t.Fatalf("ParkOpen: %v", err)
+		}
+		if has, _ := store.HasLiveConversationForTask(ctx, orgID, taskID); !has {
+			t.Error("a conversation parked open must still hold the task's gate")
+		}
+
+		// The boundary is what releases it. Stamping ended_at says this
+		// conversation is no longer the one the task is about, and the row is
+		// still `open` — so the status clause alone would not have seen it.
+		if _, err := store.EndConversationsForTask(ctx, orgID, taskID, domain.EndedRequeued); err != nil {
+			t.Fatalf("EndConversationsForTask: %v", err)
+		}
+		if has, _ := store.HasLiveConversationForTask(ctx, orgID, taskID); has {
+			t.Error("an ended conversation must not hold the task's gate")
+		}
+
+		// A terminal conversation doesn't hold it either, and a terminal one
+		// is reachable without any boundary having been stamped.
 		eventConversationID := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})
-		if has, _ := store.HasActiveAutoConversationForTask(ctx, orgID, taskID); !has {
-			t.Error("active event-trigger conversation should trip the gate")
+		if has, _ := store.HasLiveConversationForTask(ctx, orgID, taskID); !has {
+			t.Error("a live event-triggered conversation must hold the task's gate")
 		}
-
-		// A second task on the SAME entity is unaffected — the gate is the
-		// task's, so a busy sibling never blocks it.
-		ev2 := seed.Event(t, ent, domain.EventGitHubPRCICheckFailed)
-		sibling := seed.Task(t, ent, domain.EventGitHubPRCICheckFailed, ev2)
-		if has, _ := store.HasActiveAutoConversationForTask(ctx, orgID, sibling); has {
-			t.Error("a busy sibling task on the same entity closed this task's gate")
-		}
-
-		// Terminate the event conversation; only terminal event-trigger rows
-		// remain plus the still-running manual — gate flips back to
-		// false.
 		if _, err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		if has, _ := store.HasActiveAutoConversationForTask(ctx, orgID, taskID); has {
-			t.Error("terminal event conversation + active manual should NOT trip the gate")
+		if has, _ := store.HasLiveConversationForTask(ctx, orgID, taskID); has {
+			t.Error("a terminal conversation must not hold the task's gate")
 		}
 	})
 
-	t.Run("ActiveAutoConversationIDForTaskSystem", func(t *testing.T) {
-		// Same predicate as HasActiveAutoConversationForTask (non-terminal,
-		// trigger_type='event'), but returns the conversation ID instead of a
-		// bool — a busy gate is the additive-injection path, which needs the
-		// conversation to fold the new event into.
+	t.Run("LiveConversationIDForTaskSystem", func(t *testing.T) {
+		// Same predicate as HasLiveConversationForTask, but returns the
+		// conversation ID instead of a bool — a busy gate is the
+		// additive-injection path, which needs the conversation to fold the new
+		// event into.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "ha-id-ent")
@@ -3492,39 +3515,44 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
 		// No conversations → "".
-		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
+		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
 			t.Errorf("with no conversations: id=%q err=%v, want empty/nil", id, err)
 		}
 
-		// Manual conversation only — must NOT resolve.
-		_ = seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
-			t.Errorf("manual-only: id=%q err=%v, want empty (event-only)", id, err)
+		// A live manual conversation resolves: this is the row an event
+		// landing on the task now folds into instead of minting beside.
+		manualID := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != manualID {
+			t.Errorf("manual conversation: id=%q err=%v, want %q", id, err, manualID)
 		}
 
-		// Active event-trigger conversation → resolves to its conversation ID.
+		// A sibling task on the same entity still resolves to nothing.
+		ev2 := seed.Event(t, ent, domain.EventGitHubPRCICheckFailed)
+		sibling := seed.Task(t, ent, domain.EventGitHubPRCICheckFailed, ev2)
+		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, sibling); err != nil || id != "" {
+			t.Errorf("sibling task: id=%q err=%v, want empty", id, err)
+		}
+
+		// Hand the task over to an event-triggered conversation the way the
+		// delegate route does — boundary on the old one first, then the mint —
+		// and the read follows the live row rather than the older one.
+		if _, err := store.EndConversationsForTask(ctx, orgID, taskID, domain.EndedDelegated); err != nil {
+			t.Fatalf("EndConversationsForTask: %v", err)
+		}
 		eventBR := seed.BlueprintRun(t, taskID)
 		eventConversationID := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: eventBR,
 		})
-		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != eventConversationID {
-			t.Errorf("ActiveAutoConversationIDForTaskSystem = %q err=%v, want %q", id, err, eventConversationID)
+		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != eventConversationID {
+			t.Errorf("LiveConversationIDForTaskSystem = %q err=%v, want %q", id, err, eventConversationID)
 		}
 
-		// A sibling task on the same entity still resolves to nothing.
-		ev2 := seed.Event(t, ent, domain.EventGitHubPRCICheckFailed)
-		sibling := seed.Task(t, ent, domain.EventGitHubPRCICheckFailed, ev2)
-		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, sibling); err != nil || id != "" {
-			t.Errorf("sibling task: id=%q err=%v, want empty", id, err)
-		}
-
-		// The same answer for a conversation a user RESUMED. A resume keeps
-		// trigger_type='event' and puts the row back mid-flight, so it reads
-		// as a live auto conversation again — for its own task, and only its
-		// own. A human-paced follow-up on one card must never hold up automated
-		// triage of a different card on the same entity.
+		// The same answer for a conversation a user RESUMED. A resume puts the
+		// row back mid-flight, so it reads as live again — for its own task,
+		// and only its own. A human-paced follow-up on one card must never
+		// hold up automated triage of a different card on the same entity.
 		if _, err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("conclude before resume: %v", err)
 		}
@@ -3534,20 +3562,20 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if flipped, err := store.MarkQueuedForResume(ctx, orgID, eventConversationID); err != nil || !flipped {
 			t.Fatalf("MarkQueuedForResume: ok=%v err=%v", flipped, err)
 		}
-		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != eventConversationID {
+		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != eventConversationID {
 			t.Errorf("resumed conversation, own task: id=%q err=%v, want %q", id, err, eventConversationID)
 		}
-		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, sibling); err != nil || id != "" {
+		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, sibling); err != nil || id != "" {
 			t.Errorf("resumed conversation, sibling task on the same entity: id=%q err=%v, want empty", id, err)
 		}
 
-		// Terminate it — terminal-only, plus the still-active manual
-		// conversation, resolves back to "".
+		// Terminate it — terminal, plus the already-ended manual conversation,
+		// resolves back to "".
 		if _, err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
-			t.Errorf("terminal event conversation + active manual: id=%q err=%v, want empty", id, err)
+		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
+			t.Errorf("terminal event conversation + ended manual: id=%q err=%v, want empty", id, err)
 		}
 	})
 

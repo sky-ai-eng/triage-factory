@@ -851,9 +851,11 @@ func (s *Server) firstStepConversationID(ctx context.Context, orgID, userID, blu
 // writeDelegateSpawnError maps a spawner.Delegate failure to its status: a
 // bad or missing blueprint reference and a model the org/team cannot run are
 // the request's fault (422 — the body was well-formed, but what it asks for
-// can't back a run), anything else is a spawn/DB fault (500, logged +
-// redacted). Shared by the delegate route and the factory drag-to-delegate so
-// the two gestures fail identically.
+// can't back a run), a task that already holds a live run is a conflict (409
+// — nothing about the request is wrong, someone else got there first),
+// anything else is a spawn/DB fault (500, logged + redacted). Shared by the
+// delegate route and the factory drag-to-delegate so the two gestures fail
+// identically.
 //
 // Every arm carries reason SPAWN_FAILED: every caller reaches here only after
 // the agent claim stamped, and the reason — not the status — is what tells
@@ -867,6 +869,18 @@ func writeDelegateSpawnError(w http.ResponseWriter, err error) {
 			Reason:  httpx.ReasonSpawnFailed,
 			Message: err.Error(),
 			Field:   "blueprint_id",
+		})
+		return
+	}
+	// Something else already holds this task's single live engagement. The
+	// route tears the prior one down before it mints, so this is a race — a
+	// second delegate gesture, or an event firing in the window. 409 for the
+	// same fault class every other lost race on this route reports, and no
+	// `field`: nothing the caller sent is wrong.
+	if errors.Is(err, delegate.ErrTaskBusy) {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonSpawnFailed,
+			Message: "another run is already active on this task; refresh and try again",
 		})
 		return
 	}

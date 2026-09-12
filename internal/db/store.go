@@ -139,8 +139,8 @@ type Stores struct {
 	Repos RepositoryStore
 
 	// PendingFirings owns the pending_firings table — the FIFO queue
-	// of intent-to-auto-delegate rows the router enqueues when an
-	// entity already has an active auto conversation. Admin pool in Postgres
+	// of intent-to-auto-delegate rows the router enqueues when the task
+	// already has firings ahead of this one. Admin pool in Postgres
 	// (the router has no per-user identity; system service).
 	PendingFirings PendingFiringsStore
 

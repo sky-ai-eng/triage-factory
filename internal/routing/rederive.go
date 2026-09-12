@@ -40,7 +40,7 @@ func (r *Router) ReDeriveAfterScoring(ctx context.Context, orgID string, taskIDs
 // evaluation, and a crash before the batch lands just leaves the whole set
 // owed for the next cycle to redo — which is safe, because re-deriving a
 // task twice fires at most once (the (triggering_event_id, trigger_id)
-// replay fence and the one-active-auto-run index).
+// replay fence and the one-active-run index).
 //
 // A clear failure is logged and dropped for the same reason: the cost is a
 // redundant re-derive next cycle.

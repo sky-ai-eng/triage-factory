@@ -666,9 +666,9 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 	// joins through conversations, and this shape has none.
 	//
 	// Local mode has the crash window and no reaper, so boot is its only
-	// recovery surface. It has no one-active-auto-run index either, so the
-	// Postgres livelock this un-sticks isn't the local symptom; the local
-	// symptom is a parent that reads in-flight forever. Failing frees both.
+	// recovery surface. It carries the same one-active-run index, so the
+	// symptom is the same too: the childless parent holds its task's only
+	// running slot as well as reading in-flight forever. Failing frees both.
 	//
 	// Two clocks here on purpose, and the split is the opposite way round from
 	// the Postgres arm's all-now() statement:

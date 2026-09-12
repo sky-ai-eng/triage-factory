@@ -95,11 +95,13 @@ func TestStop_OpenAutoRun_DrainsQueue(t *testing.T) {
 	}
 }
 
-// TestStop_OpenManualRun_NoDrain confirms the manual short-circuit still
-// applies when a stop hits the no-goroutine path. notifyDrainer is the spot
-// that filters trigger_type=manual, not the caller, so this is a regression
-// guard against someone later adding the filter at the call site instead.
-func TestStop_OpenManualRun_NoDrain(t *testing.T) {
+// TestStop_OpenManualRun_DrainsQueue is the other half of the one-live-
+// conversation-per-task rule: a manual conversation holds the task's firing
+// gate exactly as an auto-fired one does, so its stop is the moment that gate
+// opens and the queued firings behind it have to be drained. Before the rule,
+// notifyDrainer short-circuited on trigger_type='manual' and those firings sat
+// until the periodic sweeper noticed.
+func TestStop_OpenManualRun_DrainsQueue(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-manual", "sess-2", "/tmp/wt-rm")
 	// Manual is the seedConversation default but we set it explicitly for
@@ -116,14 +118,15 @@ func TestStop_OpenManualRun_NoDrain(t *testing.T) {
 		t.Fatalf("stop: %v", err)
 	}
 
-	// Give the would-be drainer goroutine a window to fire if the
-	// filter regresses. notifyDrainer's manual-filter is synchronous
-	// so we won't see a real call here, but a sleep keeps the test
-	// honest without making it slow.
+	// notifyDrainer dispatches in a goroutine — wait briefly.
 	select {
 	case <-drainer.called:
-		t.Fatal("DrainTask called for manual conversation; should be filtered by trigger_type")
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(time.Second):
+		t.Fatal("DrainTask was never called for a manual conversation's stop")
+	}
+	calls := drainer.callsCopy()
+	if len(calls) != 1 || calls[0].taskID == "" {
+		t.Fatalf("expected 1 drain call naming the task, got %v", calls)
 	}
 }
 

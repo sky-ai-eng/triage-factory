@@ -11,9 +11,9 @@ import (
 
 // PendingFiringsStore owns the pending_firings table — the FIFO queue
 // of "intent to auto-delegate" rows the router enqueues whenever an
-// event matches a trigger but the task already has an active auto
-// conversation (or earlier queued firings ahead of it). The drain loop pops
-// them in queue order as auto conversations terminate.
+// event matches a trigger but the task has earlier queued firings ahead of
+// it. The drain loop pops them in queue order as the task's conversations
+// terminate.
 //
 // The queue drains per TASK, matching the gate that fills it. An
 // entity-shaped queue under a task-shaped gate would reintroduce the
@@ -29,10 +29,10 @@ import (
 // equals the local sentinel and otherwise ignores it (single-tenant
 // by design).
 //
-// The per-task firing gate is composed at the call site (router)
-// from HasPendingForTask here + ConversationStore.HasActiveAutoConversationForTask
-// — strict ownership rather than threading a conversation-shaped predicate
-// through this store.
+// The per-task firing gate is composed at the call site (router) from
+// HasPendingForTask here + ConversationStore's live-conversation read — strict
+// ownership rather than threading a conversation-shaped predicate through this
+// store.
 type PendingFiringsStore interface {
 	// Enqueue inserts a pending firing for (entity, task, trigger).
 	// The partial unique index on (task_id, trigger_id) WHERE
@@ -137,9 +137,9 @@ type PendingFiringsStore interface {
 
 	// HasPendingForTask returns true iff the task has any
 	// pending_firings row in 'pending' OR 'draining' status. The router
-	// composes this with ConversationStore.HasActiveAutoConversationForTask to
+	// composes this with ConversationStore's live-conversation read to
 	// enforce FIFO drainage — a new firing must queue behind older
-	// queued rows OR an active auto conversation on the same task. 'draining'
+	// queued rows OR the task's live conversation. 'draining'
 	// counts as queued intent: a drain mid-flight (popped but not yet
 	// fired) must still close the gate, or a fresh event in that window
 	// would fire immediately and jump the queue.

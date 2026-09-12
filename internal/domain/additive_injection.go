@@ -3,9 +3,9 @@ package domain
 import "fmt"
 
 // AdditiveEventInjection is the agent-facing copy for an additive event that
-// arrived while the entity already had an active auto run (TFAC-594): a
-// follow-up on the conversation in progress (e.g. a second Slack mention on a
-// live thread), not a request for a second one. metadataJSON is the
+// arrived while the task already had a live conversation: a follow-up on the
+// conversation in progress (e.g. a second Slack mention on a live thread), not
+// a request for a second one. metadataJSON is the
 // triggering event's raw metadata JSON; "" (a best-effort lookup failure, or
 // an event type with no metadata) still renders a body naming the event type
 // alone.

@@ -1529,18 +1529,25 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 	return out, rows.Err()
 }
 
-// HasActiveAutoConversationForTask: any non-terminal trigger_type='event'
-// conversation on the task. Manual delegations are excluded. Used by the
-// router's per-task firing gate.
-func (s *conversationStore) HasActiveAutoConversationForTask(ctx context.Context, orgID, taskID string) (bool, error) {
-	return hasActiveAutoConversationForTask(ctx, s.q, orgID, taskID)
+// liveConversationForTaskSQL is this dialect's one spelling of "the task's
+// live conversation", over the alias `r`: un-ended and non-terminal. See
+// db.ConversationStore for why both clauses are there and why there is one
+// spelling rather than one per door.
+const liveConversationForTaskSQL = `(r.ended_at IS NULL
+		       AND (r.status IS NULL
+		            OR r.status NOT IN (` + conversationTerminalStatusesSQL + `)))`
+
+// HasLiveConversationForTask: does the task hold a live conversation, of any
+// trigger type?
+func (s *conversationStore) HasLiveConversationForTask(ctx context.Context, orgID, taskID string) (bool, error) {
+	return hasLiveConversationForTask(ctx, s.q, orgID, taskID)
 }
 
-func (s *conversationStore) HasActiveAutoConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
-	return hasActiveAutoConversationForTask(ctx, s.admin, orgID, taskID)
+func (s *conversationStore) HasLiveConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
+	return hasLiveConversationForTask(ctx, s.admin, orgID, taskID)
 }
 
-func hasActiveAutoConversationForTask(ctx context.Context, q queryer, orgID, taskID string) (bool, error) {
+func hasLiveConversationForTask(ctx context.Context, q queryer, orgID, taskID string) (bool, error) {
 	if !isValidUUID(taskID) {
 		return false, nil
 	}
@@ -1549,9 +1556,7 @@ func hasActiveAutoConversationForTask(ctx context.Context, q queryer, orgID, tas
 		SELECT COUNT(*) FROM conversations r
 		WHERE r.org_id = $1
 		  AND r.task_id = $2
-		  AND r.trigger_type = 'event'
-		  AND (r.status IS NULL
-		       OR r.status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  AND `+liveConversationForTaskSQL+`
 	`, orgID, taskID).Scan(&count)
 	return count > 0, err
 }
@@ -1564,7 +1569,7 @@ func (s *conversationStore) ActiveIDsForTaskSystem(ctx context.Context, orgID, t
 	return activeConversationIDsForTask(ctx, s.admin, orgID, taskID)
 }
 
-func (s *conversationStore) ActiveAutoConversationIDForTaskSystem(ctx context.Context, orgID, taskID string) (string, error) {
+func (s *conversationStore) LiveConversationIDForTaskSystem(ctx context.Context, orgID, taskID string) (string, error) {
 	if !isValidUUID(taskID) {
 		return "", nil
 	}
@@ -1573,9 +1578,7 @@ func (s *conversationStore) ActiveAutoConversationIDForTaskSystem(ctx context.Co
 		SELECT r.id FROM conversations r
 		WHERE r.org_id = $1
 		  AND r.task_id = $2
-		  AND r.trigger_type = 'event'
-		  AND (r.status IS NULL
-		       OR r.status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  AND `+liveConversationForTaskSQL+`
 		ORDER BY r.started_at DESC
 		LIMIT 1
 	`, orgID, taskID).Scan(&id)

@@ -15,8 +15,7 @@ import (
 //   - the orgID to pass to every call,
 //   - a PendingFiringsSeeder for fixtures the store can't create itself
 //     (entity → task → event_handler → event chains, plus optional
-//     non-terminal conversations for the HasActiveAutoConversationForTask
-//     gate).
+//     live conversations for the gate's conversation-shaped half).
 type PendingFiringsStoreFactory func(t *testing.T) (
 	store db.PendingFiringsStore,
 	orgID string,
@@ -90,9 +89,9 @@ type PendingFiringsSeeder struct {
 //     at least one 'pending' row, scoped to the org.
 //   - ListForEntity orders by queued_at ASC then id ASC.
 //
-// The conversation-shaped half of the per-task firing gate
-// (HasActiveAutoConversationForTask) is owned by ConversationStore — its
-// behavior is covered by that store's own tests, not here.
+// The conversation-shaped half of the per-task firing gate (the
+// live-conversation read) is owned by ConversationStore — its behavior is
+// covered by that store's own tests, not here.
 func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFactory) {
 	t.Helper()
 	ctx := context.Background()

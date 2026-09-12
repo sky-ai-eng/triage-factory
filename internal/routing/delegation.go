@@ -27,12 +27,13 @@ import (
 // entity-scoped on purpose: repeated failures of one prompt against one
 // entity are the signal, whichever task carried them.
 //
-// The task gate is the serialization point: at most one auto conversation in
-// flight per task, whichever trigger it came from. A sibling task on the same
-// entity has its own gate and fires independently. If the gate is closed
-// (this task's own conversation is live, or older firings are queued for FIFO
-// fairness), the firing folds into the live conversation or enqueues onto
-// pending_firings instead of being dropped silently.
+// The task gate is the serialization point: at most one conversation in
+// flight per task, whichever trigger it came from and whoever started it. A
+// sibling task on the same entity has its own gate and fires independently.
+// If the gate is closed (this task's own conversation is live, or older
+// firings are queued for FIFO fairness), the firing folds into the live
+// conversation or enqueues onto pending_firings instead of being dropped
+// silently.
 //
 // Returns fired=true iff this call actually committed the bot to the task —
 // an immediate fireDelegate success, or a new row landed in pending_firings
@@ -47,7 +48,7 @@ import (
 // dependency this decision rests on failed, so whether the trigger should
 // have fired is unknown. The caller propagates it to the queue worker, which
 // replays the whole event; the fences (the (event, trigger) replay fence, the
-// one-active-auto-run index, the pending_firings pending-unique) make that
+// one-active-run index, the pending_firings pending-unique) make that
 // replay a no-op for anything that already committed. The line between the
 // two is whether a retry could come out differently — a state a replay would
 // find unchanged is a skip, not an error, or the event burns its attempt
@@ -171,11 +172,17 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 		return false, nil
 	}
 
-	// Per-task gate. Closed if an auto conversation is active on THIS TASK, or
-	// any pending_firings rows are already queued for it (FIFO fairness).
-	// Compose the gate from its two halves: ConversationStore owns the
+	// Per-task gate. Closed if a conversation is live on THIS TASK, or any
+	// pending_firings rows are already queued for it (FIFO fairness). Compose
+	// the gate from its two halves: ConversationStore owns the
 	// conversation-shaped predicate, PendingFiringsStore owns the queue-shaped
 	// one. The gate opens only when neither side blocks.
+	//
+	// Whatever minted the live conversation holds the gate. A task has one, and
+	// a human's delegation is as much the task's live conversation as an
+	// auto-fired one — so an event landing on a task a person is working gets
+	// folded into their agent's context by the busy branch below, rather than
+	// racing a second agent against it.
 	//
 	// The task is the unit, not the entity. A task is one situation needing
 	// attention — that is what its (entity, event type, discriminator) dedup
@@ -185,20 +192,13 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 	// 'running' by design) one such conversation held the gate shut for every
 	// other situation on that entity, with nothing left to reopen it.
 	//
-	// The active-conversation read resolves the conversation's ID rather than
+	// The live-conversation read resolves the conversation's ID rather than
 	// a bool: a busy gate is the additive-injection path, and folding the new
 	// event into the conversation needs the conversation.
-	//
-	// TODO(TFAC-996): this read matches trigger_type='event' only, so a live
-	// MANUAL conversation on the task does not hold the gate and this mints a
-	// second live conversation beside it. The rule is one per task — the
-	// delegate route enforces it across both trigger types — and dropping the
-	// filter here folds the event into whatever is live instead, which is what
-	// the busy branch below already does.
-	activeConversationID, err := r.conversations.ActiveAutoConversationIDForTaskSystem(ctx, orgID, task.ID)
+	activeConversationID, err := r.conversations.LiveConversationIDForTaskSystem(ctx, orgID, task.ID)
 	if err != nil {
-		routerLog.Error("task gate active-conversation query failed", "task_id", task.ID, "error", err)
-		return false, fmt.Errorf("task gate active-conversation query: %w", err)
+		routerLog.Error("task gate live-conversation query failed", "task_id", task.ID, "error", err)
+		return false, fmt.Errorf("task gate live-conversation query: %w", err)
 	}
 	hasActive := activeConversationID != ""
 	hasPending := false
@@ -272,11 +272,11 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 				"task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
 			return false, nil
 		}
-		// The gate read said idle, but a DIFFERENT (event, trigger) went
-		// active on this task before our insert — the one-active index
-		// is the authority, the gate just a fast-path. The
-		// intent is still valid: defer it onto pending_firings exactly as
-		// the gate's busy branch would have, instead of dropping it.
+		// The gate read said idle, but something else went live on this task
+		// before our insert — the one-active-run index is the authority, the
+		// gate just a fast-path. The intent is still valid: defer it onto
+		// pending_firings exactly as the gate's busy branch would have,
+		// instead of dropping it.
 		if errors.Is(err, delegate.ErrTaskBusy) {
 			routerLog.Info("auto-delegate deferred: task went busy under the fire (gate race)",
 				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
@@ -332,12 +332,13 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 	return true, nil
 }
 
-// tryAdditiveInjection folds a firing into its task's already-active auto
-// conversation via the cross-pod-aware injection seam, instead of deferring a
-// second conversation onto pending_firings. conversationID is that
-// conversation's id, resolved by the caller from
-// the firing's own task — so it belongs to that task by construction, with
-// no separate ownership check to make. Returns true when the caller should
+// tryAdditiveInjection folds a firing into its task's live conversation via
+// the cross-pod-aware injection seam, instead of deferring a second
+// conversation onto pending_firings. Whatever minted that conversation — an
+// earlier auto-fire, or a person's own delegation — it is the one the task is
+// about, and the event belongs in front of it. conversationID is its id,
+// resolved by the caller from the firing's own task, so it belongs to that
+// task by construction with no separate ownership check to make. Returns true when the caller should
 // treat the firing as handled; false when the caller must fall through to
 // the normal deferral so the firing is never silently dropped.
 //
@@ -622,10 +623,10 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 }
 
 // DrainTask is the spawner's hook into the per-task firing queue.
-// Called when an auto conversation terminates on the task (any terminal
-// status). A completed conversation that left an unresolved artifact still
-// counts as terminal here — the artifact is an async sidecar, so it releases
-// the task lock and doesn't block downstream processing.
+// Called when the task's live conversation terminates (any terminal status,
+// whatever minted it). A completed conversation that left an unresolved
+// artifact still counts as terminal here — the artifact is an async sidecar,
+// so it releases the task lock and doesn't block downstream processing.
 //
 // Pops the task's pending firings in FIFO order, validates each against
 // current state (task still active? trigger still enabled? breaker still
@@ -777,10 +778,10 @@ func (r *Router) DrainTask(orgID, taskID string) {
 // least one pending firing. The sweeper is the safety net for stuck
 // queues: a firing left in 'pending' after a transient validation/fire
 // error needs *some* drain to retry it, and the natural trigger
-// (notifyDrainer from an auto-conversation terminal) only fires when an auto
-// conversation is actively terminating. If nothing's terminating — task has
-// no active conversations and no events arrive — the queue would otherwise
-// sit indefinitely.
+// (notifyDrainer from a conversation's terminal) only fires when one is
+// actively terminating. If nothing's terminating — task has no live
+// conversation and no events arrive — the queue would otherwise sit
+// indefinitely.
 //
 // Cadence is 30s by default; tuneable via interval. Each tick lists
 // tasks with pending firings (cheap — partial index) and calls
@@ -852,9 +853,9 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 		// longer makes the sweeper step over every sibling task's queue on
 		// the same entity, which is how a stopped conversation used to halt
 		// triage for a whole pull request.
-		active, err := r.conversations.HasActiveAutoConversationForTaskSystem(ctx, orgID, tid)
+		active, err := r.conversations.HasLiveConversationForTaskSystem(ctx, orgID, tid)
 		if err != nil {
-			routerLog.Error("drain sweeper: active-check failed", "task_id", tid, "org", orgID, "error", err)
+			routerLog.Error("drain sweeper: live-check failed", "task_id", tid, "org", orgID, "error", err)
 			continue
 		}
 		if active {

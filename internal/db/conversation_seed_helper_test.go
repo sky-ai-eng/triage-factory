@@ -37,6 +37,13 @@ func mintBlueprintRunForTest(t *testing.T, database *sql.DB, taskID string) stri
 	`, bpID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("mintBlueprintRunForTest: insert blueprint: %v", err)
 	}
+	// One running blueprint_run per task is a schema invariant
+	// (blueprint_runs_one_active_run_per_task), so staging a task's next
+	// engagement settles the one before it — which is what the task moving on
+	// means.
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE task_id = ? AND status = 'running'`, taskID); err != nil {
+		t.Fatalf("settle the task's prior blueprint_run: %v", err)
+	}
 	if _, err := database.Exec(`
 		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
 		VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt', '[]')

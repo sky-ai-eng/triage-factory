@@ -54,12 +54,12 @@ func shortConversationID(conversationID string) string {
 }
 
 // QueueDrainer is the interface the spawner uses to notify the per-task
-// firing queue that an auto run has reached a terminal state and the
+// firing queue that a conversation has reached a terminal state and the
 // task may be ready to drain its next pending firing. Implemented by
-// the routing.Router. Manual runs do not call this — manual is fully
-// decoupled from the queue by design. orgID scopes the
-// drain to the run's tenant so multi-mode lookups hit the right
-// pending_firings rows.
+// the routing.Router. Whatever minted the conversation calls it: a manual
+// delegation holds the task's gate like any other, so its terminal is a
+// moment the queue can move. orgID scopes the drain to the run's tenant so
+// multi-mode lookups hit the right pending_firings rows.
 type QueueDrainer interface {
 	DrainTask(orgID, taskID string)
 }
@@ -727,12 +727,14 @@ func (s *Spawner) publishedRunURLFor(orgID, conversationID string) string {
 }
 
 // notifyDrainer fires the QueueDrainer hook for a task if a drainer is
-// configured AND the run that just finished was an auto-fired one.
-// Manual runs are fully decoupled from the queue by design — they
-// neither participate in the gate nor trigger drains. Runs in goroutine
-// to keep run-teardown latency unaffected.
-func (s *Spawner) notifyDrainer(orgID, triggerType, taskID string) {
-	if triggerType == "manual" || taskID == "" {
+// configured. Whatever minted the conversation that just ended, it was the
+// task's live one and its end is the moment the task's gate opens — a manual
+// delegation holds that gate exactly as an auto-fired one does, so its
+// terminal has to drain the queue too or the firings behind it wait on the
+// periodic sweeper for no reason. Runs in a goroutine to keep teardown latency
+// unaffected.
+func (s *Spawner) notifyDrainer(orgID, taskID string) {
+	if taskID == "" {
 		return
 	}
 	s.mu.Lock()

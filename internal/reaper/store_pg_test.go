@@ -670,7 +670,7 @@ func (fx *orphanFixture) newEvent(t *testing.T, h *pgtest.Harness) string {
 
 // firing is the BlueprintRun an auto-delegation would mint for this task: an
 // event-triggered run against a fresh event, which is what holds
-// blueprint_runs_one_active_auto_run_per_task.
+// blueprint_runs_one_active_run_per_task.
 func (fx *orphanFixture) firing(t *testing.T, h *pgtest.Harness) domain.BlueprintRun {
 	t.Helper()
 	return domain.BlueprintRun{
@@ -859,7 +859,7 @@ func TestFailBlueprintRunsOrphanedAtMint_NegativeSpace(t *testing.T) {
 // TestFailBlueprintRunsOrphanedAtMint_UnblocksTheOneActiveIndex is the
 // end-to-end point of the arm, at the level where the damage actually happened.
 //
-// The orphan holds blueprint_runs_one_active_auto_run_per_task against its task
+// The orphan holds blueprint_runs_one_active_run_per_task against its task
 // while the router's busy gate — which reads CONVERSATIONS — sees an idle task.
 // So every drain of the task's pending firing re-fires, hits the index, comes
 // back task-busy, and is released to pending again: a livelock at the sweeper's
@@ -878,8 +878,8 @@ func TestFailBlueprintRunsOrphanedAtMint_UnblocksTheOneActiveIndex(t *testing.T)
 	// The livelock: a NEW (event, trigger) firing on the same task — a fresh
 	// intent, not a replay — is refused by the index the orphan is holding.
 	blocked := fx.firing(t, h)
-	if _, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, blocked, db.AgentClaimStamp{}); !errors.Is(err, db.ErrTaskBusyActiveAutoRun) {
-		t.Fatalf("re-fire under the orphan = %v, want ErrTaskBusyActiveAutoRun", err)
+	if _, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, blocked, db.AgentClaimStamp{}); !errors.Is(err, db.ErrTaskBusyActiveRun) {
+		t.Fatalf("re-fire under the orphan = %v, want ErrTaskBusyActiveRun", err)
 	}
 
 	store := reaper.NewPostgresStore(h.AdminDB)

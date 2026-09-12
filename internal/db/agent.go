@@ -484,10 +484,26 @@ type ConversationStore interface {
 	// viewer claims and must see every relevant team conversation in the org.
 	ListPRCoherenceTargetsSystem(ctx context.Context, orgID string, query PRCoherenceTargetQuery) ([]domain.PRCoherenceTarget, error)
 
-	// HasActiveAutoConversationForTask returns true if the task has a non-terminal
-	// conversation with trigger_type='event'. Manual delegations are intentionally
-	// excluded (manual is decoupled from the queue). Used by the router's
-	// per-task firing gate.
+	// --- The task's live conversation ---
+	//
+	// A task has at most one live conversation, and live means two things at
+	// once: the transcript has not reached a terminal status, and no boundary
+	// has been stamped on it (ended_at IS NULL). Both clauses carry weight and
+	// neither implies the other — a conversation parked `open` is non-terminal
+	// and wakeable, so it is still the one the task is about, while a
+	// `completed` row on a task nobody moved off it carries no boundary at
+	// all. It is the conversation-layer half of the rule the blueprint layer
+	// backstops with blueprint_runs_one_active_run_per_task, and these two
+	// reads are how a caller asks it before minting.
+	//
+	// Each dialect spells the predicate once rather than per door. It is an
+	// exclusion, so a clause missing from one spelling doesn't fail closed —
+	// it readmits exactly the conversation the rule exists to keep out.
+
+	// HasLiveConversationForTask returns true if the task holds a live
+	// conversation, whatever trigger type minted it. Used by the drain
+	// sweeper, which skips a task whose own conversation will drain the queue
+	// when it ends.
 	//
 	// The task is the unit, not the entity: a task IS one situation needing
 	// attention (that is what its dedup key means), so two tasks on one pull
@@ -495,7 +511,7 @@ type ConversationStore interface {
 	// also meant one conversation parked indefinitely — a stop freezes its
 	// blueprint 'running' by design — held the gate shut for every other
 	// situation on that entity.
-	HasActiveAutoConversationForTask(ctx context.Context, orgID, taskID string) (bool, error)
+	HasLiveConversationForTask(ctx context.Context, orgID, taskID string) (bool, error)
 
 	// ActiveIDsForTask returns the IDs of conversations on the task that
 	// haven't reached a terminal state. Used by the task routes'
@@ -512,11 +528,11 @@ type ConversationStore interface {
 	// optimization, not a correctness gate.
 	ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error)
 
-	// HasActiveAutoConversationForTaskSystem mirrors HasActiveAutoConversationForTask
-	// but routes through the admin pool in Postgres. The router's
-	// per-task firing gate consumes this from its eventbus subscriber
-	// goroutine, which has no JWT-claims context.
-	HasActiveAutoConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
+	// HasLiveConversationForTaskSystem mirrors HasLiveConversationForTask
+	// but routes through the admin pool in Postgres. The router's drain
+	// sweeper consumes this from its eventbus subscriber goroutine, which has
+	// no JWT-claims context.
+	HasLiveConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
 
 	// ListForTaskSystem mirrors ListForTask on the admin pool, with org_id
 	// bound by argument. The artifact reconciler's task closure consumes it —
@@ -524,16 +540,15 @@ type ConversationStore interface {
 	// claims transaction as.
 	ListForTaskSystem(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error)
 
-	// ActiveAutoConversationIDForTaskSystem returns the ID of the task's active
-	// event-triggered conversation, or "" when none. Same predicate as
-	// HasActiveAutoConversationForTaskSystem (trigger_type='event', non-terminal);
-	// if the at-most-one-active-auto-run-per-task invariant is ever
-	// violated, returns the most recently created. Admin pool only — the
-	// router's firing gate is the sole consumer, from the same claims-less
-	// background goroutine as the Has* sibling. It returns the id rather
-	// than a bool because a busy gate is the additive-injection path, which
-	// needs the conversation to fold the new event into.
-	ActiveAutoConversationIDForTaskSystem(ctx context.Context, orgID, taskID string) (conversationID string, err error)
+	// LiveConversationIDForTaskSystem returns the ID of the task's live
+	// conversation, or "" when it has none. Same predicate as
+	// HasLiveConversationForTaskSystem; if the one-live-conversation-per-task
+	// rule is ever violated, returns the most recently started. Admin pool
+	// only — the router's firing gate is the sole consumer, from the same
+	// claims-less background goroutine as the Has* sibling. It returns the id
+	// rather than a bool because a busy gate is the additive-injection path,
+	// which needs the conversation to fold the new event into.
+	LiveConversationIDForTaskSystem(ctx context.Context, orgID, taskID string) (conversationID string, err error)
 
 	// ActiveIDsForTaskSystem mirrors ActiveIDsForTask but routes through
 	// the admin pool in Postgres, for a claims-less background caller.
