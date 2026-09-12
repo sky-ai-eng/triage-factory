@@ -51,12 +51,22 @@ type insertRow func(context.Context, *domain.Message) error
 // re-claim replay it as new input.
 //
 // The gate is the task-context row's subtype, never an empty transcript: a
-// conversation can already carry a claim-time notice or a queued follow-up
-// before it has ever spoken, and counting those as an opening leaves the run
-// with no task context at all. The window it does not close is a crash between
-// the memory rows and the task-context row, which the next claim re-mints over
-// — one duplicated memory in a transcript, against a per-row gate that would
-// have to read metadata on every claim to prevent it.
+// conversation can already carry a queued follow-up (a person typed while it
+// waited for an executor) or a stop note from a bring-up that never reached
+// the agent, and counting those as an opening leaves the run with no task
+// context at all. The window it does not close is a crash between the memory
+// rows and the task-context row, which the next claim re-mints over — one
+// duplicated memory in a transcript, against a per-row gate that would have to
+// read metadata on every claim to prevent it.
+//
+// Those same rows are why the opening is SEQUENCED rather than just appended.
+// A row's assembly position is COALESCE(seq, id) and these are inserted last,
+// so on a transcript that already holds anything the model would read the
+// follow-up before the task context explaining what the task is. Stamping the
+// opening below the earliest key that is already there puts it first, which is
+// what "the conversation opens with its context" has to mean to be worth
+// anything. On the common empty transcript nothing is stamped and arrival
+// order is the position, as it is for every other row.
 //
 // The memory rows carry the memory id and nothing else. Every other fact about
 // a memory — its conversation, its entity, its blueprint run, the prompt that
@@ -96,12 +106,54 @@ func mintOpeningRows(
 		Delivered:      &delivered,
 	})
 
+	if before, ok := earliestAssemblyKey(rows); ok {
+		hoistBefore(opening, before)
+	}
+
 	for i := range opening {
 		if err := insert(ctx, &opening[i]); err != nil {
 			return nil, err
 		}
 	}
 	return opening, nil
+}
+
+// earliestAssemblyKey is the assembly position of the first row already on the
+// transcript, or ok=false for one with none.
+//
+// It takes the minimum rather than reading rows[0], so it does not rest on the
+// caller having handed over an ordered read: the cost is one pass over a
+// handful of rows, and the failure it rules out is an opening silently minted
+// into the middle of a conversation.
+func earliestAssemblyKey(rows []domain.Message) (float64, bool) {
+	first, found := 0.0, false
+	for _, r := range rows {
+		key := float64(r.ID)
+		if r.Seq != nil {
+			key = *r.Seq
+		}
+		if !found || key < first {
+			first, found = key, true
+		}
+	}
+	return first, found
+}
+
+// hoistBefore stamps the opening rows into the gap below before, in order and
+// evenly spread, so all of them sort ahead of every row already on the
+// transcript and none of them collides with another.
+//
+// The whole unit lands inside (before-1, before), which renumbers nothing: ids
+// are the keys of the rows already there, and an integer id can never fall
+// strictly between two of these fractions. That is the seq column's stated
+// purpose — a position between two existing rows, bought without an
+// insert-time renumbering dance.
+func hoistBefore(opening []domain.Message, before float64) {
+	n := len(opening)
+	for i := range opening {
+		seq := before - 1 + float64(i+1)/float64(n+1)
+		opening[i].Seq = &seq
+	}
 }
 
 // selectInjectedMemories picks the memories that ride the opening turn: the
@@ -140,17 +192,43 @@ func selectInjectedMemories(memories []domain.TaskMemory) []domain.TaskMemory {
 // conversationOpened reports whether a conversation's opening has been minted,
 // by the one row that says so: the task context.
 //
-// It is the shared reading of "has this conversation started?" — the mint's own
-// idempotence gate, the exhausted-claim disposition, and the inherited-memory
-// clear all ask it, and all three would be wrong asking whether the transcript
-// holds ANY row. A conversation that has only been handed a claim-time notice
-// or a queued follow-up has not started: minting nothing for it leaves it with
-// no task context, parking it strands a blueprint step that never ran, and
-// keeping its predecessor's memory file credits this run with work it did not
-// do.
+// It is what the two native gates ask — the mint's own idempotence gate and
+// the inherited-memory clear — and both would be wrong asking whether the
+// transcript holds ANY row. A conversation that has only been handed a queued
+// follow-up or a stop note has not started: minting nothing for it leaves it
+// with no task context, and keeping its predecessor's memory file credits this
+// run with work it did not do.
 func conversationOpened(rows []domain.Message) bool {
 	for _, r := range rows {
 		if r.Subtype == domain.MessageSubtypeInjectionTaskContext {
+			return true
+		}
+	}
+	return false
+}
+
+// conversationHasWork reports whether a transcript holds anything a failure
+// would destroy — the question a disposition asks, which is not quite the
+// question conversationOpened answers.
+//
+// Two arms, because only one runtime mints an opening. A task-context row is
+// the native answer and will be the SDK's; an assistant row is evidence on
+// either that the model has taken a turn, and it is what an SDK transcript
+// offers in the meantime (its mirror records assistant lines and nothing
+// stands in for the opening). Asking for the opening alone would read a driven
+// SDK conversation as fresh and fail its blueprint over a runtime that would
+// not restart.
+//
+// What neither arm admits is the class both gates exist to exclude: rows the
+// control plane wrote to a conversation that never ran. A queued follow-up and
+// a stop note are role=user, an injected memory and a claim-time notice carry
+// their own subtypes, and none of them is work.
+func conversationHasWork(rows []domain.Message) bool {
+	if conversationOpened(rows) {
+		return true
+	}
+	for _, r := range rows {
+		if r.Role == "assistant" {
 			return true
 		}
 	}

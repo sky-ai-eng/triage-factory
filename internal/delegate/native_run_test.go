@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -211,6 +212,45 @@ func TestMintOpeningTurn_WritesTheMemoriesThenTheTaskContext(t *testing.T) {
 	}
 	if got := allRows(t, s, "r-open-turn"); len(got) != len(want) {
 		t.Errorf("rows after a re-claim = %d, want %d — the opening must not double", len(got), len(want))
+	}
+}
+
+// TestMintOpeningTurn_OpensAheadOfAQueuedFollowUp is the ordering guarantee
+// through the real store, which is where it can actually fail: the hoist is a
+// seq the insert has to persist and the assembly read has to order by, and a
+// column silently dropped on either side would leave the composer's own unit
+// tests green while every real run read the follow-up first.
+func TestMintOpeningTurn_OpensAheadOfAQueuedFollowUp(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-hoist", "", "/tmp/wt-hoist")
+	claimID := markEngaged(t, database, "r-hoist")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+
+	// A person types while the conversation waits for an executor.
+	if _, err := s.conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID,
+		pendingUserInput("r-hoist", runmode.LocalDefaultUserID, "and update the README")); err != nil {
+		t.Fatalf("queue the follow-up: %v", err)
+	}
+
+	transcript := newNativeTranscript(s, runmode.LocalDefaultOrgID, "r-hoist", claimID)
+	memories := []domain.TaskMemory{{ID: "mem-1", Content: "what the last conversation tried"}}
+	taskContext := "<task_context>\nPull request owner/repo#7\n</task_context>"
+	if err := s.mintOpeningTurn(ctx, transcript, runmode.LocalDefaultOrgID, "r-hoist", runmode.LocalDefaultUserID, memories, taskContext); err != nil {
+		t.Fatalf("mintOpeningTurn: %v", err)
+	}
+
+	var got []string
+	for _, r := range allRows(t, s, "r-hoist") {
+		got = append(got, r.Subtype+"/"+r.Content)
+	}
+	want := []string{
+		domain.MessageSubtypeInjectionMemory + "/what the last conversation tried",
+		domain.MessageSubtypeInjectionTaskContext + "/" + taskContext,
+		"/and update the README",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("assembly order =\n  %v\nwant\n  %v", got, want)
 	}
 }
 

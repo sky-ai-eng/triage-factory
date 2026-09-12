@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 
@@ -256,4 +257,155 @@ func TestMintOpeningRows_MintsOldestFirstUnderTheBudget(t *testing.T) {
 	if last := got[len(got)-1]; last.Subtype != domain.MessageSubtypeInjectionTaskContext {
 		t.Errorf("last row subtype = %q, want the task context to close the opening", last.Subtype)
 	}
+}
+
+// TestMintOpeningRows_OpensAheadOfWhatIsAlreadyThere is the ordering guarantee
+// the whole change rests on. A conversation can collect rows before its
+// engagement ever reaches the mint — a person types while it waits for an
+// executor, a bring-up dies and leaves a stop note — and those rows already
+// hold assembly positions the opening's own inserts land after.
+//
+// Without the hoist the model reads "and update the README" before the block
+// that says which pull request that is.
+func TestMintOpeningRows_OpensAheadOfWhatIsAlreadyThere(t *testing.T) {
+	queued := domain.Message{ID: 7, Role: "user", Content: "and update the README"}
+	stopNote := domain.Message{ID: 8, Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "the runtime would not start"}
+	existing := []domain.Message{queued, stopNote}
+
+	var got []domain.Message
+	if _, err := mintOpeningRows(context.Background(), collectRows(&got), existing,
+		memoriesOfSize(t, 10, 10), "conv-1", "user-1", "<task_context/>"); err != nil {
+		t.Fatalf("mintOpeningRows: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("minted %d rows, want two memories and the task context", len(got))
+	}
+
+	// Every opening row sorts ahead of the rows already there, and they keep
+	// their own order among themselves.
+	prev := 0.0
+	for i, r := range got {
+		if r.Seq == nil {
+			t.Fatalf("row %d carries no seq; appended to a non-empty transcript it assembles last", i)
+		}
+		if *r.Seq >= float64(queued.ID) {
+			t.Errorf("row %d seq = %v, want below the earliest existing key %d", i, *r.Seq, queued.ID)
+		}
+		if i > 0 && *r.Seq <= prev {
+			t.Errorf("row %d seq = %v, not after row %d's %v", i, *r.Seq, i-1, prev)
+		}
+		prev = *r.Seq
+	}
+
+	// And the assembly order the loop would read is the opening, then what was
+	// waiting — the point of the exercise.
+	assembled := append(append([]domain.Message{}, got...), existing...)
+	sort.SliceStable(assembled, func(i, j int) bool {
+		return assemblyKey(assembled[i]) < assemblyKey(assembled[j])
+	})
+	var order []string
+	for _, r := range assembled {
+		order = append(order, r.Subtype+"/"+r.Content)
+	}
+	want := []string{
+		domain.MessageSubtypeInjectionMemory + "/" + strings.Repeat("x", 10),
+		domain.MessageSubtypeInjectionMemory + "/" + strings.Repeat("x", 10),
+		domain.MessageSubtypeInjectionTaskContext + "/<task_context/>",
+		"/and update the README",
+		domain.MessageSubtypeStopNote + "/the runtime would not start",
+	}
+	if strings.Join(order, "|") != strings.Join(want, "|") {
+		t.Errorf("assembly order =\n  %v\nwant\n  %v", order, want)
+	}
+}
+
+// TestMintOpeningRows_LeavesArrivalOrderAloneOnAFreshTranscript: the hoist is
+// for the exception, not the rule. A conversation with nothing on it has no
+// row to sort ahead of, and stamping one anyway would put a fractional key on
+// the overwhelmingly common opening for no reason.
+func TestMintOpeningRows_LeavesArrivalOrderAloneOnAFreshTranscript(t *testing.T) {
+	var got []domain.Message
+	if _, err := mintOpeningRows(context.Background(), collectRows(&got), nil,
+		memoriesOfSize(t, 10), "conv-1", "user-1", "<task_context/>"); err != nil {
+		t.Fatalf("mintOpeningRows: %v", err)
+	}
+	for i, r := range got {
+		if r.Seq != nil {
+			t.Errorf("row %d carries seq %v; arrival order is already its position", i, *r.Seq)
+		}
+	}
+}
+
+// TestMintOpeningRows_HoistsBelowAnExistingSeq: the earliest row is the one
+// with the lowest assembly key, which is not the lowest id once anything has
+// been sequenced — a compaction places rows by seq, and reading rows[0] or
+// min(id) instead would mint the opening into the middle of the transcript.
+func TestMintOpeningRows_HoistsBelowAnExistingSeq(t *testing.T) {
+	sequenced := 2.5
+	existing := []domain.Message{
+		{ID: 40, Role: "user", Content: "arrived late, placed early", Seq: &sequenced},
+		{ID: 9, Role: "user", Content: "lower id, later position"},
+	}
+	var got []domain.Message
+	if _, err := mintOpeningRows(context.Background(), collectRows(&got), existing,
+		nil, "conv-1", "user-1", "<task_context/>"); err != nil {
+		t.Fatalf("mintOpeningRows: %v", err)
+	}
+	if len(got) != 1 || got[0].Seq == nil || *got[0].Seq >= sequenced {
+		t.Errorf("task-context seq = %v, want below the earliest assembly key %v", got[0].Seq, sequenced)
+	}
+}
+
+// TestConversationHasWork is the disposition's question, which is not the
+// mint's. Only native mints an opening today, so a driven SDK conversation has
+// to be recognised by the turn its model took — reading it as fresh fails a
+// blueprint over a runtime that would not restart.
+func TestConversationHasWork(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows []domain.Message
+		want bool
+	}{
+		{name: "nothing at all"},
+		{
+			name: "a queued follow-up is not work",
+			rows: []domain.Message{{Role: "user", Content: "and update the README"}},
+		},
+		{
+			name: "nor a stop note from a bring-up that died",
+			rows: []domain.Message{{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "would not start"}},
+		},
+		{
+			name: "nor a claim-time notice",
+			rows: []domain.Message{{Role: "user", Subtype: domain.MessageSubtypeInjectionExecutorChanged, Content: "restored"}},
+		},
+		{
+			name: "a minted opening is",
+			rows: []domain.Message{{Role: "user", Subtype: domain.MessageSubtypeInjectionTaskContext, Content: "<task_context/>"}},
+			want: true,
+		},
+		{
+			name: "and so is a turn on a transcript with no opening — the SDK's shape",
+			rows: []domain.Message{
+				{Role: "user", Content: "the human's opening ask"},
+				{Role: "assistant", Content: "looking at the failing check now"},
+			},
+			want: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := conversationHasWork(tc.rows); got != tc.want {
+				t.Errorf("conversationHasWork = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// assemblyKey is COALESCE(seq, id) — the order a transcript read hands rows
+// back in, reproduced here so a test can sort a set it built itself.
+func assemblyKey(m domain.Message) float64 {
+	if m.Seq != nil {
+		return *m.Seq
+	}
+	return float64(m.ID)
 }
