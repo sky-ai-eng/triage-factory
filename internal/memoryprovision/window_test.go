@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -190,5 +191,78 @@ func TestBuildWindowWithin_NeverExceedsItsBudget(t *testing.T) {
 	}
 	if !elided || !whole {
 		t.Fatalf("the range must cover both a windowed transcript and a whole one; elided=%v whole=%v", elided, whole)
+	}
+}
+
+// TestTruncateBytes_CutsOnARuneBoundary walks every byte offset inside a
+// multi-byte character, which is the only place the backup can be wrong: a cut
+// taken at the limit alone would slice a character in half and hand the model a
+// replacement char where the agent read a word. A transcript is whatever the
+// agent read — file contents, commit subjects, issue bodies — so non-ASCII on
+// the boundary is the ordinary case, not the exotic one.
+func TestTruncateBytes_CutsOnARuneBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		char string
+	}{
+		{"two-byte", "é"},
+		{"three-byte", "…"},
+		{"four-byte", "😀"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			width := len(tc.char)
+			if utf8.RuneCountInString(tc.char) != 1 {
+				t.Fatalf("fixture %q must be one rune", tc.char)
+			}
+			const copies = 6
+			s := strings.Repeat(tc.char, copies)
+
+			// Every offset that forces a cut, boundaries and mid-character
+			// alike — the offsets divisible by width land on a boundary
+			// already, and the rest are the ones the backup exists for.
+			for limit := 1; limit < len(s); limit++ {
+				got := truncateBytes(s, limit)
+				kept, ok := strings.CutSuffix(got, truncationMarker)
+				if !ok {
+					t.Fatalf("limit %d: %q does not say it was cut", limit, got)
+				}
+				if !utf8.ValidString(kept) {
+					t.Errorf("limit %d: kept %q is not valid UTF-8 — a character was sliced", limit, kept)
+				}
+				// The whole characters that fit, and not a byte more: the cut
+				// rounds DOWN to a boundary, never up past the limit.
+				if want := strings.Repeat(tc.char, limit/width); kept != want {
+					t.Errorf("limit %d: kept %q, want %q", limit, kept, want)
+				}
+				if len(kept) > limit {
+					t.Errorf("limit %d: kept %d bytes, over the limit", limit, len(kept))
+				}
+			}
+
+			// At and above its own length the string passes through whole,
+			// marker included by its absence.
+			if got := truncateBytes(s, len(s)); got != s {
+				t.Errorf("a string at its limit must pass through whole; got %q", got)
+			}
+		})
+	}
+}
+
+// TestRenderRow_CapsAMultiByteToolResult is the same guarantee on the path that
+// actually meets one: a tool result long enough to be cut, made of characters
+// the cap lands inside of.
+func TestRenderRow_CapsAMultiByteToolResult(t *testing.T) {
+	// 3 bytes per character, so the 4 KiB cap (not divisible by 3) is
+	// guaranteed to land mid-character.
+	rendered := renderRow(domain.Message{Role: roleTool, Content: strings.Repeat("…", toolContentLimit)})
+
+	if !utf8.ValidString(rendered) {
+		t.Error("a cut tool result must still be valid UTF-8")
+	}
+	if !strings.HasSuffix(rendered, truncationMarker) {
+		t.Error("the render must say it was cut")
+	}
+	if strings.ContainsRune(rendered, utf8.RuneError) {
+		t.Error("a sliced character would surface as U+FFFD")
 	}
 }
