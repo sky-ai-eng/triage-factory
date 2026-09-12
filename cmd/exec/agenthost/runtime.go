@@ -46,6 +46,18 @@ type Runtime interface {
 	GetRepo(ctx context.Context, slug string) (*domain.Repository, error)
 
 	TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error)
+
+	// TaskOwnRepo reports whether owner/repo is the run's own task repo — the
+	// repo gate's supplement to the worktree ledger (see IsTaskOwnRepo).
+	//
+	// It is a relayed op rather than a field on ConversationInfo because it is
+	// an AUTHORIZATION input and the sidecar is not authoritative for those:
+	// AgentHostInfo is the run's non-secret identity as the sidecar reports it,
+	// and the orchestrator deliberately re-binds every op's identity from its
+	// own ConversationInfo so a sidecar cannot escalate by lying. A stamped
+	// task repo would be exactly such a lie. The answer is asked for only on a
+	// ledger miss, so the authorized path costs nothing.
+	TaskOwnRepo(ctx context.Context, owner, repo string) (bool, error)
 	GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error)
 	ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error)
 	OrgJiraBaseURL(ctx context.Context) (string, error)
@@ -171,6 +183,7 @@ const (
 	opListRepos                        = "list_repos"
 	opGetRepo                          = "get_repo"
 	opTeamTracksRepo                   = "team_tracks_repo"
+	opTaskOwnRepo                      = "task_own_repo"
 	opGetConversationWorktreeByRepoRef = "get_conversation_worktree_by_repo_ref"
 	opListConversationWorktrees        = "list_conversation_worktrees"
 	opInsertConversationWorktree       = "insert_conversation_worktree"
@@ -371,6 +384,10 @@ func (r *directRuntime) GetRepo(ctx context.Context, slug string) (*domain.Repos
 
 func (r *directRuntime) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
 	return r.stores.TeamGitHubRepos.TracksRepoSystem(ctx, r.info.TeamID, owner, repo)
+}
+
+func (r *directRuntime) TaskOwnRepo(ctx context.Context, owner, repo string) (bool, error) {
+	return IsTaskOwnRepo(ctx, r.stores, r.info, owner, repo), nil
 }
 
 func (r *directRuntime) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
@@ -736,6 +753,14 @@ func (r *relayRuntime) TeamTracksRepo(ctx context.Context, owner, repo string) (
 		return false, err
 	}
 	return res.Tracks, nil
+}
+
+func (r *relayRuntime) TaskOwnRepo(ctx context.Context, owner, repo string) (bool, error) {
+	var res taskOwnRepoResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opTaskOwnRepo, taskOwnRepoArgs{Owner: owner, Repo: repo}, &res); err != nil {
+		return false, err
+	}
+	return res.IsTaskRepo, nil
 }
 
 func (r *relayRuntime) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {

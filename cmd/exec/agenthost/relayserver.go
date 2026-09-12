@@ -283,6 +283,17 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(conversationWorktreeResult{Worktree: w})
 
+	case opTaskOwnRepo:
+		var a taskOwnRepoArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		isTaskRepo, err := s.rt.TaskOwnRepo(ctx, a.Owner, a.Repo)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(taskOwnRepoResult{IsTaskRepo: isTaskRepo})
+
 	case opListConversationWorktrees:
 		w, err := s.rt.ListConversationWorktrees(ctx)
 		if err != nil {

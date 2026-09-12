@@ -93,3 +93,54 @@ func TestRepositoryRefCarriesProviderIdentity(t *testing.T) {
 		t.Errorf("Ref().Slug() = %q, want it to agree with Repository.Slug() %q", got, r.Slug())
 	}
 }
+
+// TestSplitGitHubEntitySourceID covers the parse two authorization gates read
+// a task's repo through, including the ordering that makes it one helper: the
+// "#N" suffix is cut before the owner/repo split, so the repo never comes back
+// named "repo#42".
+func TestSplitGitHubEntitySourceID(t *testing.T) {
+	cases := []struct {
+		sourceID string
+		owner    string
+		repo     string
+		prNumber int
+	}{
+		{"octo/repo#42", "octo", "repo", 42},
+		{"octo/repo", "octo", "repo", 0},
+		{"octo/repo#notanumber", "octo", "repo", 0},
+		{"SKY-123", "", "", 0},
+		{"", "", "", 0},
+		// A Slack entity's source id splits on "/" perfectly well, which is why
+		// the task-level helper below gates on the source rather than on this.
+		{"C1/1700000000.000100", "C1", "1700000000.000100", 0},
+	}
+	for _, c := range cases {
+		owner, repo, pr := SplitGitHubEntitySourceID(c.sourceID)
+		if owner != c.owner || repo != c.repo || pr != c.prNumber {
+			t.Errorf("SplitGitHubEntitySourceID(%q) = (%q, %q, %d), want (%q, %q, %d)",
+				c.sourceID, owner, repo, pr, c.owner, c.repo, c.prNumber)
+		}
+	}
+}
+
+// TestGitHubTaskRepo pins the source gate. A Slack task's source id parses as a
+// plausible owner/repo, so a caller that skipped the check would authorize a
+// run against a repository that does not exist.
+func TestGitHubTaskRepo(t *testing.T) {
+	cases := []struct {
+		name string
+		task Task
+		want string
+	}{
+		{"github pr task", Task{EntitySource: "github", EntitySourceID: "octo/repo#42"}, "octo/repo"},
+		{"github repo task", Task{EntitySource: "github", EntitySourceID: "octo/repo"}, "octo/repo"},
+		{"slack task", Task{EntitySource: "slack", EntitySourceID: "C1/1700000000.000100"}, ""},
+		{"jira task", Task{EntitySource: "jira", EntitySourceID: "SKY-123"}, ""},
+		{"malformed github id", Task{EntitySource: "github", EntitySourceID: "no-slash"}, ""},
+	}
+	for _, c := range cases {
+		if got := GitHubTaskRepo(c.task); got != c.want {
+			t.Errorf("%s: GitHubTaskRepo = %q, want %q", c.name, got, c.want)
+		}
+	}
+}

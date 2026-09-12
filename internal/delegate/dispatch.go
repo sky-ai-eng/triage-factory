@@ -1554,8 +1554,9 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// very repo its PR lives in. ref = pr-<N> is the materialization
 		// selector; the pushable branch comes from the tree.
 		// Idempotent on (conversation_id, repo_id, ref), so a re-claim writes
-		// nothing. Log-and-continue: a failure degrades to denied pushes
-		// (a clear 403), never a failed step.
+		// nothing. Log-and-continue: both gates fall back to their task's-own-
+		// repo arm, which authorizes the repo but derives no pushable branch,
+		// so a failure costs this conversation its push and nothing else.
 		//
 		// Detached from the step's cancellation so a shutdown mid-claim still
 		// leaves the row a resumed engagement's pushes resolve through, and
@@ -1571,6 +1572,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 				Ref:            worktree.PRRefSlug(prNumber),
 			}); werr != nil {
 				dispatchLog.Warn("record shared worktree in conversation_worktrees failed; pushes to this repo will be denied for this conversation",
+					"path", wt,
 					"conversation", conv.ID, "repo", owner+"/"+repo, "error", werr)
 			}
 			cancelLedger()
@@ -1629,7 +1631,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 // its parts. prNumber is 0 when absent/unparseable; callers surface that as a
 // setup failure.
 func parseGitHubTask(task domain.Task) (owner, repo string, prNumber int) {
-	return splitGitHubEntitySourceID(task.EntitySourceID)
+	return domain.SplitGitHubEntitySourceID(task.EntitySourceID)
 }
 
 // materializeStepSkill places one blueprint step's SKILL.md where this host's
