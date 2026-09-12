@@ -621,3 +621,33 @@ func TestDroppedDoorbell_LeavesTheConversationForTheNextSweep(t *testing.T) {
 		t.Errorf("owed = %v after the memory landed, want none", owed)
 	}
 }
+
+// TestNudge_RefusesAnEmptyOrg: an empty org means EVERY org to sweep, so a
+// doorbell carrying one would amplify a single notification — a malformed relay
+// message, a publisher bug — into a fleet-wide pass with the backoff disabled.
+// Both forms are refused, because both reach a scan: the org-wide form lands in
+// sweep directly, and the targeted form reads a conversation under no tenant.
+//
+// Asserted against a conversation that IS owed, so a guard that silently let
+// the call through would settle it and fail this.
+func TestNudge_RefusesAnEmptyOrg(t *testing.T) {
+	f := newFixture(t)
+	f.message(roleAssistant, "", "worked on it")
+	f.end()
+
+	f.mgr.Nudge("", "")               // would have swept every tenant, backoff ignored
+	f.mgr.Nudge("", f.conversationID) // would have read a conversation under no org
+	time.Sleep(50 * time.Millisecond) // the goroutine the guard must never start
+
+	if f.attemptCount() != 0 {
+		t.Errorf("attempts = %d, want 0 — an org-less doorbell must not scan", f.attemptCount())
+	}
+	if f.memory() != nil {
+		t.Error("an org-less doorbell settled a memory")
+	}
+
+	// The same conversation with its real org still settles, so the guard
+	// refuses the empty value rather than the doorbell.
+	f.mgr.Nudge(f.orgID, f.conversationID)
+	waitFor(t, func() bool { return f.memory() != nil })
+}

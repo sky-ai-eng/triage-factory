@@ -178,6 +178,31 @@ func TestApp_MemoryOwed_EmptyOrgIsRefused(t *testing.T) {
 	}
 }
 
+// A message off the wire with no org_id is malformed, and dropping it is not
+// mere hygiene: an empty org means EVERY org to the provisioner's sweep, so
+// acting on one would amplify a single bad notification into a fleet-wide pass
+// with the attempt backoff disabled — every tenant's backlog re-run because one
+// payload was wrong.
+//
+// The dispatch hands on whatever arrived, so the refusal lives at the consumer
+// (memoryprovision.Manager.Nudge), exactly as the trigger case's does in
+// ai.Manager.Trigger. This pins the outcome through the real path rather than
+// the placement: nothing scans, in either form.
+func TestApp_HandleCtlMessage_MemoryOwedWithNoOrgIsDropped(t *testing.T) {
+	a, conv := newDoorbellApp(t, runmode.RoleAll) // the holder, so the gate is not what refuses
+	a.handleCtlMessage(ctlbus.Message{Kind: "memory_owed", ConversationID: "conv-1"})
+	a.handleCtlMessage(ctlbus.Message{Kind: "memory_owed"})
+	a.dispatchCtl(`{"kind":"memory_owed","conversation_id":"conv-1"}`)
+	a.dispatchCtl(`{"kind":"memory_owed"}`)
+	select {
+	case got := <-conv.gets:
+		t.Errorf("an org-less memory_owed read a conversation (%v)", got)
+	case got := <-conv.lists:
+		t.Errorf("an org-less memory_owed swept (%v) — an empty org is every org", got)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
 // The unified dispatcher routes the kind at all — a payload that never reaches
 // handleCtlMessage is a doorbell nobody rings, and the kind lives in two switch
 // statements (ctl.go's and relay.go's) that have to agree.
