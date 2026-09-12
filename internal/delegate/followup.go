@@ -311,13 +311,16 @@ func (s *Spawner) modelFollowUpBlock(ctx context.Context, orgID string, conv *do
 // the task's unmet memory — is not mirrored here, and the limit of that is
 // worth stating. For a task holding ONE conversation it is sound: a task
 // becomes memory-pending only when a boundary lands, and a boundary on the
-// conversation being claimed stops that conversation anyway. A task may hold
-// two at once, though — the one-active-auto-run index serializes only
-// event-triggered running runs, so a manual run alongside one is legal — and
-// there one conversation's pre-agent failure stamps its boundary after the
-// other was already claimed, so that claim runs without the memory the first
-// owes. The SQL gate closes the window for every LATER claim, not for the one
-// in flight.
+// conversation being claimed stops that conversation anyway.
+//
+// TODO(TFAC-996): a task can hold two live conversations today — the auto
+// gate and the one-active-auto-run index both match trigger_type='event'
+// only, so a manual conversation sits outside them — and then one
+// conversation's pre-agent failure stamps its boundary after the other was
+// already claimed, so that claim runs without the memory the first owes. The
+// SQL gate closes it for every LATER claim, not the one in flight. Enforcing
+// one live conversation per task restores the premise above; a memory check
+// here would patch the symptom instead.
 func blueprintDrivableForClaim(br *domain.BlueprintRun, stepIndex *int) bool {
 	if br == nil {
 		return true
