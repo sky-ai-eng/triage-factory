@@ -1166,14 +1166,6 @@ function CapRow({ team, spend }: { team: UsageTeamCap; spend: number }) {
   const [persisted, setPersisted] = useState(propValue)
   const [status, setStatus] = useState<CapSaveStatus>('idle')
   const [error, setError] = useState<string | null>(null)
-
-  // Refs let the prop-sync effect read the latest draft/persisted without taking
-  // them as deps — depending on them would re-run the effect on our own save and
-  // clobber the optimistic baseline before the prop catches up.
-  const draftRef = useRef(draft)
-  draftRef.current = draft
-  const persistedRef = useRef(persisted)
-  persistedRef.current = persisted
   // Guards against a concurrent save: a blur→focus→blur before the PUT resolves
   // would still see dirty=true (persisted hasn't updated yet) and fire a second
   // PUT with interleaved status transitions. One in-flight save at a time.
@@ -1184,10 +1176,20 @@ function CapRow({ team, spend }: { team: UsageTeamCap; spend: number }) {
   // silently once the poll returns it, and re-seed the input too — unless the user
   // is mid-edit (draft no longer matches what we last persisted), so a background
   // refresh never stomps a pending edit.
-  useEffect(() => {
-    if (draftRef.current === persistedRef.current) setDraft(propValue)
+  //
+  // This is derived during render, not in an effect, and that is load-bearing:
+  // an effect is passive, so it runs some time after the commit that mounted the
+  // row — and on a slow machine that can be AFTER a keystroke the user already
+  // made into the freshly mounted input. The effect's setDraft would then land on
+  // top of the edit, snap the input back, and the blur would find nothing dirty
+  // to save. Render-time derivation sees the edit already applied, so it can only
+  // ever react to a prop that actually moved.
+  const [seenProp, setSeenProp] = useState(propValue)
+  if (propValue !== seenProp) {
+    setSeenProp(propValue)
+    if (draft === persisted) setDraft(propValue)
     setPersisted(propValue)
-  }, [propValue])
+  }
 
   const dirty = draft.trim() !== persisted
 
