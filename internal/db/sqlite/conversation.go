@@ -1355,6 +1355,14 @@ func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID stri
 }
 
 func (s *conversationStore) HasActiveClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
+	// The eviction sweep reads this immediately before a privileged removal,
+	// and an org that cannot exist here would answer a confident `false` off
+	// the org_id predicate alone — "nobody is in that tree" for a question
+	// nobody should have asked. The error routes to the caller's
+	// keep-the-warm-tree arm instead.
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
 	var exists int
 	err := s.q.QueryRowContext(ctx, `
 		SELECT EXISTS (
