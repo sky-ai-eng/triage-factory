@@ -28,6 +28,15 @@ import (
 // remain beside their SQL and are guarded here. SQL text, placeholder syntax,
 // casts, RLS parameters, and driver NULL scanning are deliberately out of
 // scope for sharing.
+//
+// That last rule is why the taskMemory*SQL fragment builders are listed below
+// rather than hoisted: they compose SQL text, and they are identical today
+// only because the predicate they spell happens to need no placeholder, cast
+// or json guard yet. Sharing them would mean undoing the abstraction the first
+// time one dialect needs its own spelling — the same reason Tier B stays
+// duplicated. What must NOT drift is the predicate's meaning, and that is
+// pinned where it belongs: the dual-dialect conformance suites assert both
+// backends answer alike.
 
 // identicalHelperRatchet is the SHRINKING section. Every name is a top-level
 // helper whose complete func declaration (excluding its doc comment) is
@@ -80,6 +89,9 @@ var identicalHelperRatchet = []string{
 	"scanTeamSettings",
 	"scanWrittenEntity",
 	"splitRepoSlug",
+	"taskMemoryAttemptSQL",
+	"taskMemoryOwedRowSQL",
+	"taskMemoryPendingSQL",
 }
 
 func TestRatchet_IdenticalDialectHelpersStayConverged(t *testing.T) {

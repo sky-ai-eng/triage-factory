@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -175,9 +176,7 @@ func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string
 		if err := rows.Scan(append(convTargets, ts.targets(&t)...)...); err != nil {
 			return nil, err
 		}
-		if err := ts.finalize(&t); err != nil {
-			return nil, err
-		}
+		ts.finalize(&t)
 		if completedAt.Valid {
 			r.CompletedAt = &completedAt.Time
 		}
@@ -408,6 +407,56 @@ func queryFactoryEntities(ctx context.Context, q queryer, query string, args ...
 //     produced by older modernc-driver writes that bound time.Time as its
 //     default String() form. The monotonic-clock suffix " m=+..." is
 //     stripped before parsing because time.Parse can't consume it.
+//
+// subselectDatetime scans a DATETIME that lost its declared column type on the
+// way out. The driver converts a plain DATETIME column because it can read the
+// column's type; inside a scalar subselect there is no such metadata, so the
+// stored text arrives verbatim and has to be parsed.
+//
+// A scanner rather than a parse at the call site: the call sites are the task
+// read's scan helpers, which are byte-identical to their Postgres twins and
+// guarded that way by the identical-helpers ratchet. Threading an error return
+// through them to serve one column would drift four shared functions for a
+// quirk that belongs to one value.
+//
+// Valid is the "there was a row" answer, exactly as sql.NullTime's is on the
+// Postgres side.
+type subselectDatetime struct {
+	Valid bool
+	Time  time.Time
+}
+
+func (d *subselectDatetime) Scan(src any) error {
+	d.Valid, d.Time = false, time.Time{}
+	switch v := src.(type) {
+	case nil:
+		return nil
+	case time.Time:
+		// A driver that did convert after all — take it rather than insisting
+		// on the text path.
+		d.Valid, d.Time = true, v.UTC()
+		return nil
+	case string:
+		return d.parse(v)
+	case []byte:
+		return d.parse(string(v))
+	default:
+		return fmt.Errorf("scan %T into a datetime", src)
+	}
+}
+
+func (d *subselectDatetime) parse(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	parsed, err := parseDBDatetime(raw)
+	if err != nil {
+		return fmt.Errorf("parse datetime %q: %w", raw, err)
+	}
+	d.Valid, d.Time = true, parsed.UTC()
+	return nil
+}
+
 func parseDBDatetime(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, nil

@@ -826,11 +826,13 @@ CREATE TABLE public.conversation_memory_entities (
 -- memory reads as a truncated window rather than as a model with nothing to
 -- say.
 --
--- Brain-written on the admin pool; the app pool only ever reads it, so tf_app
--- holds SELECT alone and tf_system nothing at all (an executor never touches
--- this table). The index below carries the newest-attempt read's whole ORDER
--- BY, id tiebreaker included: two attempts on one conversation can share a
--- started_at, so without it every tie costs a sort.
+-- Brain-written on the admin pool; every other role only ever reads it, so
+-- tf_app and tf_system hold SELECT alone — tf_system because the canonical
+-- task projection reads the pending task's newest attempt from here, so an
+-- executor selects from this table on any task read. The index below carries
+-- the newest-attempt read's whole ORDER BY, id tiebreaker included: two
+-- attempts on one conversation can share a started_at, so without it every tie
+-- costs a sort.
 CREATE TABLE public.conversation_memory_attempts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -2823,10 +2825,15 @@ GRANT ALL ON TABLE public.conversation_memory_attempts TO postgres;
 GRANT ALL ON TABLE public.conversation_memory_attempts TO anon;
 GRANT ALL ON TABLE public.conversation_memory_attempts TO authenticated;
 GRANT ALL ON TABLE public.conversation_memory_attempts TO service_role;
--- SELECT only, deliberately: the ledger is written by the brain on the admin
--- pool and only ever read on the app pool. tf_system is granted nothing at all
--- — an executor never touches this table.
+-- SELECT only for both roles, deliberately: the ledger is written by the brain
+-- on the admin pool and only ever read anywhere else. tf_system does not read
+-- the table for its own sake — it reads it through the canonical task
+-- projection, which carries the pending task's newest attempt, so an executor
+-- resolving a task with GetSystem selects from here whether it wants the
+-- columns or not. Withholding the grant does not hide the summary; it fails
+-- the whole task read.
 GRANT SELECT ON TABLE public.conversation_memory_attempts TO tf_app;
+GRANT SELECT ON TABLE public.conversation_memory_attempts TO tf_system;
 
 
 GRANT ALL ON TABLE public.messages TO postgres;

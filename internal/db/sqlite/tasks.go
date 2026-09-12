@@ -1635,13 +1635,13 @@ type taskScanState struct {
 	// the four: its validity IS "an attempt exists", which is why the three
 	// text columns can be COALESCEd to empty in SQL without losing the
 	// difference between a running attempt (no outcome yet) and no attempt at
-	// all. It scans as text and parses via parseDBDatetime — a DATETIME
-	// column loses its declared type inside a scalar subselect, the same
-	// detour claimed_at takes on the conversation read.
+	// all. subselectDatetime rather than sql.NullTime (the Postgres twin's
+	// type): a DATETIME loses its declared type inside a scalar subselect, so
+	// the driver hands back text and the scanner parses it.
 	memoryAttemptOutcome      string
 	memoryAttemptErrorKind    string
 	memoryAttemptErrorMessage string
-	memoryAttemptStartedAt    sql.NullString
+	memoryAttemptStartedAt    subselectDatetime
 }
 
 // bareTargets is the scan-target list for sqliteTaskBareColumns — the
@@ -1680,10 +1680,7 @@ func (s *taskScanState) listTargets(t *domain.Task, extras []func(*domain.Task) 
 	return out
 }
 
-// finalize moves the NullX intermediates onto the task. It returns an error
-// for the one value it has to parse rather than merely copy: the memory
-// attempt's start, which arrives as text (see the field's note).
-func (s *taskScanState) finalize(t *domain.Task) error {
+func (s *taskScanState) finalize(t *domain.Task) {
 	if s.teamID.Valid {
 		v := s.teamID.String
 		t.TeamID = &v
@@ -1711,18 +1708,13 @@ func (s *taskScanState) finalize(t *domain.Task) error {
 	t.ClaimedByAgentID = s.claimedByAgentID.String
 	t.ClaimedByUserID = s.claimedByUserID.String
 	if s.memoryAttemptStartedAt.Valid {
-		startedAt, err := parseDBDatetime(s.memoryAttemptStartedAt.String)
-		if err != nil {
-			return fmt.Errorf("parse memory attempt started_at %q: %w", s.memoryAttemptStartedAt.String, err)
-		}
 		t.MemoryAttempt = &domain.MemoryAttemptSummary{
 			Outcome:      domain.MemoryAttemptOutcome(s.memoryAttemptOutcome),
 			ErrorKind:    domain.MemoryAttemptErrorKind(s.memoryAttemptErrorKind),
 			ErrorMessage: s.memoryAttemptErrorMessage,
-			StartedAt:    startedAt.UTC(),
+			StartedAt:    s.memoryAttemptStartedAt.Time,
 		}
 	}
-	return nil
 }
 
 func scanTaskFields(rows *sql.Rows, t *domain.Task) error {
@@ -1730,7 +1722,8 @@ func scanTaskFields(rows *sql.Rows, t *domain.Task) error {
 	if err := rows.Scan(s.targets(t)...); err != nil {
 		return err
 	}
-	return s.finalize(t)
+	s.finalize(t)
+	return nil
 }
 
 func scanTaskFromRow(row *sql.Row, t *domain.Task) error {
@@ -1738,7 +1731,8 @@ func scanTaskFromRow(row *sql.Row, t *domain.Task) error {
 	if err := row.Scan(s.targets(t)...); err != nil {
 		return err
 	}
-	return s.finalize(t)
+	s.finalize(t)
+	return nil
 }
 
 // scanTaskBareRow decodes a sqliteTaskBareColumns row — an id-keyed write's
@@ -1753,9 +1747,7 @@ func scanTaskBareRow(row *sql.Row, t *domain.Task) (domain.Task, error) {
 		}
 		return domain.Task{}, err
 	}
-	if err := s.finalize(t); err != nil {
-		return domain.Task{}, err
-	}
+	s.finalize(t)
 	return *t, nil
 }
 
@@ -1775,9 +1767,7 @@ func queryListedTasksCtx(ctx context.Context, q queryer, extras []func(*domain.T
 		if err := rows.Scan(st.listTargets(&t, extras)...); err != nil {
 			return nil, err
 		}
-		if err := st.finalize(&t); err != nil {
-			return nil, err
-		}
+		st.finalize(&t)
 		tasks = append(tasks, t)
 	}
 	return tasks, rows.Err()
