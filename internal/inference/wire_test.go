@@ -273,6 +273,35 @@ func TestWire_SystemAddendumIsASecondBlockBehindTheBreakpoint(t *testing.T) {
 	}
 }
 
+// TestWire_AddendumWithoutASharedPromptTakesNoFixedBreakpoint pins the
+// degenerate arrangement: an addendum with nothing shared in front of it must
+// not inherit the fixed system breakpoint. There is no cross-conversation
+// prefix to cache there, so a marker would write an entry at a position only
+// this conversation can match — the exact loss the split exists to prevent,
+// and silent, since a request with a misplaced marker looks fine on the wire.
+func TestWire_AddendumWithoutASharedPromptTakesNoFixedBreakpoint(t *testing.T) {
+	const perConvo = "<run_context>\nrun root: /work\n</run_context>"
+	areq := toAnthropic(t, Request{
+		Provider: ProviderAnthropic, Model: "claude-sonnet-4-20250514",
+		SystemAddendum: perConvo,
+		Rows:           toolConversationRows(),
+	})
+
+	if areq.System == nil {
+		t.Fatal("an addendum-only request must still send its system text")
+	}
+	blocks := areq.System.ContentBlocks
+	if len(blocks) != 1 {
+		t.Fatalf("system message has %d blocks, want 1 (the addendum alone): %+v", len(blocks), blocks)
+	}
+	if blocks[0].Text == nil || *blocks[0].Text != perConvo {
+		t.Fatalf("the sole system block is %v, want the addendum %q", blocks[0].Text, perConvo)
+	}
+	if blocks[0].CacheControl != nil {
+		t.Fatalf("per-conversation bytes must never carry the fixed system breakpoint, got %+v", blocks[0].CacheControl)
+	}
+}
+
 // TestWire_NoAddendumKeepsTheSingleSystemBlock pins the empty-addendum case:
 // one text block holding exactly the prompt, with the marker on it. A caller
 // with nothing per-conversation to say must not pay a second block for it.

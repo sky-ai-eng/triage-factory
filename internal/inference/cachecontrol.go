@@ -33,39 +33,45 @@ func applyMovingCacheBreakpoint(msgs []schemas.ChatMessage) {
 }
 
 // withSystemCacheBreakpoint returns the system ChatMessage for one call: the
-// shared prompt, then the per-conversation addendum when there is one, with
-// the ephemeral marker on the FIRST block. An empty addendum yields a single
-// block; two empty strings yield a zero message the caller drops.
+// shared prompt, then the per-conversation addendum when there is one. The
+// ephemeral marker belongs to the shared prompt and to nothing else. Two empty
+// strings yield a zero message the caller drops.
 //
-// The marker's position is the point of the split. Block 1 is byte-identical
-// across every conversation on the same model and tool schemas, so the entry
-// written at its end is the one they all read; block 2 is this conversation's
-// alone. Stamping the last block instead would put the only system entry after
-// the per-conversation bytes, and the shared entry would never be written.
+// Which block carries the marker is the point of the split, so it is bound to
+// the block's ROLE rather than to its position. The shared prompt is
+// byte-identical across every conversation on the same model and tool schemas,
+// so the entry written at its end is the one they all read; the addendum is
+// this conversation's alone. Stamping by position — last block, or a blind
+// first — puts the fixed breakpoint on per-conversation bytes the moment the
+// two blocks are not in the arrangement the stamper assumed, and the shared
+// entry silently stops being written.
 //
-// Block 2 gets no marker of its own. A write happens only at a breakpoint, and
-// the moving conversation breakpoint already writes an entry covering block 2
-// on the first turn; every later turn's lookback finds it. A marker here would
-// write an entry at a position only this conversation can match, which its own
-// later turns already beat with a longer one.
+// The addendum never carries a marker, whether or not a shared prompt precedes
+// it. A write happens only at a breakpoint, and the moving conversation
+// breakpoint already writes an entry covering the addendum on the first turn;
+// every later turn's lookback finds it. A marker on the addendum would write an
+// entry at a position only this conversation can match, which its own later
+// turns already beat with a longer one — so an addendum with no shared prompt
+// in front of it gets a system message with no fixed breakpoint at all, which
+// is the honest answer: there is no cross-conversation prefix there to cache.
 func withSystemCacheBreakpoint(systemPrompt, addendum string) schemas.ChatMessage {
-	texts := make([]string, 0, 2)
-	for _, s := range []string{systemPrompt, addendum} {
-		if s != "" {
-			texts = append(texts, s)
-		}
+	blocks := make([]schemas.ChatContentBlock, 0, 2)
+	if systemPrompt != "" {
+		blocks = append(blocks, schemas.ChatContentBlock{
+			Type:         schemas.ChatContentBlockTypeText,
+			Text:         &systemPrompt,
+			CacheControl: ephemeralCacheControl(),
+		})
 	}
-	if len(texts) == 0 {
+	if addendum != "" {
+		blocks = append(blocks, schemas.ChatContentBlock{
+			Type: schemas.ChatContentBlockTypeText,
+			Text: &addendum,
+		})
+	}
+	if len(blocks) == 0 {
 		return schemas.ChatMessage{}
 	}
-	blocks := make([]schemas.ChatContentBlock, len(texts))
-	for i := range texts {
-		blocks[i] = schemas.ChatContentBlock{
-			Type: schemas.ChatContentBlockTypeText,
-			Text: &texts[i],
-		}
-	}
-	blocks[0].CacheControl = ephemeralCacheControl()
 	return schemas.ChatMessage{
 		Role:    schemas.ChatMessageRoleSystem,
 		Content: &schemas.ChatMessageContent{ContentBlocks: blocks},
