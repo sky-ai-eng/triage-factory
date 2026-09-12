@@ -1213,9 +1213,11 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 // conversationsHaveUnresolvedArtifacts reports whether any of the given
 // conversations still holds an unresolved artifact (a draft PR or a ready
 // review — domain.HasUnresolvedArtifacts), reading each conversation's
-// artifacts under the caller's tx. One query per conversation, bounded
-// by a blueprint's step count. Shared by the terminal-on-last check so the
-// "blueprint still has unresolved work" definition lives next to its single use.
+// artifacts under the caller's tx. One query per conversation, so the cost is
+// the caller's set — the terminal-on-last check passes the whole task's
+// conversations, which is what makes a draft carried in from an earlier
+// engagement count. Shared by that check so the "task still has unresolved
+// work" definition lives next to its single use.
 func conversationsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, convs []domain.Conversation) (bool, error) {
 	for i := range convs {
 		arts, err := tx.Artifacts.ListByConversation(ctx, orgID, convs[i].ID)

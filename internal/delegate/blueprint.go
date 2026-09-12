@@ -834,21 +834,22 @@ func (s *Spawner) CloseTaskIfTerminalAndResolved(ctx context.Context, orgID, con
 	s.broadcastTaskUpdate(orgID, br.TaskID, "done")
 }
 
-// conversationsHaveUnresolvedArtifacts reports whether any of the given runs produced an
-// unresolved artifact, reading each run's artifacts via the admin-pool reader.
-// Split out so a caller that already holds the run set (recomputeTaskBoardColumn)
-// reuses it without re-loading. Fails OPEN like taskHasUnresolvedArtifacts:
-// a per-run read error returns true rather than risk under-reporting. The read is
-// one query per run; the run set is a task's conversations, so it is bounded by
-// how often the task has been engaged, not by org history.
+// conversationsHaveUnresolvedArtifacts reports whether any of the given
+// conversations holds an unresolved artifact, reading each conversation's
+// artifacts via the admin-pool reader. Split out so a caller that already holds
+// the conversation set (recomputeTaskBoardColumn, over a blueprint's steps)
+// reuses it without re-loading. Fails OPEN like taskHasUnresolvedArtifacts: a
+// per-conversation read error returns true rather than risk under-reporting.
+// One query per conversation, so the cost is the caller's set — a blueprint's
+// steps, or a task's whole conversation history — never org-wide.
 func (s *Spawner) conversationsHaveUnresolvedArtifacts(ctx context.Context, orgID string, convs []domain.Conversation) bool {
 	if s.artifacts == nil {
 		return false
 	}
-	for _, r := range convs {
-		arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, r.ID)
+	for _, conv := range convs {
+		arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, conv.ID)
 		if err != nil {
-			blueprintLog.Warn("list artifacts for unresolved check failed; treating as unresolved (fail open)", "step_conversation", r.ID, "error", err)
+			blueprintLog.Warn("list artifacts for unresolved check failed; treating as unresolved (fail open)", "conversation", conv.ID, "error", err)
 			return true
 		}
 		if domain.HasUnresolvedArtifacts(arts) {
