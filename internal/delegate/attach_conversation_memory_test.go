@@ -75,8 +75,9 @@ func seedProducedPR(t *testing.T, s *Spawner, conversationID, repoPath string, n
 }
 
 // TestAttachConversationMemoryEntities_PrimaryAlwaysWritten: the primary join row is
-// written unconditionally at termination, exactly like the conversation_memory upsert —
-// even when the agent wrote no memory file (agent_content NULL).
+// written unconditionally at termination, even for a conversation that
+// remembered nothing — the join row is what a later memory write on the same
+// conversation becomes reachable through, so it must not wait for one.
 func TestAttachConversationMemoryEntities_PrimaryAlwaysWritten(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-prim", "sess", "/tmp/wt")
@@ -84,9 +85,10 @@ func TestAttachConversationMemoryEntities_PrimaryAlwaysWritten(t *testing.T) {
 	ctx := context.Background()
 	entA := attachEntityBySource(t, database, "github", "owner/repo#r-prim")
 
-	// Empty content → agent_content NULL, matching a run whose agent never
-	// wrote its memory file. The upsert still lands a row.
-	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-prim", entA.ID, "", ""); err != nil {
+	// source='none' → agent_content NULL, matching a conversation whose agent
+	// never wrote its memory file. The row still lands, and the primary join
+	// row still attaches to it.
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-prim", "", "", domain.MemorySourceNone); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 
@@ -95,8 +97,17 @@ func TestAttachConversationMemoryEntities_PrimaryAlwaysWritten(t *testing.T) {
 	if role := attachRoleFor(t, database, "r-prim", entA.ID); role != domain.MemoryRolePrimary {
 		t.Errorf("primary role = %q, want %q (attach is unconditional)", role, domain.MemoryRolePrimary)
 	}
+	// The 'none' row itself stays out of the entity read — there is nothing to
+	// materialize — but the join row above is what carries the agent's own
+	// memory to this entity the moment one is written.
+	if attachMemoryConversationIDs(t, s, entA.ID)["r-prim"] {
+		t.Error("a conversation that remembered nothing surfaced in the entity read")
+	}
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-prim", "", "what I tried", domain.MemorySourceAgent); err != nil {
+		t.Fatalf("upsert agent memory: %v", err)
+	}
 	if !attachMemoryConversationIDs(t, s, entA.ID)["r-prim"] {
-		t.Error("primary entity does not reach the run's memory through the join")
+		t.Error("the already-attached entity does not reach the memory the conversation later wrote")
 	}
 }
 
@@ -110,7 +121,7 @@ func TestAttachConversationMemoryEntities_ProducedStubForUnpolledPR(t *testing.T
 	ctx := context.Background()
 	entA := attachEntityBySource(t, database, "github", "owner/repo#r-prod")
 
-	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-prod", entA.ID, "", "narrative"); err != nil {
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-prod", "", "narrative", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 	// A PR the run just opened — no entity exists for it yet.
@@ -150,7 +161,7 @@ func TestAttachConversationMemoryEntities_RepoLevelTargetsSkipped(t *testing.T) 
 	ctx := context.Background()
 	entA := attachEntityBySource(t, database, "github", "owner/repo#r-skip")
 
-	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-skip", entA.ID, "", "narrative"); err != nil {
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-skip", "", "narrative", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 	// Branch push → provider "git", target "o/r": unmapped provider.
@@ -200,7 +211,7 @@ func TestAttachConversationMemoryEntities_ListFailureLeavesPrimaryIntact(t *test
 	ctx := context.Background()
 	entA := attachEntityBySource(t, database, "github", "owner/repo#r-fail")
 
-	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-fail", entA.ID, "", "narrative"); err != nil {
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-fail", "", "narrative", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 
@@ -239,7 +250,7 @@ func TestAttachConversationMemoryEntities_Precedence(t *testing.T) {
 	entP := attachMakeEntity(t, database, "github", "o/r#100", "pr")
 	entB := attachMakeEntity(t, database, "github", "o/r#200", "pr")
 
-	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, "r-prec", entP.ID, "", "narrative"); err != nil {
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, "r-prec", "", "narrative", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 	// Mid-run touches recorded before termination.
@@ -277,7 +288,7 @@ func TestAttachConversationMemoryEntities_MotivatingCase(t *testing.T) {
 	entA := attachMakeEntity(t, database, "slack", domain.SlackSourceID("C0125", "1700000000.000100"), "thread")
 	entC := attachMakeEntity(t, database, "jira", "SKY-9", "issue")
 
-	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, "r-507", entA.ID, "", "the run narrative"); err != nil {
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, "r-507", "", "the run narrative", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 	// C touched mid-run; B produced via an artifact.
@@ -343,7 +354,7 @@ func TestAttachConversationMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) 
 	})
 
 	for _, conversationID := range []string{"r-step1", "r-step2"} {
-		if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, conversationID, entA.ID, "", conversationID+" narrative"); err != nil {
+		if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, conversationID, "", conversationID+" narrative", domain.MemorySourceAgent); err != nil {
 			t.Fatalf("upsert memory %s: %v", conversationID, err)
 		}
 		s.attachConversationMemoryEntities(ctx, org, conversationID, entA.ID)

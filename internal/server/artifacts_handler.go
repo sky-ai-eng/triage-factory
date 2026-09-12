@@ -527,8 +527,8 @@ func diffTruncationNote(fileCount int) string {
 }
 
 // handleArtifactApprove promotes the draft PR to ready-for-review: it marks the
-// PR ready (MarkPRReady), flips the artifact to state=open, and captures the
-// human verdict into conversation_memory. Approval is a decoupled sidecar — it
+// PR ready (MarkPRReady) and flips the artifact to state=open. Approval is a
+// decoupled sidecar — it
 // does NOT flip conversation status or resume/terminate a blueprint; the only
 // lifecycle effect is the shared terminal-on-last task-closure check
 // (closeTaskIfTerminalAndResolved), which closes the task iff this was the last
@@ -588,9 +588,9 @@ func liveStateWord(live *ghclient.PRView) string {
 
 // reconcileArtifactOutOfBand runs the Tier-2 reconcile over the artifact's
 // conversation — the same working set the refresh route drives — so a row a
-// resolve verb found stale on GitHub catches up now: state, memory outcome,
-// terminal-on-last task closure, and the artifact_updated broadcast that makes
-// the overlay refetch. Best-effort and detached from the request: the 409 the
+// resolve verb found stale on GitHub catches up now: state, terminal-on-last
+// task closure, and the artifact_updated broadcast that makes the overlay
+// refetch. Best-effort and detached from the request: the 409 the
 // caller is about to send is correct whether or not this lands, and the next
 // reconcile pass repairs a miss.
 func (ah *artifactsHandler) reconcileArtifactOutOfBand(r *http.Request, orgID, userID string, art *domain.Artifact) {
@@ -672,12 +672,12 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		return
 	}
 
-	// Parse the artifact details for the proposed (agent-draft) baseline the
-	// human-verdict memory diffs against. A parse failure is non-fatal: we still
-	// promote the PR and only skip the verdict diff.
+	// Parse the artifact details so the flip below can carry the row's own
+	// snapshot and resolution forward. A parse failure is non-fatal: the PR is
+	// still promoted, and the flip writes what it can from the live read.
 	details, derr := domain.ParsePRArtifactDetails(art.DetailsJSON)
 	if derr != nil {
-		artifactsLog.Warn("PR artifact details unparseable; promoting from live PR and skipping the verdict diff", "artifact", art.ID, "error", derr)
+		artifactsLog.Warn("PR artifact details unparseable; promoting from the live PR", "artifact", art.ID, "error", derr)
 	}
 
 	// Read the content being promoted from the LIVE PR, never the cached
@@ -733,20 +733,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		artifactsLog.Warn("flip PR artifact to open + record action failed", "artifact", art.ID, "error", err)
 	}
 
-	// Step 2: human verdict capture — only when we recovered the agent's proposed
-	// draft (details parsed); without it there's no honest baseline to diff the
-	// human's final against, so we skip rather than fabricate a "was empty" diff.
-	if art.ConversationID != "" && derr == nil {
-		humanContent := formatPRHumanFeedback(details.Proposed.Title, details.Proposed.Body, finalTitle, finalBody)
-		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			_, err := tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
-			return err
-		}); err != nil {
-			artifactsLog.Warn("failed to record human verdict", "conversation", art.ConversationID, "error", err)
-		}
-	}
-
-	// Step 3: terminal-on-last task closure. Approval is a decoupled sidecar — it
+	// Step 2: terminal-on-last task closure. Approval is a decoupled sidecar — it
 	// never flips conversation status or resumes/terminates a blueprint. The
 	// only lifecycle effect is closing the task when this was the LAST
 	// unresolved artifact on an already-terminal blueprint (§3); otherwise a
@@ -754,7 +741,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 
-	// Step 4: tell the drafting agent its PR was approved — live if the
+	// Step 3: tell the drafting agent its PR was approved — live if the
 	// conversation is warm, else via its ledger on resume. Decoupled from
 	// the resolution above. Note the one carve-out to the ledger's "never
 	// miss" property: if the best-effort flip in step 1 failed (logged
@@ -988,18 +975,6 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 	}); err != nil {
 		internalError(w, "artifacts", err)
 		return
-	}
-
-	// Human verdict into the run's memory: the next agent on this entity should
-	// read that the work was discarded, not merely closed, and what it was.
-	if art.ConversationID != "" {
-		humanContent := formatPRRejectionHumanFeedback(details.Proposed.Title, details.Proposed.Body, details.HeadBranch)
-		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			_, err := tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
-			return err
-		}); err != nil {
-			artifactsLog.Warn("reject: failed to record human verdict", "conversation", art.ConversationID, "error", err)
-		}
 	}
 
 	ah.pingConversationsResolved(orgID)
@@ -1236,57 +1211,4 @@ func (ah *artifactsHandler) upsertPRDetails(ctx context.Context, orgID, userID s
 		_, e := tx.Artifacts.Upsert(ctx, orgID, next)
 		return e
 	})
-}
-
-// formatPRHumanFeedback builds the markdown block written to
-// conversation_memory.human_content when a draft PR is approved. Port of the deleted
-// FormatHumanFeedbackPR (pending_pr_diff.go) onto the artifact's snapshot model:
-// the agent's first draft is the proposed snapshot (always present in
-// details_json, so no nil-vs-empty pointer dance), and the final values are the
-// snapshot at approval. Reuses writeBlockquote from review_diff.go.
-//
-// No leading "## Human feedback (post-run)" heading: db.materializeMemory
-// prepends it when joining agent_content + human_content, so baking it in here
-// would double the heading. Mirrors FormatHumanFeedback.
-func formatPRHumanFeedback(proposedTitle, proposedBody, finalTitle, finalBody string) string {
-	var b strings.Builder
-
-	titleChanged := proposedTitle != finalTitle
-	bodyChanged := proposedBody != finalBody
-
-	if titleChanged || bodyChanged {
-		b.WriteString("**Outcome:** Human submitted the PR with edits.\n\n")
-	} else {
-		b.WriteString("**Outcome:** Human submitted the PR as drafted.\n\n")
-	}
-
-	if titleChanged {
-		fmt.Fprintf(&b, "**Title:** edited\n- Was: %s\n- Now: %s\n\n", proposedTitle, finalTitle)
-	}
-
-	if bodyChanged {
-		b.WriteString("**Body:** edited\n\n")
-		b.WriteString("Originally drafted as:\n\n")
-		writeBlockquote(&b, proposedBody)
-		b.WriteString("\nFinal:\n\n")
-		writeBlockquote(&b, finalBody)
-	}
-
-	return b.String()
-}
-
-// formatPRRejectionHumanFeedback builds the conversation_memory.human_content
-// block for a rejected draft PR: the outcome, what it implies for the next
-// agent on this entity, and the proposed title and body that were turned down —
-// quoted in full, because the branch that held the work is gone and this block
-// is the only record of what was proposed. Same heading rule as
-// formatPRHumanFeedback: db.materializeMemory prepends the section heading.
-func formatPRRejectionHumanFeedback(proposedTitle, proposedBody, branch string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "**Outcome:** Human rejected the PR — closed it and deleted its branch `%s` from the upstream.\n", branch)
-	b.WriteString("**Implication:** The PR you proposed was not accepted, and the human chose to discard the work rather than keep the branch for edits or a retry. Reconsider whether this entity warranted a PR at all, or whether a different approach is needed before proposing another.\n\n")
-	fmt.Fprintf(&b, "**Rejected title:** %s\n\n", proposedTitle)
-	b.WriteString("**Rejected body:**\n\n")
-	writeBlockquote(&b, proposedBody)
-	return b.String()
 }

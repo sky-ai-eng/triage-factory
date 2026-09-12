@@ -1178,10 +1178,8 @@ func (s *Server) patchStage(w http.ResponseWriter, r *http.Request, orgID, userI
 // which is what a second close rewriting closed_at / close_reason would be.
 func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userID, id, status string, hesitationMs int) bool {
 	action := swipeActionDismiss
-	outcome := discardOutcomeDismissed
 	if status == taskStatusDone {
 		action = swipeActionComplete
-		outcome = discardOutcomeCompleted
 	}
 	var newStatus string
 	var closed bool
@@ -1202,7 +1200,7 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 	}
 	// Closing a task takes it off the agent's hands: stop any in-flight run
 	// and resolve every unresolved artifact it holds.
-	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, outcome, delegate.StopCauseTaskDispositioned)
+	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, delegate.StopCauseTaskDispositioned)
 	s.broadcastTaskStatus(orgID, id, newStatus)
 	return true
 }
@@ -1354,54 +1352,6 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 	s.writeTaskResource(w, r, orgID, userID, id)
 }
 
-// discardOutcome describes how the task ended up after the user
-// rejected the agent's prepared review. The DB cleanup path is the
-// same across all four values, but the human_content note baked
-// into conversation_memory differs — the next agent reading prior memory
-// needs to know whether the human:
-//
-//   - re-queued the task (still on the docket; verdict was wrong),
-//   - dismissed it outright (the entity isn't worth pursuing),
-//   - marked it complete (the entity was resolved, but not via the
-//     agent's prepared verdict),
-//   - or claimed it themselves (the human took over and will handle
-//     the entity manually rather than re-attempting agent work).
-//
-// The distinction is the load-bearing signal in post-run memory:
-// each shape implies a different recalibration for future conversations.
-type discardOutcome int
-
-const (
-	discardOutcomeRequeued discardOutcome = iota
-	discardOutcomeDismissed
-	// discardOutcomeCompleted: user marked the task done from a
-	// finished AgentCard (failed, or parked after a cancel) by
-	// dragging it to the Done column. The agent's prepared review,
-	// if any, is being discarded — the user is signalling "the work
-	// is finished" without applying the agent's verdict to GitHub.
-	discardOutcomeCompleted
-	// discardOutcomeClaimed: user claimed the task while a conversation was
-	// awaiting approval (Board's drag-to-You from Agent/Done, or
-	// the Cards swipe-right against a delegated task). The agent's
-	// prepared review is being thrown away in favor of the human
-	// handling the entity themselves. This case exists primarily
-	// to close the race where a stale frontend conversations
-	// map could let a claim slip past without /requeue's cleanup;
-	// the task routes run the cleanup on every claim regardless of
-	// frontend state.
-	discardOutcomeClaimed
-	// discardOutcomeRedelegated: user re-delegated the task while
-	// the prior conversation was still in flight (or had landed a pending
-	// review). The bot is still on the task — the prior conversation's
-	// artifacts are thrown away in favor of a fresh conversation with
-	// (typically) different instructions. Distinct from
-	// Requeued/Dismissed/Completed/Claimed: the agent still owns
-	// the task, but the verdict it just produced is no longer the
-	// right answer. Future agents reading prior memory should
-	// reconsider the framing rather than the conclusion.
-	discardOutcomeRedelegated
-)
-
 // finalizeRequeue runs the side-effect cleanup that both /undo and
 // /requeue need after the task status flips back to queued. Three steps, in
 // this order:
@@ -1416,9 +1366,8 @@ const (
 //     above take every status rather than guarding on one.
 //
 //   - artifact teardown: resolve every unresolved artifact the task's
-//     conversations hold (close all draft PRs, dismiss all pending reviews) and
-//     write the discard verdict to conversation_memory.human_content, so a
-//     returned-to-queue task leaves no stranded GitHub draft / pending
+//     conversations hold (close all draft PRs, dismiss all pending reviews), so
+//     a returned-to-queue task leaves no stranded GitHub draft / pending
 //     review. It rides inside teardownTaskConversations behind the stop, so it
 //     operates on settled conversations; it never flips conversations.status
 //     itself.
@@ -1450,7 +1399,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 	// against a queued task. WithoutCancel inherits the request's values
 	// (claims among them) while breaking the cancel chain.
 	cleanupCtx := context.WithoutCancel(r.Context())
-	s.teardownTaskConversations(cleanupCtx, orgID, userID, taskID, discardOutcomeRequeued, delegate.StopCauseTaskRequeued)
+	s.teardownTaskConversations(cleanupCtx, orgID, userID, taskID, delegate.StopCauseTaskRequeued)
 	s.revertJiraStateIfApplicable(cleanupCtx, orgID, userID, task)
 	// Requeue clears both claim cols and flips status to
 	// 'queued'. Peer Board sessions need a task_updated event to
@@ -1482,21 +1431,12 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 // task's conversations (ListForTask spans the blueprint's step conversations and
 // any standalone conversation) rather than on a conversation status.
 //
-// outcome shapes the discard note baked into conversation_memory.human_content so the next
-// agent reading memory can distinguish "still on the docket, the human just
-// didn't like this verdict" (requeued) from "walked away from the entity"
-// (dismissed) from "resolved it themselves" (completed) from "took over"
-// (claimed). The note is written per conversation that held a resolved
-// artifact, keyed on that conversation's dominant kind (PR precedence, matching
-// the legacy single-artifact path).
-//
 // All-or-nothing per call: any DB error inside the closure rolls back the whole
-// batch (notes + flips + audit rows), leaving the artifacts unresolved for a
-// retry on the next /undo, /requeue, dismiss, or complete. UpdateConversationMemoryHumanContent
-// is idempotent and the flips re-target the same predicate set, so retry is safe.
-// All failures are logged, not fatal: the calling handler has already flipped the
-// task to its new state.
-func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskID string, outcome discardOutcome) {
+// batch (flips + audit rows), leaving the artifacts unresolved for a retry on
+// the next /undo, /requeue, dismiss, or complete. The flips re-target the same
+// predicate set, so retry is safe. All failures are logged, not fatal: the
+// calling handler has already flipped the task to its new state.
+func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskID string) {
 	// Draft PRs captured inside the tx (state already flipped) and closed on GitHub
 	// AFTER it commits — a network call must not hold the tx open. Dismissed reviews
 	// need no post-tx pass: a review is staged TF-side (TFAC-494), so the in-tx flip
@@ -1524,17 +1464,6 @@ func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskI
 			pendingReviews := domain.AllPendingReviewArtifacts(arts)
 			if len(draftPRs) == 0 && len(pendingReviews) == 0 {
 				continue
-			}
-
-			// Write the discard note BEFORE the flips so the next agent reading
-			// memory on this entity sees the human's verdict alongside the agent's
-			// self-report. Keyed on the conversation's dominant kind (PR precedence).
-			kind := "review"
-			if len(draftPRs) > 0 {
-				kind = "pr"
-			}
-			if _, err := tx.TaskMemory.UpdateConversationMemoryHumanContent(ctx, orgID, conversationID, buildDiscardHumanContent(outcome, kind)); err != nil {
-				return fmt.Errorf("human_content write: %w", err)
 			}
 
 			// Abandon each pending review by flipping its artifact to dismissed. No
@@ -1663,61 +1592,6 @@ func closeDraftPRBestEffort(ctx context.Context, resolver ghclient.Resolver, org
 	}
 	if err := gh.ClosePR(ctx, owner, repo, number); err != nil {
 		approvalDiscardLog.Warn("close draft PR on github failed (artifact already marked closed)", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-	}
-}
-
-// buildDiscardHumanContent renders the post-run human verdict
-// recorded when the user rejects an agent-prepared approval. The
-// four shapes — requeued, dismissed, completed, claimed — give
-// the next agent on this entity different recalibration signals:
-//
-//   - requeued: "try again, but not like that" (verdict was wrong;
-//     the task is back in the queue).
-//   - dismissed: "this entity wasn't worth pursuing" (the human
-//     walked away from the entity entirely).
-//   - completed: "you reached the right ballpark but I resolved
-//     this myself" (the human accepted the task as done without
-//     applying the agent's prepared review/PR).
-//   - claimed: "I'll handle this myself" (the human took over the
-//     task; the entity is still being worked on, just by hand).
-//
-// kind is "review" or "pr" — picks the right artifact noun so the
-// next agent reading memory sees text that matches what was
-// actually discarded (a review verdict vs a queued PR). Defaults
-// to review wording for any unknown value.
-func buildDiscardHumanContent(outcome discardOutcome, kind string) string {
-	artifact := "review"
-	verdictNoun := "verdict"
-	if kind == "pr" {
-		artifact = "PR"
-		verdictNoun = "PR"
-	}
-	switch outcome {
-	case discardOutcomeDismissed:
-		return fmt.Sprintf(
-			"**Outcome:** Human discarded the prepared %s and dismissed the task entirely.\n"+
-				"**Implication:** The %s you proposed was not accepted, and the human chose to walk away from this entity rather than re-queue it. Future runs on similar entities should reconsider whether the situation warrants action at all.",
-			artifact, verdictNoun)
-	case discardOutcomeCompleted:
-		return fmt.Sprintf(
-			"**Outcome:** Human marked the task complete without submitting the prepared %s.\n"+
-				"**Implication:** The human acknowledged the task as resolved but chose not to apply your %s to the entity. They likely handled it manually or via a different framing. Future runs should consider whether the agent's path was the right one or whether the human's resolution implies a gap in the prompt's approach.",
-			artifact, verdictNoun)
-	case discardOutcomeClaimed:
-		return fmt.Sprintf(
-			"**Outcome:** Human discarded the prepared %s and claimed the task to handle it themselves.\n"+
-				"**Implication:** The %s you proposed was not accepted. The human took over to work the entity manually rather than apply your %s or re-queue it for another agent attempt — a sign that automation wasn't the right fit for this case.",
-			artifact, verdictNoun, artifact)
-	case discardOutcomeRedelegated:
-		return fmt.Sprintf(
-			"**Outcome:** Human re-delegated the task to the bot while this run was in flight; the prior %s was discarded in favor of a fresh attempt.\n"+
-				"**Implication:** The human kept the agent on the task but didn't accept the %s you produced — likely a prompt-fit issue or a missing-context issue rather than an automation-fit issue. Reconsider the framing or scope before producing a new %s.",
-			artifact, verdictNoun, artifact)
-	default: // discardOutcomeRequeued
-		return fmt.Sprintf(
-			"**Outcome:** Human discarded the prepared %s without submitting it; task returned to the triage queue.\n"+
-				"**Implication:** The %s you proposed was not accepted. Reconsider whether this entity warrants any %s at all, or whether a different framing is needed.",
-			artifact, verdictNoun, artifact)
 	}
 }
 

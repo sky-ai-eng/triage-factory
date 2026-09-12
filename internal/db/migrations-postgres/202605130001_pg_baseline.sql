@@ -773,21 +773,30 @@ CREATE TABLE public.artifacts (
 );
 
 
+-- One row per conversation that settled the question of what it remembered.
+-- source says who wrote agent_content: 'agent' (the conversation's own memory
+-- file), 'generated' (TF composed it from the transcript) or 'none' (nothing was
+-- remembered, and agent_content is NULL). App-validated, the type/origin
+-- pattern; the store door holds the invariant that agent_content IS NULL
+-- exactly when source = 'none'.
+--
+-- Which entities the row is reachable from lives in conversation_memory_entities
+-- below, which every read joins through.
 CREATE TABLE public.conversation_memory (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     conversation_id uuid NOT NULL,
-    entity_id uuid NOT NULL,
     blueprint_run_id uuid,
     agent_content text,
-    human_content text,
+    source text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
--- Lets one conversation_memory row reach every entity the run touched, not just
--- the denormalized entity_id above. Keyed on conversation_id because touches are
--- recorded mid-run, before the conversation_memory row exists. role is free text.
+-- How a conversation_memory row is reached from an entity, and the only way:
+-- one join row per entity the conversation touched, produced for, or was
+-- primarily about. Keyed on conversation_id because touches are recorded
+-- mid-run, before the conversation_memory row exists. role is free text.
 CREATE TABLE public.conversation_memory_entities (
     org_id uuid NOT NULL,
     conversation_id uuid NOT NULL,
@@ -1579,12 +1588,6 @@ CREATE INDEX idx_artifacts_org_created ON public.artifacts USING btree (org_id, 
 CREATE INDEX idx_artifacts_conversation ON public.artifacts USING btree (conversation_id);
 
 
-CREATE INDEX idx_conversation_memory_entity_created ON public.conversation_memory USING btree (entity_id, created_at);
-
-
-CREATE INDEX idx_conversation_memory_entity_blueprint ON public.conversation_memory USING btree (entity_id, blueprint_run_id);
-
-
 CREATE INDEX idx_conversation_memory_conversation ON public.conversation_memory USING btree (conversation_id);
 
 
@@ -1921,10 +1924,6 @@ ALTER TABLE ONLY public.artifacts
 
 ALTER TABLE ONLY public.artifacts
     ADD CONSTRAINT artifacts_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
-
-
-ALTER TABLE ONLY public.conversation_memory
-    ADD CONSTRAINT conversation_memory_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id);
 
 
 ALTER TABLE ONLY public.conversation_memory

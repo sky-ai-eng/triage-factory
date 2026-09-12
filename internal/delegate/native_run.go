@@ -630,14 +630,15 @@ func (s *Spawner) recordNativeResult(
 	}
 
 	// Concluded. Record the conversation's memory exactly as processCompletion
-	// does — row presence means "the conversation terminated", NULL content
-	// means the agent wrote no usable memory file.
+	// does — the agent's own file, filed as source=agent, and no row at all
+	// when it wrote none.
 	agentContent, fileState := readConversationMemory(claudeCwd, priorMemory)
-	if _, err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID, cfg.blueprintRunID, agentContent); err != nil {
-		delegateLog.Warn("upsert memory for conversation failed", "conversation", conversationID, "error", err)
-	}
-	if fileState != memoryFilePresent {
-		delegateLog.Debug("no usable memory file at termination", "conversation", conversationID, "state", fileState)
+	if fileState == memoryFilePresent {
+		if _, err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, cfg.blueprintRunID, agentContent, domain.MemorySourceAgent); err != nil {
+			delegateLog.Warn("upsert memory for conversation failed", "conversation", conversationID, "error", err)
+		}
+	} else {
+		delegateLog.Debug("no usable memory file at termination (no memory row written)", "conversation", conversationID, "state", fileState)
 	}
 	s.attachConversationMemoryEntities(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID)
 

@@ -170,13 +170,13 @@ type Stores struct {
 	// background worker with no per-user identity.
 	ConversationQueue ConversationQueueStore
 
-	// TaskMemory owns the conversation_memory table — per-conversation agent
-	// narrative + human verdict, read back by the delegate spawner to
-	// materialize prior context into fresh worktrees. Holds both pools: app
-	// for request-handler equivalents (review/PR submit, swipe-discard
-	// cleanup, factory/conversation-summary reads) and admin for the
-	// spawner's runAgent goroutine (post-completion upsert +
-	// engagement-start materializer, both without a JWT-claims context).
+	// TaskMemory owns the conversation_memory table — one per-conversation
+	// narrative and the source that says who wrote it, read back by the
+	// delegate spawner to materialize prior context into fresh worktrees.
+	// Holds both pools: app for request-handler equivalents
+	// (factory/conversation-summary reads) and admin for the spawner's
+	// runAgent goroutine (post-completion upsert + engagement-start
+	// materializer, both without a JWT-claims context).
 	TaskMemory TaskMemoryStore
 
 	// MemoryAttempts owns the conversation_memory_attempts table — the ledger

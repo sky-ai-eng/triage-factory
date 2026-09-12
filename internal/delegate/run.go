@@ -838,33 +838,35 @@ func (s *Spawner) processCompletion(
 		return true, fencedOut
 	}
 
-	// Unconditional upsert of the conversation_memory row at termination: row presence
-	// === "the run terminated", agent_content NULL === "the agent didn't write a
-	// usable memory file" (UpsertAgentMemory normalizes empty/whitespace input
-	// to NULL on the way in). blueprint_run_id is denormalized onto the row so
+	// The agent's own memory file, filed as source=agent when it wrote one.
+	// Nothing is written otherwise: the row's source would have to claim the
+	// conversation settled on remembering nothing, and this gate only knows
+	// that no file reached it. blueprint_run_id is denormalized onto the row so
 	// the next run's materializer can tell this workflow run's own steps from
-	// history.
+	// history. The per-state logging stays: each shape of "no file" points
+	// somewhere different when a run looks wrong afterwards.
 	agentContent, fileState := readConversationMemory(claudeCwd, priorMemory)
-	if _, err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID, blueprintRunID, agentContent); err != nil {
-		delegateLog.Warn("upsert memory for conversation failed", "conversation", conversationID, "error", err)
+	if fileState == memoryFilePresent {
+		if _, err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, blueprintRunID, agentContent, domain.MemorySourceAgent); err != nil {
+			delegateLog.Warn("upsert memory for conversation failed", "conversation", conversationID, "error", err)
+		}
 	}
 	switch fileState {
 	case memoryFileMissing:
-		delegateLog.Debug("memory file missing at termination (agent_content NULL)", "conversation", conversationID)
+		delegateLog.Debug("memory file missing at termination (no memory row written)", "conversation", conversationID)
 	case memoryFileEmpty:
-		delegateLog.Debug("memory file present but empty at termination (agent_content NULL)", "conversation", conversationID)
+		delegateLog.Debug("memory file present but empty at termination (no memory row written)", "conversation", conversationID)
 	case memoryFileReadErr:
-		delegateLog.Debug("memory file unreadable at termination (agent_content NULL)", "conversation", conversationID)
+		delegateLog.Debug("memory file unreadable at termination (no memory row written)", "conversation", conversationID)
 	case memoryFileStale:
-		delegateLog.Debug("memory file holds exactly the content this conversation inherited; it belongs to the previous step (agent_content NULL)", "conversation", conversationID)
+		delegateLog.Debug("memory file holds exactly the content this conversation inherited; it belongs to the previous step (no memory row written)", "conversation", conversationID)
 	}
 
 	// Attach the conversation's memory to every entity it materially engaged —
-	// the primary (task) entity plus everything it produced — so the narrative
-	// is reachable from all of them, not just the denormalized primary on
-	// conversation_memory.entity_id. Cancellation-detached for the same reason
-	// the upsert above is: a cancelled turn still owns its terminal
-	// bookkeeping.
+	// the primary (task) entity plus everything it produced — since the join
+	// rows are the only way a reader reaches the memory from an entity.
+	// Cancellation-detached for the same reason the upsert above is: a
+	// cancelled turn still owns its terminal bookkeeping.
 	s.attachConversationMemoryEntities(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID)
 
 	// Every run is a step of a blueprint_run now (a single prompt is a 1-step

@@ -163,7 +163,7 @@ func (a *App) buildAI() {
 	// reconcile on one tenant can't head-of-line-block another. The shared
 	// Reconciler is also handed to the server for the Tier-2 run-scoped refresh
 	// endpoint, so foreground and background reconciliation run one code path.
-	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores.Artifacts, a.stores.TaskMemory, a.wsHub)
+	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores.Artifacts, a.wsHub)
 	a.reconcilerCore = reconciler
 	a.reconciler = reconcile.NewManager(reconciler)
 	a.srv.SetReconciler(reconciler)

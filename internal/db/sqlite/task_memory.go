@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,24 +13,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// humanFeedbackHeader marks the start of the human verdict in
-// materialized memory. Stable so the next agent's prompt context can
-// parse the boundary regardless of which conversation wrote which half.
-const humanFeedbackHeader = "## Human feedback (post-run)\n\n"
-
-// humanFeedbackSeparator is the divider rendered when both halves of
-// a memory row are populated — leading newlines and HR push the
-// header onto its own visual block after the agent's text. The
-// agent-empty + human-set case uses humanFeedbackHeader alone (no
-// stray HR ahead of the only block of content).
-const humanFeedbackSeparator = "\n\n---\n" + humanFeedbackHeader
-
 // taskMemoryStore — SQLite impl. The constructor accepts two queryers
 // for signature parity with the Postgres impl; SQLite has one
 // connection so both collapse to the same queryer. The `...System`
 // variants with a non-System counterpart delegate to it;
-// RecordEntityTouchSystem and CountMemoriesForEntitySystem have none
-// and implement directly.
+// GetForConversationSystem, RecordEntityTouchSystem and
+// CountMemoriesForEntitySystem have none and implement directly.
 type taskMemoryStore struct{ q queryer }
 
 func newTaskMemoryStore(q, _ queryer) db.TaskMemoryStore { return &taskMemoryStore{q: q} }
@@ -44,12 +31,15 @@ var _ db.TaskMemoryStore = (*taskMemoryStore)(nil)
 // (StepIndex, PromptName) become correlated scalar subqueries in
 // taskMemoryRowColumns instead — same restriction sqliteClaimReturningColumns
 // (conversation.go) exists for.
-func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error) {
+func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, conversationID, blueprintRunID, content string, source domain.MemorySource) (domain.TaskMemory, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return domain.TaskMemory{}, err
 	}
+	if err := db.ValidateMemorySource(content, source); err != nil {
+		return domain.TaskMemory{}, err
+	}
 	var agentContent any
-	if strings.TrimSpace(content) != "" {
+	if source != domain.MemorySourceNone {
 		agentContent = content
 	}
 	var blueprintRun any
@@ -57,58 +47,39 @@ func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, conversa
 		blueprintRun = blueprintRunID
 	}
 	mem, err := scanTaskMemory(s.q.QueryRowContext(ctx, `
-		INSERT INTO conversation_memory (id, conversation_id, entity_id, blueprint_run_id, agent_content, created_at)
+		INSERT INTO conversation_memory (id, conversation_id, blueprint_run_id, agent_content, source, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(conversation_id) DO UPDATE SET agent_content = excluded.agent_content, blueprint_run_id = excluded.blueprint_run_id
+		ON CONFLICT(conversation_id) DO UPDATE SET agent_content = excluded.agent_content, source = excluded.source, blueprint_run_id = excluded.blueprint_run_id
 		RETURNING `+taskMemoryRowColumns,
-		uuid.New().String(), conversationID, entityID, blueprintRun, agentContent, time.Now().UTC()))
+		uuid.New().String(), conversationID, blueprintRun, agentContent, string(source), time.Now().UTC()))
 	if err != nil {
 		return domain.TaskMemory{}, fmt.Errorf("upsert conversation_memory: %w", err)
 	}
 	return mem, nil
 }
 
-func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error) {
-	return s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, blueprintRunID, content)
+func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, blueprintRunID, content string, source domain.MemorySource) (domain.TaskMemory, error) {
+	return s.UpsertAgentMemory(ctx, orgID, conversationID, blueprintRunID, content, source)
 }
 
-// UpdateConversationMemoryHumanContent returns the stored row on a hit.
-// RETURNING answers "did this land" and "what does the row say now" in one
-// statement: SQLite reports a row here whenever the WHERE clause matched,
-// regardless of whether the SET assignment actually changed a value, so zero
-// rows back means no row matched — a nil row with a nil error, logged and not
-// fatal (see the interface doc).
-func (s *taskMemoryStore) UpdateConversationMemoryHumanContent(ctx context.Context, orgID, conversationID, content string) (*domain.TaskMemory, error) {
+// GetForConversationSystem is the one read that does NOT filter on
+// agent_content: a 'none' row is the answer to "did this conversation settle
+// what it remembered", and hiding it would make an unanswered conversation
+// indistinguishable from one that answered "nothing".
+func (s *taskMemoryStore) GetForConversationSystem(ctx context.Context, orgID, conversationID string) (*domain.TaskMemory, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	var humanContent any
-	if strings.TrimSpace(content) != "" {
-		humanContent = content
-	}
-	mem, err := scanTaskMemory(s.q.QueryRowContext(ctx,
-		`UPDATE conversation_memory SET human_content = ? WHERE conversation_id = ? RETURNING `+taskMemoryRowColumns,
-		humanContent, conversationID))
+	mem, err := scanTaskMemory(s.q.QueryRowContext(ctx, taskMemorySelect+`
+		WHERE rm.conversation_id = ?
+	`, conversationID))
 	if errors.Is(err, sql.ErrNoRows) {
-		// Logged-and-returned-nil: if the conversation_memory row genuinely
-		// doesn't exist (cleanup race, taken-over conversation, etc.), the
-		// human's submit shouldn't fail. The agent-side upsert path
-		// will surface its own warning if it failed earlier.
-		memoryLog.Warn("no conversation_memory row; human_content not recorded", "conversation_id", conversationID)
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("update conversation_memory human_content: %w", err)
+		return nil, fmt.Errorf("get conversation_memory for conversation: %w", err)
 	}
 	return &mem, nil
-}
-
-// UpdateConversationMemoryHumanContentSystem is identical to UpdateConversationMemoryHumanContent
-// in SQLite: local mode is single-tenant (N=1) with no RLS, so there is no
-// admin/app pool split. The method exists for parity with the Postgres store,
-// where the reconciler (no JWT-claims context) needs the admin pool. TFAC-464.
-func (s *taskMemoryStore) UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) (*domain.TaskMemory, error) {
-	return s.UpdateConversationMemoryHumanContent(ctx, orgID, conversationID, content)
 }
 
 func (s *taskMemoryStore) GetMemoriesForEntity(ctx context.Context, orgID, entityID string) ([]domain.TaskMemory, error) {
@@ -144,7 +115,8 @@ func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, 
 		return nil, nil
 	}
 	rows, err := s.q.QueryContext(ctx, taskMemorySelect+`
-		WHERE rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
+		WHERE rm.agent_content IS NOT NULL
+		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
 		ORDER BY rm.created_at DESC
 		LIMIT ?
 	`, entityID, limit)
@@ -162,7 +134,8 @@ func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, 
 
 func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]domain.TaskMemory, error) {
 	rows, err := q.QueryContext(ctx, taskMemorySelect+`
-		WHERE rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
+		WHERE rm.agent_content IS NOT NULL
+		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
 		ORDER BY rm.created_at ASC
 	`, entityID)
 	if err != nil {
@@ -179,7 +152,7 @@ func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]do
 // row id. Both joins are LEFT so a row whose conversation or prompt is gone
 // still comes back — it loses its legible name, never its content.
 const taskMemorySelect = `
-	SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at,
+	SELECT rm.id, rm.conversation_id, rm.blueprint_run_id, rm.agent_content, rm.source, rm.created_at,
 	       c.blueprint_step_index, p.name
 	FROM conversation_memory rm
 	LEFT JOIN conversations c ON c.id = rm.conversation_id
@@ -191,28 +164,29 @@ const taskMemorySelect = `
 // RETURNING clause forbids the LEFT JOIN taskMemorySelect uses, so the
 // producing conversation's naming facts become correlated scalar subqueries
 // against the bare conversations/prompts table names instead — the same
-// restriction sqliteClaimReturningColumns (conversation.go) exists for. Every
-// write below RETURNs it.
+// restriction sqliteClaimReturningColumns (conversation.go) exists for.
 const taskMemoryRowColumns = `
-	id, conversation_id, entity_id, blueprint_run_id, agent_content, human_content, created_at,
+	id, conversation_id, blueprint_run_id, agent_content, source, created_at,
 	(SELECT c.blueprint_step_index FROM conversations c WHERE c.id = conversation_memory.conversation_id),
 	(SELECT p.name FROM conversations c JOIN prompts p ON p.id = c.prompt_id WHERE c.id = conversation_memory.conversation_id)
 `
 
 // scanTaskMemory decodes one row in taskMemorySelect/taskMemoryRowColumns
-// order — shared by the multi-row entity reads (via scanTaskMemories) and the
-// single-row writes' RETURNING.
+// order — shared by the multi-row entity reads (via scanTaskMemories), the
+// per-conversation point read, and the single-row write's RETURNING.
 func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, error) {
 	var m domain.TaskMemory
-	var blueprintRunID, agentContent, humanContent, promptName sql.NullString
+	var blueprintRunID, agentContent, promptName sql.NullString
+	var source string
 	var stepIndex sql.NullInt64
 	var createdAt time.Time
-	if err := row.Scan(&m.ID, &m.ConversationID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt,
+	if err := row.Scan(&m.ID, &m.ConversationID, &blueprintRunID, &agentContent, &source, &createdAt,
 		&stepIndex, &promptName); err != nil {
 		return domain.TaskMemory{}, err
 	}
 	m.BlueprintRunID = blueprintRunID.String
-	m.Content = materializeMemory(agentContent.String, humanContent.String)
+	m.Content = agentContent.String
+	m.Source = domain.MemorySource(source)
 	m.CreatedAt = createdAt
 	if stepIndex.Valid {
 		idx := int(stepIndex.Int64)
@@ -222,8 +196,8 @@ func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, err
 	return m, nil
 }
 
-// scanTaskMemories drains a conversation_memory result set into materialized
-// TaskMemory rows, one scanTaskMemory call per row.
+// scanTaskMemories drains a conversation_memory result set into TaskMemory
+// rows, one scanTaskMemory call per row.
 func scanTaskMemories(rows *sql.Rows) ([]domain.TaskMemory, error) {
 	var out []domain.TaskMemory
 	for rows.Next() {
@@ -273,29 +247,8 @@ func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgI
 	var n int
 	err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM conversation_memory rm
-		WHERE rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
+		WHERE rm.agent_content IS NOT NULL
+		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
 	`, entityID).Scan(&n)
 	return n, err
-}
-
-// materializeMemory composes the agent's narrative and the human's
-// verdict into a single Content string the next agent reads. The
-// separator format is stable — the next agent's prompt context parses
-// it as a boundary, so any change here needs a matching update to the
-// briefing docs that teach agents how to read prior memory.
-func materializeMemory(agentContent, humanContent string) string {
-	hasAgent := strings.TrimSpace(agentContent) != ""
-	hasHuman := strings.TrimSpace(humanContent) != ""
-	switch {
-	case hasAgent && hasHuman:
-		return agentContent + humanFeedbackSeparator + humanContent
-	case hasHuman:
-		// Agent-empty + human-set: render just the header + body, no
-		// leading HR. The HR only makes sense as a divider between two
-		// blocks; without an agent block it would just be visual noise
-		// the next agent has to skip past.
-		return humanFeedbackHeader + humanContent
-	default:
-		return agentContent
-	}
 }

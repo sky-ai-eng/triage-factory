@@ -1420,8 +1420,8 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 		orgA, taskID, entityA)
 	MustExec(t, h.AdminDB, `INSERT INTO messages (org_id, conversation_id, role, content) VALUES ($1, $2, 'assistant', 'hi')`,
 		orgA, conversationID)
-	MustExec(t, h.AdminDB, `INSERT INTO conversation_memory (org_id, conversation_id, entity_id, agent_content) VALUES ($1, $2, $3, 'note')`,
-		orgA, conversationID, entityA)
+	MustExec(t, h.AdminDB, `INSERT INTO conversation_memory (org_id, conversation_id, agent_content, source) VALUES ($1, $2, 'note', 'agent')`,
+		orgA, conversationID)
 	MustExec(t, h.AdminDB, `INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role) VALUES ($1, $2, $3, 'primary')`,
 		orgA, conversationID, entityA)
 	MustExec(t, h.AdminDB, `INSERT INTO conversation_worktrees (org_id, conversation_id, repository_id, path, ref) VALUES ($1, $2, $3, '/tmp/x', 'pr-1')`,

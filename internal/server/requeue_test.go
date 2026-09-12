@@ -77,15 +77,13 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 	}
 
 	// conversation_memory: agent finished and wrote its self-report (the
-	// termination upsert). We assert below that
-	// human_content lands without trampling agent_content.
-	if _, err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "e_pa", "", "agent self-report"); err != nil {
+	// termination upsert). The teardown below must leave it alone.
+	if _, err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "", "agent self-report", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
-	// The primary join row a real conversation's completion will carry once the
-	// run-end attach ticket (TFAC-625) lands — GetMemoriesForEntity's
-	// join-based read (TFAC-622), exercised in assertPendingApprovalCleanedUp
-	// below, needs it to find anything.
+	// The primary join row a conversation's completion carries beside its
+	// memory — GetMemoriesForEntity's join-based read, exercised in
+	// assertPendingApprovalCleanedUp below, needs it to find anything.
 	if err := sqlitestore.New(database).TaskMemory.RecordEntityTouchSystem(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "e_pa", domain.MemoryRolePrimary); err != nil {
 		t.Fatalf("RecordEntityTouchSystem: %v", err)
 	}
@@ -117,13 +115,11 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 }
 
 // assertPendingApprovalCleanedUp checks every post-condition the task-level
-// resolve-all teardown is meant to deliver: task at the expected post-state, the
-// unresolved review artifact flipped to dismissed, human_content recording the
-// discard with a marker phrase that distinguishes the requeue from the dismiss
-// flavor, agent_content preserved (the whole point was keeping both
-// halves). wantTaskStatus and wantHumanContentMarker let callers vary the
-// assertion across the requeue (`queued` + "returned to the triage queue") and
-// dismiss (`dismissed` + "dismissed the task entirely") paths.
+// resolve-all teardown is meant to deliver: task at the expected post-state,
+// the unresolved review artifact flipped to dismissed, and the conversation's
+// own memory untouched — the teardown resolves artifacts, it does not write
+// memory. wantTaskStatus lets callers vary the assertion across the requeue
+// (`queued`), dismiss (`dismissed`) and complete (`done`) paths.
 //
 // Decoupled-lifecycle invariant (TFAC-379): teardown NEVER flips
 // conversations.status — the completed conversation stays completed. The
@@ -134,7 +130,7 @@ func assertPendingApprovalCleanedUp(
 	t *testing.T,
 	database *sql.DB,
 	taskID, conversationID, reviewID string,
-	wantTaskStatus, wantHumanContentMarker string,
+	wantTaskStatus string,
 ) {
 	t.Helper()
 
@@ -169,52 +165,17 @@ func assertPendingApprovalCleanedUp(
 		t.Errorf("review artifact state = %q, want %q (dismissed on abandon)", artState, domain.ArtifactStateReviewDismissed)
 	}
 
-	var agentContent, humanContent sql.NullString
-	if err := database.QueryRow(
-		`SELECT agent_content, human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID,
-	).Scan(&agentContent, &humanContent); err != nil {
-		t.Fatalf("scan conversation_memory: %v", err)
-	}
-	if !agentContent.Valid || agentContent.String != "agent self-report" {
-		t.Errorf("agent_content = %v, want preserved %q", agentContent, "agent self-report")
-	}
-	if !humanContent.Valid || !strings.Contains(humanContent.String, wantHumanContentMarker) {
-		t.Errorf("human_content missing %q marker; got %q", wantHumanContentMarker, humanContent.String)
-	}
-	// Stored value MUST NOT carry the "## Human feedback (post-run)"
-	// heading — materialization owns that, and a writer that bakes it
-	// into the stored body double-heads the agent-readable file. The
-	// canonical heading should appear only after materializeMemory
-	// joins agent_content + human_content via humanFeedbackSeparator.
-	if humanContent.Valid && strings.Contains(humanContent.String, "## Human feedback (post-run)") {
-		t.Errorf("stored human_content includes the canonical heading; materialization layer should own it: %q", humanContent.String)
-	}
-
-	// Read-side check: GetMemoriesForEntity's materialization must produce
-	// the heading exactly once, anchoring the boundary the next
-	// agent's prompt parser scans for.
-	var entityID string
-	if err := database.QueryRow(`SELECT entity_id FROM tasks WHERE id = ?`, taskID).Scan(&entityID); err != nil {
-		t.Fatalf("lookup entity_id: %v", err)
-	}
-	mems, err := sqlitestore.New(database).TaskMemory.GetMemoriesForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	// The agent's own memory is the conversation's account of what it tried;
+	// the teardown resolves artifacts and must not touch it.
+	mem, err := sqlitestore.New(database).TaskMemory.GetForConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("GetMemoriesForEntity: %v", err)
-	}
-	var mem *domain.TaskMemory
-	for i := range mems {
-		if mems[i].ConversationID == conversationID {
-			mem = &mems[i]
-			break
-		}
+		t.Fatalf("GetForConversationSystem: %v", err)
 	}
 	if mem == nil {
-		t.Fatalf("GetMemoriesForEntity returned no row for conversation %s after cleanup", conversationID)
+		t.Fatalf("no conversation_memory row for conversation %s after cleanup", conversationID)
 	}
-	headingCount := strings.Count(mem.Content, "## Human feedback (post-run)")
-	if headingCount != 1 {
-		t.Errorf("materialized content has %d occurrences of canonical heading; want exactly 1\n--- materialized ---\n%s",
-			headingCount, mem.Content)
+	if mem.Content != "agent self-report" || mem.Source != domain.MemorySourceAgent {
+		t.Errorf("memory = (Source=%q, Content=%q), want the agent's self-report preserved", mem.Source, mem.Content)
 	}
 }
 
@@ -247,8 +208,7 @@ func TestHandleUndo_CleansUpPendingApprovalConversation(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
-		"queued", "returned to the triage queue")
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, "queued")
 
 	// /undo must record an 'undo' swipe_events row — that's the
 	// audit signal for swipe-card analytics that distinguishes it
@@ -277,8 +237,7 @@ func TestHandleRequeue_CleansUpPendingApprovalConversation(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
-		"queued", "returned to the triage queue")
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, "queued")
 
 	// /requeue must NOT record a swipe_events row — this is a
 	// deliberate state change, not a swipe undo. Recording it
@@ -300,12 +259,6 @@ func TestHandleRequeue_CleansUpPendingApprovalConversation(t *testing.T) {
 // agent already produced a review awaiting approval. Today this
 // orphans the review and leaves it hanging unresolved against a
 // dismissed task — this is the other half.
-//
-// The dismiss-flavored human_content note carries a different
-// implication marker ("dismissed the task entirely") than the
-// requeue paths so a future agent reading prior memory can
-// distinguish "the human shelved this verdict but kept the entity
-// on the docket" from "the human walked away from this entity".
 func TestTaskPatch_DismissCleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
@@ -316,8 +269,7 @@ func TestTaskPatch_DismissCleansUpPendingApprovalConversation(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
-		"dismissed", "dismissed the task entirely")
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, "dismissed")
 }
 
 // TestTaskPatch_CompleteCleansUpPendingApprovalConversation is the fourth
@@ -325,13 +277,8 @@ func TestTaskPatch_DismissCleansUpPendingApprovalConversation(t *testing.T) {
 // awaiting approval. The complete swipe action flips the task to
 // 'done' (so the card lands in the Done column rather than
 // disappearing from the board, the way dismiss makes it) but reuses
-// the same cleanup — review artifact flipped to dismissed, the
-// completed conversation left untouched, agent_content preserved,
-// human_content recording the user's verdict with a complete-flavored
-// marker that's distinct from both the requeue and dismiss shapes.
-// Future agents reading memory should be able to tell "the human
-// resolved this themselves without applying my prepared review" from
-// "the human walked away from the entity entirely."
+// the same cleanup — review artifact flipped to dismissed, the completed
+// conversation left untouched, the agent's own memory preserved.
 func TestTaskPatch_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
@@ -342,8 +289,7 @@ func TestTaskPatch_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
-		"done", "marked the task complete without submitting")
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, "done")
 }
 
 // TestTaskClaim_CleansUpPendingApprovalConversation guards the race the PR #77
@@ -371,9 +317,8 @@ func TestTaskClaim_CleansUpPendingApprovalConversation(t *testing.T) {
 	// Claim no longer transitions status; the task stays
 	// 'queued' and claimed_by_user_id is set instead. The
 	// pending-approval cleanup invariants (conversation cancelled, review row
-	// removed, human_content marker) are unchanged.
-	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
-		"queued", "claimed the task to handle it themselves")
+	// removed) are unchanged.
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, "queued")
 	// Pin the claim col too — it's the actual responsibility signal
 	// post-B+.
 	var claimedByUserID sql.NullString
@@ -1274,54 +1219,31 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 	}
 }
 
-// TestTeardownTaskArtifacts_Idempotent calls the teardown twice against the same
-// task with a different outcome the second time. The first call resolves the
-// review artifact (→ dismissed) and writes the requeue verdict; the second call
-// finds no unresolved artifact left, so it writes nothing — otherwise:
-//
-//   - human_content would be overwritten with the second outcome's text, erasing
-//     the first verdict from memory
-//
-// We pick discardOutcomeDismissed for the second call so that if the no-op broke,
-// the human_content marker would visibly flip from "returned to the triage queue"
-// to "dismissed the task entirely" — making the test failure mode loud rather
-// than silent. The completed conversation stays completed across both calls (a
-// resolve never flips conversation lifecycle).
+// TestTeardownTaskArtifacts_Idempotent calls the teardown twice against the
+// same task. The first call resolves the review artifact (→ dismissed); the
+// second finds nothing unresolved left and is a no-op — the artifact stays
+// dismissed, the agent's memory stays its own, and the completed conversation
+// stays completed across both (a resolve never flips conversation lifecycle).
 func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
 
-	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
+	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
+	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
 
-	var humanContentBefore sql.NullString
-	if err := s.db.QueryRow(
-		`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID,
-	).Scan(&humanContentBefore); err != nil {
-		t.Fatalf("scan after first call: %v", err)
-	}
-	if !strings.Contains(humanContentBefore.String, "returned to the triage queue") {
-		t.Fatalf("first call didn't write requeue marker; got %q", humanContentBefore.String)
-	}
-
-	// Second call: different outcome, must not take effect — the review is already
-	// dismissed, so there's nothing unresolved to re-resolve.
-	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeDismissed)
-
-	var humanContentAfter sql.NullString
 	var convStatusAfter string
-	if err := s.db.QueryRow(
-		`SELECT rm.human_content, r.status
-		 FROM conversation_memory rm JOIN conversations r ON r.id = rm.conversation_id
-		 WHERE rm.conversation_id = ?`, conversationID,
-	).Scan(&humanContentAfter, &convStatusAfter); err != nil {
+	if err := s.db.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatusAfter); err != nil {
 		t.Fatalf("scan after second call: %v", err)
 	}
 	if convStatusAfter != "completed" {
 		t.Errorf("conversation status drifted after second call: %q (teardown must not flip conversation lifecycle)", convStatusAfter)
 	}
-	if humanContentAfter.String != humanContentBefore.String {
-		t.Errorf("human_content overwritten by second call:\n  before: %q\n  after:  %q",
-			humanContentBefore.String, humanContentAfter.String)
+	mem, err := sqlitestore.New(s.db).TaskMemory.GetForConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	if err != nil || mem == nil {
+		t.Fatalf("GetForConversationSystem after second call: mem=%v err=%v", mem, err)
+	}
+	if mem.Content != "agent self-report" || mem.Source != domain.MemorySourceAgent {
+		t.Errorf("memory = (Source=%q, Content=%q) after two teardowns, want the agent's row untouched", mem.Source, mem.Content)
 	}
 }
 
@@ -1344,10 +1266,9 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 		t.Fatalf("rename artifacts table: %v", err)
 	}
 
-	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
+	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
 
-	// The conversation is untouched (never flipped — teardown doesn't touch its status),
-	// and human_content was rolled back with the rest of the batch.
+	// The conversation is untouched (never flipped — teardown doesn't touch its status).
 	var convStatus string
 	if err := s.db.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
 		t.Fatalf("scan conversation after sabotaged teardown: %v", err)
@@ -1355,20 +1276,13 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 	if convStatus != "completed" {
 		t.Fatalf("conversation status = %q after failure; want %q (conversation untouched)", convStatus, "completed")
 	}
-	var humanContent sql.NullString
-	if err := s.db.QueryRow(`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID).Scan(&humanContent); err != nil {
-		t.Fatalf("scan conversation_memory after failure: %v", err)
-	}
-	if humanContent.Valid {
-		t.Errorf("human_content = %q after failure; want NULL (batch must roll back atomically)", humanContent.String)
-	}
 
 	// Heal the table; the next call must resolve the still-pending review.
 	if _, err := s.db.Exec(`ALTER TABLE artifacts_temp RENAME TO artifacts`); err != nil {
 		t.Fatalf("restore artifacts table: %v", err)
 	}
 
-	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
+	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
 
 	var artState string
 	if err := s.db.QueryRow(`SELECT state FROM artifacts WHERE id = ?`, reviewID).Scan(&artState); err != nil {
@@ -1376,41 +1290,6 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 	}
 	if artState != domain.ArtifactStateReviewDismissed {
 		t.Errorf("review artifact state = %q after retry; want %q (review should be dismissed)", artState, domain.ArtifactStateReviewDismissed)
-	}
-}
-
-// TestTeardownTaskArtifacts_AgentContentNullSurvives is the
-// synthetic-row case: agent skipped the memory file, so
-// conversation_memory exists with agent_content NULL. The discard teardown
-// still lands human_content cleanly on the existing row (the spec's
-// guarantee that the unconditional termination-time upsert means
-// no INSERT-or-UPDATE branching is needed downstream).
-func TestTeardownTaskArtifacts_AgentContentNullSurvives(t *testing.T) {
-	s := newTestServer(t)
-	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
-
-	// Force agent_content NULL to simulate a noncompliant gate
-	// (UpsertAgentMemory("") would have done this in
-	// production; we set it directly to skip the dependency).
-	if _, err := s.db.Exec(
-		`UPDATE conversation_memory SET agent_content = NULL WHERE conversation_id = ?`, conversationID,
-	); err != nil {
-		t.Fatalf("force null agent_content: %v", err)
-	}
-
-	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
-
-	var agentContent, humanContent sql.NullString
-	if err := s.db.QueryRow(
-		`SELECT agent_content, human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID,
-	).Scan(&agentContent, &humanContent); err != nil {
-		t.Fatalf("scan conversation_memory: %v", err)
-	}
-	if agentContent.Valid {
-		t.Errorf("agent_content was NULL pre-cleanup; should still be NULL post-cleanup, got %q", agentContent.String)
-	}
-	if !humanContent.Valid || !strings.Contains(humanContent.String, "Human discarded") {
-		t.Errorf("human_content not landed against NULL agent_content row: %v", humanContent)
 	}
 }
 
@@ -1580,8 +1459,7 @@ func TestHandleRequeue_TerminalConversationIsNotStopped(t *testing.T) {
 
 	// The teardown half still ran: artifact resolved, memory note written,
 	// task back in the queue, the completed conversation left completed.
-	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
-		"queued", "returned to the triage queue")
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, "queued")
 
 	var parkReason sql.NullString
 	if err := s.db.QueryRow(`SELECT park_reason FROM conversations WHERE id = ?`, conversationID).Scan(&parkReason); err != nil {

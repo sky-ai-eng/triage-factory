@@ -160,7 +160,7 @@ type ConversationSeeder struct {
 	// SetConversationMemory upserts a conversation_memory row with the given
 	// agent_content. content="" inserts an empty string;
 	// NullMemorySentinel inserts SQL NULL.
-	SetConversationMemory func(t *testing.T, conversationID, entityID, content string)
+	SetConversationMemory func(t *testing.T, conversationID, content string)
 
 	// SeedRawMessage inserts a messages row with rawJSON written
 	// directly into the given column ("reasoning" or "content_blocks"),
@@ -4638,10 +4638,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		conversationEmpty := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
 		conversationWhitespace := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
 		conversationPopulated := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		seed.SetConversationMemory(t, conversationNullContent, ent, NullMemorySentinel)
-		seed.SetConversationMemory(t, conversationEmpty, ent, "")
-		seed.SetConversationMemory(t, conversationWhitespace, ent, "  \t\n ")
-		seed.SetConversationMemory(t, conversationPopulated, ent, "real reasoning text")
+		seed.SetConversationMemory(t, conversationNullContent, NullMemorySentinel)
+		seed.SetConversationMemory(t, conversationEmpty, "")
+		seed.SetConversationMemory(t, conversationWhitespace, "  \t\n ")
+		seed.SetConversationMemory(t, conversationPopulated, "real reasoning text")
 
 		want := map[string]bool{
 			conversationNoRow:       true,

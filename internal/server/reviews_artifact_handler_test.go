@@ -30,7 +30,7 @@ func seedReviewArtifactWithConversation(t *testing.T, s *Server, suffix, owner, 
 	t.Helper()
 	conversationID = seedSteerConversation(t, s.db, suffix, "completed")
 	taskID = fixtureUUID("t_" + suffix)
-	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
+	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "agent self-report", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	line := 3
@@ -41,8 +41,8 @@ func seedReviewArtifactWithConversation(t *testing.T, s *Server, suffix, owner, 
 	d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
 	d.ReviewBody = "## Review\nlgtm"
 	d.ReviewEvent = event
-	// The staged comment carries the badge baked in — what the agent drafted. The
-	// proposed snapshot is identical, so the verdict diff resolves to "as drafted".
+	// The staged comment carries the badge baked in — what the agent drafted, and
+	// what the proposed snapshot on the artifact row records.
 	staged := []domain.ReviewArtifactComment{
 		{ID: "c_1", Path: "a.go", Line: &line, Body: domain.SeverityBadgeMarkdown(domain.SeverityMajor) + "nit: rename"},
 	}
@@ -105,8 +105,8 @@ func TestReviewArtifactGet_SeverityRoundTrip(t *testing.T) {
 // TestReviewArtifactApprove pins the atomic submit-on-approval flow: SubmitReview
 // POSTs the staged body+event+footer+comments to GitHub, the artifact flips
 // pending → submitted and gains the submitted review's id + URL, the
-// conversation stays completed (approval never flips it), and the human verdict
-// lands in conversation_memory.
+// conversation stays completed (approval never flips it), and the conversation's
+// own memory is left exactly as its gate filed it.
 //
 // The POST asserted here is composed by review.SubmitStaged — the same function
 // the auto-post posture calls from the agent's finalize, whose test
@@ -186,13 +186,10 @@ func TestReviewArtifactApprove(t *testing.T) {
 	if convStatus != "completed" {
 		t.Errorf("conversation status = %q, want completed", convStatus)
 	}
-	var human string
-	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {
-		t.Fatalf("read conversation_memory: %v", err)
-	}
-	if !strings.Contains(human, "as drafted") {
-		t.Errorf("human_content = %q, want the 'as drafted' verdict (proposed==final)", human)
-	}
+	// Submitting a review writes no memory: the conversation's row is the
+	// agent's own account of what it tried, and a verdict about an artifact is
+	// not that.
+	assertAgentMemoryUntouched(t, srv, conversationID)
 }
 
 // TestReviewArtifactApprove_NonPending_409 pins the state guard: a stale/double

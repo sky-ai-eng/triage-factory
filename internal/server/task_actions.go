@@ -104,7 +104,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	// Taking a task onto a human's plate takes it off the agent's: stop any
 	// in-flight run and resolve every unresolved artifact the task holds.
-	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, discardOutcomeClaimed, delegate.StopCauseTaskDispositioned)
+	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, delegate.StopCauseTaskDispositioned)
 	if jiraUserClient != nil {
 		s.syncJiraClaim(r, orgID, userID, id, jiraUserClient)
 	}
@@ -454,7 +454,7 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 	// Re-delegating is still a handoff off whatever was in flight: stop the
 	// running conversation and resolve the task's unresolved artifacts before
 	// the new run starts.
-	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, discardOutcomeRedelegated, delegate.StopCauseTaskDispositioned)
+	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, delegate.StopCauseTaskDispositioned)
 
 	response := map[string]any{"status": newStatus}
 	if s.spawner != nil {
@@ -586,19 +586,15 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 //
 // cause is the lifecycle event the caller is acting on. It reaches each
 // stopped transcript verbatim, so it is the whole explanation a human reading
-// that history gets. outcome shapes the discard note baked into
-// conversation_memory, so the next agent reading it can tell apart "human
-// walked away" (dismiss) from "human resolved it" (complete) from "human took
-// over" (claim) from "re-delegate" from "still on the docket" (requeue).
-// Best-effort throughout.
+// that history gets. Best-effort throughout.
 //
 // ctx must already be detached from the request (context.WithoutCancel): a
 // client disconnect after the response must not leave a live agent running or
 // a GitHub draft stranded. The detach belongs to the caller because a caller
 // with further cleanup of its own needs every part of it on one context.
-func (s *Server) teardownTaskConversations(ctx context.Context, orgID, userID, id string, outcome discardOutcome, cause delegate.StopCause) {
+func (s *Server) teardownTaskConversations(ctx context.Context, orgID, userID, id string, cause delegate.StopCause) {
 	s.stopTaskConversations(ctx, orgID, userID, id, cause)
-	s.teardownTaskArtifacts(ctx, orgID, userID, id, outcome)
+	s.teardownTaskArtifacts(ctx, orgID, userID, id)
 }
 
 // stopTaskConversations stops every active run on a task and cancels the

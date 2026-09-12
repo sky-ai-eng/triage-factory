@@ -239,22 +239,26 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("close entity: %v", err)
 			}
 		},
-		SetConversationMemory: func(t *testing.T, conversationID, entityID, content string) {
+		SetConversationMemory: func(t *testing.T, conversationID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
-					INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content)
-					VALUES ($1, $2, $3, $4, NULL)
-				`, memID, orgID, conversationID, entityID); err != nil {
+					INSERT INTO conversation_memory (id, org_id, conversation_id, agent_content, source)
+					VALUES ($1, $2, $3, NULL, 'none')
+				`, memID, orgID, conversationID); err != nil {
 					t.Fatalf("seed null conversation_memory: %v", err)
 				}
 				return
 			}
+			// Raw SQL, deliberately: the empty and whitespace-only shapes the
+			// memory_missing derivation has to trim are ones the store door
+			// refuses under source='agent', and this seeder's subject is the
+			// derivation, not the door.
 			if _, err := conn.Exec(`
-				INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content)
-				VALUES ($1, $2, $3, $4, $5)
-			`, memID, orgID, conversationID, entityID, content); err != nil {
+				INSERT INTO conversation_memory (id, org_id, conversation_id, agent_content, source)
+				VALUES ($1, $2, $3, $4, 'agent')
+			`, memID, orgID, conversationID, content); err != nil {
 				t.Fatalf("seed conversation_memory: %v", err)
 			}
 		},

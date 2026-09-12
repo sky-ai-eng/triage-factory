@@ -28,7 +28,7 @@ func seedPgConversationWithMemory(t *testing.T, h *pgtest.Harness, stores db.Sto
 		t.Fatalf("seed conversation: %v", err)
 	}
 	ctx := context.Background()
-	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, entityID, "", narrative); err != nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, "", narrative, domain.MemorySourceAgent); err != nil {
 		t.Fatalf("UpsertAgentMemorySystem: %v", err)
 	}
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, domain.MemoryRolePrimary); err != nil {
@@ -37,7 +37,7 @@ func seedPgConversationWithMemory(t *testing.T, h *pgtest.Harness, stores db.Sto
 	return conversationID
 }
 
-// contentsOf collects each entry's composed Content for set assertions.
+// contentsOf collects each entry's Content for set assertions.
 func contentsOf(mems []MemoryLoadEntry) map[string]bool {
 	out := map[string]bool{}
 	for _, m := range mems {

@@ -259,9 +259,8 @@ func writeReviewNotPending(w http.ResponseWriter, state string) {
 
 // reviewApprove creates and submits the staged review to GitHub atomically
 // (SubmitReview — one POST carrying commit_id + event + body + footer + the staged
-// comments[]), stamps the submitted review's id + URL onto the artifact, records
-// the human verdict into conversation_memory, and runs the shared
-// conversation/task/blueprint bookkeeping. Nothing touched GitHub before this
+// comments[]), stamps the submitted review's id + URL onto the artifact, and
+// runs the shared conversation/task/blueprint bookkeeping. Nothing touched GitHub before this
 // point (the review was staged entirely TF-side), so concurrent runs on one PR
 // each submit their own review here — GitHub allows unlimited submitted reviews
 // per identity.
@@ -457,8 +456,8 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		return
 	}
 	submittedEvent := res.Event
-	// Record the event we submitted so a later reader — and the
-	// proposed-vs-final diff below — sees what was sent.
+	// Record the event we submitted so a later reader sees what was sent: the
+	// staged value is what the human asked for, this is what GitHub took.
 	details.ReviewEvent = submittedEvent
 
 	// Step 1: stamp the submitted review's id + URL onto the claimed artifact (a
@@ -507,21 +506,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Step 2: human verdict capture — diff the agent's proposed draft against the
-	// human-edited final (body, event, the staged comments — all from the
-	// post-claim re-read, so a last-moment edit shows up in the diff) into
-	// conversation_memory.human_content.
-	if fresh.ConversationID != "" {
-		humanContent := FormatHumanFeedback(buildReviewHumanFeedbackInput(details, details.StagedComments))
-		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			_, err := tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, fresh.ConversationID, humanContent)
-			return err
-		}); err != nil {
-			artifactsLog.Warn("failed to record human verdict", "conversation", fresh.ConversationID, "error", err)
-		}
-	}
-
-	// Step 3: terminal-on-last task closure. Approval is a decoupled sidecar — it
+	// Step 2: terminal-on-last task closure. Approval is a decoupled sidecar — it
 	// never flips conversation status or resumes/terminates a blueprint. The
 	// only lifecycle effect is closing the task when this was the LAST
 	// unresolved artifact on an already-terminal blueprint; otherwise a no-op.
@@ -915,76 +900,6 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// buildReviewHumanFeedbackInput diffs the agent's proposed review draft (snapshot
-// in details_json) against the human-edited final (staged body/event + the staged
-// comments at approval), producing the input FormatHumanFeedback renders into
-// conversation_memory.human_content. Comments are joined by their stable TF-local id;
-// severity badges are stripped from both sides so the diff shows clean prose.
-func buildReviewHumanFeedbackInput(details domain.ReviewArtifactDetails, finalComments []domain.ReviewArtifactComment) HumanFeedbackInput {
-	type cmt struct {
-		path string
-		line int
-		body string
-	}
-	proposed := make(map[string]cmt, len(details.Proposed.Comments))
-	proposedOrder := make([]string, 0, len(details.Proposed.Comments))
-	for _, c := range details.Proposed.Comments {
-		if c.ID == "" {
-			continue
-		}
-		_, clean := domain.ParseSeverityBadge(c.Body)
-		if _, seen := proposed[c.ID]; !seen {
-			proposedOrder = append(proposedOrder, c.ID)
-		}
-		proposed[c.ID] = cmt{path: c.Path, line: derefInt(c.Line), body: clean}
-	}
-	final := make(map[string]cmt, len(finalComments))
-	finalOrder := make([]string, 0, len(finalComments))
-	for _, c := range finalComments {
-		if c.ID == "" {
-			continue
-		}
-		_, clean := domain.ParseSeverityBadge(c.Body)
-		if _, seen := final[c.ID]; !seen {
-			finalOrder = append(finalOrder, c.ID)
-		}
-		final[c.ID] = cmt{path: c.Path, line: derefInt(c.Line), body: clean}
-	}
-
-	entries := make([]ReviewCommentDiffEntry, 0, len(proposedOrder)+len(finalOrder))
-	for _, id := range proposedOrder {
-		p := proposed[id]
-		f, ok := final[id]
-		switch {
-		case !ok:
-			entries = append(entries, ReviewCommentDiffEntry{Path: p.path, Line: p.line, Status: CommentDiffRemoved, Original: p.body})
-		case p.body != f.body:
-			entries = append(entries, ReviewCommentDiffEntry{Path: p.path, Line: p.line, Status: CommentDiffEdited, Original: p.body, Final: f.body})
-		default:
-			entries = append(entries, ReviewCommentDiffEntry{Path: p.path, Line: p.line, Status: CommentDiffUnchanged, Original: p.body, Final: f.body})
-		}
-	}
-	// Comments in the final set but not the agent's draft were added by the human
-	// (out of scope today, but handled so the diff stays honest if it happens).
-	for _, id := range finalOrder {
-		if _, ok := proposed[id]; ok {
-			continue
-		}
-		f := final[id]
-		entries = append(entries, ReviewCommentDiffEntry{Path: f.path, Line: f.line, Status: CommentDiffAdded, Final: f.body})
-	}
-
-	proposedBody := details.Proposed.Body
-	proposedEvent := details.Proposed.Event
-	return HumanFeedbackInput{
-		OriginalBody:  &proposedBody,
-		FinalBody:     details.ReviewBody,
-		OriginalEvent: &proposedEvent,
-		FinalEvent:    details.ReviewEvent,
-		Comments:      entries,
-	}
 }
 
 // derefInt returns the pointed-to int, or 0 for a nil pointer (a GitHub comment
