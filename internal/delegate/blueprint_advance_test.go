@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,8 +18,18 @@ import (
 // approval — the GitHub-native successor to seeding a pending_prs row.
 func seedDraftPRArtifact(t *testing.T, s *Spawner, conversationID string) {
 	t.Helper()
-	a := domain.NewPullRequestArtifact("o/r", 1, "node", "h", "main",
-		"https://github.com/o/r/pull/1", "queued PR", "", true)
+	seedDraftPRArtifactNumbered(t, s, conversationID, 1)
+}
+
+// seedDraftPRArtifactNumbered is seedDraftPRArtifact with the PR number spelled
+// out, for a fixture that hangs two draft PRs off one task: artifacts are
+// uniquely keyed by their dedup_key, so a second one at the same number would
+// upsert over the first instead of joining it.
+func seedDraftPRArtifactNumbered(t *testing.T, s *Spawner, conversationID string, number int) {
+	t.Helper()
+	url := fmt.Sprintf("https://github.com/o/r/pull/%d", number)
+	a := domain.NewPullRequestArtifact("o/r", number, fmt.Sprintf("node-%d", number), "h", "main",
+		url, "queued PR", "", true)
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
@@ -250,9 +261,9 @@ func makeConversationBlueprintStep(t *testing.T, database *sql.DB, conversationI
 		t.Fatalf("settle the task's prior blueprint_run: %v", err)
 	}
 	if _, err := database.Exec(
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path, step_plan)
-		 VALUES (?, ?, ?, 'manual', ?, '[]')`,
-		"bpr-"+conversationID, "bp-"+conversationID, taskID, "/tmp/wt-"+conversationID,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path, step_plan, started_at)
+		 VALUES (?, ?, ?, 'manual', ?, '[]', `+nextEngagementStartedAt+`)`,
+		"bpr-"+conversationID, "bp-"+conversationID, taskID, "/tmp/wt-"+conversationID, taskID,
 	); err != nil {
 		t.Fatalf("seed blueprint_runs: %v", err)
 	}
@@ -320,5 +331,91 @@ func TestCloseTaskIfTerminalAndResolved_LeavesAnUnfinishedBlueprintAlone(t *test
 	s.CloseTaskIfTerminalAndResolved(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if got := readTaskStatus(t, database, taskID); got == "done" {
 		t.Errorf("task closed while its blueprint run was still in flight")
+	}
+}
+
+// TestTerminateBlueprint_UnresolvedIsAskedOfTheWholeTask pins the scope of the
+// completed arm's unresolved check. The blueprint that just finished produced
+// no artifact of its own; an earlier engagement on the same task left a draft
+// PR open. That draft is unresolved work on this task, so the completion must
+// not close it — the older, per-blueprint read would have called the task clean
+// and closed it with the draft still sitting on GitHub.
+func TestTerminateBlueprint_UnresolvedIsAskedOfTheWholeTask(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-task-wide")
+	stampBotClaim(t, database, taskID)
+	// The prior engagement: its own step conversation, carrying the draft PR.
+	priorBlueprintRunID := blueprintRunIDForConversation(t, database, conversationID)
+	addStepConversation(t, database, priorBlueprintRunID, taskID, "r-prior-task-wide", 0, "completed")
+	seedDraftPRArtifact(t, s, "r-prior-task-wide")
+	// The engagement that is finishing now, with nothing of its own unresolved.
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
+	setConversationStatus(t, database, conversationID, "completed")
+
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, "bpr-"+conversationID, taskID, "event", "",
+		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
+		domain.BlueprintRunStatusCompleted, "", nil, true)
+
+	if got := readTaskStatus(t, database, taskID); got == "done" {
+		t.Errorf("task closed while a draft PR from an earlier engagement was still open")
+	}
+}
+
+// TestCloseTaskIfTerminalAndResolved_StandsDownOnceTheTaskMovesOn pins the two
+// guards that keep a late resolution from closing a task somebody else now
+// holds. Every arm shares one fixture — a clean completion with nothing
+// unresolved — so the control arm proves the closure fires here and each other
+// arm isolates what stops it.
+//
+// Both guards are needed and neither implies the other: a handover clears the
+// agent claim without minting a run, and a re-delegation mints a run without
+// clearing the claim.
+func TestCloseTaskIfTerminalAndResolved_StandsDownOnceTheTaskMovesOn(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		moveOn   func(t *testing.T, database *sql.DB, taskID string)
+		wantDone bool
+	}{
+		{
+			name:     "still_the_bot's_and_still_its_newest_run",
+			moveOn:   func(*testing.T, *sql.DB, string) {},
+			wantDone: true,
+		},
+		{
+			name:     "a_human_took_the_task_over",
+			moveOn:   func(t *testing.T, database *sql.DB, taskID string) { stampUserClaim(t, database, taskID) },
+			wantDone: false,
+		},
+		{
+			name: "a_later_delegation_superseded_the_run",
+			moveOn: func(t *testing.T, database *sql.DB, taskID string) {
+				seedConversationBlueprint(t, database, "superseding-"+taskID, taskID)
+			},
+			wantDone: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, database, conversationID, taskID := setupAdvanceFixture(t, "resolved-moved-on")
+			stampBotClaim(t, database, taskID)
+			makeConversationBlueprintStep(t, database, conversationID, taskID)
+			setConversationStatus(t, database, conversationID, "completed")
+			completeBlueprintRun(t, database, "bpr-"+conversationID)
+			tc.moveOn(t, database, taskID)
+
+			s.CloseTaskIfTerminalAndResolved(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+
+			if done := readTaskStatus(t, database, taskID) == "done"; done != tc.wantDone {
+				t.Errorf("task done = %v, want %v", done, tc.wantDone)
+			}
+		})
+	}
+}
+
+// completeBlueprintRun drives a blueprint_run to a clean terminal without
+// running terminateBlueprint's whole disposition, so a closure test can set up
+// the resolved-after-the-fact state the reconciler's hook meets.
+func completeBlueprintRun(t *testing.T, database *sql.DB, blueprintRunID string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE id = ?`, blueprintRunID); err != nil {
+		t.Fatalf("complete blueprint_run: %v", err)
 	}
 }

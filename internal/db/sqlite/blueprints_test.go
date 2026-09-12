@@ -59,6 +59,19 @@ func TestBlueprintStore_SQLite_OneActiveRunPerTask(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_SQLite_NewestRunForTask runs the shared newest-run suite
+// against the SQLite impl.
+func TestBlueprintStore_SQLite_NewestRunForTask(t *testing.T) {
+	dbtest.RunNewestRunForTaskConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		blueprintID := "bp-newest-" + uuid.New().String()[:8]
+		insertBlueprintForTest(t, conn, blueprintID, "Newest-run fixture")
+		task := seedEntityEventTask(t, conn, "newest-run")
+		return sqlitestore.New(conn).Blueprints, runmode.LocalDefaultOrgID, blueprintID, task.ID
+	})
+}
+
 // TestBlueprintStore_SQLite_DuplicationConformance runs the shared
 // DuplicatePrompts deep-copy suite against the SQLite impl. User prompts seed
 // via the store; system prompts (source='system', creator NULL, a system_slug)

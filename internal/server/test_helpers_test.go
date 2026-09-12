@@ -308,10 +308,17 @@ func seedBlueprintRunSQLite(t *testing.T, database *sql.DB, taskID string) strin
 	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE task_id = ? AND status = 'running'`, taskID); err != nil {
 		t.Fatalf("settle the task's prior blueprint_run: %v", err)
 	}
+	// started_at is stamped one second past the task's latest engagement
+	// rather than left to CURRENT_TIMESTAMP: SQLite stamps that to the second,
+	// so two runs seeded back to back tie, and "the task's newest run"
+	// (Blueprints.NewestRunForTask, which the terminal-on-last closing hooks
+	// read) would fall through to the id tiebreaker instead of the sequence
+	// the fixture is staging.
 	if _, err := database.Exec(
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
-		 VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt-test', '[]')`,
-		blueprintRunID, blueprintID, taskID,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan, started_at)
+		 VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt-test', '[]',
+		         COALESCE((SELECT datetime(MAX(started_at), '+1 second') FROM blueprint_runs WHERE task_id = ?), CURRENT_TIMESTAMP))`,
+		blueprintRunID, blueprintID, taskID, taskID,
 	); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}

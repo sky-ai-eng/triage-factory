@@ -1089,6 +1089,14 @@ func (ah *artifactsHandler) pingConversationsResolved(orgID string) {
 //     and processCompletion (run.go), which close the task only on a clean finish.
 //     Resolving a stray draft PR on an aborted blueprint must not override the
 //     "needs a human" disposition.
+//   - a task nobody's agent holds any more, or one whose newest blueprint run
+//     is not this artifact's, is somebody else's now. Artifacts outlive the run
+//     that produced them, so a resolution can arrive long after the task was
+//     requeued, self-claimed or re-delegated — and closing on it would yank the
+//     task to done under the person or agent working it today. Both guards are
+//     needed: a re-delegation keeps the task bot-claimed and only the run id
+//     tells the engagements apart, while a self-claim clears the agent id and
+//     mints no run at all.
 //
 // No accept/dismiss distinction — the task closes on the last resolution
 // regardless of whether anything was accepted (epic decision #3). This is the
@@ -1136,7 +1144,27 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		if !closeEligible {
 			return nil // no need to scan artifacts if we can't close anyway
 		}
-		// Step 2: unresolved check scoped to the TASK (all its conversations),
+		// Step 2: the task must still be the one this run was about. A task
+		// that has moved on — its claim handed to a human, or a later
+		// delegation minted over it — is closed by whatever ends THAT
+		// engagement, not by a resolution belonging to a superseded one.
+		task, e := tx.Tasks.Get(ctx, orgID, taskID)
+		if e != nil {
+			return fmt.Errorf("read task: %w", e)
+		}
+		if task == nil || task.ClaimedByAgentID == "" {
+			closeEligible = false
+			return nil
+		}
+		newest, e := tx.Blueprints.NewestRunForTask(ctx, orgID, taskID)
+		if e != nil {
+			return fmt.Errorf("newest run for task: %w", e)
+		}
+		if newest == nil || newest.ID != br.ID {
+			closeEligible = false
+			return nil
+		}
+		// Step 3: unresolved check scoped to the TASK (all its conversations),
 		// matching teardownTaskArtifacts — not just the current blueprint's step
 		// conversations. A stranded artifact from a prior attempt (e.g. a
 		// teardown that partially failed on a network blip) must block closure

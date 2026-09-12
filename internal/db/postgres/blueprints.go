@@ -939,6 +939,36 @@ func (s *blueprintStore) ActiveRunForTaskSystem(ctx context.Context, orgID, task
 	return getBlueprintRun(ctx, s.admin, orgID, id)
 }
 
+func (s *blueprintStore) NewestRunForTask(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
+	return newestRunForTask(ctx, s.app, s.GetRun, orgID, taskID)
+}
+
+func (s *blueprintStore) NewestRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
+	return newestRunForTask(ctx, s.admin, s.GetRunSystem, orgID, taskID)
+}
+
+// newestRunForTask reads the id first and hydrates through the pool's own
+// GetRun, so the projection stays the point read's rather than a second column
+// list that can drift from it.
+func newestRunForTask(ctx context.Context, q queryer, getRun func(context.Context, string, string) (*domain.BlueprintRun, error), orgID, taskID string) (*domain.BlueprintRun, error) {
+	if !isValidUUID(taskID) {
+		return nil, nil
+	}
+	var id string
+	err := q.QueryRowContext(ctx, `
+		SELECT id FROM blueprint_runs
+		WHERE org_id = $1 AND task_id = $2
+		ORDER BY started_at DESC, id DESC LIMIT 1
+	`, orgID, taskID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return getRun(ctx, orgID, id)
+}
+
 func blueprintRunArgs(br domain.BlueprintRun) (triggerID, abortReason, completedAt any) {
 	if br.TriggerID != "" {
 		triggerID = br.TriggerID

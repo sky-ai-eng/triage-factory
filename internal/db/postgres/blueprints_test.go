@@ -74,6 +74,22 @@ func TestBlueprintStore_Postgres_OneActiveRunPerTaskConformance(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_Postgres_NewestRunForTask runs the shared newest-run suite
+// against the Postgres impl.
+func TestBlueprintStore_Postgres_NewestRunForTask(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunNewestRunForTaskConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID := seedPgOrgForBlueprints(t, h)
+		teamID := seedPgDefaultTeam(t, h, orgID, userID)
+		blueprintID := "bp-newest-" + orgID[:8]
+		seedPgBlueprintInTeam(t, h, orgID, userID, teamID, blueprintID)
+		return pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).Blueprints,
+			orgID, blueprintID, seedPgTask(t, h, orgID, userID)
+	})
+}
+
 // TestBlueprintStore_Postgres_DuplicationConformance runs the shared
 // DuplicatePrompts deep-copy suite against the Postgres impl. Both pools wire
 // to AdminDB; prompts are seeded through the store so the

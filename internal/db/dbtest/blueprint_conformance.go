@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -149,6 +150,100 @@ func RunOneActiveRunPerTaskConformance(t *testing.T, mk BlueprintRunWriteFactory
 			}
 		})
 	}
+}
+
+// RunNewestRunForTaskConformance pins NewestRunForTask / …System: the task's
+// most recent blueprint_run by started_at, whatever its status, and (nil, nil)
+// for a task that has never been delegated.
+//
+// Status-independence is the load-bearing half. The closing hooks ask this of a
+// run that has already COMPLETED, to find out whether the task has since moved
+// on to a later engagement — so an implementation that filtered to live runs, or
+// that preferred one, would answer "no newest" for exactly the case the hooks
+// exist to catch.
+func RunNewestRunForTaskConformance(t *testing.T, mk BlueprintRunWriteFactory) {
+	t.Helper()
+
+	t.Run("newest_by_started_at_whatever_the_status", func(t *testing.T) {
+		store, orgID, blueprintID, taskID := mk(t)
+		ctx := context.Background()
+
+		// Read both pools every time: the hooks split across them (the request
+		// handler on the app pool, the spawner's reconciler hook on the admin
+		// pool) and must not be able to disagree about which run is newest.
+		newest := func(t *testing.T, when string) *domain.BlueprintRun {
+			t.Helper()
+			app, err := store.NewestRunForTask(ctx, orgID, taskID)
+			if err != nil {
+				t.Fatalf("NewestRunForTask (%s): %v", when, err)
+			}
+			sys, err := store.NewestRunForTaskSystem(ctx, orgID, taskID)
+			if err != nil {
+				t.Fatalf("NewestRunForTaskSystem (%s): %v", when, err)
+			}
+			switch {
+			case app == nil && sys == nil:
+				return nil
+			case app == nil || sys == nil || app.ID != sys.ID:
+				t.Fatalf("the two pools disagree about the newest run (%s): app=%v system=%v", when, app, sys)
+			}
+			return app
+		}
+
+		if got := newest(t, "before any delegation"); got != nil {
+			t.Errorf("NewestRunForTask on an undelegated task = %+v, want nil", got)
+		}
+
+		first, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
+			BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
+		})
+		if err != nil {
+			t.Fatalf("CreateRun (first): %v", err)
+		}
+		if got := newest(t, "one run"); got == nil || got.ID != first.ID {
+			t.Errorf("NewestRunForTask = %v, want the only run %s", got, first.ID)
+		}
+
+		// A task holds one live run at a time, so the next engagement settles
+		// the one before it — which is also what makes the first run a
+		// superseded one rather than a competing one.
+		if _, err := store.MarkRunStatusSystem(ctx, orgID, first.ID, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
+			t.Fatalf("settle the first run: %v", err)
+		}
+		time.Sleep(1100 * time.Millisecond) // SQLite's second-granularity timestamps
+		second, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
+			BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
+		})
+		if err != nil {
+			t.Fatalf("CreateRun (second): %v", err)
+		}
+		if got := newest(t, "re-delegated"); got == nil || got.ID != second.ID {
+			t.Errorf("NewestRunForTask = %v, want the later run %s", got, second.ID)
+		}
+
+		// Both terminal: a task whose every run has finished still has a
+		// newest, and it is still the later one.
+		if _, err := store.MarkRunStatusSystem(ctx, orgID, second.ID, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
+			t.Fatalf("settle the second run: %v", err)
+		}
+		if got := newest(t, "both terminal"); got == nil || got.ID != second.ID {
+			t.Errorf("NewestRunForTask with no live run = %v, want the later run %s", got, second.ID)
+		}
+	})
+
+	t.Run("a_task_with_no_runs_is_a_miss_not_an_error", func(t *testing.T) {
+		store, orgID, _, _ := mk(t)
+		ctx := context.Background()
+		stranger := uuid.New().String()
+		got, err := store.NewestRunForTask(ctx, orgID, stranger)
+		if err != nil || got != nil {
+			t.Errorf("NewestRunForTask on an unknown task = (%v, %v), want (nil, nil)", got, err)
+		}
+		gotSys, err := store.NewestRunForTaskSystem(ctx, orgID, stranger)
+		if err != nil || gotSys != nil {
+			t.Errorf("NewestRunForTaskSystem on an unknown task = (%v, %v), want (nil, nil)", gotSys, err)
+		}
+	})
 }
 
 // RunBlueprintStoreConformance runs the shared CRUD + step round-trip +

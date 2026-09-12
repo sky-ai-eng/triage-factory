@@ -884,6 +884,29 @@ func (s *blueprintStore) ActiveRunForTaskSystem(ctx context.Context, orgID, task
 	return s.GetRun(ctx, orgID, id)
 }
 
+func (s *blueprintStore) NewestRunForTask(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	var id string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT id FROM blueprint_runs
+		WHERE task_id = ?
+		ORDER BY started_at DESC, id DESC LIMIT 1
+	`, taskID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.GetRun(ctx, orgID, id)
+}
+
+func (s *blueprintStore) NewestRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
+	return s.NewestRunForTask(ctx, orgID, taskID)
+}
+
 func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

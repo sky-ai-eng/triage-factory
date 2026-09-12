@@ -568,6 +568,26 @@ type BlueprintStore interface {
 	// (recomputeTaskBoardColumn) reads it to place a task with live work.
 	ActiveRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error)
 
+	// NewestRunForTask returns the task's most recent blueprint_run by
+	// started_at whatever its status, or (nil, nil) when the task has never
+	// been delegated. Ordering breaks a started_at tie on id DESC so the
+	// answer is total — SQLite stamps started_at to the second, and two runs
+	// minted inside one second must still have a newest.
+	//
+	// The terminal-on-last closing hooks read it to ask whether the run behind
+	// a just-resolved artifact is still the engagement the task is about. A
+	// task's artifacts outlive the run that produced them, so a resolution can
+	// arrive against a superseded run — one the task was requeued or
+	// re-claimed away from — and closing on it would yank the task to done
+	// under whoever holds it now.
+	//
+	// On the app pool the answer is the newest run the CALLER can see, and
+	// blueprint_runs_select is creator-scoped for manual runs: a later manual
+	// delegation by a different user does not narrow it. Event-fired runs
+	// (creator_user_id NULL) are org-visible and always counted, as is the
+	// caller's own work. The System variant sees every run.
+	NewestRunForTask(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error)
+
 	// GetRun returns a blueprint run by id, or (nil, nil) when not found.
 	GetRun(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)
 
@@ -659,4 +679,5 @@ type BlueprintStore interface {
 	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 	ConversationsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 	ActiveStepConversationIDsSystem(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
+	NewestRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error)
 }
