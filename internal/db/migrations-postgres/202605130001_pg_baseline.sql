@@ -963,6 +963,17 @@ CREATE TABLE public.conversations (
     model text,
     -- SDK resume handle. NULL under runtime='native', where messages are truth.
     sdk_session_id text,
+    -- This conversation's own system block (the run's facts, its verb
+    -- reference, its mission and its step addendum) as the launch composed it —
+    -- a fourth SDK resume coordinate beside sdk_session_id, worktree_path and
+    -- model. The SDK harness takes its append once and replays only the session
+    -- transcript afterwards, so a resumed turn is handed this string again
+    -- rather than a recomposition off today's prompt row. Block 1 is not stored:
+    -- agentprompt.Build is byte-identical for a fixed spec, so the resume
+    -- rebuilds it. Empty is a legal value (every section is optional), and every
+    -- row here is empty in practice — a multi delegation mints runtime='native',
+    -- whose loop re-sends its block on every request.
+    system_block text DEFAULT ''::text NOT NULL,
     worktree_path text,
     result_summary text,
     outcome text,

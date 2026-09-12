@@ -1068,6 +1068,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 
 	outcome, rerr := s.ResumeWithMessage(stepCtx, orgID, conv.ID, conv.SessionID, resumeCwd, message, ResumeOptions{
 		Model:             conv.Model,
+		SystemBlock:       s.launchedSystemBlock(stepCtx, orgID, conv.ID),
 		RepoEnv:           repoEnv,
 		ExtraAllowedTools: extraTools,
 		Namespace:         namespace,

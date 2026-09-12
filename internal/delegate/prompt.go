@@ -174,17 +174,68 @@ func machinistSpec() agentprompt.Spec {
 // inside Claude Code's third system block, which is a divergence in framing
 // and not in content.
 //
-// resolveCLIPath runs here, over the composed string and nothing else. Every
-// `triagefactory exec` in it was written by TF, by the org in its own prompt
-// row, or by a team in its own knowledge base; the two things the rewrite must
-// never touch — the task context and the injected memories, the only
-// externally-authored text a run reads — are transcript rows and never part of
-// this string.
-func sdkSystemPrompt(mission, runContextBlock, toolsRef, nonTerminal, binaryPath string) string {
+// It takes block 2 already composed rather than composing it, because two
+// launches of one conversation call this: the first, which composes the block
+// from the run's live inputs and stores it, and every resume after that, which
+// reads that stored block back. Both then reach the same bytes through the same
+// function, which is what makes a woken conversation's append the one it opened
+// with rather than a second composition that agrees with the first by care.
+//
+// resolveCLIPath runs here, over the composed string and nothing else, and at
+// each launch rather than once — the run's binary is where THIS process can
+// execute it, which a stored block cannot know. Every `triagefactory exec` in
+// it was written by TF, by the org in its own prompt row, or by a team in its
+// own knowledge base; the two things the rewrite must never touch — the task
+// context and the injected memories, the only externally-authored text a run
+// reads — are transcript rows and never part of this string.
+func sdkSystemPrompt(conversationBlock, binaryPath string) string {
 	return resolveCLIPath(joinSections(
 		agentprompt.Build(machinistSpec()),
-		composeConversationSystemBlock(mission, runContextBlock, toolsRef, nonTerminal),
+		conversationBlock,
 	), binaryPath)
+}
+
+// persistSystemBlock records the block the SDK harness is about to be launched
+// with, so a resume of this conversation can be handed the same one. Reports
+// whether the claim fence refused it, on which the caller parks — the same
+// disposition the phase write's refusal takes, and for the same reason: a
+// refusal means a successor owns the conversation, and this engagement's append
+// is not the one its next turn should replay.
+//
+// Any other failure is a warning and the launch proceeds. The agent in front of
+// us has the append in hand and runs correctly without the row; what a lost
+// write costs is a later wake, which composes the framework blocks alone.
+func (s *Spawner) persistSystemBlock(ctx context.Context, orgID, conversationID, claimID, block string) (fenced bool) {
+	// Detached from cancellation for the reason updatePhase is: a shutdown
+	// landing mid-launch must not drop a coordinate the row already owes.
+	ctx = context.WithoutCancel(ctx)
+	if _, err := s.conversations.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, block); errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Error("claim fence refused the system-block write — this executor no longer owns the conversation",
+			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "error", err)
+		return true
+	} else if err != nil {
+		delegateLog.Warn("record the launch's system block failed; a resume of this conversation will wake without its mission",
+			"conversation", conversationID, "org_id", orgID, "error", err)
+	}
+	return false
+}
+
+// launchedSystemBlock reads that block back for a resume.
+//
+// A read failure degrades to the empty block rather than refusing the turn, and
+// the asymmetry is deliberate. Resuming on the framework blocks alone is what
+// every SDK resume did until this column existed — the agent keeps its session
+// history, and loses the mission for one turn. Handing the claim back instead
+// would spend an attempt against TF_MAX_CLAIM_ATTEMPTS on a read that is
+// transient, and running out of those ends the conversation outright.
+func (s *Spawner) launchedSystemBlock(ctx context.Context, orgID, conversationID string) string {
+	block, err := s.conversations.SystemBlockSystem(ctx, orgID, conversationID)
+	if err != nil {
+		delegateLog.Warn("read the launch's system block failed; this turn resumes on the framework blocks alone",
+			"conversation", conversationID, "org_id", orgID, "error", err)
+		return ""
+	}
+	return block
 }
 
 // composeConversationSystemBlock assembles the conversation's own system block —

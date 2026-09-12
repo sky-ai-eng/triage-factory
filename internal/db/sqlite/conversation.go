@@ -472,6 +472,32 @@ func (s *conversationStore) SetWorktreePath(ctx context.Context, orgID, conversa
 	return scanConversationReturning(row)
 }
 
+// setSystemBlock is the write behind SetSystemBlockForClaimSystem, split out so
+// the fenced door can run it inside the fence's own transaction. No unfenced
+// door exposes it: only the engagement that composed the append writes it.
+func (s *conversationStore) setSystemBlock(ctx context.Context, orgID, conversationID, block string) (*domain.Conversation, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	row := s.q.QueryRowContext(ctx, `
+		UPDATE conversations SET system_block = ? WHERE id = ?
+		RETURNING `+sqliteConversationReturningColumns, block, conversationID)
+	return scanConversationReturning(row)
+}
+
+func (s *conversationStore) SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	var block string
+	err := s.q.QueryRowContext(ctx,
+		`SELECT system_block FROM conversations WHERE id = ?`, conversationID).Scan(&block)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", db.ErrNoSuchConversation
+	}
+	return block, err
+}
+
 func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) (*domain.ExecutorClaim, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -1464,6 +1490,22 @@ func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID,
 			return err
 		}
 		r, err := (&conversationStore{q: q}).SetSession(ctx, orgID, conversationID, sessionID)
+		result = r
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *conversationStore) SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (*domain.Conversation, error) {
+	var result *domain.Conversation
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		r, err := (&conversationStore{q: q}).setSystemBlock(ctx, orgID, conversationID, block)
 		result = r
 		return err
 	})

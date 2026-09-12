@@ -294,6 +294,21 @@ type ResumeOptions struct {
 	// the first place.
 	RepoEnv string
 
+	// SystemBlock is this conversation's own system block as its launch
+	// composed it — conversations.system_block, read back by the claim
+	// (launchedSystemBlock). The append this resume hands the harness is the
+	// framework blocks in front of it, which is byte-for-byte what the launch
+	// sent.
+	//
+	// It is a captured value rather than something composed here for the same
+	// reason Model is: recomposing would read the prompt row, the team settings
+	// and the knowledge base as they are today, and a conversation woken a week
+	// after it parked would be told to do something nobody asked it to do. Empty
+	// is a legal value — a conversation whose block really was empty, and a
+	// conversation launched before the column existed both resume on the
+	// framework blocks alone.
+	SystemBlock string
+
 	// ExtraAllowedTools carries the prompt/agent-derived tool extensions
 	// so a resumed session has the same --allowedTools as the initial
 	// invocation. Without this, MCP tools allowed on the first run
@@ -508,11 +523,13 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		PermissionMode: s.resolveSDKPermissionMode(ctx, opts.TeamID),
 		SessionID:      sessionID,
 		Message:        message,
-		// TODO(TFAC-995): SystemPrompt belongs here, composed as runAgent
-		// composes it. A resumed turn carries none, so it wakes without the
-		// framework blocks, the mission or the step addendum its launch was
-		// given — the harness replays the session's own history, not the
-		// prompt that was appended to it.
+		// The append the launch gave this conversation, through the composer the
+		// launch used. The harness replays the session's own history but not the
+		// prompt that was appended to it, so a turn sent without this one wakes
+		// on Claude Code's defaults — no framework blocks, no mission, no step
+		// addendum. The CLI path resolves against THIS process's binary, which
+		// is why the stored half stops at the block.
+		SystemPrompt: sdkSystemPrompt(opts.SystemBlock, agentproc.AgentVisibleBinary(selfBin)),
 
 		// gh is granted only alongside a live channel — see runAgent's note.
 		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{

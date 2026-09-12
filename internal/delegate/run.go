@@ -460,13 +460,13 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// reference and the step addendum — are the harness's system append; the
 	// task context is externally-authored text and stays a transcript row, which
 	// is what the model reads as the conversation's first turn.
-	systemPrompt := sdkSystemPrompt(
+	systemBlock := composeConversationSystemBlock(
 		mission,
 		runContext(cfg.scope, agentRunRoot, branchTemplate, runURL, knowledge),
 		cfg.toolsRef,
 		cfg.appendSysPrompt,
-		agentBin,
 	)
+	systemPrompt := sdkSystemPrompt(systemBlock, agentBin)
 	taskContext := BuildTaskContext(task, metadataJSON, cfg.prSkeleton, artifacts)
 
 	// The task context's retention, on the same terms as the native path: the
@@ -476,11 +476,26 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// on a warm step, where the run tree belongs to the sandbox identity.
 	writeTaskContextFile(memoryDir, taskContext, memoryOwned)
 
-	// The stop is read before the phase write, so a run stopped during
-	// bring-up parks here without ever asking the fence — the refusal below is
-	// then reserved for a claim that went away with no cancel behind it.
+	// The stop is read before the two fenced writes below, so a run stopped
+	// during bring-up parks here without ever asking the fence — their refusal
+	// is then reserved for a claim that went away with no cancel behind it.
 	if ctx.Err() != nil {
 		return cancelled("", 0)
+	}
+	// Block 2 goes on the row before the agent gets it. The harness is handed
+	// its append once, at launch, and replays only the session transcript
+	// afterwards, so this is the copy a resume of this conversation sends back —
+	// and the inputs it was composed from are gone by then: the mission comes
+	// from a prompt row the org may edit, the run context from team settings and
+	// a knowledge base that move. Recomposing at the wake would be a different
+	// prompt wearing this conversation's id.
+	//
+	// Below the stop read for the same reason the phase write is: a fence
+	// refusal here means a successor owns the conversation, which is not what a
+	// user cancel is, and only one of the two parks with a cancel recorded.
+	if s.persistSystemBlock(ctx, orgID, conversationID, cfg.claimID, systemBlock) {
+		parked = true
+		return true
 	}
 	if s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting) {
 		// Fenced out before the runtime came up: nothing to write, no process
