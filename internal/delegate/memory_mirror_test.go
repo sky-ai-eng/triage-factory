@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -26,6 +27,9 @@ type countingTaskMemory struct {
 	db.TaskMemoryStore
 	upserts int
 	touches int
+	// failTouches makes the next N attach calls fail, so a test can drive the
+	// join row's own retry without the content ever changing.
+	failTouches int
 }
 
 func (c *countingTaskMemory) UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, blueprintRunID, content string, source domain.MemorySource) (domain.TaskMemory, error) {
@@ -35,6 +39,10 @@ func (c *countingTaskMemory) UpsertAgentMemorySystem(ctx context.Context, orgID,
 
 func (c *countingTaskMemory) RecordEntityTouchSystem(ctx context.Context, orgID, conversationID, entityID, role string) error {
 	c.touches++
+	if c.failTouches > 0 {
+		c.failTouches--
+		return errors.New("attach refused")
+	}
 	return c.TaskMemoryStore.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, role)
 }
 
@@ -92,8 +100,49 @@ func TestMemoryMirror_FilesEachChangeOnceIsAll(t *testing.T) {
 	if counting.upserts != 2 {
 		t.Errorf("upserts = %d after the agent rewrote the file, want 2", counting.upserts)
 	}
+	if counting.touches != 1 {
+		t.Errorf("touches = %d, want 1 — the join row is keyed (conversation, entity), so one success covers every later filing", counting.touches)
+	}
 	if got := memoryContentFor(t, s, task.EntityID, conversationID); got != "re-ran it clean; pushing the real fix" {
 		t.Errorf("agent_content = %q, want the rewritten file", got)
+	}
+}
+
+// TestMemoryMirror_RetriesTheEntityAttachUntilItLands: the two writes a filing
+// makes fail independently, and the join row is the one an entity read needs —
+// a memory row without it is durable and invisible. Tracking it under the
+// content digest would mean a single failed attach is never retried, because
+// every later look sees the same unchanged file and skips. Nor does the
+// conclusion gate's own attach save it: a conversation ended at a boundary
+// never reaches a conclusion.
+func TestMemoryMirror_RetriesTheEntityAttachUntilItLands(t *testing.T) {
+	s, conversationID, task, cwd, mirror, counting := mirrorFixture(t, "mirror-attach-retry")
+	ctx := context.Background()
+	counting.failTouches = 1
+
+	writeAgentMemory(t, cwd, "what the agent worked out")
+	mirror.check(ctx)
+	if counting.upserts != 1 {
+		t.Fatalf("upserts = %d, want 1 — the content itself landed", counting.upserts)
+	}
+	if got := memoryContentFor(t, s, task.EntityID, conversationID); got != "" {
+		t.Fatalf("entity read = %q; the fixture is not reproducing the failed attach", got)
+	}
+
+	// The file has not changed, so the content is not re-filed — but the
+	// attach that failed is tried again.
+	mirror.check(ctx)
+	if counting.upserts != 1 {
+		t.Errorf("upserts = %d, want 1 — an unchanged file must not be re-filed to retry its attach", counting.upserts)
+	}
+	if got := memoryContentFor(t, s, task.EntityID, conversationID); got != "what the agent worked out" {
+		t.Errorf("entity read = %q, want the mirrored memory — the attach was never retried", got)
+	}
+
+	// And once it has landed, later looks leave it alone.
+	mirror.check(ctx)
+	if counting.touches != 2 {
+		t.Errorf("touches = %d, want 2 (one refused, one landed)", counting.touches)
 	}
 }
 

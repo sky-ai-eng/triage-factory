@@ -240,6 +240,12 @@ type memoryMirror struct {
 	// the two can meet on the last tool row of a run.
 	mu    sync.Mutex
 	filed *[sha256.Size]byte
+	// attached records that the primary join row landed. Tracked apart from
+	// filed because the two writes fail independently and the join row does
+	// not depend on the content: it is keyed (conversation, entity), so one
+	// success covers every later filing and a failure has to be retried on a
+	// later look the content digest would otherwise skip entirely.
+	attached bool
 }
 
 // newMemoryMirror builds the mirror for one engagement.
@@ -307,31 +313,38 @@ func (m *memoryMirror) file(ctx context.Context, force bool) memoryFileState {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !force && m.filed != nil && *m.filed == sum {
-		return state
-	}
 
 	// Detached from the caller's cancellation for the reason the gate's own
 	// upsert is: a tool call that resolves as the engagement is stopped still
 	// wrote what it wrote, and this row is the only durable copy of it.
 	bgCtx := context.WithoutCancel(ctx)
-	if _, err := m.memory.UpsertAgentMemorySystem(bgCtx, m.orgID, m.conversationID, m.blueprintRunID, content, domain.MemorySourceAgent); err != nil {
-		delegateLog.Warn("mirror the agent's memory file failed", "conversation", m.conversationID, "error", err)
-		return state
-	}
-	m.filed = &sum
 
-	// The primary join row is the only way an entity read reaches this memory,
-	// so it is written alongside every filing rather than once: the write is
-	// idempotent and upgrades role rather than downgrading it, which costs a
-	// no-op and never leaves a filed row unreachable because the attach that
-	// would have made it visible happened to be the one that failed.
-	if m.entityID == "" {
+	// The content, unless this mirror already filed these exact bytes. An
+	// ending forces it (see settle).
+	if force || m.filed == nil || *m.filed != sum {
+		if _, err := m.memory.UpsertAgentMemorySystem(bgCtx, m.orgID, m.conversationID, m.blueprintRunID, content, domain.MemorySourceAgent); err != nil {
+			delegateLog.Warn("mirror the agent's memory file failed", "conversation", m.conversationID, "error", err)
+			return state
+		}
+		m.filed = &sum
+	}
+
+	// The primary join row, until it lands — an entity read reaches this
+	// memory through it and nowhere else, so a row filed without one is
+	// durable and invisible. Its own flag, not the content's: a failure here
+	// has to be retried on a later look, and every later look sees the same
+	// unchanged file the digest above just skipped. The gate's own
+	// attachConversationMemoryEntities is no backstop for it either — that
+	// runs at a conclusion, and a conversation ended at a boundary never
+	// reaches one.
+	if m.entityID == "" || m.attached {
 		return state
 	}
 	if err := m.memory.RecordEntityTouchSystem(bgCtx, m.orgID, m.conversationID, m.entityID, domain.MemoryRolePrimary); err != nil {
-		delegateLog.Warn("attach primary entity to mirrored conversation memory failed", "conversation", m.conversationID, "entity", m.entityID, "error", err)
+		delegateLog.Warn("attach primary entity to mirrored conversation memory failed; retrying on this engagement's next look", "conversation", m.conversationID, "entity", m.entityID, "error", err)
+		return state
 	}
+	m.attached = true
 	return state
 }
 
