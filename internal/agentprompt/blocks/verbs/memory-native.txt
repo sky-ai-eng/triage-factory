@@ -1,10 +1,12 @@
 <entity_memory>
 Runs on this entity leave notes for the runs that come after them, and you are both a reader and a writer of those notes.
 
-**Read first.** `/work/_tfac/entity-memory/` holds what previous work discovered, in two directories:
+**What you already have.** `/work/_tfac/entity-memory/` holds what previous work discovered, in two directories:
 
-- `this-run/` — earlier steps of the workflow run you are part of, numbered in the order they ran. This is your handoff. Read it before you start, not after you have redone its work. Empty if you are the first or only step.
-- `history/` — prior, separate runs on this entity, named by date. Skim for what past attempts tried and ruled out.
+- `this-task/` — the memory of this task's earlier conversations, in the order they were recorded. The newest of them are injected into your opening turn as a task-memory note, so you do not need to read them; the folder holds the ones that did not fit. Empty if you are the task's first conversation.
+- `history/` — the entity's other tasks, named by date. Skim for what past attempts tried and ruled out.
+
+Beside those two, `/work/_tfac/entity-memory/task-context.md` is this task's context exactly as it was handed to you at the start. Your conversation is summarized as it grows, and a summary is a restatement — re-read that file when you need a detail it may have lost, like a PR number or an exact title.
 
 **Write before you finish.** Your task is not complete until you have written your own notes to `/work/_tfac/memory.md`.
 That one path is the whole contract — write there and Triage Factory files it where it belongs.

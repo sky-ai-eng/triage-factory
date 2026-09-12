@@ -172,7 +172,7 @@ func TestRunContext_OmitsAbsentFacts(t *testing.T) {
 // orchestrator names, and finds this step's notes already in it.
 func TestBlueprintStepNonterminalPrompt_PointsAtTheHandoffFolder(t *testing.T) {
 	addendum := agentprompt.NonTerminalCompletion(machinistSpec())
-	if !strings.Contains(addendum, "_tfac/entity-memory/this-run/") {
-		t.Error("expected the handoff addendum to point the agent at _tfac/entity-memory/this-run/")
+	if !strings.Contains(addendum, "_tfac/entity-memory/this-task/") {
+		t.Error("expected the handoff addendum to point the agent at _tfac/entity-memory/this-task/")
 	}
 }

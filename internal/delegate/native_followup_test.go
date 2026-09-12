@@ -22,6 +22,18 @@ func markNative(t *testing.T, database *sql.DB, conversationID string) {
 }
 
 // pendingRows returns the conversation's undelivered user rows, oldest-first.
+// allRows is the whole assembly window, in order — what a caller asserting the
+// shape of a conversation's opening reads, where pendingRows below answers the
+// narrower question of what is still queued as input.
+func allRows(t *testing.T, s *Spawner, conversationID string) []domain.Message {
+	t.Helper()
+	rows, err := s.conversations.ListForAssemblySystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	if err != nil {
+		t.Fatalf("list for assembly: %v", err)
+	}
+	return rows
+}
+
 func pendingRows(t *testing.T, s *Spawner, conversationID string) []domain.Message {
 	t.Helper()
 	rows, err := s.conversations.ListForAssemblySystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)

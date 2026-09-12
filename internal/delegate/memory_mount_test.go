@@ -99,10 +99,10 @@ func TestBlueprintHandoff_WarmStepReadsItsPredecessorFromTheMount(t *testing.T) 
 		t.Error("a staging dir is no repo; it must carry no repo-owned set")
 	}
 
-	materializePriorMemories(s.taskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dir, task.EntityID, blueprintRunID, gotOwned)
+	materializeEntityMemories(s.taskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dir, task.EntityID, task.ID, gotOwned)
 
 	// Step 1's handoff is in the tree step 2 will mount...
-	assertMemoryFile(t, filepath.Join(dir, "this-run", "01-t.md"), "step 1 chose approach X because Y")
+	assertMemoryFile(t, filepath.Join(dir, "this-task", "01-t.md"), "step 1 chose approach X because Y")
 	// ...and the run tree took no write at all.
 	if _, err := os.Lstat(filepath.Join(cwd, "_tfac", "entity-memory")); !os.IsNotExist(err) {
 		t.Errorf("staging wrote into the run tree (err=%v); a handed-off tree cannot accept writes", err)
@@ -122,7 +122,7 @@ func TestStagedEntityMemorySource_ResumeReusesWhatTheClaimStaged(t *testing.T) {
 	}
 
 	dir := sandbox.TrustedMemorySourcePath(conversationID)
-	if err := os.MkdirAll(filepath.Join(dir, "this-run"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "this-task"), 0o755); err != nil {
 		t.Fatalf("stage: %v", err)
 	}
 	t.Cleanup(func() { removeStagedMemory(dir) })

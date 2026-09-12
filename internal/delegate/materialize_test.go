@@ -16,11 +16,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestMaterializePriorMemories_CreatesDirsEvenWithNoPriors guards the invariant
+// TestMaterializeEntityMemories_CreatesDirsEvenWithNoPriors guards the invariant
 // the prompt depends on: the agent's initial cwd has both memory folders it is
 // told to look in, regardless of whether prior runs ever existed for this
 // entity. Without them the instructed `ls` fails noisily on a first run.
-func TestMaterializePriorMemories_CreatesDirsEvenWithNoPriors(t *testing.T) {
+func TestMaterializeEntityMemories_CreatesDirsEvenWithNoPriors(t *testing.T) {
 	database := newDelegateTestDB(t)
 	cwd := t.TempDir()
 
@@ -39,9 +39,9 @@ func TestMaterializePriorMemories_CreatesDirsEvenWithNoPriors(t *testing.T) {
 		t.Fatalf("expected 0 priors for new entity, got %d", len(mems))
 	}
 
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), entity.ID, "bpr-noprior", nil)
+	materializeEntityMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), entity.ID, "task-noprior", nil)
 
-	for _, name := range []string{currentRunDirName, priorRunsDirName} {
+	for _, name := range []string{currentTaskDirName, priorRunsDirName} {
 		dir := filepath.Join(cwd, "_tfac", "entity-memory", name)
 		info, err := os.Stat(dir)
 		if err != nil {
@@ -60,83 +60,99 @@ func TestMaterializePriorMemories_CreatesDirsEvenWithNoPriors(t *testing.T) {
 	}
 }
 
-// TestMaterializePriorMemories_ReadableLayout is the acceptance test for the
-// materialized layout: two earlier steps of the CURRENT workflow run land in
-// this-run/ numbered in step order and named after their prompts, and a prior
-// separate run on the same entity lands in history/ named by its date.
-func TestMaterializePriorMemories_ReadableLayout(t *testing.T) {
+// TestMaterializeEntityMemories_ReadableLayout is the acceptance test for the
+// materialized layout and for the split that decides it: two earlier
+// conversations on THIS task land in this-task/ numbered in the order they
+// recorded and named after their prompts, and a conversation on another task
+// of the same entity lands in history/ named by its date.
+//
+// The two this-task conversations belong to different blueprint runs
+// deliberately — a re-delegation is still the same task, and the split that
+// keyed on the workflow run would have filed the earlier one as history.
+func TestMaterializeEntityMemories_ReadableLayout(t *testing.T) {
 	database := newDelegateTestDB(t)
 	cwd := t.TempDir()
 	stores := sqlitestore.New(database)
 	ctx := context.Background()
 
 	entity, task := seedMemoryFixture(t, database, stores, "owner/repo#7")
+	otherTask := seedSecondTaskOnEntity(t, database, stores, entity.ID)
 
-	const currentBlueprintRunID = "bpr-current"
-	const priorBlueprintRunID = "bpr-prior"
-	seedBlueprintRun(t, database, stores, "bp-current", currentBlueprintRunID, task.ID)
-	seedBlueprintRun(t, database, stores, "bp-prior", priorBlueprintRunID, task.ID)
+	seedBlueprintRun(t, database, stores, "bp-first", "bpr-first", task.ID)
+	seedBlueprintRun(t, database, stores, "bp-second", "bpr-second", task.ID)
+	seedBlueprintRun(t, database, stores, "bp-other", "bpr-other", otherTask.ID)
 
 	ensureTestPrompt(t, database, domain.Prompt{ID: "p-triage", Name: "Triage", Body: "x", Source: "user"})
 	ensureTestPrompt(t, database, domain.Prompt{ID: "p-implement", Name: "Implement the fix", Body: "x", Source: "user"})
 	ensureTestPrompt(t, database, domain.Prompt{ID: "p-cifix", Name: "CI Fix", Body: "x", Source: "user"})
 
-	// The current workflow run's two earlier steps, seeded newest-first so the
-	// materializer is provably ordering on step index and not on arrival order.
+	// This task's own two conversations, in the order they recorded. The step
+	// indices repeat across the two blueprint runs, which is exactly why the
+	// numbering is created order and not the step index.
 	seedMemory(t, ctx, stores, database, memoryFixture{
-		conversationID: "step2-run", promptID: "p-implement", stepIndex: 1,
-		blueprintRunID: currentBlueprintRunID, entityID: entity.ID, taskID: task.ID,
-		content: "step 2 findings",
+		conversationID: "conv-first", promptID: "p-triage", stepIndex: 0,
+		blueprintRunID: "bpr-first", entityID: entity.ID, taskID: task.ID,
+		content: "the first conversation's findings", createdAt: "2026-07-21 09:00:00+00:00",
 	})
 	seedMemory(t, ctx, stores, database, memoryFixture{
-		conversationID: "step1-run", promptID: "p-triage", stepIndex: 0,
-		blueprintRunID: currentBlueprintRunID, entityID: entity.ID, taskID: task.ID,
-		content: "step 1 findings",
+		conversationID: "conv-second", promptID: "p-implement", stepIndex: 0,
+		blueprintRunID: "bpr-second", entityID: entity.ID, taskID: task.ID,
+		content: "the second conversation's findings", createdAt: "2026-07-21 11:00:00+00:00",
 	})
-	// A prior, separate run on the same entity.
+	// Another task on the same entity.
 	seedMemory(t, ctx, stores, database, memoryFixture{
-		conversationID: "prior-run", promptID: "p-cifix", stepIndex: 0,
-		blueprintRunID: priorBlueprintRunID, entityID: entity.ID, taskID: task.ID,
+		conversationID: "conv-other-task", promptID: "p-cifix", stepIndex: 0,
+		blueprintRunID: "bpr-other", entityID: entity.ID, taskID: otherTask.ID,
 		content: "what i did last time", createdAt: "2026-07-20 09:30:00+00:00",
 	})
 
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), entity.ID, currentBlueprintRunID, nil)
+	thisTask := materializeEntityMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), entity.ID, task.ID, nil)
 
 	root := filepath.Join(cwd, "_tfac", "entity-memory")
-	assertMemoryFile(t, filepath.Join(root, "this-run", "01-triage.md"), "step 1 findings")
-	assertMemoryFile(t, filepath.Join(root, "this-run", "02-implement-the-fix.md"), "step 2 findings")
+	assertMemoryFile(t, filepath.Join(root, "this-task", "01-triage.md"), "the first conversation's findings")
+	assertMemoryFile(t, filepath.Join(root, "this-task", "02-implement-the-fix.md"), "the second conversation's findings")
 	assertMemoryFile(t, filepath.Join(root, "history", "2026-07-20-ci-fix.md"), "what i did last time")
 
 	// Nothing else: no id-named leftovers, no loose files at the top level.
-	assertDirNames(t, root, []string{"history", "this-run"})
-	assertDirNames(t, filepath.Join(root, "this-run"), []string{"01-triage.md", "02-implement-the-fix.md"})
+	assertDirNames(t, root, []string{"history", "this-task"})
+	assertDirNames(t, filepath.Join(root, "this-task"), []string{"01-triage.md", "02-implement-the-fix.md"})
 	assertDirNames(t, filepath.Join(root, "history"), []string{"2026-07-20-ci-fix.md"})
+
+	// The returned set is the injection's source, so it must be the same split
+	// the folder is — the other task's memory has no business in the opening
+	// turn of a conversation on this one.
+	if len(thisTask) != 2 || thisTask[0].ConversationID != "conv-first" || thisTask[1].ConversationID != "conv-second" {
+		t.Errorf("returned this-task set = %+v, want conv-first then conv-second", thisTask)
+	}
 }
 
-// TestMaterializePriorMemories_HistoryNameCollision pins the disambiguation: two
-// prior runs of the same prompt on the same day must both survive materializing,
-// rather than the second silently overwriting the first.
-func TestMaterializePriorMemories_HistoryNameCollision(t *testing.T) {
+// TestMaterializeEntityMemories_HistoryNameCollision pins the disambiguation:
+// two of the entity's other tasks running the same prompt on the same day must
+// both survive materializing, rather than the second silently overwriting the
+// first.
+func TestMaterializeEntityMemories_HistoryNameCollision(t *testing.T) {
 	database := newDelegateTestDB(t)
 	cwd := t.TempDir()
 	stores := sqlitestore.New(database)
 	ctx := context.Background()
 
-	entity, task := seedMemoryFixture(t, database, stores, "owner/repo#9")
-	seedBlueprintRun(t, database, stores, "bp-a", "bpr-a", task.ID)
-	seedBlueprintRun(t, database, stores, "bp-b", "bpr-b", task.ID)
+	entity, taskA := seedMemoryFixture(t, database, stores, "owner/repo#9")
+	taskB := seedSecondTaskOnEntity(t, database, stores, entity.ID)
+	seedBlueprintRun(t, database, stores, "bp-a", "bpr-a", taskA.ID)
+	seedBlueprintRun(t, database, stores, "bp-b", "bpr-b", taskB.ID)
 	ensureTestPrompt(t, database, domain.Prompt{ID: "p-cifix", Name: "CI Fix", Body: "x", Source: "user"})
 
 	seedMemory(t, ctx, stores, database, memoryFixture{
 		conversationID: "run-a", promptID: "p-cifix", stepIndex: 0, blueprintRunID: "bpr-a",
-		entityID: entity.ID, taskID: task.ID, content: "first attempt", createdAt: "2026-07-20 09:00:00+00:00",
+		entityID: entity.ID, taskID: taskA.ID, content: "first attempt", createdAt: "2026-07-20 09:00:00+00:00",
 	})
 	seedMemory(t, ctx, stores, database, memoryFixture{
 		conversationID: "run-b", promptID: "p-cifix", stepIndex: 0, blueprintRunID: "bpr-b",
-		entityID: entity.ID, taskID: task.ID, content: "second attempt", createdAt: "2026-07-20 17:00:00+00:00",
+		entityID: entity.ID, taskID: taskB.ID, content: "second attempt", createdAt: "2026-07-20 17:00:00+00:00",
 	})
 
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), entity.ID, "bpr-current", nil)
+	// A third task on the entity, so both of the above are history to it.
+	materializeEntityMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), entity.ID, "task-current", nil)
 
 	historyDir := filepath.Join(cwd, "_tfac", "entity-memory", "history")
 	assertMemoryFile(t, filepath.Join(historyDir, "2026-07-20-ci-fix.md"), "first attempt")
@@ -147,7 +163,7 @@ func TestMaterializePriorMemories_HistoryNameCollision(t *testing.T) {
 // shared worktree depends on. Step 1 writes the one path it is told about;
 // termination ingests it into conversation_memory under the workflow run; step
 // 2 starting in the SAME tree renders it back as a numbered file under
-// this-run/ and only then clears the path for its own write. The clear must
+// this-task/ and only then clears the path for its own write. The clear must
 // never be the reason a later step loses its predecessor's handoff.
 func TestBlueprintHandoff_MemorySurvivesTheFixedPathClear(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "handoff")
@@ -162,12 +178,12 @@ func TestBlueprintHandoff_MemorySurvivesTheFixedPathClear(t *testing.T) {
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, runMirror(s, task, conversationID, blueprintRunID, cwd, nil), "", "event", "")
 
 	// Step 2's run start, in the order runAgent performs it.
-	materializePriorMemories(s.taskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), task.EntityID, blueprintRunID, nil)
+	materializeEntityMemories(s.taskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), task.EntityID, task.ID, nil)
 	clearAgentMemoryFile(cwd, nil)
 
 	// Step 1's narrative is where the prompt tells step 2 to look — named for
 	// the step and the prompt that produced it, not for either id.
-	assertMemoryFile(t, filepath.Join(cwd, "_tfac", "entity-memory", "this-run", "01-t.md"), "step 1 chose approach X because Y")
+	assertMemoryFile(t, filepath.Join(cwd, "_tfac", "entity-memory", "this-task", "01-t.md"), "step 1 chose approach X because Y")
 	// And the write path is free, so step 2's own memory can't be confused for
 	// step 1's if step 2 writes nothing.
 	if _, state := readAgentMemoryFile(cwd); state != memoryFileMissing {
@@ -240,7 +256,7 @@ func TestScanRepoFiles_GuardsEveryWriteIntoATrackedScratchDir(t *testing.T) {
 	})
 
 	clearAgentMemoryFile(cwd, owned)
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), entity.ID, "bpr-current", owned)
+	materializeEntityMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), entity.ID, "task-current", owned)
 
 	assertMemoryFile(t, filepath.Join(cwd, "_tfac", "memory.md"), "repo-authored memory")
 	assertMemoryFile(t, historyName, "repo-authored history")
@@ -345,6 +361,25 @@ func seedMemoryFixture(t *testing.T, database *sql.DB, stores db.Stores, sourceI
 		t.Fatalf("task: %v", err)
 	}
 	return *entity, *task
+}
+
+// seedSecondTaskOnEntity stages another task on the same entity — what makes a
+// memory history rather than this task's. Its own event type, because the
+// active-task uniqueness index is on (entity, event type, dedup key).
+func seedSecondTaskOnEntity(t *testing.T, database *sql.DB, stores db.Stores, entityID string) domain.Task {
+	t.Helper()
+	ctx := context.Background()
+	evt, err := stores.Events.Record(ctx, runmode.LocalDefaultOrgID, domain.Event{
+		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entityID, MetadataJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	task, _, err := testTaskStore(database).FindOrCreate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "", evt, 0.5)
+	if err != nil {
+		t.Fatalf("second task: %v", err)
+	}
+	return *task
 }
 
 // seedBlueprintRun stages the blueprint + blueprint_run pair a step

@@ -121,9 +121,22 @@ func newLaunchFixtureWithWorktree(t *testing.T, suffix, wt string) *launchFixtur
 // progress" rather than a step that has never started.
 func (f *launchFixture) speak(t *testing.T, role, content string) {
 	t.Helper()
+	f.say(t, role, "", content)
+}
+
+// open writes the row that makes a conversation a started one — the same
+// injection:task-context row a real engagement mints before its first call,
+// and the row every "has this conversation started?" gate reads.
+func (f *launchFixture) open(t *testing.T) {
+	t.Helper()
+	f.say(t, "user", domain.MessageSubtypeInjectionTaskContext, "<task_context>\nPull request owner/repo#7\n</task_context>")
+}
+
+func (f *launchFixture) say(t *testing.T, role, subtype, content string) {
+	t.Helper()
 	delivered := true
 	if _, err := f.stores.Conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-		ConversationID: f.conv.ID, Role: role, Content: content,
+		ConversationID: f.conv.ID, Role: role, Subtype: subtype, Content: content,
 		Delivered: &delivered, WindowState: domain.MessageWindowActive,
 	}); err != nil {
 		t.Fatalf("insert transcript row: %v", err)
@@ -220,6 +233,7 @@ func TestPreAgentFailure_HandsTheClaimBackAndDestroysNothing(t *testing.T) {
 // by a runtime that never started.
 func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testing.T) {
 	f := newLaunchFixture(t, "parks")
+	f.open(t)
 	f.speak(t, "user", "have another look at the failing check")
 	f.speak(t, "assistant", "on it")
 	// The follow-up that woke it: undelivered, so it is also what would
@@ -392,6 +406,7 @@ func TestRunNativeAgent_ToolHostLaunchFailureRecordsNothing(t *testing.T) {
 // has to be exercised this way. See claim_fence_test.go.
 func TestParkAfterLaunchExhaustion_FencedClaimRecordsNothing(t *testing.T) {
 	f := newLaunchFixture(t, "fenced")
+	f.open(t)
 	f.speak(t, "user", "keep going")
 
 	fenced := &fencedConversationStore{ConversationStore: f.s.conversations}

@@ -5,6 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // TestWriteTaskContextFile_LandsInTheStagedTarget is the task context's whole
@@ -75,5 +79,20 @@ func TestWriteTaskContextFile_OverwritesThePriorStep(t *testing.T) {
 	}
 	if strings.Contains(string(got), "step 0") {
 		t.Errorf("the earlier step's task context survived: %q", got)
+	}
+}
+
+// TestNativeMemoryBlock_NamesTheRetainedTaskContext ties the file the launch
+// writes to the path the prompt sends the agent to.
+//
+// They are produced in two packages that cannot share a constant — agentprompt
+// spells its paths out literally to keep the prefix cacheable, and it may not
+// import the delegate package that names the file. So the tie is this
+// assertion: rename the file or move the staging directory and the retention
+// still happens, silently, at a path nothing tells the agent about.
+func TestNativeMemoryBlock_NamesTheRetainedTaskContext(t *testing.T) {
+	want := agentproc.SandboxWorkRoot + "/" + worktree.ScratchDir + "/" + worktree.EntityMemoryDir + "/" + taskContextFileName
+	if composed := agentprompt.Build(nativeSpec()); !strings.Contains(composed, want) {
+		t.Errorf("the native prompt does not name the retained task context at %q; a compacted run has no way back to it", want)
 	}
 }

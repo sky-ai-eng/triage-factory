@@ -107,7 +107,11 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// runtimes' setup is comparable in the backend rather than only in prose.
 	stagingCtx, stagingSpan := tracer.Start(ctx, "engagement.stage_context")
 	memoryDir, memoryOwned := entityMemoryTarget(&cfg, conversationID, claudeCwd, owned)
-	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, cfg.blueprintRunID, memoryOwned)
+	// The this-task share comes back from the materializer rather than from a
+	// read of its own: the opening rows and the this-task/ folder are two
+	// renderings of one answer, and two reads could disagree about what the
+	// folder holds and what the turn carries.
+	taskMemories := materializeEntityMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, task.ID, memoryOwned)
 
 	// The SDK path's twin again: the task team's knowledge base plus every
 	// other team's published root, copied in before the jail starts so it is
@@ -180,7 +184,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	delegateLog.Info("native agent loop starting", "conversation", conversationID, "cwd", claudeCwd, "model", model)
 
 	transcript := newNativeTranscript(s, orgID, conversationID, cfg.claimID)
-	if err := s.mintOpeningTurn(ctx, transcript, orgID, conversationID, creatorUserID, launchText.taskContext); err != nil {
+	if err := s.mintOpeningTurn(ctx, transcript, orgID, conversationID, creatorUserID, taskMemories, launchText.taskContext); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "conversation", conversationID, "claim", cfg.claimID)
 			return engagementDisposition{fenced: true}
@@ -263,36 +267,29 @@ func (s *Spawner) executorChangedSince(ctx context.Context, orgID, conversationI
 	return prior != "" && prior != self
 }
 
-// mintOpeningTurn queues the delegation's opening turn — the task context the
-// run is about — when the conversation has no transcript yet.
+// mintOpeningTurn writes the native conversation's opening rows — the task's
+// injected memories, then the task context — through the claim-fenced
+// transcript.
 //
-// It is written pending, like every other input, so the engagement's entry
-// is just its first drain — there is no first-call special case anywhere in
-// the engine. The engagement's first drain is a bare one, so the row keeps the
-// blank subtype it was written with. Gating on an empty transcript makes it
-// idempotent: a re-claim of a conversation that has already spoken adds
-// nothing, and a crash between this insert and the first call leaves the row
-// for the next claim to drain rather than losing the opening.
+// It is the runtime half of mintOpeningRows: the transcript read the gate
+// needs, and the insert door the rows go through. Everything about which rows
+// exist and in what order lives there, so the SDK opens a conversation with
+// the same rows by supplying its own door.
 //
 // What the run was asked to do is not here: the mission is a system block, so
 // it is re-sent on every call and a compaction can never summarize it away.
-// This row can be, and its bytes are on disk for the agent to re-read.
-//
-// TODO(TFAC-992): mint this row with subtype injection:task-context. It carries
-// the blank subtype of an ordinary human turn today, so compaction reads it as
-// the conversation's original request and copies externally-authored text into
-// every result row — the re-injection agentloop.originalRequest is written to
-// give a person's opening ask, not a control-plane-minted one. That ticket also
-// moves the three gates that count rows here onto the same subtype.
-func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Transcript, orgID, conversationID, creatorUserID, opening string) error {
+// These rows can be, and the task context's bytes are on disk for the agent to
+// re-read.
+func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Transcript, orgID, conversationID, creatorUserID string, memories []domain.TaskMemory, taskContext string) error {
 	rows, err := transcript.ListForAssembly(ctx, orgID, conversationID)
 	if err != nil {
 		return err
 	}
-	if len(rows) > 0 {
-		return nil
+	insert := func(ctx context.Context, msg *domain.Message) error {
+		_, err := transcript.Insert(ctx, orgID, msg)
+		return err
 	}
-	_, err = transcript.Insert(ctx, orgID, pendingUserInput(conversationID, creatorUserID, opening))
+	_, err = mintOpeningRows(ctx, insert, rows, memories, conversationID, creatorUserID, taskContext)
 	return err
 }
 
@@ -391,12 +388,14 @@ func nativeSpec() agentprompt.Spec {
 // sandbox identity — digest it instead, so termination can refuse to ingest
 // content this agent never wrote.
 //
-// Both are skipped for a conversation that has already been driven: a parked
+// Both are skipped for a conversation that has already been opened: a parked
 // engagement picking up a steer, whose own memory file is at that path. The
 // transcript is this runtime's "has it run before". It stands in for the SDK
 // path's prior session id, which the native runtime has no counterpart to, and
-// it is the same signal mintOpeningTurn reads to answer the same question a few
-// calls later.
+// it is the same conversationOpened reading mintOpeningRows makes a few calls
+// later — the task-context row, not any row, so a conversation that has only
+// been handed a claim-time notice still clears the path it is about to be
+// judged on.
 func (s *Spawner) prepareInheritedMemory(ctx context.Context, orgID, conversationID, cwd string, owned repoFiles, handedOff bool) *memoryFingerprint {
 	driven, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 	if err != nil {
@@ -406,7 +405,7 @@ func (s *Spawner) prepareInheritedMemory(ctx context.Context, orgID, conversatio
 		// re-claimed engagement's own notes costs one run's notes and nothing
 		// downstream.
 		delegateLog.Warn("read transcript to classify the inherited memory file failed; treating this claim as fresh", "conversation", conversationID, "error", err)
-	} else if len(driven) > 0 {
+	} else if conversationOpened(driven) {
 		return nil
 	}
 	if !handedOff {

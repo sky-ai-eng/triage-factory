@@ -458,9 +458,14 @@ func TestDisposeOfModelRefusal_ParksOnceWithTheRefusal(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-refused", "sess-refused", t.TempDir())
+	// The opening the mint writes before an engagement's first call, then the
+	// turn it produced: this is a conversation with work to protect, which is
+	// what makes the refusal a park rather than a failure.
 	if _, err := database.Exec(
-		`INSERT INTO messages (org_id, conversation_id, role, content)
-		 VALUES (?, 'r-refused', 'assistant', 'work happened here')`, runmode.LocalDefaultOrgID,
+		`INSERT INTO messages (org_id, conversation_id, role, subtype, content)
+		 VALUES (?, 'r-refused', 'user', ?, '<task_context>x</task_context>'),
+		        (?, 'r-refused', 'assistant', '', 'work happened here')`,
+		runmode.LocalDefaultOrgID, domain.MessageSubtypeInjectionTaskContext, runmode.LocalDefaultOrgID,
 	); err != nil {
 		t.Fatalf("seed transcript: %v", err)
 	}

@@ -34,6 +34,10 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 				t.Helper()
 				return seedSQLiteBlueprintRunForTaskMemory(t, conn, suffix)
 			},
+			TaskFor: func(t *testing.T, conversationID string) string {
+				t.Helper()
+				return taskForSQLiteConversation(t, conn, conversationID)
+			},
 			Role: func(t *testing.T, conversationID, entityID string) string {
 				t.Helper()
 				return roleForSQLiteJoinRow(t, conn, conversationID, entityID)
@@ -62,6 +66,10 @@ func TestTaskMemoryStore_SQLite_ReturnedRowConformance(t *testing.T) {
 				t.Helper()
 				return seedSQLiteBlueprintRunForTaskMemory(t, conn, suffix)
 			},
+			TaskFor: func(t *testing.T, conversationID string) string {
+				t.Helper()
+				return taskForSQLiteConversation(t, conn, conversationID)
+			},
 			Role: func(t *testing.T, conversationID, entityID string) string {
 				t.Helper()
 				return roleForSQLiteJoinRow(t, conn, conversationID, entityID)
@@ -70,6 +78,18 @@ func TestTaskMemoryStore_SQLite_ReturnedRowConformance(t *testing.T) {
 		}
 		return stores.TaskMemory, runmode.LocalDefaultOrgID, seed
 	})
+}
+
+// taskForSQLiteConversation reads back the seeded conversation's task_id
+// directly — the store interface has no conversation read, and the naming-facts
+// conformance subtest needs the id the entity reads must project.
+func taskForSQLiteConversation(t *testing.T, conn *sql.DB, conversationID string) string {
+	t.Helper()
+	var taskID sql.NullString
+	if err := conn.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, conversationID).Scan(&taskID); err != nil {
+		t.Fatalf("read conversations.task_id: %v", err)
+	}
+	return taskID.String
 }
 
 // roleForSQLiteJoinRow reads back conversation_memory_entities.role directly — the

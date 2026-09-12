@@ -91,7 +91,7 @@ func TestEnsureSandboxMemoryLink_ForceReplaces(t *testing.T) {
 
 	t.Run("real_directory", func(t *testing.T) {
 		dir := t.TempDir()
-		real := filepath.Join(dir, ScratchDir, EntityMemoryDir, "this-run")
+		real := filepath.Join(dir, ScratchDir, EntityMemoryDir, "this-task")
 		if err := os.MkdirAll(real, 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
