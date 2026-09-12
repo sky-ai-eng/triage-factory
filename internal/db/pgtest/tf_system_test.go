@@ -63,11 +63,14 @@ func TestTfSystem_DDLDenied(t *testing.T) {
 // TF_SECRET_ENCRYPTION_KEY at all as of TFAC-614 — its per-run credential
 // material arrives pre-resolved via sealed claim_credentials bundles
 // instead, so the org_secrets grant this ticket originally shipped is
-// dead weight and was removed; this pins that it stays removed).
+// dead weight and was removed; this pins that it stays removed), and
+// conversation_memory_attempts (the memory-generation ledger is written by the
+// brain on the control plane and read by the task read — an executor has no
+// business in it at all).
 func TestTfSystem_OffSurfaceReadDenied(t *testing.T) {
 	h := Shared(t)
 
-	for _, table := range []string{"sso_connections", "org_secrets"} {
+	for _, table := range []string{"sso_connections", "org_secrets", "conversation_memory_attempts"} {
 		var n int
 		err := h.SystemDB.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n)
 		if err == nil {

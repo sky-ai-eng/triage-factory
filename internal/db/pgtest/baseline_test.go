@@ -27,7 +27,12 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"team_github_groups", "team_github_repos",
 		"prompts", "events_catalog", "entities", "entity_links", "events",
 		"event_handlers", "tasks", "task_events", "conversations", "claims", "artifacts",
-		"messages", "claim_credentials", "conversation_memory", "conversation_memory_entities", "pending_firings", "conversation_worktrees",
+		"messages", "claim_credentials", "conversation_memory", "conversation_memory_entities",
+		// conversation_memory_attempts: the memory-generation attempt ledger,
+		// which separates "no memory was owed" from "one was owed and
+		// generation failed".
+		"conversation_memory_attempts",
+		"pending_firings", "conversation_worktrees",
 		"swipe_events", "poller_state", "repositories",
 		// org_secrets replaces the Supabase Vault secret path (TFAC-402):
 		// app-encrypted ciphertext in a normal RLS table.
@@ -1489,6 +1494,55 @@ func TestGooseDBVersionLockdown(t *testing.T) {
 	}
 	if seqHas {
 		t.Errorf("tf_app has USAGE on goose_db_version_id_seq")
+	}
+}
+
+// TestConversationMemoryAttemptsGrants — the memory-generation ledger is
+// brain-written and app-read, so tf_app holds SELECT and nothing else. A write
+// grant here would not break anything visibly: the only app-pool caller is the
+// task read, so an excess INSERT/UPDATE/DELETE would sit unused until someone
+// wrote a handler against it and put the provisioner's ledger under a
+// request's control. Pinned rather than trusted for exactly that reason.
+func TestConversationMemoryAttemptsGrants(t *testing.T) {
+	h := Shared(t)
+
+	for priv, want := range map[string]bool{
+		"SELECT": true,
+		"INSERT": false,
+		"UPDATE": false,
+		"DELETE": false,
+	} {
+		var has bool
+		if err := h.AdminDB.QueryRow(
+			`SELECT has_table_privilege('tf_app', 'public.conversation_memory_attempts', $1)`, priv,
+		).Scan(&has); err != nil {
+			t.Fatalf("has_table_privilege(tf_app, conversation_memory_attempts, %s): %v", priv, err)
+		}
+		if has != want {
+			t.Errorf("tf_app %s on conversation_memory_attempts = %t, want %t", priv, has, want)
+		}
+	}
+
+	// RLS on, with the org-scoped policy the app-pool read is filtered by.
+	var rlsEnabled bool
+	if err := h.AdminDB.QueryRow(
+		`SELECT relrowsecurity FROM pg_class WHERE oid = 'public.conversation_memory_attempts'::regclass`,
+	).Scan(&rlsEnabled); err != nil {
+		t.Fatalf("probe relrowsecurity: %v", err)
+	}
+	if !rlsEnabled {
+		t.Error("conversation_memory_attempts has RLS disabled")
+	}
+	var policies int
+	if err := h.AdminDB.QueryRow(
+		`SELECT COUNT(*) FROM pg_policies
+		  WHERE schemaname = 'public' AND tablename = 'conversation_memory_attempts'
+		    AND policyname = 'conversation_memory_attempts_all'`,
+	).Scan(&policies); err != nil {
+		t.Fatalf("probe pg_policies: %v", err)
+	}
+	if policies != 1 {
+		t.Errorf("conversation_memory_attempts_all policy count = %d, want 1", policies)
 	}
 }
 

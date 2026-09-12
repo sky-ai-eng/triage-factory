@@ -70,6 +70,9 @@ func New(conn *sql.DB) db.Stores {
 		// connection so the dual-pool constructor collapses; the
 		// `...System` variants forward to the non-System bodies.
 		TaskMemory: newTaskMemoryStore(conn, conn),
+		// MemoryAttempts is admin-only in Postgres; SQLite has the one
+		// connection and assertLocalOrg standing in for the org scope.
+		MemoryAttempts: newMemoryAttemptStore(conn),
 		// ConversationWorktrees wires both args to conn — SQLite has one
 		// connection so the dual-pool constructor collapses; the
 		// `...System` variants forward to the non-System bodies.
