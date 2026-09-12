@@ -22,11 +22,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/maximhq/bifrost/core/schemas"
+
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
+	"github.com/sky-ai-eng/triage-factory/internal/inference"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -379,7 +382,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// covers the on-disk context the agent will read.
 	stagingCtx, stagingSpan := tracer.Start(ctx, "engagement.stage_context")
 	memoryDir, memoryOwned := entityMemoryTarget(&cfg, conversationID, claudeCwd, owned)
-	materializeEntityMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, task.ID, memoryOwned)
+	// The this-task share comes back from the materializer rather than from a
+	// read of its own: the opening rows and the this-task/ folder are two
+	// renderings of one answer, and two reads could disagree about what the
+	// folder holds and what the turn carries.
+	taskMemories := materializeEntityMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, task.ID, memoryOwned)
 
 	// The team knowledge base, copied into ./_tfac/knowledge/: the task team's
 	// own two roots plus every other team's published one, resolved from
@@ -447,7 +454,27 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	runURL := s.runURLFor(orgID, conversationID)
 	publishedRunURL := s.publishedRunURLFor(orgID, conversationID)
 	artifacts := s.taskArtifacts(context.WithoutCancel(ctx), orgID, task.ID)
-	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, artifacts, mission, cfg.scope, cfg.toolsRef, agentBin, agentRunRoot, branchTemplate, runURL, knowledge)
+
+	// The two channels this launch composes, split by who authored what. TF's
+	// own words — the framework blocks, the mission, this run's facts, the verb
+	// reference and the step addendum — are the harness's system append; the
+	// task context is externally-authored text and stays a transcript row, which
+	// is what the model reads as the conversation's first turn.
+	systemPrompt := sdkSystemPrompt(
+		mission,
+		runContext(cfg.scope, agentRunRoot, branchTemplate, runURL, knowledge),
+		cfg.toolsRef,
+		cfg.appendSysPrompt,
+		agentBin,
+	)
+	taskContext := BuildTaskContext(task, metadataJSON, cfg.prSkeleton, artifacts)
+
+	// The task context's retention, on the same terms as the native path: the
+	// row carrying these bytes is compacted like any other, and this file is the
+	// original an agent whose summary lost a PR number re-reads. It lands inside
+	// the memory tree because that is the one per-launch location still writable
+	// on a warm step, where the run tree belongs to the sandbox identity.
+	writeTaskContextFile(memoryDir, taskContext, memoryOwned)
 
 	// The stop is read before the phase write, so a run stopped during
 	// bring-up parks here without ever asking the fence — the refusal below is
@@ -578,13 +605,32 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	}
 	defer func() { _ = localSbx.Close() }()
 
+	sink := newConversationSink(s, orgID, conversationID, cfg.claimID, triggerType, creatorUserID)
+
+	// The conversation's opening rows, minted through the sink's own insert door
+	// and assembled into the blocks of the agent's first user message. Last
+	// before the launch, so the rows a crashed bring-up leaves behind are the
+	// rows of a conversation that really was about to speak.
+	openingBlocks, err := s.openingTurnBlocks(ctx, sink, orgID, conversationID, creatorUserID, taskMemories, taskContext)
+	if err != nil {
+		if errors.Is(err, db.ErrClaimReleased) {
+			// Fenced out before the first turn: a successor owns the
+			// conversation, and every row this engagement still wrote would
+			// interleave with its. Nothing to record, nothing to kill.
+			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "conversation", conversationID, "claim", cfg.claimID)
+			parked = true
+			return true
+		}
+		return fail("failed to open the conversation: "+err.Error(), domain.ConversationFailureUnclassified)
+	}
+
 	delegateLog.Info("claude starting for conversation", "conversation", conversationID, "cwd", claudeCwd)
 	baseOpts := agentproc.RunOptions{
 		Cwd:            claudeCwd,
 		Model:          model,
 		PermissionMode: s.resolveSDKPermissionMode(ctx, teamID),
 		SessionID:      resumeSession,
-		Message:        prompt,
+		OpeningBlocks:  openingBlocks,
 		// The gh subcommands are granted only when the channel is actually
 		// live: without one, `gh` on a local host would resolve to the user's
 		// own installation under the user's own auth, so the allowlist must
@@ -597,7 +643,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		ExtraEnv:     extraEnv,
 		TraceID:      conversationID,
 		WorkspaceKey: namespace,
-		SystemPrompt: cfg.appendSysPrompt,
+		SystemPrompt: systemPrompt,
 		OrgID:        orgID,
 		Secrets:      s.getRunSecrets(),
 		LLMResolver:  s.llmResolverForConversation(orgID, conversationID),
@@ -634,7 +680,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// isolation there) and whenever the operator opted out.
 		LocalSandbox: localSbx.runSpec(),
 	}
-	sink := newConversationSink(s, orgID, conversationID, cfg.claimID, triggerType, creatorUserID)
 
 	// Off-allowlist tool calls route to one of two dispositions, chosen once
 	// per run:
@@ -742,6 +787,79 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	}
 
 	return fail("agent runtime exited cleanly without producing a result event", domain.ConversationFailureNoResult)
+}
+
+// openingTurnBlocks mints the SDK conversation's opening rows and assembles
+// them into the content blocks of its first user message.
+//
+// It is the runtime half of mintOpeningRows, the counterpart of native's
+// mintOpeningTurn: the transcript read the gate needs, the insert door the rows
+// go through — the sink's, so the rows broadcast to the run station and pass
+// the claim fence like every other row this engagement writes — and then the
+// one assembler both runtimes send through.
+//
+// A conversation that is already open mints nothing and sends the rows it
+// already has. That is the crash re-claim with a surviving session: the SDK
+// process is new even when the session it resumes is not, so it is told what
+// its predecessor was told rather than being left to infer the task from a
+// transcript it cannot see.
+func (s *Spawner) openingTurnBlocks(ctx context.Context, sink *conversationSink, orgID, conversationID, creatorUserID string, memories []domain.TaskMemory, taskContext string) ([]agentproc.ContentBlock, error) {
+	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("read transcript: %w", err)
+	}
+	insert := func(_ context.Context, msg *domain.Message) error { return sink.OnMessage(msg) }
+	opening, err := mintOpeningRows(ctx, insert, rows, memories, conversationID, creatorUserID, taskContext)
+	if err != nil {
+		return nil, err
+	}
+	if opening == nil {
+		opening = openingRowsOf(rows)
+	}
+	return openingContentBlocks(opening)
+}
+
+// openingContentBlocks renders the opening rows as the blocks of one user
+// message, through the same assembler the native loop calls on every request.
+//
+// One assembler is the whole point: the envelope that brackets the memory run
+// and the packing that folds the rows into a single turn are assembly's, not
+// this path's, so the bytes a model reads first do not depend on which runtime
+// is driving. The cache breakpoint is suppressed — it is the native request
+// builder's moving marker, and the SDK harness owns caching on its own side.
+//
+// The block boundaries survive to the wire rather than being joined here: they
+// are what the parity is about, and a joined string would make the two
+// runtimes' first turns equal only in their characters.
+//
+// Anything other than one all-text user message is a wiring error and fails the
+// launch. The opening is composed from rows this process just wrote, every one
+// of them text, so a second message or a non-text block means assembly and the
+// minter have come apart — which is worth a failed run rather than an agent
+// silently started on a truncated opening.
+func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, error) {
+	msgs, err := inference.RowsToMessages(rows, inference.AssemblyOptions{NoCacheBreakpoint: true})
+	if err != nil {
+		return nil, fmt.Errorf("assemble the opening turn: %w", err)
+	}
+	if len(msgs) != 1 || msgs[0].Role != schemas.ChatMessageRoleUser {
+		return nil, fmt.Errorf("the opening turn assembled to %d messages, want exactly one user message", len(msgs))
+	}
+	content := msgs[0].Content
+	switch {
+	case content == nil:
+		return nil, errors.New("the opening turn assembled to a message with no content")
+	case content.ContentStr != nil:
+		return []agentproc.ContentBlock{{Type: "text", Text: *content.ContentStr}}, nil
+	}
+	blocks := make([]agentproc.ContentBlock, 0, len(content.ContentBlocks))
+	for i, b := range content.ContentBlocks {
+		if b.Type != schemas.ChatContentBlockTypeText || b.Text == nil {
+			return nil, fmt.Errorf("the opening turn carries a %q block at %d; only text reaches the agent", b.Type, i)
+		}
+		blocks = append(blocks, agentproc.ContentBlock{Type: "text", Text: *b.Text})
+	}
+	return blocks, nil
 }
 
 // processCompletion is the single disposition authority for a result, whatever

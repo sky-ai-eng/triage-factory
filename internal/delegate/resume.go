@@ -508,6 +508,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		PermissionMode: s.resolveSDKPermissionMode(ctx, opts.TeamID),
 		SessionID:      sessionID,
 		Message:        message,
+		// TODO(TFAC-995): SystemPrompt belongs here, composed as runAgent
+		// composes it. A resumed turn carries none, so it wakes without the
+		// framework blocks, the mission or the step addendum its launch was
+		// given — the harness replays the session's own history, not the
+		// prompt that was appended to it.
+
 		// gh is granted only alongside a live channel — see runAgent's note.
 		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
 			SelfBin: selfBin,
