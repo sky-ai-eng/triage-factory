@@ -620,7 +620,7 @@ func (s *Spawner) recordNativeResult(
 		// holds its tree: whatever the agent had written by the time the loop
 		// broke is its account of the work, and a failed conversation is
 		// exactly the one a person will want it from.
-		mirror.check(ctx)
+		mirror.settle(ctx)
 		reason := "native agent loop failed"
 		if result.Err != nil {
 			reason = result.Err.Error()
@@ -652,7 +652,7 @@ func (s *Spawner) recordNativeResult(
 	// reason the mirror is not the only read. No row is written when the agent
 	// wrote none — the state is logged instead, because each shape of "no
 	// file" points somewhere different when a run looks wrong afterwards.
-	if fileState := mirror.check(ctx); fileState != memoryFilePresent {
+	if fileState := mirror.settle(ctx); fileState != memoryFilePresent {
 		delegateLog.Debug("no usable memory file at termination (no memory row written)", "conversation", conversationID, "state", fileState)
 	}
 	s.attachConversationMemoryEntities(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID)

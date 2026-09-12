@@ -504,11 +504,17 @@ func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext
 	// time. A park is an ending it may have written right up to, and the
 	// snapshot below is not a substitute — it puts the file where only an
 	// executor holding this tree can read it, while the row is what a handler
-	// on another pod sees. It runs ahead of the fence check on purpose: the
-	// content is this conversation's own file and the upsert is keyed by the
-	// conversation, so a successor overwrites it with the same file's later
-	// state rather than being handed a stranger's notes.
-	park.mirror.check(ctx)
+	// on another pod sees.
+	//
+	// It runs ahead of the flip, so a park the fence goes on to refuse has
+	// filed anyway. That is the point rather than an oversight: the ordinary
+	// refusal here is a cross-pod stop, where control parked the row and
+	// released the claim on the user's behalf and this engagement is the only
+	// thing holding the file. Skipping it there would lose exactly the notes
+	// this mirror exists to keep. The rarer refusal — a successor mid-flight —
+	// is what settle's unconditional write answers: the successor's own ending
+	// re-asserts its file over anything a zombie filed first.
+	park.mirror.settle(ctx)
 
 	// The flip does not wait on the capture, and the durable state record is
 	// what makes that safe. It is opened FIRST — before the flip, never after —

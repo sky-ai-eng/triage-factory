@@ -216,7 +216,8 @@ func readConversationMemory(cwd string, prior *memoryFingerprint) (string, memor
 // check cannot re-derive: where the tree is, what the file held when this
 // engagement inherited it, and the digest of the content last filed — which is
 // what keeps a run that never touches the file from re-filing the same bytes
-// on every tool call.
+// on every tool call. That digest is an optimization for the mid-run look
+// only; an ending settles unconditionally (see settle).
 //
 // Advisory throughout. A read error, a refused write, a spawner with no memory
 // store: each logs and returns, and the run is untouched. The gates that call
@@ -260,16 +261,41 @@ func (s *Spawner) newMemoryMirror(orgID, conversationID, blueprintRunID, entityI
 	}
 }
 
-// check files the memory file when the agent has written something new, and
-// returns the file's state so a caller that is also an ending can log why
-// there was nothing to file.
+// check is the mid-run look, one per tool call: it files the memory file when
+// the agent has written something new and does nothing when it has not.
 //
 // Nothing is filed for a file that is absent, empty, unreadable, or still
 // byte-for-byte what this engagement inherited — the four answers the
-// completion gate has always refused to ingest — nor for content already
-// filed. A nil mirror answers memoryFileMissing, which is the honest reading:
-// a caller with no tree yet has no file this conversation may claim.
+// completion gate has always refused to ingest — nor for content this mirror
+// has already filed. A nil mirror answers memoryFileMissing, which is the
+// honest reading: a caller with no tree yet has no file this conversation may
+// claim.
 func (m *memoryMirror) check(ctx context.Context) memoryFileState {
+	return m.file(ctx, false)
+}
+
+// settle is the look an ENDING takes — a park, a conclusion, a failure — and
+// it writes whatever the file says even when this mirror filed those exact
+// bytes already.
+//
+// The skip check is in-memory state about what THIS mirror wrote, not a read
+// of the row, so it cannot see a row someone else changed. That someone is
+// real: the memory upsert is keyed by conversation and is not claim-fenced, so
+// a zombie engagement's own ending files into a row its successor now owns.
+// Under the mid-run rule the successor would then never correct it — its
+// digest still matches its own unchanged file — and the conversation would
+// end holding the loser's narrative.
+//
+// Writing unconditionally at the ending is what closes that, and it restores
+// the property the completion gate had before this mirror existed and that is
+// far easier to reason about than any digest rule: at an ending, the row is
+// what the file says. The cost is one redundant upsert per ending.
+func (m *memoryMirror) settle(ctx context.Context) memoryFileState {
+	return m.file(ctx, true)
+}
+
+// file is check and settle's shared body; force is what settle adds.
+func (m *memoryMirror) file(ctx context.Context, force bool) memoryFileState {
 	if m == nil || m.memory == nil {
 		return memoryFileMissing
 	}
@@ -281,7 +307,7 @@ func (m *memoryMirror) check(ctx context.Context) memoryFileState {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.filed != nil && *m.filed == sum {
+	if !force && m.filed != nil && *m.filed == sum {
 		return state
 	}
 

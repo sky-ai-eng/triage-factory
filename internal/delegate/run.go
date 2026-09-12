@@ -184,7 +184,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// had written by the time the run broke is its account of the work,
 		// and a failed conversation is exactly the one a person will want it
 		// from.
-		mirror.check(ctx)
+		mirror.settle(ctx)
 		if !s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, creatorUserID, msg, kind) {
 			return false
 		}
@@ -861,7 +861,7 @@ func (s *Spawner) processCompletion(
 	// nothing, and this gate only knows that no file reached it. The per-state
 	// logging stays: each shape of "no file" points somewhere different when a
 	// run looks wrong afterwards.
-	switch mirror.check(ctx) {
+	switch mirror.settle(ctx) {
 	case memoryFileMissing:
 		delegateLog.Debug("memory file missing at termination (no memory row written)", "conversation", conversationID)
 	case memoryFileEmpty:

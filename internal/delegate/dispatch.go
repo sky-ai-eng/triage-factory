@@ -1030,7 +1030,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// the queued message is flushed on the way out — it stays in the
 	// transcript, and there is no successor claim left to deliver it to.
 	if !sessionTranscriptExists(resumeCwd, conv.SessionID) {
-		mirror.check(stepCtx)
+		mirror.settle(stepCtx)
 		s.failEngagement(conv.ID, errors.New("resume: session transcript did not survive"))
 		flushPendingInput()
 		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", userID,
@@ -1084,12 +1084,12 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 	if rerr != nil {
-		mirror.check(stepCtx)
+		mirror.settle(stepCtx)
 		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", userID, "resume failed: "+rerr.Error(), classifyFailureKind(rerr))
 		return
 	}
 	if outcome.Completion == nil {
-		mirror.check(stepCtx)
+		mirror.settle(stepCtx)
 		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", userID, "resume produced no completion", domain.ConversationFailureNoResult)
 		return
 	}

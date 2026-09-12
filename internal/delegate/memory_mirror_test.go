@@ -97,6 +97,48 @@ func TestMemoryMirror_FilesEachChangeOnceIsAll(t *testing.T) {
 	}
 }
 
+// TestMemoryMirror_SettleReassertsTheFileOverALateWriter is the ending's whole
+// reason for writing unconditionally.
+//
+// The memory upsert is keyed by conversation and is not claim-fenced, so an
+// engagement that lost its claim still files into the row on its way out — a
+// park ahead of the fence check is exactly that. The skip check is in-memory
+// state about what THIS mirror wrote, not a read of the row, so the successor
+// cannot see that its row was changed under it: mid-run it looks at its own
+// unchanged file, matches its own digest, and leaves the loser's narrative
+// standing. Its ending is what puts the row back, and only because settle
+// declines to consult the digest.
+func TestMemoryMirror_SettleReassertsTheFileOverALateWriter(t *testing.T) {
+	s, conversationID, task, cwd, successor, _ := mirrorFixture(t, "mirror-late-writer")
+	ctx := context.Background()
+
+	// The engagement that owns the conversation files its work.
+	writeAgentMemory(t, cwd, "the successor's narrative")
+	successor.check(ctx)
+
+	// A zombie on the same conversation, in the tree it still holds, reaches
+	// its own ending and files over it.
+	zombieCwd := t.TempDir()
+	writeAgentMemory(t, zombieCwd, "the zombie's narrative")
+	runMirror(s, task, conversationID, "bpr-"+conversationID, zombieCwd, nil).settle(ctx)
+	if got := memoryContentFor(t, s, task.EntityID, conversationID); got != "the zombie's narrative" {
+		t.Fatalf("agent_content = %q, want the zombie's — the fixture is not reproducing the clobber", got)
+	}
+
+	// Mid-run the successor cannot tell: its file has not changed, so neither
+	// has its digest. This is the hazard, asserted rather than described.
+	successor.check(ctx)
+	if got := memoryContentFor(t, s, task.EntityID, conversationID); got != "the zombie's narrative" {
+		t.Errorf("agent_content = %q; a mid-run check is not expected to notice a row it did not write", got)
+	}
+
+	// Its ending is. At an ending the row is what the file says, full stop.
+	successor.settle(ctx)
+	if got := memoryContentFor(t, s, task.EntityID, conversationID); got != "the successor's narrative" {
+		t.Errorf("agent_content = %q, want the successor's — settle must re-assert its file", got)
+	}
+}
+
 // TestMemoryMirror_RefusesThePredecessorsFile is the mirror's half of the rule
 // the completion gate has always enforced: a blueprint's steps share a tree and
 // all write the same filename, so a step that has written nothing must not have
