@@ -921,6 +921,43 @@ func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, co
 	return setConversationWorktreePath(ctx, s.admin, orgID, conversationID, path)
 }
 
+// SetSystemBlockForClaimSystem stamps the system append this engagement
+// launched the SDK harness with, refused once a successor holds the
+// conversation. Fenced-only: nothing without a claim composes an append.
+func (s *conversationStore) SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (*domain.Conversation, error) {
+	var result *domain.Conversation
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		r, err := writeConversationReturning(ctx, q, `
+			UPDATE conversations SET system_block = $1 WHERE org_id = $2 AND id = $3
+			RETURNING *
+		`, block, orgID, conversationID)
+		if err != nil {
+			return err
+		}
+		result = r
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// SystemBlockSystem reads that stamp back on the resume path — the admin pool,
+// like every other engagement-facing read: the dispatcher holds no JWT claims.
+func (s *conversationStore) SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error) {
+	var block string
+	err := s.admin.QueryRowContext(ctx,
+		`SELECT system_block FROM conversations WHERE org_id = $1 AND id = $2`, orgID, conversationID).Scan(&block)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", db.ErrNoSuchConversation
+	}
+	return block, err
+}
+
 // SetWorktreePathForClaimSystem is SetWorktreePathSystem behind the fence — the
 // workspace stamp an engagement writes once its setup or rehydrate resolves a
 // path, refused once a successor holds the conversation.

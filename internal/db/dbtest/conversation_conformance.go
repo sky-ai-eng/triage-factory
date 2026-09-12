@@ -2216,6 +2216,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		refuse("SetSessionForClaimSystem", err)
 		_, err = store.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, "/tmp/zombie")
 		refuse("SetWorktreePathForClaimSystem", err)
+		_, err = store.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, "<run_context>zombie</run_context>")
+		refuse("SetSystemBlockForClaimSystem", err)
 		_, err = store.InsertMessageForClaimSystem(ctx, orgID, claimID, &domain.Message{
 			ConversationID: conversationID, Role: "assistant", Content: "zombie", Delivered: &pending,
 		})
@@ -2547,6 +2549,57 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if got, _ = store.Get(ctx, orgID, conversationID); got == nil || got.WorktreePath != "/tmp/triagefactory-runs/rebuilt" {
 			t.Errorf("worktree_path after a rehydrate = %v, want /tmp/triagefactory-runs/rebuilt", got)
+		}
+	})
+
+	// The fourth resume coordinate, which unlike the other three is read back
+	// through a door of its own rather than off the conversation projection —
+	// so the round trip is the contract, and both halves of it are here.
+	t.Run("SystemBlockRoundTrips_AndTheDefaultIsEmptyRatherThanNull", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+
+		// Never written: the column answers with the empty string, not NULL and
+		// not an error. This is the pre-launch read and the read of a
+		// conversation whose block really was empty, and the resume cannot tell
+		// them apart because it does not need to — both send the framework
+		// blocks alone.
+		if got, err := store.SystemBlockSystem(ctx, orgID, conversationID); err != nil || got != "" {
+			t.Fatalf("SystemBlockSystem before any launch = (%q, %v), want (\"\", nil)", got, err)
+		}
+
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-block", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, conversationID)[0].ID
+
+		// Multi-line text with the markup a real block carries, so a backend
+		// that mangles or truncates it fails here rather than in a prompt.
+		const block = "<run_context>\nRun root: /work\n</run_context>\n\n<tools>\ngh pr view\n</tools>\n\nreview the pull request"
+		written, err := store.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, block)
+		if err != nil {
+			t.Fatalf("SetSystemBlockForClaimSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetSystemBlockForClaimSystem", *written, func() (*domain.Conversation, error) {
+			return store.Get(ctx, orgID, conversationID)
+		})
+		if got, err := store.SystemBlockSystem(ctx, orgID, conversationID); err != nil || got != block {
+			t.Fatalf("SystemBlockSystem = (%q, %v), want the block back verbatim", got, err)
+		}
+
+		// A crash re-claim composes the append again and overwrites: the column
+		// is what the harness was LAST handed, which is what its next resume
+		// has to replay.
+		if _, err := store.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, "recomposed"); err != nil {
+			t.Fatalf("re-stamp the system block: %v", err)
+		}
+		if got, _ := store.SystemBlockSystem(ctx, orgID, conversationID); got != "recomposed" {
+			t.Errorf("system block after a re-launch = %q, want recomposed", got)
+		}
+
+		if _, err := store.SystemBlockSystem(ctx, orgID, "00000000-0000-0000-0000-0000000000ff"); !errors.Is(err, db.ErrNoSuchConversation) {
+			t.Errorf("SystemBlockSystem for an unknown id = %v, want ErrNoSuchConversation", err)
 		}
 	})
 
