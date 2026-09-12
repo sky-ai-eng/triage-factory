@@ -9,14 +9,16 @@ package domain
 //   - a finalized pending review (state=pending AND the ready sentinel
 //     ReviewEvent is set) — FirstReadyReview's predicate.
 //
-// These helpers share those exact predicates so every consumer (board column,
-// run projection, terminal task-close gate) agrees on what "unresolved" means.
+// These helpers share those exact predicates so every consumer agrees on what
+// "unresolved" means: the attention filter (and its SQL twin in both dialects),
+// the conversation projection's pending-artifact fields, and the terminal
+// task-close gate.
 
 // HasUnresolvedArtifacts reports whether arts contains at least one artifact
 // still awaiting human resolution (a draft PR or a ready pending review). The
-// signal is derived, never stored: a task surfaces in the approval column
-// whenever its artifact set has ≥1 unresolved item, regardless of whether its
-// conversation is live or terminal.
+// signal is derived, never stored: ≥1 unresolved item is what keeps a task
+// open and shows it as owing a human something, regardless of whether its
+// conversation is live or terminal. It moves no board column.
 func HasUnresolvedArtifacts(arts []Artifact) bool {
 	return FirstDraftPullRequest(arts) != nil || FirstReadyReview(arts) != nil
 }

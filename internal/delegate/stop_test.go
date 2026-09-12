@@ -457,7 +457,7 @@ func TestStop_MidBlueprintStep_ResumesAndIsDriven(t *testing.T) {
 func TestParkConversationOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "cancel-park")
+	s, database, conversationID, _ := setupAdvanceFixture(t, "cancel-park")
 	blobs, err := storage.New()
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
@@ -472,7 +472,6 @@ func TestParkConversationOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	if fenced := s.parkConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: conversationID,
-		taskID:         taskID,
 		namespace:      namespace,
 		claudeCwd:      wtPath,
 		triggerType:    "event",

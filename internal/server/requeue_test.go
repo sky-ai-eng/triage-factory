@@ -19,8 +19,7 @@ import (
 
 // pendingApprovalFixture installs the full FK chain for a task whose delegated
 // conversation has COMPLETED (terminal) while leaving an unresolved review
-// artifact in the approval column — a finalized pending review plus the agent-
-// side memory row. Returns (taskID, conversationID, reviewID). Centralized here
+// artifact behind — a finalized pending review plus the agent-side memory row. Returns (taskID, conversationID, reviewID). Centralized here
 // so each teardown test exercises the shape the task-level resolve-all gesture
 // is meant to clean up: agent finished, wrote memory, prepared a review, the
 // human then dragged the card to Done / Queue / dismissed it instead of

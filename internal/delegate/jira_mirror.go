@@ -1,20 +1,21 @@
-// TFAC-300: board → Jira lifecycle mirror (the system/bot lane).
+// The board → Jira lifecycle mirror (the system/bot lane).
 //
 // When a delegated agent works a Jira-backed task the TF board moves the card
-// through in_progress → in_review → done, but none of that reaches the real
-// Jira ticket — a watcher on Jira (not TF) sees the ticket keep its original
-// assignee and status the whole time. This file mirrors the board moves back
-// onto the ticket under the org's system/bot credential (jira.Resolver.ForSystem,
-// TFAC-34), so the bot-side lifecycle is visible in Jira exactly as the
-// user-claim path already mirrors it for human-claimed tasks (the claim guard
-// in server.handleTaskClaim).
+// into In Progress and, on a clean finish, to Done, but none of that reaches
+// the real Jira ticket — a watcher on Jira (not TF) sees the ticket keep its
+// original assignee and status the whole time. This file mirrors the board
+// moves back onto the ticket under the org's system/bot credential
+// (jira.Resolver.ForSystem), so the bot-side lifecycle is visible in Jira
+// exactly as the user-claim path already mirrors it for human-claimed tasks
+// (the claim guard in server.handleTaskClaim).
 //
 // Two chokepoints drive it, and both move the ticket into the InProgress bucket
 // — no board/task hook writes Done anymore (runJiraMirror still has a done mode,
 // but it is reserved for the forthcoming merge-driven Done mirror, not these):
-//   - recomputeTaskBoardColumn → mirrorJiraInProgress (board in_progress /
-//     in_review, which both collapse to InProgress — there is no in-review
-//     canonical, and a bot awaiting input is still "in progress" to a watcher).
+//   - placeTaskInProgress → mirrorJiraInProgress: the delegation was minted and
+//     the board card moved to In Progress, so the bot has the ticket. One
+//     delegation makes at most one mirror pass here, because the board write it
+//     rides is a single forward placement rather than a recomputed column.
 //   - terminateBlueprint's completed branch → mirrorJiraInProgressForTask: a
 //     finished run means the agent opened its PR and the work is awaiting human
 //     review + merge, which is still "in progress" to a watcher, NOT done. A
@@ -23,7 +24,7 @@
 //     ticket-done: that conflated the task lifecycle (TF's board "done" column =
 //     work submitted) with the entity lifecycle (the change shipped).
 //
-// Both points only ever see bot-owned tasks: recomputeTaskBoardColumn
+// Both points only ever see bot-owned tasks: placeTaskInProgress
 // early-returns unless claimed_by_agent_id is set, and the completion path
 // re-checks it. So every write here is bot-attributed by construction — there is
 // no "bot or human?" branch at the write site. A user takeover flips the claim
@@ -94,10 +95,9 @@ func (s *Spawner) jiraMirrorRule(task *domain.Task) *domain.JiraProjectStatusRul
 
 // mirrorJiraInProgress mirrors a bot-owned task's board move onto its Jira
 // ticket: assign the service account and transition into the InProgress bucket,
-// under the org's system/bot credential. Both board in_progress and in_review
-// land here. Detached so Jira latency never blocks the board WS update; a no-op
-// for non-Jira tasks or when no rule resolves (skip + log, like the user path's
-// "no in_progress rule configured" branch).
+// under the org's system/bot credential. Detached so Jira latency never blocks
+// the board WS update; a no-op for non-Jira tasks or when no rule resolves
+// (skip + log, like the user path's "no in_progress rule configured" branch).
 func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 	rule := s.jiraMirrorRule(task)
 	if rule == nil {
@@ -129,9 +129,9 @@ func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 // write belongs to the user's own task-lifecycle writes, so a no-longer-bot-owned task
 // is skipped. Called from terminateBlueprint's completed branch; a
 // failed/aborted/cancelled run never reaches it. The in-progress mirror is
-// idempotent, so in the common case (the dispatch-time mirror already moved the
+// idempotent, so in the common case (the mint-time mirror already moved the
 // ticket) this is a single GetClaimState read and no write — and it self-heals a
-// ticket left in To Do by a transient dispatch-time mirror failure.
+// ticket left in To Do by a transient mint-time mirror failure.
 func (s *Spawner) mirrorJiraInProgressForTask(ctx context.Context, orgID, taskID string) {
 	if s.tasks == nil {
 		return
@@ -225,8 +225,8 @@ func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.Jira
 	// here is "unknown" — skip rather than risk transitioning a ticket a
 	// concurrent done mirror already moved to Done back to In Progress. Blindly
 	// proceeding (state == nil → assign + transition to In Progress) is exactly
-	// the backward move the per-issue lock exists to prevent. Self-heals: every
-	// board column transition re-fires the mirror, and the failed read logs.
+	// the backward move the per-issue lock exists to prevent. The failed read
+	// logs, and a clean completion re-asserts the bucket later.
 	if state == nil {
 		jiraLog.Warn("mirror: could not read claim state; skipping in-progress mirror", "issue", issueKey)
 		return
@@ -242,7 +242,7 @@ func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.Jira
 			// Skip the transition too: assign + transition move together (same as
 			// the user-path claim guard), so a failed assign leaves the ticket
 			// untouched — To Do + unassigned — rather than "In Progress but
-			// unassigned". Self-heals on the next board transition's mirror pass.
+			// unassigned". The completion mirror re-asserts the bucket later.
 			jiraLog.Warn("mirror: assign to service account failed", "issue", issueKey, "error", err)
 			return
 		}

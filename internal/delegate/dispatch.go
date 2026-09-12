@@ -571,7 +571,6 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		s.markConversationOpen(stepCtx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conv.ID,
-			taskID:         task.ID,
 			triggerType:    conv.TriggerType,
 			creatorUserID:  conv.CreatorUserID,
 			claimID:        conv.ClaimID,
@@ -646,12 +645,6 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	if sidecar == nil {
 		gh = s.resolveGHClient(ctx, orgID, owner, repo)
 	}
-
-	// The blueprint_run is live on this step → place the task in_progress before
-	// any (possibly slow) workspace setup, so the board reflects the work
-	// immediately. The aggregate bounces in_progress ↔ in_review as steps
-	// park/resume.
-	s.recomputeTaskBoardColumn(orgID, task.ID)
 
 	// Build (step 0, first claim) or rehydrate (later steps / crash re-claim) the
 	// shared workspace. A transient setup failure requeues; a persistent one
@@ -913,7 +906,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		// No workspace rehydrated yet, so markConversationOpen (the no-snapshot park)
 		// rather than parkConversationOpen: there is nothing on disk to capture.
 		s.endEngagementIfStopped(conv.ID, ctx, stepCtx)
-		disposed = s.markConversationOpen(ctx, resumeParkContext(orgID, conv, task, userID))
+		disposed = s.markConversationOpen(ctx, resumeParkContext(orgID, conv, userID))
 		return
 	}
 
@@ -959,7 +952,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 			// A stop, not a failure: cause is whatever the bring-up was doing
 			// when the cancel landed, which is not why this engagement ended.
 			s.endEngagementIfStopped(conv.ID, ctx, stepCtx)
-			disposed = s.markConversationOpen(ctx, resumeParkContext(orgID, conv, task, userID))
+			disposed = s.markConversationOpen(ctx, resumeParkContext(orgID, conv, userID))
 			return
 		}
 		s.failEngagement(conv.ID, cause)
@@ -1072,7 +1065,6 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		ExtraAllowedTools: extraTools,
 		Namespace:         namespace,
 		TeamID:            conv.TeamID,
-		TaskID:            task.ID,
 		sidecar:           sidecar,
 		localGit:          localGit,
 		claimID:           conv.ClaimID,
@@ -1082,7 +1074,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		// The agent worked in the rehydrated tree before the kill, so this
 		// park snapshots it — the whole point of a stop being a park is that
 		// the work survives the gesture.
-		park := resumeParkContext(orgID, conv, task, userID)
+		park := resumeParkContext(orgID, conv, userID)
 		park.namespace, park.claudeCwd, park.mirror = namespace, resumeCwd, mirror
 		if outcome != nil {
 			park.costUSD = outcome.CostUSD
@@ -1128,11 +1120,10 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 //
 // The caller fills namespace/claudeCwd when there is a workspace worth
 // snapshotting — see the two call sites, which differ on exactly that.
-func resumeParkContext(orgID string, conv *domain.Conversation, task *domain.Task, userID string) liveParkContext {
+func resumeParkContext(orgID string, conv *domain.Conversation, userID string) liveParkContext {
 	return liveParkContext{
 		orgID:          orgID,
 		conversationID: conv.ID,
-		taskID:         task.ID,
 		triggerType:    "manual",
 		creatorUserID:  userID,
 		claimID:        conv.ClaimID,
@@ -1146,8 +1137,9 @@ func resumeParkContext(orgID string, conv *domain.Conversation, task *domain.Tas
 // The post-step switch:
 // continue→enqueue-next, finish→complete+close, abort→leave-open,
 // open→leave parked — now driven by the DB rather than a
-// goroutine stack. It calls recomputeTaskBoardColumn on every transition so the
-// board stays live under the queue model.
+// goroutine stack. None of those transitions touches the task's board column:
+// the delegation placed it in_progress at mint and it stays there until a
+// terminal closes it.
 func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *domain.BlueprintRun, stepConversation domain.Conversation, cfg runConfig, startTime time.Time) {
 	// The reactor's writes are detached on purpose (see dispatchClaimedConversation's
 	// context split): the agent has run, so the blueprint MUST be advanced or
@@ -1200,14 +1192,12 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 	}
 
 	// Parked mid-step with no cancel behind it: leave the blueprint running, the
-	// worktree on disk, and the snapshot in the blob store for the resume path.
-	// The aggregate column lands the task in_review. Only `open` parks now: a
-	// step that queued a draft PR / pending review completes normally and the
-	// orchestrator advances — the artifact is a sidecar, surfaced via the
-	// derived approval column below.
+	// worktree on disk, the snapshot in the blob store for the resume path —
+	// and the task's column where it is. Only `open` parks now: a step that
+	// queued a draft PR / pending review completes normally and the
+	// orchestrator advances, the artifact riding along as a sidecar.
 	if stepConversation.Status == "open" {
 		dispatchLog.Info("blueprint_run step paused; blueprint remains running", "blueprint_run", br.ID, "step", stepIdx, "status", stepConversation.Status)
-		s.recomputeTaskBoardColumn(orgID, br.TaskID)
 		return
 	}
 
@@ -1299,7 +1289,6 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		// The shared worktree stays on disk (cfg.isBlueprintStep kept runAgent
 		// from cleaning it), so the next claim warm-reuses it. Nudge the
 		// dispatcher to pick the step up now.
-		s.recomputeTaskBoardColumn(orgID, br.TaskID)
 		s.wakeDispatcher()
 	case blueprintStepFinish:
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
@@ -1999,7 +1988,6 @@ func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reaso
 		return
 	}
 	s.broadcastConversationUpdate(orgID, conv.ID, "open")
-	s.recomputeTaskBoardColumn(orgID, conv.TaskID)
 	toast.Error(s.wsHub, orgID, toastMsg)
 }
 

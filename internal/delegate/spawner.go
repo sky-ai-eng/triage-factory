@@ -1198,10 +1198,9 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, conversationID, claimI
 		display = "running"
 	}
 	s.broadcastConversationUpdate(orgID, conversationID, display)
-	// Board placement is not mirrored per-run from setup progress here:
-	// the blueprint orchestrator drives the aggregate column via
-	// recomputeTaskBoardColumn at its transition points (blueprint start, step
-	// start, park, resume). updatePhase stays a pure claim-phase + WS helper.
+	// Setup progress moves no board column: the task was placed in_progress
+	// when its delegation was minted and stays there. updatePhase is a pure
+	// claim-phase + WS helper.
 	return false
 }
 
@@ -1242,31 +1241,25 @@ func (s *Spawner) setWorktreePath(ctx context.Context, orgID, conversationID, cl
 	return err
 }
 
-// recomputeTaskBoardColumn is the blueprint-era board placement rule: a task's
-// live column (tasks.status) is a recomputed aggregate over its active
-// blueprint_run's step runs, never a mirror of one run. For a bot-claimed task
-// with an active blueprint_run it sets in_review ("needs 👀") when the blueprint
-// has an unresolved artifact (a draft PR / ready review — the derived approval
-// signal, never a stored status) or any step
-// run is parked open, else in_progress, writing tasks.status only when it
-// changes and pushing a WS nudge so peer boards follow.
+// placeTaskInProgress lands a delegated task in the In Progress column, and it
+// is the whole of the board placement a delegation does: one forward write at
+// the moment the blueprint run is minted, never a recomputation afterwards.
+// Nothing in the run's later life moves the card again — not a park, a step
+// advance, a completion that left a draft PR behind, or a wake. What still
+// needs a human rides the card frame and the attention order rather than the
+// lane the card sits in.
 //
-// Terminal columns are NOT owned here — terminateBlueprint closes the task
-// (done) on a clean finish and leaves it open for attention on abort/fail. This
-// helper deliberately no-ops when there is no active blueprint_run.
+// Three guards, each of them about not writing over a decision that isn't this
+// delegation's to make: only a bot-claimed task is placed (a user takeover
+// flips the claim to the user, who owns the lifecycle from then on), a
+// done/dismissed task is never reopened, and a task already in_progress is
+// left alone — which also spares its Jira ticket a redundant mirror pass.
 //
-// The rule has no step-count gate: a 1-step and a multi-step blueprint move
-// identically, bouncing in_progress ↔ in_review across however many
-// human-interaction points the blueprint has, and the aggregate-over-runs shape
-// is parallel-ready by construction (more concurrent runs just feed it). A user
-// claim is column-neutral: it flips the claim to the user, so the bot-claim guard
-// below short-circuits and the column doesn't move.
-//
-// All failures are logged-not-fatal — the run state is already persisted and
-// broadcast; a failed board write leaves a recoverable state the next transition
-// reconciles.
-func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
-	if s.tasks == nil || s.blueprints == nil {
+// All failures are logged-not-fatal. The blueprint_run is committed and the
+// step is enqueued by the time this runs, so a failed board write costs a card
+// in the wrong lane, which a human can fix, rather than the run.
+func (s *Spawner) placeTaskInProgress(orgID, taskID string) {
+	if s.tasks == nil {
 		return
 	}
 	ctx := context.Background()
@@ -1274,99 +1267,26 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 	if err != nil || task == nil {
 		return
 	}
-	// Only place bot-claimed tasks. A user takeover flips the claim to the user,
-	// who owns the lifecycle from then on — leave their card alone.
 	if task.ClaimedByAgentID == "" {
 		return
 	}
-	// A closed/dismissed task is terminal — a late transition must not reopen it.
 	if task.Status == "done" || task.Status == "dismissed" {
 		return
 	}
-	// The active blueprint_run is the unit the board tracks. None → no live work
-	// to place; the terminal column belongs to terminateBlueprint, so leave the
-	// task as-is. When the task was re-delegated, the latest running blueprint_run
-	// drives the column, so a stale older run's transitions resolve against the
-	// newer run's state rather than clobbering it.
-	br, err := s.blueprints.ActiveRunForTaskSystem(ctx, orgID, taskID)
-	if err != nil || br == nil {
+	if task.Status == "in_progress" {
 		return
 	}
-	convs, err := s.blueprints.ConversationsForBlueprintSystem(ctx, orgID, br.ID)
-	if err != nil {
+	if _, err := s.tasks.SetStatusSystem(ctx, orgID, taskID, "in_progress"); err != nil {
+		delegateLog.Warn("place task in_progress failed", "task", taskID, "error", err)
 		return
 	}
-	target := "in_progress"
-	for _, r := range convs {
-		if r.Status == "open" {
-			target = "in_review"
-			break
-		}
-	}
-	// An unresolved artifact (draft PR / ready review) is the derived approval
-	// signal, and it is derived rather than stored: a step that completed
-	// leaving one keeps the task in the approval column even though no run is open.
-	// A parked-open run and an unresolved artifact both map to the same column
-	// (in_review), so the two checks are unordered as far as the result goes; the
-	// loop above runs first only as an optimization — the artifact reads are
-	// skipped once a parked-open run has already forced in_review (and reuse the
-	// convs slice already loaded above rather than re-fetching).
-	if target != "in_review" && s.conversationsHaveUnresolvedArtifacts(ctx, orgID, convs) {
-		target = "in_review"
-	}
-	// Idempotent: skip the write + WS broadcast when already at the target.
-	if task.Status == target {
-		return
-	}
-	if _, err := s.tasks.SetStatusSystem(ctx, orgID, taskID, target); err != nil {
-		delegateLog.Warn("set board column for task failed", "column", target, "task", taskID, "error", err)
-		return
-	}
-	s.broadcastTaskUpdate(orgID, taskID, target)
+	s.broadcastTaskUpdate(orgID, taskID, "in_progress")
 
-	// TFAC-300: mirror the board move back onto the Jira ticket under the org's
-	// system/bot credential. Past the idempotency guard, so this fires only on a
-	// real column change — and both in_progress and in_review collapse to the
-	// same InProgress bucket, so bouncing across human-interaction points makes
-	// at most one real Jira move (the rest no-op in the mirror's own membership
-	// skip). task is bot-claimed here (guarded above), so the write is always
-	// bot-attributed by construction.
+	// Mirror the move onto the task's Jira ticket under the org's system/bot
+	// credential, so a watcher on Jira sees the bot pick the ticket up. Past
+	// the guards above, so it fires exactly as often as the board write does;
+	// task is bot-claimed here, so the write is bot-attributed by construction.
 	s.mirrorJiraInProgress(orgID, task)
-}
-
-// placeTaskInApprovalColumn lands a task in the derived approval column
-// (in_review) and leaves it open — the terminal-time counterpart to
-// recomputeTaskBoardColumn for a blueprint that COMPLETED with an unresolved
-// artifact. recomputeTaskBoardColumn no-ops once the blueprint is
-// terminal (no active run), so terminateBlueprint calls this instead to surface
-// the still-open task for approval rather than closing it. Same ownership guards
-// as recomputeTaskBoardColumn (bot-claimed, non-terminal, idempotent); the Jira
-// in-progress re-assert is left to the caller (terminateBlueprint already mirrors
-// it once for the completed terminal) so this never double-mirrors.
-func (s *Spawner) placeTaskInApprovalColumn(ctx context.Context, orgID, taskID string) {
-	if s.tasks == nil {
-		return
-	}
-	task, err := s.tasks.GetSystem(ctx, orgID, taskID)
-	if err != nil || task == nil {
-		return
-	}
-	// Only place bot-claimed tasks — a user takeover owns the lifecycle.
-	if task.ClaimedByAgentID == "" {
-		return
-	}
-	// A closed/dismissed task is terminal — never reopen it.
-	if task.Status == "done" || task.Status == "dismissed" {
-		return
-	}
-	if task.Status == "in_review" {
-		return // idempotent
-	}
-	if _, err := s.tasks.SetStatusSystem(ctx, orgID, taskID, "in_review"); err != nil {
-		delegateLog.Warn("place task in approval column failed", "task", taskID, "error", err)
-		return
-	}
-	s.broadcastTaskUpdate(orgID, taskID, "in_review")
 }
 
 // broadcastTaskUpdate emits a task_updated WS event so the

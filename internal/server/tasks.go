@@ -1180,8 +1180,9 @@ func (s *Server) patchWake(w http.ResponseWriter, r *http.Request, orgID, userID
 
 // patchStage moves a task between the user's own progress markers — "I'm
 // working on this now" and "I've submitted this for review". Both require the
-// caller to hold the user claim: a bot-claimed task advances through the
-// spawner, and an unclaimed one has nobody whose progress this would be.
+// caller to hold the user claim: a bot-claimed task is placed in_progress once
+// by the spawner when its delegation is minted and is not a person's to stage,
+// and an unclaimed one has nobody whose progress this would be.
 func (s *Server) patchStage(w http.ResponseWriter, r *http.Request, orgID, userID, id string, task *domain.Task, status string) bool {
 	if task.ClaimedByUserID != userID {
 		forbidden(w, "only the user holding this task's claim can move it between in_progress and in_review")

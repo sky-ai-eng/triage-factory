@@ -211,13 +211,12 @@ func conversationOpened(rows []domain.Message) bool {
 // would destroy — the question a disposition asks, which is not quite the
 // question conversationOpened answers.
 //
-// Two arms, because only one runtime mints an opening. A task-context row is
-// the native answer and will be the SDK's; an assistant row is evidence on
-// either that the model has taken a turn, and it is what an SDK transcript
-// offers in the meantime (its mirror records assistant lines and nothing
-// stands in for the opening). Asking for the opening alone would read a driven
-// SDK conversation as fresh and fail its blueprint over a runtime that would
-// not restart.
+// Two arms, and both carry weight. A task-context row is the opening every
+// runtime mints. An assistant row is evidence the model has taken a turn, and
+// it is all a conversation opened by an earlier build has to offer — those
+// transcripts begin at the agent's first reply, so asking for the opening
+// alone would read one as fresh and fail its blueprint over a runtime that
+// would not restart.
 //
 // What neither arm admits is the class both gates exist to exclude: rows the
 // control plane wrote to a conversation that never ran. A queued follow-up and
@@ -233,4 +232,27 @@ func conversationHasWork(rows []domain.Message) bool {
 		}
 	}
 	return false
+}
+
+// openingRowsOf returns the rows a conversation was opened with — the injected
+// memories and the task context — picked out of a transcript that may hold
+// anything else besides.
+//
+// It exists for the one launch that does not mint: an engagement re-claiming a
+// conversation whose opening is already on the transcript still has to SEND
+// that opening, because the runtime it drives has no memory of the last
+// attempt. Selecting by subtype rather than by position is what makes that
+// true of a transcript the control plane wrote to in between.
+//
+// Order is left to the assembler, which sorts by COALESCE(seq, id) — the same
+// key the hoist above stamps into.
+func openingRowsOf(rows []domain.Message) []domain.Message {
+	out := make([]domain.Message, 0, maxInjectedMemories+1)
+	for _, r := range rows {
+		switch r.Subtype {
+		case domain.MessageSubtypeInjectionMemory, domain.MessageSubtypeInjectionTaskContext:
+			out = append(out, r)
+		}
+	}
+	return out
 }

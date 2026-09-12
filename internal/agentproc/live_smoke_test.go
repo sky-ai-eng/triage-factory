@@ -2,6 +2,8 @@ package agentproc
 
 import (
 	"context"
+	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -546,5 +548,186 @@ func findFirstAssistant(msgs []*domain.Message) *domain.Message {
 			return m
 		}
 	}
+	return nil
+}
+
+// TestSDK_LiveSmoke_OpeningTurnIsTheAssembledRows is the acceptance for the
+// opening a delegated SDK conversation actually sends: the rows a launch mints
+// — the task-memory envelope around one prior memory, then the task context —
+// assembled into one block-content user message.
+//
+// Four things it proves that a unit test cannot. The blocks survive Go, the
+// wrapper, the SDK and the API as ONE turn (one assistant reply, one result,
+// not four turns or a silently joined string). The session file the SDK writes
+// records them as a block array, which is what a `--resume` replays. The resume
+// really does replay them. And the model reads the envelope as the framing of
+// what follows rather than as prose, which is the whole reason the boundaries
+// are preserved rather than joined.
+//
+// Gated like TestSDK_LiveSmoke.
+func TestSDK_LiveSmoke_OpeningTurnIsTheAssembledRows(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	// The shape RowsToMessages produces over one memory row and a task-context
+	// row. Spelled literally rather than assembled here: agentproc sits below
+	// the packages that own rows and assembly, and what this test is for is the
+	// wire, not the composition.
+	const taskContext = "<task_context>\nPull request owner/repo#7 — \"Fix the flaky poller test\"\n</task_context>"
+	envelopeOpen := domain.MemoryEnvelopeOpen(1)
+	blocks := []ContentBlock{
+		{Type: "text", Text: envelopeOpen},
+		{Type: "text", Text: "A prior conversation rewrote the poller's fixture and left the assertion alone."},
+		{Type: "text", Text: domain.MemoryEnvelopeClose},
+		{Type: "text", Text: taskContext + "\n\nBefore doing anything else: reply with the first line of the first content block you were given, verbatim, and nothing else. Use no tools."},
+	}
+
+	cwd := t.TempDir()
+	sink := newLiveSink()
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd:           cwd,
+		OpeningBlocks: blocks,
+		Model:         "haiku",
+		TraceID:       "live-opening-rows",
+	}, sink, denyAllPermissions)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+
+	reply := sink.waitAssistant(t, 90*time.Second)
+	t.Logf("opening turn reply: %q", reply.Content)
+	if !strings.Contains(reply.Content, `<system-note kind="task-memory">`) {
+		t.Errorf("assistant reply = %q; the model did not quote the envelope's first line, so the opening did not arrive as the framing of what followed", reply.Content)
+	}
+
+	sid := lr.SessionID()
+	if sid == "" {
+		t.Fatal("no session id; nothing to read the transcript from")
+	}
+	if err := lr.Close(); err != nil {
+		t.Logf("close returned (non-fatal): %v", err)
+	}
+	<-lr.Done()
+
+	// Exactly one turn: one assistant message and one result for one send.
+	if got := countAssistants(sink.snapshot()); got != 1 {
+		t.Errorf("assistant messages = %d, want 1 — the opening must be one turn, not one per block", got)
+	}
+	if lr.Result() == nil {
+		t.Error("expected a terminal Result for the opening turn")
+	}
+
+	// The session file is what --resume replays, so the block array has to be
+	// in it: a joined string here would be a resume that reads a different
+	// opening than the one that was sent.
+	entry := firstUserEntry(t, sid)
+	content, ok := entry["content"].([]any)
+	if !ok {
+		t.Fatalf("the session's first user entry carries %T content, want a block array: %#v", entry["content"], entry)
+	}
+	if len(content) != len(blocks) {
+		t.Fatalf("the session records %d content blocks, want %d: %#v", len(content), len(blocks), content)
+	}
+	for i, raw := range content {
+		b, _ := raw.(map[string]any)
+		if b["type"] != "text" || b["text"] != blocks[i].Text {
+			t.Errorf("session block %d = %#v, want %q", i, raw, blocks[i].Text)
+		}
+	}
+
+	// --resume replays it: a fresh process on the same session is still
+	// answering about blocks it never sent.
+	resumed := newLiveSink()
+	rlr, err := RunInteractive(ctx, RunOptions{
+		Cwd:       cwd,
+		SessionID: sid,
+		Message:   "Quote the first line of the very first content block of this conversation, verbatim, and nothing else. Use no tools.",
+		Model:     "haiku",
+		TraceID:   "live-opening-rows-resume",
+	}, resumed, denyAllPermissions)
+	if err != nil {
+		t.Fatalf("RunInteractive (resume) failed: %v", err)
+	}
+	defer func() { _ = rlr.Close() }()
+
+	replayed := resumed.waitAssistant(t, 90*time.Second)
+	t.Logf("resumed turn reply: %q", replayed.Content)
+	if !strings.Contains(replayed.Content, `<system-note kind="task-memory">`) {
+		t.Errorf("resumed reply = %q; --resume did not replay the opening blocks", replayed.Content)
+	}
+}
+
+// snapshot copies the sink's messages under its lock, for the assertions that
+// run after the process is gone.
+func (s *liveSink) snapshot() []*domain.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*domain.Message(nil), s.messages...)
+}
+
+func countAssistants(msgs []*domain.Message) int {
+	n := 0
+	for _, m := range msgs {
+		if m.Role == "assistant" && m.Content != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// firstUserEntry decodes the first `type: "user"` line of the session
+// transcript the SDK wrote for sessionID.
+//
+// Found by walking ~/.claude/projects for the session's own file rather than by
+// re-deriving the cwd-encoded directory name: that encoding belongs to
+// internal/worktree, which imports this package, so the test locates the file
+// by the one name it already knows.
+func firstUserEntry(t *testing.T, sessionID string) map[string]any {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("resolve home: %v", err)
+	}
+	var found string
+	if err := filepath.WalkDir(filepath.Join(home, ".claude", "projects"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || found != "" {
+			return nil //nolint:nilerr // a missing or unreadable subtree just isn't the session
+		}
+		if d.Name() == sessionID+".jsonl" {
+			found = path
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk the session directory: %v", err)
+	}
+	if found == "" {
+		t.Fatalf("no session transcript named %s.jsonl under ~/.claude/projects", sessionID)
+	}
+	raw, err := os.ReadFile(found) //nolint:gosec // a path this test just found by name
+	if err != nil {
+		t.Fatalf("read the session transcript: %v", err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var entry map[string]any
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		if entry["type"] != "user" {
+			continue
+		}
+		msg, ok := entry["message"].(map[string]any)
+		if !ok {
+			continue
+		}
+		return msg
+	}
+	t.Fatalf("no user entry in the session transcript at %s", found)
 	return nil
 }

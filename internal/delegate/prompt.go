@@ -162,29 +162,29 @@ func machinistSpec() agentprompt.Spec {
 	}
 }
 
-// buildPrompt composes what the SDK runtime says first: the task context, the
-// mission, this run's own facts, its verb reference, then the framework prompt —
-// whose completion contract is last, so it is the final thing the model reads.
+// sdkSystemPrompt is the whole of what the SDK harness is appended: the
+// framework blocks, then this conversation's own block.
 //
-// Each section is composed on its own. BuildTaskContext is built entirely from
-// external data — PR titles, ticket fields, chat messages — and is the one
-// section resolveCLIPath never runs over; joining first and rewriting after
-// would put a rewrite over attacker-influenced text for no gain.
+// The SDK takes one appended string where the native engine takes two system
+// blocks, so the parity between the runtimes is the bytes rather than the
+// shape — block 1 is agentprompt.Build over the spec every SDK run shares,
+// block 2 is composeConversationSystemBlock over this run's facts, and a
+// native and an SDK conversation on one task are told the same things in the
+// same order. What the harness does with them is its own: the append lands
+// inside Claude Code's third system block, which is a divergence in framing
+// and not in content.
 //
-// metadataJSON is the primary event's metadata blob ("" is fine — the context
-// block just carries no event fields). skeleton is the rendered PR history
-// block, empty for a task with no pull request behind it. artifacts is what the
-// task's earlier conversations already produced. knowledge is the manifest of
-// what this launch staged under _tfac/knowledge/, empty when it staged nothing.
-func buildPrompt(task domain.Task, metadataJSON, skeleton string, artifacts []domain.Artifact, mission, scope, toolsRef, binaryPath, runRoot, branchTemplate, runURL, knowledge string) string {
-	cli := func(s string) string { return resolveCLIPath(s, binaryPath) }
-	return joinSections(
-		BuildTaskContext(task, metadataJSON, skeleton, artifacts),
-		cli(mission),
-		runContext(scope, runRoot, branchTemplate, runURL, knowledge),
-		cli("<tools>\n"+strings.TrimSpace(toolsRef)+"\n</tools>"),
-		cli(agentprompt.Build(machinistSpec())),
-	)
+// resolveCLIPath runs here, over the composed string and nothing else. Every
+// `triagefactory exec` in it was written by TF, by the org in its own prompt
+// row, or by a team in its own knowledge base; the two things the rewrite must
+// never touch — the task context and the injected memories, the only
+// externally-authored text a run reads — are transcript rows and never part of
+// this string.
+func sdkSystemPrompt(mission, runContextBlock, toolsRef, nonTerminal, binaryPath string) string {
+	return resolveCLIPath(joinSections(
+		agentprompt.Build(machinistSpec()),
+		composeConversationSystemBlock(mission, runContextBlock, toolsRef, nonTerminal),
+	), binaryPath)
 }
 
 // composeConversationSystemBlock assembles the conversation's own system block —

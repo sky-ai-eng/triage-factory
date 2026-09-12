@@ -865,25 +865,6 @@ func (s *blueprintStore) SetRunWorktreePathSystem(ctx context.Context, orgID, id
 		worktreePath, id))
 }
 
-func (s *blueprintStore) ActiveRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	var id string
-	err := s.q.QueryRowContext(ctx, `
-		SELECT id FROM blueprint_runs
-		WHERE task_id = ? AND status = 'running'
-		ORDER BY started_at DESC LIMIT 1
-	`, taskID).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return s.GetRun(ctx, orgID, id)
-}
-
 // IsNewestRunForTask has no RLS to read past — N=1, one connection, every row
 // visible — so it asks the question directly.
 func (s *blueprintStore) IsNewestRunForTask(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error) {
@@ -913,7 +894,6 @@ func (s *blueprintStore) IsNewestRunForTask(ctx context.Context, orgID, taskID, 
 func (s *blueprintStore) IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error) {
 	return s.IsNewestRunForTask(ctx, orgID, taskID, blueprintRunID)
 }
-
 func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

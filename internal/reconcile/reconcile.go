@@ -52,8 +52,8 @@ type Reconciler struct {
 // request became ready somewhere other than the approval click — a human on
 // GitHub, or an agent whose mission asked for it. The click runs the
 // terminal-on-last task closure itself; this is how the same closure reaches a
-// resolution nobody clicked, so a task does not sit in the approval column
-// with nothing left to approve.
+// resolution nobody clicked, so a task does not stay open asking for an
+// approval nobody has left to give.
 type PullRequestResolvedHook func(ctx context.Context, orgID, conversationID string)
 
 // NewReconciler builds the shared reconciler. ws may be nil (broadcasts become
@@ -188,8 +188,8 @@ func (rc *Reconciler) BackfillPRArtifactsForBranches(ctx context.Context, orgID 
 // state transition: PR draft/open/merged/closed, review submitted/dismissed,
 // branch deleted. Each transition broadcasts over the WS hub (as
 // artifact_updated on the owning conversation, so the conversation view's
-// artifact-derived surface refreshes), and a draft pull request leaving the
-// approval column runs the resolved hook. Returns the artifacts that
+// artifact-derived surface refreshes), and a draft pull request that stops
+// being unresolved runs the resolved hook. Returns the artifacts that
 // transitioned, carrying their new state.
 //
 // Best-effort per artifact: a single GitHub or write failure is logged and
@@ -265,7 +265,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	}
 
 	// Pass 3 — apply each transition, then run the draft-resolved closure once
-	// per conversation whose draft pull request left the approval column this
+	// per conversation whose draft pull request stopped being unresolved this
 	// cycle.
 	//
 	// The write-back runs on a detached ctx (the fetches above stayed
@@ -307,12 +307,12 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 }
 
 // isDraftResolved reports whether this transition is a draft pull request
-// leaving the approval column by any route GitHub can show: marked ready,
-// merged as a draft, or closed unopened. Each ends the approval the draft was
-// waiting on, and each is a route the approval click cannot have taken (the
-// click flips the row itself, so the reconciler never sees that one as a
-// transition). A review resolving is not here: the approval column reads
-// reviews through the same predicate, but nothing marks one ready out of band.
+// ceasing to await a human by any route GitHub can show: marked ready, merged
+// as a draft, or closed unopened. Each ends the approval the draft was waiting
+// on, and each is a route the approval click cannot have taken (the click
+// flips the row itself, so the reconciler never sees that one as a
+// transition). A review resolving is not here: the unresolved predicate reads
+// reviews too, but nothing marks one ready out of band.
 func isDraftResolved(a domain.Artifact, newState string) bool {
 	return a.Kind == domain.ArtifactKindPullRequest && a.State == domain.ArtifactStatePRDraft &&
 		newState != domain.ArtifactStatePRDraft
@@ -413,8 +413,8 @@ func nextState(a domain.Artifact, snapshots map[string]domain.PRSnapshot, branch
 // Draft is one-way. A row that has left `draft` was resolved — a human, or an
 // agent on a human's instruction, marked it ready — and a later conversion
 // back to draft on GitHub is that human reworking the pull request, not a new
-// approval to wait on. Re-deriving `draft` from the flag would put the task
-// back in the approval column with nothing for the click to do and, on a task
+// approval to wait on. Re-deriving `draft` from the flag would show the task
+// as owing a human an approval with nothing for the click to do and, on a task
 // already closed, surface a banner on a card nobody can act on. The only
 // producer of a `draft` row is the create verb, which stamps it at mint.
 func prState(snap domain.PRSnapshot, current string) string {

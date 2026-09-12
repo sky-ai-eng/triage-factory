@@ -317,13 +317,6 @@ type ResumeOptions struct {
 	// the absent-auto-deny resolve.
 	TeamID string
 
-	// TaskID is the task the conversation belongs to, for the board column
-	// a park recomputes: a turn the user pauses parks the conversation open
-	// from inside the driver, and the task's column has to follow. The
-	// dispatcher captures it from the task it already resolved; empty
-	// degrades to a no-op recompute.
-	TaskID string
-
 	// sidecar, when non-nil (TF_ROLE=executor), is the run network +
 	// credential sidecar the dispatcher stood up for this resume turn.
 	// ResumeWithMessage threads it into agentproc.RunOptions and the agenthost;
@@ -508,6 +501,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		PermissionMode: s.resolveSDKPermissionMode(ctx, opts.TeamID),
 		SessionID:      sessionID,
 		Message:        message,
+		// TODO(TFAC-995): SystemPrompt belongs here, composed as runAgent
+		// composes it. A resumed turn carries none, so it wakes without the
+		// framework blocks, the mission or the step addendum its launch was
+		// given — the harness replays the session's own history, not the
+		// prompt that was appended to it.
+
 		// gh is granted only alongside a live channel — see runAgent's note.
 		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
 			SelfBin: selfBin,
@@ -566,7 +565,6 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 			park: liveParkContext{
 				orgID:          orgID,
 				conversationID: conversationID,
-				taskID:         opts.TaskID,
 				namespace:      opts.Namespace,
 				claudeCwd:      cwd,
 				triggerType:    triggerType,

@@ -212,7 +212,7 @@ func TestDriveLiveConversation_IdleHibernates(t *testing.T) {
 	}
 	proc := newFakeLiveProc("sess-idle")
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrgID, conversationID: "r-idle", taskID: taskID,
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-idle",
 		namespace: "seedbpr-r-idle", claudeCwd: "/tmp/wt-idle",
 		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
 	}
@@ -485,7 +485,7 @@ func TestDriveLiveConversation_NoneLeavesTheClaimForCompletion(t *testing.T) {
 	none := &agentproc.Result{Result: "prose, no completion envelope"}
 	results <- none
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrgID, conversationID: "r-none", taskID: taskID,
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-none",
 		namespace: "seedbpr-r-none", claudeCwd: "/tmp/wt-none",
 		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
 		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
@@ -539,7 +539,7 @@ func TestDriveLiveConversation_InterruptParksOpenNotTerminal(t *testing.T) {
 	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
 	results <- &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrgID, conversationID: "r-pause", taskID: taskID,
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-pause",
 		namespace: "seedbpr-r-pause", claudeCwd: "/tmp/wt-pause",
 		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
 		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
@@ -658,7 +658,7 @@ func TestDriveLiveConversation_IdleParkSettlesProcessSpend(t *testing.T) {
 	proc := newFakeLiveProc("sess-idle-spend")
 	proc.result = &agentproc.Result{CostUSD: 0.42, NumTurns: 2}
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrgID, conversationID: "r-idle-spend", taskID: taskID,
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-idle-spend",
 		namespace: "seedbpr-r-idle-spend", claudeCwd: "/tmp/wt-idle-spend",
 		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID, claimID: claimID,
 	}

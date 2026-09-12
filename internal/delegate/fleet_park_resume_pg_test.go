@@ -178,7 +178,6 @@ func (f *parkFleet) engage(t *testing.T, s *Spawner) *liveEngagement {
 		e.fenced = s.parkConversationOpen(context.Background(), liveParkContext{
 			orgID:          f.orgID,
 			conversationID: claimed.ID,
-			taskID:         claimed.TaskID,
 			namespace:      f.keyID,
 			claudeCwd:      f.wtPath,
 			triggerType:    claimed.TriggerType,
@@ -218,7 +217,6 @@ func (f *parkFleet) parkIdle(t *testing.T, s *Spawner, conv *domain.Conversation
 	if fenced := s.parkConversationOpen(context.Background(), liveParkContext{
 		orgID:          f.orgID,
 		conversationID: conv.ID,
-		taskID:         conv.TaskID,
 		namespace:      f.keyID,
 		claudeCwd:      cwd,
 		triggerType:    conv.TriggerType,

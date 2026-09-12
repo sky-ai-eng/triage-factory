@@ -282,25 +282,26 @@ func TestRunJiraMirror_Idempotent_AlreadyInBucket_NoWrites(t *testing.T) {
 	}
 }
 
-// in_review collapses into In Progress: a bot that parks a run (board →
-// in_review) re-targets the SAME InProgress canonical, so the second mirror
-// pass finds the ticket already there and makes no distinct Jira move.
-func TestRunJiraMirror_InReviewCollapsesToInProgress_NoDistinctMove(t *testing.T) {
+// A second in-progress pass over the same ticket — the re-assert a clean
+// completion makes — finds it already in the bucket and makes no further Jira
+// move. This is what lets the mirror be called from more than one point
+// without a watcher seeing the ticket churn.
+func TestRunJiraMirror_SecondInProgressPass_NoDistinctMove(t *testing.T) {
 	fake := newRecordingJiraServer(t, "To Do", "")
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	// First in-progress (board in_progress) — assign + transition.
+	// The mint-time mirror — assign + transition.
 	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
-	// Board bounces to in_review, which also maps to InProgressCanonical.
+	// The completion's re-assert, onto the same InProgress canonical.
 	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 1 {
-		t.Errorf("assigns = %d, want 1 (assigned once; in_review re-assign is a no-op)", assigns)
+		t.Errorf("assigns = %d, want 1 (assigned once; the re-assert is a no-op)", assigns)
 	}
 	if len(transitions) != 1 || transitions[0] != "In Progress" {
-		t.Errorf("transitions = %v, want exactly one In Progress move (no distinct in_review move)", transitions)
+		t.Errorf("transitions = %v, want exactly one In Progress move", transitions)
 	}
 }
 
@@ -494,7 +495,7 @@ func TestLookupJiraRuleForTaskSystem_NoRuleForProject_Nil(t *testing.T) {
 	}
 }
 
-// --- Hook 1: recomputeTaskBoardColumn -> in-progress mirror ---------------
+// --- Hook 1: placeTaskInProgress -> in-progress mirror --------------------
 
 // setupJiraMirrorFixture seeds a bot-claimable Jira run+task (its 1-step
 // blueprint_run starts 'running') plus the SKY status rule, and returns a
@@ -503,19 +504,7 @@ func TestLookupJiraRuleForTaskSystem_NoRuleForProject_Nil(t *testing.T) {
 func setupJiraMirrorFixture(t *testing.T, suffix string, status, assignee string) (*Spawner, *sql.DB, string, string, *recordingJiraServer, *fakeJiraResolver) {
 	t.Helper()
 	database := newDelegateTestDB(t)
-	// Bot-claim writes need an agents row (FK on claimed_by_agent_id).
-	if _, err := database.Exec(
-		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Triage Factory Bot')`,
-		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
-	); err != nil {
-		t.Fatalf("seed local agent: %v", err)
-	}
-	if _, err := database.Exec(
-		`INSERT OR IGNORE INTO team_agents (team_id, agent_id, enabled) VALUES (?, ?, 1)`,
-		runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID,
-	); err != nil {
-		t.Fatalf("seed local team_agents: %v", err)
-	}
+	seedLocalBotAgent(t, database)
 	seedJiraMirrorRule(t, database)
 
 	conversationID := "r-jira-" + suffix
@@ -533,12 +522,12 @@ func setupJiraMirrorFixture(t *testing.T, suffix string, status, assignee string
 }
 
 // A bot delegation against a Jira task assigns the service account and
-// transitions the ticket to InProgressCanonical on the first in-progress move.
-func TestRecomputeBoard_JiraTask_MirrorsInProgress(t *testing.T) {
+// transitions the ticket to InProgressCanonical when the run is minted.
+func TestPlaceTaskInProgress_JiraTask_MirrorsInProgress(t *testing.T) {
 	s, database, _, taskID, fake, res := setupJiraMirrorFixture(t, "ip", "To Do", "")
 	stampBotClaim(t, database, taskID)
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
+	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Fatalf("board status = %q, want in_progress", got)
@@ -556,14 +545,13 @@ func TestRecomputeBoard_JiraTask_MirrorsInProgress(t *testing.T) {
 	}
 }
 
-// A user takeover flips the claim off the agent; recomputeTaskBoardColumn
+// A user takeover flips the claim off the agent; placeTaskInProgress
 // early-returns, so the bot never mirrors (no ForSystem, no Jira write).
-func TestRecomputeBoard_UserClaimedJiraTask_NoMirror(t *testing.T) {
-	s, database, conversationID, taskID, fake, res := setupJiraMirrorFixture(t, "user", "To Do", "")
+func TestPlaceTaskInProgress_UserClaimedJiraTask_NoMirror(t *testing.T) {
+	s, database, _, taskID, fake, res := setupJiraMirrorFixture(t, "user", "To Do", "")
 	stampUserClaim(t, database, taskID)
-	setConversationStatus(t, database, conversationID, "open")
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
+	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
 
 	if n := res.systemCalls(); n != 0 {
 		t.Errorf("ForSystem calls = %d, want 0 (user-claimed task: bot must not mirror)", n)
@@ -575,20 +563,41 @@ func TestRecomputeBoard_UserClaimedJiraTask_NoMirror(t *testing.T) {
 
 // A GitHub-backed task resolves no rule, so the mirror no-ops even when the
 // resolver is wired.
-func TestRecomputeBoard_GitHubTask_NoMirror(t *testing.T) {
+func TestPlaceTaskInProgress_GitHubTask_NoMirror(t *testing.T) {
 	s, database, _, taskID := setupAdvanceFixture(t, "gh-nomirror")
 	stampBotClaim(t, database, taskID)
 	fake := newRecordingJiraServer(t, "To Do", "")
 	res := &fakeJiraResolver{client: fake.client()}
 	s.SetJiraResolver(res)
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
+	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Fatalf("board status = %q, want in_progress", got)
 	}
 	if n := res.systemCalls(); n != 0 {
 		t.Errorf("ForSystem calls = %d, want 0 (GitHub task: no Jira rule)", n)
+	}
+}
+
+// The placement is the only board write a delegation makes, so the mirror it
+// carries fires once: a second call finds the task already in_progress, writes
+// nothing, and never reaches Jira. This is what keeps a Jira watcher from
+// seeing a ticket churn as a run parks and resumes.
+func TestPlaceTaskInProgress_SecondCallMirrorsNothing(t *testing.T) {
+	s, database, _, taskID, fake, res := setupJiraMirrorFixture(t, "once", "To Do", "")
+	stampBotClaim(t, database, taskID)
+
+	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
+	fake.waitTransition(t)
+	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
+
+	if n := res.systemCalls(); n != 1 {
+		t.Errorf("ForSystem calls = %d, want 1 (the second placement is a no-op)", n)
+	}
+	assigns, transitions := fake.snapshot()
+	if assigns != 1 || len(transitions) != 1 {
+		t.Errorf("assigns = %d, transitions = %v, want 1 and one In Progress move", assigns, transitions)
 	}
 }
 
