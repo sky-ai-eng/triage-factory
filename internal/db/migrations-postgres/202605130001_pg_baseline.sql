@@ -3149,7 +3149,13 @@ CREATE INDEX idx_conversations_task_ended ON public.conversations (task_id) WHER
 -- ended". The complement of the index above, ordered, because this one is a
 -- LIMIT 1 lookup on the hot claim scan rather than an exclusion set — every
 -- candidate row the scan considers runs it.
-CREATE INDEX idx_conversations_task_open ON public.conversations (task_id, started_at DESC) WHERE (ended_at IS NULL);
+--
+-- The key carries the lookup's WHOLE sort order, tiebreak included. Stopping at
+-- started_at leaves the planner an Incremental Sort over each tie group to
+-- settle id, which is per-candidate work on that hot scan; with id in the key
+-- the Limit reads one index tuple. id last also makes the scan index-only —
+-- the id IS what the subquery selects.
+CREATE INDEX idx_conversations_task_open ON public.conversations (task_id, started_at DESC, id DESC) WHERE (ended_at IS NULL);
 -- Placement tier-1 claim: an executor pulling its own preferred queued runs,
 -- ordered by started_at, id. Global-oldest uses idx_conversations_needs_driving.
 CREATE INDEX idx_conversations_queued_preferred ON public.conversations (preferred_executor_id, started_at, id) WHERE (status IS NULL);

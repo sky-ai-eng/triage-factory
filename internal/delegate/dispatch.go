@@ -1558,7 +1558,16 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	if warm == "" {
 		warm = br.WorktreePath
 	}
-	convForWS := &domain.Conversation{ID: conv.ID, ClaimID: conv.ClaimID, TaskID: task.ID, WorktreePath: warm, BlueprintRunID: br.ID}
+	// Runtime travels with it because the ladder's LAST rung reads it: a
+	// workspace that no persist is going to deliver is rebuilt from nothing for
+	// a native conversation, whose continuity is its transcript, and refused as
+	// expired for an SDK one, whose continuity was the session file inside the
+	// blob. Synthesizing this row without the column answers "unknown", which
+	// takes the refusal for both.
+	convForWS := &domain.Conversation{
+		ID: conv.ID, ClaimID: conv.ClaimID, TaskID: task.ID,
+		Runtime: conv.Runtime, WorktreePath: warm, BlueprintRunID: br.ID,
+	}
 	cfg := runConfig{orgID: orgID}
 	switch task.EntitySource {
 	case "github":

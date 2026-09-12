@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -280,6 +281,59 @@ func TestBuildStepConfig_RedelegationAfterAFailedRunWithNoBlobBuildsFresh(t *tes
 	}
 	if cfg.wtPath != worktree.RunRoot(f.task.ID) {
 		t.Errorf("fresh wtPath = %q, want the task's run root %q", cfg.wtPath, worktree.RunRoot(f.task.ID))
+	}
+}
+
+// TestBuildStepConfig_LadderLastRungReadsTheStepsRuntime pins the column the
+// ladder's final rung turns on reaching it at all.
+//
+// A persist whose writer died leaves the one shape the blob store cannot
+// answer alone: pending forever, nothing coming. The ladder's answer is by
+// runtime — a native conversation is rebuilt from nothing, because its
+// continuity is its transcript, while an SDK one is refused as expired,
+// because its continuity was the session file inside the blob that never
+// landed. A synthesized config row without `runtime` answers "unknown", which
+// takes the refusal for both and strands a native step over a tree it never
+// needed.
+func TestBuildStepConfig_LadderLastRungReadsTheStepsRuntime(t *testing.T) {
+	cases := []struct {
+		runtime  string
+		wantErr  error
+		wantProv domain.WorkspaceProvenance
+	}{
+		{runtime: domain.ConversationRuntimeNative, wantProv: domain.WorkspaceProvenanceFresh},
+		{runtime: domain.ConversationRuntimeSDK, wantErr: ErrWorkspaceExpired},
+	}
+	for _, tc := range cases {
+		t.Run(tc.runtime, func(t *testing.T) {
+			paths.SetForTest(t, t.TempDir())
+			f := seedStepFixture(t, "slack", "ladder-"+tc.runtime, 1, "")
+			t.Cleanup(func() { worktree.RemoveRunRoot(f.task.ID) })
+			wireBlobStore(t, f.s)
+
+			// Pending forever, its writer gone — no claim row behind the
+			// record, so the liveness read answers "not coming" rather than
+			// waiting out the bound — and no blob to find.
+			seedSnapshotState(t, f.s, f.task.ID, "claim-vanished", domain.WorkspaceSnapshotPending)
+
+			runB := f.redelegate(t, "ladder-"+tc.runtime)
+			next := f.enqueueStepZero(t, runB)
+			cfg, err := f.s.buildStepConfig(context.Background(), runmode.LocalDefaultOrgID, runB, f.task,
+				domain.Conversation{ID: next, TaskID: f.task.ID, Runtime: tc.runtime, BlueprintRunID: runB.ID}, nil, nil)
+
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("buildStepConfig = %v, want %v", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildStepConfig: %v", err)
+			}
+			if cfg.workspace != tc.wantProv {
+				t.Errorf("workspace provenance = %q, want %q", cfg.workspace, tc.wantProv)
+			}
+		})
 	}
 }
 
