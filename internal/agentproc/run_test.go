@@ -29,6 +29,22 @@ func TestRun_RefusesMultiMode(t *testing.T) {
 	}
 }
 
+// TestRun_RefusesOpeningBlocks pins that the one-shot path fails loudly on a
+// message it cannot express: `-p` takes a string, so blocks handed to Run
+// would otherwise be dropped on the floor and the agent would open on an empty
+// prompt. Returns before ensureSDKTraced, so it needs no node on PATH.
+func TestRun_RefusesOpeningBlocks(t *testing.T) {
+	outcome, err := Run(context.Background(), RunOptions{
+		OpeningBlocks: []ContentBlock{{Type: "text", Text: "the opening turn"}},
+	}, nil)
+	if err == nil {
+		t.Fatal("Run() with OpeningBlocks = nil error, want a refusal")
+	}
+	if outcome != nil {
+		t.Errorf("Run() with OpeningBlocks returned non-nil Outcome %+v, want nil (nothing spawned)", outcome)
+	}
+}
+
 // captureSink records what consumeStream delivered, so a test can
 // assert the regression-case message survived the stream reader.
 type captureSink struct {

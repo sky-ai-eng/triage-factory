@@ -3,6 +3,7 @@ package agentproc
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
+
+// ContentBlock is one block of a block-content user message: the shape the
+// Agent SDK passes straight through to the API's MessageParam content array.
+// Text is the only payload the opening turn carries, so it is the only one
+// the transport spells.
+//
+// Declared here rather than taken from TF's neutral message model because
+// this is a wire shape of the wrapper control protocol — agentproc sits below
+// the packages that own that model, and the two vocabularies are not the same
+// (the neutral one names an image "image_url", the API names it "image").
+type ContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
 
 // RunOptions configures one `claude -p` invocation. Callers populate
 // every field they care about; zero-values fall back to claude's
@@ -40,10 +55,23 @@ type RunOptions struct {
 	// session.
 	SessionID string
 
-	// Message is the value passed to `-p`. For an initial invocation
-	// this is the full prompt (mission + envelope); for a resume it's
-	// just the new user turn.
+	// Message is the value passed to `-p`, and the opening user message of
+	// an interactive run that carries no OpeningBlocks. For an initial
+	// invocation this is the full prompt (mission + envelope); for a resume
+	// it's just the new user turn.
 	Message string
+
+	// OpeningBlocks, when non-empty, is the opening user message of an
+	// interactive run, sent as block content rather than as a string:
+	// RunInteractive writes it through SendBlocks once the wrapper signals
+	// ready and Message is not sent at all. The boundaries are the point —
+	// the opening turn is assembled from a set of rows, and joining them into
+	// one string would drop the structure the model is handed.
+	//
+	// Interactive-mode only: the one-shot `-p` path has no way to express a
+	// block array, so Run refuses a call that carries blocks rather than
+	// dropping them.
+	OpeningBlocks []ContentBlock
 
 	// AllowedTools is the comma-joined --allowedTools value. Callers
 	// build this themselves (see internal/delegate.BuildAllowedTools) —
@@ -462,6 +490,9 @@ type Outcome struct {
 func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	if err := refuseMultiModeSDKLoop(); err != nil {
 		return nil, err
+	}
+	if len(opts.OpeningBlocks) > 0 {
+		return nil, errors.New("opening blocks are an interactive-mode message; the one-shot -p path takes Message")
 	}
 
 	// Derived ctx so the stream-error path can SIGKILL the process

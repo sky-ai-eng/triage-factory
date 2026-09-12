@@ -188,10 +188,15 @@ function createInputStream() {
   }
 }
 
-function userMessage(text) {
+// userMessage builds one SDKUserMessage. Its `message` is the API's
+// MessageParam, whose content takes either a plain string or an array of
+// content blocks — blocks when the Go side sent them, the string otherwise.
+// Blocks win when both arrive: a turn assembled from several rows travels as
+// those blocks, and joining them into a string would lose the boundaries.
+function userMessage(text, blocks) {
   return {
     type: "user",
-    message: { role: "user", content: text ?? "" },
+    message: { role: "user", content: blocks ?? (text ?? "") },
     parent_tool_use_id: null,
   }
 }
@@ -321,7 +326,7 @@ async function runStreamingInput(options, permissionPrompts) {
 
     switch (ctl.kind) {
       case "user_message":
-        input.push(userMessage(ctl.text))
+        input.push(userMessage(ctl.text, ctl.blocks))
         break
 
       case "interrupt":

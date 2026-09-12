@@ -2,6 +2,7 @@ package agentproc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -220,5 +221,74 @@ func TestLiveRun_SendRefusedOnceClosing(t *testing.T) {
 	}
 	if got := l.QueuedTurns(); got != 0 {
 		t.Errorf("a refused send must not count as an owed turn; QueuedTurns = %d", got)
+	}
+}
+
+// TestLiveRun_SendBlocksWritesBlockContent pins the block spelling of a user
+// message: one control line carrying the blocks verbatim and no text field
+// beside them, counted as exactly one owed turn — the same debt Send takes on,
+// since a block-content message is still one turn.
+func TestLiveRun_SendBlocksWritesBlockContent(t *testing.T) {
+	stdin := newSyncBuffer()
+	l := &LiveRun{
+		stdin:  captureWriteCloser{stdin},
+		ready:  make(chan struct{}),
+		done:   make(chan struct{}),
+		stream: NewStreamState(),
+	}
+	close(l.ready)
+
+	blocks := []ContentBlock{
+		{Type: "text", Text: "<untrusted-input>"},
+		{Type: "text", Text: "the task context"},
+	}
+	if err := l.SendBlocks(context.Background(), blocks); err != nil {
+		t.Fatalf("SendBlocks: %v", err)
+	}
+
+	var ctl struct {
+		Kind   string         `json:"kind"`
+		Text   *string        `json:"text"`
+		Blocks []ContentBlock `json:"blocks"`
+	}
+	line := strings.TrimSpace(stdin.String())
+	if err := json.Unmarshal([]byte(line), &ctl); err != nil {
+		t.Fatalf("decode control line %q: %v", line, err)
+	}
+	if ctl.Kind != "user_message" {
+		t.Errorf("kind = %q, want user_message", ctl.Kind)
+	}
+	if ctl.Text != nil {
+		t.Errorf("blocks message also carried text %q; the wrapper reads blocks first and a joined string would be a second, disagreeing copy", *ctl.Text)
+	}
+	if !slices.Equal(ctl.Blocks, blocks) {
+		t.Errorf("blocks = %v, want %v", ctl.Blocks, blocks)
+	}
+	if got := l.QueuedTurns(); got != 1 {
+		t.Errorf("QueuedTurns after one SendBlocks = %d, want 1", got)
+	}
+}
+
+// TestLiveRun_SendBlocksRefusesEmpty: a user message with no content is not a
+// turn (and the API rejects it), so an empty list is refused before anything
+// is written and the process is left owing nothing.
+func TestLiveRun_SendBlocksRefusesEmpty(t *testing.T) {
+	stdin := newSyncBuffer()
+	l := &LiveRun{
+		stdin:  captureWriteCloser{stdin},
+		ready:  make(chan struct{}),
+		done:   make(chan struct{}),
+		stream: NewStreamState(),
+	}
+	close(l.ready)
+
+	if err := l.SendBlocks(context.Background(), nil); err == nil {
+		t.Fatal("SendBlocks(nil) = nil, want an error")
+	}
+	if stdin.String() != "" {
+		t.Errorf("refused send still wrote %q", stdin.String())
+	}
+	if got := l.QueuedTurns(); got != 0 {
+		t.Errorf("QueuedTurns after a refused send = %d, want 0", got)
 	}
 }

@@ -18,10 +18,15 @@ import (
 // stdin (Go → wrapper), newline-delimited JSON, one object per line:
 //
 //	{"kind":"user_message","text":"..."}
+//	{"kind":"user_message","blocks":[{"type":"text","text":"..."}, ...]}
 //	{"kind":"interrupt"}
 //	{"kind":"set_mode","mode":"default|acceptEdits|plan|bypassPermissions|dontAsk|auto"}
 //	{"kind":"permission_response","tool_call_id":"<id>","behavior":"allow"|"deny","message":"...","updated_input":{...}}
 //	{"kind":"end"}
+//
+// A user_message spells its content one way or the other — text is a plain
+// string turn, blocks a block-content one — and either is one turn. Nothing
+// sends both; the wrapper prefers blocks if anything ever did.
 //
 // On an allow, updated_input optionally overrides the tool input; when
 // omitted the wrapper echoes the original input back to the SDK (its CLI
@@ -163,9 +168,10 @@ func InteractiveSupported() bool {
 // LiveRun the caller steers. The reader loop runs in a background
 // goroutine; the call returns as soon as the subprocess is started.
 //
-// If opts.Message is non-empty it is sent as the first user_message once
-// the wrapper signals ready. perms answers tool-permission prompts; a
-// nil perms denies every prompt. A nil sink discards stream events.
+// The opening user message is sent once the wrapper signals ready:
+// opts.OpeningBlocks when set, otherwise opts.Message. perms answers
+// tool-permission prompts; a nil perms denies every prompt. A nil sink
+// discards stream events.
 //
 // Local mode only, and enforced: refuses with errSDKLoopInMultiMode before
 // spawning anything if runmode is multi (the SDK loop only ever runs local —
@@ -233,12 +239,20 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 	// + recorder as well.
 	go l.readLoop(runCtx, opts, proc, sink, perms)
 
-	// Send the initial prompt once the wrapper is ready. Done in its own
-	// goroutine so RunInteractive returns immediately; Send blocks on the
-	// ready signal internally.
-	if opts.Message != "" {
+	// Send the opening message once the wrapper is ready. Done in its own
+	// goroutine so RunInteractive returns immediately; the send blocks on the
+	// ready signal internally. Blocks and Message are two spellings of the
+	// same one turn, so a run carrying blocks never also sends Message.
+	var opening func() error
+	switch {
+	case len(opts.OpeningBlocks) > 0:
+		opening = func() error { return l.SendBlocks(ctx, opts.OpeningBlocks) }
+	case opts.Message != "":
+		opening = func() error { return l.Send(ctx, opts.Message) }
+	}
+	if opening != nil {
 		go func() {
-			if err := l.Send(ctx, opts.Message); err != nil {
+			if err := opening(); err != nil {
 				agentprocLog.Error("initial message send failed", "error", err)
 			}
 		}()
@@ -251,6 +265,28 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 // has signaled readiness (or the run finishes / ctx cancels first), and
 // refuses with ErrRunClosing once Close has begun.
 func (l *LiveRun) Send(ctx context.Context, text string) error {
+	return l.sendUserMessage(ctx, map[string]any{"kind": "user_message", "text": text})
+}
+
+// SendBlocks delivers a user message whose content is a block array rather
+// than a string — the shape an opening turn assembled from several rows
+// takes, where the boundaries between them are part of what the model reads.
+// One message and one owed turn, on the same terms as Send: it blocks on
+// readiness and refuses with ErrRunClosing once Close has begun.
+//
+// An empty list is refused rather than sent: a user message with no content
+// is not a turn, and the API rejects it.
+func (l *LiveRun) SendBlocks(ctx context.Context, blocks []ContentBlock) error {
+	if len(blocks) == 0 {
+		return errors.New("send blocks: no content blocks")
+	}
+	return l.sendUserMessage(ctx, map[string]any{"kind": "user_message", "blocks": blocks})
+}
+
+// sendUserMessage is the body both send verbs share: refuse once closing,
+// wait for the wrapper, count the turn the process now owes, write the
+// control, and mark the request so the wait is billed to it.
+func (l *LiveRun) sendUserMessage(ctx context.Context, ctl map[string]any) error {
 	if l.closing.Load() {
 		return ErrRunClosing
 	}
@@ -264,7 +300,7 @@ func (l *LiveRun) Send(ctx context.Context, text string) error {
 	// Counted before the write goes out, so the result answering it can
 	// never be read against a count that has not seen the send.
 	l.queuedTurns.Add(1)
-	if err := l.writeControl(map[string]any{"kind": "user_message", "text": text}); err != nil {
+	if err := l.writeControl(ctl); err != nil {
 		l.queuedTurns.Add(-1)
 		return err
 	}
