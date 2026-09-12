@@ -9,7 +9,7 @@ import (
 )
 
 // The migration that gives conversation_memory a `source` and takes away
-// `entity_id` and `human_content` (202609120001). It runs on real deployed
+// `entity_id` and `human_content` (202609120003). It runs on real deployed
 // data, where the only thing a NULL agent_content row records is that the
 // agent wrote no usable memory file — so it carries across as 'none', and
 // anything with content as 'agent'.
@@ -34,9 +34,11 @@ func TestMigrate_ConversationMemoryGainsSourceAndDropsEntityAndHumanContent(t *t
 		gooseMu.Unlock()
 		t.Fatalf("SetDialect: %v", err)
 	}
-	// Stop one version short, so the rows below are staged the way a deployed
-	// build wrote them — with entity_id and human_content still present.
-	upToErr := goose.UpTo(database, dir, 202609060002)
+	// Stop short of this migration, so the rows below are staged the way a
+	// deployed build wrote them — with entity_id and human_content still
+	// present. The two siblings in between (202609120001/0002) touch other
+	// tables, so where in that run the seed lands does not matter.
+	upToErr := goose.UpTo(database, dir, 202609120002)
 	gooseMu.Unlock()
 	if upToErr != nil {
 		t.Fatalf("goose.UpTo previous version: %v", upToErr)
@@ -95,7 +97,7 @@ func TestMigrate_ConversationMemoryGainsSourceAndDropsEntityAndHumanContent(t *t
 	goose.SetBaseFS(treeFS)
 	upErr := goose.SetDialect("sqlite3")
 	if upErr == nil {
-		upErr = goose.UpTo(database, dir, 202609120001)
+		upErr = goose.UpTo(database, dir, 202609120003)
 	}
 	gooseMu.Unlock()
 	if upErr != nil {

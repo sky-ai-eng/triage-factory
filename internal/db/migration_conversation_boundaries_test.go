@@ -11,7 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// The migration that gives conversations their boundary columns (202609120001).
+// The migration that gives conversations their boundary columns (202609120002).
 // It adds two nullable columns and one partial index and backfills nothing, so
 // what there is to pin is that it is additive: rows written by a deployed build
 // survive it reading "never ended", the columns then round-trip every value in
@@ -32,7 +32,7 @@ func TestMigrate_ConversationsGainTheirBoundaryColumns(t *testing.T) {
 	}
 	// Stop one version short, so the rows below are staged exactly the way a
 	// deployed build wrote them — with no column to end them in.
-	upToErr := goose.UpTo(database, dir, 202609060002)
+	upToErr := goose.UpTo(database, dir, 202609120001)
 	gooseMu.Unlock()
 	if upToErr != nil {
 		t.Fatalf("goose.UpTo previous version: %v", upToErr)
@@ -71,7 +71,7 @@ func TestMigrate_ConversationsGainTheirBoundaryColumns(t *testing.T) {
 	goose.SetBaseFS(treeFS)
 	upErr := goose.SetDialect("sqlite3")
 	if upErr == nil {
-		upErr = goose.UpTo(database, dir, 202609120001)
+		upErr = goose.UpTo(database, dir, 202609120002)
 	}
 	gooseMu.Unlock()
 	if upErr != nil {
