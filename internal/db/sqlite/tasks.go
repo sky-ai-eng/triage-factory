@@ -1044,7 +1044,7 @@ func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, use
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	if newStatus != "in_progress" && newStatus != "in_review" {
+	if newStatus != "in_progress" {
 		return false, nil
 	}
 	res, err := s.q.ExecContext(ctx, `
@@ -1052,7 +1052,7 @@ func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, use
 		   SET status = ?
 		 WHERE id = ?
 		   AND claimed_by_user_id = ?
-		   AND status IN ('queued', 'in_progress', 'in_review')
+		   AND status IN ('queued', 'in_progress')
 	`, newStatus, taskID, userID)
 	if err != nil {
 		return false, err

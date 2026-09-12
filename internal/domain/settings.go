@@ -900,14 +900,13 @@ type JiraProjectStatusRules struct {
 	//
 	// InReview names the status a ticket sits in while the work it tracks
 	// awaits human review. It is optional, and it is the one rule here that
-	// feeds nothing TF polls or classifies on. In particular no Jira status is
-	// ever read back into TF's in_review board column: that column is a fact
-	// about a RUN (agent work awaiting a human) rather than about a ticket, so
-	// a ticket somebody moved to "Code Review" by hand belongs on no TF board
-	// at all. Its members reach neither the discovery JQL nor the stock deck's
-	// buckets, which is why a status may sit in BOTH InProgressMembers and
-	// InReviewMembers — "counts as actively worked on" is true of a ticket
-	// under review.
+	// feeds nothing TF polls or classifies on. It has no counterpart on the TF
+	// board either: "awaiting a human" is a fact about a RUN, carried on the
+	// card frame and the attention order, so a ticket somebody moved to "Code
+	// Review" by hand lands in no lane of its own. Its members reach neither
+	// the discovery JQL nor the stock deck's buckets, which is why a status
+	// may sit in BOTH InProgressMembers and InReviewMembers — "counts as
+	// actively worked on" is true of a ticket under review.
 	//
 	// TODO(TFAC-883): nothing writes this status onto a ticket. The rule is
 	// stored and settable; whether TF should act on it, and off which signal,

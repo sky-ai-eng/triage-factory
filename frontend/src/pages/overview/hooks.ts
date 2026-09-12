@@ -196,9 +196,9 @@ export function useConversationSets(
 
 /**
  * The rows' tasks, for the reference and the glyph. One list read over the
- * statuses that can carry a conversation — `claimed` is the claim axis
- * (a queued task someone took), the three working columns, and recent `done`
- * (a settled run still asking) — keyed by task id for the join.
+ * statuses that can carry a conversation — `queued` (a task can hold
+ * artifacts and conversations there, claimed or not), `in_progress`, and
+ * recent `done` (a settled run still asking) — keyed by task id for the join.
  */
 export function useTasksIndex(teamId: string, tick: number): Map<string, Task> | null {
   const [got, setGot] = useState<{ team: string; index: Map<string, Task> } | null>(null)
@@ -206,7 +206,7 @@ export function useTasksIndex(teamId: string, tick: number): Map<string, Task> |
     if (!teamId) return
     let live = true
     void apiList<Task>(TASK_LIST_PATH, {
-      statuses: ['claimed', 'in_progress', 'in_review', 'done'],
+      statuses: ['queued', 'in_progress', 'done'],
       team_ids: [teamId],
       closed_since: new Date(Date.now() - 7 * 86400_000).toISOString(),
       page_size: TASK_PAGE_SIZE,

@@ -633,7 +633,7 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 		}
 		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.Close", closed, bareRead(closeID))
 
-		status, err := store.SetStatus(ctx, orgID, statusID, "in_review")
+		status, err := store.SetStatus(ctx, orgID, statusID, "in_progress")
 		if err != nil {
 			return fmt.Errorf("SetStatus: %w", err)
 		}

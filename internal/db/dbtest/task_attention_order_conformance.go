@@ -183,16 +183,16 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 		// a prompt owned by the conversation's active claim outranks the same
 		// conversation without one, whatever its priority.
 		s, orgID, seed := mk(t)
-		prompted := seed.Task(t, TaskAttentionFixture{Suffix: "attn-prompted", Title: "prompted", Status: "in_review", Priority: 0.1})
-		working := seed.Task(t, TaskAttentionFixture{Suffix: "attn-working", Title: "working", Status: "in_review", Priority: 0.9})
+		prompted := seed.Task(t, TaskAttentionFixture{Suffix: "attn-prompted", Title: "prompted", Status: "in_progress", Priority: 0.1})
+		working := seed.Task(t, TaskAttentionFixture{Suffix: "attn-working", Title: "working", Status: "in_progress", Priority: 0.9})
 
 		promptedConv := seed.Conversation(t, prompted, "")
 		seed.PendingPermission(t, promptedConv, seed.ActiveClaim(t, promptedConv))
 		seed.ActiveClaim(t, seed.Conversation(t, working, ""))
 
-		got, _ := list(t, s, orgID, db.TaskListFilter{Statuses: []string{"in_review"}})
+		got, _ := list(t, s, orgID, inProgress())
 		if want := []string{prompted, working}; !slices.Equal(got, want) {
-			t.Errorf("In Review lane = %v, want %v — an unanswered prompt leads the lane", got, want)
+			t.Errorf("In Progress lane = %v, want %v — an unanswered prompt leads the lane", got, want)
 		}
 	})
 

@@ -859,11 +859,11 @@ func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // Task status vocabulary, split by who owns each write. Terminal statuses
-// close a task; the stage statuses are the user's own progress markers.
+// close a task; in_progress is the stage marker — set once by the spawner
+// when a delegation is minted, or by hand by the user holding the claim.
 const (
 	taskStatusQueued     = "queued"
 	taskStatusInProgress = "in_progress"
-	taskStatusInReview   = "in_review"
 	taskStatusSnoozed    = "snoozed"
 	taskStatusDone       = "done"
 	taskStatusDismissed  = "dismissed"
@@ -909,13 +909,13 @@ type taskPatchRequest struct {
 	SnoozeUntil json.RawMessage `json:"snooze_until,omitempty"`
 	// HesitationMs is the dwell time before the gesture, recorded on the
 	// swipe_events row the dismiss / complete / snooze arms write. The stage
-	// arms (in_progress / in_review) write no audit row, so carrying it there
-	// would be a field the server accepts and silently drops.
+	// arm (in_progress) writes no audit row, so carrying it there would be a
+	// field the server accepts and silently drops.
 	HesitationMs int `json:"hesitation_ms,omitempty"`
 }
 
 // handleTaskPatch is the task's field-write path: the lifecycle axis (done,
-// dismissed, the in_progress → in_review stages) and the wake time. Effects
+// dismissed, the in_progress stage) and the wake time. Effects
 // that a field write can't express keep their own verb routes — claim and
 // delegate reach external systems and spawn runs, requeue and undo tear down
 // artifacts and reverse an audit row.
@@ -930,7 +930,7 @@ type taskPatchRequest struct {
 //
 // Then the state round: a closed task refuses everything (409
 // ALREADY_TERMINAL — requeue and undo are how a task re-opens), and the stage
-// statuses require the caller's own active claim (403). Neither round is the
+// status requires the caller's own active claim (403). Neither round is the
 // last word on safety; the store carries its own predicates, because the row
 // can change between this handler's read and its write.
 //
@@ -1028,7 +1028,7 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 		if !s.patchWake(w, r, orgID, userID, id) {
 			return
 		}
-	case status == taskStatusInProgress || status == taskStatusInReview:
+	case status == taskStatusInProgress:
 		if !s.patchStage(w, r, orgID, userID, id, task, status) {
 			return
 		}
@@ -1103,7 +1103,7 @@ func (s *Server) writeTaskResourceSystem(w http.ResponseWriter, r *http.Request,
 // would strand both. 'snoozed' isn't either: it is what setting snooze_until
 // means, and accepting it as a status would be a second way to say it, one
 // that can't carry the wake time the row needs.
-var patchableTaskStatuses = []string{taskStatusInProgress, taskStatusInReview, taskStatusDone, taskStatusDismissed}
+var patchableTaskStatuses = []string{taskStatusInProgress, taskStatusDone, taskStatusDismissed}
 
 // patchWritesAudit reports whether the PATCH body describes a gesture that
 // lands a swipe_events row — the dismiss / complete / snooze arms. The stage
@@ -1178,14 +1178,14 @@ func (s *Server) patchWake(w http.ResponseWriter, r *http.Request, orgID, userID
 	return true
 }
 
-// patchStage moves a task between the user's own progress markers — "I'm
-// working on this now" and "I've submitted this for review". Both require the
-// caller to hold the user claim: a bot-claimed task is placed in_progress once
-// by the spawner when its delegation is minted and is not a person's to stage,
-// and an unclaimed one has nobody whose progress this would be.
+// patchStage sets the user's own progress marker — "I'm working on this now".
+// It requires the caller to hold the user claim: a bot-claimed task is placed
+// in_progress once by the spawner when its delegation is minted and is not a
+// person's to stage, and an unclaimed one has nobody whose progress this
+// would be.
 func (s *Server) patchStage(w http.ResponseWriter, r *http.Request, orgID, userID, id string, task *domain.Task, status string) bool {
 	if task.ClaimedByUserID != userID {
-		forbidden(w, "only the user holding this task's claim can move it between in_progress and in_review")
+		forbidden(w, "only the user holding this task's claim can move it to in_progress")
 		return false
 	}
 	var advanced bool

@@ -33,8 +33,8 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 	// already have moved the lifecycle status (e.g. snooze-wake inside
 	// ClaimQueuedForUser). This audit path MUST NOT write status for
 	// those actions or it would clobber the lifecycle status of an
-	// in_progress / in_review task during a takeover/delegate/reassign
-	// (the assignee picker exercises all three).
+	// in_progress task during a takeover/delegate/reassign (the assignee
+	// picker exercises all three).
 	// Only dismiss + complete are genuine lifecycle moves recorded
 	// here; snooze flows through SnoozeTask separately.
 	//
@@ -82,14 +82,14 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			return err
 		}
 		if newStatus == "" {
-			// claim / delegate: preserve in_progress / in_review across
+			// claim / delegate: preserve in_progress across
 			// takeover, but flip 'snoozed' → 'queued' so the
 			// "snoozed ↔ unclaimed" invariant holds even when a code
 			// path bypasses the claim helpers (which do the wake
 			// atomically under normal operation). The CASE expression
 			// keeps every non-snoozed status intact — load-bearing for
 			// the assignee picker's take-over-from-bot path, which
-			// hits an in_progress / in_review row.
+			// hits an in_progress row.
 			res, err := q.ExecContext(ctx,
 				`UPDATE tasks
 				   SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,

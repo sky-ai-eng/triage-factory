@@ -22,13 +22,12 @@ type Task struct {
 	// team on the first human claim.
 	TeamID *string `json:"team_id,omitempty"`
 
-	// Status + lifecycle. `claimed` and `delegated` were removed
-	// (responsibility moved to the claim cols). `in_progress` and
-	// `in_review` were added as real lifecycle stages so the
-	// board can show work moving through stages independently of who
-	// (user or bot) is doing it. Bot-claimed tasks auto-transition
-	// based on conversation state; user-claimed tasks transition manually.
-	Status         string     `json:"status"`           // queued | in_progress | in_review | done | dismissed | snoozed
+	// Status + lifecycle. Responsibility lives on the claim cols, not
+	// here: `in_progress` is a lifecycle stage the board shows
+	// independently of who (user or bot) is doing the work. A bot-claimed
+	// task is placed there once, when its delegation is minted; a
+	// user-claimed one is moved there by hand.
+	Status         string     `json:"status"`           // queued | in_progress | done | dismissed | snoozed
 	CloseReason    string     `json:"close_reason"`     // run_completed | user_completed | user_dismissed | auto_closed_by_event | entity_closed | reconciled (the terminal-state sweep found the entity already finished, with no event to name) | duplicate_entity_merged (write-once, by the migration that merged two entity rows for one Jira issue: this card duplicated one already on the surviving entity)
 	CloseEventType string     `json:"close_event_type"` // FK to events_catalog.id; the event type that triggered the close (event-driven closes: auto_closed_by_event + entity_closed). NULL for non-event closes (run_completed, user_*, reconciled, duplicate_entity_merged)
 	ClosedAt       *time.Time `json:"closed_at"`
