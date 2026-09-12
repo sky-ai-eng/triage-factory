@@ -34,15 +34,17 @@ var attachLog = logging.Component("memoryentities")
 // The primary attach is unconditional even though the upsert is not — the join
 // row is what a later memory write on this conversation becomes reachable
 // through, and writing it costs nothing when there is no memory yet. On the
-// produced side, FindOrCreate (not lookup-only) is deliberate: a PR the run
+// produced side, FindOrCreate (not lookup-only) is deliberate: a PR the agent
 // just opened may not have been polled yet, so the attach mints the
 // create-minimal stub the poller/enrichment path later fills (the artifact URL
 // links it out). A repo-level artifact target (a branch push, or owner/repo
 // with no '#N') maps to no entity and is skipped.
 //
-// A nil store is an absent capability, not an error: without taskMemory there
-// is nowhere to write at all, and without artifacts or entities the produced
-// pass cannot resolve anything — the primary row still lands.
+// A nil store is an absent capability, not an error, and the two cases are not
+// the same: a nil taskMemory is nowhere to write, so nothing is attached at all
+// — not even the primary row. A nil artifacts or entities store costs only the
+// produced pass, which cannot resolve anything without them; the primary row
+// still lands.
 func Attach(ctx context.Context, taskMemory db.TaskMemoryStore, artifacts db.ArtifactStore, entities db.EntityStore, orgID, conversationID, primaryEntityID string) {
 	if taskMemory == nil {
 		return
@@ -55,8 +57,9 @@ func Attach(ctx context.Context, taskMemory db.TaskMemoryStore, artifacts db.Art
 	if artifacts == nil || entities == nil {
 		return
 	}
-	// produced — every external object the run created/mutated, resolved from
-	// its artifacts. A listing failure leaves the upsert + primary row intact.
+	// produced — every external object the agent created/mutated, resolved from
+	// the conversation's artifacts. A listing failure leaves the upsert +
+	// primary row intact.
 	arts, err := artifacts.ListByConversationSystem(ctx, orgID, conversationID)
 	if err != nil {
 		attachLog.Warn("list artifacts for produced-entity attach failed", "conversation", conversationID, "error", err)

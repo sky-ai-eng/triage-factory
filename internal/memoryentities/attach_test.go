@@ -229,7 +229,7 @@ func TestAttach_ProducedStubForUnpolledPR(t *testing.T) {
 	if _, err := sqlitestore.New(database).TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-prod", "", "narrative", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
-	// A PR the run just opened — no entity exists for it yet.
+	// A PR the agent just opened — no entity exists for it yet.
 	seedProducedPR(t, database, "r-prod", "o/r", 4242, "https://github.com/o/r/pull/4242")
 
 	attachAll(t, database, runmode.LocalDefaultOrgID, "r-prod", entA.ID)
@@ -421,7 +421,7 @@ func TestAttach_Precedence(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 
-	// Primary P is itself a PR that the run also produced and had already
+	// Primary P is itself a PR that the agent also produced and had already
 	// touched mid-run — it must still end primary.
 	entP := makeEntity(t, database, "github", "o/r#100", "pr")
 	entB := makeEntity(t, database, "github", "o/r#200", "pr")
@@ -451,7 +451,7 @@ func TestAttach_Precedence(t *testing.T) {
 }
 
 // TestAttach_MotivatingCase is the read-path acceptance for the motivating
-// case: a Slack-thread-triggered run (primary A) that opens a PR (produced B)
+// case: a Slack-thread-triggered conversation (primary A) that opens a PR (produced B)
 // and touches an issue (C) leaves its narrative reachable from all three, with
 // roles {A: primary, B: produced, C: touched}.
 func TestAttach_MotivatingCase(t *testing.T) {

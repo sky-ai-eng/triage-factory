@@ -647,7 +647,7 @@ func isSlugChar(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
 }
 
-// attachConversationMemoryEntities makes a terminated run's memory reachable
+// attachConversationMemoryEntities makes a terminated conversation's memory reachable
 // from every entity it materially engaged. The rule itself lives in
 // internal/memoryentities, where it is reachable by anything that writes a
 // conversation's memory row; this is the spawner's stores bound to it.
