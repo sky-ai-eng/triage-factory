@@ -70,12 +70,14 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 	}
 
 	// The defensive branch: a run with no frozen plan falls back to the live
-	// steps, which carry a prompt id and no name.
+	// steps, which carry a prompt id and no name. Its own task, because one
+	// running blueprint_run per task is a schema invariant.
 	unplannedID := fixtureUUID("br-unnamed")
+	unplannedTaskID := seedBlueprintRunTask(t, s, "owner/repo#unnamed")
 	if _, err := sqlitestore.New(s.db).Blueprints.CreateRun(ctx, runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:           unplannedID,
 		BlueprintID:  bpID,
-		TaskID:       taskID,
+		TaskID:       unplannedTaskID,
 		TriggerType:  domain.BlueprintTriggerManual,
 		Status:       domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-unnamed",

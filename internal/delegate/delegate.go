@@ -105,14 +105,19 @@ type runConfig struct {
 	localGit *localGitChannel
 }
 
-// ErrTaskBusy is returned by Delegate on the event path when the fenced
-// insert loses to the one-active-auto-run-per-task index: a different
-// (event, trigger) pair went active on the same task between the
-// router's gate read and this insert. Unlike ErrAlreadyFired (permanently
-// satisfied — the run for this exact event exists), task-busy means the
-// caller's intent is still valid and must be deferred onto
-// pending_firings (or released back there), never dropped.
-var ErrTaskBusy = errors.New("delegate: another auto run is active on this task")
+// ErrTaskBusy is returned by Delegate, on either path, when the insert loses
+// to the one-active-run-per-task index: something already holds this task's
+// single live engagement. On the event path that is a different (event,
+// trigger) pair going active between the router's gate read and this insert;
+// on the manual path it is a second delegate gesture racing the first, or an
+// event firing that got there first.
+//
+// Unlike ErrAlreadyFired (permanently satisfied — the run for this exact event
+// exists), task-busy means the caller's intent is still valid: the event path
+// defers it onto pending_firings (or releases it back there) rather than
+// dropping it, and the delegate route answers 409 so the person retries
+// against a view that shows what is already running.
+var ErrTaskBusy = errors.New("delegate: another run is active on this task")
 
 // ErrAlreadyFired is returned by Delegate on the event path when the run
 // insert hit the (triggering_event_id, trigger_id) fence — a run for this
@@ -413,15 +418,24 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// returns ErrAlreadyFired, so the router skips cleanly instead of minting a
 	// duplicate blueprint_run — closing the latent gap that multi-step chains
 	// were never replay-fenced. Manual delegations write under the user's
-	// synthetic claims so blueprint_runs_insert RLS sees the creator; they carry
-	// no triggering_event_id and never fence (multiple manual runs of one task
-	// stay allowed). Everything before this insert (blueprint/step resolution,
-	// usage bumps) is cheap and idempotent enough to re-run on a fenced replay.
+	// synthetic claims so blueprint_runs_insert RLS sees the creator; they
+	// carry no triggering_event_id, so they take no part in the REPLAY fence —
+	// but the one-active-run-per-task index holds them like any other mint,
+	// which is what makes two concurrent delegate gestures produce one run.
+	// Everything before this insert (blueprint/step resolution, usage bumps) is
+	// cheap and idempotent enough to re-run on a fenced replay.
 	if triggerType == "manual" {
 		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
 			_, e := ts.Blueprints.CreateRun(bgCtx, orgID, brRow)
 			return e
 		}); err != nil {
+			// The one-active-run-per-task index refused: this task already
+			// holds a live engagement. The delegate route tears the prior one
+			// down before it calls here, so reaching this means something
+			// landed in between — a second gesture, or an auto-fire.
+			if errors.Is(err, db.ErrTaskBusyActiveRun) {
+				return "", ErrTaskBusy
+			}
 			return "", fmt.Errorf("create blueprint run: %w", err)
 		}
 	} else {
@@ -432,7 +446,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		// claim race has a winner either way and the run must still stand.
 		inserted, _, err := s.blueprints.CreateRunIfNotFiredSystem(bgCtx, orgID, brRow, opts.TaskClaim)
 		if err != nil {
-			if errors.Is(err, db.ErrTaskBusyActiveAutoRun) {
+			if errors.Is(err, db.ErrTaskBusyActiveRun) {
 				return "", ErrTaskBusy
 			}
 			return "", fmt.Errorf("create blueprint run: %w", err)

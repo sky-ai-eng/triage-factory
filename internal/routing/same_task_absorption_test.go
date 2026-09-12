@@ -758,3 +758,162 @@ func TestTryAutoDelegate_FrozenTask_BlocksOnlyItself(t *testing.T) {
 		t.Errorf("follow-up on the frozen task should fold into its parked conversation, got calls=%+v", stub.calls)
 	}
 }
+
+// setupManualAbsorbScenario is setupAbsorbScenario's other half: the task's
+// live conversation is a person's delegation rather than an auto-fire, and the
+// org bot is wired and enabled so the claim the fold rides can actually be
+// stamped. Returns the entity, the task, the trigger the event will match, and
+// the manual conversation's id.
+func setupManualAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task *domain.Task, trigger domain.EventHandler, manualConversationID string) {
+	t.Helper()
+	registerAbsorbEventType(t, absorbTestEventType)
+	seedAbsorbEventCatalog(t, database, absorbTestEventType)
+
+	st := sqlitestore.New(database)
+	ctx := context.Background()
+	if _, err := database.Exec(
+		`INSERT INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	if err := st.TeamAgents.AddForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("add agent to team: %v", err)
+	}
+
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "fake", "fake/manual#"+uuid.New().String()[:8], "thing",
+		"Manual Absorption Thing", "https://example.com/manual-absorption")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	entityID = entity.ID
+	createTestPrompt(t, database, domain.Prompt{ID: "p-manual-absorb", Name: "Absorb", Body: "x", Source: "user"})
+
+	firstEventID, err := st.Events.Record(ctx, runmode.LocalDefaultOrgID, domain.Event{
+		EventType:    absorbTestEventType,
+		EntityID:     &entityID,
+		MetadataJSON: `{"first":true}`,
+		CreatedAt:    time.Now(),
+		OrgID:        runmode.LocalDefaultOrgID,
+	})
+	if err != nil {
+		t.Fatalf("record first event: %v", err)
+	}
+	gotTask, _, err := testTaskStore(database).FindOrCreate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		entityID, absorbTestEventType, "", firstEventID, 0.5)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	task = gotTask
+
+	trig := domain.EventHandler{
+		ID:                     "trigger-manual-absorb",
+		Kind:                   domain.EventHandlerKindTrigger,
+		BlueprintID:            "p-manual-absorb",
+		TriggerType:            domain.TriggerTypeEvent,
+		EventType:              absorbTestEventType,
+		BreakerThreshold:       intPtr(4),
+		MinAutonomySuitability: floatPtr(0),
+		Enabled:                true,
+	}
+	createTriggerForTestRouting(t, database, trig)
+	if err := database.QueryRow(`SELECT blueprint_id FROM event_handlers WHERE id = ?`, trig.ID).Scan(&trig.BlueprintID); err != nil {
+		t.Fatalf("resolve trigger blueprint id: %v", err)
+	}
+	trigger = trig
+
+	// The person's delegation: a manual blueprint_run and its running
+	// conversation, exactly what POST /api/tasks/{id}/delegate leaves behind.
+	blueprintRunID, err := stubDelegateRun(database, *task, delegate.DelegateOpts{
+		ExplicitBlueprintID: trigger.BlueprintID,
+		TriggerType:         "manual",
+		CreatorUserID:       runmode.LocalDefaultUserID,
+	})
+	if err != nil {
+		t.Fatalf("seed manual conversation: %v", err)
+	}
+	if err := database.QueryRow(`SELECT id FROM conversations WHERE blueprint_run_id = ?`, blueprintRunID).Scan(&manualConversationID); err != nil {
+		t.Fatalf("resolve seeded manual conversation id: %v", err)
+	}
+	return
+}
+
+// TestTryAutoDelegate_LiveManualConversation_AbsorbsTheEvent is the rule this
+// ticket restores: a task has one live conversation, and whoever started it
+// holds the task's gate. An event landing on a task a person is working is
+// folded into their agent's context — it does not mint a second agent beside
+// it, which is what the auto-only gate used to do with nothing able to say
+// which conversation the task was about.
+//
+// The claim rides the fold, as it does on every other commitment point: the
+// bot taking the event on is the bot taking the task on.
+func TestTryAutoDelegate_LiveManualConversation_AbsorbsTheEvent(t *testing.T) {
+	database := newTestDB(t)
+	entityID, task, trigger, manualConversationID := setupManualAbsorbScenario(t, database)
+
+	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType:    absorbTestEventType,
+		EntityID:     &entityID,
+		MetadataJSON: `{"mention":"ci went red"}`,
+		CreatedAt:    time.Now(),
+		OrgID:        runmode.LocalDefaultOrgID,
+	})
+	if err != nil {
+		t.Fatalf("record second event: %v", err)
+	}
+
+	st := sqlitestore.New(database)
+	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
+		st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings,
+		st.Events, st.Orgs, st.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
+
+	injectedConversationID := ""
+	if fired, err := router.tryAutoDelegateTrackingInjection(context.Background(), runmode.LocalDefaultOrgID,
+		task, trigger, entityID, secondEventID, runmode.LocalDefaultTeamID, &injectedConversationID); err != nil {
+		t.Fatalf("tryAutoDelegateTrackingInjection: %v", err)
+	} else if fired {
+		t.Fatal("the event minted a second delegation beside the person's live conversation")
+	}
+	if injectedConversationID != manualConversationID {
+		t.Errorf("tracked injected conversation = %q, want the live manual conversation %q", injectedConversationID, manualConversationID)
+	}
+	if len(stub.calls) != 1 || stub.calls[0].conversationID != manualConversationID {
+		t.Fatalf("expected one injection into %q, got %+v", manualConversationID, stub.calls)
+	}
+
+	// No second blueprint_run — the one the person's delegation minted is
+	// still the task's only one.
+	var runs int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM blueprint_runs WHERE task_id = ?`, task.ID).Scan(&runs); err != nil {
+		t.Fatalf("count blueprint runs: %v", err)
+	}
+	if runs != 1 {
+		t.Errorf("blueprint_runs on the task = %d, want 1 (the fold mints nothing)", runs)
+	}
+
+	rows, err := st.PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil {
+		t.Fatalf("list pending firings: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected no pending_firings row (folded, not deferred), got %d", len(rows))
+	}
+
+	var kind string
+	if err := database.QueryRow(`SELECT kind FROM task_events WHERE task_id = ? AND event_id = ?`, task.ID, secondEventID).Scan(&kind); err != nil {
+		t.Fatalf("read task_events for injected bookkeeping: %v", err)
+	}
+	if kind != "injected" {
+		t.Errorf("task_events.kind = %q, want %q", kind, "injected")
+	}
+
+	var claimed sql.NullString
+	if err := database.QueryRow(`SELECT claimed_by_agent_id FROM tasks WHERE id = ?`, task.ID).Scan(&claimed); err != nil {
+		t.Fatalf("read task claim: %v", err)
+	}
+	if claimed.String != runmode.LocalDefaultAgentID {
+		t.Errorf("task claim = %q, want the bot %q — the fold is a commitment like any other", claimed.String, runmode.LocalDefaultAgentID)
+	}
+}

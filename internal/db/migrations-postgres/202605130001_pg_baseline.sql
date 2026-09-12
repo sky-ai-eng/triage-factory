@@ -3153,12 +3153,19 @@ CREATE INDEX idx_conversations_queued_preferred ON public.conversations (preferr
 -- Replay fence: one event firing one trigger materializes at most one
 -- blueprint_run. Partial, so manual runs (NULL) never participate.
 CREATE UNIQUE INDEX blueprint_runs_event_trigger_fence ON public.blueprint_runs (triggering_event_id, trigger_id) WHERE (triggering_event_id IS NOT NULL);
--- One active auto (trigger_type='event') run per task — the DB twin of the
--- router's check-then-act in-process gate. The task is the unit, not the entity:
--- two tasks on one pull request may each have an agent in flight. A second
--- manual run is allowed. A violation becomes db.ErrTaskBusyActiveAutoRun, so the
--- caller queues the intent rather than dropping it as a replay.
-CREATE UNIQUE INDEX blueprint_runs_one_active_auto_run_per_task ON public.blueprint_runs (org_id, task_id) WHERE (trigger_type = 'event'::text AND status = 'running'::text);
+-- One active run per task, whatever minted it — the DB backstop for a rule the
+-- mint doors can only check-then-act. The task is the unit, not the entity: two
+-- tasks on one pull request may each have an agent in flight. A violation
+-- becomes db.ErrTaskBusyActiveRun, so an event-path caller queues the intent
+-- rather than dropping it as a replay and the delegate route answers 409.
+--
+-- A parked conversation's blueprint stays 'running' by design, so this holds a
+-- task's slot until something concludes that blueprint. That makes cancelling
+-- the blueprint part of a teardown load-bearing rather than a courtesy: every
+-- door that ends a task's engagement before minting the next one has to reach
+-- the blueprint layer (Spawner.StopConversationAndCancelBlueprint), or the new
+-- mint is refused by a run nothing is driving.
+CREATE UNIQUE INDEX blueprint_runs_one_active_run_per_task ON public.blueprint_runs (org_id, task_id) WHERE (status = 'running'::text);
 
 ALTER TABLE ONLY public.blueprint_steps
     ADD CONSTRAINT blueprint_steps_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;

@@ -56,6 +56,24 @@ func TestBlueprintStore_Postgres_RunWriteConformance(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_Postgres_OneActiveRunPerTaskConformance runs the shared
+// one-running-blueprint_run-per-task suite against the Postgres impl, whose
+// index widened from the auto-only half it shipped with. Its sibling in
+// blueprints_task_race_test.go covers the same index under real concurrency.
+func TestBlueprintStore_Postgres_OneActiveRunPerTaskConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunOneActiveRunPerTaskConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID := seedPgOrgForBlueprints(t, h)
+		teamID := seedPgDefaultTeam(t, h, orgID, userID)
+		blueprintID := "bp-oneactive-" + orgID[:8]
+		seedPgBlueprintInTeam(t, h, orgID, userID, teamID, blueprintID)
+		return pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).Blueprints,
+			orgID, blueprintID, seedPgTask(t, h, orgID, userID)
+	})
+}
+
 // TestBlueprintStore_Postgres_DuplicationConformance runs the shared
 // DuplicatePrompts deep-copy suite against the Postgres impl. Both pools wire
 // to AdminDB; prompts are seeded through the store so the
@@ -455,8 +473,11 @@ func TestBlueprintStore_Postgres_StepPlanLengths(t *testing.T) {
 		t.Fatalf("CreateRun (three steps): %v", err)
 	}
 	threeID := threeIDRow.ID
+	// Its own task: one running blueprint_run per task is a schema invariant,
+	// and nothing here is about two runs sharing a task.
+	oneStepTaskID := seedPgTask(t, h, orgID, userID)
 	oneIDRow, err := blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
-		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
+		BlueprintID: blueprintID, TaskID: oneStepTaskID, TriggerType: domain.BlueprintTriggerManual,
 		WorktreePath: "/tmp/wt-pg-spl-1", StepPlan: plan[:1],
 	})
 	if err != nil {
@@ -553,10 +574,13 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 	// Inside WithTx so JWT claims are set; the COALESCE in
 	// createRunManual resolves tf.current_user_id() to userID.
 	var manualBlueprintRunID string
+	// Its own task — the event run above still holds the first one's single
+	// running slot.
+	manualTaskID := seedPgTask(t, h, orgID, userID)
 	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		idRow, err := tx.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
 			BlueprintID:  blueprintID,
-			TaskID:       taskID,
+			TaskID:       manualTaskID,
 			TriggerType:  domain.BlueprintTriggerManual,
 			WorktreePath: "/tmp/wt-blueprint-manual",
 		})

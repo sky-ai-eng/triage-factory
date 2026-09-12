@@ -94,6 +94,63 @@ func RunBlueprintRunWriteConformance(t *testing.T, mk BlueprintRunWriteFactory) 
 	})
 }
 
+// RunOneActiveRunPerTaskConformance pins the DB backstop for "a task has at
+// most one live conversation": blueprint_runs_one_active_run_per_task refuses a
+// second running run on the task whatever minted it, and both mint doors report
+// the refusal as db.ErrTaskBusyActiveRun rather than a raw driver error.
+//
+// The trigger-type axis is the point. The index used to be auto-only, so a
+// human's delegation could mint a second live engagement beside an auto-fired
+// one and the task had two conversations with nothing able to say which it was
+// about.
+func RunOneActiveRunPerTaskConformance(t *testing.T, mk BlueprintRunWriteFactory) {
+	t.Helper()
+
+	// Both orderings, because the two arms are different SQL in Postgres
+	// (createRunManual on the app pool, createRunEventTriggered on the admin
+	// pool) and only a pair of cases proves neither is the unguarded one.
+	for _, tc := range []struct {
+		name         string
+		first, again domain.BlueprintTriggerType
+	}{
+		{"manual_then_event", domain.BlueprintTriggerManual, domain.BlueprintTriggerEvent},
+		{"event_then_manual", domain.BlueprintTriggerEvent, domain.BlueprintTriggerManual},
+		{"manual_then_manual", domain.BlueprintTriggerManual, domain.BlueprintTriggerManual},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, orgID, blueprintID, taskID := mk(t)
+			ctx := context.Background()
+
+			held, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
+				BlueprintID: blueprintID, TaskID: taskID, TriggerType: tc.first,
+			})
+			if err != nil {
+				t.Fatalf("CreateRun (%s, the run that holds the task): %v", tc.first, err)
+			}
+
+			if _, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
+				BlueprintID: blueprintID, TaskID: taskID, TriggerType: tc.again,
+			}); !errors.Is(err, db.ErrTaskBusyActiveRun) {
+				t.Fatalf("CreateRun (%s) onto a busy task = %v, want db.ErrTaskBusyActiveRun", tc.again, err)
+			}
+
+			// Teardown then re-delegate: the delegate route cancels the
+			// blueprint behind the conversation it ends, and the next mint has
+			// to succeed. This is the deadlock the widened index would
+			// otherwise create — a parked conversation's blueprint stays
+			// 'running' by design, so nothing but that cancel reopens the task.
+			if _, err := store.MarkRunStatusSystem(ctx, orgID, held.ID, domain.BlueprintRunStatusCancelled, "system_cancelled", nil); err != nil {
+				t.Fatalf("cancel the held run: %v", err)
+			}
+			if _, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
+				BlueprintID: blueprintID, TaskID: taskID, TriggerType: tc.again,
+			}); err != nil {
+				t.Fatalf("CreateRun (%s) after the prior run was cancelled: %v", tc.again, err)
+			}
+		})
+	}
+}
+
 // RunBlueprintStoreConformance runs the shared CRUD + step round-trip +
 // composition suite against any db.BlueprintStore impl:
 //

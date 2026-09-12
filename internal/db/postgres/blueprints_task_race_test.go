@@ -99,11 +99,11 @@ func newRaceFixture(t *testing.T, h *pgtest.Harness) raceFixture {
 	return raceFixture{orgID: orgID, entityID: entityID, userID: userID, agentID: agentID, newTask: newTask, firing: firing}
 }
 
-// TestBlueprintStore_Postgres_OneActiveAutoRunPerTask: the task gate
-// (HasActiveAutoConversationForTaskSystem) is check-then-act, so two different
+// TestBlueprintStore_Postgres_OneActiveRunPerTask: the task gate
+// (LiveConversationIDForTaskSystem) is check-then-act, so two different
 // (event, trigger) pairs racing to auto-fire on the SAME task could both
 // pass the check and each mint an active blueprint_run —
-// blueprint_runs_one_active_auto_run_per_task is the DB-enforced backstop.
+// blueprint_runs_one_active_run_per_task is the DB-enforced backstop.
 //
 // Several distinct (trigger, triggering_event) pairs on one task fire
 // CreateRunIfNotFiredSystem CONCURRENTLY (real goroutines behind a start
@@ -113,7 +113,7 @@ func newRaceFixture(t *testing.T, h *pgtest.Harness) raceFixture {
 // reports the task-busy sentinel, not inserted=false (which means "replay,
 // permanently satisfied" and would silently drop the loser's intent) and
 // never a raw unique-violation error.
-func TestBlueprintStore_Postgres_OneActiveAutoRunPerTask(t *testing.T) {
+func TestBlueprintStore_Postgres_OneActiveRunPerTask(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -156,8 +156,8 @@ func TestBlueprintStore_Postgres_OneActiveAutoRunPerTask(t *testing.T) {
 			winners++
 			continue
 		}
-		if !errors.Is(errs[i], db.ErrTaskBusyActiveAutoRun) {
-			t.Fatalf("racer %d: loser must surface ErrTaskBusyActiveAutoRun (defer, don't drop), got inserted=false err=%v", i, errs[i])
+		if !errors.Is(errs[i], db.ErrTaskBusyActiveRun) {
+			t.Fatalf("racer %d: loser must surface ErrTaskBusyActiveRun (defer, don't drop), got inserted=false err=%v", i, errs[i])
 		}
 	}
 	if winners != 1 {

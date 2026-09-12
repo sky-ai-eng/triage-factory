@@ -334,6 +334,15 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 			`, bpID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID); err != nil {
 				t.Fatalf("seed blueprint: %v", err)
 			}
+			// Settle whatever the task was already running: one running
+			// blueprint_run per task is a schema invariant, and staging a
+			// task's second engagement means the first one is over.
+			if _, err := conn.Exec(`
+				UPDATE blueprint_runs SET status = 'completed', completed_at = CURRENT_TIMESTAMP
+				WHERE task_id = ? AND status = 'running'
+			`, taskID); err != nil {
+				t.Fatalf("settle the task's prior blueprint_run: %v", err)
+			}
 			brID := uuid.New().String()
 			if _, err := conn.Exec(`
 				INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)

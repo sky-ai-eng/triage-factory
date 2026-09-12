@@ -586,6 +586,13 @@ func seedPgTeamConversationOnEntity(t *testing.T, h *pgtest.Harness, orgID, user
 	`, bpID, orgID, userID, teamID); err != nil {
 		t.Fatalf("seed blueprint: %v", err)
 	}
+	// One running blueprint_run per task is a schema invariant
+	// (blueprint_runs_one_active_run_per_task), so staging a task's next
+	// engagement settles the one before it — which is what the task moving on
+	// means.
+	if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE org_id = $1 AND task_id = $2 AND status = 'running'`, orgID, taskID); err != nil {
+		t.Fatalf("settle the task's prior blueprint_run: %v", err)
+	}
 	brID := uuid.New().String()
 	if _, err := conn.Exec(`
 		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
@@ -702,6 +709,13 @@ func seedPgConversationForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, use
 	`, bpID, orgID, userID); err != nil {
 		t.Fatalf("seed blueprint: %v", err)
 	}
+	// One running blueprint_run per task is a schema invariant
+	// (blueprint_runs_one_active_run_per_task), so staging a task's next
+	// engagement settles the one before it — which is what the task moving on
+	// means.
+	if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE org_id = $1 AND task_id = $2 AND status = 'running'`, orgID, taskID); err != nil {
+		t.Fatalf("settle the task's prior blueprint_run: %v", err)
+	}
 	brID := uuid.New().String()
 	if _, err := conn.Exec(`
 		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
@@ -766,6 +780,13 @@ func seedPgBlueprintRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, use
 		t.Fatalf("seed blueprint: %v", err)
 	}
 
+	// One running blueprint_run per task is a schema invariant
+	// (blueprint_runs_one_active_run_per_task), so staging a task's next
+	// engagement settles the one before it — which is what the task moving on
+	// means.
+	if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE org_id = $1 AND task_id = $2 AND status = 'running'`, orgID, taskID); err != nil {
+		t.Fatalf("settle the task's prior blueprint_run: %v", err)
+	}
 	blueprintRunID := uuid.New().String()
 	if _, err := conn.Exec(`
 		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, worktree_path, step_plan)

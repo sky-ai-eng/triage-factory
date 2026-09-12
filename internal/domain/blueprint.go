@@ -61,7 +61,7 @@ func (s BlueprintRunStatus) Terminal() bool {
 // between the two leaves a 'running' parent with nothing to drive it: no
 // conversation means no claim, so every recovery surface that joins through
 // conversations looks straight past it, and (in Postgres) it keeps holding the
-// one-active-auto-run index against its task.
+// one-active-run index against its task.
 //
 // The transition running → failed on this reason belongs exclusively to the
 // two recovery surfaces — the leader reaper's sweep and the boot reconcile. No

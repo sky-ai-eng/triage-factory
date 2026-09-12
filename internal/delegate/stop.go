@@ -247,7 +247,7 @@ func (s *Spawner) StopBlueprintRun(orgID, blueprintRunID string, cause StopCause
 		// No step was stopped, so nothing is going to carry this run to a
 		// terminal — every path that finalizes a blueprint runs off a step's.
 		// Finalize it here instead of leaving it 'running' with nothing coming,
-		// holding its worktree and its task's one-active-auto-run slot.
+		// holding its worktree and its task's one-active-run slot.
 		s.finalizeCancelledBlueprintRun(ctx, orgID, br, nil, "")
 	}
 	return errors.Join(errs...)
@@ -365,14 +365,12 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	//
 	// We also have to drain the task's firing queue ourselves: a stop that
 	// finds no goroutine — a run parked `open`, or one owned by another pod —
-	// has no defer to piggy-back on, and an auto-fired run stopped in that
-	// state would leave the queue stuck until some other run on that task
-	// terminated. Draining alongside a killed goroutine's own defer is safe:
-	// DrainTask serializes per task and every pop is a guarded status
-	// transition, so whichever runs first fires the queued intent and the other
-	// finds nothing to pop. The preflight above already loaded the run, so the
-	// trigger type and the task the drain is keyed on are in hand.
-	triggerType := conv.TriggerType
+	// has no defer to piggy-back on, and a run stopped in that state would
+	// leave the queue stuck until some other run on that task terminated.
+	// Draining alongside a killed goroutine's own defer is safe: DrainTask
+	// serializes per task and every pop is a guarded status transition, so
+	// whichever runs first fires the queued intent and the other finds nothing
+	// to pop.
 
 	// User-initiated stop: write under the stopping user's
 	// synthetic claims so RLS sees a legitimate user-attributed
@@ -453,9 +451,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 		// stopped conversation permanently unresumable.
 		s.finalizeParkedBlueprintOnCancel(bgCtx, orgID, conv, userID)
 	}
-	// The task's drain is keyed off the run's trigger type so the manual
-	// short-circuit holds.
-	s.notifyDrainer(orgID, triggerType, conv.TaskID)
+	s.notifyDrainer(orgID, conv.TaskID)
 	return nil
 }
 

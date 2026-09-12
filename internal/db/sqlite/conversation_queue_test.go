@@ -612,20 +612,23 @@ func TestConversationQueueStore_SQLite_FleetQueueShares(t *testing.T) {
 		ctx := context.Background()
 		org := runmode.LocalDefaultOrgID
 
-		task := seedEntityEventTask(t, conn, "rq-fqs")
 		insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqfqs-p0", Name: "Step 0", Body: "b", Source: "user"})
 		insertBlueprintForTest(t, conn, "rqfqs-bp", "RQ FQS Blueprint")
 		if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "rqfqs-bp", []string{"rqfqs-p0"}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
+		taskSeq := 0
 		seed := dbtest.FleetQueueSharesSeeder{
-			// One blueprint_run per staged run — the real firing model (one
-			// delegation = one blueprint_run), and what makes several
-			// queued rows concurrently claimable: a blueprint drives its
-			// current step and no other, so siblings under one blueprint
-			// could never all be queued at once.
+			// One task and one blueprint_run per staged run — the real firing
+			// model (one delegation = one blueprint_run on its own task), and
+			// what makes several queued rows concurrently claimable: a
+			// blueprint drives its current step and no other, so siblings
+			// under one blueprint could never all be queued at once, and one
+			// task never holds two running blueprints at all.
 			EnqueueConversation: func(t *testing.T) string {
 				t.Helper()
+				taskSeq++
+				task := seedEntityEventTask(t, conn, fmt.Sprintf("rq-fqs-%d", taskSeq))
 				conversationID := uuid.New().String()
 				step := 0
 				created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{

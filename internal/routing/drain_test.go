@@ -82,12 +82,21 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 		// would hide the very coupling the router now depends on.
 		inserted, _, err := store.Blueprints.CreateRunIfNotFiredSystem(context.Background(), runmode.LocalDefaultOrgID, br, opts.TaskClaim)
 		if err != nil {
+			// Map the store sentinel the way production's Delegate does, so a
+			// router test exercising the busy-task deferral sees the error the
+			// router branches on rather than a raw store error.
+			if errors.Is(err, dbpkg.ErrTaskBusyActiveRun) {
+				return "", delegate.ErrTaskBusy
+			}
 			return "", err
 		}
 		if !inserted {
 			return "", delegate.ErrAlreadyFired
 		}
 	} else if _, err := store.Blueprints.CreateRun(context.Background(), runmode.LocalDefaultOrgID, br); err != nil {
+		if errors.Is(err, dbpkg.ErrTaskBusyActiveRun) {
+			return "", delegate.ErrTaskBusy
+		}
 		return "", err
 	}
 	// Raw insert rather than a store call: conversation rows are minted by

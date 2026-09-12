@@ -780,9 +780,8 @@ func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID stri
 		// today, but any caller reaching this path (tests seeding event
 		// runs, a future direct CreateRun user) deserves the documented
 		// sentinel, not a raw unique_violation.
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blueprintRunsOneActivePerTaskConstraint {
-			return domain.BlueprintRun{}, db.ErrTaskBusyActiveAutoRun
+		if isTaskBusyActiveRun(err) {
+			return domain.BlueprintRun{}, db.ErrTaskBusyActiveRun
 		}
 		return domain.BlueprintRun{}, fmt.Errorf("insert blueprint_run (event): %w", err)
 	}
@@ -808,19 +807,36 @@ func (s *blueprintStore) createRunManual(ctx context.Context, orgID string, br d
 		RETURNING `+pgBlueprintRunColumns,
 		br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan).Scan)
 	if err != nil {
+		// The manual mint is fenced by the same index as the event one. Two
+		// delegate gestures on one task race here with nothing else between
+		// them — the route tears the prior engagement down and mints, which is
+		// check-then-act — and an event firing can get there first.
+		if isTaskBusyActiveRun(err) {
+			return domain.BlueprintRun{}, db.ErrTaskBusyActiveRun
+		}
 		return domain.BlueprintRun{}, fmt.Errorf("insert blueprint_run (manual): %w", err)
 	}
 	return stored, nil
 }
 
+// isTaskBusyActiveRun reports whether err is the one-active-run-per-task index
+// refusing an insert. Every mint door translates through here so the three
+// arms cannot disagree about which violation is a busy task.
+func isTaskBusyActiveRun(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" &&
+		pgErr.ConstraintName == blueprintRunsOneActivePerTaskConstraint
+}
+
 // blueprintRunsOneActivePerTaskConstraint is the partial unique index name
-// backing "at most one active (trigger_type='event', status='running')
-// blueprint_run per task" — the DB-enforced twin of the router's in-process
-// task gate (HasActiveAutoConversationForTaskSystem), which is check-then-act: two
-// processes (or a leader-failover overlap within one) could both pass the
-// check and each mint an active auto run on the same task via different
-// triggers. See the migration for the full index definition.
-const blueprintRunsOneActivePerTaskConstraint = "blueprint_runs_one_active_auto_run_per_task"
+// backing "at most one running blueprint_run per task, whatever minted it".
+// Every gate above it is check-then-act — the router reads its task gate and
+// then inserts, the delegate route tears down and then mints — so two
+// processes (or a leader-failover overlap within one) can both pass the check.
+// This index is what actually holds the rule. See the migration for the full
+// definition and for what a parked conversation's still-running blueprint
+// means for it.
+const blueprintRunsOneActivePerTaskConstraint = "blueprint_runs_one_active_run_per_task"
 
 // CreateRunIfNotFiredSystem is the event-path fenced insert (admin pool).
 // Two independent unique constraints can turn this insert into a clean
@@ -829,12 +845,12 @@ const blueprintRunsOneActivePerTaskConstraint = "blueprint_runs_one_active_auto_
 //   - blueprint_runs_event_trigger_fence (ON CONFLICT, inference-targeted):
 //     a replayed (triggering_event_id, trigger_id) — the at-least-once event
 //     queue redelivering an event whose first auto-delegation already fired.
-//   - blueprint_runs_one_active_auto_run_per_task (caught below): a
-//     DIFFERENT (event, trigger) pair racing to fire on the SAME task
-//     while another auto run is still active on it. A single INSERT's ON
+//   - blueprint_runs_one_active_run_per_task (caught below): a DIFFERENT
+//     (event, trigger) pair racing to fire on the SAME task, or a manual
+//     delegation, while a run is still active on it. A single INSERT's ON
 //     CONFLICT can only target one arbiter index, so this second case
 //     isn't inference-eligible — it surfaces as a raw unique_violation,
-//     translated to db.ErrTaskBusyActiveAutoRun. NOT the inserted=false
+//     translated to db.ErrTaskBusyActiveRun. NOT the inserted=false
 //     contract: a replay is permanently satisfied, task-busy is a
 //     deferral — the caller must queue the intent, not drop it.
 //
@@ -870,9 +886,8 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
 		`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
 		if err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blueprintRunsOneActivePerTaskConstraint {
-				return db.ErrTaskBusyActiveAutoRun
+			if isTaskBusyActiveRun(err) {
+				return db.ErrTaskBusyActiveRun
 			}
 			return fmt.Errorf("insert blueprint_run (fenced): %w", err)
 		}

@@ -44,7 +44,7 @@ func TestStopBlueprintRun_TearsDownTheRunItsIDNames(t *testing.T) {
 		t.Fatalf("read blueprint_run: %v", err)
 	}
 	if bpStatus != "cancelled" {
-		t.Errorf("blueprint_run status = %q, want cancelled — a run left 'running' keeps executing for a firing that was rolled back, and holds its task's one-active-auto-run slot", bpStatus)
+		t.Errorf("blueprint_run status = %q, want cancelled — a run left 'running' keeps executing for a firing that was rolled back, and holds its task's one-active-run slot", bpStatus)
 	}
 	if !cancelRequested {
 		t.Error("blueprint_run cancel_requested = false; the signal is what stops the claim gate handing out this blueprint's steps during the teardown")

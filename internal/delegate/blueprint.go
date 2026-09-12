@@ -211,7 +211,7 @@ func (s *Spawner) terminateBlueprint(
 
 	// Drain the task's queue exactly once for the blueprint (independent of
 	// how many steps ran).
-	s.notifyDrainer(orgID, triggerType, taskID)
+	s.notifyDrainer(orgID, taskID)
 
 	dur := time.Since(startTime)
 	blueprintLog.Info("blueprint_run terminated",
@@ -539,11 +539,10 @@ func (s *Spawner) CancelBlueprintRun(orgID, blueprintRunID, userID string) error
 // 'running' blueprint IS the intended state, because it is what keeps the
 // parked step claimable again on resume.
 //
-// It does NOT drain the task's firing queue: the drainer's manual short-circuit
-// keys off the run's trigger type, which the caller already passes to
-// notifyDrainer — folding the drain in here (via terminateBlueprint) would
-// couple it to the write-pool routing and drain a manual run that must not.
-// So this finalizes the blueprint row + worktree + snapshot only:
+// It does NOT drain the task's firing queue: its caller already does that from
+// the stop path, and folding the drain in here (via terminateBlueprint) would
+// couple it to the write-pool routing for nothing. So this finalizes the
+// blueprint row + worktree + snapshot only:
 //
 //   - marks the blueprint_run cancelled, routed by userID exactly like
 //     CancelBlueprintRun — a user cancel (non-empty) under the user's

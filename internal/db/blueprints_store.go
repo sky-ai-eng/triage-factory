@@ -40,16 +40,20 @@ var (
 	// distinct — the fence would silently not engage. The event path always
 	// supplies both, so an empty value is a programming error surfaced loud.
 	ErrBlueprintRunFenceRequiresEventAndTrigger = errors.New("db: CreateRunIfNotFiredSystem requires non-empty TriggeringEventID and TriggerID")
-	// ErrTaskBusyActiveAutoRun is returned by CreateRunIfNotFiredSystem
-	// (Postgres) when the insert loses to the one-active-auto-run-per-task
-	// partial unique index: a DIFFERENT (event, trigger) pair won the race
-	// to fire on the same task. Deliberately distinct from the
-	// inserted=false replay-fence outcome — a replay is permanently
-	// satisfied (the run for THIS event exists), while task-busy is a
-	// deferral: the caller's intent is still valid and must be queued (or
-	// released back to the queue), never dropped. Conflating the two turns
-	// a routine busy-task race into silent intent loss.
-	ErrTaskBusyActiveAutoRun = errors.New("db: another auto run is active on this task (one-active-per-task index)")
+	// ErrTaskBusyActiveRun is returned by both mint doors, in both dialects,
+	// when the insert loses to the one-active-run-per-task partial unique
+	// index: something else already holds this task's single live engagement.
+	// On the event path that is a DIFFERENT (event, trigger) pair winning the
+	// race; on the manual path it is a second delegate gesture, or an event
+	// firing that got there first.
+	//
+	// Deliberately distinct from CreateRunIfNotFiredSystem's inserted=false
+	// replay-fence outcome — a replay is permanently satisfied (the run for
+	// THIS event exists), while task-busy is a deferral: the event caller's
+	// intent is still valid and must be queued (or released back to the
+	// queue), never dropped. Conflating the two turns a routine busy-task race
+	// into silent intent loss.
+	ErrTaskBusyActiveRun = errors.New("db: another run is active on this task (one-active-per-task index)")
 )
 
 // DuplicationStep is one selected prompt resolved to its place in a source
