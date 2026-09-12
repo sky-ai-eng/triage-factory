@@ -218,6 +218,15 @@ type teamTracksRepoResult struct {
 	Tracks bool `json:"tracks"`
 }
 
+type taskOwnRepoArgs struct {
+	Owner string `json:"owner"`
+	Repo  string `json:"repo"`
+}
+
+type taskOwnRepoResult struct {
+	IsTaskRepo bool `json:"is_task_repo"`
+}
+
 type conversationWorktreeByRepoRefArgs struct {
 	RepoID string `json:"repo_id"`
 	Ref    string `json:"ref"`

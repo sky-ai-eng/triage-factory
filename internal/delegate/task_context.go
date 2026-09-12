@@ -53,7 +53,7 @@ func BuildTaskContext(task domain.Task, metadataJSON, skeleton string) string {
 
 	switch task.EntitySource {
 	case "github":
-		owner, repo, prNumber := splitGitHubEntitySourceID(task.EntitySourceID)
+		owner, repo, prNumber := domain.SplitGitHubEntitySourceID(task.EntitySourceID)
 		if owner != "" && repo != "" {
 			add("Repository", owner+"/"+repo)
 		}

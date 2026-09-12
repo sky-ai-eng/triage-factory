@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // maxClaimAttempts caps how many times the dispatcher re-claims one queue
@@ -43,6 +44,11 @@ import (
 // the shape of the transient infrastructure faults it exists for. A fault that
 // outlasts it is not one more retry away.
 const maxClaimAttempts = 5
+
+// ledgerWriteTimeout bounds the conversation_worktrees write a claim makes on
+// its way to starting the agent. Long enough that only a genuinely stuck store
+// hits it, short enough that one does not hold the step behind it.
+const ledgerWriteTimeout = 5 * time.Second
 
 // Default cadences for RunDispatcher, exported so main can tune them and tests
 // can drive the loop fast. The scan is the correctness backstop (a dropped wake
@@ -1540,6 +1546,37 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 			return runConfig{}, err
 		}
 		cfg.wtPath, cfg.runRoot, cfg.workspace = wt, wt, prov
+		// This conversation gets its own conversation_worktrees row for the
+		// task's PR repo. Push authority is per conversation: the gate reads
+		// the rows keyed to the one pushing and derives the ref from each
+		// recorded tree's live branch, so a conversation that shares a tree it
+		// did not itself materialize holds no row and is left read-only on the
+		// very repo its PR lives in. ref = pr-<N> is the materialization
+		// selector; the pushable branch comes from the tree.
+		// Idempotent on (conversation_id, repo_id, ref), so a re-claim writes
+		// nothing. Log-and-continue: both gates fall back to their task's-own-
+		// repo arm, which authorizes the repo but derives no pushable branch,
+		// so a failure costs this conversation its push and nothing else.
+		//
+		// Detached from the step's cancellation so a shutdown mid-claim still
+		// leaves the row a resumed engagement's pushes resolve through, and
+		// bounded because WithoutCancel drops the parent's deadline along with
+		// it: this write sits inline on the path to starting the agent, so a
+		// store stuck on a lock costs a denied push, never the step's start.
+		if s.conversationWorktrees != nil && owner != "" && repo != "" && prNumber > 0 {
+			ledgerCtx, cancelLedger := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
+			if _, _, werr := s.conversationWorktrees.InsertSystem(ledgerCtx, orgID, domain.ConversationWorktree{
+				ConversationID: conv.ID,
+				RepoID:         owner + "/" + repo,
+				Path:           wt,
+				Ref:            worktree.PRRefSlug(prNumber),
+			}); werr != nil {
+				dispatchLog.Warn("record shared worktree in conversation_worktrees failed; pushes to this repo will be denied for this conversation",
+					"path", wt,
+					"conversation", conv.ID, "repo", owner+"/"+repo, "error", werr)
+			}
+			cancelLedger()
+		}
 	case "jira":
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
 		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindJira)
@@ -1594,7 +1631,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 // its parts. prNumber is 0 when absent/unparseable; callers surface that as a
 // setup failure.
 func parseGitHubTask(task domain.Task) (owner, repo string, prNumber int) {
-	return splitGitHubEntitySourceID(task.EntitySourceID)
+	return domain.SplitGitHubEntitySourceID(task.EntitySourceID)
 }
 
 // materializeStepSkill places one blueprint step's SKILL.md where this host's

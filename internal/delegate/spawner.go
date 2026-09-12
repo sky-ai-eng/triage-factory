@@ -1031,7 +1031,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		// still rejected by the receive-pack gate: read-only bootstrap, push
 		// authority is earned once the checkout's branch resolves through a real
 		// ledger row.
-		if isTaskOwnRepo(ctx, stores, info, owner, repo) {
+		if agenthost.IsTaskOwnRepo(ctx, stores, info, owner, repo) {
 			return gitproxy.Decision{Allowed: true, ProtectedRefs: pushpolicy.Refs(protected)}, nil
 		}
 		return gitDenyNotMaterialized(repoID), nil
@@ -1065,30 +1065,8 @@ func gitDenyNotMaterialized(repoID string) gitproxy.Decision {
 	return gitproxy.Decision{
 		Allowed:     false,
 		DenyReason:  "repo-not-materialized",
-		DenyMessage: fmt.Sprintf("gitproxy: repo %s is tracked by this team but not yet materialized in this run; run 'workspace add %s' to persist it, then retry", repoID, repoID),
+		DenyMessage: fmt.Sprintf("gitproxy: repo %s is tracked by this team but not yet materialized in this run; run 'workspace add %s' for its default branch, or 'workspace add %s --pr <N>' to check out a pull request head, then retry", repoID, repoID, repoID),
 	}
-}
-
-// isTaskOwnRepo reports whether (owner, repo) is the GitHub repo of the run's
-// own task — the repo the run was created to work on. It authorizes the initial
-// setup clone for read before that repo's conversation_worktrees ledger row exists (the
-// row is written post-clone). ConversationInfo carries no task id, so the run is resolved
-// to its task here. Non-GitHub tasks and any resolution failure report false,
-// falling back to the ledger gate (fail closed).
-func isTaskOwnRepo(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, owner, repo string) bool {
-	if stores.Conversations == nil || stores.Tasks == nil || info.ConversationID == "" {
-		return false
-	}
-	conv, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
-	if err != nil || conv == nil || conv.TaskID == "" {
-		return false
-	}
-	task, err := stores.Tasks.GetSystem(ctx, info.OrgID, conv.TaskID)
-	if err != nil || task == nil || task.EntitySource != "github" {
-		return false
-	}
-	taskOwner, taskRepo, _ := parseGitHubTask(*task)
-	return strings.EqualFold(taskOwner, owner) && strings.EqualFold(taskRepo, repo)
 }
 
 // gitPushRecorder builds the git proxy's RecordPush callback for one run. The

@@ -1448,8 +1448,21 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 			return nil
 		}
 	}
+	// No ledger row. The run's OWN task repo is authorized anyway, because a
+	// conversation working in a tree another conversation materialized holds no
+	// row for the one repo its whole mission is about — and refusing there
+	// tells an agent to `workspace add` a repo it is already standing in. The
+	// exception is exactly one repo wide and resolves on the orchestrator.
+	isTaskRepo, terr := c.rt.TaskOwnRepo(ctx, owner, repo)
+	if terr != nil {
+		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
+		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, terr)
+	}
+	if isTaskRepo {
+		return nil
+	}
 	c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-materialized")
-	return fmt.Errorf("repo %s is tracked by this team but not yet materialized in this run; run 'workspace add %s' to persist it, then retry", repoID, repoID)
+	return fmt.Errorf("repo %s is tracked by this team but not yet materialized in this run; run 'workspace add %s' for its default branch, or 'workspace add %s --pr <N>' to check out a pull request head, then retry", repoID, repoID, repoID)
 }
 
 func (c *LocalClient) GithubGetPR(ctx context.Context, owner, repo string, number int, verbose bool) (*ghclient.PRView, error) {
