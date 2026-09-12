@@ -1123,15 +1123,15 @@ type ConversationStore interface {
 	// that drops a blob on age, so a state left out of it is a key nothing
 	// ever comes back for.
 	//
-	// The per-row stamp is COALESCE(parked_at, completed_at, ended_at,
-	// queued_at, started_at), first non-NULL winning: parked_at tracks a
-	// parked conversation's last park (stamped by the park, cleared by the
-	// resume flips, so a repeatedly-resumed long-lived conversation ages from
-	// its most recent park rather than its initial start), completed_at covers
-	// both terminals, ended_at a row the task moved on from without reaching
-	// either, queued_at a row waiting for or inside an engagement (the resume
-	// that cleared parked_at re-stamped it, and started_at still holds the
-	// original mint), and started_at a fresh mint that never queued.
+	// A row's stamp is the NEWEST of parked_at, completed_at, ended_at,
+	// queued_at and started_at — the largest, not the first of a ranking.
+	// Each of those columns records that something happened at a time, so the
+	// largest is when the row last did anything; and the columns are not
+	// cleared in step, so any ranking is wrong for some row. A resume clears
+	// parked_at but leaves completed_at, so a conversation resumed from
+	// `completed` carries a stale completion beside a fresh queued_at, while a
+	// completed conversation that was never resumed carries a queued_at older
+	// than its completion. The maximum is right for both; no order is.
 	//
 	// The claim guard is the same one the eviction enumeration applies, and it
 	// is not redundant with the age rule: an engagement holds the blob open as

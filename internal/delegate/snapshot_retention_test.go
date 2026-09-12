@@ -187,6 +187,7 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-20 days') WHERE id=?`, oldConversationID); err != nil {
 		t.Fatalf("age old run: %v", err)
 	}
+	ageConversationMint(t, database, oldConversationID, "-20 days")
 	putTestSnapshot(t, s, oldKey)
 
 	seedConversation(t, database, "r-fresh", "sess-fresh", "/tmp/wt-fresh")
@@ -214,17 +215,20 @@ func TestListReapableSnapshotKeys_CoversEveryTerminalAndExcludesInTTL(t *testing
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, abortConversationID); err != nil {
 		t.Fatalf("age abort run: %v", err)
 	}
+	ageConversationMint(t, database, abortConversationID, "-30 days")
 
 	seedConversation(t, database, "r-fin2", "s", "/tmp/wt")
 	finishKey := taskIDForConversation(t, database, "r-fin2")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish', completed_at=datetime('now','-30 days') WHERE id='r-fin2'`); err != nil {
 		t.Fatalf("finish run: %v", err)
 	}
+	ageConversationMint(t, database, "r-fin2", "-30 days")
 	seedConversation(t, database, "r-failed2", "s", "/tmp/wt")
 	failedKey := taskIDForConversation(t, database, "r-failed2")
 	if _, err := database.Exec(`UPDATE conversations SET status='failed', completed_at=datetime('now','-30 days') WHERE id='r-failed2'`); err != nil {
 		t.Fatalf("failed run: %v", err)
 	}
+	ageConversationMint(t, database, "r-failed2", "-30 days")
 	seedConversation(t, database, "r-open2", "s", "/tmp/wt")
 	openKey := taskIDForConversation(t, database, "r-open2")
 	if _, err := database.Exec(`UPDATE conversations SET status='open', completed_at=NULL, started_at=datetime('now') WHERE id='r-open2'`); err != nil {
@@ -262,6 +266,7 @@ func TestListReapableSnapshotKeys_SharedTaskNeedsAllPastTTL(t *testing.T) {
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, conversationID1); err != nil {
 		t.Fatalf("age step 1: %v", err)
 	}
+	ageConversationMint(t, database, conversationID1, "-30 days")
 	// A second step on the SAME blueprint_run, also completed+abort but fresh.
 	addStepConversation(t, database, bpr, taskID, "run2-shared", 1, "running")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='run2-shared'`); err != nil {
@@ -343,6 +348,7 @@ func TestListReapableSnapshotKeys_NewestFailedConversationHoldsTheKey(t *testing
 	); err != nil {
 		t.Fatalf("age step 1: %v", err)
 	}
+	ageConversationMint(t, database, step1, "-30 days")
 	addStepConversation(t, database, bpr, taskID, "step-failed", 1, "running")
 	if _, err := database.Exec(
 		`UPDATE conversations SET status='failed', failure_kind=?, completed_at=datetime('now','-1 hours') WHERE id='step-failed'`,
@@ -350,6 +356,7 @@ func TestListReapableSnapshotKeys_NewestFailedConversationHoldsTheKey(t *testing
 	); err != nil {
 		t.Fatalf("fail step 2: %v", err)
 	}
+	ageConversationMint(t, database, "step-failed", "-1 hours")
 
 	if keysContain(reapKeys(t, s, cutoff), taskID) {
 		t.Errorf("task %s reaped while its newest conversation failed an hour ago; that blob is the tree its next conversation starts in", taskID)
@@ -360,6 +367,7 @@ func TestListReapableSnapshotKeys_NewestFailedConversationHoldsTheKey(t *testing
 	if _, err := database.Exec(`UPDATE conversations SET completed_at=datetime('now','-30 days') WHERE id='step-failed'`); err != nil {
 		t.Fatalf("age the failure: %v", err)
 	}
+	ageConversationMint(t, database, "step-failed", "-30 days")
 	if !keysContain(reapKeys(t, s, cutoff), taskID) {
 		t.Errorf("task %s whose every conversation is past the TTL is not reapable; its blob would leak forever", taskID)
 	}
@@ -409,6 +417,7 @@ func TestListReapableSnapshotKeys_InFlightConversationHoldsTheKey(t *testing.T) 
 	); err != nil {
 		t.Fatalf("age the park: %v", err)
 	}
+	ageConversationMint(t, database, parked, "-30 days")
 	addStepConversation(t, database, blueprintRunIDForConversation(t, database, parked), taskID, "step-live", 1, "running")
 	// The engagement's own row is aged too, so the age rule alone would let
 	// the key go: the claim is the only thing left holding it.

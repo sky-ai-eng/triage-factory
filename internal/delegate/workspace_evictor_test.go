@@ -193,6 +193,7 @@ func TestEvictIdleWorkspaces_RefusesWhileASiblingStepIsClaimed(t *testing.T) {
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', completed_at=datetime('now','-2 hours') WHERE id='step-live'`); err != nil {
 		t.Fatalf("settle sibling: %v", err)
 	}
+	ageConversationMint(t, database, "step-live", "-2 hours")
 	s.EvictIdleWorkspaces(ctx, time.Hour)
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
 		t.Fatalf("tree %s survived once every conversation was at rest and unclaimed (stat err %v)", wtPath, err)
@@ -220,6 +221,7 @@ func TestEvictIdleWorkspaces_EvictsATaskWhoseConversationFailed(t *testing.T) {
 	); err != nil {
 		t.Fatalf("fail the conversation: %v", err)
 	}
+	ageConversationMint(t, database, conversationID, "-2 hours")
 
 	s.EvictIdleWorkspaces(context.Background(), time.Hour)
 
@@ -413,6 +415,7 @@ func parkAged(t *testing.T, database *sql.DB, conversationID, wtPath, age string
 	); err != nil {
 		t.Fatalf("park conversation: %v", err)
 	}
+	ageConversationMint(t, database, conversationID, age)
 }
 
 func worktreePathOf(t *testing.T, database *sql.DB, conversationID string) string {

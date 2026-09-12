@@ -492,25 +492,26 @@ func workspaceKeyMembersSQL(alias string) string {
 	return alias + ".task_id IS NOT NULL AND " + alias + ".parent_conversation_id IS NULL"
 }
 
-// workspaceKeyIdleSinceSQL is when a workspace key last saw activity,
-// aggregated over its members: the newest of their last-activity stamps.
+// workspaceKeyIdleSinceSQL is when a workspace key last saw activity: over its
+// members, the newest stamp any of their rows carries.
 //
-// The per-row stamp is a COALESCE ladder, first non-NULL winning:
+// Newest, not first-of-a-priority-order, and that is the whole design. Every
+// one of these columns records that something happened at a time — the row
+// was minted, queued, parked, concluded, or superseded — so the largest of
+// them IS when the row last did anything, and no ranking has to be invented.
+// A ranking would also be wrong rather than merely redundant, because the
+// columns are not cleared in step: a resume clears parked_at but leaves
+// completed_at, so a conversation resumed from `completed` (the follow-up
+// path) carries a stale completion AND a fresh queued_at. Rank completed_at
+// first and a month-old run someone followed up on today reads as a month
+// idle; rank queued_at first and a completed run that was never resumed ages
+// from its original enqueue, which is older than its completion. Neither
+// order is right, because what is wanted is the maximum.
 //
-//   - parked_at — a parked conversation, re-stamped each park, so a
-//     repeatedly-resumed one ages from its most recent park rather than its
-//     first start.
-//   - completed_at — either terminal, `failed` included.
-//   - ended_at — a row the task moved on from without reaching either, such
-//     as a queued conversation a boundary superseded.
-//   - queued_at — a row waiting for or inside an engagement. A resume clears
-//     parked_at and re-stamps this, which is the only stamp that then says
-//     anything true about the row: started_at is still the original mint, so
-//     a resumed month-old park would otherwise read as a month idle and have
-//     its blob taken while the engagement rehydrating from it runs.
-//   - started_at — a fresh mint that never went through the queue.
+// GREATEST ignores NULLs in Postgres and started_at is NOT NULL, so the
+// result is never NULL: a row with nothing else stamped ages from its mint.
 func workspaceKeyIdleSinceSQL(alias string) string {
-	return "MAX(COALESCE(" + alias + ".parked_at, " + alias + ".completed_at, " +
+	return "MAX(GREATEST(" + alias + ".parked_at, " + alias + ".completed_at, " +
 		alias + ".ended_at, " + alias + ".queued_at, " + alias + ".started_at))"
 }
 

@@ -98,6 +98,13 @@ type ConversationSeeder struct {
 	// the one store write that touches the column after the mint.
 	BackdateQueuedAt func(t *testing.T, conversationID string, age time.Duration)
 
+	// BackdateCompletedAt is BackdateStartedAt for the terminal stamp. No
+	// store method rewrites completed_at after the terminal — and notably the
+	// resume flips do not CLEAR it — so staging "concluded long ago, and
+	// something else happened since" needs its own door. The workspace sweeps
+	// read the newest stamp a row carries, which is what that shape is for.
+	BackdateCompletedAt func(t *testing.T, conversationID string, age time.Duration)
+
 	// ClaimRows returns the conversation's claims rows oldest-first, so
 	// the suite can assert mint/release bookkeeping.
 	ClaimRows func(t *testing.T, conversationID string) []ClaimRow
@@ -1629,6 +1636,64 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if reapKeysContain(after, taskID) {
 			t.Errorf("task %s is reapable on the started_at of a conversation that ended just now; ended_at is what says when it went quiet", taskID)
+		}
+	})
+
+	// Why a row's age is the NEWEST stamp it carries and not a ranking of its
+	// columns. Three arms, each of which some fixed order gets wrong:
+	//
+	//  1. A completed conversation that was never resumed carries a queued_at
+	//     OLDER than its completion (the original enqueue), so an order that
+	//     preferred queued_at would age it from before it ran.
+	//  2. Aged wholesale, it is reapable — the precondition for the third.
+	//  3. Resumed from `completed` — the follow-up on a finished run —
+	//     MarkQueuedForResume clears parked_at but never completed_at, so the
+	//     row now carries a stale completion beside a just-written queued_at.
+	//     An order that preferred completed_at would drop the blob that
+	//     follow-up is about to rehydrate from, in the window before an
+	//     executor claims it and the claim guard takes over.
+	t.Run("ListReapableSnapshotKeys_AgeIsTheNewestStampNotARanking", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID, bpr, taskID := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "shipped it", "finish", "", ""); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		// Minted and queued two days ago, concluded just now.
+		seed.BackdateStartedAt(t, conversationID, 48*time.Hour)
+		seed.BackdateQueuedAt(t, conversationID, 48*time.Hour)
+		cutoff := time.Now().Add(-time.Hour)
+
+		justConcluded, err := store.ListReapableSnapshotKeysSystem(ctx, cutoff)
+		if err != nil {
+			t.Fatalf("ListReapableSnapshotKeysSystem(just concluded): %v", err)
+		}
+		if reapKeysContain(justConcluded, taskID) {
+			t.Errorf("task %s is reapable an instant after it concluded; its age came from the enqueue two days before, not the newest thing that happened to it", taskID)
+		}
+
+		// Age the conclusion too and the key goes.
+		seed.BackdateCompletedAt(t, conversationID, 48*time.Hour)
+		seed.SetBlueprintRunStatus(t, bpr, "completed")
+		aged, err := store.ListReapableSnapshotKeysSystem(ctx, cutoff)
+		if err != nil {
+			t.Fatalf("ListReapableSnapshotKeysSystem(aged): %v", err)
+		}
+		if !reapKeysContain(aged, taskID) {
+			t.Fatalf("two-day-old completed task %s is not reapable; the fixture has not staged the precondition", taskID)
+		}
+
+		// A follow-up resumes it. Nothing clears the old completed_at, and no
+		// executor has claimed it yet, so the stamp is all that withholds it.
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
+			t.Fatalf("MarkQueuedForResume: ok=%v err=%v", ok, err)
+		}
+		resumed, err := store.ListReapableSnapshotKeysSystem(ctx, cutoff)
+		if err != nil {
+			t.Fatalf("ListReapableSnapshotKeysSystem(resumed): %v", err)
+		}
+		if reapKeysContain(resumed, taskID) {
+			t.Errorf("task %s stayed reapable after a follow-up resumed its completed conversation; the stale completed_at outranked the fresh queued_at, and the blob would go before the dispatcher claims it", taskID)
 		}
 	})
 

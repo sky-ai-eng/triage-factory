@@ -1224,9 +1224,9 @@ func (s *conversationStore) ParkOpenSystem(ctx context.Context, orgID, conversat
 // their last-activity stamps, and whether anything is engaged on the key. The
 // Postgres twin carries the reasoning for all three: why a subagent row and a
 // task-less conversation are out of the members, why every status is in
-// (idleness decides a key's collection, not which states wrote its blob), each
-// rung of the COALESCE ladder, and why the claim guard counts wider than the
-// members do.
+// (idleness decides a key's collection, not which states wrote its blob), why
+// the stamp is the newest of a row's rather than a ranking of them, and why
+// the claim guard counts wider than the members do.
 //
 // datetime() wraps the stamp here because the column holds mixed on-disk
 // formats (CURRENT_TIMESTAMP text vs Go-bound values), so a raw MAX would
@@ -1237,8 +1237,18 @@ func workspaceKeyMembersSQL(alias string) string {
 }
 
 func workspaceKeyIdleSinceSQL(alias string) string {
-	return "MAX(datetime(COALESCE(" + alias + ".parked_at, " + alias + ".completed_at, " +
-		alias + ".ended_at, " + alias + ".queued_at, " + alias + ".started_at)))"
+	// The outer MAX is the aggregate over the key's members; the inner max is
+	// SQLite's scalar one, picking the newest stamp on a single row. That
+	// scalar yields NULL if ANY argument is NULL, so each nullable stamp
+	// floors to started_at — NOT NULL, and the right answer for a row with
+	// nothing else stamped. Postgres says the same thing with GREATEST, which
+	// drops NULLs on its own.
+	stamp := func(col string) string {
+		return "datetime(COALESCE(" + alias + "." + col + ", " + alias + ".started_at))"
+	}
+	return "MAX(max(datetime(" + alias + ".started_at), " +
+		stamp("parked_at") + ", " + stamp("completed_at") + ", " +
+		stamp("ended_at") + ", " + stamp("queued_at") + "))"
 }
 
 func workspaceKeyUnclaimedSQL(orgCol, taskCol string) string {
