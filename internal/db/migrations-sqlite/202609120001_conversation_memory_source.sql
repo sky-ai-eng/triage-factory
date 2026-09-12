@@ -38,14 +38,33 @@ CREATE TABLE conversation_memory_new (
     created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Every row carries across. A legacy NULL-content row recorded that the agent
--- wrote no usable memory file, and the only honest reading of that is 'none';
--- anything with content was the agent's own narrative.
+-- Every row carries across. A row that recorded no usable memory file reads as
+-- 'none' — the only honest reading of it — and anything with content was the
+-- agent's own narrative.
+--
+-- "No usable memory file" is EMPTY, not just NULL: the writer canonicalized
+-- empty and whitespace-only input to NULL, but this table is older than that
+-- writer's current shape and a released build is not something this migration
+-- gets to assume about. A surviving '' or all-whitespace row copied as 'agent'
+-- would break the invariant the new store door holds (agent_content IS NULL
+-- exactly when source = 'none') in the direction that actually costs something:
+-- it is non-NULL, so every entity read admits it, and the materializer writes
+-- the next agent an empty file — the precise thing hiding 'none' rows exists to
+-- prevent. So the copy applies the emptiness test itself and lands NULL.
+--
+-- The trim set is the four ASCII blanks, matching the memory_missing derivation
+-- these rows are already read through (internal/db/sqlite/factory.go,
+-- conversation.go) — one answer to "is this row empty", not a second spelling of
+-- it. Non-empty content is copied verbatim, never trimmed: the door stores what
+-- the agent wrote.
 INSERT INTO conversation_memory_new (
     id, org_id, conversation_id, blueprint_run_id, agent_content, source, created_at)
 SELECT
-    id, org_id, conversation_id, blueprint_run_id, agent_content,
-    CASE WHEN agent_content IS NULL THEN 'none' ELSE 'agent' END,
+    id, org_id, conversation_id, blueprint_run_id,
+    CASE WHEN NULLIF(TRIM(agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL
+         THEN NULL ELSE agent_content END,
+    CASE WHEN NULLIF(TRIM(agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL
+         THEN 'none' ELSE 'agent' END,
     created_at
 FROM conversation_memory;
 

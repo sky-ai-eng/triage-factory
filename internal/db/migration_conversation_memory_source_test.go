@@ -59,10 +59,12 @@ func TestMigrate_ConversationMemoryGainsSourceAndDropsEntityAndHumanContent(t *t
 		}
 	}
 
-	// Two memory rows on one entity: one the agent wrote, one it did not. Each
-	// carries the human_content the five deleted writers used to compose, and
-	// the primary join row every memory has carried since the backfill.
-	seed := func(conversationID, agentContent string) {
+	// Four memory rows on one entity, one per shape a deployed row can hold:
+	// content, NULL, and the two the current writer canonicalizes away but an
+	// older one may have stored — '' and whitespace-only. Each carries the
+	// human_content the five deleted writers used to compose, and the primary
+	// join row every memory has carried since the backfill.
+	seed := func(conversationID string, agentContent any) {
 		t.Helper()
 		if _, err := database.Exec(
 			`INSERT INTO conversations (id, org_id, team_id, origin, status) VALUES (?, ?, ?, 'interactive', 'completed')`,
@@ -70,14 +72,10 @@ func TestMigrate_ConversationMemoryGainsSourceAndDropsEntityAndHumanContent(t *t
 		); err != nil {
 			t.Fatalf("seed conversation %s: %v", conversationID, err)
 		}
-		var content any
-		if agentContent != "" {
-			content = agentContent
-		}
 		if _, err := database.Exec(
 			`INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content, human_content, created_at)
 			 VALUES (?, ?, ?, ?, 'a machine-composed verdict', '2026-09-01 00:00:00')`,
-			"mem-"+conversationID, conversationID, entityID, content,
+			"mem-"+conversationID, conversationID, entityID, agentContent,
 		); err != nil {
 			t.Fatalf("seed memory %s: %v", conversationID, err)
 		}
@@ -89,7 +87,9 @@ func TestMigrate_ConversationMemoryGainsSourceAndDropsEntityAndHumanContent(t *t
 		}
 	}
 	seed("conv-wrote", "what I tried and why")
-	seed("conv-silent", "")
+	seed("conv-silent", nil)
+	seed("conv-empty", "")
+	seed("conv-blank", " \t\r\n ")
 
 	gooseMu.Lock()
 	goose.SetBaseFS(treeFS)
@@ -116,11 +116,32 @@ func TestMigrate_ConversationMemoryGainsSourceAndDropsEntityAndHumanContent(t *t
 		t.Errorf("a row with content read back (source=%q, agent_content=%q), want (agent, %q)",
 			source, content.String, "what I tried and why")
 	}
-	// The only honest reading of a legacy NULL-content row: nothing was
+	// The only honest reading of a row that recorded nothing: nothing was
 	// remembered. Anything else would put words in a conversation's mouth.
-	if content, source := read("conv-silent"); source != "none" || content.Valid {
-		t.Errorf("a NULL-content row read back (source=%q, agent_content valid=%v), want (none, invalid)",
-			source, content.Valid)
+	//
+	// '' and whitespace-only are that same row wearing a different spelling —
+	// shapes the current writer canonicalizes to NULL but an older one may have
+	// stored. Copied as 'agent' they would be non-NULL, so every entity read
+	// would admit them and the materializer would hand the next agent an empty
+	// file; they must land exactly where the store door would put them.
+	for _, conversationID := range []string{"conv-silent", "conv-empty", "conv-blank"} {
+		if content, source := read(conversationID); source != "none" || content.Valid {
+			t.Errorf("%s read back (source=%q, agent_content valid=%v), want (none, invalid)",
+				conversationID, source, content.Valid)
+		}
+	}
+
+	// And the invariant itself, over every row the copy produced — it is what
+	// lets the entity reads filter on the content column alone.
+	var violations int
+	if err := database.QueryRow(`
+		SELECT count(*) FROM conversation_memory
+		WHERE (agent_content IS NULL) <> (source = 'none')
+	`).Scan(&violations); err != nil {
+		t.Fatalf("count invariant violations: %v", err)
+	}
+	if violations != 0 {
+		t.Errorf("%d migrated row(s) break agent_content IS NULL <=> source = 'none'", violations)
 	}
 
 	// The dropped columns are gone from the rebuilt table.
@@ -146,8 +167,8 @@ func TestMigrate_ConversationMemoryGainsSourceAndDropsEntityAndHumanContent(t *t
 	).Scan(&joinRows); err != nil {
 		t.Fatalf("count join rows: %v", err)
 	}
-	if joinRows != 2 {
-		t.Errorf("conversation_memory_entities has %d rows for the entity, want 2 (untouched by the rebuild)", joinRows)
+	if joinRows != 4 {
+		t.Errorf("conversation_memory_entities has %d rows for the entity, want 4 (untouched by the rebuild)", joinRows)
 	}
 
 	// The UNIQUE(conversation_id) the reads and the upsert's ON CONFLICT both
