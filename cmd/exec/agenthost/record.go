@@ -364,10 +364,9 @@ func stampPRAttribution(ctx context.Context, stores db.Stores, info Conversation
 // a stub the poll cycle enriches, but reading another entity's memory must not
 // conjure the entity into existence.
 //
-// Content is composed by the store read (agent narrative + the
-// "## Human feedback (post-run)" separator), the same materialization the
-// spawn-time materializer emits — so the on-demand pull reads identically to
-// the auto-staged files. Count is the pre-limit scoped total (its dedicated
+// Content is the agent's own narrative verbatim, the same thing the spawn-time
+// materializer writes into a run tree — so the on-demand pull reads identically
+// to the auto-staged files. Count is the pre-limit scoped total (its dedicated
 // count method); Memories is the most recent `limit`, capped IN the query (not
 // fetched-all-then-sliced) so a hot entity's long history isn't transferred to
 // keep only the tail. The touch is best-effort — a read never fails on its

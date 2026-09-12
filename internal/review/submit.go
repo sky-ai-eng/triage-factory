@@ -148,8 +148,8 @@ func SubmitStaged(ctx context.Context, gh Submitter, in SubmitInput) (SubmitResu
 
 	// SubmitReview returns the event it submitted (it doesn't parse an
 	// authoritative event back from GitHub's response) — pass it back so the
-	// persisted artifact, any verdict diff, and the caller's response all
-	// reflect the same value that was requested.
+	// persisted artifact and the caller's response both reflect the same value
+	// that was requested.
 	reviewID, submittedEvent, err := gh.SubmitReview(ctx, in.Owner, in.Repo, in.Number,
 		commitID, in.Details.ReviewEvent, in.Details.ReviewBody+in.Footer, comments)
 	if err != nil {

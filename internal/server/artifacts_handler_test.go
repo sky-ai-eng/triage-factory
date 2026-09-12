@@ -649,8 +649,9 @@ func TestArtifactUpdate_PartialEdit_GetPRFailure_502(t *testing.T) {
 }
 
 // TestArtifactApprove_MalformedDetails_StillPromotes pins that an unparseable
-// details_json costs only the verdict diff: approve still marks the PR ready
-// and flips the artifact, and still writes nothing to the PR's title or body.
+// details_json costs only what the row could not carry forward: approve still
+// marks the PR ready and flips the artifact, and still writes nothing to the
+// PR's title or body.
 func TestArtifactApprove_MalformedDetails_StillPromotes(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -919,8 +920,8 @@ func seedBranchArtifact(t *testing.T, s *Server, conversationID, repoPath, ref s
 // TestArtifactReject_PR pins the whole rejection: the head branch is deleted
 // from the upstream, the draft PR closed, the PR artifact flipped to closed
 // carrying branch_deleted, the run's branch artifact retired, both writes
-// audited, the human verdict recorded — and, as with dismiss, the conversation
-// lifecycle untouched.
+// audited — and, as with dismiss, the conversation lifecycle untouched and its
+// memory left alone.
 func TestArtifactReject_PR(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)

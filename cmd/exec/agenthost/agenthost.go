@@ -171,10 +171,10 @@ type MemoryLoadResult struct {
 	Memories []MemoryLoadEntry `json:"memories"`
 }
 
-// MemoryLoadEntry is one prior conversation's memory on the entity — the agent
-// narrative composed with the human's post-run verdict, exactly as the
-// spawn-time materializer composes it (agent content + a
-// "## Human feedback (post-run)" separator).
+// MemoryLoadEntry is one prior conversation's memory on the entity: the agent's
+// own narrative, verbatim, exactly what the spawn-time materializer stages into
+// a run tree. A conversation that remembered nothing has no entry here at all —
+// the entity reads hide those rows rather than returning an empty one.
 type MemoryLoadEntry struct {
 	ConversationID string    `json:"conversation_id"`
 	BlueprintRunID string    `json:"blueprint_run_id,omitempty"`

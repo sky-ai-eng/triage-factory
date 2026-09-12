@@ -87,8 +87,8 @@ func TestLocalClient_GithubCreatePR_RecordsArtifact(t *testing.T) {
 				t.Errorf("details coords mismatch: %+v", d)
 			}
 			// The proposed snapshot is the body exactly as GitHub received it —
-			// footer included — so the approval-time verdict diff compares like
-			// with like.
+			// footer included — since it is the durable record of what the agent
+			// drafted.
 			if d.Proposed.Title != "Fix the thing" || d.Proposed.Body != *sentBody {
 				t.Errorf("proposed snapshot mismatch: %+v (sent %q)", d.Proposed, *sentBody)
 			}

@@ -1676,8 +1676,8 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 		return "", fmt.Errorf("parse review artifact details: %w", err)
 	}
 	// Staging onto a finalized review (ready sentinel set) would mutate a draft the
-	// human is already approving — and the Proposed snapshot is frozen, so the new
-	// comment would never enter the verdict diff. Reject it.
+	// human is already approving — and the Proposed snapshot is frozen by then, so
+	// the row's record of what the agent drafted would no longer include it. Reject it.
 	if details.ReviewEvent != "" {
 		return "", fmt.Errorf("this review has already been finalized for approval; start a fresh review to add more comments")
 	}
@@ -2175,7 +2175,8 @@ func (c *LocalClient) recordGithubCommentState(ctx context.Context, commentID in
 
 // recordGithubPR upserts the `pull_request` artifact for a freshly opened PR. The
 // proposed snapshot {title, body} is the body exactly as sent to GitHub, footer
-// included, so the human-verdict diff at approval compares like with like;
+// included — it is the durable record of what the agent drafted, so it has to be
+// what GitHub received rather than a reconstruction of it;
 // node_id / head_branch / base ride details_json for reconciliation and the
 // server's edit/approve handlers. A zero number (a 2xx whose body didn't parse)
 // has no stable key to dedup on, so recording is skipped with a debug

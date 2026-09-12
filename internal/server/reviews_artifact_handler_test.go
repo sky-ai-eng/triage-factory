@@ -41,8 +41,8 @@ func seedReviewArtifactWithConversation(t *testing.T, s *Server, suffix, owner, 
 	d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
 	d.ReviewBody = "## Review\nlgtm"
 	d.ReviewEvent = event
-	// The staged comment carries the badge baked in — what the agent drafted. The
-	// proposed snapshot is identical, so the verdict diff resolves to "as drafted".
+	// The staged comment carries the badge baked in — what the agent drafted, and
+	// what the proposed snapshot on the artifact row records.
 	staged := []domain.ReviewArtifactComment{
 		{ID: "c_1", Path: "a.go", Line: &line, Body: domain.SeverityBadgeMarkdown(domain.SeverityMajor) + "nit: rename"},
 	}
@@ -105,8 +105,8 @@ func TestReviewArtifactGet_SeverityRoundTrip(t *testing.T) {
 // TestReviewArtifactApprove pins the atomic submit-on-approval flow: SubmitReview
 // POSTs the staged body+event+footer+comments to GitHub, the artifact flips
 // pending → submitted and gains the submitted review's id + URL, the
-// conversation stays completed (approval never flips it), and the human verdict
-// lands in conversation_memory.
+// conversation stays completed (approval never flips it), and the conversation's
+// own memory is left exactly as its gate filed it.
 //
 // The POST asserted here is composed by review.SubmitStaged — the same function
 // the auto-post posture calls from the agent's finalize, whose test
