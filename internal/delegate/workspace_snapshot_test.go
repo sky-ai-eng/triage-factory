@@ -706,13 +706,15 @@ func TestEnsureWorkspace_ColdPath_NoSnapshotErrors(t *testing.T) {
 	}
 }
 
-// TestFailRun_DiscardsWorkspaceSnapshot: a parked run that then fails (e.g. an
-// open run whose resume errors mid-execution) drops its snapshot rather than
-// orphaning the blob. failConversation is the single failure chokepoint covering the
-// resume goroutine's failure exits.
-func TestFailRun_DiscardsWorkspaceSnapshot(t *testing.T) {
+// TestFailRun_LeavesTheWorkspaceSnapshotToItsOwner: a failure does not delete
+// the blueprint's workspace blob. Every snapshot is keyed by blueprint_run_id
+// (memoryNamespace is the only thing that names one), and the blueprint's own
+// teardown owns that key — a delete from the conversation's failure would
+// either miss (a key nothing writes) or take a workspace out from under a
+// blueprint the failure has not ended.
+func TestFailRun_LeavesTheWorkspaceSnapshotToItsOwner(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, _, conversationID, taskID := setupAdvanceFixture(t, "failrun-discard")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "failrun-discard")
 	blobs, err := storage.New()
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
@@ -720,7 +722,7 @@ func TestFailRun_DiscardsWorkspaceSnapshot(t *testing.T) {
 	s.SetStorage(blobs)
 
 	ctx := context.Background()
-	key := snapshotKey(runmode.LocalDefaultOrgID, conversationID)
+	key := snapshotKey(runmode.LocalDefaultOrgID, blueprintRunIDForConversation(t, database, conversationID))
 	if err := blobs.Put(ctx, key, strings.NewReader("snapshot")); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
@@ -729,8 +731,8 @@ func TestFailRun_DiscardsWorkspaceSnapshot(t *testing.T) {
 	// methods (no synthetic-claims tx needed in the fixture).
 	s.failConversation(runmode.LocalDefaultOrgID, conversationID, taskID, "", "event", "", "boom", domain.ConversationFailureUnclassified)
 
-	if ok, _ := blobs.Exists(ctx, key); ok {
-		t.Error("failConversation did not discard the workspace snapshot — blob orphaned on failure")
+	if ok, _ := blobs.Exists(ctx, key); !ok {
+		t.Error("failConversation deleted the blueprint's workspace snapshot; terminateBlueprint owns that blob")
 	}
 }
 

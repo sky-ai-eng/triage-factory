@@ -532,6 +532,15 @@ func conversationResponse(conv *domain.Conversation, artifactCount int, arts []d
 	if conv.QueuePosition != nil {
 		out["queue_position"] = *conv.QueuePosition
 	}
+	// The boundary: when this conversation stopped being its task's live one,
+	// and why. Both keys are absent — not null, not "" — while it is open, so
+	// a client reads "ended" off presence rather than off a sentinel, the same
+	// way it reads queue_position. They travel together by construction: the
+	// stamp writes both columns or neither.
+	if conv.EndedAt != nil {
+		out["ended_at"] = *conv.EndedAt
+		out["ended_reason"] = string(conv.EndedReason)
+	}
 	if artifactCount == 0 || len(arts) > 0 {
 		prCount, reviewCount := domain.UnresolvedArtifactCounts(arts)
 		out["has_unresolved_artifacts"] = prCount > 0 || reviewCount > 0
@@ -856,7 +865,8 @@ func steerErrorStatus(err error) (int, string) {
 	case errors.Is(err, delegate.ErrSignalAckTimeout):
 		return http.StatusGatewayTimeout, httpx.ReasonUpstreamUnavailable
 	case errors.Is(err, delegate.ErrConversationConcluded),
-		errors.Is(err, delegate.ErrBlueprintCancelled):
+		errors.Is(err, delegate.ErrBlueprintCancelled),
+		errors.Is(err, delegate.ErrConversationEnded):
 		return http.StatusConflict, httpx.ReasonAlreadyTerminal
 	case errors.Is(err, delegate.ErrNoLiveProcess),
 		errors.Is(err, delegate.ErrConversationNotSteerable),

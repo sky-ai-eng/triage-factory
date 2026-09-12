@@ -95,6 +95,13 @@ const (
 	// cause rather than a disposition because the task is still open: what
 	// ended is this attempt at it, not the work.
 	StopCauseTaskRequeued StopCause = "task_requeued"
+	// StopCauseTaskDelegated — the task was handed to a new delegation. Split
+	// from a disposition for the same reason a requeue is: the task is still
+	// open and the work goes on, under a conversation that is not this one.
+	StopCauseTaskDelegated StopCause = "task_delegated"
+	// StopCauseTaskTakenOver — a person claimed a task the agent held. Also a
+	// still-open task, and the sentence a reader needs is who has it now.
+	StopCauseTaskTakenOver StopCause = "task_taken_over"
 	// StopCauseTeamArchived — the team that owns the work was archived.
 	StopCauseTeamArchived StopCause = "team_archived"
 	// StopCauseFiringReverted — the firing that spawned the run was rolled
@@ -113,6 +120,10 @@ func (c StopCause) note() string {
 		return "Run stopped: the task it was working on was dispositioned."
 	case StopCauseTaskRequeued:
 		return "Run stopped: the task it was working on was returned to the queue."
+	case StopCauseTaskDelegated:
+		return "Run stopped: the task was handed to a new delegation."
+	case StopCauseTaskTakenOver:
+		return "Run stopped: a person took the task over."
 	case StopCauseTeamArchived:
 		return "Run stopped: the team that owns this work was archived."
 	case StopCauseFiringReverted:
@@ -565,9 +576,8 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	if errors.Is(insertErr, db.ErrClaimReleased) {
 		// Not this engagement's run to fail anymore. Everything below writes
 		// or broadcasts about a conversation a successor is driving, so the
-		// whole tail is skipped — including the breaker tick and the snapshot
-		// discard, which would delete the workspace that successor resumes
-		// from.
+		// whole tail is skipped — the boundary stamp and the breaker tick
+		// among them, both of which would speak for the successor's run.
 		delegateLog.Error("claim fence refused the failure terminal — a successor owns this conversation; recording nothing",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "error", insertErr)
 		return true
@@ -604,17 +614,18 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 		delegateLog.Warn("failed to mark conversation as failed", "conversation", conversationID, "error", markErr)
 	}
 
+	// The boundary, stamped after the terminal it belongs to: a failure ends
+	// the conversation's life as its task's live one, so nothing resumes it
+	// and the memory it may owe has a row to be owed against. Reached only on
+	// the unfenced path — a successor's conversation is not this engagement's
+	// to end. Best-effort: the terminal above is the load-bearing write, and a
+	// failed stamp must not turn a recorded failure into an error.
+	if _, err := s.conversations.EndConversationSystem(bgCtx, orgID, conversationID, domain.EndedFailed); err != nil {
+		delegateLog.Warn("stamp the failure boundary on the conversation failed", "conversation", conversationID, "error", err)
+	}
+
 	s.updateBreakerCounter(taskID, triggerType, "failed")
 	s.broadcastConversationFailed(orgID, conversationID, kind)
-
-	// A failed run won't resume, so drop the workspace snapshot it may have
-	// written when it parked (e.g. a turn-end park that later failed
-	// mid-resume). Keyed by the run's own id: for a blueprint step (whose
-	// snapshot is keyed by blueprint_run_id) this is a harmless no-op and
-	// terminateBlueprint owns that blob; for a run that never snapshotted it's
-	// also a no-op. The single failure chokepoint covers every failConversation caller
-	// (the resume goroutine's three exits among them).
-	s.discardWorkspaceSnapshot(bgCtx, orgID, conversationID)
 
 	// Surface as a sticky error toast so the user sees the failure even when
 	// they're not watching the runs page. A memory-limit kill gets copy that

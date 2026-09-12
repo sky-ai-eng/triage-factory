@@ -71,13 +71,14 @@ type FactorySeeder struct {
 	// when it started.
 	FinishConversation func(t *testing.T, conversationID, status string, completedAt time.Time)
 
-	// SetConversationMemory upserts a conversation_memory row with the given
-	// agent_content. content="" inserts a literal empty string;
-	// content with whitespace exercises the BTRIM/TRIM derivation
-	// for memory_missing. To insert a row with NULL agent_content,
-	// pass a sentinel (we use "<NULL>" by convention — the seeder
-	// implementation maps it to NULL).
-	SetConversationMemory func(t *testing.T, conversationID, content string)
+	// SetConversationMemory inserts a conversation_memory row with the given
+	// agent_content and source. content=NullMemorySentinel stores SQL NULL,
+	// which is the shape a `none` row has.
+	//
+	// Raw SQL in every impl, deliberately: the suite's subject here is the
+	// memory_missing derivation, so a source the store door would refuse for
+	// this content has to be seedable anyway.
+	SetConversationMemory func(t *testing.T, conversationID, content string, source domain.MemorySource)
 }
 
 // nullSentinel is the content string callers pass to SetConversationMemory
@@ -235,18 +236,18 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		evID := seed.Event(t, ent, domain.EventGitHubPROpened, "", now, time.Time{})
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, "", evID, "queued", now)
 
-		// One conversation per memory state we need to cover.
+		// One conversation per memory source we need to cover. The belt asks
+		// the same question as the run station — did the AGENT write? — so a
+		// `none` row and a provisioner-generated one both read as missing.
 		conversationNoRow := seed.Conversation(t, taskID, "running")
-		conversationNullContent := seed.Conversation(t, taskID, "running")
-		conversationEmptyContent := seed.Conversation(t, taskID, "running")
-		conversationWhitespace := seed.Conversation(t, taskID, "running")
+		conversationNone := seed.Conversation(t, taskID, "running")
+		conversationGenerated := seed.Conversation(t, taskID, "running")
 		conversationPopulated := seed.Conversation(t, taskID, "running")
 		conversationTerminal := seed.Conversation(t, taskID, "completed") // must NOT appear
 
-		seed.SetConversationMemory(t, conversationNullContent, nullSentinel)
-		seed.SetConversationMemory(t, conversationEmptyContent, "")
-		seed.SetConversationMemory(t, conversationWhitespace, "  \t\n ")
-		seed.SetConversationMemory(t, conversationPopulated, "agent wrote real reasoning")
+		seed.SetConversationMemory(t, conversationNone, nullSentinel, domain.MemorySourceNone)
+		seed.SetConversationMemory(t, conversationGenerated, "a summary nobody's agent wrote", domain.MemorySourceGenerated)
+		seed.SetConversationMemory(t, conversationPopulated, "agent wrote real reasoning", domain.MemorySourceAgent)
 
 		convs, err := store.ActiveConversations(ctx, orgID)
 		if err != nil {
@@ -263,18 +264,17 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		if gotIDs[conversationTerminal] {
 			t.Errorf("terminal conversation %s leaked into ActiveConversations — status filter failed", conversationTerminal)
 		}
-		for _, id := range []string{conversationNoRow, conversationNullContent, conversationEmptyContent, conversationWhitespace, conversationPopulated} {
+		for _, id := range []string{conversationNoRow, conversationNone, conversationGenerated, conversationPopulated} {
 			if !gotIDs[id] {
 				t.Errorf("active conversation %s missing from ActiveConversations", id)
 			}
 		}
 
 		want := map[string]bool{
-			conversationNoRow:        true,
-			conversationNullContent:  true,
-			conversationEmptyContent: true,
-			conversationWhitespace:   true,
-			conversationPopulated:    false,
+			conversationNoRow:     true,
+			conversationNone:      true,
+			conversationGenerated: true,
+			conversationPopulated: false,
 		}
 		for id, expected := range want {
 			if gotMem[id] != expected {

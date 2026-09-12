@@ -441,7 +441,7 @@ type ConversationStore interface {
 	// Get returns a single agent conversation by ID, or nil if absent — any
 	// conversation type, not just delegation (subagent rows hydrate the
 	// same shape). MemoryMissing is derived from a LEFT JOIN
-	// to conversation_memory; ClaimedAt/Attempts/ExecutorID derive from claims per
+	// to conversation_memory — true unless that row's source is `agent`; ClaimedAt/Attempts/ExecutorID derive from claims per
 	// the interface doc. The accounting fields are derived too:
 	// TotalCostUSD + the four token fields are SUMs over the messages
 	// ledger, DurationMs/NumTurns SUMs over the claims' telemetry.

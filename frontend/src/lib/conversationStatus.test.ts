@@ -268,6 +268,26 @@ describe('resumeBlockedCopy', () => {
     )
   })
 
+  it('gives each boundary its own sentence about who carries the work now', () => {
+    // Six rungs, one per reason a task can move on, and the part that differs
+    // is what the reader does next — so no two may collapse onto one sentence,
+    // and none may fall through to the generic copy.
+    const reasons = [
+      'ended_requeued',
+      'ended_delegated',
+      'ended_taken_over',
+      'ended_step_advanced',
+      'ended_team_archived',
+      'ended_failed',
+    ]
+    const generic = resumeBlockedCopy(base({}))
+    const copies = reasons.map((r) => resumeBlockedCopy(base({ resume_blocked_reason: r })))
+    for (const [i, copy] of copies.entries()) {
+      expect(copy, reasons[i]).not.toBe(generic)
+    }
+    expect(new Set(copies).size).toBe(reasons.length)
+  })
+
   it('says something true for a reason this build does not know', () => {
     expect(resumeBlockedCopy(base({ resume_blocked_reason: 'reason_from_the_future' }))).toMatch(
       /follow-up/i,

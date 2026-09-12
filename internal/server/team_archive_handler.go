@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -183,6 +184,23 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 				continue
 			}
 			cancelledRuns++
+		}
+	}
+
+	// The boundary, over the whole enumerated set and not just the ones that
+	// stopped. The stop is what ends a process; this is what ends the
+	// conversation, and an archived team's work is over whether or not its
+	// executor was reachable — a run left un-ended because its stop failed is
+	// exactly the row that would otherwise stay resumable on a team nobody can
+	// see. Stamped one at a time because the set is team-scoped rather than
+	// task-scoped, and best-effort per row for the same reason the stops are:
+	// the tombstone has already landed. The context outlives the request for
+	// that same reason — a browser closing mid-loop would otherwise leave an
+	// archived team holding conversations nobody ended.
+	stampCtx := context.WithoutCancel(r.Context())
+	for _, conversationID := range conversationIDs {
+		if _, eErr := th.allStores.Conversations.EndConversationSystem(stampCtx, orgID, conversationID, domain.EndedTeamArchived); eErr != nil {
+			teamsLog.Warn("archive: stamp the team-archive boundary failed", "team", teamID, "conversation", conversationID, "error", eErr)
 		}
 	}
 

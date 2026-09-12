@@ -157,10 +157,14 @@ type ConversationSeeder struct {
 	// assertions.
 	StampAgentClaim func(t *testing.T, taskID, agentID string)
 
-	// SetConversationMemory upserts a conversation_memory row with the given
-	// agent_content. content="" inserts an empty string;
-	// NullMemorySentinel inserts SQL NULL.
-	SetConversationMemory func(t *testing.T, conversationID, content string)
+	// SetConversationMemory inserts a conversation_memory row with the given
+	// agent_content and source. content=NullMemorySentinel stores SQL NULL,
+	// which is the shape a `none` row has.
+	//
+	// Raw SQL in every impl, deliberately: the suite's subject here is the
+	// memory_missing derivation, so a source the store door would refuse for
+	// this content has to be seedable anyway.
+	SetConversationMemory func(t *testing.T, conversationID, content string, source domain.MemorySource)
 
 	// SeedRawMessage inserts a messages row with rawJSON written
 	// directly into the given column ("reasoning" or "content_blocks"),
@@ -4624,31 +4628,32 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("MemoryMissing_DerivedFromConversationMemoryJOIN", func(t *testing.T) {
+	t.Run("MemoryMissing_IsFalseOnlyForAnAgentWrittenRow", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "mem")
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
-		// One conversation per memory-content state. memory_missing should be
-		// true for no-row, NULL, "", whitespace; false for populated.
+		// The flag asks one question — did the AGENT write its own memory? —
+		// so the source alone answers it. A `none` row (the run concluded with
+		// nothing to say) and a provisioner-generated one (a stand-in for an
+		// agent that never wrote) both leave it true; only the agent's own
+		// words clear it. Content never enters into it: the door already holds
+		// agent_content NULL exactly when the source is `none`.
 		conversationNoRow := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		conversationNullContent := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		conversationEmpty := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		conversationWhitespace := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		conversationPopulated := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		seed.SetConversationMemory(t, conversationNullContent, NullMemorySentinel)
-		seed.SetConversationMemory(t, conversationEmpty, "")
-		seed.SetConversationMemory(t, conversationWhitespace, "  \t\n ")
-		seed.SetConversationMemory(t, conversationPopulated, "real reasoning text")
+		conversationNone := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		conversationGenerated := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		conversationAgent := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		seed.SetConversationMemory(t, conversationNone, NullMemorySentinel, domain.MemorySourceNone)
+		seed.SetConversationMemory(t, conversationGenerated, "a summary nobody's agent wrote", domain.MemorySourceGenerated)
+		seed.SetConversationMemory(t, conversationAgent, "real reasoning text", domain.MemorySourceAgent)
 
 		want := map[string]bool{
-			conversationNoRow:       true,
-			conversationNullContent: true,
-			conversationEmpty:       true,
-			conversationWhitespace:  true,
-			conversationPopulated:   false,
+			conversationNoRow:     true,
+			conversationNone:      true,
+			conversationGenerated: true,
+			conversationAgent:     false,
 		}
 		for id, expected := range want {
 			got, err := store.Get(ctx, orgID, id)

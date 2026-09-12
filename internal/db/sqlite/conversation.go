@@ -628,10 +628,11 @@ func (s *conversationStore) EndConversationSystem(ctx context.Context, orgID, co
 
 // sqliteConversationColumns is the SELECT list scanned into a domain.Conversation
 // via scanConversation. Same shape as Postgres' pgConversationColumns; the
-// memory_missing derivation uses SQLite's TRIM(...) variant with the
-// explicit whitespace charset (Postgres uses BTRIM with an E'...'
-// escape string). The claim-derived columns (claimed_at / executor_id /
-// attempts / duration_ms / num_turns) are correlated subselects over
+// memory_missing derivation asks the same question of the same column and
+// spells the null-safe comparison SQLite's way (Postgres uses IS DISTINCT
+// FROM) — see pgConversationColumns for why the source alone answers it.
+// The claim-derived columns (claimed_at / executor_id / attempts /
+// duration_ms / num_turns) are correlated subselects over
 // claims and the accounting columns (cost + tokens) subselects over the
 // messages ledger; claimed_at loses its declared column type inside the
 // subselect, so it scans as text and parses via parseDBDatetime. Status is
@@ -665,7 +666,7 @@ const sqliteConversationColumns = `
 	(SELECT COALESCE(SUM(m.output_tokens), 0)         FROM messages m WHERE m.conversation_id = r.id) AS output_tokens,
 	(SELECT COALESCE(SUM(m.cache_read_tokens), 0)     FROM messages m WHERE m.conversation_id = r.id) AS cache_read_tokens,
 	(SELECT COALESCE(SUM(m.cache_creation_tokens), 0) FROM messages m WHERE m.conversation_id = r.id) AS cache_creation_tokens,
-	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
+	(COALESCE(rm.source, '') <> 'agent') AS memory_missing,
 	COALESCE(a.display_name, '') AS actor_agent_name,
 	r.ended_at, COALESCE(r.ended_reason, '')
 `
@@ -783,8 +784,7 @@ const sqliteConversationReturningColumns = `
 	(SELECT COALESCE(SUM(m.output_tokens), 0)         FROM messages m WHERE m.conversation_id = conversations.id) AS output_tokens,
 	(SELECT COALESCE(SUM(m.cache_read_tokens), 0)     FROM messages m WHERE m.conversation_id = conversations.id) AS cache_read_tokens,
 	(SELECT COALESCE(SUM(m.cache_creation_tokens), 0) FROM messages m WHERE m.conversation_id = conversations.id) AS cache_creation_tokens,
-	(NULLIF(TRIM((SELECT rm.agent_content FROM conversation_memory rm WHERE rm.conversation_id = conversations.id),
-	              ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
+	(COALESCE((SELECT rm.source FROM conversation_memory rm WHERE rm.conversation_id = conversations.id), '') <> 'agent') AS memory_missing,
 	COALESCE((SELECT a.display_name FROM agents a WHERE a.id = conversations.actor_agent_id), '') AS actor_agent_name,
 	ended_at, COALESCE(ended_reason, '')
 `

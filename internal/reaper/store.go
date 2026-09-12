@@ -198,7 +198,17 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 			-- No park_reason: this arm does not park, it fails. failure_kind is
 			-- where a failure's cause is recorded, and stamping the same word into
 			-- the park column would put a value on a row that was never parked.
+			--
+			-- ended_at/ended_reason ride the same statement because a failure IS
+			-- a boundary: the brain is the only thing left that can say so for a
+			-- conversation whose executor is gone, and a row failed here without
+			-- the stamp would stay resumable and owe its memory to nobody.
+			-- COALESCE holds the store doors' guard from raw SQL: a conversation
+			-- a handler already ended (a takeover whose stop never landed, then
+			-- an executor death) keeps the boundary that actually happened
+			-- rather than having it relabelled as this failure.
 			UPDATE conversations SET status = 'failed', failure_kind = 'executor_lost', completed_at = now(),
+				ended_at = COALESCE(ended_at, now()), ended_reason = COALESCE(ended_reason, 'failed'),
 				result_summary = 'Failed: executor lost repeatedly and the retry budget (TF_MAX_CLAIM_ATTEMPTS) for this loss episode is exhausted (reaper)'
 			WHERE id IN (
 				SELECT r.id `+reapCandidateJoin+`

@@ -385,6 +385,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		}
 		closeGate("task_missing", err)
 		s.failEngagement(conv.ID, fmt.Errorf("load task: %v", err))
+		s.failClaimedConversation(orgID, conv, fmt.Sprintf("load task: %v", err))
 		s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, startTime,
 			runConfig{orgID: orgID, teamID: conv.TeamID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("load task: %v", err), conv.BlueprintStepIndex, true)
 		return
@@ -1258,6 +1259,16 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("step %d: %v", next, err), &stepIdx, false)
 			return
 		}
+		// Step N stops being the task's live conversation the moment N+1 is
+		// minted, so the boundary is stamped BEFORE the enqueue: the invariant
+		// is that a new conversation never opens on a task whose prior one is
+		// still un-ended. The agent's own memory row is already filed — the
+		// completion gate wrote it in the terminal this reactor is reacting to.
+		// Best-effort: an unstamped step is a row the provisioner sweeps later,
+		// while refusing to advance would strand the blueprint.
+		if _, err := s.conversations.EndConversationSystem(ctx, orgID, stepConversation.ID, domain.EndedStepAdvanced); err != nil {
+			dispatchLog.Warn("stamp the step-advance boundary on the concluded step failed", "conversation", stepConversation.ID, "blueprint_run", br.ID, "error", err)
+		}
 		if err := s.enqueueBlueprintStep(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), nextModel, triggerType, br.TriggerID, creatorUserID, br.ActorAgentID); err != nil {
 			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("enqueue step %d: %v", next, err), &stepIdx, false)
@@ -1693,6 +1704,7 @@ func (s *Spawner) disposeOfExhaustedConversation(orgID string, br *domain.Bluepr
 		return true
 	}
 	dispatchLog.Error("workspace setup failed after attempts; failing blueprint", "conversation", conv.ID, "attempts", conv.Attempts, "error", cause)
+	s.failClaimedConversation(orgID, &conv, cause.Error())
 	s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
 		runConfig{orgID: orgID, teamID: conv.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
 		domain.BlueprintRunStatusFailed, cause.Error(), conv.BlueprintStepIndex, false)
@@ -1763,6 +1775,7 @@ func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, c
 	}
 	dispatchLog.Error("blueprint step refused: the model it would run on is not enabled for its team",
 		"conversation", conv.ID, "blueprint_run", br.ID, "team", conv.TeamID, "error", cause)
+	s.failClaimedConversation(orgID, &conv, cause.Error())
 	s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
 		runConfig{orgID: orgID, teamID: conv.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
 		domain.BlueprintRunStatusFailed, cause.Error(), conv.BlueprintStepIndex, false)
@@ -1811,14 +1824,25 @@ func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reaso
 	toast.Error(s.wsHub, orgID, toastMsg)
 }
 
-// failClaimedConversation marks an orphaned claimed conversation failed (its
-// blueprint_run vanished, so there is nothing to drive). Best-effort, and
-// fenced on this claim like every other terminal an engagement writes: if the
-// claim is gone, a successor holds the conversation and reaches this same
-// branch itself.
+// failClaimedConversation writes the terminal and the boundary for a claimed
+// conversation this engagement is giving up on: the blueprint_run behind it
+// vanished, its task did, its setup budget ran out on a step that never ran,
+// or its model left the team's set. Every one of those used to leave the row
+// NULL-status with a released claim — neither failed nor ended, so the task
+// never read it as done with and the claim scan kept handing it back while its
+// blueprint sat `failed`.
+//
+// Unclassified is the honest kind: what failed is the machinery around the
+// conversation, not anything the agent did, and every existing kind names the
+// latter.
+//
+// Best-effort, and fenced on this claim like every other terminal an
+// engagement writes: if the claim is gone, a successor holds the conversation
+// and reaches this same branch itself, so neither write is ours to make.
 func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversation, reason string) {
 	dispatchLog.Error("marking conversation failed", "conversation", conv.ID, "reason", reason)
-	_, err := s.conversations.MarkFailedIfActiveForClaimSystem(context.Background(), orgID, conv.ID, conv.ClaimID, "")
+	bgCtx := context.Background()
+	_, err := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, string(domain.ConversationFailureUnclassified))
 	if errors.Is(err, db.ErrClaimReleased) {
 		dispatchLog.Error("claim fence refused the orphaned-conversation terminal — a successor owns this conversation; recording nothing",
 			"conversation", conv.ID, "claim_id", conv.ClaimID, "org_id", orgID, "error", err)
@@ -1826,5 +1850,8 @@ func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversatio
 	}
 	if err != nil {
 		dispatchLog.Warn("mark orphaned conversation failed", "conversation", conv.ID, "error", err)
+	}
+	if _, err := s.conversations.EndConversationSystem(bgCtx, orgID, conv.ID, domain.EndedFailed); err != nil {
+		dispatchLog.Warn("stamp the failure boundary on the orphaned conversation failed", "conversation", conv.ID, "error", err)
 	}
 }

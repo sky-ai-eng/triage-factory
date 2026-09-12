@@ -1372,6 +1372,12 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 //     operates on settled conversations; it never flips conversations.status
 //     itself.
 //
+//   - boundary: every conversation the task still had is stamped `requeued`,
+//     so nothing resumes into a task the next claimant will start fresh on and
+//     the reason a person reads is the gesture that ended it. It follows the
+//     stop rather than replacing it — a stop that failed still has to leave a
+//     row saying the task moved on.
+//
 //   - Jira reversal: if the task is Jira-backed and we have a
 //     SourceStatus snapshot (recorded at claim time), unassign and
 //     transition back. Guarded against external mutations: skip if
@@ -1400,6 +1406,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 	// (claims among them) while breaking the cancel chain.
 	cleanupCtx := context.WithoutCancel(r.Context())
 	s.teardownTaskConversations(cleanupCtx, orgID, userID, taskID, delegate.StopCauseTaskRequeued)
+	s.endTaskConversations(cleanupCtx, orgID, userID, taskID, domain.EndedRequeued)
 	s.revertJiraStateIfApplicable(cleanupCtx, orgID, userID, task)
 	// Requeue clears both claim cols and flips status to
 	// 'queued'. Peer Board sessions need a task_updated event to
