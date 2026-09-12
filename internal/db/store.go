@@ -179,6 +179,15 @@ type Stores struct {
 	// engagement-start materializer, both without a JWT-claims context).
 	TaskMemory TaskMemoryStore
 
+	// MemoryAttempts owns the conversation_memory_attempts table — the ledger
+	// of tries at generating a memory for a conversation that ended owing one,
+	// which is what separates "nothing was owed" from "generation failed".
+	// Admin pool in Postgres: the writer is the brain's memory provisioner, a
+	// background goroutine with no JWT-claims context, and tf_app holds SELECT
+	// alone while tf_system holds nothing at all (an executor never touches
+	// this table).
+	MemoryAttempts MemoryAttemptStore
+
 	// ConversationWorktrees owns the conversation_worktrees table — one row per
 	// (conversation_id, repo_id) lazy worktree reservation a Jira-style run
 	// accumulates as the agent materializes repos via `workspace
@@ -513,6 +522,7 @@ type TxStores struct {
 	PendingFirings           PendingFiringsStore
 	Events                   EventStore
 	TaskMemory               TaskMemoryStore
+	MemoryAttempts           MemoryAttemptStore
 	ConversationWorktrees    ConversationWorktreeStore
 	Orgs                     OrgsStore
 	OrgMemberships           OrgMembershipsStore

@@ -196,6 +196,10 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// autonomously, same shape Events / Conversations use for their
 		// admin-pool halves.
 		TaskMemory: newTaskMemoryStore(tx, s.admin),
+		// MemoryAttempts has no app-side half, so it stays pinned to the real
+		// admin pool: its writes inside WithTx commit autonomously, the same
+		// shape the admin halves above take.
+		MemoryAttempts: newMemoryAttemptStore(s.admin),
 		// ConversationWorktrees: app-side write routes through the tx; admin
 		// half stays pinned to s.admin so DeleteByPathSystem +
 		// ListSystem inside WithTx route outside the tx — those
