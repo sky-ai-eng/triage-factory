@@ -91,8 +91,9 @@ const sqliteTaskRuleOrderJoin = `
 	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 
 // sqliteTaskAttentionTier orders the OPEN rows of a lane by whose move it is —
-// the first preference term on the In Progress and In Review lanes, so the card
-// waiting on a human is on page one rather than wherever its priority put it.
+// the first preference term on the In Progress lane, and on the unfiltered read
+// that contains it, so the card waiting on a human is on page one rather than
+// wherever its priority put it.
 // It is a subquery and no join, so it is absent from the count query by
 // construction; the page projects it as well as orders by it, because a keyset
 // cursor resumes from the tuple's values and this is one of them.

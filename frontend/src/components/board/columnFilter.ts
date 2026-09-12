@@ -9,7 +9,7 @@ import type { Task } from '../../types'
 
 export type SourceFilter = 'all' | 'github' | 'jira'
 // Sort keys the column popover offers. 'default' preserves the order the board
-// hands us (priority for the queue, run-attention for in-progress/in-review) —
+// hands us (priority for the queue, run-attention for in-progress) —
 // the smart baseline — so picking a sort is an explicit override, never the
 // thing that silently reshuffles a freshly-loaded board.
 export type SortKey = 'default' | 'title' | 'created' | 'event_type' | 'claimee'

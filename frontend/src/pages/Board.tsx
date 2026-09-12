@@ -772,10 +772,10 @@ export default function Board() {
     }
   }, [conversations, dropPermissionConversation])
 
-  // Sort tasks with active conversations in a meaningful order. Used for
-  // In Progress and In Review where the conversation state matters for
-  // attention. Needs-you (a parked permission prompt or an unresolved
-  // artifact) > failed > everything in flight > completed.
+  // Sort tasks with active conversations in a meaningful order. Used for the
+  // In Progress lane, the one column whose rows all carry a conversation whose
+  // state decides the order. Needs-you (a parked permission prompt or an
+  // unresolved artifact) > failed > everything in flight > completed.
   const sortByConversationAttention = useCallback(
     (tasks: Task[]) => {
       const weight = (t: Task) => {
