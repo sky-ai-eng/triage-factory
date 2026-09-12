@@ -41,7 +41,9 @@ type AssemblyOptions struct {
 // at a fractional seq lands between the two rows it belongs between. Rows in
 // window_state 'inactive' (superseded by compaction) are dropped; 'elided'
 // rows render as the deterministic stub; undelivered rows are excluded unless
-// IncludeUndelivered is set. cache_control is written here and only here
+// IncludeUndelivered is set. Each run of memory rows surviving that filter is
+// bracketed in the task-memory envelope, then adjacent user messages are
+// packed. cache_control is written here and only here
 // (AssemblyOptions.NoCacheBreakpoint opts out): the moving conversation
 // breakpoint lands on the last block of the final message.
 func RowsToMessages(rows []domain.Message, opts AssemblyOptions) ([]schemas.ChatMessage, error) {
@@ -51,7 +53,7 @@ func RowsToMessages(rows []domain.Message, opts AssemblyOptions) ([]schemas.Chat
 		return effectiveKey(sorted[i]) < effectiveKey(sorted[j])
 	})
 
-	out := make([]schemas.ChatMessage, 0, len(sorted))
+	active := make([]domain.Message, 0, len(sorted))
 	for i := range sorted {
 		r := sorted[i]
 		if r.WindowState == domain.MessageWindowInactive {
@@ -60,6 +62,11 @@ func RowsToMessages(rows []domain.Message, opts AssemblyOptions) ([]schemas.Chat
 		if !isDelivered(r) && !opts.IncludeUndelivered {
 			continue
 		}
+		active = append(active, r)
+	}
+
+	out := make([]schemas.ChatMessage, 0, len(active))
+	for _, r := range active {
 		if r.WindowState == domain.MessageWindowElided {
 			out = append(out, elidedStub(r))
 			continue
@@ -71,6 +78,7 @@ func RowsToMessages(rows []domain.Message, opts AssemblyOptions) ([]schemas.Chat
 		out = append(out, m)
 	}
 
+	wrapMemoryRuns(active, out)
 	out = consolidateAdjacentUsers(out)
 
 	if !opts.NoCacheBreakpoint {
@@ -298,6 +306,59 @@ func wrapSteer(r domain.Message, content *schemas.ChatMessageContent) *schemas.C
 	blocks = append(blocks, content.ContentBlocks...)
 	blocks = append(blocks, schemas.ChatContentBlock{Type: schemas.ChatContentBlockTypeText, Text: &closing})
 	return &schemas.ChatMessageContent{ContentBlocks: blocks}
+}
+
+// wrapMemoryRuns brackets each maximal run of consecutive `injection:memory`
+// messages in the task-memory envelope: the opening block is prepended to the
+// first message of the run and the closing block appended to the last, so the
+// memories read as one labelled note rather than as K unlabelled documents. A
+// run of one gets both on the same message. Consolidation then folds the
+// bracketed run and the task-context row that follows into a single user turn.
+//
+// It is wrapSteer's sibling one level up — a function of the rows and nothing
+// else, so two executors assembling the same rows produce the same request —
+// and it works over a run because the envelope's K is a property of the run,
+// not of any row in it. rows[i] is the row msgs[i] was assembled from; the
+// caller has already dropped inactive rows, which is what makes a fully
+// compacted run no run at all and so no envelope. An elided row keeps its
+// place and renders its stub inside.
+//
+// The messages are mutated in place: the envelope changes content, and
+// nothing about the list's shape.
+func wrapMemoryRuns(rows []domain.Message, msgs []schemas.ChatMessage) {
+	for i := 0; i < len(rows); {
+		if rows[i].Subtype != domain.MessageSubtypeInjectionMemory {
+			i++
+			continue
+		}
+		j := i
+		for j < len(rows) && rows[j].Subtype == domain.MessageSubtypeInjectionMemory {
+			j++
+		}
+		prependTextBlock(&msgs[i], domain.MemoryEnvelopeOpen(j-i))
+		appendTextBlock(&msgs[j-1], domain.MemoryEnvelopeClose)
+		i = j
+	}
+}
+
+// prependTextBlock / appendTextBlock put one text block at either end of a
+// message's content, normalizing string content to blocks first so the
+// envelope's blocks stay their own — a memory's text is never concatenated
+// into the framing.
+func prependTextBlock(msg *schemas.ChatMessage, text string) {
+	blocks := append([]schemas.ChatContentBlock{{
+		Type: schemas.ChatContentBlockTypeText,
+		Text: &text,
+	}}, contentAsBlocks(msg.Content)...)
+	msg.Content = &schemas.ChatMessageContent{ContentBlocks: blocks}
+}
+
+func appendTextBlock(msg *schemas.ChatMessage, text string) {
+	blocks := append(contentAsBlocks(msg.Content), schemas.ChatContentBlock{
+		Type: schemas.ChatContentBlockTypeText,
+		Text: &text,
+	})
+	msg.Content = &schemas.ChatMessageContent{ContentBlocks: blocks}
 }
 
 // rowContent maps a row's content into the bifrost content union. The row's

@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // ConversationOutcome is the single terminal vocabulary an agent emits in its
 // completion envelope (the `outcome` field). It replaces the dual-channel
@@ -232,12 +235,59 @@ const (
 	// request (unanchored conversations), and the summary. The only
 	// compaction text that stays in the active window.
 	MessageSubtypeInjectionCompactionResult = "injection:compaction-result"
+	// MessageSubtypeInjectionMemory marks one prior conversation's memory,
+	// injected into a new conversation's opening rows so the handoff is in
+	// the transcript rather than a folder the agent may or may not read. One
+	// row per memory, oldest first, content the memory text and nothing
+	// around it — the framing is the assembly-time envelope below, so the
+	// stored row stays the source it came from and a surface can render it
+	// as a card linking back to that conversation.
+	MessageSubtypeInjectionMemory = "injection:memory"
+	// MessageSubtypeInjectionTaskContext marks the rendered <task_context>
+	// row that closes a conversation's opening rows. It is externally
+	// authored text, which is why it is a user row rather than part of the
+	// instruction channel, and its own subtype is what lets compaction skip
+	// it as a candidate <original_request> and what the row-counting gates
+	// ask for when they answer "has this conversation started?".
+	MessageSubtypeInjectionTaskContext = "injection:task-context"
 	// MessageSubtypeStopNote marks a delivered row recording why an
 	// engagement stopped — a guard park, an unrecoverable provider error.
 	// A statement of fact written into history, not input awaiting
 	// consumption, which is why it carries no injection: prefix.
 	MessageSubtypeStopNote = "stop-note"
 )
+
+// The task-memory envelope brackets the run of MessageSubtypeInjectionMemory
+// rows on the wire: one opening block before the first, one closing block
+// after the last, each memory its own block between them. The text lives here
+// rather than in the package that renders it because it is domain vocabulary
+// the way the subtypes beside it are — assembly reads a row's subtype and
+// these strings, and nothing else.
+//
+// Nothing per-run enters it. K is the number of rows in the run, which is
+// what was injected rather than what the task has: the injection budget can
+// leave older memories out, and the second sentence is what tells the agent
+// the folder holds more than the turn does. Both paths are the fixed relative
+// ones every run tree presents. So two executors assembling the same rows
+// build the same bytes.
+const (
+	memoryEnvelopeOpenFormat = "<system-note kind=\"task-memory\">\n" +
+		"This task has %d prior conversations. Their memory files are at " +
+		"_tfac/entity-memory/this-task/ and are injected below, deliberately, " +
+		"so you do not need to read them. Memories from other tasks on this " +
+		"entity are at _tfac/entity-memory/history/ and have not been " +
+		"included.\n"
+
+	// MemoryEnvelopeClose closes the envelope. Its leading newline puts the
+	// tag on its own line whether or not the last memory ends with one.
+	MemoryEnvelopeClose = "\n</system-note>"
+)
+
+// MemoryEnvelopeOpen renders the envelope's opening block for a run of k
+// memory rows. Its trailing newline starts the first memory on its own line.
+func MemoryEnvelopeOpen(k int) string {
+	return fmt.Sprintf(memoryEnvelopeOpenFormat, k)
+}
 
 // Conversation is the durable agent-context row: one row per transcript,
 // regardless of surface (a delegated task conversation, a future interactive
