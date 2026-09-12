@@ -245,7 +245,7 @@ func (e *Engine) compactWarm(ctx context.Context, params Params) error {
 	if err != nil {
 		return err
 	}
-	span := append(compactionSpan(rows, params.MissionAnchored), replyRow.ID)
+	span := append(compactionSpan(rows), replyRow.ID)
 	return e.commitCompaction(ctx, params, rows, nil, summary, span)
 }
 
@@ -268,8 +268,8 @@ func (e *Engine) compactCold(ctx context.Context, params Params) error {
 	}
 	callStarted := time.Now()
 	// Rows assemble with undelivered rows excluded (the default), so queued
-	// input is never summarized; the pinned opening rides along as context
-	// in the anchored arm and is simply excluded from the span below.
+	// input is never summarized: it survives the commit as live input ordered
+	// after the result row.
 	completion, err := e.streamWithRetry(ctx, client, inference.Request{
 		Provider:     provider,
 		Model:        model,
@@ -319,7 +319,7 @@ func (e *Engine) compactCold(ctx context.Context, params Params) error {
 		replyRow.CostUSD = &cost
 	}
 
-	span := compactionSpan(rows, params.MissionAnchored)
+	span := compactionSpan(rows)
 	return e.commitCompaction(ctx, params, rows, replyRow, summary, span)
 }
 
@@ -335,30 +335,23 @@ func (e *Engine) commitCompaction(ctx context.Context, params Params, rows []dom
 	return nil
 }
 
-// compactionSpan selects the row ids a compaction supersedes: every
-// delivered row in the current window, minus the pinned opening on a
-// mission-anchored conversation. Undelivered rows never flip — the model has
-// not seen them, and they survive as live queued input ordered after the
-// result row by the commit's re-seq.
+// compactionSpan selects the row ids a compaction supersedes: every delivered
+// row in the current window, with nothing exempt. Undelivered rows never flip —
+// the model has not seen them, and they survive as live queued input ordered
+// after the result row by the commit's re-seq.
 //
-// The pin is the leading run of rows before the first assistant turn OR the
-// first compaction result, whichever comes first. The second bound is what
-// keeps summaries from accumulating: after one compaction the window opens
-// with [mission..., result], and pinning "everything before the first
-// assistant row" would grandfather the old summary into every window that
-// follows. The mission is the only text with a standing claim to survival.
-func compactionSpan(rows []domain.Message, anchored bool) []int {
-	start := 0
-	if anchored {
-		for i, r := range rows {
-			if r.Role == "assistant" || r.Subtype == domain.MessageSubtypeInjectionCompactionResult {
-				break
-			}
-			start = i + 1
-		}
-	}
+// Nothing is pinned, and that is a decision rather than an omission. What a
+// conversation must not lose is retained rather than re-sent: a delegation's
+// mission is in the system prompt, which is re-sent every turn and can never be
+// summarized, and its task context is on disk at a path the prompt names. A pin
+// would also carry that context — externally-authored text — verbatim into
+// every window for the life of the conversation, where a summary is at least
+// the model's own restatement. It would be unavailable on the SDK runtime in
+// any case, which has no lever for one, so keeping it here would make the same
+// task behave differently after a compaction in local and in multi.
+func compactionSpan(rows []domain.Message) []int {
 	var ids []int
-	for _, r := range rows[start:] {
+	for _, r := range rows {
 		if !isDelivered(r) {
 			continue
 		}
@@ -423,17 +416,18 @@ func extractSummary(text string) (string, bool) {
 
 // composeResultRow builds the machine-composed row that replaces the span —
 // the only compaction text that enters the active window. The summary is the
-// model's; everything around it is mechanical, so the objective can never
-// depend on the model having preserved it: the anchored arm keeps the
-// mission rows themselves, and the unanchored arm carries the original
-// request verbatim right here.
+// model's; everything around it is mechanical, so a conversation whose whole
+// statement of purpose was one human message can never lose it to a summary
+// that happened not to restate it: that message is carried verbatim right here.
+//
+// A conversation that has no such message gets no such block. A delegation is
+// the case: its instruction is in the system prompt, re-sent every turn, so
+// there is nothing here to rescue.
 func composeResultRow(params Params, rows []domain.Message, summary string) *domain.Message {
 	var b strings.Builder
 	b.WriteString(compactionPreamble)
-	if !params.MissionAnchored {
-		if orig, ok := originalRequest(rows); ok {
-			b.WriteString("\n\n<original_request>\n" + orig + "\n</original_request>")
-		}
+	if orig, ok := originalRequest(rows); ok {
+		b.WriteString("\n\n<original_request>\n" + orig + "\n</original_request>")
 	}
 	b.WriteString("\n\n<summary>\n" + summary + "\n</summary>")
 	return &domain.Message{
@@ -448,12 +442,20 @@ func composeResultRow(params Params, rows []domain.Message, summary string) *dom
 	}
 }
 
-// originalRequest returns the conversation's first genuine human message,
-// capped — content is retained on the inactive row either way, so the cut
-// loses nothing recoverable.
+// originalRequest returns the conversation's opening human message, capped —
+// content is retained on the inactive row either way, so the cut loses nothing
+// recoverable.
+//
+// A blank subtype is the whole test, narrower than IsHumanInput deliberately.
+// A steer is a human row too, but it is something said to a conversation
+// already under way, so admitting one would let a mid-run aside be re-injected
+// into every window afterwards as the thing the conversation was for. And a
+// row the control plane minted carries a subtype of its own, which is what
+// keeps a delegation's opening — externally-authored task context — out of
+// here structurally rather than by a flag the caller has to set correctly.
 func originalRequest(rows []domain.Message) (string, bool) {
 	for _, r := range rows {
-		if r.Role != "user" || !IsHumanInput(r) {
+		if r.Role != "user" || r.Subtype != "" {
 			continue
 		}
 		text := r.Content

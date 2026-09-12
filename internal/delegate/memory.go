@@ -90,6 +90,7 @@ const (
 	agentMemoryFileName  = "memory.md"
 	entityMemoryDirName  = worktree.EntityMemoryDir
 	currentRunDirName    = "this-run"
+	taskContextFileName  = "task-context.md"
 	priorRunsDirName     = "history"
 	memorySlugMaxLen     = 32
 	historyDateLayoutUTC = "2006-01-02"
@@ -522,6 +523,44 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root
 	}
 	if written > 0 {
 		delegateLog.Info("materialized prior memories for entity", "count", written, "entity", entityID)
+	}
+}
+
+// writeTaskContextFile retains this launch's rendered <task_context> as a file
+// the agent can re-read, at the fixed name every prompt block names it by.
+//
+// It is the task context's whole retention. Nothing is pinned through a
+// compaction, so the row carrying these bytes is summarized like any other —
+// and a summary is the model's restatement, which is the right posture for
+// externally-authored text but loses the PR number the agent needs an hour
+// later. The file is the original, addressed by a path rather than re-sent.
+//
+// root is entityMemoryTarget's answer, which is why the file sits one directory
+// inside the memory tree rather than beside it in _tfac/: on a warm, handed-off
+// step the run tree belongs to the sandbox identity and TF may not write there,
+// while the staged memory dir is the one per-launch location it still owns. In
+// local mode that same path is a real directory in the tree.
+//
+// Best-effort, like the prior memories rendered next to it: an agent that
+// cannot re-read the original still has the summary, and a run must not fail
+// for a file it may never open. A repo-owned name yields to the repo for the
+// reason every other write here does — the collision costs a re-read, the
+// user's committed file is worth more.
+func writeTaskContextFile(root, taskContext string, owned repoFiles) {
+	if root == "" || strings.TrimSpace(taskContext) == "" {
+		return
+	}
+	if owned.owns(entityMemoryDirName, taskContextFileName) {
+		delegateLog.Warn("repo tracks the task-context path; this run's task context is not retained as a file", "path", filepath.Join(root, taskContextFileName))
+		return
+	}
+	if err := os.MkdirAll(root, 0755); err != nil {
+		delegateLog.Warn("create the task-context directory failed; this run's task context is not retained as a file", "path", root, "error", err)
+		return
+	}
+	file := filepath.Join(root, taskContextFileName)
+	if err := os.WriteFile(file, []byte(taskContext+"\n"), 0644); err != nil {
+		delegateLog.Warn("write the task-context file failed; a compacted run cannot re-read its task context", "path", file, "error", err)
 	}
 }
 

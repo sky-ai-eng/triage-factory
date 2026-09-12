@@ -92,14 +92,18 @@ func composeBlocks(paths []string) string {
 	return strings.Join(sections, "\n\n")
 }
 
-// Build composes the agent-facing framework prompt for spec — the whole prompt
-// for a step that concludes the run. A step that hands off to a later one calls
-// BuildNonTerminalStep instead.
+// Build composes the agent-facing framework prompt for spec — the whole of
+// what this package contributes, for a terminal step and a handoff alike. A
+// step that hands off carries NonTerminalCompletion's addendum as well, and its
+// caller places it: both runtimes deliver it on their per-conversation channel,
+// so this composition stays one cache entry per (spec, tools) rather than
+// forking into a terminal and a non-terminal variant.
 //
 // The result is byte-identical for a fixed Spec (rule 3): the block set, the
 // arm each section takes, and the join depend on nothing else. Per-run text has
-// no way in — the mission and the task context ride the opening turn — so this
-// returns the string composed at init.
+// no way in — the mission, the task context and the step addendum reach the
+// model through channels this package does not compose — so this returns the
+// string composed at init.
 //
 // Panics on a Spec no arm covers. The Spec is assembled from typed constants
 // at a handful of call sites, so an unrepresentable combination is a wiring
@@ -115,29 +119,6 @@ func Build(spec Spec) string {
 		static = composeBlocks(paths)
 	}
 	return static + "\n"
-}
-
-// BuildNonTerminalStep composes the framework prompt for a blueprint step that
-// hands off to a later step instead of concluding the run: Build's text with
-// the handoff addendum appended.
-//
-// The addendum is appended rather than composed into the block set. It still
-// lands after the completion contract it amends, and the static set stays one
-// cache entry instead of forking into terminal and non-terminal variants.
-//
-// Under RuntimeSDK this returns Build's text unchanged. Not a gap: that harness
-// takes the addendum on --append-system-prompt, so appending it here too would
-// send it twice.
-func BuildNonTerminalStep(spec Spec) string {
-	static := Build(spec)
-	if spec.Runtime != RuntimeNative {
-		return static
-	}
-	addendum := strings.TrimSpace(NonTerminalCompletion(spec))
-	if addendum == "" {
-		return static
-	}
-	return strings.TrimSuffix(static, "\n") + "\n\n" + addendum + "\n"
 }
 
 // nonTerminalCompletions is the handoff addendum per runtime, resolved once at
@@ -157,9 +138,9 @@ var nonTerminalCompletions = func() map[Runtime]string {
 // that hands off to a later blueprint step instead of concluding the run, or
 // "" when spec's runtime has no such block yet.
 //
-// It is exported alongside BuildNonTerminalStep because the SDK takes this text
-// on --append-system-prompt — a different channel from the composed prompt, so
-// that caller needs the addendum by itself.
+// It is exported because both runtimes deliver it on a channel of their own —
+// the SDK on --append-system-prompt, the native loop in its per-conversation
+// system block — so every caller needs the addendum by itself.
 func NonTerminalCompletion(spec Spec) string {
 	return nonTerminalCompletions[spec.Runtime]
 }

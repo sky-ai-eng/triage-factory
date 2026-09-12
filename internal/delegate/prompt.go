@@ -187,6 +187,33 @@ func buildPrompt(task domain.Task, metadataJSON, skeleton string, artifacts []do
 	)
 }
 
+// composeConversationSystemBlock assembles the conversation's own system block —
+// everything the framework prompt refers to but cannot contain, because it
+// differs per run and the framework prompt has to stay byte-identical to remain
+// a shared cached prefix.
+//
+// It rides a second system block behind that prefix's breakpoint rather than a
+// transcript row, because these four sections are TF's own words. What the
+// model is told to do, where its tree is, which verbs exist and how this step
+// ends are the instruction channel; the task context is not, and stays a user
+// row (BuildTaskContext) because it renders PR titles and issue bodies an
+// outsider wrote.
+//
+// The order is the run's facts and its verb reference first, the instruction
+// and the step addendum last, so the mission and how to end it are the final
+// thing the model reads before the conversation itself.
+//
+// Every argument is optional and an empty one renders nothing: a manual
+// conversation has no mission, a terminal step no addendum, and a run whose org
+// documented no verbs no tools section.
+func composeConversationSystemBlock(mission, runContextBlock, toolsRef, nonTerminal string) string {
+	tools := ""
+	if t := strings.TrimSpace(toolsRef); t != "" {
+		tools = "<tools>\n" + t + "\n</tools>"
+	}
+	return joinSections(runContextBlock, tools, mission, nonTerminal)
+}
+
 // resolveCLIPath points every `triagefactory exec …` invocation at the binary
 // this run can actually execute: the host binary's own path in local mode, the
 // canonical bind-mount inside the jail. The allowlist

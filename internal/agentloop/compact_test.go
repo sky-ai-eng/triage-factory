@@ -92,11 +92,10 @@ func TestWarmCompaction_TripsCommitsAndOrdersQueue(t *testing.T) {
 		return tr.find(func(m domain.Message) bool { return strings.Contains(m.Content, sub) })
 	}
 
-	// The pinned opening survives; the worked turn, the request, and the
-	// summarize reply are all inactive; the result row is active and carries
-	// the summary but (anchored) no re-injected original request.
-	if m := byContent("the mission"); m == nil || m.WindowState == domain.MessageWindowInactive {
-		t.Fatalf("opening row = %+v, want pinned active", m)
+	// Nothing is pinned: the opening compacts with the worked turn, the request
+	// and the summarize reply, and the result row is the only active text left.
+	if m := byContent("the mission"); m == nil || m.WindowState != domain.MessageWindowInactive {
+		t.Fatalf("opening row = %+v, want compacted like every other delivered row", m)
 	}
 	if m := byContent("worked a lot"); m == nil || m.WindowState != domain.MessageWindowInactive {
 		t.Fatalf("span row = %+v, want inactive", m)
@@ -116,8 +115,11 @@ func TestWarmCompaction_TripsCommitsAndOrdersQueue(t *testing.T) {
 	if !strings.Contains(resultRow.Content, "everything that happened") {
 		t.Errorf("result row content = %q, want the summary", resultRow.Content)
 	}
-	if strings.Contains(resultRow.Content, "<original_request>") {
-		t.Errorf("anchored result row re-injected the original request: %q", resultRow.Content)
+	// This conversation's opening IS a plain human message, so the result row
+	// carries it verbatim — that is what replaced the pin for the shape the pin
+	// was never for.
+	if !strings.Contains(resultRow.Content, "<original_request>\nthe mission\n</original_request>") {
+		t.Errorf("result row = %q, want the opening human message carried verbatim", resultRow.Content)
 	}
 
 	// Ordering: the queued row was re-seqed after the result row and
@@ -345,10 +347,11 @@ func TestWarmCompactionFailure_NoSummaryHandsOff(t *testing.T) {
 	}
 }
 
-// TestUnanchoredCompaction_ReinjectsTheOriginalRequest covers the taskless
-// arm: nothing pinned, and the first human message survives mechanically in
-// the result row — capped when enormous.
-func TestUnanchoredCompaction_ReinjectsTheOriginalRequest(t *testing.T) {
+// TestCompaction_ReinjectsTheOpeningHumanMessage covers the shape the
+// re-injection was written for — a conversation a person opened by asking for
+// something. Nothing is pinned, and that message survives mechanically in the
+// result row instead, capped when enormous.
+func TestCompaction_ReinjectsTheOpeningHumanMessage(t *testing.T) {
 	t.Run("verbatim under the cap", func(t *testing.T) {
 		tr := newMemTranscript(
 			domain.Message{Role: "user", Content: "please build me the widget"},
@@ -357,7 +360,6 @@ func TestUnanchoredCompaction_ReinjectsTheOriginalRequest(t *testing.T) {
 		provider := &scriptedProvider{turns: []scriptedTurn{summaryReply("did widget things"), {text: "done"}}}
 		engine := newTestEngine(tr, provider, newScriptedToolHost())
 		params := testParams()
-		params.MissionAnchored = false
 
 		if result := engine.Run(context.Background(), params); result.Kind != ResultConcluded {
 			t.Fatalf("result = %+v, want concluded", result)
@@ -366,7 +368,7 @@ func TestUnanchoredCompaction_ReinjectsTheOriginalRequest(t *testing.T) {
 			return strings.Contains(m.Content, "build me the widget") && m.Subtype == ""
 		})
 		if opening == nil || opening.WindowState != domain.MessageWindowInactive {
-			t.Fatalf("unanchored opening = %+v, want compacted like everything else", opening)
+			t.Fatalf("opening = %+v, want compacted like everything else", opening)
 		}
 		resultRow := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionResult })
 		if !strings.Contains(resultRow.Content, "<original_request>\nplease build me the widget\n</original_request>") {
@@ -383,7 +385,6 @@ func TestUnanchoredCompaction_ReinjectsTheOriginalRequest(t *testing.T) {
 		provider := &scriptedProvider{turns: []scriptedTurn{summaryReply("s"), {text: "done"}}}
 		engine := newTestEngine(tr, provider, newScriptedToolHost())
 		params := testParams()
-		params.MissionAnchored = false
 
 		if result := engine.Run(context.Background(), params); result.Kind != ResultConcluded {
 			t.Fatalf("result = %+v, want concluded", result)
@@ -652,91 +653,95 @@ func TestCompaction_SanitizesModelTextForStore(t *testing.T) {
 	})
 }
 
-// composedOpeningTurn is the shape a delegation's opening turn really has now
-// that the mission rides the transcript: several sections in one row. The
-// fixtures above use a one-line stand-in; the pin has to hold for this.
-const composedOpeningTurn = "<run_context>\n" +
-	"Branch naming convention for this team: tfac/SKY-9\n" +
-	"</run_context>\n\n" +
-	"<task_context>\n" +
-	"Reference data about the task that fired this run.\n\n" +
-	"- Task: CI is failing on the retry path\n" +
-	"- Repository: owner/repo\n" +
-	"- Pull request: #18\n" +
-	"</task_context>\n\n" +
-	"Fix the failing check on pull request 18."
-
-// TestAnchoredCompaction_PinsTheComposedOpeningTurn is what keeps a long run
-// from summarizing away the only statement of what it was asked to do. Several
-// turns happen first, so the pin is exercised on a real window rather than on a
-// transcript whose opening is also its only row.
-func TestAnchoredCompaction_PinsTheComposedOpeningTurn(t *testing.T) {
-	tr := newMemTranscript(
-		domain.Message{Role: "user", Content: composedOpeningTurn},
-		domain.Message{Role: "assistant", Content: "reading the failing job"},
-		domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "check the flaky test too"},
-		domain.Message{Role: "assistant", Content: "found the race"},
-		usedAssistant("pushed the fix", overThreshold, time.Now().UTC()),
-	)
-	provider := &scriptedProvider{turns: []scriptedTurn{
-		summaryReply("fixed the race, pushed"),
-		{text: "done"},
-	}}
-	engine := newTestEngine(tr, provider, newScriptedToolHost())
-
-	if result := engine.Run(context.Background(), testParams()); result.Kind != ResultConcluded {
-		t.Fatalf("result = %+v, want concluded", result)
+// TestCompactionSpan_TakesEveryDeliveredRow is the pin's deletion stated
+// directly: no row in the window is exempt, whatever it carries or where it
+// sits. Undelivered rows are still excluded — the model has not seen them, and
+// they survive the commit as live queued input.
+func TestCompactionSpan_TakesEveryDeliveredRow(t *testing.T) {
+	rows := []domain.Message{
+		{ID: 1, Role: "user", Content: "<task_context>…</task_context>"},
+		{ID: 2, Role: "user", Content: "the mission"},
+		{ID: 3, Role: "assistant", Content: "working"},
+		{ID: 4, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "and this"},
+		{ID: 5, Role: "assistant", Content: "still working"},
+		{ID: 6, Role: "user", Content: "queued", Delivered: boolPtr(false)},
 	}
-
-	opening := tr.find(func(m domain.Message) bool { return m.Content == composedOpeningTurn })
-	if opening == nil || opening.WindowState == domain.MessageWindowInactive {
-		t.Fatalf("opening turn = %+v, want pinned active through the compaction", opening)
-	}
-	// Everything after it went: the pin is the opening, not the beginning of the
-	// conversation.
-	for _, gone := range []string{"reading the failing job", "check the flaky test too", "found the race", "pushed the fix"} {
-		row := tr.find(func(m domain.Message) bool { return m.Content == gone })
-		if row == nil || row.WindowState != domain.MessageWindowInactive {
-			t.Errorf("row %q = %+v, want compacted", gone, row)
-		}
-	}
-
-	// What the model reads next: the mission, in full, ahead of the summary.
-	final := provider.requests[len(provider.requests)-1]
-	var window []string
-	for _, r := range final.Rows {
-		if r.WindowState != domain.MessageWindowInactive {
-			window = append(window, r.Content)
-		}
-	}
-	if len(window) == 0 || window[0] != composedOpeningTurn {
-		t.Fatalf("post-compaction window opens with %.60q, want the whole opening turn", strings.Join(window, "|"))
-	}
-	if !strings.Contains(strings.Join(window, "\n"), "fixed the race, pushed") {
-		t.Errorf("post-compaction window = %v, want the summary after the mission", window)
+	if got, want := compactionSpan(rows), []int{1, 2, 3, 4, 5}; !reflect.DeepEqual(got, want) {
+		t.Errorf("span = %v, want %v — every delivered row, nothing pinned", got, want)
 	}
 }
 
-// TestCompactionSpan_AnchorCoversEveryLeadingUserRow covers the shape the
-// opening turn is not, but could become: several rows rather than one. The
-// anchor is every leading row before the first assistant turn, so splitting the
-// mission up later cannot feed half of it to the summarizer.
-func TestCompactionSpan_AnchorCoversEveryLeadingUserRow(t *testing.T) {
+// TestCompaction_TheMissionSurvivesInTheSystemBlock is the whole reason the pin
+// could go. A delegation's mission was a transcript row that compaction had to
+// be taught to spare; it is a system block now, re-sent on every call, so there
+// is nothing for a summary to lose and no exemption to get right.
+func TestCompaction_TheMissionSurvivesInTheSystemBlock(t *testing.T) {
+	const mission = "Fix the failing check on pull request 18."
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Content: "<task_context>\nPull request: #18\n</task_context>"},
+		domain.Message{Role: "assistant", Content: "reading the failing job"},
+		usedAssistant("pushed the fix", overThreshold, time.Now().UTC()),
+	)
+	provider := &scriptedProvider{turns: []scriptedTurn{summaryReply("fixed the race, pushed"), {text: "done"}}}
+	engine := newTestEngine(tr, provider, newScriptedToolHost())
+
+	params := testParams()
+	params.SystemAddendum = "<run_context>…</run_context>\n\n" + mission
+	if result := engine.Run(context.Background(), params); result.Kind != ResultConcluded {
+		t.Fatalf("result = %+v, want concluded", result)
+	}
+
+	// Every row in the window went, the opening included.
+	for _, gone := range []string{"<task_context>", "reading the failing job", "pushed the fix"} {
+		row := tr.find(func(m domain.Message) bool { return strings.Contains(m.Content, gone) })
+		if row == nil || row.WindowState != domain.MessageWindowInactive {
+			t.Errorf("row %q = %+v, want compacted — nothing is pinned", gone, row)
+		}
+	}
+	// And the mission is still there, because it was never a row.
+	final := provider.requests[len(provider.requests)-1]
+	if !strings.Contains(final.SystemAddendum, mission) {
+		t.Errorf("post-compaction call's system addendum = %q, want the mission intact", final.SystemAddendum)
+	}
+}
+
+// TestOriginalRequest_SkipsWhatTheControlPlaneMinted pins the discriminator
+// that replaced the pin's flag. A row TF composed and inserted on the agent's
+// behalf carries a subtype; only a blank one is somebody asking for something.
+// That is what keeps a delegation's opening — externally-authored task context —
+// out of every post-compaction window structurally, rather than by a parameter
+// each caller has to set correctly.
+func TestOriginalRequest_SkipsWhatTheControlPlaneMinted(t *testing.T) {
+	minted := []domain.Message{
+		{ID: 1, Role: "user", Subtype: domain.MessageSubtypeInjectionNudge, Content: "you have not opened a pull request"},
+		{ID: 2, Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "earlier work, summarized"},
+	}
+	if got, ok := originalRequest(minted); ok {
+		t.Errorf("originalRequest = %q, want none — every row here is TF's own text", got)
+	}
+	if got, ok := originalRequest(append(minted, domain.Message{ID: 3, Role: "user", Content: "please build me the widget"})); !ok || got != "please build me the widget" {
+		t.Errorf("originalRequest = %q (ok=%v), want the one blank-subtype row", got, ok)
+	}
+}
+
+// TestOriginalRequest_IsNeverASteer keeps a mid-run aside out of every window
+// that follows. A steer is a human row, but it is something said to a
+// conversation already under way — re-injecting one would make the last thing
+// somebody shouted read as the thing the conversation was for.
+func TestOriginalRequest_IsNeverASteer(t *testing.T) {
 	rows := []domain.Message{
-		{ID: 1, Role: "user", Content: "<run_context>…</run_context>"},
-		{ID: 2, Role: "user", Content: "<task_context>…</task_context>"},
-		{ID: 3, Role: "user", Content: "the mission"},
-		{ID: 4, Role: "assistant", Content: "working"},
-		{ID: 5, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "and this"},
-		{ID: 6, Role: "assistant", Content: "still working"},
-		{ID: 7, Role: "user", Content: "queued", Delivered: boolPtr(false)},
+		{ID: 1, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "actually check the flaky test"},
+		{ID: 2, Role: "assistant", Content: "working"},
+		{ID: 3, Role: "user", Content: "please build me the widget"},
 	}
-	if got, want := compactionSpan(rows, true), []int{4, 5, 6}; !reflect.DeepEqual(got, want) {
-		t.Errorf("anchored span = %v, want %v — every leading user row is the mission", got, want)
+	got, ok := originalRequest(rows)
+	if !ok || got != "please build me the widget" {
+		t.Errorf("originalRequest = %q (ok=%v), want the blank-subtype row, not the steer ahead of it", got, ok)
 	}
-	// Unanchored, the same rows are all fair game: a taskless conversation's
-	// opening is just its oldest message, re-injected into the result row.
-	if got, want := compactionSpan(rows, false), []int{1, 2, 3, 4, 5, 6}; !reflect.DeepEqual(got, want) {
-		t.Errorf("unanchored span = %v, want %v", got, want)
+
+	// A conversation whose only human-looking rows are steers has no original
+	// request at all, rather than borrowing one.
+	if _, ok := originalRequest(rows[:2]); ok {
+		t.Error("a steer was returned as the original request")
 	}
 }

@@ -93,35 +93,6 @@ func TestBuild_ModeArmsDiverge(t *testing.T) {
 	}
 }
 
-// TestBuildNonTerminalStep_SDKIsUnchanged pins the channel split: the SDK
-// harness delivers the handoff addendum itself (--append-system-prompt), so
-// appending it to the composed text as well would send it twice.
-func TestBuildNonTerminalStep_SDKIsUnchanged(t *testing.T) {
-	spec := machinistSpec(ModeMulti)
-	if Build(spec) != BuildNonTerminalStep(spec) {
-		t.Error("the SDK's non-terminal composition grew an addendum its harness already delivers")
-	}
-}
-
-// TestBuildNonTerminalStep_NativeAppendsOnlyTheAddendum pins what a native
-// composition may carry beyond the static blocks: the handoff addendum, and
-// nothing else. Everything about the particular run — the mission, the run
-// context, the externally-authored task block — reaches the model through the
-// opening turn instead, and this package takes no argument that could carry it.
-func TestBuildNonTerminalStep_NativeAppendsOnlyTheAddendum(t *testing.T) {
-	spec := Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti}
-	terminal := Build(spec)
-	handoff := BuildNonTerminalStep(spec)
-
-	addendum := strings.TrimSpace(block(blockCompletionNativeNT))
-	if want := strings.TrimSuffix(terminal, "\n") + "\n\n" + addendum + "\n"; handoff != want {
-		t.Errorf("a non-terminal step's prompt is not exactly the prefix plus the addendum;\ngot  %q\nwant %q", handoff, want)
-	}
-	if strings.Contains(terminal, addendum) {
-		t.Error("a terminal step carries the handoff addendum")
-	}
-}
-
 // TestNonTerminalCompletion_RuntimeArms pins that each runtime gets its own
 // handoff addendum, because the two describe incompatible ways to end a step.
 // The SDK's step emits a JSON envelope carrying a "continue" outcome; the
@@ -225,18 +196,22 @@ func walkBlocks(t *testing.T) []string {
 }
 
 // TestBuild_NativeSectionOrder pins the one ordering that is load-bearing
-// rather than stylistic: the handoff addendum falls after the completion
-// contract it amends, and outside the cached region, so the prefix does not
-// fork into terminal and non-terminal variants.
+// rather than stylistic: who the agent is comes first and the completion
+// contract comes last, so how to finish is the final thing in the composition.
+//
+// The handoff addendum that amends that contract is deliberately not here. It
+// is per step, so it would fork this prefix into a terminal and a non-terminal
+// variant — two cache entries where the design wants one. Its caller appends it
+// on the per-conversation channel instead, which lands it after the contract
+// for the same reason and costs nothing shared.
 func TestBuild_NativeSectionOrder(t *testing.T) {
 	spec := Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti}
-	got := BuildNonTerminalStep(spec)
+	got := Build(spec)
 
 	prev := -1
 	for _, section := range []string{
 		block(blockIdentityMachinistNv),
 		block(blockCompletionNative),
-		strings.TrimSpace(block(blockCompletionNativeNT)),
 	} {
 		at := strings.Index(got, section)
 		if at < 0 {
@@ -246,6 +221,12 @@ func TestBuild_NativeSectionOrder(t *testing.T) {
 			t.Fatalf("section %.40q is out of order", section)
 		}
 		prev = at
+	}
+	if !strings.HasSuffix(strings.TrimRight(got, "\n"), block(blockCompletionNative)) {
+		t.Error("the completion contract is not the last thing in the composition")
+	}
+	if strings.Contains(got, strings.TrimSpace(block(blockCompletionNativeNT))) {
+		t.Error("the handoff addendum is composed into the shared prefix, forking it per step")
 	}
 }
 
