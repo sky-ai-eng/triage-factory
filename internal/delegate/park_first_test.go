@@ -125,7 +125,7 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "park-first-idle")
+	s, database, conversationID, _ := setupAdvanceFixture(t, "park-first-idle")
 	blobs, err := storage.New()
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
@@ -146,7 +146,6 @@ func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 	if fenced := s.parkConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: conversationID,
-		taskID:         taskID,
 		namespace:      namespace,
 		claudeCwd:      wt,
 		triggerType:    "event",
@@ -175,7 +174,7 @@ func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 func TestParkConversationOpen_RetriesALostLifecycleOpen(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "park-lost-open")
+	s, database, conversationID, _ := setupAdvanceFixture(t, "park-lost-open")
 	wireBlobStore(t, s)
 	namespace := taskIDForConversation(t, database, conversationID)
 	flaky := &flakyBeginSnapshotStore{WorkspaceSnapshotStore: s.workspaceSnapshots, failFirst: true}
@@ -188,7 +187,6 @@ func TestParkConversationOpen_RetriesALostLifecycleOpen(t *testing.T) {
 	if fenced := s.parkConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: conversationID,
-		taskID:         taskID,
 		namespace:      namespace,
 		claudeCwd:      wt,
 		triggerType:    "event",

@@ -208,7 +208,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		fenced := s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
-			taskID:         task.ID,
 			namespace:      workspaceKey(task.ID),
 			claudeCwd:      cfg.wtPath,
 			triggerType:    triggerType,
@@ -712,7 +711,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			park: liveParkContext{
 				orgID:          orgID,
 				conversationID: conversationID,
-				taskID:         task.ID,
 				namespace:      namespace,
 				claudeCwd:      claudeCwd,
 				triggerType:    triggerType,
@@ -959,7 +957,6 @@ func (s *Spawner) processCompletion(
 		fencedOut := s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
-			taskID:         task.ID,
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			triggerType:    triggerType,
@@ -1140,12 +1137,6 @@ func (s *Spawner) processCompletion(
 	} else {
 		s.broadcastConversationUpdate(orgID, conversationID, broadcastStatus)
 	}
-	// Recompute the aggregate board column. A completed step that left an
-	// unresolved artifact (draft PR / ready review) lands the task in_review (the
-	// derived approval column); otherwise it stays in_progress until the
-	// orchestrator advances (next step) or terminates (done / leave-open).
-	s.recomputeTaskBoardColumn(orgID, task.ID)
-
 	// Toast the terminal state. Success cases auto-hide; a failure shows as an
 	// error toast so the user notices even if they've clicked away from the
 	// runs page.

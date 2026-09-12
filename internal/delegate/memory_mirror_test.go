@@ -332,7 +332,6 @@ func TestParkConversationOpen_FilesTheAgentsMemoryFile(t *testing.T) {
 	if fenced := s.parkConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: conversationID,
-		taskID:         task.ID,
 		claudeCwd:      cwd,
 		reason:         db.ParkIdle(),
 		runtime:        domain.ConversationRuntimeSDK,

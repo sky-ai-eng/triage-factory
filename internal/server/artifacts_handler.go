@@ -1081,8 +1081,8 @@ func (ah *artifactsHandler) pingConversationsResolved(orgID string) {
 //   - a LIVE blueprint run keeps running — resolving an artifact never closes
 //     its task; the run's own eventual termination (terminateBlueprint /
 //     standalone completion) re-checks this and closes the task then.
-//   - a cleanly-completed blueprint run with other unresolved artifacts stays in
-//     the approval column; the last resolution is what closes it.
+//   - a cleanly-completed blueprint run with other unresolved artifacts leaves
+//     its task open; the last resolution is what closes it.
 //   - an ABORTED / FAILED / CANCELLED blueprint run leaves the task open for
 //     human attention regardless of artifact state — mirroring
 //     terminateBlueprint (blueprint.go)

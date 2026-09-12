@@ -65,7 +65,6 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		fenced := s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
-			taskID:         task.ID,
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			triggerType:    triggerType,
@@ -628,7 +627,6 @@ func (s *Spawner) recordNativeResult(
 		return s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
-			taskID:         task.ID,
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			triggerType:    triggerType,
@@ -659,7 +657,6 @@ func (s *Spawner) recordNativeResult(
 		_ = s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
-			taskID:         task.ID,
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			triggerType:    triggerType,
@@ -718,7 +715,6 @@ func (s *Spawner) recordNativeResult(
 	}
 	s.updateBreakerCounter(task.ID, triggerType, "completed")
 	s.broadcastConversationUpdate(orgID, conversationID, broadcastStatus)
-	s.recomputeTaskBoardColumn(orgID, task.ID)
 	toast.Success(s.wsHub, orgID, fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
 	return false
 }

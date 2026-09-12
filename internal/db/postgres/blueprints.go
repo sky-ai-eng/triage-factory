@@ -920,25 +920,6 @@ func (s *blueprintStore) SetRunWorktreePathSystem(ctx context.Context, orgID, id
 		 RETURNING `+pgBlueprintRunColumns, orgID, id, worktreePath))
 }
 
-func (s *blueprintStore) ActiveRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
-	if !isValidUUID(taskID) {
-		return nil, nil
-	}
-	var id string
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT id FROM blueprint_runs
-		WHERE org_id = $1 AND task_id = $2 AND status = 'running'
-		ORDER BY started_at DESC LIMIT 1
-	`, orgID, taskID).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return getBlueprintRun(ctx, s.admin, orgID, id)
-}
-
 func blueprintRunArgs(br domain.BlueprintRun) (triggerID, abortReason, completedAt any) {
 	if br.TriggerID != "" {
 		triggerID = br.TriggerID
