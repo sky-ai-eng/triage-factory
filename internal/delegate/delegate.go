@@ -481,8 +481,10 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	toast.Info(s.wsHub, orgID, fmt.Sprintf("%s: %s (%s)",
 		verb, truncateToastMsg(blueprint.Name, 60), shortConversationID(blueprintRunID)))
 
-	// The blueprint_run is live → place the task in_progress immediately.
-	s.recomputeTaskBoardColumn(orgID, task.ID)
+	// The blueprint_run is live → place the task in_progress. This is the only
+	// board write a delegation makes; nothing in the run's later life moves the
+	// card again.
+	s.placeTaskInProgress(orgID, task.ID)
 	s.wakeDispatcher()
 	return blueprintRunID, nil
 }

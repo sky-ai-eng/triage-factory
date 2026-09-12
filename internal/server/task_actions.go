@@ -20,9 +20,13 @@ import (
 // The task verb routes: claim, delegate, requeue and undo. Each earns its
 // verb by carrying an effect a field write can't express — an external Jira
 // write, a spawned run, artifact teardown, an audit reversal. The lifecycle
-// axis (dismissed / done / snoozed / the in_progress → in_review stages) is a
-// field write and lives on PATCH /api/tasks/{id} in tasks.go; requeue and undo
-// live there too, next to the finalizer they share.
+// axis (dismissed / done / snoozed / the user's own stage markers) is a field
+// write and lives on PATCH /api/tasks/{id} in tasks.go; requeue and undo live
+// there too, next to the finalizer they share.
+//
+// Delegate is the one verb here that also moves a column: the spawner places
+// the task in_progress when it mints the blueprint run, and nothing the run
+// does afterwards moves it again.
 //
 // swipe_events is a "state-change log," not a "user-gesture log." For
 // lifecycle actions the write IS the state change, so the audit + lifecycle

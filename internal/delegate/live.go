@@ -59,7 +59,6 @@ type liveProc interface {
 type liveParkContext struct {
 	orgID          string
 	conversationID string
-	taskID         string
 	namespace      string // task id — the snapshot/worktree key
 	claudeCwd      string
 	triggerType    string
@@ -481,7 +480,6 @@ func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext
 		return false
 	}
 	s.broadcastConversationUpdate(park.orgID, park.conversationID, "open")
-	s.recomputeTaskBoardColumn(park.orgID, park.taskID)
 	return false
 }
 

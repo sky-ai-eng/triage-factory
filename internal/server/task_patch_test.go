@@ -15,10 +15,10 @@ import (
 
 // TestTaskPatchStage_RejectsBotClaimedTask pins the guard rule for the manual
 // user transition: only a task the CALLER holds may move through Claimed →
-// In Progress → In Review. Bot-claimed tasks transition automatically via the
-// spawner (see internal/delegate/spawner.go recomputeTaskBoardColumn);
-// allowing the user to flip them by hand would race the conversation
-// lifecycle.
+// In Progress → In Review. A bot-claimed task is placed by the spawner when
+// its delegation is minted (see internal/delegate/spawner.go
+// placeTaskInProgress); allowing the user to flip it by hand would race the
+// conversation lifecycle.
 func TestTaskPatchStage_RejectsBotClaimedTask(t *testing.T) {
 	s := newTestServer(t)
 	taskID := seedLifecycleTask(t, s.db, "bot-claimed", lifecycleTaskOpts{

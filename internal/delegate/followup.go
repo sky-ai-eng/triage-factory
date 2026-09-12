@@ -788,9 +788,6 @@ func (s *Spawner) wakeParked(ctx context.Context, orgID string, conv domain.Conv
 	}
 	s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
 	s.recordResumeTaskEvent(ctx, orgID, userID, conv)
-	// The parked step is queued again → bounce the aggregate board column back
-	// to in_progress (no-op if a sibling run is still parked).
-	s.recomputeTaskBoardColumn(orgID, conv.TaskID)
 	// Same-process fast path (local): the wake is a ~ms in-process dispatcher
 	// nudge. Cross-pod there is no wake nudge by design — the claiming
 	// executor's own scan-interval backstop picks the row up.

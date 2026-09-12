@@ -128,15 +128,15 @@ func (s *Spawner) terminateBlueprint(
 	}
 
 	if status == domain.BlueprintRunStatusCompleted {
-		// Completion and task-closure are independent now. A clean
-		// finalization closes the task ONLY when no artifact remains unresolved; a
-		// blueprint that completed with an open draft PR / ready review leaves the
-		// task open, surfaced in the derived approval column, until the last
-		// artifact is resolved (the last resolution closes it).
-		if s.blueprintHasUnresolvedArtifacts(bgCtx, orgID, blueprintRunID) {
-			// Leave the task open and place it in the approval column. Don't close.
-			s.placeTaskInApprovalColumn(bgCtx, orgID, taskID)
-		} else {
+		// Completion and task-closure are independent. A clean finalization
+		// closes the task ONLY when no artifact remains unresolved; a blueprint
+		// that completed with an open draft PR / ready review leaves the task
+		// exactly as it is — bot-claimed and in_progress — until the last
+		// artifact is resolved (the last resolution closes it). The signal that
+		// a human is owed something rides the card frame and the attention
+		// order, not the lane the card sits in, so there is no column to move
+		// it to and nothing to write here.
+		if !s.blueprintHasUnresolvedArtifacts(bgCtx, orgID, blueprintRunID) {
 			// Mirror single-run behavior: a clean blueprint finalization with no
 			// unresolved artifact closes the task.
 			var closeErr error
@@ -731,8 +731,8 @@ func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conver
 // produced an artifact still awaiting human resolution (a draft PR or a ready
 // pending review — domain.HasUnresolvedArtifacts). This is the derived signal
 // that decides whether a completed blueprint closes its task (none unresolved)
-// or leaves it open in the approval column (≥1 unresolved). It loads the
-// blueprint's step runs, then delegates to conversationsHaveUnresolvedArtifacts. Runs from
+// or leaves it open for a human (≥1 unresolved). It loads the blueprint's step
+// runs, then delegates to conversationsHaveUnresolvedArtifacts. Runs from
 // a detached goroutine with no request claims, so it reads via the admin-pool
 // `...System` readers.
 //
@@ -767,7 +767,7 @@ func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, bl
 // run finished cleanly and no conversation on the task — any attempt, not just
 // this blueprint's steps — still holds an unresolved artifact. Anything else is
 // a no-op: an aborted or failed blueprint keeps its task open for a human, and
-// a sibling draft keeps the approval column honest.
+// so does a sibling draft nobody has answered yet.
 //
 // Fails CLOSED on a read error, like the rest of this family: leaving a task
 // open spuriously is recoverable by a human, closing one with a draft still
@@ -808,8 +808,10 @@ func (s *Spawner) CloseTaskIfTerminalAndResolved(ctx context.Context, orgID, con
 
 // conversationsHaveUnresolvedArtifacts reports whether any of the given runs produced an
 // unresolved artifact, reading each run's artifacts via the admin-pool reader.
-// Split out so a caller that already holds the run set (recomputeTaskBoardColumn)
-// reuses it without re-loading. Fails OPEN like blueprintHasUnresolvedArtifacts:
+// Split out so a caller that already holds the run set — the terminal-on-last
+// close reads the task's conversations — reuses it without re-loading, while
+// blueprintHasUnresolvedArtifacts loads one blueprint's steps and calls in.
+// Fails OPEN like blueprintHasUnresolvedArtifacts:
 // a per-run read error returns true rather than risk under-reporting. The read is
 // one query per run; the run set is a single blueprint_run's steps, so it is
 // bounded by step count, not blueprint history.

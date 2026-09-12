@@ -564,8 +564,8 @@ type BlueprintStore interface {
 	SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) (domain.BlueprintRun, error)
 
 	// ActiveRunForTaskSystem returns the most recent still-running blueprint_run
-	// for a task, or (nil, nil) when none is active. The board-column aggregate
-	// (recomputeTaskBoardColumn) reads it to place a task with live work.
+	// for a task, or (nil, nil) when none is active — the question "does this
+	// task have live blueprint work right now?".
 	ActiveRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error)
 
 	// GetRun returns a blueprint run by id, or (nil, nil) when not found.

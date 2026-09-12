@@ -191,14 +191,18 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 
 // TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen pins the
 // terminal-on-last gate: a blueprint that completes while a draft PR / ready
-// review is still unresolved does NOT close its task — it leaves it open and
-// surfaced in the derived approval column (in_review). The last artifact
-// resolution closes it.
+// review is still unresolved does NOT close its task — and does not move its
+// column either. The card stays exactly where the mint put it, bot-claimed and
+// in_progress; the last artifact resolution closes it.
 func TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-unresolved")
 	stampBotClaim(t, database, taskID)
 	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	blueprintRunID := "bpr-" + conversationID
+	// The delegation placed the task when it minted the run.
+	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
+		t.Fatalf("place task: %v", err)
+	}
 	// The step completed and left a draft PR unresolved.
 	setConversationStatus(t, database, conversationID, "completed")
 	seedDraftPRArtifact(t, s, conversationID)
@@ -207,8 +211,15 @@ func TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen(t *tes
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
 
-	if got := readTaskStatus(t, database, taskID); got != "in_review" {
-		t.Errorf("task.status = %q, want in_review (completed with an unresolved artifact leaves the task open in the approval column)", got)
+	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
+		t.Errorf("task.status = %q, want in_progress (an unresolved artifact leaves the task open, and moves no column)", got)
+	}
+	var claimedByAgent sql.NullString
+	if err := database.QueryRow(`SELECT claimed_by_agent_id FROM tasks WHERE id = ?`, taskID).Scan(&claimedByAgent); err != nil {
+		t.Fatalf("read claim: %v", err)
+	}
+	if claimedByAgent.String != runmode.LocalDefaultAgentID {
+		t.Errorf("claimed_by_agent_id = %q, want the bot — an unresolved completion keeps the task bot-claimed", claimedByAgent.String)
 	}
 }
 
@@ -263,27 +274,30 @@ func makeConversationBlueprintStep(t *testing.T, database *sql.DB, conversationI
 
 // TestCloseTaskIfTerminalAndResolved_ClosesOnceTheLastDraftIsResolved pins the
 // closure a draft PR resolved off-click reaches: the blueprint completed with
-// the draft unresolved (task parked in the approval column); once the artifact
-// is no longer a draft — a human marked it ready on GitHub — the same
+// the draft unresolved, so the task stayed open and in_progress; once the
+// artifact is no longer a draft — a human marked it ready on GitHub — the same
 // terminal-on-last rule closes the task.
 func TestCloseTaskIfTerminalAndResolved_ClosesOnceTheLastDraftIsResolved(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "resolved-closes")
 	stampBotClaim(t, database, taskID)
 	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	blueprintRunID := "bpr-" + conversationID
+	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
+		t.Fatalf("place task: %v", err)
+	}
 	setConversationStatus(t, database, conversationID, "completed")
 	seedDraftPRArtifact(t, s, conversationID)
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
-	if got := readTaskStatus(t, database, taskID); got != "in_review" {
-		t.Fatalf("task.status = %q before resolution, want in_review", got)
+	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
+		t.Fatalf("task.status = %q before resolution, want in_progress", got)
 	}
 
 	// Still a draft: the closure is a no-op, whoever asks.
 	s.CloseTaskIfTerminalAndResolved(context.Background(), runmode.LocalDefaultOrgID, conversationID)
-	if got := readTaskStatus(t, database, taskID); got != "in_review" {
-		t.Fatalf("task.status = %q after a no-op closure, want in_review (the draft is still unresolved)", got)
+	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
+		t.Fatalf("task.status = %q after a no-op closure, want in_progress (the draft is still unresolved)", got)
 	}
 
 	// Marked ready on GitHub: the reconciler flips the row, then runs this.
