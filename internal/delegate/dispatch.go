@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // maxClaimAttempts caps how many times the dispatcher re-claims one queue
@@ -1532,6 +1533,27 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 			return runConfig{}, err
 		}
 		cfg.wtPath, cfg.runRoot, cfg.workspace = wt, wt, prov
+		// This conversation gets its own conversation_worktrees row for the
+		// task's PR repo. Push authority is per conversation: the gate reads
+		// the rows keyed to the one pushing and derives the ref from each
+		// recorded tree's live branch, so a conversation that shares a tree it
+		// did not itself materialize holds no row and is left read-only on the
+		// very repo its PR lives in. ref = pr-<N> is the materialization
+		// selector; the pushable branch comes from the tree.
+		// Idempotent on (conversation_id, repo_id, ref), so a re-claim writes
+		// nothing. Log-and-continue: a failure degrades to denied pushes
+		// (a clear 403), never a failed step.
+		if s.conversationWorktrees != nil && owner != "" && repo != "" && prNumber > 0 {
+			if _, _, werr := s.conversationWorktrees.InsertSystem(context.WithoutCancel(ctx), orgID, domain.ConversationWorktree{
+				ConversationID: conv.ID,
+				RepoID:         owner + "/" + repo,
+				Path:           wt,
+				Ref:            worktree.PRRefSlug(prNumber),
+			}); werr != nil {
+				dispatchLog.Warn("record shared worktree in conversation_worktrees failed; pushes to this repo will be denied for this conversation",
+					"conversation", conv.ID, "repo", owner+"/"+repo, "error", werr)
+			}
+		}
 	case "jira":
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
 		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindJira)
