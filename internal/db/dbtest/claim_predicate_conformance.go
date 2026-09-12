@@ -154,6 +154,26 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		d := delivered
 		return domain.Message{Role: "user", Content: content, Subtype: "", Delivered: &d, WindowState: domain.MessageWindowActive}
 	}
+	// retire takes a conversation out of its task's way, the way the reactor
+	// does when the task moves on: the boundary stamp, and the memory that
+	// boundary owes.
+	//
+	// Both, always. The stamp alone would trade one gate for another — an
+	// ended conversation with no memory row is exactly what makes its task
+	// memory-pending — and the suite has subtests for each gate separately.
+	// This is for the siblings a case stages around the row it is really
+	// about.
+	retire := func(t *testing.T, h ClaimPredicateHarness, convID string) {
+		t.Helper()
+		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, convID, domain.EndedRequeued); err != nil {
+			t.Fatalf("end conversation %s: %v", convID, err)
+		}
+		if _, err := h.Stores.TaskMemory.UpsertAgentMemorySystem(
+			ctx, h.OrgID, convID, "", "", domain.MemorySourceNone,
+		); err != nil {
+			t.Fatalf("file the memory %s owes: %v", convID, err)
+		}
+	}
 
 	for _, runtime := range []string{domain.ConversationRuntimeSDK, domain.ConversationRuntimeNative} {
 		t.Run("runtime="+runtime, func(t *testing.T) {
@@ -391,6 +411,13 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 					resume(t, h, neverRan)
 					mustNotClaim(t, h)
 
+					// The later row is retired so the step the pointer names is
+					// the task's live conversation again — which is the only
+					// state a task can actually be in, since a conversation
+					// never opens on a task whose prior one has not ended. The
+					// sibling is staged for the assertion above; this is the
+					// boundary its existence implies.
+					retire(t, h, neverRan)
 					resume(t, h, ran)
 					mustClaim(t, h, ran)
 				})
@@ -639,6 +666,51 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			t.Errorf("park_reason = %q after the claim un-parked it, want cleared — "+
 				"the row is mid-flight, so it is not parked for any reason", got.ParkReason)
 		}
+	})
+
+	// The task gate. The workspace is keyed by the task, so the ceiling is one
+	// driven conversation per TASK — not per blueprint run, which is where it
+	// used to sit and which let a second delegation's step open in a tree the
+	// first delegation's step was still working in. The task's live
+	// conversation is its newest un-ended top-level row; nothing else on it is
+	// drivable, whatever its own state says.
+	t.Run("OnlyTheTasksNewestUnEndedConversationIsClaimed", func(t *testing.T) {
+		h := mk(t)
+		earlier := h.EnqueueDelegation(t, "sdk")
+		later := h.EnqueueDelegation(t, "sdk")
+
+		// Point the blueprint back at the earlier step, so its own clause
+		// admits that row. What refuses it now is the task: `later` is newer
+		// and has not ended, so it is the live conversation. Neither is
+		// claimable — `later` fails the step equality, `earlier` fails this.
+		h.SetBlueprintState(t, "running", 0)
+		mustNotClaim(t, h)
+
+		// The boundary is what moves the task on, and it is the only thing
+		// that does: `earlier` was drivable in every other respect the whole
+		// time.
+		retire(t, h, later)
+		mustClaim(t, h, earlier)
+	})
+
+	// And the state the rule is really about: a task whose newer conversation
+	// is parked `open` — nothing is driving it, and a follow-up could wake it
+	// at any moment — still holds the queue shut over every older row. The
+	// gate reads the boundary, not the status, because a parked conversation
+	// is idle rather than finished and the tree is still its.
+	t.Run("AQueuedStepBehindANewerOpenConversationIsNotClaimed", func(t *testing.T) {
+		h := mk(t)
+		earlier := h.EnqueueDelegation(t, "sdk")
+		later := h.EnqueueDelegation(t, "sdk")
+		mustClaim(t, h, later)
+		release(t, h, h.OrgID, later, "parked")
+		h.SetStoredStatus(t, later, "open")
+
+		h.SetBlueprintState(t, "running", 0)
+		mustNotClaim(t, h)
+
+		retire(t, h, later)
+		mustClaim(t, h, earlier)
 	})
 
 	// The memory gate. A conversation that ended without leaving a memory

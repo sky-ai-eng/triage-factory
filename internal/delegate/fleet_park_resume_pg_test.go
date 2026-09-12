@@ -896,6 +896,17 @@ func TestFleet_Eviction_RoundTripsTheUncommittedDelta(t *testing.T) {
 	}
 	pgtest.MustExec(t, f.h.AdminDB, `UPDATE claims SET released_at = now(), outcome = 'parked' WHERE id = $1`, siblingClaim)
 	pgtest.MustExec(t, f.h.AdminDB, `UPDATE conversations SET status = 'completed', completed_at = now() - interval '7 hours' WHERE id = $1`, sibling)
+	// The sibling is a prop for the guard above, and it has to leave the
+	// task's way once it has served: a task drives its live conversation,
+	// which is its newest un-ended one, so an un-ended sibling would hold the
+	// resume below out of the queue. Its boundary comes with the memory that
+	// boundary owes, the pair the reactor writes when a task moves on.
+	if _, err := f.stores.Conversations.EndConversationSystem(context.Background(), f.orgID, sibling, domain.EndedRequeued); err != nil {
+		t.Fatalf("end the sibling step: %v", err)
+	}
+	if _, err := f.stores.TaskMemory.UpsertAgentMemorySystem(context.Background(), f.orgID, sibling, "", "", domain.MemorySourceNone); err != nil {
+		t.Fatalf("file the sibling's memory: %v", err)
+	}
 
 	// Nothing in the way: the tree goes, the blob stays.
 	f.x.EvictIdleWorkspaces(context.Background(), after)

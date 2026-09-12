@@ -1435,8 +1435,30 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 		BlueprintRunID:      blueprintRunID,
 		BlueprintStepIndex:  &stepIdx,
 		PreferredExecutorID: preferred,
+		WorktreePath:        s.inheritedWorktreePath(ctx, orgID, task.ID),
 	})
 	return err
+}
+
+// inheritedWorktreePath is the tree the conversation being minted opens in:
+// the task's, as its previous conversation left it. The workspace is keyed by
+// the task, so a step advance and a second delegation inherit the same one —
+// this is what makes ensureWorkspace's warm stat hit on a row that has never
+// run, instead of the claim paying a cold rehydrate for a tree already on
+// disk.
+//
+// "" is the ordinary answer for the first conversation on a task, and it is
+// also what a failed read gives: the stamp is an optimization over evidence
+// the claim can rebuild from (the snapshot blob, keyed by the same task), so a
+// store that cannot answer costs one rehydrate rather than a refused mint.
+func (s *Spawner) inheritedWorktreePath(ctx context.Context, orgID, taskID string) string {
+	path, err := s.conversations.NewestWorktreePathForTaskSystem(ctx, orgID, taskID)
+	if err != nil {
+		dispatchLog.Warn("read the task's newest worktree_path for the mint failed; the claim will rehydrate instead of reusing the tree",
+			"task", taskID, "error", err)
+		return ""
+	}
+	return path
 }
 
 // freshStepWorkspace rebuilds a step's run tree from nothing by running the
@@ -1473,18 +1495,24 @@ func (s *Spawner) freshStepWorkspace(ctx context.Context, orgID string, br *doma
 	return cfg.wtPath, nil
 }
 
-// buildStepConfig produces the runConfig for a claimed step. On the first claim
-// of a blueprint (br.WorktreePath empty) it builds the shared worktree via the
-// source-specific setup and stamps the resolved path onto the blueprint_run. On
-// every later claim it reconstructs the lightweight config from the task and
-// guarantees the shared worktree is on disk (warm reuse, or cold rehydrate from
-// the durable snapshot via ensureWorkspace).
+// buildStepConfig produces the runConfig for a claimed step. When the task has
+// no workspace anywhere it builds one via the source-specific setup; otherwise
+// it reconstructs the lightweight config from the task and guarantees the
+// shared worktree is on disk (warm reuse, or cold rehydrate from the durable
+// snapshot via ensureWorkspace).
+//
+// The workspace is the TASK's, so the fresh-clone arm is not "the first claim
+// of this blueprint" — it is "nothing on this task has a tree". A second
+// delegation mints a second blueprint_run, and keying the clone on that row's
+// empty worktree_path is what used to throw the previous run's work away: a
+// cold clone onto the base branch, beside a snapshot blob nothing would ask
+// for again.
 func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, conv domain.Conversation, gh *ghclient.Client, sidecar *runSidecar, localChannels ...*localGitChannel) (runConfig, error) {
 	var localGit *localGitChannel
 	if len(localChannels) > 0 {
 		localGit = localChannels[0]
 	}
-	if br.WorktreePath == "" {
+	if !s.taskHasWorkspace(ctx, orgID, br, task, conv) {
 		var (
 			cfg runConfig
 			err error
@@ -1507,22 +1535,30 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 			return runConfig{}, err
 		}
 		// Whatever the source setup built, it built from nothing: this arm runs
-		// only when the blueprint has no worktree recorded yet.
+		// only when the task has no workspace to inherit.
 		cfg.workspace = domain.WorkspaceProvenanceFresh
-		// Stamp the shared worktree path onto the blueprint_run so later steps
-		// (and the resume/cancel cleanup) can reconstruct it.
-		if _, e := s.blueprints.SetRunWorktreePathSystem(context.WithoutCancel(ctx), orgID, br.ID, cfg.wtPath); e != nil {
-			dispatchLog.Warn("set worktree_path for blueprint_run failed", "blueprint_run", br.ID, "error", e)
-		}
+		s.stampRunWorktreePath(ctx, orgID, br, cfg.wtPath)
 		return cfg, nil
 	}
 
-	// Later step (or crash re-claim): reconstruct config + ensure the shared
-	// worktree exists. ensureWorkspace warm-returns the on-disk path or cold-
-	// rebuilds it from the snapshot keyed by the task id.
+	// The task has a workspace: reconstruct the config and guarantee the tree
+	// is on disk. ensureWorkspace warm-returns the path this conversation
+	// inherited (the mint stamped it from the task's previous conversation) or
+	// cold-rebuilds from the snapshot keyed by the task id.
 	// ClaimID travels with it: the rehydrate inside ensureWorkspace re-stamps
 	// worktree_path, and that stamp is a fenced engagement write.
-	convForWS := &domain.Conversation{ID: conv.ID, ClaimID: conv.ClaimID, TaskID: task.ID, WorktreePath: br.WorktreePath, BlueprintRunID: br.ID}
+	//
+	// The warm path is this conversation's own, falling back to the one its
+	// blueprint_run recorded. Both name the same tree — the task's — and the
+	// conversation's comes first because a second delegation's run row carries
+	// none: its first step inherits the task's tree, which is the whole point
+	// of keying the workspace by the task. The run's is what a step whose
+	// mint-time stamp could not be read still warm-resolves through.
+	warm := conv.WorktreePath
+	if warm == "" {
+		warm = br.WorktreePath
+	}
+	convForWS := &domain.Conversation{ID: conv.ID, ClaimID: conv.ClaimID, TaskID: task.ID, WorktreePath: warm, BlueprintRunID: br.ID}
 	cfg := runConfig{orgID: orgID}
 	switch task.EntitySource {
 	case "github":
@@ -1624,7 +1660,82 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		dispatchLog.Warn("set worktree_path for blueprint step failed; a follow-up to this conversation will be refused",
 			"conversation", conv.ID, "blueprint_run", br.ID, "error", err)
 	}
+	s.stampRunWorktreePath(ctx, orgID, br, cfg.wtPath)
 	return cfg, nil
+}
+
+// taskHasWorkspace answers the fresh-clone arm's question: is there a workspace
+// on this task to open in, or is this the first agent it has ever had?
+//
+// It asks exactly what the ensureWorkspace ladder can act on, rung by rung, so
+// the two cannot disagree about a task:
+//
+//   - a tree on disk, named by either record that can name one — the
+//     conversation's own path, which the mint stamped from the task's previous
+//     conversation, or the blueprint_run's, which its first claim stamped. The
+//     stat is what makes a path evidence: a recorded path whose directory is
+//     gone is the memory of a workspace, and nothing rebuilds a tree from a
+//     string.
+//   - the snapshot blob, keyed by the task. The durable copy: it outlives the
+//     tree, since a blueprint's terminal removes the directory and keeps the
+//     blob, and it outlives the run that wrote it, which is what a second
+//     delegation on the task rehydrates from.
+//   - a persist in flight. A park flips the conversation before it uploads, so
+//     "not there yet" and "not there at all" look identical from the blob
+//     store, and the lifecycle row is what separates them. Only `pending`
+//     counts: a `written` row over a blob that is gone, or a `failed` one,
+//     describes a workspace nothing can produce.
+//
+// With none of the three the task has nothing — the state a first delegation
+// starts in, and equally the state a task is left in when its only run failed
+// before it ever parked, since the terminal swept the tree and there was no
+// blob to keep. Cloning is the only thing that can be done for it, and the
+// conversation asking is a new one with no transcript to lose, so the ladder's
+// workspace-expired answer would be a refusal over continuity nobody had.
+//
+// The stat races the evictor, benignly in both directions: a tree deleted just
+// after it is re-resolved by the ladder under the workspace lock, and the
+// evictor only ever deletes a tree whose blob it has confirmed, which is the
+// second rung.
+func (s *Spawner) taskHasWorkspace(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, conv domain.Conversation) bool {
+	for _, path := range []string{conv.WorktreePath, br.WorktreePath} {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	keyID := workspaceKey(task.ID)
+	if s.snapshotBlobExists(ctx, orgID, keyID) {
+		return true
+	}
+	state, err := s.snapshotStateFor(ctx, orgID, keyID)
+	if err != nil {
+		// Unreadable is not evidence of absence, and the ladder is the safer
+		// answer: cloning over a persist that is landing loses the task's
+		// work, where a rehydrate that finds nothing falls through to a fresh
+		// tree.
+		dispatchLog.Warn("read the task's workspace snapshot state failed; taking the rehydrate ladder rather than cloning over it",
+			"task", task.ID, "conversation", conv.ID, "error", err)
+		return true
+	}
+	return state != nil && state.State == domain.WorkspaceSnapshotPending
+}
+
+// stampRunWorktreePath records the resolved tree on the blueprint_run, on the
+// first claim of a run that has none yet. The row is no longer what decides
+// where a step opens — the conversation's own path and the task's snapshot do
+// that — but the terminal cleanup and the cancel finalizers still read it to
+// find the tree they must remove, so a run that never stamped one would leave
+// its worktree behind.
+func (s *Spawner) stampRunWorktreePath(ctx context.Context, orgID string, br *domain.BlueprintRun, path string) {
+	if br.WorktreePath != "" || path == "" {
+		return
+	}
+	if _, err := s.blueprints.SetRunWorktreePathSystem(context.WithoutCancel(ctx), orgID, br.ID, path); err != nil {
+		dispatchLog.Warn("set worktree_path for blueprint_run failed", "blueprint_run", br.ID, "error", err)
+	}
 }
 
 // parseGitHubTask splits a GitHub PR task's "owner/repo#N" entity source id into

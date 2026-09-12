@@ -3645,6 +3645,95 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// The tree a task's NEXT conversation opens in. The workspace is keyed by
+	// the task, so a step advance and a second delegation alike inherit the
+	// one the task's previous conversation left — the mint stamps this answer
+	// onto the row it writes, and the claim's warm stat finds a tree already
+	// on disk instead of rehydrating a path nobody wrote down.
+	t.Run("NewestWorktreePathForTaskSystem", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "newest-wt-ent")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+		// A task with no conversations has nothing to inherit. "" is the
+		// answer, not an error: it is what the first delegation on a task
+		// legitimately reads, and it is what routes that claim to a clone.
+		if got, err := store.NewestWorktreePathForTaskSystem(ctx, orgID, taskID); err != nil || got != "" {
+			t.Errorf("with no conversations: path=%q err=%v, want empty/nil", got, err)
+		}
+
+		// A conversation that never recorded a path is skipped rather than
+		// answered with: what the read is after is a tree, and an empty column
+		// names none.
+		pathless := seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Status: "completed", Model: "m",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
+		})
+		seed.BackdateStartedAt(t, pathless, 10*time.Minute)
+		if got, err := store.NewestWorktreePathForTaskSystem(ctx, orgID, taskID); err != nil || got != "" {
+			t.Errorf("with only a pathless conversation: path=%q err=%v, want empty/nil", got, err)
+		}
+
+		// The older conversation's tree, once it has one. An ended
+		// conversation still counts — the boundary says the task moved on,
+		// not that its workspace did.
+		older := seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Status: "completed", Model: "m",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
+		})
+		seed.BackdateStartedAt(t, older, 8*time.Minute)
+		if _, err := store.SetWorktreePath(ctx, orgID, older, "/tmp/triagefactory-runs/older"); err != nil {
+			t.Fatalf("set worktree (older): %v", err)
+		}
+		if _, err := store.EndConversationsForTask(ctx, orgID, taskID, domain.EndedDelegated); err != nil {
+			t.Fatalf("EndConversationsForTask: %v", err)
+		}
+		if got, err := store.NewestWorktreePathForTaskSystem(ctx, orgID, taskID); err != nil || got != "/tmp/triagefactory-runs/older" {
+			t.Errorf("after the first tree: path=%q err=%v, want the older conversation's", got, err)
+		}
+
+		// A subagent row is part of its spawner's engagement, not a
+		// conversation of the task's own, so the tree it names is never what
+		// the task's next conversation inherits.
+		sub := seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Status: "running", Model: "m",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
+		})
+		seed.BackdateStartedAt(t, sub, time.Minute)
+		if _, err := store.SetWorktreePath(ctx, orgID, sub, "/tmp/triagefactory-runs/subagent"); err != nil {
+			t.Fatalf("set worktree (subagent): %v", err)
+		}
+		seed.SetParentConversation(t, sub, older)
+		if got, err := store.NewestWorktreePathForTaskSystem(ctx, orgID, taskID); err != nil || got != "/tmp/triagefactory-runs/older" {
+			t.Errorf("with a newer subagent row: path=%q err=%v, want the older top-level conversation's", got, err)
+		}
+
+		// Newest wins. This is the answer a re-delegation inherits: the tree
+		// as the task's most recent conversation left it, not the first one
+		// that ever ran there.
+		newer := seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Status: "running", Model: "m",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
+		})
+		seed.BackdateStartedAt(t, newer, 2*time.Minute)
+		if _, err := store.SetWorktreePath(ctx, orgID, newer, "/tmp/triagefactory-runs/newer"); err != nil {
+			t.Fatalf("set worktree (newer): %v", err)
+		}
+		if got, err := store.NewestWorktreePathForTaskSystem(ctx, orgID, taskID); err != nil || got != "/tmp/triagefactory-runs/newer" {
+			t.Errorf("with two trees: path=%q err=%v, want the newest conversation's", got, err)
+		}
+
+		// And a sibling task on the same entity inherits none of it: the tree
+		// belongs to the task, which is what its dedup key means.
+		ev2 := seed.Event(t, ent, domain.EventGitHubPRCICheckFailed)
+		sibling := seed.Task(t, ent, domain.EventGitHubPRCICheckFailed, ev2)
+		if got, err := store.NewestWorktreePathForTaskSystem(ctx, orgID, sibling); err != nil || got != "" {
+			t.Errorf("sibling task: path=%q err=%v, want empty", got, err)
+		}
+	})
+
 	t.Run("EntitiesWithOpenConversations_EmptyInputFastPath", func(t *testing.T) {
 		store, orgID, _, _ := mk(t)
 		got, err := store.EntitiesWithOpenConversations(context.Background(), orgID, nil)

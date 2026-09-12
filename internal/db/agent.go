@@ -528,6 +528,24 @@ type ConversationStore interface {
 	// optimization, not a correctness gate.
 	ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error)
 
+	// NewestWorktreePathForTaskSystem returns the worktree_path of the task's
+	// newest top-level conversation that recorded one, or "" when no
+	// conversation on the task ever did. Admin pool — the caller is the
+	// blueprint mint, which runs with no JWT-claims context on the event path.
+	//
+	// The workspace is keyed by the task, so this is where the NEXT
+	// conversation on it opens: the mint stamps the answer onto the row it
+	// writes, and the claim's warm stat finds a tree already on disk instead
+	// of paying a cold rehydrate for a path nobody wrote down. A miss is an
+	// ordinary answer ("" — the first conversation on a task has nothing to
+	// inherit), not an error.
+	//
+	// Newest by the same order the claim gate's live-conversation lookup uses,
+	// and top-level for the same reason: a subagent's tree is its spawner's
+	// engagement, not the task's. An ended conversation still counts — the
+	// boundary says the task moved on, not that its workspace did.
+	NewestWorktreePathForTaskSystem(ctx context.Context, orgID, taskID string) (string, error)
+
 	// HasLiveConversationForTaskSystem mirrors HasLiveConversationForTask
 	// but routes through the admin pool in Postgres. The router's drain
 	// sweeper consumes this from its eventbus subscriber goroutine, which has

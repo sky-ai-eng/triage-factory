@@ -211,9 +211,9 @@ const eligibleForDrivingSQL = needsDrivingSQL
 // it runs, the step it came to rest on once it stopped.
 //
 // One is the ceiling because the workspace is one. Every step shares a worktree
-// and a snapshot blob keyed on the blueprint run, so two driven at once means
-// two agents in one git tree and whichever concludes last overwriting the
-// other's snapshot. Storage forces the rule; the predicate states it.
+// and a snapshot blob keyed on the task, so two driven at once means two agents
+// in one git tree and whichever concludes last overwriting the other's
+// snapshot. Storage forces the rule; the predicate states it.
 //
 // Equality alone admits every legitimate dispatch because the pointer moves
 // BEFORE the row it names is enqueued (see reactToStepTerminal), and nothing
@@ -240,13 +240,48 @@ const eligibleForDrivingSQL = needsDrivingSQL
 // blueprint clause alone; its doc carries what that costs, when it costs
 // anything, and what closes it.
 //
+// The third clause is the task's, and it is the ceiling the blueprint clause
+// used to carry alone. The workspace is one per TASK now, not one per
+// blueprint run, so "two driven at once means two agents in one git tree"
+// spans every conversation the task has ever held — a second blueprint's step
+// as much as a sibling step of the same one. The task's live conversation is
+// its newest non-ended top-level row, and nothing else on it is drivable.
+//
 // TODO(TFAC-991): nothing generates the owed memory yet, so a task that
 // reaches this state stays gated until the memory provisioner lands and
 // starts filing rows for the conversations this predicate waits on.
 var blueprintDrivableSQL = `((r.blueprint_run_id IS NULL
 	    OR (br.cancel_requested = false AND br.status <> 'cancelled'
 	        AND r.blueprint_step_index = br.current_step_index))
+	   AND (r.task_id IS NULL OR r.id = ` + taskLiveConversationSQL("r.org_id", "r.task_id") + `)
 	   AND (r.task_id IS NULL OR NOT ` + taskMemoryPendingSQL("r.org_id", "r.task_id") + `))`
+
+// taskLiveConversationSQL is the task's live conversation: the newest one that
+// has not ended, top-level rows only. It is a scalar subquery rather than a
+// NOT EXISTS anti-join because the answer IS an id — the claim gate compares
+// the candidate against it, and a later reader that wants the row itself gets
+// the same definition rather than a second spelling of it.
+//
+// ended_at is the boundary, not status: an ended conversation may still be
+// parked `open`, and a live one may have completed its transcript and be
+// waiting for a follow-up. What the tree belongs to is the question, and the
+// boundary is what answers it.
+//
+// The ordering matters only for a task that legitimately holds two un-ended
+// rows, which the boundary doors make impossible going forward and which a
+// pre-boundary install can still carry. Newest-wins is the reading the column
+// migration committed to; the id tiebreak makes it total.
+//
+// Subagent rows are excluded because a subagent is part of its spawner's
+// engagement rather than a conversation of the task's own — the same reason
+// the boundary doors skip them.
+func taskLiveConversationSQL(orgExpr, taskExpr string) string {
+	return `(SELECT live.id FROM conversations live
+		WHERE live.org_id = ` + orgExpr + ` AND live.task_id = ` + taskExpr + `
+		  AND live.ended_at IS NULL AND live.parent_conversation_id IS NULL
+		ORDER BY live.started_at DESC, live.id DESC
+		LIMIT 1)`
+}
 
 // conversationQueueClaimSelect is the candidate CTE's projection —
 // everything the dispatcher needs to branch on and drive the claimed

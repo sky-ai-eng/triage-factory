@@ -29,7 +29,7 @@ import (
 // casts, RLS parameters, and driver NULL scanning are deliberately out of
 // scope for sharing.
 //
-// That last rule is why the taskMemory*SQL fragment builders are listed below
+// That last rule is why the task*SQL fragment builders are listed below
 // rather than hoisted: they compose SQL text, and they are identical today
 // only because the predicate they spell happens to need no placeholder, cast
 // or json guard yet. Sharing them would mean undoing the abstraction the first
@@ -89,6 +89,7 @@ var identicalHelperRatchet = []string{
 	"scanTeamSettings",
 	"scanWrittenEntity",
 	"splitRepoSlug",
+	"taskLiveConversationSQL",
 	"taskMemoryAttemptSQL",
 	"taskMemoryOwedRowSQL",
 	"taskMemoryPendingSQL",

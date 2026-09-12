@@ -20,10 +20,12 @@
 // that safe — see parkConversationOpen for the ordering and workspace_wait.go
 // for the resume that reads it.
 //
-// The write policy and the retention sweep move together, always: the reaper
-// enumerates exactly the states listed above (ListReapableSnapshotKeysSystem),
-// so widening one without the other either leaks blobs forever or reaps a
-// workspace something still wants.
+// The write policy and the retention sweep move together, always, and the
+// sweep is the only thing that drops a blob: no terminal discards one, because
+// the key is the task and a blueprint reaching its end is not the task
+// reaching its own. So a state that can hold a blob and is outside
+// ListReapableSnapshotKeysSystem's set leaks it forever, and a state inside it
+// that something still wants is reaped out from under that want.
 
 package delegate
 
@@ -1015,8 +1017,8 @@ func snapshotReader(r io.Reader) (io.ReadCloser, string, error) {
 }
 
 // DiscardWorkspaceSnapshot is the exported seam onto the snapshot discard, for
-// a caller outside the package that terminates a blueprint's work by a route of
-// its own rather than through terminateBlueprint. Idempotent and nil-safe.
+// a caller outside the package that has established a task's workspace is not
+// wanted again. Idempotent and nil-safe.
 //
 // It takes the task id, not a conversation id: the snapshot key is the
 // workspace key (see snapshotKey), so a conversation id names a blob that
