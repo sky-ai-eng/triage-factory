@@ -95,3 +95,13 @@
 body:has(.bc-dragging) .tip {
   display: none !important;
 }
+/* The hand that took the card keeps it. The cursor is whatever sits under the
+   pointer, and under the pointer for the whole drag is the lifted card — a
+   link title, running text, a button, each asking for its own — so without
+   this the hand flips to an arrow, an I-beam or a finger as the card moves.
+   One cursor from the body down for the length of the drag, over every
+   element's own, the inline `grab` on the resting card included. */
+body:has(.bc-dragging),
+body:has(.bc-dragging) * {
+  cursor: grabbing !important;
+}
