@@ -127,7 +127,7 @@ describe('Tooltip', () => {
   })
 
   it('lets a click through to a link the host wraps — the hint is its definition, not its gate', () => {
-    const navigated = vi.fn((e: Event) => e.preventDefault())
+    const navigated = vi.fn((e: { preventDefault: () => void }) => e.preventDefault())
     render(
       <Tooltip content="acme/api#761" focusable={false}>
         <a href="https://example.test/761" onClick={navigated}>
