@@ -199,6 +199,9 @@ describe('deriveCard lifecycle', () => {
     ]
     expect(deriveCard(task(), steps[1], steps, NOW).chain).toEqual({ done: 1, total: 3 })
     expect(deriveCard(task(), steps[1], [steps[1]], NOW).chain).toBeUndefined()
+    // Returned to the queue, the task keeps its conversation's artifacts but
+    // not the run's shape: the steps are over.
+    expect(deriveCard(task({ status: 'queued' }), steps[1], steps, NOW).chain).toBeUndefined()
   })
 
   it('says when a snoozed task wakes in place of its age', () => {
