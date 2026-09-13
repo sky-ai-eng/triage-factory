@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useDroppable } from '@dnd-kit/core'
 import { Tooltip } from '../../ui/tooltip/Tooltip'
 import {
@@ -22,14 +22,14 @@ import {
 import EventBadge from '../EventBadge'
 import { bodyEase } from '../../pages/setup/glassStyle'
 import {
-  emptyFilter,
+  emptyLaneFilter,
   filterIsActive,
+  SEARCH_MAX_CHARS,
   SORT_LABEL,
-  type ColumnFilterState,
+  SOURCE_OPTIONS,
+  type LaneFilter,
   type SortKey,
-  type SourceFilter,
-} from './columnFilter'
-import type { Task } from '../../types'
+} from './laneFilter'
 
 // BoardColumn is the board's column shell in the borderless liquid-glass
 // idiom: no outlines anywhere — panes separate by depth and light, not lines.
@@ -53,8 +53,9 @@ import type { Task } from '../../types'
 //
 // Search + structured filters live in a sticky frosted header inside the scroll
 // body; the sliders button melts the header downward into an expanding filter
-// panel. State is owned by Board.tsx; the apply/sort pass lives in
-// ./columnFilter.ts so this file exports only a component (Fast Refresh).
+// panel. State is owned by Board.tsx, and every field of it is a question the
+// SERVER answers — the column only edits the filter and renders the page that
+// comes back; laneFilter.ts is the translation into the list body.
 
 // The search field floats — no box, no border, just the icon + text on the
 // column glass (the Her move). A whisper of fill appears only on focus so
@@ -90,6 +91,12 @@ const FADE_LAYERS = Array.from({ length: FADE_N }, (_, k) => {
 const CARD_FADE_MASK =
   'linear-gradient(to bottom, transparent 0, #000 8px, #000 calc(100% - 44px), transparent 100%)'
 
+// How close to the loaded end the reader has to come before the next page is
+// asked for, in screens of the card area. Two: far enough that the page lands
+// before the reader reaches the end, near enough that a lane nobody scrolls
+// never fetches what nobody reads.
+const FETCH_AHEAD_SCREENS = 2
+
 const searchInputClass =
   'w-full rounded-lg bg-transparent py-1.5 pl-7 pr-7 text-body text-ink-1 placeholder:text-ink-3 outline-none transition-colors focus:bg-[var(--color-raised)]/40'
 
@@ -111,12 +118,28 @@ function joinDT(date: string, time: string): string {
   return `${date}T${time || '00:00'}`
 }
 
+// The lane's paging, as the column tail reads it: how many rows the lane
+// holds, what its query matches across every page (null on a list that cannot
+// count itself), whether the server minted a further page, whether one is in
+// flight, and the ask for it.
+export interface LanePaging {
+  shown: number
+  total: number | null
+  hasMore: boolean
+  loading: boolean
+  onNearEnd: () => void
+}
+
 interface Props {
   id: string
   title: string
-  tasks: Task[] // raw list, used to populate the event-type chips
-  filter: ColumnFilterState
-  onFilterChange: (next: ColumnFilterState) => void
+  filter: LaneFilter
+  onFilterChange: (next: LaneFilter) => void
+  // The event types present in the lane under its current query — the facet
+  // read, not the page — so the chips show what exists, including the types
+  // the reader filtered out and the ones on pages the list has not fetched.
+  eventTypes: string[]
+  paging: LanePaging
   // Optional header slot for a column-specific note (e.g. Done's "last 7
   // days"). Renders to the right of the title, inside the bracket.
   headerExtra?: React.ReactNode
@@ -136,9 +159,10 @@ interface Props {
 export default function BoardColumn({
   id,
   title,
-  tasks,
   filter,
   onFilterChange,
+  eventTypes,
+  paging,
   headerExtra,
   snooze,
   index = 0,
@@ -194,15 +218,23 @@ export default function BoardColumn({
     wasOver.current = dragOver
   }, [dragOver, lapOnce])
 
-  // Event-type chips reflect the unfiltered set so the user always sees what
-  // types exist in this column, even after filtering them out.
-  const eventTypes = useMemo(() => {
-    const seen = new Set<string>()
-    for (const t of tasks) {
-      if (t.event_type) seen.add(t.event_type)
-    }
-    return Array.from(seen).sort()
-  }, [tasks])
+  // Fetch-on-scroll is how a lane deeper than one page asks for the rest:
+  // when the reader comes within FETCH_AHEAD_SCREENS of the loaded end, the
+  // next page is requested. The same check runs once after every page lands,
+  // because a filtered lane can be shorter than its scroll area — with nothing
+  // to scroll, the scroll handler would never fire and the rows past the first
+  // page would be unreachable with no affordance left to ask for them.
+  // onNearEnd is a no-op while a page is in flight or once the server minted
+  // no further token, so the post-page check cannot loop.
+  const cardsRef = useRef<HTMLDivElement>(null)
+  const { hasMore, loading, onNearEnd, shown } = paging
+  const nearEnd = (el: HTMLElement) =>
+    el.scrollHeight - el.scrollTop - el.clientHeight < el.clientHeight * FETCH_AHEAD_SCREENS
+  useEffect(() => {
+    const el = cardsRef.current
+    if (!el || !hasMore || loading) return
+    if (nearEnd(el)) onNearEnd()
+  }, [shown, hasMore, loading, onNearEnd])
 
   const hasFilters = filterIsActive(filter)
 
@@ -259,6 +291,7 @@ export default function BoardColumn({
                 type="text"
                 aria-label={`Search ${title}`}
                 placeholder="Search…"
+                maxLength={SEARCH_MAX_CHARS}
                 value={filter.search}
                 onChange={(e) => onFilterChange({ ...filter, search: e.target.value })}
                 className={searchInputClass}
@@ -314,10 +347,27 @@ export default function BoardColumn({
         {/* Cards scroll independently below the masthead; the mask melts the
             overflow into the page at top + bottom instead of a hard cutoff. */}
         <div
+          ref={cardsRef}
+          onScroll={(e) => {
+            if (hasMore && !loading && nearEnd(e.currentTarget)) onNearEnd()
+          }}
           className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3 pt-1"
           style={{ maskImage: CARD_FADE_MASK, WebkitMaskImage: CARD_FADE_MASK }}
         >
           {children}
+          {/* The tail states what is on screen against what the query
+              matches, and both halves answer the same query — so a search
+              reads "2 of 6" rather than counting a filtered page against an
+              unfiltered lane. Passive: the next page arrives by scrolling. A
+              lane that silently stopped at its page size would read as "that
+              is all there is", which is the failure the list contract exists
+              to prevent. A null total is a list that cannot count itself;
+              it says nothing rather than "of 0". */}
+          {paging.total !== null && paging.shown < paging.total && (
+            <p className="pb-1 pt-2 text-center font-mono text-reported tabular-nums text-ink-3">
+              {paging.shown} of {paging.total}
+            </p>
+          )}
         </div>
 
         {/* The rust L-bracket — concentric fading dashes (see TraceLayer). At
@@ -437,11 +487,6 @@ export function CollapsedColumn({
 }
 
 const SORT_KEYS: SortKey[] = ['default', 'created', 'title', 'event_type', 'claimee']
-const SOURCES: { value: SourceFilter; label: string }[] = [
-  { value: 'all', label: 'All' },
-  { value: 'github', label: 'GitHub' },
-  { value: 'jira', label: 'Jira' },
-]
 
 function pill(selected: boolean): string {
   return `rounded-full px-2.5 py-1 text-reported font-medium transition-colors ${
@@ -512,8 +557,8 @@ function FilterControls({
   eventTypes,
   snooze,
 }: {
-  filter: ColumnFilterState
-  onChange: (next: ColumnFilterState) => void
+  filter: LaneFilter
+  onChange: (next: LaneFilter) => void
   eventTypes: string[]
   snooze?: { shown: boolean; onToggle: () => void }
 }) {
@@ -554,7 +599,7 @@ function FilterControls({
               onChange({
                 ...filter,
                 sortKey: k,
-                sortDir: k === 'default' ? emptyFilter.sortDir : filter.sortDir,
+                sortDir: k === 'default' ? emptyLaneFilter.sortDir : filter.sortDir,
               })
             }
             className={pill(filter.sortKey === k)}
@@ -578,7 +623,7 @@ function FilterControls({
       </Group>
 
       <Group label="Source">
-        {SOURCES.map((s) => (
+        {SOURCE_OPTIONS.map((s) => (
           <button
             key={s.value}
             type="button"
@@ -641,7 +686,7 @@ function FilterControls({
         <button
           type="button"
           disabled={!filterIsActive(filter)}
-          onClick={() => onChange({ ...emptyFilter, search: filter.search })}
+          onClick={() => onChange({ ...emptyLaneFilter, search: filter.search })}
           className="text-reported text-ink-3 transition-colors hover:text-ink-2 disabled:opacity-40"
         >
           Reset filters

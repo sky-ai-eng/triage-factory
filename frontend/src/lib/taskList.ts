@@ -3,6 +3,12 @@
  *  spelling that answers the same question differently. */
 export const TASK_LIST_PATH = '/api/tasks/list'
 
+/** The list's synthetic sibling: the event types present in a lane and how
+ *  many rows carry each — the set a lane's filter chips are drawn from. It
+ *  takes the lane's own filters and none of the reader's, so the chips show
+ *  what the lane holds including the types the reader just filtered out. */
+export const TASK_FACETS_PATH = '/api/tasks/facets'
+
 /** The keys the server will order a lane by. There is deliberately no
  *  'default' member: the default order is what you get by sending no
  *  `sort_key` at all, so naming it would be a second spelling of absent. */
@@ -87,9 +93,30 @@ export function queueCountBody(): TaskListRequest {
   return { ...queueListBody([]), page_size: 0 }
 }
 
-/** One lane of the board by status. `claimed` is the claim axis rather than a
- *  lifecycle status — a queued task someone has taken — and is why the board's
- *  Claimed column can't be spelled as a plain status. */
+/** The board's Queued lane: every task still queued, held or not. A task
+ *  someone has claimed but not started sits here wearing its assignee mark
+ *  rather than in a lane of its own, so the lane deliberately does not narrow
+ *  by `only_unclaimed` the way the pickable projection above does — the rail's
+ *  queued count keeps that narrowing, since the number it names is the depth
+ *  of what can still be picked up. */
+export function queuedLaneBody(
+  teamIds: string[],
+  showSnoozed = false,
+  filters: TaskListFilters = {},
+): TaskListRequest {
+  return {
+    statuses: showSnoozed ? ['queued', 'snoozed'] : ['queued'],
+    team_ids: teamIds,
+    include_snoozed: showSnoozed,
+    page_size: TASK_PAGE_SIZE,
+    ...filters,
+  }
+}
+
+/** One lane of the board by status. The vocabulary also carries `claimed` —
+ *  a queued task someone has taken, the claim axis rather than a lifecycle
+ *  status — which no lane is built from; it stays a legitimate headless
+ *  question. */
 export function statusListBody(
   status: string,
   teamIds: string[],
@@ -110,5 +137,52 @@ export function doneListBody(teamIds: string[], filters: TaskListFilters = {}): 
   return {
     ...statusListBody('done', teamIds, filters),
     closed_since: since.toISOString(),
+  }
+}
+
+/** One event type present in a lane, and how many of its tasks sit there. */
+export interface TaskFacet {
+  value: string
+  count: number
+}
+
+/** The response of POST /api/tasks/facets: a fixed schema of named cuts. */
+export interface TaskFacetsResponse {
+  event_types: TaskFacet[]
+}
+
+/** The lane half of a list body — what the facet route takes. It refuses the
+ *  reader's own narrowing and the page fields by name rather than ignoring
+ *  them, so this picks the lane fields out rather than forwarding the list
+ *  body whole. */
+export type TaskFacetsRequest = Pick<
+  TaskListRequest,
+  | 'statuses'
+  | 'team_ids'
+  | 'only_unclaimed'
+  | 'include_snoozed'
+  | 'closed_since'
+  | 'created_since'
+  | 'sources'
+>
+
+export function facetsBody(lane: TaskListRequest): TaskFacetsRequest {
+  const {
+    statuses,
+    team_ids,
+    only_unclaimed,
+    include_snoozed,
+    closed_since,
+    created_since,
+    sources,
+  } = lane
+  return {
+    statuses,
+    team_ids,
+    only_unclaimed,
+    include_snoozed,
+    closed_since,
+    created_since,
+    sources,
   }
 }
