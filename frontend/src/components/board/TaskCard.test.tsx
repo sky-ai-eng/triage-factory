@@ -4,9 +4,9 @@ import { MemoryRouter } from 'react-router'
 import { TaskCard } from './TaskCard'
 
 // One card for every lane state. These pin what each state spends a line on,
-// and what it does not: the summary yields to the run's own words, a
-// permission takes the activity row's slot, an approval spends no line and
-// brightens the frame, and a settled run folds its row into the footer.
+// and what it does not: the summary shows in every state, a permission takes
+// the activity row's slot, an approval spends no line and brightens the
+// frame, and a settled run folds its row into the footer.
 
 function renderCard(props: Partial<React.ComponentProps<typeof TaskCard>> = {}) {
   return render(
@@ -68,7 +68,7 @@ describe('TaskCard, queued', () => {
 })
 
 describe('TaskCard, working', () => {
-  it('scans the live command in place of the summary and carries the crate mark', () => {
+  it('scans the live command under the summary and carries the crate mark', () => {
     renderCard({
       lifecycle: 'working',
       elapsed: '18:04',
@@ -77,7 +77,7 @@ describe('TaskCard, working', () => {
       href: '/runs/c1',
     })
     expect(screen.getByText('Reading internal/delegate/teardown.go')).toBeInTheDocument()
-    expect(screen.queryByText('Two readers hit the cgroup file at once.')).not.toBeInTheDocument()
+    expect(screen.getByText('Two readers hit the cgroup file at once.')).toBeInTheDocument()
     expect(document.querySelector('[data-mark="crates"] .tf-crates')).not.toBeNull()
     expect(screen.getByText('18:04')).toBeInTheDocument()
   })
@@ -93,7 +93,7 @@ describe('TaskCard, working', () => {
     expect(screen.getByRole('link', { name: 'View run' })).toHaveAttribute('href', '/runs/c1')
   })
 
-  it('lets a permission take the activity row, with the verbs, and drops the summary', () => {
+  it('lets a permission take the activity row, with the verbs, and keeps the summary', () => {
     const onAllow = vi.fn()
     const onDeny = vi.fn()
     renderCard({
@@ -106,7 +106,7 @@ describe('TaskCard, working', () => {
     })
     expect(screen.getByText('psql -f migrations/0042_up.sql')).toBeInTheDocument()
     expect(screen.queryByText('Reading a file')).not.toBeInTheDocument()
-    expect(screen.queryByText('Two readers hit the cgroup file at once.')).not.toBeInTheDocument()
+    expect(screen.getByText('Two readers hit the cgroup file at once.')).toBeInTheDocument()
     // The stack depth rides inside the shield; there is no "+N more" row.
     expect(screen.getByText('3')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Allow/ }))

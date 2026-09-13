@@ -17,8 +17,10 @@ import './task-card.css'
 // absent for exactly the reason its data is.
 //
 // The SUMMARY belongs to neither. It says what the work is, in the reporter's
-// words, and it is valid in any lifecycle — it yields only to words the run is
-// producing right now. The rule and its reasoning are at `talking`, below.
+// words, and it shows in every lifecycle, beside whatever the run is producing
+// right now: the reader scanning a lane of working cards wants to know what
+// each one is about, and the live line under it says what the agent is doing
+// about it. Two paragraphs on a card is the accepted cost.
 //
 // Attention comes in two shapes that look alike and behave nothing alike:
 //
@@ -386,14 +388,6 @@ export function TaskCard({
   // it was already spending.
   const settled = !queued && !working && !blocked
   const asking = pendingCount(pending) > 0
-  // The summary yields to words the run is PRODUCING — a live command, or a
-  // permission request. Those are prose in the column the summary occupies,
-  // and two paragraphs plus a title is where a card stops being scannable. A
-  // pending approval costs no line at all — it lives in the frame and the
-  // strip — so a settled run keeps its description even while something waits
-  // on a verdict. Suppressed, not dropped: the caller keeps passing it and it
-  // returns when the run stops talking.
-  const talking = blocked || (working && !!command)
   // Liveness and blocking are INDEPENDENT. A run waiting on a permission is
   // still claimed and current, so its status mark stays the live mark; the
   // plate is what says it has stopped.
@@ -511,16 +505,15 @@ export function TaskCard({
       <Chain chain={chain} working={working} />
 
       {/* What the work IS, in the reporter's own words rather than the run's.
-          Available in every state: the caller decides — pass it or do not. */}
-      {!talking &&
-        (summaryPending ? (
-          <span style={{ display: 'flex', flexDirection: 'column' }}>
-            <Bar w="92%" i={0} />
-            <Bar w="64%" i={1} />
-          </span>
-        ) : (
-          summary && <div className="tc-summary">{summary}</div>
-        ))}
+          Shown in every state: the caller decides — pass it or do not. */}
+      {summaryPending ? (
+        <span style={{ display: 'flex', flexDirection: 'column' }}>
+          <Bar w="92%" i={0} />
+          <Bar w="64%" i={1} />
+        </span>
+      ) : (
+        summary && <div className="tc-summary">{summary}</div>
+      )}
 
       {slot}
 
