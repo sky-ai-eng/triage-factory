@@ -32,7 +32,7 @@ func TestMigrate_ConversationsGainTheirBoundaryColumns(t *testing.T) {
 	}
 	// Stop one version short, so the rows below are staged exactly the way a
 	// deployed build wrote them — with no column to end them in.
-	upToErr := goose.UpTo(database, dir, 202609120001)
+	upToErr := goose.UpTo(database, dir, beforeTaskContextModel)
 	gooseMu.Unlock()
 	if upToErr != nil {
 		t.Fatalf("goose.UpTo previous version: %v", upToErr)
@@ -71,7 +71,7 @@ func TestMigrate_ConversationsGainTheirBoundaryColumns(t *testing.T) {
 	goose.SetBaseFS(treeFS)
 	upErr := goose.SetDialect("sqlite3")
 	if upErr == nil {
-		upErr = goose.UpTo(database, dir, 202609120002)
+		upErr = goose.UpTo(database, dir, taskContextModel)
 	}
 	gooseMu.Unlock()
 	if upErr != nil {

@@ -205,8 +205,7 @@ func TestReDeriveAfterScoring_BotClaimed_Skips(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
-	// Stamp the bot claim — task stays status='queued' but the
-	// responsibility axis is committed.
+	// Stamp the bot claim, which is also what puts the task in progress.
 	if _, err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("stamp agent claim: %v", err)
 	}
@@ -220,8 +219,8 @@ func TestReDeriveAfterScoring_BotClaimed_Skips(t *testing.T) {
 	if task.ClaimedByAgentID != runmode.LocalDefaultAgentID {
 		t.Errorf("ClaimedByAgentID = %q, want %q (re-derive must not clear claim)", task.ClaimedByAgentID, runmode.LocalDefaultAgentID)
 	}
-	if task.Status != "queued" {
-		t.Errorf("Status = %q, want queued", task.Status)
+	if task.Status != "in_progress" {
+		t.Errorf("Status = %q, want in_progress", task.Status)
 	}
 	firings, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, task.EntityID)
 	if err != nil {

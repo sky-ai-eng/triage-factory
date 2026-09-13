@@ -11,86 +11,24 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// placeTaskInProgress is the whole of a delegation's board placement: one
-// forward write when the blueprint run is minted. These tests pin that write
-// and its three guards directly, then walk the paths a run passes through
-// afterwards — a park, a step advance, a wake — to show none of them touches
-// the column. (The fourth, a completion holding an unresolved artifact, is
-// pinned next to the rest of terminateBlueprint in blueprint_advance_test.go.)
+// The claim is the stage marker: stamping the bot claim is what lands a
+// delegated task in_progress, so a delegation's board work is one
+// announcement at mint and nothing afterwards. These tests walk the paths a
+// run passes through — a park, a step advance, a wake — to show none of them
+// touches the column, and pin the mint itself at the one production call
+// site. (The fourth path, a completion holding an unresolved artifact, is
+// pinned next to the rest of terminateBlueprint in blueprint_advance_test.go;
+// the announcement's own guards are pinned against the Jira mirror they gate,
+// in jira_mirror_test.go.)
 //
 // setupAdvanceFixture seeds an entity + event + task + a 1-step blueprint_run
 // whose single run starts 'running' (see seedConversation → seedConversationBlueprint).
 
-func TestPlaceTaskInProgress_BotClaimedTaskMoves(t *testing.T) {
-	s, database, _, taskID := setupAdvanceFixture(t, "ip")
-	stampBotClaim(t, database, taskID)
-
-	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
-
-	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
-		t.Errorf("task.status = %q, want in_progress (a minted delegation places its task)", got)
-	}
-}
-
-// A run parked `open` and an unresolved draft PR say a human is owed
-// something; neither is board placement. The card lands in_progress whatever
-// the run's state, and the signal rides the card frame and the attention order.
-func TestPlaceTaskInProgress_ParkedRunWithDraftPRStillInProgress(t *testing.T) {
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "parked-draft")
-	stampBotClaim(t, database, taskID)
-	setConversationStatus(t, database, conversationID, "open")
-	seedDraftPRArtifact(t, s, conversationID)
-
-	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
-
-	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
-		t.Errorf("task.status = %q, want in_progress (a parked run with a draft PR is placed like any other)", got)
-	}
-}
-
-// A user takeover flips the claim to the user, who owns the lifecycle from
-// then on — a delegation must not move their card.
-func TestPlaceTaskInProgress_UserClaimedTaskNeutral(t *testing.T) {
-	s, database, _, taskID := setupAdvanceFixture(t, "user-claim")
-	stampUserClaim(t, database, taskID)
-
-	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
-
-	if got := readTaskStatus(t, database, taskID); got != "queued" {
-		t.Errorf("status = %q, want queued (user-claimed task must not auto-move)", got)
-	}
-}
-
-// Unclaimed task — the spawner mustn't place rows it doesn't own.
-func TestPlaceTaskInProgress_UnclaimedTaskNeutral(t *testing.T) {
-	s, database, _, taskID := setupAdvanceFixture(t, "unclaimed")
-
-	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
-
-	if got := readTaskStatus(t, database, taskID); got != "queued" {
-		t.Errorf("status = %q, want queued (unclaimed task must not move)", got)
-	}
-}
-
-// Already-terminal task: a placement must not reopen a done/dismissed row.
-func TestPlaceTaskInProgress_TerminalTaskNeutral(t *testing.T) {
-	s, database, _, taskID := setupAdvanceFixture(t, "already-done")
-	stampBotClaim(t, database, taskID)
-	if _, err := database.Exec(`UPDATE tasks SET status = 'dismissed' WHERE id = ?`, taskID); err != nil {
-		t.Fatalf("dismiss task: %v", err)
-	}
-
-	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
-
-	if got := readTaskStatus(t, database, taskID); got != "dismissed" {
-		t.Errorf("status = %q, want dismissed (terminal task must not flip)", got)
-	}
-}
-
-// TestDelegate_PlacesTheTaskInProgress walks the one production call site: a
-// minted blueprint run leaves its task in_progress, and the step it enqueued
-// is queued rather than driven from here.
-func TestDelegate_PlacesTheTaskInProgress(t *testing.T) {
+// TestDelegate_LeavesTheTaskInProgress walks the one production call site: a
+// minted blueprint run leaves its task in_progress — put there by the claim
+// the manual handler stamped before delegating — and the step it enqueued is
+// queued rather than driven from here.
+func TestDelegate_LeavesTheTaskInProgress(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedLocalBotAgent(t, database)
 	task, bpID := delegatableFixture(t, database, "place")
@@ -105,7 +43,7 @@ func TestDelegate_PlacesTheTaskInProgress(t *testing.T) {
 	}
 
 	if got := readTaskStatus(t, database, task.ID); got != "in_progress" {
-		t.Errorf("task.status = %q, want in_progress (mint places the task)", got)
+		t.Errorf("task.status = %q, want in_progress (the claim placed the task; the mint left it there)", got)
 	}
 }
 
@@ -117,9 +55,6 @@ func TestReactor_StepAdvanceLeavesTheColumnAlone(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	seedLocalBotAgent(t, database)
 	stampBotClaim(t, database, taskID)
-	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
-		t.Fatalf("place task: %v", err)
-	}
 
 	stepConversation, _ := s.conversations.GetSystem(context.Background(), org, step0ConversationID)
 	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
@@ -137,9 +72,6 @@ func TestReactor_StepAdvanceLeavesTheColumnAlone(t *testing.T) {
 func TestMarkConversationOpen_ParkLeavesTheColumnAlone(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "park-noboard")
 	stampBotClaim(t, database, taskID)
-	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
-		t.Fatalf("place task: %v", err)
-	}
 
 	if fenced := s.markConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
@@ -169,9 +101,6 @@ func TestSendMessage_WakeLeavesTheColumnAlone(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "wake-noboard")
 	stampBotClaim(t, database, taskID)
 	setConversationStatus(t, database, conversationID, "open")
-	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
-		t.Fatalf("place task: %v", err)
-	}
 
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
@@ -225,10 +154,16 @@ func seedLocalBotAgent(t *testing.T, database *sql.DB) {
 	}
 }
 
+// The claim doors land a queued row in_progress in the same UPDATE, and the
+// tasks_queue_unclaimed CHECK refuses anything else — so these fixtures write
+// what a real claim writes rather than the claim column alone.
 func stampBotClaim(t *testing.T, database *sql.DB, taskID string) {
 	t.Helper()
 	if _, err := database.Exec(
-		`UPDATE tasks SET claimed_by_agent_id = ?, claimed_by_user_id = NULL WHERE id = ?`,
+		`UPDATE tasks
+		    SET claimed_by_agent_id = ?, claimed_by_user_id = NULL,
+		        status = CASE WHEN status IN ('queued', 'snoozed') THEN 'in_progress' ELSE status END
+		  WHERE id = ?`,
 		runmode.LocalDefaultAgentID, taskID,
 	); err != nil {
 		t.Fatalf("stamp bot claim: %v", err)
@@ -238,7 +173,10 @@ func stampBotClaim(t *testing.T, database *sql.DB, taskID string) {
 func stampUserClaim(t *testing.T, database *sql.DB, taskID string) {
 	t.Helper()
 	if _, err := database.Exec(
-		`UPDATE tasks SET claimed_by_user_id = ?, claimed_by_agent_id = NULL WHERE id = ?`,
+		`UPDATE tasks
+		    SET claimed_by_user_id = ?, claimed_by_agent_id = NULL,
+		        status = CASE WHEN status IN ('queued', 'snoozed') THEN 'in_progress' ELSE status END
+		  WHERE id = ?`,
 		runmode.LocalDefaultUserID, taskID,
 	); err != nil {
 		t.Fatalf("stamp user claim: %v", err)

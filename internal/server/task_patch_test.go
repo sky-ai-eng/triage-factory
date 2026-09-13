@@ -15,11 +15,9 @@ import (
 )
 
 // TestTaskPatchStage_RejectsBotClaimedTask pins the guard rule for the manual
-// user transition: only a task the CALLER holds may move from Claimed to
-// In Progress. A bot-claimed task is placed by the spawner when
-// its delegation is minted (see internal/delegate/spawner.go
-// placeTaskInProgress); allowing the user to flip it by hand would race the
-// conversation lifecycle.
+// user transition: only the task's own claimant may write its stage. A
+// bot-claimed task was placed in progress by the bot's own claim; letting a
+// person write the column by hand would be them staging somebody else's work.
 func TestTaskPatchStage_RejectsBotClaimedTask(t *testing.T) {
 	s := newTestServer(t)
 	taskID := seedLifecycleTask(t, s.db, "bot-claimed", lifecycleTaskOpts{
@@ -32,8 +30,8 @@ func TestTaskPatchStage_RejectsBotClaimedTask(t *testing.T) {
 		t.Fatalf("status = %d, want 403 (bot-claimed task isn't the caller's to advance); body=%s",
 			rec.Code, rec.Body.String())
 	}
-	if got := readTaskStatus(t, s.db, taskID); got != "queued" {
-		t.Errorf("task.status = %q, want %q", got, "queued")
+	if got := readTaskStatus(t, s.db, taskID); got != "in_progress" {
+		t.Errorf("task.status = %q, want %q (the bot's own claim placed it)", got, "in_progress")
 	}
 }
 
@@ -226,8 +224,8 @@ func TestTaskPatch_RejectsEmptyAndContradictoryBodies(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 			}
-			if got := readTaskStatus(t, s.db, taskID); got != "queued" {
-				t.Errorf("task.status = %q, want the seeded queued", got)
+			if got := readTaskStatus(t, s.db, taskID); got != "in_progress" {
+				t.Errorf("task.status = %q, want the seeded in_progress", got)
 			}
 		})
 	}
@@ -261,10 +259,11 @@ func TestTaskPatch_RejectsHesitationWhereNoGestureLands(t *testing.T) {
 	})
 }
 
-// TestTaskPatchStage_HappyPath_QueuedToInProgress is the canonical flow: a
-// task the caller holds moves from 'queued' to 'in_progress', and the route
-// answers with the task resource rather than a status stub.
-func TestTaskPatchStage_HappyPath_QueuedToInProgress(t *testing.T) {
+// TestTaskPatchStage_HappyPath_ReassertsInProgress is the canonical flow. The
+// claim already put the task in progress, so what the route does is re-assert
+// it for the holder — idempotent by construction — and answer with the task
+// resource rather than a status stub.
+func TestTaskPatchStage_HappyPath_ReassertsInProgress(t *testing.T) {
 	s := newTestServer(t)
 	taskID := seedLifecycleTask(t, s.db, "happy-ip", lifecycleTaskOpts{
 		claimedByUserID: runmode.LocalDefaultUserID,
@@ -424,9 +423,16 @@ func seedLifecycleTask(t *testing.T, database *sql.DB, suffix string, opts lifec
 		t.Fatalf("seed event: %v", err)
 	}
 
+	// A held task is in progress and an unheld one is queued: the claim is
+	// the stage marker, and tasks_queue_unclaimed refuses any other pairing.
+	// An explicit opts.status still wins, for the rows that are about a
+	// terminal or a snooze.
 	status := opts.status
 	if status == "" {
 		status = "queued"
+		if opts.claimedByAgentID != "" || opts.claimedByUserID != "" {
+			status = "in_progress"
+		}
 	}
 	var agentClaim, userClaim any
 	if opts.claimedByAgentID != "" {

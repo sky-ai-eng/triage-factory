@@ -320,7 +320,7 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 		StampAgentClaim: func(t *testing.T, taskID, agent string) {
 			t.Helper()
 			if _, err := conn.Exec(
-				`UPDATE tasks SET claimed_by_agent_id = $1::uuid, claimed_by_user_id = NULL WHERE id = $2 AND org_id = $3`,
+				`UPDATE tasks SET claimed_by_agent_id = $1::uuid, claimed_by_user_id = NULL, status = 'in_progress' WHERE id = $2 AND org_id = $3`,
 				agent, taskID, orgID,
 			); err != nil {
 				t.Fatalf("stamp claim: %v", err)

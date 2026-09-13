@@ -32,7 +32,7 @@ func TestMigrate_WorkspaceSnapshotsByTask_KeepsTheNewestRunsRowPerTask(t *testin
 	}
 	// One version short, so the rows below are staged the way an install
 	// keyed by the blueprint run wrote them.
-	upToErr := goose.UpTo(database, dir, 202609120004)
+	upToErr := goose.UpTo(database, dir, beforeTaskContextModel)
 	gooseMu.Unlock()
 	if upToErr != nil {
 		t.Fatalf("goose.UpTo previous version: %v", upToErr)
@@ -87,7 +87,7 @@ func TestMigrate_WorkspaceSnapshotsByTask_KeepsTheNewestRunsRowPerTask(t *testin
 	goose.SetBaseFS(treeFS)
 	upErr := goose.SetDialect("sqlite3")
 	if upErr == nil {
-		upErr = goose.UpTo(database, dir, 202609120005)
+		upErr = goose.UpTo(database, dir, taskContextModel)
 	}
 	gooseMu.Unlock()
 	if upErr != nil {

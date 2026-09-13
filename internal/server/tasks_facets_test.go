@@ -69,7 +69,7 @@ func TestTaskFacets_CountsTheLane(t *testing.T) {
 		// board's toggle asks for it.
 		{name: "sleeping", status: "queued", snoozeUntil: &future},
 		// Other lanes entirely.
-		{name: "claimed", status: "queued", claimedUser: true},
+		{name: "claimed", status: "in_progress", claimedUser: true},
 		{name: "closed", status: "done", closedAt: &past},
 	} {
 		seedTaskFixture(t, s.db, f)
@@ -114,7 +114,7 @@ func TestTaskFacets_AgreesWithTheList(t *testing.T) {
 		{name: "agree-ci", status: "queued"},
 		{name: "agree-review", status: "queued", eventType: domain.EventGitHubPRReviewRequested},
 		{name: "agree-sleeping", status: "queued", snoozeUntil: &future},
-		{name: "agree-claimed", status: "queued", claimedUser: true},
+		{name: "agree-claimed", status: "in_progress", claimedUser: true},
 	} {
 		seedTaskFixture(t, s.db, f)
 	}

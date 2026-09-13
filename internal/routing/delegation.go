@@ -705,11 +705,17 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				//
 				// Roll the side-effect chain back in reverse: tear down
 				// the blueprint run we just spawned — every step of it, since
-				// the firing that minted it is being undone — then revert the
-				// task to 'queued' so the limbo state (task=delegated + no
-				// live blueprint run) is not externally visible. Mirrors what
+				// the firing that minted it is being undone. Mirrors what
 				// fireDelegate already does when spawner.Delegate itself
 				// fails.
+				//
+				// The task's own row is left exactly as it is, and that is
+				// the whole of its rollback: the bot's claim has to stay —
+				// the next drain pass needs it or attemptDrainOne's
+				// ClaimedByAgentID guard skips the retry as claim_changed,
+				// silently dropping the queued intent — and a claim is the
+				// stage marker, so a row the bot still holds belongs in In
+				// Progress whether or not a run is live under it right now.
 				//
 				// PopForTask already claimed this row into 'draining'
 				// — release it back to 'pending' so a later
@@ -719,7 +725,7 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				// 'pending' rows, and HasPendingForTask /
 				// ListTasksWithPending don't see 'draining' rows
 				// either, so nothing would ever pick it up again.
-				routerLog.Error("mark firing fired failed, rolling back: tearing down blueprint run + reverting task to queued",
+				routerLog.Error("mark firing fired failed, rolling back: tearing down blueprint run, task keeps the bot's claim for the retry",
 					"firing_id", firing.ID, "blueprint_run", blueprintRunID, "error", err)
 				// Addressed by blueprint run, which is what Delegate returned
 				// and the only id this path holds: its steps' conversations are
@@ -741,15 +747,13 @@ func (r *Router) DrainTask(orgID, taskID string) {
 					default:
 						// The rest of the rollback lands regardless, which is
 						// what makes this the bad outcome rather than a partial
-						// one: the task goes back to 'queued' and the firing
-						// back to 'pending' under a blueprint run that, as far
-						// as anything here knows, is still executing for
-						// nobody.
+						// one: the firing goes back to 'pending' under a
+						// blueprint run that, as far as anything here knows,
+						// is still executing for nobody.
 						routerLog.Error("tear down blueprint run after mark-fired failure: rollback may have left a live run with no task claiming it",
 							"firing_id", firing.ID, "blueprint_run", blueprintRunID, "error", cerr)
 					}
 				}
-				r.revertTaskStatus(ctx, orgID, firing.TaskID, "queued")
 				if rerr := r.firings.Release(ctx, orgID, firing.ID); rerr != nil {
 					routerLog.Error("release firing after mark-fired failure failed",
 						"firing_id", firing.ID, "error", rerr)
@@ -970,35 +974,3 @@ func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *doma
 // transient branch: same release-and-retry handling, but logged as routine
 // (Info) rather than as a Warn-worthy transient failure.
 var errDrainTaskBusy = errors.New("routing: task busy at drain fire; firing released for retry")
-
-// revertTaskStatus moves a task's lifecycle axis back to the given
-// status and broadcasts the change so the frontend doesn't get stuck
-// showing a stale state. Claim cols are intentionally left alone —
-// The three axes (lifecycle / claim / conversations) are
-// orthogonal, and this helper only touches lifecycle.
-//
-// The only caller today is the mark-fired-failure rollback path in
-// DrainTask: a blueprint run was successfully spawned but the UPDATE that
-// records the firing→blueprint-run association failed. The recovery flow
-// cancels it, leaves the firing in 'pending' so the next drain
-// retries it, and reverts the task lifecycle for FE consistency.
-// Critically, the firing's *commitment* (the bot has taken this task)
-// is unchanged — the next drain pass needs the bot claim to remain
-// set or attemptDrainOne's ClaimedByAgentID guard would skip the
-// retry as claim_changed, silently dropping the queued intent. So
-// the claim col stays with the bot here; only status moves.
-//
-// Code paths that DO want to release the claim (user requeue, task
-// completion, swipe-undo) clear the claim cols on their own — they
-// don't go through this helper.
-func (r *Router) revertTaskStatus(ctx context.Context, orgID, taskID, status string) {
-	if _, err := r.tasks.SetStatusSystem(ctx, orgID, taskID, status); err != nil {
-		routerLog.Error("failed to revert task status", "task_id", taskID, "status", status, "error", err)
-		return
-	}
-	r.ws.Broadcast(websocket.Event{
-		Type:  "task_updated",
-		OrgID: orgID,
-		Data:  map[string]any{"task_id": taskID, "status": status},
-	})
-}

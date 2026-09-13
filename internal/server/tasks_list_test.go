@@ -163,8 +163,11 @@ func TestTaskList_QueueProjectionParity(t *testing.T) {
 	fixtures := []taskFixture{
 		{name: "pickable", status: "queued", inQueue: true},
 		{name: "pickable-woke", status: "queued", snoozeUntil: &past, inQueue: true},
-		{name: "user-claimed", status: "queued", claimedUser: true},
-		{name: "bot-claimed", status: "queued", claimedBot: true},
+		// Held rows. Neither is queued: a claim lands its task in progress,
+		// so the queue holds nobody's work and these are here to show the
+		// projection has nothing to exclude.
+		{name: "user-claimed", status: "in_progress", claimedUser: true},
+		{name: "bot-claimed", status: "in_progress", claimedBot: true},
 		// A queued row still inside a snooze window: the defensive half of
 		// the old filter, and the state ?status=queued surfaced and
 		// /api/queue didn't.

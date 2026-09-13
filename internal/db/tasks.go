@@ -64,8 +64,11 @@ type AgentClaimStamp struct {
 // status='queued' that someone (a user or the bot) has taken. "Queued and
 // held by someone" is a question a headless caller can legitimately ask, and
 // it can't be spelled with a lifecycle status because a claim doesn't change
-// one. It stays scoped to status='queued' so a claimed task that advanced to
-// in_progress renders in its own column rather than twice.
+// one. It stays scoped to status='queued'.
+//
+// TODO(TFAC-1009): the tasks_queue_unclaimed CHECK empties this projection —
+// assigning a task lands it in progress, so a queued row holds no claim and
+// nothing can match. The value leaves the vocabulary with that ticket.
 const TaskListStatusClaimed = "claimed"
 
 // TaskListStatuses is the full vocabulary TaskListFilter.Statuses accepts:
@@ -487,22 +490,24 @@ type TaskStore interface {
 	Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error)
 
 	// SetStatus updates the lifecycle status only — claim cols are
-	// unaffected. The only production caller is
-	// revertTaskStatus in DrainTask's mark-fired-failure rollback;
-	// every other lifecycle write routes through a guarded helper.
+	// unaffected. No production path calls it: every lifecycle write
+	// routes through a guarded helper, and a status the claim columns
+	// contradict is what tasks_queue_unclaimed refuses. It survives as the
+	// primitive fixtures and conformance tests reach for when they need to
+	// write a status with nothing else in view.
 	SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error)
 
-	// AdvanceStatusForUser flips a user-claimed task's lifecycle
-	// status forward (board manual transitions). Guards:
+	// AdvanceStatusForUser re-asserts a user-claimed task's stage. Guards:
 	//   - task must be claimed by userID
-	//   - current status must be one of {queued, in_progress}
+	//   - current status must be in_progress
 	//   - newStatus must be in_progress
-	// Refuses all other shapes — terminal transitions (done /
-	// dismissed) go through Close + handleTaskPatch, requeue clears the
-	// claim entirely, and bot-claimed tasks transition via
-	// SetStatusSystem from the router. Returns ok=true when the
-	// update actually changed a row; false means a guard tripped
-	// (caller surfaces 409).
+	// The claim itself is what lands a task in progress, so this is the
+	// idempotent arm of that transition rather than the transition: a task
+	// whose claim the caller holds is already there. Refuses all other
+	// shapes — terminal transitions (done / dismissed) go through Close +
+	// handleTaskPatch, and requeue clears the claim entirely. Returns
+	// ok=true when the update actually matched a row; false means a guard
+	// tripped (caller surfaces 409).
 	AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string) (bool, error)
 
 	// RecordEvent inserts into the task_events junction (task_id,
@@ -519,10 +524,13 @@ type TaskStore interface {
 	// --- Claim mutations ---
 
 	// SetClaimedByAgent stamps the agent claim with no race-safety
-	// guards. Production paths use StampAgentClaimIfUnclaimed
-	// (auto-trigger) or HandoffAgentClaim (user-initiated) instead;
-	// this primitive survives for test fixtures and migration
-	// backfills only.
+	// guards, landing a queued or snoozed row in progress the way every
+	// other claim door does — the tasks_queue_unclaimed CHECK refuses the
+	// held-queued row it would otherwise write. An empty agentID clears the
+	// claim and leaves the status alone. Production paths use
+	// StampAgentClaimIfUnclaimed (auto-trigger) or HandoffAgentClaim
+	// (user-initiated) instead; this primitive survives for test fixtures
+	// and migration backfills only.
 	SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) (domain.Task, error)
 
 	// SetClaimedByUser is the symmetric unconditional user-claim
@@ -532,7 +540,8 @@ type TaskStore interface {
 	// StampAgentClaimIfUnclaimed is the race-safe agent-claim stamp
 	// for the auto-trigger path. Guards on (a) no user claim,
 	// (b) not already same-agent, (c) row not terminal. Atomically
-	// wakes a snoozed task. Returns ok=true when the claim moved.
+	// wakes a snoozed task and lands the row in_progress — the claim is
+	// the stage marker. Returns ok=true when the claim moved.
 	//
 	// actingTeamID is the team the bot acted for — the firing
 	// trigger's team. On a successful claim it becomes the task's
@@ -542,7 +551,8 @@ type TaskStore interface {
 
 	// HandoffAgentClaim is the race-safe "user delegates to bot"
 	// helper — accepts unclaimed→bot, same-user→bot, idempotent
-	// same-agent→bot; refuses on a different-user claim. See
+	// same-agent→bot; refuses on a different-user claim. A landing
+	// claim puts the row in_progress, like every other claim door. See
 	// HandoffResult for the discriminator the caller maps. On a
 	// changed claim the owning team_id consolidates to the acting
 	// team derived from the delegating user (their team in the task's
@@ -565,17 +575,19 @@ type TaskStore interface {
 	ResolveClaimTeam(ctx context.Context, orgID, taskID, userID string) (string, error)
 
 	// TakeoverClaimFromAgent atomically flips a bot-claimed task
-	// to a user claim. Race-safe: guards on the bot still holding
-	// the claim AND no other user owning it. Returns ok=true on
-	// success; false means the race was lost (caller surfaces 409).
+	// to a user claim, landing the row in_progress. Race-safe: guards on
+	// the bot still holding the claim AND no other user owning it. Returns
+	// ok=true on success; false means the race was lost (caller surfaces
+	// 409).
 	// On success the owning team_id consolidates to the acting team
 	// derived from userID (see ClaimQueuedForUser).
 	TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string) (bool, error)
 
 	// ClaimQueuedForUser is the user-claim handler's atomic "take
 	// this task off the queue" — succeeds only on (queued|snoozed)
-	// + both claim cols NULL. Returns ok=true when the claim landed;
-	// false means another claimant won or the task is closed.
+	// + both claim cols NULL, and lands the row in_progress, which is
+	// what taking it off the queue means. Returns ok=true when the claim
+	// landed; false means another claimant won or the task is closed.
 	//
 	// On success the owning team_id consolidates to the acting team:
 	// the claimer's team in the task's visibility set (task_teams),

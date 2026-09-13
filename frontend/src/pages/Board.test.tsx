@@ -1,18 +1,19 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import Board from './Board'
 import type { Conversation, Task, TeamMember } from '../types'
 
-// The board's lanes, checked against what it actually reads, and its one
-// confirmation, checked against when it asks. Three lanes: the task
-// lifecycle and nothing else — a held-but-unstarted task sits in Queued
-// wearing its assignee mark, so the Queued read does not narrow to the
-// unclaimed the way the rail's count does. Every filter field travels in the
-// list body, because a lane holds one page and a client-side pass could only
-// narrow what it had already fetched. And returning a task to the queue asks
-// only when a run is in flight, since stopping it is the one thing the move
-// destroys; with nothing running it fires without a word.
+// The board's lanes, checked against what it actually reads; the two gestures
+// that move a card into In Progress; and its one confirmation, checked against
+// when it asks. Three lanes: the task lifecycle and nothing else — and the
+// Queued lane holds nobody's work, because assigning a task is what starts it,
+// so the lane needs no `only_unclaimed` narrowing to be the pickable set.
+// Every filter field travels in the list body, because a lane holds one page
+// and a client-side pass could only narrow what it had already fetched. And
+// returning a task to the queue asks only when a run is in flight, since
+// stopping it is the one thing the move destroys; with nothing running it
+// fires without a word.
 
 const api = vi.hoisted(() => ({
   apiList: vi.fn(),
@@ -23,6 +24,27 @@ const api = vi.hoisted(() => ({
 vi.mock('../lib/apiClient', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/apiClient')>()
   return { ...actual, ...api }
+})
+
+/** The drop, reached without a pointer. Only DndContext is replaced — with a
+ *  passthrough that hands the board's own onDragEnd to the test — so the
+ *  columns still register as drop targets and the cards still render. */
+const dnd = vi.hoisted(() => ({ drop: null as null | ((taskId: string, col: string) => unknown) }))
+vi.mock('@dnd-kit/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@dnd-kit/core')>()
+  return {
+    ...actual,
+    DndContext: ({
+      children,
+      onDragEnd,
+    }: {
+      children: React.ReactNode
+      onDragEnd: (e: unknown) => unknown
+    }) => {
+      dnd.drop = (taskId, col) => onDragEnd({ active: { id: taskId }, over: { id: col } })
+      return children
+    },
+  }
 })
 
 vi.mock('../hooks/useWebSocket', () => ({
@@ -71,6 +93,18 @@ const HELD: Task = {
   created_at: '2026-09-01T11:00:00Z',
 } as Task
 
+/** The task the board paints into Queued: nobody holds it, because nobody can
+ *  hold a queued task. */
+const FREE: Task = {
+  id: 'task-free',
+  source: 'github',
+  source_id: 'acme/api#762',
+  title: 'Retire the legacy shim',
+  status: 'queued',
+  event_type: 'github:pr:opened',
+  created_at: '2026-09-01T10:00:00Z',
+} as Task
+
 /** Its conversation, in whichever state a test puts it. */
 function conversation(status: string): Conversation {
   return {
@@ -100,7 +134,11 @@ beforeEach(() => {
     if (path !== '/api/tasks/list') throw new Error('unexpected apiList ' + path)
     listBodies.push(body)
     const statuses = (body.statuses as string[] | undefined) ?? []
-    const items = statuses.includes('in_progress') ? [HELD] : []
+    const items = statuses.includes('in_progress')
+      ? [HELD]
+      : statuses.includes('queued')
+        ? [FREE]
+        : []
     return { items, next_page_token: '', total_count: items.length }
   })
   api.apiJSON.mockImplementation(async (path: string, init?: { body?: string }) => {
@@ -115,6 +153,11 @@ beforeEach(() => {
     throw new Error('unexpected apiJSON ' + path)
   })
   api.apiFetch.mockResolvedValue(undefined)
+  dnd.drop = null
+})
+
+afterEach(() => {
+  dnd.drop = null
 })
 
 function renderBoard() {
@@ -131,11 +174,20 @@ function laterBodies(): Array<Record<string, unknown>> {
   return listBodies.slice(3)
 }
 
-/** Walks the picker on the held card to its Unassign row: the mark names its
- *  holder, and the rows are the listbox's options. */
+/** Opens one card's assignee picker and returns a scope over it — every card
+ *  on the board has one, and their rows carry the same names, so a row has to
+ *  be chosen inside the picker that owns it. The mark names its holder, and
+ *  the rows are its listbox's options. */
+async function openPicker(markLabel: string) {
+  const mark = await screen.findByRole('button', { name: markLabel })
+  fireEvent.click(mark)
+  return within(mark.parentElement as HTMLElement)
+}
+
+/** Walks the picker on the held card to its Unassign row. */
 async function unassignHeld() {
-  fireEvent.click(await screen.findByRole('button', { name: 'Assigned to Aidan' }))
-  fireEvent.click(screen.getByRole('option', { name: 'Unassign' }))
+  const picker = await openPicker('Assigned to Aidan')
+  fireEvent.click(picker.getByRole('option', { name: 'Unassign' }))
 }
 
 describe('the board lanes', () => {
@@ -148,14 +200,13 @@ describe('the board lanes', () => {
     expect(screen.queryAllByText('In Review')).toHaveLength(0)
   })
 
-  it('asks for three lanes, and the Queued lane keeps the tasks people hold', async () => {
+  it('asks for three lanes, and the Queued lane asks for the whole queue', async () => {
     renderBoard()
     await waitFor(() => expect(listBodies.length).toBe(3))
     const asked = listBodies.flatMap((b) => (b.statuses as string[] | undefined) ?? [])
     expect(asked.sort()).toEqual(['done', 'in_progress', 'queued'])
-    // A claimed-but-unstarted task sits in Queued wearing its assignee mark,
-    // so the lane is every queued task; only the rail's count narrows to the
-    // ones still up for grabs.
+    // The queue holds nobody's work — assigning a task lands it in In Progress
+    // — so the lane needs no claim narrowing to be the pickable set.
     const queued = listBodies.find((b) => (b.statuses as string[]).includes('queued'))
     expect(queued).not.toHaveProperty('only_unclaimed')
   })
@@ -214,6 +265,41 @@ describe('the lane read runs on the server', () => {
         ),
       ).toBe(true),
     )
+  })
+})
+
+describe('starting a queued task', () => {
+  /** Every /api/tasks/… path the board asked for, in call order. */
+  function taskCalls(): string[] {
+    return api.apiFetch.mock.calls
+      .map((c) => String(c[0]))
+      .filter((p) => p.startsWith('/api/tasks/'))
+  }
+
+  it('makes the drag one call: the claim is what moves the card', async () => {
+    renderBoard()
+    await waitFor(() => expect(listBodies.length).toBe(3))
+
+    await act(async () => {
+      await dnd.drop!(FREE.id, 'in_progress')
+    })
+
+    // One call, and it is the claim — no second write staging the row, because
+    // the server lands it in progress in the same UPDATE that takes the claim.
+    expect(taskCalls()).toEqual([`/api/tasks/${FREE.id}/claim`])
+  })
+
+  it('claims from the picker on a Queued card, then re-reads every lane', async () => {
+    renderBoard()
+    await waitFor(() => expect(listBodies.length).toBe(3))
+
+    const picker = await openPicker('Unassigned')
+    fireEvent.click(picker.getByRole('option', { name: ME.display_name }))
+
+    await waitFor(() => expect(taskCalls()).toEqual([`/api/tasks/${FREE.id}/claim`]))
+    // The card left Queued, so every lane is stale — the picker refetches all
+    // three rather than patching the one it thinks it moved.
+    await waitFor(() => expect(laterBodies().length).toBeGreaterThanOrEqual(3))
   })
 })
 

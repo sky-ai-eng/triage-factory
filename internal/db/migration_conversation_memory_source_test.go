@@ -38,7 +38,7 @@ func TestMigrate_ConversationMemoryGainsSourceAndDropsEntityAndHumanContent(t *t
 	// deployed build wrote them — with entity_id and human_content still
 	// present. The two siblings in between (202609120001/0002) touch other
 	// tables, so where in that run the seed lands does not matter.
-	upToErr := goose.UpTo(database, dir, 202609120002)
+	upToErr := goose.UpTo(database, dir, beforeTaskContextModel)
 	gooseMu.Unlock()
 	if upToErr != nil {
 		t.Fatalf("goose.UpTo previous version: %v", upToErr)
@@ -97,7 +97,7 @@ func TestMigrate_ConversationMemoryGainsSourceAndDropsEntityAndHumanContent(t *t
 	goose.SetBaseFS(treeFS)
 	upErr := goose.SetDialect("sqlite3")
 	if upErr == nil {
-		upErr = goose.UpTo(database, dir, 202609120003)
+		upErr = goose.UpTo(database, dir, taskContextModel)
 	}
 	gooseMu.Unlock()
 	if upErr != nil {

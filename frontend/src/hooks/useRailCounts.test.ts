@@ -85,11 +85,12 @@ describe('useRailCounts', () => {
     })
     // needs: the server-side attention predicate.
     expect(bodyFor(CONVERSATIONS, 'needs')).toEqual({ attention: true, page_size: 0 })
-    // queued: the Queued column's own filter set, page removed.
+    // queued: the Queued lane's own filter set, page removed. No claim
+    // narrowing — the queue holds nobody's work, so every queued row is one
+    // somebody can still pick up.
     expect(bodyFor(TASKS, 'queued')).toEqual({
       statuses: ['queued'],
       team_ids: [],
-      only_unclaimed: true,
       include_snoozed: false,
       page_size: 0,
     })

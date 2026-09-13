@@ -1014,7 +1014,7 @@ func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, use
 		 WHERE org_id = $2
 		   AND id = $3
 		   AND claimed_by_user_id = $4
-		   AND status IN ('queued', 'in_progress')
+		   AND status = 'in_progress'
 	`, newStatus, orgID, taskID, userID)
 	if err != nil {
 		return false, err
@@ -1073,16 +1073,30 @@ func (s *taskStore) MarkEventInjectedSystem(ctx context.Context, orgID, taskID, 
 
 // --- Claim mutations ---
 
+// pgClaimStageExpr is the stage a claim lands on. Assigning a task — to a
+// person or to the bot — IS the stage marker, so every door that lands a claim
+// writes it in the same UPDATE and they cannot drift. Queued and snoozed are
+// the only statuses it moves: a claim on a row already in progress leaves it
+// there, and the doors' own WHERE clauses keep done and dismissed out of
+// reach. Reassign is the one claim write without it — the row it moves the
+// claim on is already held, so it is already in progress. The
+// `tasks_queue_unclaimed` CHECK is the backstop underneath.
+const pgClaimStageExpr = `CASE WHEN status IN ('queued', 'snoozed') THEN 'in_progress' ELSE status END`
+
 func (s *taskStore) SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) (domain.Task, error) {
 	var a any
 	if agentID != "" {
 		a = agentID
 	}
+	// A landing claim stages the row; clearing one leaves the status where it
+	// is, which is why the stage expression sits behind the claimant's own
+	// nullity rather than being written flat.
 	var t domain.Task
 	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_agent_id = $1,
-		       claimed_by_user_id  = NULL
+		       claimed_by_user_id  = NULL,
+		       status = CASE WHEN $1::uuid IS NULL THEN status ELSE `+pgClaimStageExpr+` END
 		 WHERE org_id = $2 AND id = $3
 		RETURNING `+pgTaskBareColumns,
 		a, orgID, taskID), &t)
@@ -1097,7 +1111,8 @@ func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID 
 	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_user_id  = $1,
-		       claimed_by_agent_id = NULL
+		       claimed_by_agent_id = NULL,
+		       status = CASE WHEN $1::uuid IS NULL THEN status ELSE `+pgClaimStageExpr+` END
 		 WHERE org_id = $2 AND id = $3
 		RETURNING `+pgTaskBareColumns,
 		u, orgID, taskID), &t)
@@ -1162,7 +1177,7 @@ func stampAgentClaimIfUnclaimed(ctx context.Context, q queryer, orgID, taskID, a
 		   SET claimed_by_agent_id = $1,
 		       team_id = COALESCE(NULLIF($4, '')::uuid, team_id),
 		       snooze_until = NULL,
-		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		       status = `+pgClaimStageExpr+`
 		 WHERE org_id = $2 AND id = $3
 		   AND claimed_by_user_id IS NULL
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != $1)
@@ -1196,7 +1211,7 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 		             ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC LIMIT 1),
 		           team_id),
 		       snooze_until = NULL,
-		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		       status = `+pgClaimStageExpr+`
 		 WHERE org_id = $2 AND id = $3
 		   AND (claimed_by_user_id  IS NULL OR claimed_by_user_id  = $4)
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != $1)
@@ -1285,7 +1300,7 @@ func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, u
 		       claimed_by_agent_id = NULL,
 		       team_id = `+pgActingTeamExpr+`,
 		       snooze_until = NULL,
-		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		       status = `+pgClaimStageExpr+`
 		 WHERE org_id = $2 AND id = $3
 		   AND claimed_by_agent_id IS NOT NULL
 		   AND claimed_by_user_id  IS NULL
@@ -1310,7 +1325,7 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 		   SET claimed_by_user_id = $1,
 		       team_id = `+pgActingTeamExpr+`,
 		       snooze_until = NULL,
-		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		       status = `+pgClaimStageExpr+`
 		 WHERE org_id = $2 AND id = $3
 		   AND status IN ('queued', 'snoozed')
 		   AND claimed_by_user_id  IS NULL
@@ -1356,8 +1371,7 @@ func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUser
 		UPDATE tasks
 		   SET claimed_by_user_id = $1,
 		       team_id = `+pgActingTeamExpr+`,
-		       snooze_until = NULL,
-		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		       snooze_until = NULL
 		 WHERE org_id = $2 AND id = $3
 		   AND claimed_by_user_id = $4
 		   AND status NOT IN ('done', 'dismissed')

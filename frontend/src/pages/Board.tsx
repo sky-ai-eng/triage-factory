@@ -27,7 +27,7 @@ import {
   TASK_LIST_PATH,
   doneListBody,
   facetsBody,
-  queuedLaneBody,
+  queueListBody,
   statusListBody,
   type TaskFacetsResponse,
   type TaskListRequest,
@@ -535,7 +535,7 @@ export default function Board() {
     const fields = laneFilterFields(filtersRef.current[col])
     switch (col) {
       case 'queued':
-        return queuedLaneBody(tf, showSnoozedRef.current, fields)
+        return queueListBody(tf, showSnoozedRef.current, fields)
       case 'in_progress':
         return statusListBody('in_progress', tf, fields)
       case 'done':
@@ -962,9 +962,9 @@ export default function Board() {
 
   // A status write on the task. Complete (drag-to-Done from In Progress)
   // keeps the card in Done; dismiss (drag-to-Done from Queued) closes it
-  // unworked; in_progress is the human's one stage marker. Ending the task
-  // force-resolves every unresolved artifact server-side and cancels a live
-  // conversation; we only confirm first.
+  // unworked; in_progress is how a card comes back out of Done. Ending the
+  // task force-resolves every unresolved artifact server-side and cancels a
+  // live conversation; we only confirm first.
   const patchStatus = useCallback(
     async (taskId: string, status: 'done' | 'dismissed' | 'in_progress', failure: string) => {
       try {
@@ -1216,14 +1216,14 @@ export default function Board() {
           await fireEnd(taskId, 'dismiss')
           return
         }
-        // Queued → In Progress: the human's one stage marker. Claim first —
-        // idempotent when the caller already holds it — then advance.
+        // Queued → In Progress: the drag is a claim, and the claim is what
+        // moves the card — the server lands the row in progress in the same
+        // write. Idempotent when the caller already holds it.
         await apiFetch(`/api/tasks/${taskId}/claim`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({}),
         })
-        await patchStatus(taskId, 'in_progress', 'Could not start the task.')
         return
       }
 

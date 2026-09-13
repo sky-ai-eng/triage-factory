@@ -48,10 +48,10 @@ type taskJSON struct {
 	PriorityReasoning   string   `json:"priority_reasoning,omitempty"`
 	CloseReason         string   `json:"close_reason,omitempty"`
 	// SnoozeUntil — populated when the task is in a snoozed state.
-	// Under the "snoozed ↔ unclaimed" invariant,
-	// this is only ever set on queue-lane tasks. Any claim-axis
+	// A snoozed task holds no claim (the tasks_queue_unclaimed CHECK),
+	// so this is only ever set on queue-lane tasks. Any claim-axis
 	// transition wakes the task atomically (clears snooze_until +
-	// flips status='snoozed' → 'queued'), so claimed cards on the
+	// lands the row in_progress), so claimed cards on the
 	// Board never carry a snooze. The Cards triage view renders
 	// future-snoozed entries hidden via the TaskListFilter status filter;
 	// the Board's Queue lane could optionally render them at the
@@ -860,8 +860,9 @@ func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // Task status vocabulary, split by who owns each write. Terminal statuses
-// close a task; in_progress is the stage marker — set once by the spawner
-// when a delegation is minted, or by hand by the user holding the claim.
+// close a task; in_progress is where a claim lands a task, written by the
+// claim doors themselves — assigning work, to a person or to the bot, is what
+// starts it.
 const (
 	taskStatusQueued     = "queued"
 	taskStatusInProgress = "in_progress"
@@ -1179,11 +1180,12 @@ func (s *Server) patchWake(w http.ResponseWriter, r *http.Request, orgID, userID
 	return true
 }
 
-// patchStage sets the user's own progress marker — "I'm working on this now".
-// It requires the caller to hold the user claim: a bot-claimed task is placed
-// in_progress once by the spawner when its delegation is minted and is not a
-// person's to stage, and an unclaimed one has nobody whose progress this
-// would be.
+// patchStage re-asserts that the caller is working on this task. It requires
+// the caller to hold the user claim: a bot-claimed task is not a person's to
+// stage, and an unclaimed one has nobody whose progress this would be. Holding
+// a claim already means in progress, so this is idempotent by construction —
+// the route stays because "in_progress" is a status a headless caller may
+// legitimately PATCH, and the guards are what make it safe.
 func (s *Server) patchStage(w http.ResponseWriter, r *http.Request, orgID, userID, id string, task *domain.Task, status string) bool {
 	if task.ClaimedByUserID != userID {
 		forbidden(w, "only the user holding this task's claim can move it to in_progress")

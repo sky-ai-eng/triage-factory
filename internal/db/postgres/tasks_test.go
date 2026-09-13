@@ -359,6 +359,12 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 		if got.ClaimedByAgentID != "" {
 			t.Errorf("ClaimedByAgentID=%q, want empty after reassign", got.ClaimedByAgentID)
 		}
+		// A reassign moves the claim and nothing else: the row is already in
+		// progress because it is already held, so the handoff has no stage to
+		// write.
+		if got.Status != "in_progress" {
+			t.Errorf("status=%q, want in_progress untouched by the handoff", got.Status)
+		}
 		// The claim already moved to userB — a second reassign expecting
 		// userA as the "from" claimant must now be refused (stale CAS
 		// expectation), and the successful reassign above must survive.

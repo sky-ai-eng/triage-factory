@@ -20,13 +20,13 @@ import (
 // The task verb routes: claim, delegate, requeue and undo. Each earns its
 // verb by carrying an effect a field write can't express — an external Jira
 // write, a spawned run, artifact teardown, an audit reversal. The lifecycle
-// axis (dismissed / done / snoozed / the user's own stage markers) is a field
-// write and lives on PATCH /api/tasks/{id} in tasks.go; requeue and undo live
-// there too, next to the finalizer they share.
+// axis (dismissed / done / snoozed) is a field write and lives on
+// PATCH /api/tasks/{id} in tasks.go; requeue and undo live there too, next to
+// the finalizer they share.
 //
-// Delegate is the one verb here that also moves a column: the spawner places
-// the task in_progress when it mints the blueprint run, and nothing the run
-// does afterwards moves it again.
+// Claim and delegate both move a column, and by the same mechanism: assigning
+// a task is what lands it in_progress, so the claim doors write the stage in
+// the same UPDATE. Nothing the run does afterwards moves it again.
 //
 // swipe_events is a "state-change log," not a "user-gesture log." For
 // lifecycle actions the write IS the state change, so the audit + lifecycle
@@ -53,9 +53,11 @@ type taskClaimRequest struct {
 }
 
 // handleTaskClaim moves a task's user claim. Self-claim (no target) takes
-// ownership for the caller, tears down whatever the agent had in flight, and
-// syncs a Jira-backed ticket to the caller. Handoff (a target) moves an
-// existing user claim to someone else and deliberately touches neither.
+// ownership for the caller, lands the task in progress, tears down whatever
+// the agent had in flight, and syncs a Jira-backed ticket to the caller.
+// Handoff (a target) moves an existing user claim to someone else and
+// deliberately touches neither — nor the stage, since the row the handoff
+// starts from is already in progress.
 //
 // POST /api/tasks/{id}/claim
 func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
@@ -152,7 +154,9 @@ const (
 // selfClaim is the claim route's no-target arm: a race-safe transition to the
 // caller's ownership with three accept paths (idempotent same-user, takeover
 // from bot, claim from unclaimed) and one refuse path (different user owns it
-// → 409). For a Jira-backed task it resolves the acting user's Jira client up
+// → 409). Both landing paths put the task in progress in the same UPDATE that
+// writes the claim — the claim IS the stage marker, so the queue holds nobody's
+// work. For a Jira-backed task it resolves the acting user's Jira client up
 // front so a user with no connected Jira is refused BEFORE the claim lands
 // (acting as the bot here would mis-assign the ticket to the service account).
 // Returns the resolved Jira client (nil for GitHub tasks), which accept path
@@ -254,8 +258,8 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 	}
 
 	// Audit post-mutation, best-effort: the claim helpers already cleared
-	// snooze_until and flipped status atomically, so RecordSwipe is a no-op on
-	// lifecycle and the load-bearing effect is the swipe_events row. If it
+	// snooze_until and landed the row in_progress atomically, so RecordSwipe is
+	// a no-op on lifecycle and the load-bearing effect is the swipe_events row. If it
 	// doesn't land — an insert failure, or the task closing under us, which
 	// RecordSwipe's own status predicate refuses — the claim still landed, so
 	// log and continue rather than 500-ing on a committed state change.
