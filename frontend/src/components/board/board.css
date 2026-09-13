@@ -1,0 +1,107 @@
+/* The lane strip and its columns. Reasoning in Board.tsx and BoardColumn.tsx;
+   geometry here. */
+
+/* Mount reveal: bodyEase — 340ms on cubic-bezier(.22,1,.36,1) — staggered
+   50ms down the row. fill-mode is BACKWARDS and must stay that way: a
+   transform left standing on a column makes it the containing block, and an
+   open assignee picker could then no longer lift its card over the scrim.
+   The stagger index rides down as an inherited custom property rather than
+   via :nth-child on the animated element, so a lane and a rail stagger alike
+   whatever wraps them. */
+@keyframes bc-colin {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.bc-strip > *:nth-child(1) {
+  --bc-i: 0;
+}
+.bc-strip > *:nth-child(2) {
+  --bc-i: 1;
+}
+.bc-strip > *:nth-child(3) {
+  --bc-i: 2;
+}
+.bc-strip > *:nth-child(4) {
+  --bc-i: 3;
+}
+.bc-strip > *:nth-child(5) {
+  --bc-i: 4;
+}
+.bc-col,
+.bc-rail {
+  animation: bc-colin 0.34s var(--ease-default) backwards;
+  animation-delay: calc(var(--bc-i, 0) * 0.05s);
+}
+
+/* The strip's edge fades, painted OVER the lane rather than masked out of it.
+   A mask promotes the masked element to its own composited layer, which the
+   browser rasterizes once and then scales — so under zoom every glyph behind
+   it goes soft. Two gradient overlays give the identical picture against a
+   flat ground and touch no layer the text lives in. Opacity is written per
+   side from how much is left to scroll, so an edge with nothing past it wears
+   no gradient. */
+.bc-fade {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40px;
+  z-index: 2;
+  pointer-events: none;
+}
+.bc-fade-l {
+  left: 0;
+  background: linear-gradient(to right, var(--color-ground), transparent);
+}
+.bc-fade-r {
+  right: 0;
+  background: linear-gradient(to left, var(--color-ground), transparent);
+}
+
+/* The same rule, vertically, for a column's card area: cards emerge from
+   under the masthead through a short top fade and melt into the page through
+   a deeper bottom one. */
+.bc-vfade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+.bc-vfade-t {
+  top: 0;
+  height: 8px;
+  background: linear-gradient(to bottom, var(--color-ground), transparent);
+}
+.bc-vfade-b {
+  bottom: 0;
+  height: 44px;
+  background: linear-gradient(to top, var(--color-ground), transparent);
+}
+
+/* Tooltips are noise mid-drag: the reader is aiming at a lane, not reading
+   about a card — and a hint left open on a title follows the lifted card
+   around. The board root carries the class for the length of a drag, and the
+   rule reaches the whole page from the body rather than from that root: the
+   lifted card is the drag overlay, a sibling of the root, and its own title
+   sits under the pointer for the entire drag — a hint scoped to the root
+   would leave exactly that one showing. Same construction as the scrim's
+   rule in assignee-picker.css. */
+body:has(.bc-dragging) .tip {
+  display: none !important;
+}
+/* The hand that took the card keeps it. The cursor is whatever sits under the
+   pointer, and under the pointer for the whole drag is the lifted card — a
+   link title, running text, a button, each asking for its own — so without
+   this the hand flips to an arrow, an I-beam or a finger as the card moves.
+   One cursor from the body down for the length of the drag, over every
+   element's own, the inline `grab` on the resting card included. */
+body:has(.bc-dragging),
+body:has(.bc-dragging) * {
+  cursor: grabbing !important;
+}

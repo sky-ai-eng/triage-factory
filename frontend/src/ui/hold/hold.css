@@ -16,8 +16,8 @@
     color 0.12s linear;
   font: 400 11px/1 var(--font-sans);
   cursor: pointer;
-  user-select: none;
   -webkit-user-select: none;
+  user-select: none;
   touch-action: none;
   text-align: center;
   --hatch-ink: color-mix(in srgb, var(--color-warm) 46%, transparent);

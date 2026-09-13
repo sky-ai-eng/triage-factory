@@ -21,6 +21,7 @@ import {
 } from 'lucide-react'
 import EventBadge from '../EventBadge'
 import { bodyEase } from '../../pages/setup/glassStyle'
+import './board.css'
 import {
   emptyLaneFilter,
   filterIsActive,
@@ -84,13 +85,6 @@ const FADE_LAYERS = Array.from({ length: FADE_N }, (_, k) => {
   return { length: 2 * ARM * t, opacity: 0.46 * (1 - t) + 0.07 }
 })
 
-// The card scroll area dissolves its cards into the page at top + bottom rather
-// than hard-cutting them — a tall column melts its overflow into the field the
-// same way the board's horizontal scroll fades at its edges. A small top fade
-// (cards emerge from under the masthead) + a deeper bottom fade.
-const CARD_FADE_MASK =
-  'linear-gradient(to bottom, transparent 0, #000 8px, #000 calc(100% - 44px), transparent 100%)'
-
 // How close to the loaded end the reader has to come before the next page is
 // asked for, in screens of the card area. Two: far enough that the page lands
 // before the reader reaches the end, near enough that a lane nobody scrolls
@@ -146,8 +140,6 @@ interface Props {
   // Optional snoozed toggle (Queued only) — surfaced inside the filter panel
   // rather than as a button stacked on the column.
   snooze?: { shown: boolean; onToggle: () => void }
-  // Position in the row (0-based) — drives the staggered mount reveal.
-  index?: number
   // True when a drag is currently over this column or any of its cards
   // (resolved at the board level). Fires the border-trace + brightens it.
   dragOver?: boolean
@@ -165,7 +157,6 @@ export default function BoardColumn({
   paging,
   headerExtra,
   snooze,
-  index = 0,
   dragOver = false,
   onCollapse,
   children,
@@ -238,15 +229,16 @@ export default function BoardColumn({
 
   const hasFilters = filterIsActive(filter)
 
-  // Fixed 430px width (keep in sync with COL_W in Board.tsx, which
+  // Fixed 360px width (keep in sync with COL_W in Board.tsx, which
   // computes the centered-lane layout). Fixed, not viewport-relative, so cards
-  // don't compress as columns scroll into view.
+  // don't compress as columns scroll into view. The mount reveal is board.css's
+  // keyframe with a backwards fill, and the stagger index rides in as --bc-i
+  // from the strip: a transform left standing on the column would make it the
+  // containing block, and an open assignee picker could no longer lift its
+  // card above the scrim.
   return (
-    <motion.div
-      className="flex h-full w-[430px] shrink-0 flex-col"
-      initial={reduce ? false : { opacity: 0, y: 14 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={reduce ? { duration: 0 } : { ...bodyEase, delay: index * 0.05 }}
+    <div
+      className="bc-col flex h-full w-[360px] shrink-0 flex-col"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
@@ -344,18 +336,21 @@ export default function BoardColumn({
           </motion.div>
         </div>
 
-        {/* Cards scroll independently below the masthead; the mask melts the
-            overflow into the page at top + bottom instead of a hard cutoff. */}
-        <div
-          ref={cardsRef}
-          onScroll={(e) => {
-            if (hasMore && !loading && nearEnd(e.currentTarget)) onNearEnd()
-          }}
-          className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3 pt-1"
-          style={{ maskImage: CARD_FADE_MASK, WebkitMaskImage: CARD_FADE_MASK }}
-        >
-          {children}
-          {/* The tail states what is on screen against what the query
+        {/* Cards scroll independently below the masthead. The two fades melt
+            the overflow into the page at top + bottom instead of a hard
+            cutoff — painted over the area, never a mask on it (board.css). */}
+        <div className="relative min-h-0 flex-1">
+          <span aria-hidden className="bc-vfade bc-vfade-t" />
+          <span aria-hidden className="bc-vfade bc-vfade-b" />
+          <div
+            ref={cardsRef}
+            onScroll={(e) => {
+              if (hasMore && !loading && nearEnd(e.currentTarget)) onNearEnd()
+            }}
+            className="h-full space-y-3 overflow-y-auto px-3 pb-3 pt-1"
+          >
+            {children}
+            {/* The tail states what is on screen against what the query
               matches, and both halves answer the same query — so a search
               reads "2 of 6" rather than counting a filtered page against an
               unfiltered lane. Passive: the next page arrives by scrolling. A
@@ -363,11 +358,12 @@ export default function BoardColumn({
               is all there is", which is the failure the list contract exists
               to prevent. A null total is a list that cannot count itself;
               it says nothing rather than "of 0". */}
-          {paging.total !== null && paging.shown < paging.total && (
-            <p className="pb-1 pt-2 text-center font-mono text-reported tabular-nums text-ink-3">
-              {paging.shown} of {paging.total}
-            </p>
-          )}
+            {paging.total !== null && paging.shown < paging.total && (
+              <p className="pb-1 pt-2 text-center font-mono text-reported tabular-nums text-ink-3">
+                {paging.shown} of {paging.total}
+              </p>
+            )}
+          </div>
         </div>
 
         {/* The rust L-bracket — concentric fading dashes (see TraceLayer). At
@@ -388,7 +384,7 @@ export default function BoardColumn({
           ))}
         </svg>
       </div>
-    </motion.div>
+    </div>
   )
 }
 
@@ -433,28 +429,23 @@ function TraceLayer({
 export function CollapsedColumn({
   title,
   count,
-  index = 0,
   onExpand,
 }: {
   title: string
   count: number
-  index?: number
   onExpand: () => void
 }) {
   const reduce = !!useReducedMotion()
   const [hovered, setHovered] = useState(false)
   return (
-    <motion.button
+    <button
       type="button"
       aria-label={`Expand ${title}`}
       title={`Expand ${title}`}
       onClick={onExpand}
-      onHoverStart={() => setHovered(true)}
-      onHoverEnd={() => setHovered(false)}
-      className="group flex h-full w-5 shrink-0 cursor-pointer flex-col items-center justify-center gap-3 text-ink-3"
-      initial={reduce ? false : { opacity: 0, y: 14 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={reduce ? { duration: 0 } : { ...bodyEase, delay: index * 0.05 }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      className="bc-rail group flex h-full w-5 shrink-0 cursor-pointer flex-col items-center justify-center gap-3 text-ink-3"
     >
       <ChevronDown size={15} className="opacity-60 transition-opacity group-hover:opacity-100" />
       <motion.div
@@ -482,7 +473,7 @@ export function CollapsedColumn({
         </span>
       </motion.div>
       <ChevronUp size={15} className="opacity-60 transition-opacity group-hover:opacity-100" />
-    </motion.button>
+    </button>
   )
 }
 

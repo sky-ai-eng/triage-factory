@@ -10,8 +10,8 @@
   /* The page stays legible behind it: this is a question about what you are
      looking at, so hiding it would be the wrong kind of modal. */
   background: color-mix(in srgb, var(--color-sunk) 62%, transparent);
-  backdrop-filter: blur(2px) saturate(0.7);
   -webkit-backdrop-filter: blur(2px) saturate(0.7);
+  backdrop-filter: blur(2px) saturate(0.7);
   animation: dlg-fade 0.12s linear;
 }
 
