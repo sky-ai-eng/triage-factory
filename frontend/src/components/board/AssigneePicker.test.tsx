@@ -171,4 +171,36 @@ describe('AssigneePicker', () => {
     expect(mark).toHaveTextContent('PR')
     expect(screen.queryByRole('listbox')).toBeNull()
   })
+
+  it('marks an agent holder even when this team has no bot configured', () => {
+    // Claimed by the agent, but this team has none configured — the fallback
+    // mark still needs a seat in the option list to be shown as held.
+    renderPicker(task({ claimed_by_agent_id: 'a1' }), [ME, PRIYA], null)
+    fireEvent.click(screen.getByRole('button', { name: 'Assigned to Agent' }))
+    expect(screen.getByRole('option', { name: 'Agent' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('marks a user holder who has since left the team roster', () => {
+    renderPicker(task({ claimed_by_user_id: 'ugone' }), [ME, PRIYA], null)
+    fireEvent.click(screen.getByRole('button', { name: 'Assigned to User ugone' }))
+    expect(screen.getByRole('option', { name: 'User ugone' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+  })
+
+  it('only wires remeasure listeners while the menu is open', () => {
+    const addSpy = vi.spyOn(window, 'addEventListener')
+    renderPicker(task())
+    expect(addSpy).not.toHaveBeenCalledWith('resize', expect.any(Function))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unassigned' }))
+    expect(addSpy).toHaveBeenCalledWith('resize', expect.any(Function))
+
+    const removeSpy = vi.spyOn(window, 'removeEventListener')
+    fireEvent.keyDown(document.querySelector('.assign')!, { key: 'Escape' })
+    expect(removeSpy).toHaveBeenCalledWith('resize', expect.any(Function))
+    addSpy.mockRestore()
+    removeSpy.mockRestore()
+  })
 })

@@ -242,21 +242,37 @@ export default function AssigneePicker({
       kind: 'user',
     })
   }
+  // Who holds it, as the mark and the marked row. The holder must be a
+  // roster entry, not just a value compared against one: an agent claim with
+  // no bot configured for this team, or a user who has left it, names
+  // someone the loops above never added, and a fallback entry that isn't in
+  // `roster` can't appear in `list` — the holder's row would be unmarked or
+  // simply absent rather than inert.
+  let holder: Entry | null = null
+  if (task.claimed_by_agent_id) {
+    holder = roster.find((e) => e.kind === 'agent') ?? null
+    if (!holder) {
+      holder = { key: 'agent', name: 'Agent', kind: 'agent' }
+      roster.unshift(holder)
+    }
+  } else if (task.claimed_by_user_id) {
+    if (task.claimed_by_user_id === currentUserID && currentUserID !== '') {
+      holder = roster.find((e) => e.kind === 'me')!
+    } else {
+      holder = roster.find((e) => e.key === task.claimed_by_user_id) ?? null
+      if (!holder) {
+        holder = {
+          key: task.claimed_by_user_id,
+          name: 'User ' + task.claimed_by_user_id.slice(0, 8),
+          kind: 'user',
+        }
+        roster.push(holder)
+      }
+    }
+  }
+
   roster.push(UNASSIGN)
   const defaults = [...roster.slice(0, SHOWN - 1), UNASSIGN]
-
-  // Who holds it, as the mark and the marked row.
-  const holder: Entry | null = task.claimed_by_agent_id
-    ? (roster.find((e) => e.kind === 'agent') ?? { key: 'agent', name: 'Agent', kind: 'agent' })
-    : task.claimed_by_user_id
-      ? task.claimed_by_user_id === currentUserID && currentUserID !== ''
-        ? roster.find((e) => e.kind === 'me')!
-        : (roster.find((e) => e.key === task.claimed_by_user_id) ?? {
-            key: task.claimed_by_user_id,
-            name: 'User ' + task.claimed_by_user_id.slice(0, 8),
-            kind: 'user',
-          })
-      : null
 
   const { list, rest, browse } = rank(roster, q, defaults)
 
@@ -361,6 +377,12 @@ export default function AssigneePicker({
   })
 
   useEffect(() => {
+    // A card's picker only needs to know about the outside world while its
+    // own menu is up — closed, there is nothing on screen to keep aligned.
+    // Wiring these unconditionally means one resize listener and one
+    // ResizeObserver per card on the board, all firing on every scroll,
+    // whether or not that card's picker has ever been opened.
+    if (!open) return
     const remeasure = () => {
       placePicker()
       chooseSide()
@@ -387,7 +409,7 @@ export default function AssigneePicker({
       document.removeEventListener('scroll', remeasure, true)
       ro?.disconnect()
     }
-  }, [sizeStem, chooseSide, placePicker])
+  }, [open, sizeStem, chooseSide, placePicker])
 
   // Closing returns the focus it took. Without this, dismissing with Escape
   // leaves the tab ring on a button that is now invisible, and the next Tab
