@@ -621,30 +621,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 
 	sink := newConversationSink(s, orgID, conversationID, cfg.claimID, triggerType, creatorUserID)
 
-	// The conversation's opening rows, minted through the sink's own insert door
-	// and assembled into the blocks of the agent's first user message. Last
-	// before the launch, so the rows a crashed bring-up leaves behind are the
-	// rows of a conversation that really was about to speak.
-	openingBlocks, err := s.openingTurnBlocks(ctx, sink, orgID, conversationID, creatorUserID, taskMemories, taskContext)
-	if err != nil {
-		if errors.Is(err, db.ErrClaimReleased) {
-			// Fenced out before the first turn: a successor owns the
-			// conversation, and every row this engagement still wrote would
-			// interleave with its. Nothing to record, nothing to kill.
-			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "conversation", conversationID, "claim", cfg.claimID)
-			parked = true
-			return true
-		}
-		return fail("failed to open the conversation: "+err.Error(), domain.ConversationFailureUnclassified)
-	}
-
 	delegateLog.Info("claude starting for conversation", "conversation", conversationID, "cwd", claudeCwd)
 	baseOpts := agentproc.RunOptions{
 		Cwd:            claudeCwd,
 		Model:          model,
 		PermissionMode: s.resolveSDKPermissionMode(ctx, teamID),
 		SessionID:      resumeSession,
-		OpeningBlocks:  openingBlocks,
 		// The gh subcommands are granted only when the channel is actually
 		// live: without one, `gh` on a local host would resolve to the user's
 		// own installation under the user's own auth, so the allowlist must
@@ -693,6 +675,22 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// Local mount namespace. nil in multi mode (the gVisor jail is the
 		// isolation there) and whenever the operator opted out.
 		LocalSandbox: localSbx.runSpec(),
+	}
+
+	// The first user message this launch sends, composed onto the options and
+	// recorded through the sink's own insert door. Last before the launch, so
+	// the rows a crashed bring-up leaves behind are the rows of a conversation
+	// that really was about to speak.
+	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, taskMemories, taskContext); err != nil {
+		if errors.Is(err, db.ErrClaimReleased) {
+			// Fenced out before the first turn: a successor owns the
+			// conversation, and every row this engagement still wrote would
+			// interleave with its. Nothing to record, nothing to kill.
+			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "conversation", conversationID, "claim", cfg.claimID)
+			parked = true
+			return true
+		}
+		return fail("failed to open the conversation: "+err.Error(), domain.ConversationFailureUnclassified)
 	}
 
 	// Off-allowlist tool calls route to one of two dispositions, chosen once
@@ -802,6 +800,59 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	return fail("agent runtime exited cleanly without producing a result event", domain.ConversationFailureNoResult)
 }
 
+// composeLaunchTurn puts the launch's first user message on opts and records
+// it on the transcript. Exactly one of opts.OpeningBlocks and opts.Message is
+// set; the SDK sends whichever it finds.
+//
+// The fork is opts.SessionID, which is the same value that becomes `--resume`,
+// so what the agent is sent cannot disagree with what it loads. A resumed
+// session holds the opening and every turn taken on it, and re-sending the
+// opening over the top of that would read as a second briefing and restart the
+// mission — so it gets the continuation note instead, which says the one thing
+// the session cannot: the process it is talking to is a new one. A launch with
+// no session to resume has a model that knows nothing, and gets the opening.
+func (s *Spawner) composeLaunchTurn(
+	ctx context.Context,
+	opts *agentproc.RunOptions,
+	sink *conversationSink,
+	orgID, conversationID, creatorUserID string,
+	memories []domain.TaskMemory,
+	taskContext string,
+) error {
+	if opts.SessionID != "" {
+		if err := s.recordContinuationNote(sink, conversationID, creatorUserID); err != nil {
+			return err
+		}
+		opts.Message = domain.SessionContinuationNote
+		return nil
+	}
+	blocks, err := s.openingTurnBlocks(ctx, sink, orgID, conversationID, creatorUserID, memories, taskContext)
+	if err != nil {
+		return err
+	}
+	opts.OpeningBlocks = blocks
+	return nil
+}
+
+// recordContinuationNote writes the note a resuming launch sends, through the
+// same door the rest of the engagement's rows go through.
+//
+// Delivered, not pending: an undelivered user row is the SDK's resume queue,
+// so a note left there would come back at the next claim as a follow-up
+// nobody typed. The row exists so the transcript shows what was actually sent
+// — the session file is the model's copy, and nothing else here reads it.
+func (s *Spawner) recordContinuationNote(sink *conversationSink, conversationID, creatorUserID string) error {
+	delivered := true
+	return sink.OnMessage(&domain.Message{
+		ConversationID: conversationID,
+		UserID:         creatorUserID,
+		Role:           "user",
+		Subtype:        domain.MessageSubtypeInjectionNudge,
+		Content:        domain.SessionContinuationNote,
+		Delivered:      &delivered,
+	})
+}
+
 // openingTurnBlocks mints the SDK conversation's opening rows and assembles
 // them into the content blocks of its first user message.
 //
@@ -812,10 +863,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // one assembler both runtimes send through.
 //
 // A conversation that is already open mints nothing and sends the rows it
-// already has. That is the crash re-claim with a surviving session: the SDK
-// process is new even when the session it resumes is not, so it is told what
-// its predecessor was told rather than being left to infer the task from a
-// transcript it cannot see.
+// already has. That is a launch whose model has none of them: a re-claim with
+// no session to resume starts an SDK process that knows nothing, on a
+// transcript whose opening was minted by the engagement that died.
 func (s *Spawner) openingTurnBlocks(ctx context.Context, sink *conversationSink, orgID, conversationID, creatorUserID string, memories []domain.TaskMemory, taskContext string) ([]agentproc.ContentBlock, error) {
 	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 	if err != nil {
