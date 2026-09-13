@@ -231,9 +231,9 @@ const (
 	// and flips inactive with the span it asked to compact.
 	MessageSubtypeInjectionCompactionRequest = "injection:compaction-request"
 	// MessageSubtypeInjectionCompactionResult marks the machine-composed row
-	// that replaces a compacted span: the preamble, the re-injected original
-	// request (unanchored conversations), and the summary. The only
-	// compaction text that stays in the active window.
+	// that replaces a compacted span: the preamble and the summary, and
+	// nothing else. The only compaction text that stays in the active
+	// window.
 	MessageSubtypeInjectionCompactionResult = "injection:compaction-result"
 	// MessageSubtypeInjectionMemory marks one prior conversation's memory,
 	// injected into a new conversation's opening rows so the handoff is in
@@ -246,9 +246,8 @@ const (
 	// MessageSubtypeInjectionTaskContext marks the rendered <task_context>
 	// row that closes a conversation's opening rows. It is externally
 	// authored text, which is why it is a user row rather than part of the
-	// instruction channel, and its own subtype is what lets compaction skip
-	// it as a candidate <original_request> and what the row-counting gates
-	// ask for when they answer "has this conversation started?".
+	// instruction channel, and its own subtype is what the row-counting
+	// gates ask for when they answer "has this conversation started?".
 	MessageSubtypeInjectionTaskContext = "injection:task-context"
 	// MessageSubtypeStopNote marks a delivered row recording why an
 	// engagement stopped — a guard park, an unrecoverable provider error.

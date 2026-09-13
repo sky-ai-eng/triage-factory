@@ -115,11 +115,11 @@ func TestWarmCompaction_TripsCommitsAndOrdersQueue(t *testing.T) {
 	if !strings.Contains(resultRow.Content, "everything that happened") {
 		t.Errorf("result row content = %q, want the summary", resultRow.Content)
 	}
-	// This conversation's opening IS a plain human message, so the result row
-	// carries it verbatim — that is what replaced the pin for the shape the pin
-	// was never for.
-	if !strings.Contains(resultRow.Content, "<original_request>\nthe mission\n</original_request>") {
-		t.Errorf("result row = %q, want the opening human message carried verbatim", resultRow.Content)
+	// Nothing is re-injected verbatim, not even the opening human message:
+	// the result row is the preamble and the summary, and the summary is what
+	// carries the request.
+	if strings.Contains(resultRow.Content, "<original_request>") || strings.Contains(resultRow.Content, "the mission") {
+		t.Errorf("result row = %q, want no verbatim re-injection of the opening", resultRow.Content)
 	}
 
 	// Ordering: the queued row was re-seqed after the result row and
@@ -347,56 +347,35 @@ func TestWarmCompactionFailure_NoSummaryHandsOff(t *testing.T) {
 	}
 }
 
-// TestCompaction_ReinjectsTheOpeningHumanMessage covers the shape the
-// re-injection was written for — a conversation a person opened by asking for
-// something. Nothing is pinned, and that message survives mechanically in the
-// result row instead, capped when enormous.
-func TestCompaction_ReinjectsTheOpeningHumanMessage(t *testing.T) {
-	t.Run("verbatim under the cap", func(t *testing.T) {
-		tr := newMemTranscript(
-			domain.Message{Role: "user", Content: "please build me the widget"},
-			usedAssistant("worked", overThreshold, time.Now().UTC()),
-		)
-		provider := &scriptedProvider{turns: []scriptedTurn{summaryReply("did widget things"), {text: "done"}}}
-		engine := newTestEngine(tr, provider, newScriptedToolHost())
-		params := testParams()
+// TestCompaction_ResultRowIsPreambleAndSummaryOnly takes the one shape whose
+// whole statement of purpose is a human message — a conversation somebody
+// opened by asking for something. That row compacts like any other, and the
+// row that replaces the span is the preamble and the summary, byte for byte:
+// the summary is the only thing that states the request.
+func TestCompaction_ResultRowIsPreambleAndSummaryOnly(t *testing.T) {
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Content: "please build me the widget"},
+		usedAssistant("worked", overThreshold, time.Now().UTC()),
+	)
+	provider := &scriptedProvider{turns: []scriptedTurn{summaryReply("did widget things"), {text: "done"}}}
+	engine := newTestEngine(tr, provider, newScriptedToolHost())
 
-		if result := engine.Run(context.Background(), params); result.Kind != ResultConcluded {
-			t.Fatalf("result = %+v, want concluded", result)
-		}
-		opening := tr.find(func(m domain.Message) bool {
-			return strings.Contains(m.Content, "build me the widget") && m.Subtype == ""
-		})
-		if opening == nil || opening.WindowState != domain.MessageWindowInactive {
-			t.Fatalf("opening = %+v, want compacted like everything else", opening)
-		}
-		resultRow := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionResult })
-		if !strings.Contains(resultRow.Content, "<original_request>\nplease build me the widget\n</original_request>") {
-			t.Fatalf("result row = %q, want the original request re-injected verbatim", resultRow.Content)
-		}
+	if result := engine.Run(context.Background(), testParams()); result.Kind != ResultConcluded {
+		t.Fatalf("result = %+v, want concluded", result)
+	}
+	opening := tr.find(func(m domain.Message) bool {
+		return strings.Contains(m.Content, "build me the widget") && m.Subtype == ""
 	})
-
-	t.Run("capped over 4096 bytes", func(t *testing.T) {
-		huge := strings.Repeat("x", 5000)
-		tr := newMemTranscript(
-			domain.Message{Role: "user", Content: huge},
-			usedAssistant("worked", overThreshold, time.Now().UTC()),
-		)
-		provider := &scriptedProvider{turns: []scriptedTurn{summaryReply("s"), {text: "done"}}}
-		engine := newTestEngine(tr, provider, newScriptedToolHost())
-		params := testParams()
-
-		if result := engine.Run(context.Background(), params); result.Kind != ResultConcluded {
-			t.Fatalf("result = %+v, want concluded", result)
-		}
-		resultRow := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionResult })
-		if strings.Contains(resultRow.Content, huge) {
-			t.Fatal("an over-cap original request was re-injected wholesale")
-		}
-		if !strings.Contains(resultRow.Content, "[truncated — the original message was 5000 bytes") {
-			t.Fatalf("result row = %.120q..., want the truncation note", resultRow.Content)
-		}
-	})
+	if opening == nil || opening.WindowState != domain.MessageWindowInactive {
+		t.Fatalf("opening = %+v, want compacted like everything else", opening)
+	}
+	resultRow := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionResult })
+	if resultRow == nil {
+		t.Fatal("no result row")
+	}
+	if want := compactionPreamble + "\n\n<summary>\ndid widget things\n</summary>"; resultRow.Content != want {
+		t.Errorf("result row = %q, want exactly the preamble and the summary (%q)", resultRow.Content, want)
+	}
 }
 
 // TestReactiveOverflow_CompactsAndRetriesOnce: the provider rejects for
@@ -703,69 +682,37 @@ func TestCompaction_TheMissionSurvivesInTheSystemBlock(t *testing.T) {
 	if !strings.Contains(final.SystemAddendum, mission) {
 		t.Errorf("post-compaction call's system addendum = %q, want the mission intact", final.SystemAddendum)
 	}
-}
-
-// TestOriginalRequest_SkipsWhatTheControlPlaneMinted pins the discriminator
-// that replaced the pin's flag. A row TF composed and inserted on the agent's
-// behalf carries a subtype; only a blank one is somebody asking for something.
-// That is what keeps a delegation's opening — externally-authored task context —
-// out of every post-compaction window structurally, rather than by a parameter
-// each caller has to set correctly.
-func TestOriginalRequest_SkipsWhatTheControlPlaneMinted(t *testing.T) {
-	minted := []domain.Message{
-		{ID: 1, Role: "user", Subtype: domain.MessageSubtypeInjectionNudge, Content: "you have not opened a pull request"},
-		{ID: 2, Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "earlier work, summarized"},
-	}
-	if got, ok := originalRequest(minted); ok {
-		t.Errorf("originalRequest = %q, want none — every row here is TF's own text", got)
-	}
-	if got, ok := originalRequest(append(minted, domain.Message{ID: 3, Role: "user", Content: "please build me the widget"})); !ok || got != "please build me the widget" {
-		t.Errorf("originalRequest = %q (ok=%v), want the one blank-subtype row", got, ok)
+	// The task-context row is not re-injected either: on a delegation the
+	// first blank-subtype row is somebody's follow-up, never the request, so
+	// nothing is copied into the result row at all.
+	resultRow := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionResult })
+	if resultRow == nil || strings.Contains(resultRow.Content, "<original_request>") {
+		t.Errorf("result row = %+v, want no verbatim re-injection", resultRow)
 	}
 }
 
-// TestOriginalRequest_IsNeverQueuedInput keeps input the model has not been
-// shown out of the result row. The rows a compaction sees are the whole
-// assembly window, undelivered ones included — and a queued row survives the
-// commit as live input ordered after the summary, so copying it in here would
-// both misreport it as what the conversation was for and hand the model the
-// same text twice.
-func TestOriginalRequest_IsNeverQueuedInput(t *testing.T) {
-	queued := []domain.Message{
-		{ID: 1, Role: "user", Subtype: domain.MessageSubtypeInjectionNudge, Content: "a notice the loop wrote", Delivered: boolPtr(true)},
-		{ID: 2, Role: "assistant", Content: "working"},
-		{ID: 3, Role: "user", Content: "one more thing while you are in there", Delivered: boolPtr(false)},
+// TestCompactionPrompts_AskTheSummaryToCarryTheRequest is the contract that
+// makes the result row's shape safe: the request reaches a continuation only
+// through the summary, so both prompts require it of every summary, and first
+// — a reader who gets no further than the opening section still learns what
+// the work is for.
+func TestCompactionPrompts_AskTheSummaryToCarryTheRequest(t *testing.T) {
+	if !strings.HasPrefix(compactionSections, "1. Request — ") {
+		t.Errorf("compactionSections opens with %.60q…, want the Request section first", compactionSections)
 	}
-	if got, ok := originalRequest(queued); ok {
-		t.Errorf("originalRequest = %q, want none — the only blank-subtype row is queued input the model has not read", got)
-	}
-
-	// Delivered, and it is the answer.
-	delivered := append([]domain.Message(nil), queued...)
-	delivered[2].Delivered = boolPtr(true)
-	if got, ok := originalRequest(delivered); !ok || got != "one more thing while you are in there" {
-		t.Errorf("originalRequest = %q (ok=%v), want the row once the model has actually seen it", got, ok)
-	}
-}
-
-// TestOriginalRequest_IsNeverASteer keeps a mid-run aside out of every window
-// that follows. A steer is a human row, but it is something said to a
-// conversation already under way — re-injecting one would make the last thing
-// somebody shouted read as the thing the conversation was for.
-func TestOriginalRequest_IsNeverASteer(t *testing.T) {
-	rows := []domain.Message{
-		{ID: 1, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "actually check the flaky test"},
-		{ID: 2, Role: "assistant", Content: "working"},
-		{ID: 3, Role: "user", Content: "please build me the widget"},
-	}
-	got, ok := originalRequest(rows)
-	if !ok || got != "please build me the widget" {
-		t.Errorf("originalRequest = %q (ok=%v), want the blank-subtype row, not the steer ahead of it", got, ok)
-	}
-
-	// A conversation whose only human-looking rows are steers has no original
-	// request at all, rather than borrowing one.
-	if _, ok := originalRequest(rows[:2]); ok {
-		t.Error("a steer was returned as the original request")
+	const instruction = "write the Request section first"
+	for name, prompt := range map[string]string{
+		"warm": warmCompactionRequest,
+		"cold": coldCompactionSystemPrompt,
+	} {
+		if !strings.Contains(prompt, compactionSections) {
+			t.Errorf("%s prompt does not splice in the shared section list", name)
+		}
+		if !strings.Contains(prompt, instruction) {
+			t.Errorf("%s prompt = %q, want the instruction %q", name, prompt, instruction)
+		}
+		if strings.Contains(prompt, "Do not restate the original request") {
+			t.Errorf("%s prompt still tells the model the request is preserved separately", name)
+		}
 	}
 }

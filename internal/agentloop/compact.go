@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/maximhq/bifrost/core/schemas"
 
@@ -27,12 +26,13 @@ import (
 //   - reactive (in the stream error path): a provider context-overflow error
 //     is a compaction trigger, not a run failure.
 //
-// Summary-only replacement, no retained conversational tail: continuity
-// lives in summary fidelity, in mechanical re-injection (the pinned mission
-// opening, or the original request copied into the result row), and in
-// re-derivable working state (the worktree persists). The commit is one
-// fenced store transaction; everything the compactor decides is derived from
-// rows, never kept as engagement state.
+// Summary-only replacement, no retained conversational tail, and nothing
+// re-injected verbatim: continuity lives in summary fidelity — the prompts
+// below require the summary to open by stating what the conversation was
+// asked for — and in what is re-sent or re-derivable regardless (a
+// delegation's mission is a system block on every call; the worktree
+// persists). The commit is one fenced store transaction; everything the
+// compactor decides is derived from rows, never kept as engagement state.
 
 const (
 	// DefaultCompactionThreshold is the fraction of the model's window at
@@ -63,12 +63,6 @@ const (
 	compactionFailNoSummary = "no-parseable-summary"
 	compactionFailUnmapped  = "unmappable-reply"
 )
-
-// originalRequestCap bounds the verbatim re-injection of a taskless
-// conversation's first message into the result row. Beyond it the text is
-// cut (the full row is retained in the compacted history) — re-injecting a
-// pasted log wholesale would rebuild the bloat compaction just shed.
-const originalRequestCap = 4096
 
 // compactionDue reports whether the window is full enough to compact:
 // occupancy at or over the threshold fraction of the model's datasheet
@@ -246,7 +240,7 @@ func (e *Engine) compactWarm(ctx context.Context, params Params) error {
 		return err
 	}
 	span := append(compactionSpan(rows), replyRow.ID)
-	return e.commitCompaction(ctx, params, rows, nil, summary, span)
+	return e.commitCompaction(ctx, params, nil, summary, span)
 }
 
 // compactCold is the forced-shape call: nothing inherited, nothing that can
@@ -320,13 +314,13 @@ func (e *Engine) compactCold(ctx context.Context, params Params) error {
 	}
 
 	span := compactionSpan(rows)
-	return e.commitCompaction(ctx, params, rows, replyRow, summary, span)
+	return e.commitCompaction(ctx, params, replyRow, summary, span)
 }
 
 // commitCompaction composes the result row and commits the whole compaction
 // through the transcript's single fenced transaction.
-func (e *Engine) commitCompaction(ctx context.Context, params Params, rows []domain.Message, replyRow *domain.Message, summary string, span []int) error {
-	resultRow := composeResultRow(params, rows, summary)
+func (e *Engine) commitCompaction(ctx context.Context, params Params, replyRow *domain.Message, summary string, span []int) error {
+	resultRow := composeResultRow(params, summary)
 	if err := e.Transcript.Compact(ctx, params.OrgID, params.ConversationID, replyRow, resultRow, span); err != nil {
 		return fmt.Errorf("commit compaction: %w", err)
 	}
@@ -415,21 +409,13 @@ func extractSummary(text string) (string, bool) {
 }
 
 // composeResultRow builds the machine-composed row that replaces the span —
-// the only compaction text that enters the active window. The summary is the
-// model's; everything around it is mechanical, so a conversation whose whole
-// statement of purpose was one human message can never lose it to a summary
-// that happened not to restate it: that message is carried verbatim right here.
-//
-// A conversation that has no such message gets no such block — a delegation is
-// meant to be that case, since its instruction is in the system prompt and
-// re-sent every turn, and originalRequest below says what still has to change
-// for that to be true of the row it opens with.
-func composeResultRow(params Params, rows []domain.Message, summary string) *domain.Message {
+// the only compaction text that enters the active window. It is the preamble
+// and the summary, nothing else: the summary itself is trusted to state what
+// the conversation was asked for, which is the first section both compaction
+// prompts require of it.
+func composeResultRow(params Params, summary string) *domain.Message {
 	var b strings.Builder
 	b.WriteString(compactionPreamble)
-	if orig, ok := originalRequest(rows); ok {
-		b.WriteString("\n\n<original_request>\n" + orig + "\n</original_request>")
-	}
 	b.WriteString("\n\n<summary>\n" + summary + "\n</summary>")
 	return &domain.Message{
 		ConversationID: params.ConversationID,
@@ -441,43 +427,6 @@ func composeResultRow(params Params, rows []domain.Message, summary string) *dom
 		// otherwise fail the fenced commit's insert on Postgres.
 		Content: sanitizeForStore(b.String()),
 	}
-}
-
-// originalRequest returns the conversation's opening human message, capped —
-// content is retained on the inactive row either way, so the cut loses nothing
-// recoverable.
-//
-// Two conditions, and each rules out a different way of picking the wrong row.
-//
-// A blank subtype, narrower than IsHumanInput deliberately: a steer is a human
-// row too, but it is something said to a conversation already under way, so
-// admitting one would let a mid-run aside be re-injected into every window
-// afterwards as the thing the conversation was for. The same test is what a
-// control-plane-minted opening is meant to fail, by carrying a subtype of its
-// own rather than by a flag each caller has to set correctly.
-//
-// And delivered, because the rows here are the whole assembly window,
-// undelivered ones included (Transcript.ListForAssembly). A queued row is input
-// the model has not been shown yet; it survives the compaction as live input
-// ordered after the result row, so copying it in here would both put words in
-// the conversation's mouth that were never its request and show the model the
-// same text twice.
-func originalRequest(rows []domain.Message) (string, bool) {
-	for _, r := range rows {
-		if r.Role != "user" || r.Subtype != "" || !isDelivered(r) {
-			continue
-		}
-		text := r.Content
-		if len(text) > originalRequestCap {
-			cut := originalRequestCap
-			for cut > 0 && !utf8.RuneStart(text[cut]) {
-				cut--
-			}
-			text = text[:cut] + fmt.Sprintf("\n[truncated — the original message was %d bytes; the full text remains in the compacted history]", len(r.Content))
-		}
-		return text, true
-	}
-	return "", false
 }
 
 // canonicalCompactionArtifact renders the forced-shape call's output in the
@@ -580,14 +529,15 @@ func parseForcedCompaction(completion *inference.Completion) (analysis, summary 
 
 // compactionSections is the summary's section contract, shared verbatim by
 // both prompts so the two paths produce the same document.
-const compactionSections = `1. Progress — what has been accomplished and where the work stands.
-2. User messages — every message the user sent, listed near-verbatim. Do not paraphrase them into a gestalt.
-3. Unactioned instructions — anything the user asked for that is not yet fully done, quoted verbatim.
-4. Information gathered — key findings, preserving exact values that would be hard to recover: file paths, identifiers, URLs, error messages, command output, code fragments.
-5. Approaches tried — what worked, and what failed with why. Mark failed approaches "do not retry".
-6. Decisions — choices already settled that must not be relitigated, with their reasons.
-7. Current work — precisely what was in flight at this moment: which files, which symbols, what the in-progress change was.
-8. Next step — the concrete immediate action a continuation should take.`
+const compactionSections = `1. Request — what this conversation was asked for: the person's ask, or the mission it was started to carry out, in one short paragraph, in their words where a person wrote them.
+2. Progress — what has been accomplished and where the work stands.
+3. User messages — every message the user sent, listed near-verbatim. Do not paraphrase them into a gestalt.
+4. Unactioned instructions — anything the user asked for that is not yet fully done, quoted verbatim.
+5. Information gathered — key findings, preserving exact values that would be hard to recover: file paths, identifiers, URLs, error messages, command output, code fragments.
+6. Approaches tried — what worked, and what failed with why. Mark failed approaches "do not retry".
+7. Decisions — choices already settled that must not be relitigated, with their reasons.
+8. Current work — precisely what was in flight at this moment: which files, which symbols, what the in-progress change was.
+9. Next step — the concrete immediate action a continuation should take.`
 
 // warmCompactionRequest is the ask appended to the live transcript. It
 // renders bare on the wire — the subtype is provenance, not an envelope —
@@ -604,7 +554,7 @@ Then write the replacement summary inside <summary> tags, with these sections:
 
 ` + compactionSections + `
 
-Do not restate the original request or mission — it is preserved separately and will accompany this summary. Reply with the analysis and the summary only.
+The history that states the request is being replaced, so the summary is what carries it: write the Request section first, from what was actually asked, not from what the work has since turned into. Reply with the analysis and the summary only.
 </system-note>`
 
 // coldCompactionSystemPrompt is the forced-shape call's entire system
@@ -615,7 +565,7 @@ Call the ` + compactionToolName + ` tool exactly once. Put your reasoning about 
 
 ` + compactionSections + `
 
-Do not restate the original request or mission in the summary — it is preserved separately and will accompany it.`
+The history that states the request is being replaced, so the summary is what carries it: write the Request section first, from what was actually asked, not from what the work has since turned into.`
 
 // compactionPreamble opens the result row — the only compaction text that
 // enters the active window.
