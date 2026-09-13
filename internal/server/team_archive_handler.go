@@ -187,30 +187,29 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// The boundary, over the whole enumerated set and not just the ones that
-	// stopped. The stop is what ends a process; this is what ends the
-	// conversation, and an archived team's work is over whether or not its
-	// executor was reachable — a run left un-ended because its stop failed is
-	// exactly the row that would otherwise stay resumable on a team nobody can
-	// see. Stamped one at a time because the set is team-scoped rather than
-	// task-scoped, and best-effort per row for the same reason the stops are:
-	// the tombstone has already landed. The context outlives the request for
-	// that same reason — a browser closing mid-loop would otherwise leave an
+	// The boundary, over every un-ended conversation the team holds — wider
+	// than the set that was stopped, on both axes. The stop is what ends a
+	// process; this is what ends the conversation, and an archived team's
+	// work is over whether or not its executor was reachable and whether or
+	// not its transcript had already concluded. Either row left un-ended
+	// still reads as its task's live conversation and as resumable, on a team
+	// nobody can see. Best-effort, for the same reason the stops are: the
+	// tombstone has already landed. The context outlives the request for that
+	// same reason — a browser closing mid-write would otherwise leave an
 	// archived team holding conversations nobody ended.
 	stampCtx := context.WithoutCancel(r.Context())
-	for _, conversationID := range conversationIDs {
-		ended, eErr := th.allStores.Conversations.EndConversationSystem(stampCtx, orgID, conversationID, domain.EndedTeamArchived)
-		if eErr != nil {
-			teamsLog.Warn("archive: stamp the team-archive boundary failed", "team", teamID, "conversation", conversationID, "error", eErr)
-			continue
-		}
-		// The memory doorbell, for the rows this loop actually stamped: a nil
-		// row is one that had already ended, and whatever it owes was rung for
-		// by the boundary that ended it. An archived team's runs are the
-		// clearest case for generating from the transcript — nobody is going
-		// back to write the memory by hand.
-		if ended != nil && th.memoryOwed != nil {
-			th.memoryOwed(orgID, ended.ID)
+	ended, eErr := th.allStores.Conversations.EndConversationsForTeamSystem(stampCtx, orgID, teamID, domain.EndedTeamArchived)
+	if eErr != nil {
+		teamsLog.Warn("archive: stamp the team-archive boundary failed", "team", teamID, "error", eErr)
+	}
+	// The memory doorbell, per row the door actually stamped: a row it did not
+	// return had already ended, and whatever it owes was rung for by the
+	// boundary that ended it. An archived team's runs are the clearest case
+	// for generating from the transcript — nobody is going back to write the
+	// memory by hand.
+	for _, conv := range ended {
+		if th.memoryOwed != nil {
+			th.memoryOwed(orgID, conv.ID)
 		}
 	}
 

@@ -26,31 +26,43 @@ func pgConversationBoundary(t *testing.T, h *pgtest.Harness, conversationID stri
 	return ended, reason
 }
 
-// TestTeamArchive_EndsEveryConversationItEnumerated: archiving a team ends its
-// work, and the stamp is over the whole enumerated set rather than only the
-// conversations a stop happened to reach. This rig wires no spawner, so
-// nothing is stopped at all — which is exactly the case that matters: a
-// conversation left un-ended because its executor was unreachable is the one
-// that would stay resumable on a team nobody can see.
-//
+// teamArchiveConversation seeds one conversation on the rig's team.
 // origin='interactive' sidesteps the origin-requires-parents CHECK; the
-// enumeration reads team_id and status and nothing else.
-func TestTeamArchive_EndsEveryConversationItEnumerated(t *testing.T) {
+// boundary door reads team_id, the boundary column and the parent link, and
+// nothing else.
+func teamArchiveConversation(t *testing.T, r *teamArchiveRig, status any) string {
+	t.Helper()
+	id := uuid.New().String()
+	pgtest.MustExec(t, r.h.AdminDB, `
+		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility,
+		                           type, origin, trigger_type, status)
+		VALUES ($1, $2, $3, $4, 'team', 'delegation', 'interactive', 'manual', $5)
+	`, id, r.orgID, r.owner, r.teamID, status)
+	return id
+}
+
+// TestTeamArchive_EndsEveryUnEndedConversationTheTeamHolds: archiving a team
+// ends its work, and the stamp is wider than the stop it follows on both
+// axes. This rig wires no spawner, so nothing is stopped at all — which is
+// exactly the case that matters: a conversation left un-ended because its
+// executor was unreachable, and one left un-ended because its blueprint had
+// already finished, both stay resumable on a team nobody can see.
+func TestTeamArchive_EndsEveryUnEndedConversationTheTeamHolds(t *testing.T) {
 	r := newTeamArchiveRig(t)
 
-	seed := func(status any) string {
-		t.Helper()
-		id := uuid.New().String()
-		pgtest.MustExec(t, r.h.AdminDB, `
-			INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility,
-			                           type, origin, trigger_type, status)
-			VALUES ($1, $2, $3, $4, 'team', 'delegation', 'interactive', 'manual', $5)
-		`, id, r.orgID, r.owner, r.teamID, status)
-		return id
-	}
-	midFlight := seed(nil)
-	parked := seed("open")
-	terminal := seed("completed")
+	midFlight := teamArchiveConversation(t, r, nil)
+	parked := teamArchiveConversation(t, r, "open")
+	concluded := teamArchiveConversation(t, r, "completed")
+
+	// A boundary that already happened is the one that happened.
+	alreadyEnded := teamArchiveConversation(t, r, "completed")
+	pgtest.MustExec(t, r.h.AdminDB,
+		`UPDATE conversations SET ended_at = now(), ended_reason = $2 WHERE id = $1`,
+		alreadyEnded, string(domain.EndedTakenOver))
+	// A subagent ends with its spawner, never with the team.
+	subagent := teamArchiveConversation(t, r, nil)
+	pgtest.MustExec(t, r.h.AdminDB,
+		`UPDATE conversations SET parent_conversation_id = $2 WHERE id = $1`, subagent, midFlight)
 
 	rec := httptest.NewRecorder()
 	r.th.handleTeamArchive(rec, r.req(http.MethodPost, "/api/teams/"+r.teamID+"/archive", r.owner, r.teamID))
@@ -58,18 +70,19 @@ func TestTeamArchive_EndsEveryConversationItEnumerated(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	for _, id := range []string{midFlight, parked} {
+	for _, id := range []string{midFlight, parked, concluded} {
 		if ended, reason := pgConversationBoundary(t, r.h, id); !ended || reason != string(domain.EndedTeamArchived) {
 			t.Errorf("%s boundary = (ended=%v, reason=%q), want a stamp with reason %q",
 				id, ended, reason, domain.EndedTeamArchived)
 		}
 	}
-	// A conversation that had already reached a terminal is not in the
-	// enumerated set, so the archive says nothing about it — the same shape as
-	// the stop loop it follows.
-	if ended, reason := pgConversationBoundary(t, r.h, terminal); ended || reason != "" {
-		t.Errorf("terminal conversation %s boundary = (ended=%v, reason=%q), want none — it was never enumerated",
-			terminal, ended, reason)
+	if ended, reason := pgConversationBoundary(t, r.h, subagent); ended || reason != "" {
+		t.Errorf("subagent %s boundary = (ended=%v, reason=%q), want none — it is its spawner's",
+			subagent, ended, reason)
+	}
+	if _, reason := pgConversationBoundary(t, r.h, alreadyEnded); reason != string(domain.EndedTakenOver) {
+		t.Errorf("already-ended conversation %s now reads %q, want its original %q",
+			alreadyEnded, reason, domain.EndedTakenOver)
 	}
 }
 
@@ -131,27 +144,26 @@ func TestTaskReassign_StampsNothing(t *testing.T) {
 // archived team's runs are the clearest case for generating a memory from the
 // transcript — nobody is going back to write one by hand — so each stamp rings.
 //
-// Once per stamped row and no more: the loop re-asks the door per conversation,
-// and a row that had already ended comes back nil, with whatever it owes rung
-// for by the boundary that actually ended it.
+// Once per stamped row and no more: the door returns what it stamped, so a row
+// that had already ended is not among them — whatever it owes was rung for by
+// the boundary that actually ended it. A conversation whose transcript had
+// concluded IS among them: it was still un-ended, and the archive is the
+// boundary it never got.
 func TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped(t *testing.T) {
 	r := newTeamArchiveRig(t)
 	d := &doorbell{}
 	r.th.memoryOwed = d.ring
 
-	seed := func(status any) string {
-		t.Helper()
-		id := uuid.New().String()
-		pgtest.MustExec(t, r.h.AdminDB, `
-			INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility,
-			                           type, origin, trigger_type, status)
-			VALUES ($1, $2, $3, $4, 'team', 'delegation', 'interactive', 'manual', $5)
-		`, id, r.orgID, r.owner, r.teamID, status)
-		return id
-	}
-	midFlight := seed(nil)
-	parked := seed("open")
-	seed("completed") // terminal: never enumerated, so never stamped and never rung
+	midFlight := teamArchiveConversation(t, r, nil)
+	parked := teamArchiveConversation(t, r, "open")
+	concluded := teamArchiveConversation(t, r, "completed")
+
+	// Already ended: whatever it owes was rung for by the boundary that
+	// actually ended it, so this archive neither stamps nor rings.
+	alreadyEnded := teamArchiveConversation(t, r, "open")
+	pgtest.MustExec(t, r.h.AdminDB,
+		`UPDATE conversations SET ended_at = now(), ended_reason = $2 WHERE id = $1`,
+		alreadyEnded, string(domain.EndedTakenOver))
 
 	rec := httptest.NewRecorder()
 	r.th.handleTeamArchive(rec, r.req(http.MethodPost, "/api/teams/"+r.teamID+"/archive", r.owner, r.teamID))
@@ -160,7 +172,7 @@ func TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped(t *test
 	}
 
 	got := d.taken()
-	want := map[string]bool{midFlight: true, parked: true}
+	want := map[string]bool{midFlight: true, parked: true, concluded: true}
 	if len(got) != len(want) {
 		t.Fatalf("rang %d times for %d stamped conversations: %v", len(got), len(want), got)
 	}

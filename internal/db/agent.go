@@ -315,9 +315,17 @@ type ConversationStore interface {
 	// and the column marks when the current one began — the placement
 	// claim's aging window and the UI's queue-dwell readout both measure
 	// from it. started_at is never touched.
-	// ok=false means the conversation is no longer resumable (a concurrent
-	// resume/cancel/claim already moved it, or it failed) — the caller maps
-	// the miss to 409.
+	// A conversation carrying a boundary (ended_at) is refused whatever its
+	// status. An ended conversation is not the task's any more: the
+	// task-level claim arm claims only the newest un-ended row, so a wake
+	// here would queue a row nothing ever claims, with whatever input was
+	// staged on it sitting undelivered forever. The composer refuses first
+	// and names which rung it tripped; this is the same refusal at the door
+	// every caller passes through.
+	//
+	// ok=false means the conversation is no longer resumable (a boundary
+	// already ended it, or a concurrent resume/cancel/claim already moved it,
+	// or it failed) — the caller maps the miss to 409.
 	//
 	// One blueprint fact IS checked here, in the same statement, because it
 	// is the one no caller can check without racing: a `completed` row whose
@@ -486,19 +494,27 @@ type ConversationStore interface {
 
 	// --- The task's live conversation ---
 	//
-	// A task has at most one live conversation, and live means two things at
-	// once: the transcript has not reached a terminal status, and no boundary
-	// has been stamped on it (ended_at IS NULL). Both clauses carry weight and
-	// neither implies the other — a conversation parked `open` is non-terminal
-	// and wakeable, so it is still the one the task is about, while a
-	// `completed` row on a task nobody moved off it carries no boundary at
-	// all. It is the conversation-layer half of the rule the blueprint layer
-	// backstops with blueprint_runs_one_active_run_per_task, and these two
-	// reads are how a caller asks it before minting.
+	// A task has at most one live conversation: no boundary stamped on it
+	// (ended_at IS NULL), and top-level, since a subagent row belongs to its
+	// spawner's engagement rather than to the task. That is the base, and the
+	// claim gate asks exactly it — which conversation owns the task's one
+	// workspace tree — because a `completed` row on a task nobody moved off
+	// it still holds that tree. It is the conversation-layer half of the rule
+	// the blueprint layer backstops with
+	// blueprint_runs_one_active_run_per_task.
 	//
-	// Each dialect spells the predicate once rather than per door. It is an
-	// exclusion, so a clause missing from one spelling doesn't fail closed —
-	// it readmits exactly the conversation the rule exists to keep out.
+	// The two reads below ask a narrower question on top of the base: will
+	// this conversation read new input on its own? That adds the status
+	// clause, because a concluded conversation reads nothing until a resume
+	// re-queues it — so an event landing on its task mints a conversation
+	// rather than folding into one nobody is going to read. A conversation
+	// parked `open` passes both: it is wakeable, and it is still the one the
+	// task is about.
+	//
+	// Each dialect spells the base once and composes both questions from it
+	// rather than restating either per door. They are exclusions, so a clause
+	// missing from one spelling doesn't fail closed — it readmits exactly the
+	// conversation the rule exists to keep out.
 
 	// HasLiveConversationForTask returns true if the task holds a live
 	// conversation, whatever trigger type minted it. Used by the drain
@@ -894,6 +910,24 @@ type ConversationStore interface {
 	// may not even be a member of the team whose conversations it is ending.
 	EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error)
 	EndConversationSystem(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error)
+
+	// EndConversationsForTeamSystem is the task door's team-scoped sibling:
+	// every non-ended top-level conversation the team owns, whatever its
+	// status, stamped in one statement and returned as Get projects them.
+	// Same predicate, same miss semantics, same non-publishing contract — the
+	// caller broadcasts and rings the memory doorbell per returned row.
+	//
+	// The archive is its caller, and the status is deliberately not narrowed
+	// there either. A team's work is over, so a conversation whose blueprint
+	// finished has to carry the boundary too: left un-ended it still reads as
+	// the task's live conversation and as resumable, on a team nobody can
+	// see. The stop pass beside it keeps its own narrower enumeration
+	// (ActiveIDsForTeamSystem) — stopping is for the ones still running.
+	//
+	// Admin-pool only, with no app-pool twin: archive is an org-admin action
+	// whose caller may not be a member of the team whose conversations it is
+	// ending, so the team-visibility RLS would hide the rows.
+	EndConversationsForTeamSystem(ctx context.Context, orgID, teamID string, reason domain.EndedReason) ([]domain.Conversation, error)
 
 	// EndTerminalConversationsForTaskSystem is EndConversationsForTaskSystem
 	// narrowed to the rows whose transcript has already finished — status is

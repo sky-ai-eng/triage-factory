@@ -283,6 +283,52 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				}
 			})
 
+			// The boundary is a rest state with no way back either, and for
+			// a different reason than a failure: an ended conversation is not
+			// the task's any more. The task-level claim arm claims only the
+			// newest un-ended row, so a wake here would queue a row nothing
+			// ever claims — with whatever was typed onto it sitting
+			// undelivered forever. The Go gate refuses first and names the
+			// rung; this is the store refusing at the door underneath it.
+			t.Run("Ended_IsNotBroughtBackByTheUnTerminalWrite", func(t *testing.T) {
+				for _, tc := range []struct{ name, status string }{
+					{"parked", "open"},
+					{"concluded", "completed"},
+				} {
+					t.Run(tc.name, func(t *testing.T) {
+						h := mk(t)
+						convID := h.EnqueueDelegation(t, runtime)
+						mustClaim(t, h, convID)
+						if tc.status == "open" {
+							release(t, h, h.OrgID, convID, "parked")
+						} else {
+							release(t, h, h.OrgID, convID, "completed")
+							// Settled, so the refusal below is the boundary's
+							// alone rather than the running-blueprint arm's.
+							h.SetBlueprintState(t, "completed", 0)
+						}
+						h.SetStoredStatus(t, convID, tc.status)
+						if _, err := h.Stores.Conversations.EndConversationSystem(
+							ctx, h.OrgID, convID, domain.EndedRequeued,
+						); err != nil {
+							t.Fatalf("end the conversation: %v", err)
+						}
+
+						if flipped, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || flipped {
+							t.Fatalf("MarkQueuedForResume on an ended %s run = (%v, %v), want no flip", tc.status, flipped, err)
+						}
+						if st := h.StoredStatus(t, convID); st != tc.status {
+							t.Errorf("stored status = %q, want %q — a refused flip writes nothing", st, tc.status)
+						}
+						// And the input that would have ridden the wake
+						// changes nothing, which is the shape this refusal
+						// exists to prevent.
+						h.InsertRow(t, convID, userRow("are you still there?", false))
+						mustNotClaim(t, h)
+					})
+				}
+			})
+
 			// Ordinary sequential dispatch, which the gate must not narrow into
 			// a stall: every step of a running blueprint is claimed exactly
 			// once, in order, and exactly one is claimable at a time.
@@ -711,6 +757,73 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 
 		retire(t, h, later)
 		mustClaim(t, h, earlier)
+	})
+
+	// Where the two questions the store answers about a task's conversations
+	// come apart. A conversation that concluded its transcript and carries no
+	// boundary still OWNS the task's tree — so the claim gate holds every
+	// older row shut behind it — while the router, asking whether anything
+	// will read an event that arrives, reads the task as idle. Both answers
+	// are right, and the gate's is what keeps a second agent out of the tree
+	// the concluded conversation may still be resumed into.
+	t.Run("ACompletedUnEndedConversationIsTheTasksLiveOne_ButNotTheRouters", func(t *testing.T) {
+		h := mk(t)
+		earlier := h.EnqueueDelegation(t, "sdk")
+		later := h.EnqueueDelegation(t, "sdk")
+		taskID := mustClaim(t, h, later).TaskID
+		release(t, h, h.OrgID, later, "completed")
+		h.SetStoredStatus(t, later, "completed")
+
+		// Point the blueprint back at the earlier step so its own clause
+		// admits that row: what refuses it now is the task alone, which is
+		// the gate saying the tree is still the concluded conversation's.
+		h.SetBlueprintState(t, "running", 0)
+		mustNotClaim(t, h)
+
+		// The router, on the same task at the same moment, names the other
+		// row entirely: the concluded one reads nothing until a resume, so
+		// what an arriving event could fold into is the queued step.
+		if id, err := h.Stores.Conversations.LiveConversationIDForTaskSystem(ctx, h.OrgID, taskID); err != nil || id != earlier {
+			t.Errorf("the router's read = %q err=%v, want the queued step %q rather than the concluded %q", id, err, earlier, later)
+		}
+
+		// The boundary is what moves the task on, and then the two agree:
+		// an ended conversation is neither answer.
+		retire(t, h, later)
+		mustClaim(t, h, earlier)
+		if id, err := h.Stores.Conversations.LiveConversationIDForTaskSystem(ctx, h.OrgID, taskID); err != nil || id != earlier {
+			t.Errorf("the router's read = %q err=%v, want %q", id, err, earlier)
+		}
+	})
+
+	// A subagent row answers neither question: it is part of its spawner's
+	// engagement rather than a conversation of the task's own, so it neither
+	// owns the tree nor is somewhere an event can be folded.
+	t.Run("AnUnEndedSubagentConversationIsNeitherAnswer", func(t *testing.T) {
+		h := mk(t)
+		if h.SetParentConversation == nil {
+			t.Skip("harness cannot stage a subagent row")
+		}
+		spawner := h.EnqueueDelegation(t, "sdk")
+		sub := h.EnqueueDelegation(t, "sdk")
+		h.SetParentConversation(t, sub, spawner)
+
+		// The newest un-ended row on the task is the subagent, and the claim
+		// gate looks straight past it to the conversation that owns the tree.
+		h.SetBlueprintState(t, "running", 0)
+		taskID := mustClaim(t, h, spawner).TaskID
+		if id, err := h.Stores.Conversations.LiveConversationIDForTaskSystem(ctx, h.OrgID, taskID); err != nil || id != spawner {
+			t.Errorf("the router's read = %q err=%v, want the spawner %q", id, err, spawner)
+		}
+
+		// And with the spawner ended, the subagent left behind holds nothing
+		// open: the task reads idle to the router and free to the gate.
+		retire(t, h, spawner)
+		if id, err := h.Stores.Conversations.LiveConversationIDForTaskSystem(ctx, h.OrgID, taskID); err != nil || id != "" {
+			t.Errorf("a subagent alone: the router's read = %q err=%v, want empty", id, err)
+		}
+		next := h.EnqueueDelegation(t, "sdk")
+		mustClaim(t, h, next)
 	})
 
 	// The memory gate. A conversation that ended without leaving a memory

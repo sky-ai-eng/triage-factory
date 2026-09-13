@@ -252,29 +252,21 @@ var blueprintDrivableSQL = `((r.blueprint_run_id IS NULL
 	   AND (r.task_id IS NULL OR r.id = ` + taskLiveConversationSQL("r.org_id", "r.task_id") + `)
 	   AND (r.task_id IS NULL OR NOT ` + taskMemoryPendingSQL("r.org_id", "r.task_id") + `))`
 
-// taskLiveConversationSQL is the task's live conversation: the newest one that
-// has not ended, top-level rows only. It is a scalar subquery rather than a
-// NOT EXISTS anti-join because the answer IS an id — the claim gate compares
-// the candidate against it, and a later reader that wants the row itself gets
-// the same definition rather than a second spelling of it.
+// taskLiveConversationSQL is the conversation that owns the task's tree: the
+// newest row of liveTopLevelConversationSQL (conversation.go), which is where
+// that base predicate and the two other questions asked of it are written
+// down. It is a scalar subquery rather than a NOT EXISTS anti-join because
+// the answer IS an id — the claim gate compares the candidate against it, and
+// a reader that wants the row itself gets the same definition rather than a
+// second spelling of it.
 //
-// ended_at is the boundary, not status: an ended conversation may still be
-// parked `open`, and a live one may have completed its transcript and be
-// waiting for a follow-up. What the tree belongs to is the question, and the
-// boundary is what answers it.
-//
-// The ordering matters only for a task that legitimately holds two un-ended
-// rows, which the boundary doors make impossible going forward and which a
-// pre-boundary install can still carry. Newest-wins is the reading the column
-// migration committed to; the id tiebreak makes it total.
-//
-// Subagent rows are excluded because a subagent is part of its spawner's
-// engagement rather than a conversation of the task's own — the same reason
-// the boundary doors skip them.
+// The ordering decides only a task holding more than one un-ended row.
+// Newest-wins is the reading the boundary column committed to; the id
+// tiebreak makes it total.
 func taskLiveConversationSQL(orgExpr, taskExpr string) string {
 	return `(SELECT live.id FROM conversations live
 		WHERE live.org_id = ` + orgExpr + ` AND live.task_id = ` + taskExpr + `
-		  AND live.ended_at IS NULL AND live.parent_conversation_id IS NULL
+		  AND ` + liveTopLevelConversationSQL("live") + `
 		ORDER BY live.started_at DESC, live.id DESC
 		LIMIT 1)`
 }

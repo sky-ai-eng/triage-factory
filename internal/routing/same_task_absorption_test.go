@@ -919,3 +919,59 @@ func TestTryAutoDelegate_LiveManualConversation_AbsorbsTheEvent(t *testing.T) {
 		t.Errorf("task claim = %q, want the bot %q — the fold is a commitment like any other", claimed.String, runmode.LocalDefaultAgentID)
 	}
 }
+
+// TestTryAutoDelegate_SubagentRowIsNotTheTasksLiveConversation: a subagent row
+// belongs to its spawner's engagement, not to the task. So a task whose only
+// un-ended conversation is one has nothing to fold an event into — nobody is
+// going to read that transcript — and the gate opens: the firing mints a
+// conversation of the task's own instead.
+func TestTryAutoDelegate_SubagentRowIsNotTheTasksLiveConversation(t *testing.T) {
+	database := newTestDB(t)
+	entityID, task, trigger, activeConversationID := setupAbsorbScenario(t, database)
+
+	// The spawner's subagent, then the spawner's own boundary: what the task
+	// is left holding is one un-ended row from an engagement that is over.
+	if _, err := database.Exec(`
+		INSERT INTO conversations (id, task_id, prompt_id, status, model, trigger_type,
+			origin, parent_conversation_id)
+		VALUES (?, ?, 'p-absorb', 'running', 'stub', 'manual', 'interactive', ?)
+	`, uuid.New().String(), task.ID, activeConversationID); err != nil {
+		t.Fatalf("seed the subagent row: %v", err)
+	}
+	if _, err := database.Exec(`
+		UPDATE conversations SET ended_at = CURRENT_TIMESTAMP, ended_reason = 'step_advanced' WHERE id = ?
+	`, activeConversationID); err != nil {
+		t.Fatalf("end the spawner: %v", err)
+	}
+
+	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType:    absorbTestEventType,
+		EntityID:     &entityID,
+		MetadataJSON: `{"mention":"second"}`,
+		CreatedAt:    time.Now(),
+		OrgID:        runmode.LocalDefaultOrgID,
+	})
+	if err != nil {
+		t.Fatalf("record second event: %v", err)
+	}
+
+	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal, allowFire: true}
+	router := newAbsorbTestRouter(database, sqlitestore.New(database).Conversations, stub)
+
+	if !mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "") {
+		t.Fatal("expected the firing to be handled")
+	}
+	if len(stub.calls) != 0 {
+		t.Errorf("folded into a subagent's transcript: %+v", stub.calls)
+	}
+	if len(stub.delegated) != 1 || stub.delegated[0] != task.ID {
+		t.Errorf("delegated = %v, want exactly [%s]", stub.delegated, task.ID)
+	}
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil {
+		t.Fatalf("list pending firings: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected the firing to fire outright, got %d deferred row(s)", len(rows))
+	}
+}

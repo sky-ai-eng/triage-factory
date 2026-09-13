@@ -3775,6 +3775,85 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// The team-scoped boundary door, which the archive is the caller of. Its
+	// predicate is the task door's with the set swapped: every un-ended
+	// top-level row the team owns, whatever its status. A team's work is over,
+	// so a conversation whose blueprint finished carries the stamp too —
+	// un-ended it would read as its task's live conversation forever, on a
+	// team nobody can see.
+	t.Run("EndConversationsForTeamSystem_StampsEveryUnEndedTopLevelRow", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "team-boundary")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		archived := seed.Team(t, "tb-archived")
+		other := seed.Team(t, "tb-other")
+
+		seedFor := func(teamID, status string) string {
+			t.Helper()
+			return seed.Conversation(t, domain.Conversation{
+				TaskID: taskID, TeamID: teamID, PromptID: conversationTestPrompt(t),
+				Status: status, Model: "m", BlueprintRunID: seed.BlueprintRun(t, taskID),
+			})
+		}
+		midFlight := seedFor(archived, "")
+		concluded := seedFor(archived, domain.StatusCompleted)
+		elsewhere := seedFor(other, "")
+
+		// A boundary that already happened is the one that happened.
+		alreadyEnded := seedFor(archived, domain.StatusCompleted)
+		if _, err := store.EndConversationSystem(ctx, orgID, alreadyEnded, domain.EndedTakenOver); err != nil {
+			t.Fatalf("stage the already-ended row: %v", err)
+		}
+		// A subagent ends with its spawner, so the team's stamp skips it for
+		// the same reason the task's does.
+		subagent := seedFor(archived, "")
+		seed.SetParentConversation(t, subagent, midFlight)
+
+		stamped, err := store.EndConversationsForTeamSystem(ctx, orgID, archived, domain.EndedTeamArchived)
+		if err != nil {
+			t.Fatalf("EndConversationsForTeamSystem: %v", err)
+		}
+		got := make(map[string]bool, len(stamped))
+		for _, c := range stamped {
+			got[c.ID] = true
+			if c.EndedReason != domain.EndedTeamArchived {
+				t.Errorf("%s ended_reason = %q, want team_archived", c.ID, c.EndedReason)
+			}
+			AssertWriteReturnedStoredRow(t, "EndConversationsForTeamSystem "+c.ID, c, func() (*domain.Conversation, error) {
+				return store.Get(ctx, orgID, c.ID)
+			})
+		}
+		for id, what := range map[string]string{midFlight: "the mid-flight row", concluded: "the concluded row"} {
+			if !got[id] {
+				t.Errorf("%s (%s) was not stamped", what, id)
+			}
+		}
+		if len(got) != 2 {
+			t.Errorf("stamped %d rows, want the 2 un-ended top-level ones: %v", len(got), got)
+		}
+		for id, what := range map[string]string{
+			elsewhere: "another team's conversation",
+			subagent:  "a subagent row",
+		} {
+			c, err := store.Get(ctx, orgID, id)
+			if err != nil || c == nil {
+				t.Fatalf("Get %s: err=%v got=%v", id, err, c)
+			}
+			if c.EndedAt != nil {
+				t.Errorf("%s (%s) was stamped", what, id)
+			}
+		}
+		c, err := store.Get(ctx, orgID, alreadyEnded)
+		if err != nil || c == nil {
+			t.Fatalf("Get %s: err=%v got=%v", alreadyEnded, err, c)
+		}
+		if c.EndedReason != domain.EndedTakenOver {
+			t.Errorf("an already-ended row now reads %q, want its original taken_over", c.EndedReason)
+		}
+	})
+
 	t.Run("HasLiveConversationForTask", func(t *testing.T) {
 		// The rule's predicate: a live conversation is un-ended AND
 		// non-terminal, whatever trigger type minted it. A sibling task on the
@@ -3916,6 +3995,41 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
 			t.Errorf("terminal event conversation + ended manual: id=%q err=%v, want empty", id, err)
+		}
+	})
+
+	t.Run("LiveConversationForTask_SkipsASubagentRow", func(t *testing.T) {
+		// A subagent is part of its spawner's engagement rather than a
+		// conversation of the task's own, so neither read sees one. What hangs
+		// on it is the router: an event landing on a task whose only un-ended
+		// row is a subagent must mint a conversation, not fold into a
+		// transcript nobody is going to read.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "sub-live")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+		spawner := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		subagent := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		seed.SetParentConversation(t, subagent, spawner)
+
+		// The spawner is the answer while it is live, however new its
+		// subagent — the newest-row ordering never gets to see one.
+		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != spawner {
+			t.Errorf("with a subagent open: id=%q err=%v, want the spawner %q", id, err, spawner)
+		}
+
+		// And once the spawner's boundary lands, what is left is un-ended and
+		// non-terminal and still answers nothing.
+		if _, err := store.EndConversationSystem(ctx, orgID, spawner, domain.EndedStepAdvanced); err != nil {
+			t.Fatalf("end the spawner: %v", err)
+		}
+		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
+			t.Errorf("a subagent alone: id=%q err=%v, want empty", id, err)
+		}
+		if has, err := store.HasLiveConversationForTask(ctx, orgID, taskID); err != nil || has {
+			t.Errorf("a subagent alone: has=%v err=%v, want false", has, err)
 		}
 	})
 
