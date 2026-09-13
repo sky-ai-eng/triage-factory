@@ -773,8 +773,8 @@
   bottom: -36px;
   /* Barely there. This is only the ground the item hazes sit on — it keeps the
      whole area reading as one field without becoming a rectangle. */
-  backdrop-filter: blur(3px) saturate(0.8);
   -webkit-backdrop-filter: blur(3px) saturate(0.8);
+  backdrop-filter: blur(3px) saturate(0.8);
   background: color-mix(in srgb, var(--color-ground) 42%, transparent);
   -webkit-mask-image:
     linear-gradient(to right, transparent 0, #000 22%, #000 74%, transparent 100%),
@@ -803,8 +803,8 @@
   position: absolute;
   inset: -7px -16px -7px 6px;
   z-index: -1;
-  backdrop-filter: blur(10px) saturate(0.6);
   -webkit-backdrop-filter: blur(10px) saturate(0.6);
+  backdrop-filter: blur(10px) saturate(0.6);
   background: color-mix(in srgb, var(--color-ground) 78%, transparent);
   -webkit-mask-image:
     linear-gradient(to right, transparent 0, #000 16%, #000 76%, transparent 100%),

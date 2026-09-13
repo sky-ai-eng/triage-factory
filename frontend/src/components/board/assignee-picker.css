@@ -33,8 +33,8 @@ body:has(#tf-assign-scrim.on) .tip {
   pointer-events: none;
   cursor: default;
   background: color-mix(in srgb, var(--color-ground) 60%, transparent);
-  backdrop-filter: blur(2.4px);
   -webkit-backdrop-filter: blur(2.4px);
+  backdrop-filter: blur(2.4px);
   /* Trails on close: the page comes back only once the menu has gone. */
   transition: opacity calc(0.16s * var(--tk-assign, 1)) cubic-bezier(0.4, 0, 0.9, 1)
     calc(0.06s * var(--tk-assign, 1));
