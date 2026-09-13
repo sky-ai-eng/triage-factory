@@ -872,10 +872,9 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 // that keeps content the agent never wrote from being ingested as its work.
 //
 // Returns parked: true when the run ended dormant (open) rather than terminal,
-// so runAgent's cleanup defers keep the worktree + session JSONL on disk as the
-// warm resume cache. A terminal completion (including one that produced a draft
-// PR / pending review) returns false — the artifact is a resolvable sidecar, not
-// a reason to park.
+// which is what keeps the session JSONL on disk as the warm resume cache. A
+// terminal completion (including one that produced a draft PR / pending review)
+// returns false — the artifact is a resolvable sidecar, not a reason to park.
 //
 // claimID names the engagement that produced this result, so its terminal
 // write goes through the claim fence. Empty on paths with no claimed run in

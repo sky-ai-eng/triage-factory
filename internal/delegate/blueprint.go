@@ -314,10 +314,9 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID, wsKey string, cfg 
 // `workspace add --pr N` worktree left in the shared bare, keyed off the
 // conversation_worktrees row's ref (pr-<N>) and conversation_id (the conversation that created it, so the
 // per-run branch namespace matches). A no-op for non-PR refs (default, branch
-// slugs) — those leave detached checkouts with no per-PR config. Folds the
-// eager path's inline cleanup into the lazy teardown so the bootstrap sweep
-// stays a pure crash backstop (Decision D / TFAC-502). Shared by both lazy
-// teardown paths (runAgent's Jira defer and runBlueprintWorktreeCleanup).
+// slugs) — those leave detached checkouts with no per-PR config. The blueprint
+// teardown above is its only caller: reclaiming inline there is what keeps the
+// bootstrap sweep a pure crash backstop rather than the ordinary path.
 func reclaimWorkspaceAddPRConfig(w domain.ConversationWorktree) {
 	prNum, ok := prNumberFromRef(w.Ref)
 	if !ok {

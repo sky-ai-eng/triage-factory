@@ -12,15 +12,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
-// ensureRunTreeFixture creates the on-disk directory RunTreeRoot(conversationID)
-// resolves to. The worktree/mount-scope check now requires a launch's
-// Worktree to actually exist (realPath resolves symlinks, which needs the
-// path to be there) — in production internal/worktree.CreateForPR /
-// MakeRunRoot always materialize it before agentproc.Run ever issues the
-// launch RPC, so tests that want an ACCEPTED launch must do the same.
-func ensureRunTreeFixture(t *testing.T, conversationID string) string {
+// ensureRunTreeFixture creates the on-disk directory RunTreeRoot(rootKey)
+// resolves to. The worktree/mount-scope check requires a launch's Worktree to
+// actually exist (realPath resolves symlinks, which needs the path to be
+// there) — in production internal/worktree.CreateForPR / MakeRunRoot always
+// materialize it before agentproc.Run ever issues the launch RPC, so tests
+// that want an ACCEPTED launch must do the same. Callers pass the workspace
+// key, which is the key a run tree is built under.
+func ensureRunTreeFixture(t *testing.T, rootKey string) string {
 	t.Helper()
-	dir := RunTreeRoot(conversationID)
+	dir := RunTreeRoot(rootKey)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir run-tree fixture %q: %v", dir, err)
 	}

@@ -262,8 +262,8 @@ func expectedPath(runRoot, owner, repo, ref string) string {
 
 // stubCalls records create / remove / stat invocations and returns canned
 // responses. Defaults are tuned for "happy first add against an empty run":
-//   - createPath="" → create returns the deterministic production path
-//     (expectedPath keyed on conversationID) so most tests don't need to set it.
+//   - createPath="" → create returns the path production would compute under
+//     the run root deps was given, so most tests don't need to set it.
 //   - statPath defaults to ErrNotExist (no path is "live" until a test puts
 //     something in liveDirs).
 //   - now defaults to time.Now (real clock); tests that exercise the
