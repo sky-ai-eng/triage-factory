@@ -377,9 +377,10 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Fatalf("SetClaimedByUser: %v", err)
 		}
 
-		// The claim axis, not the pickable queue: queueFilter excludes
-		// claimed rows, which is the whole set this sort orders.
-		base := db.TaskListFilter{Statuses: []string{"queued"}, IncludeSnoozed: true}
+		// The claim axis, across both lanes it now spans: claiming a task
+		// lands it in progress, so a set that holds the claimed rows AND an
+		// unclaimed one has to ask for both statuses.
+		base := db.TaskListFilter{Statuses: []string{"queued", "in_progress"}, IncludeSnoozed: true}
 		for _, dir := range []string{db.TaskSortDirAsc, db.TaskSortDirDesc} {
 			f := base
 			f.SortKey, f.SortDir = db.TaskSortClaimee, dir
@@ -444,62 +445,43 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	// status='queued' so the Board's Claimed column doesn't double-render a
 	// user-claimed task that's also in In Progress. Distinct from the broader
 	// "any non-terminal user-claimed task" set.
-	t.Run("List_claimed_excludes_in_progress", func(t *testing.T) {
-		s, orgID, _, _, userID, seed, _ := mk(t)
-		_, _, queuedID := seed(t, "bs-claimed-q")
-		_, _, ipID := seed(t, "bs-claimed-ip")
-
-		for _, id := range []string{queuedID, ipID} {
-			if ok, err := s.ClaimQueuedForUser(ctx, orgID, id, userID); err != nil || !ok {
-				t.Fatalf("claim %s: ok=%v err=%v", id, ok, err)
-			}
+	// The Claimed projection is "status queued plus a claim column set", and
+	// the queue-holds-no-assignee rule empties it: every claim door lands its
+	// row in progress, and tasks_queue_unclaimed refuses anything that would
+	// put a held row back in the queue. So the filter is still answerable and
+	// its answer is nothing, whoever holds the task.
+	//
+	// TODO(TFAC-1009): the value leaves the list vocabulary, and this test
+	// with it.
+	t.Run("List_claimed_projection_is_empty_because_the_queue_holds_no_claims", func(t *testing.T) {
+		s, orgID, _, agentID, userID, seed, _ := mk(t)
+		_, _, byUser := seed(t, "bs-claimed-user")
+		_, _, byAgent := seed(t, "bs-claimed-bot")
+		if ok, err := s.ClaimQueuedForUser(ctx, orgID, byUser, userID); err != nil || !ok {
+			t.Fatalf("claim: ok=%v err=%v", ok, err)
 		}
-		if ok, err := s.AdvanceStatusForUser(ctx, orgID, ipID, userID, "in_progress"); err != nil || !ok {
-			t.Fatalf("advance ip: ok=%v err=%v", ok, err)
+		if ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, byAgent, agentID, ""); err != nil || !ok {
+			t.Fatalf("stamp agent: ok=%v err=%v", ok, err)
 		}
 
-		claimed, _, err := s.List(ctx, orgID, claimedFilter(), db.ListOpts{Limit: 50})
+		claimed, total, err := s.List(ctx, orgID, claimedFilter(), db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("List claimed: %v", err)
+		}
+		if len(claimed) != 0 || total != 0 {
+			t.Errorf("Claimed projection returned %d rows / total %d, want none — a claimed task is in progress", len(claimed), total)
+		}
+		// Both rows are findable, on the lane the claim put them in.
+		inProgress, _, err := s.List(ctx, orgID, db.TaskListFilter{Statuses: []string{"in_progress"}}, db.ListOpts{Limit: 50})
+		if err != nil {
+			t.Fatalf("List in_progress: %v", err)
 		}
 		seen := map[string]bool{}
-		for _, x := range claimed {
+		for _, x := range inProgress {
 			seen[x.ID] = true
 		}
-		if !seen[queuedID] {
-			t.Errorf("Claimed projection missing the queued+claim task %s", queuedID)
-		}
-		if seen[ipID] {
-			t.Errorf("Claimed projection contained an in_progress task %s; would double-render with In Progress column", ipID)
-		}
-	})
-
-	// Bot-claimed status='queued' tasks (just-delegated, conversation
-	// not yet advanced) also belong in the Claimed projection so the
-	// board's Claimed column surfaces them and the delegate-spawn-
-	// failure retry UI can render. Without this they'd disappear
-	// between the delegate stamp and the first non-initializing
-	// conversation-status transition.
-	t.Run("List_claimed_includes_bot_claimed_queued", func(t *testing.T) {
-		s, orgID, _, agentID, _, seed, _ := mk(t)
-		_, _, taskID := seed(t, "bs-claimed-bot")
-		if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, ""); err != nil {
-			t.Fatalf("stamp agent: %v", err)
-		}
-
-		claimed, _, err := s.List(ctx, orgID, claimedFilter(), db.ListOpts{Limit: 50})
-		if err != nil {
-			t.Fatalf("List claimed: %v", err)
-		}
-		var seen bool
-		for _, x := range claimed {
-			if x.ID == taskID {
-				seen = true
-				break
-			}
-		}
-		if !seen {
-			t.Errorf("Claimed projection missing bot-claimed queued task %s; delegate-failure retry UI would have nothing to render against", taskID)
+		if !seen[byUser] || !seen[byAgent] {
+			t.Errorf("in_progress lane missing a claimed task: user=%v bot=%v", seen[byUser], seen[byAgent])
 		}
 	})
 
@@ -763,10 +745,17 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if ok {
 			t.Error("second claim returned ok=true on already-claimed task; guard broken")
 		}
-		// Verify the original claim survived.
+		// Verify the original claim survived — and that it landed the row in
+		// progress, which is what taking a task off the queue means.
 		got, _ := s.Get(ctx, orgID, taskID)
 		if got.ClaimedByUserID != userID {
 			t.Errorf("user claim was overwritten: got %q want %q", got.ClaimedByUserID, userID)
+		}
+		if got.Status != "in_progress" {
+			t.Errorf("status = %q, want in_progress — the claim is the stage marker", got.Status)
+		}
+		if got.SnoozeUntil != nil {
+			t.Errorf("snooze_until = %v, want NULL on a claimed row", got.SnoozeUntil)
 		}
 	})
 
@@ -788,12 +777,25 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	t.Run("StampAgentClaimIfUnclaimed_lands_then_skips_same_agent", func(t *testing.T) {
 		s, orgID, _, agentID, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "stamp")
+		// From snoozed, so the landing row exercises both halves of the wake:
+		// the status moves to in_progress rather than back to queued, and the
+		// wake time goes with it.
+		if _, err := s.SetStatus(ctx, orgID, taskID, "snoozed"); err != nil {
+			t.Fatalf("SetStatus snoozed: %v", err)
+		}
 		ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, "")
 		if err != nil {
 			t.Fatalf("first stamp: %v", err)
 		}
 		if !ok {
 			t.Fatal("first stamp returned ok=false")
+		}
+		landed, _ := s.Get(ctx, orgID, taskID)
+		if landed.Status != "in_progress" {
+			t.Errorf("status = %q, want in_progress — the bot's claim is the stage marker too", landed.Status)
+		}
+		if landed.SnoozeUntil != nil {
+			t.Errorf("snooze_until = %v, want NULL on a claimed row", landed.SnoozeUntil)
 		}
 		// Same agent again — should no-op (ok=false).
 		ok, err = s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, "")
@@ -884,6 +886,13 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if result != db.HandoffChanged {
 			t.Errorf("first handoff result=%v, want HandoffChanged", result)
 		}
+		landed, _ := s.Get(ctx, orgID, taskID)
+		if landed.Status != "in_progress" {
+			t.Errorf("status = %q, want in_progress — delegating is assigning", landed.Status)
+		}
+		if landed.SnoozeUntil != nil {
+			t.Errorf("snooze_until = %v, want NULL on a claimed row", landed.SnoozeUntil)
+		}
 		// Same-agent already-owns → HandoffNoOp.
 		result, err = s.HandoffAgentClaim(ctx, orgID, taskID, agentID, userID)
 		if err != nil {
@@ -925,6 +934,9 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		if got.ClaimedByUserID != userID {
 			t.Errorf("ClaimedByUserID=%q, want %q", got.ClaimedByUserID, userID)
+		}
+		if got.Status != "in_progress" {
+			t.Errorf("status = %q, want in_progress — the takeover is a claim", got.Status)
 		}
 	})
 
@@ -969,8 +981,8 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Error("AdvanceStatusForUser landed on bot-claimed task; should refuse (status owned by the conversation lifecycle)")
 		}
 		got, _ := s.Get(ctx, orgID, taskID)
-		if got.Status != "queued" {
-			t.Errorf("status=%q, want queued (refusal must not transition)", got.Status)
+		if got.Status != "in_progress" {
+			t.Errorf("status=%q, want in_progress (the bot's own claim placed it; the refusal changes nothing)", got.Status)
 		}
 	})
 
@@ -1161,6 +1173,52 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		// ClaimQueuedForUser, which sets the owning team atomically.)
 		if _, err := s.SetClaimedByUser(ctx, orgID, task.ID, userID); err == nil {
 			t.Error("expected the claimed-requires-team CHECK to reject claiming an unowned task, got nil error")
+		}
+	})
+
+	// The queue holds nobody's work, and it is the schema that says so rather
+	// than the six claim doors agreeing to. SetStatus is the unguarded status
+	// primitive — it writes the column with no claim in view — so pushing a
+	// held row back to queued (or to snoozed, the other unclaimed-by-rule
+	// status) is the shortest path to the shape no door may persist.
+	t.Run("QueueUnclaimed_check_rejects_a_held_queued_row", func(t *testing.T) {
+		s, orgID, _, agentID, userID, seed, _ := mk(t)
+		_, _, byUser := seed(t, "queue-held-user")
+		_, _, byAgent := seed(t, "queue-held-agent")
+		if ok, err := s.ClaimQueuedForUser(ctx, orgID, byUser, userID); err != nil || !ok {
+			t.Fatalf("claim: ok=%v err=%v", ok, err)
+		}
+		if ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, byAgent, agentID, ""); err != nil || !ok {
+			t.Fatalf("stamp: ok=%v err=%v", ok, err)
+		}
+		for _, c := range []struct{ taskID, status string }{
+			{byUser, "queued"},
+			{byUser, "snoozed"},
+			{byAgent, "queued"},
+			{byAgent, "snoozed"},
+		} {
+			if _, err := s.SetStatus(ctx, orgID, c.taskID, c.status); err == nil {
+				t.Errorf("SetStatus(%s) on a held task succeeded; tasks_queue_unclaimed must refuse it", c.status)
+			}
+			got, _ := s.Get(ctx, orgID, c.taskID)
+			if got.Status != "in_progress" {
+				t.Errorf("status = %q after a refused write, want in_progress", got.Status)
+			}
+		}
+
+		// The converse is not enforced, and the primitive's clearing arm is
+		// where that shows: an empty id names nobody, so it takes the claim
+		// off and leaves the stage where it was. Only requeue returns a task
+		// to the queue, and it writes the status itself.
+		cleared, err := s.SetClaimedByUser(ctx, orgID, byUser, "")
+		if err != nil {
+			t.Fatalf("SetClaimedByUser(clear): %v", err)
+		}
+		if cleared.ClaimedByUserID != "" {
+			t.Errorf("claim = %q after clearing, want empty", cleared.ClaimedByUserID)
+		}
+		if cleared.Status != "in_progress" {
+			t.Errorf("status = %q after clearing a claim, want in_progress untouched", cleared.Status)
 		}
 	})
 
@@ -1789,25 +1847,29 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 			t.Fatalf("claim: ok=%v err=%v", ok, err)
 		}
 
-		// queued + only_unclaimed keeps the free one; the claimed lane keeps
-		// the taken one; asking for both lanes at once keeps both, because
-		// the status set is an OR and only_unclaimed is off.
+		// The claim took the taken one out of the queue, so queued keeps the
+		// free one and in_progress keeps the other; asking for both lanes at
+		// once keeps both, because the status set is an OR.
 		if ids, total := listIDs(t, s, orgID, queueFilter(), db.ListOpts{Limit: 50}); !slices.Equal(ids, []string{freeID}) || total != 1 {
 			t.Errorf("queue projection = %v (total %d), want just the unclaimed task", ids, total)
 		}
-		if ids, total := listIDs(t, s, orgID, claimedFilter(), db.ListOpts{Limit: 50}); !slices.Equal(ids, []string{takenID}) || total != 1 {
-			t.Errorf("claimed projection = %v (total %d), want just the claimed task", ids, total)
+		inProgress := db.TaskListFilter{Statuses: []string{"in_progress"}, IncludeSnoozed: true}
+		if ids, total := listIDs(t, s, orgID, inProgress, db.ListOpts{Limit: 50}); !slices.Equal(ids, []string{takenID}) || total != 1 {
+			t.Errorf("in_progress lane = %v (total %d), want just the claimed task", ids, total)
 		}
-		both := db.TaskListFilter{Statuses: []string{"queued", db.TaskListStatusClaimed}, IncludeSnoozed: true}
+		both := db.TaskListFilter{Statuses: []string{"queued", "in_progress"}, IncludeSnoozed: true}
 		if _, total := listIDs(t, s, orgID, both, db.ListOpts{Limit: 50}); total != 2 {
-			t.Errorf("queued+claimed total = %d, want 2", total)
+			t.Errorf("queued+in_progress total = %d, want 2", total)
 		}
-		// Contradictory but well-formed: the claimed lane under
-		// only_unclaimed is empty rather than an error.
-		contradiction := claimedFilter()
-		contradiction.OnlyUnclaimed = true
+		// Contradictory but well-formed: the queue lane narrowed to the
+		// claimed is empty rather than an error. (So is the claimed lane
+		// under only_unclaimed — see the claimed-projection test above, where
+		// it is empty for the stronger reason that nothing is there at all.)
+		contradiction := queueFilter()
+		contradiction.OnlyUnclaimed = false
+		contradiction.Statuses = []string{db.TaskListStatusClaimed}
 		if ids, total := listIDs(t, s, orgID, contradiction, db.ListOpts{Limit: 50}); len(ids) != 0 || total != 0 {
-			t.Errorf("claimed+only_unclaimed = %v (total %d), want empty", ids, total)
+			t.Errorf("claimed lane = %v (total %d), want empty", ids, total)
 		}
 	})
 

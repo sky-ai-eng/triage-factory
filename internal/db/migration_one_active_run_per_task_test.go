@@ -32,7 +32,7 @@ func TestMigrate_OneActiveRunPerTask_SettlesWhatThePreIndexEraAllowed(t *testing
 	}
 	// One version short, so the rows below are staged the way an install with
 	// no index wrote them.
-	upToErr := goose.UpTo(database, dir, 202609120003)
+	upToErr := goose.UpTo(database, dir, beforeTaskContextModel)
 	gooseMu.Unlock()
 	if upToErr != nil {
 		t.Fatalf("goose.UpTo previous version: %v", upToErr)
@@ -75,8 +75,10 @@ func TestMigrate_OneActiveRunPerTask_SettlesWhatThePreIndexEraAllowed(t *testing
 			VALUES ('br-quiet', 'bp1', 't-quiet', 'manual', '` + userID + `', 'running', '2026-01-01 00:00:00', '[]', '')`,
 
 		// Conversations: one live under each superseded run, one live under the
-		// survivor, one already terminal under a superseded run, and one
-		// already ended (with a reason that must not be rewritten).
+		// survivor, and one already terminal under a superseded run. No
+		// already-ended row: the boundary columns are minted a few statements
+		// above the cleanup, in this same migration, so every conversation
+		// reaches it unended.
 		`INSERT INTO conversations (id, task_id, prompt_id, blueprint_run_id, status)
 			VALUES ('c-oldest', 't-crowded', 'p1', 'br-oldest', 'open')`,
 		`INSERT INTO conversations (id, task_id, prompt_id, blueprint_run_id, status)
@@ -85,8 +87,6 @@ func TestMigrate_OneActiveRunPerTask_SettlesWhatThePreIndexEraAllowed(t *testing
 			VALUES ('c-newest', 't-crowded', 'p1', 'br-newest', 'running')`,
 		`INSERT INTO conversations (id, task_id, prompt_id, blueprint_run_id, status)
 			VALUES ('c-oldest-done', 't-crowded', 'p1', 'br-oldest', 'completed')`,
-		`INSERT INTO conversations (id, task_id, prompt_id, blueprint_run_id, status, ended_at, ended_reason)
-			VALUES ('c-oldest-ended', 't-crowded', 'p1', 'br-oldest', 'open', '2025-12-31 00:00:00', 'taken_over')`,
 	} {
 		if _, err := database.Exec(stmt); err != nil {
 			t.Fatalf("seed %q: %v", stmt, err)
@@ -97,7 +97,7 @@ func TestMigrate_OneActiveRunPerTask_SettlesWhatThePreIndexEraAllowed(t *testing
 	goose.SetBaseFS(treeFS)
 	upErr := goose.SetDialect("sqlite3")
 	if upErr == nil {
-		upErr = goose.UpTo(database, dir, 202609120004)
+		upErr = goose.UpTo(database, dir, taskContextModel)
 	}
 	gooseMu.Unlock()
 	if upErr != nil {
@@ -134,8 +134,6 @@ func TestMigrate_OneActiveRunPerTask_SettlesWhatThePreIndexEraAllowed(t *testing
 		// Terminal already — it is nobody's live conversation, so there is no
 		// boundary to invent for it.
 		{"c-oldest-done", ""},
-		// Already ended: the first boundary is the one that happened.
-		{"c-oldest-ended", "taken_over"},
 	} {
 		var reason string
 		if err := database.QueryRow(

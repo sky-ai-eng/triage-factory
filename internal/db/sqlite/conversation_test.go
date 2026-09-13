@@ -343,7 +343,7 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 		StampAgentClaim: func(t *testing.T, taskID, agentID string) {
 			t.Helper()
 			if _, err := conn.Exec(
-				`UPDATE tasks SET claimed_by_agent_id = ?, claimed_by_user_id = NULL WHERE id = ?`,
+				`UPDATE tasks SET claimed_by_agent_id = ?, claimed_by_user_id = NULL, status = 'in_progress' WHERE id = ?`,
 				agentID, taskID,
 			); err != nil {
 				t.Fatalf("stamp claim: %v", err)

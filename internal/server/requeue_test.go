@@ -61,7 +61,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 	}
 	if _, err := database.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
-		 VALUES ('00000000-0000-4000-8000-000000000024', 'e_pa', ?, 'ev_pa', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000024', 'e_pa', ?, 'ev_pa', 'in_progress', ?)`,
 		eventType, runmode.LocalDefaultAgentID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
@@ -360,7 +360,7 @@ func TestTaskDelegate_CarriesArtifactsToTheNextRun(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "queued")
+	assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "in_progress")
 }
 
 // TestTaskPatch_DismissCleansUpPendingApprovalConversation is the third
@@ -440,9 +440,9 @@ func TestTaskClaim_CarriesArtifactsToTheClaimant(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// Claim no longer transitions status; the task stays 'queued' and
-	// claimed_by_user_id is set instead.
-	assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "queued")
+	// The claim moved from the bot to the person; the task was already in
+	// progress under the bot's and stays there under theirs.
+	assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "in_progress")
 	// Pin the claim col too — it's the actual responsibility signal
 	// post-B+.
 	var claimedByUserID sql.NullString
@@ -484,8 +484,8 @@ func TestTaskClaim_WithoutPendingApprovalIsNoOp(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// Claim is a responsibility-axis action; status stays
-	// 'queued', claim col gets stamped.
+	// The claim stamps the responsibility axis and lands the row in progress
+	// in the same write — assigning a task is what starts it.
 	var status string
 	var claimedByUserID sql.NullString
 	if err := s.db.QueryRow(
@@ -493,8 +493,8 @@ func TestTaskClaim_WithoutPendingApprovalIsNoOp(t *testing.T) {
 	).Scan(&status, &claimedByUserID); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
-	if status != "queued" {
-		t.Errorf("task.status = %q, want %q (claim no longer changes status)", status, "queued")
+	if status != "in_progress" {
+		t.Errorf("task.status = %q, want %q (the claim is what starts the task)", status, "in_progress")
 	}
 	if !claimedByUserID.Valid || claimedByUserID.String == "" {
 		t.Errorf("task.claimed_by_user_id empty after claim swipe; want stamped")
@@ -525,7 +525,7 @@ func TestTaskClaim_AgainstBotClaimedIsTakeover(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
-		 VALUES ('00000000-0000-4000-8000-000000000001', 'e_bot', ?, 'ev_bot', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000001', 'e_bot', ?, 'ev_bot', 'in_progress', ?)`,
 		eventType, runmode.LocalDefaultAgentID,
 	); err != nil {
 		t.Fatalf("seed task with bot claim: %v", err)
@@ -585,7 +585,7 @@ func TestTaskClaim_RefusedLeavesNoAuditRow(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('00000000-0000-4000-8000-000000000009', 'e_refuse', ?, 'ev_refuse', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000009', 'e_refuse', ?, 'ev_refuse', 'in_progress', ?)`,
 		eventType, otherUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
@@ -616,7 +616,7 @@ func TestTaskClaim_RefusedLeavesNoAuditRow(t *testing.T) {
 	).Scan(&status, &claim); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
-	if status != "queued" {
+	if status != "in_progress" {
 		t.Errorf("status = %q; refused gesture changed lifecycle", status)
 	}
 	if !claim.Valid || claim.String != otherUserID {
@@ -655,7 +655,7 @@ func TestTaskDelegate_RefusedLeavesNoAuditRow(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('00000000-0000-4000-8000-000000000007', 'e_drefuse', ?, 'ev_drefuse', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000007', 'e_drefuse', ?, 'ev_drefuse', 'in_progress', ?)`,
 		eventType, otherUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
@@ -842,7 +842,7 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-			 VALUES ('00000000-0000-4000-8000-000000000006', 'e_diff_del', ?, 'ev_diff_del', 'queued', ?)`,
+			 VALUES ('00000000-0000-4000-8000-000000000006', 'e_diff_del', ?, 'ev_diff_del', 'in_progress', ?)`,
 			eventType, otherUserID,
 		); err != nil {
 			t.Fatalf("seed other-user-claimed task: %v", err)
@@ -954,7 +954,7 @@ func TestTaskPatchSnooze_RefusesOnClaimedTask(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('00000000-0000-4000-8000-000000000010', 'e_snz_claim', ?, 'ev_snz_claim', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000010', 'e_snz_claim', ?, 'ev_snz_claim', 'in_progress', ?)`,
 		eventType, runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed claimed task: %v", err)
@@ -977,8 +977,8 @@ func TestTaskPatchSnooze_RefusesOnClaimedTask(t *testing.T) {
 	).Scan(&status, &snoozeUntil, &claim); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
-	if status != "queued" {
-		t.Errorf("status = %q, want 'queued' (refusal must not transition lifecycle)", status)
+	if status != "in_progress" {
+		t.Errorf("status = %q, want 'in_progress' (refusal must not transition lifecycle)", status)
 	}
 	if snoozeUntil.Valid {
 		t.Errorf("snooze_until = %v, want NULL (refusal must not set deferral)", snoozeUntil.Time)
@@ -1030,7 +1030,7 @@ func TestTaskDelegate_TransfersOwnUserClaim(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('00000000-0000-4000-8000-000000000004', 'e_y2a', ?, 'ev_y2a', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000004', 'e_y2a', ?, 'ev_y2a', 'in_progress', ?)`,
 		eventType, runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed user-claimed task: %v", err)
@@ -1117,7 +1117,7 @@ func TestTaskClaim_AgainstOtherUserClaimReturns409(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('00000000-0000-4000-8000-000000000003', 'e_oth', ?, 'ev_oth', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000003', 'e_oth', ?, 'ev_oth', 'in_progress', ?)`,
 		eventType, otherUserID,
 	); err != nil {
 		t.Fatalf("seed task with other-user claim: %v", err)
@@ -1254,7 +1254,7 @@ func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('00000000-0000-4000-8000-000000000008', 'e_plain', 'github:pr:opened', 'ev_plain', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000008', 'e_plain', 'github:pr:opened', 'ev_plain', 'in_progress', ?)`,
 		runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
@@ -1307,7 +1307,7 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('00000000-0000-4000-8000-000000000013', 'e_undo_claim', 'github:pr:opened', 'ev_undo_claim', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000013', 'e_undo_claim', 'github:pr:opened', 'ev_undo_claim', 'in_progress', ?)`,
 		runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)

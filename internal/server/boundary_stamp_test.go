@@ -89,10 +89,15 @@ func TestTaskClaim_TakeoverStampsTheBoundary(t *testing.T) {
 // the claim the task's columns read identically, but nothing was taken from
 // anybody — there is no conversation the task stopped being about, and a stamp
 // here would record a handoff that never happened.
+//
+// It also pins what the pickup DOES do to the row it lands on: a queued task
+// returns at in_progress, because taking it is what starts it.
 func TestTaskClaim_PickingUpAnUnclaimedTaskStampsNothing(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
-	if _, err := s.db.Exec(`UPDATE tasks SET claimed_by_agent_id = NULL WHERE id = ?`, taskID); err != nil {
+	if _, err := s.db.Exec(
+		`UPDATE tasks SET claimed_by_agent_id = NULL, status = 'queued' WHERE id = ?`, taskID,
+	); err != nil {
 		t.Fatalf("unclaim the task: %v", err)
 	}
 
@@ -101,6 +106,16 @@ func TestTaskClaim_PickingUpAnUnclaimedTaskStampsNothing(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	assertUnstamped(t, s.db, conversationID)
+
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode claim response: %v", err)
+	}
+	if body.Status != "in_progress" {
+		t.Errorf("claim response status = %q, want in_progress", body.Status)
+	}
 }
 
 // TestTaskClaim_IdempotentReClaimStampsNothing: the caller already owns it and
@@ -109,7 +124,7 @@ func TestTaskClaim_IdempotentReClaimStampsNothing(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
 	if _, err := s.db.Exec(
-		`UPDATE tasks SET claimed_by_agent_id = NULL, claimed_by_user_id = ? WHERE id = ?`,
+		`UPDATE tasks SET claimed_by_agent_id = NULL, claimed_by_user_id = ?, status = 'in_progress' WHERE id = ?`,
 		runmode.LocalDefaultUserID, taskID,
 	); err != nil {
 		t.Fatalf("pre-claim the task for the caller: %v", err)

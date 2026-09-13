@@ -213,10 +213,15 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB) dbtest.PendingFiringsSeeder {
 		return agent.String, user.String
 	}
 
+	// A claim lands the row in progress, the way every claim door does — the
+	// tasks_queue_unclaimed CHECK refuses the held-queued row otherwise.
 	claimTaskForUser := func(t *testing.T, taskID string) {
 		t.Helper()
 		if _, err := conn.Exec(`
-			UPDATE tasks SET claimed_by_user_id = ?, claimed_by_agent_id = NULL WHERE id = ?
+			UPDATE tasks
+			   SET claimed_by_user_id = ?, claimed_by_agent_id = NULL,
+			       status = CASE WHEN status IN ('queued', 'snoozed') THEN 'in_progress' ELSE status END
+			 WHERE id = ?
 		`, runmode.LocalDefaultUserID, taskID); err != nil {
 			t.Fatalf("claim task for user: %v", err)
 		}

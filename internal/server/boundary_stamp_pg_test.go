@@ -106,8 +106,8 @@ func TestTaskReassign_StampsNothing(t *testing.T) {
 		t.Fatalf("seed event: %v", err)
 	}
 	if err := r.h.AdminDB.QueryRow(`
-		INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id, claimed_by_user_id)
-		VALUES ($1, $2, $3, $4, 'github:pr:opened', $5, $2) RETURNING id
+		INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id, claimed_by_user_id, status)
+		VALUES ($1, $2, $3, $4, 'github:pr:opened', $5, $2, 'in_progress') RETURNING id
 	`, r.orgID, r.admin, r.teamID, entityID, evtID).Scan(&taskID); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}

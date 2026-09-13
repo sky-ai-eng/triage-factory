@@ -12,10 +12,11 @@
 // Two chokepoints drive it, and both move the ticket into the InProgress bucket
 // — no board/task hook writes Done anymore (runJiraMirror still has a done mode,
 // but it is reserved for the forthcoming merge-driven Done mirror, not these):
-//   - placeTaskInProgress → mirrorJiraInProgress: the delegation was minted and
-//     the board card moved to In Progress, so the bot has the ticket. One
-//     delegation makes at most one mirror pass here, because the board write it
-//     rides is a single forward placement rather than a recomputed column.
+//   - announceTaskPlacement → mirrorJiraInProgress: the delegation was minted,
+//     and stamping the bot claim put the card in In Progress, so the bot has
+//     the ticket. One delegation makes at most one mirror pass here, because
+//     the announcement it rides runs once at mint rather than on a recomputed
+//     column.
 //   - terminateBlueprint's completed branch → mirrorJiraInProgressForTask: a
 //     finished run means the agent opened its PR and the work is awaiting human
 //     review + merge, which is still "in progress" to a watcher, NOT done. A
@@ -24,7 +25,7 @@
 //     ticket-done: that conflated the task lifecycle (TF's board "done" column =
 //     work submitted) with the entity lifecycle (the change shipped).
 //
-// Both points only ever see bot-owned tasks: placeTaskInProgress
+// Both points only ever see bot-owned tasks: announceTaskPlacement
 // early-returns unless claimed_by_agent_id is set, and the completion path
 // re-checks it. So every write here is bot-attributed by construction — there is
 // no "bot or human?" branch at the write site. A user takeover flips the claim

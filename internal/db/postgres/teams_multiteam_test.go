@@ -454,26 +454,28 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		claimed := seedMultiTeamTask(t, h, orgID, userID, teamA, "claimed-a")
 		pgtest.MustExec(t, h.AdminDB,
 			`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, claimed, teamB)
+		// The claim lands the row in progress, which is where the lane read
+		// below looks for it: tasks_queue_unclaimed refuses a held queued row.
 		pgtest.MustExec(t, h.AdminDB,
-			`UPDATE tasks SET claimed_by_user_id = $2 WHERE id = $1`, claimed, userID)
+			`UPDATE tasks SET claimed_by_user_id = $2, status = 'in_progress' WHERE id = $1`, claimed, userID)
 
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
 			// Owning team A still matches.
-			onA, e := claimedForTeams(ctx, store, orgID, []string{teamA})
+			onA, e := inProgressForTeams(ctx, store, orgID, []string{teamA})
 			if e != nil {
 				return e
 			}
 			if !containsTask(onA, claimed) {
-				t.Errorf("claimed projection(team A) missing the A-owned task %s", claimed)
+				t.Errorf("in_progress lane(team A) missing the A-owned task %s", claimed)
 			}
 			// Stale visibility team B must NOT match a claimed task.
-			onB, e := claimedForTeams(ctx, store, orgID, []string{teamB})
+			onB, e := inProgressForTeams(ctx, store, orgID, []string{teamB})
 			if e != nil {
 				return e
 			}
 			if containsTask(onB, claimed) {
-				t.Errorf("claimed projection(team B) matched task %s via a stale task_teams row; claimed tasks consolidate to team_id", claimed)
+				t.Errorf("in_progress lane(team B) matched task %s via a stale task_teams row; claimed tasks consolidate to team_id", claimed)
 			}
 			return nil
 		})
@@ -552,7 +554,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		pgtest.MustExec(t, h.AdminDB,
 			`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, task, teamB)
 		pgtest.MustExec(t, h.AdminDB,
-			`UPDATE tasks SET claimed_by_user_id = $2 WHERE id = $1`, task, userID)
+			`UPDATE tasks SET claimed_by_user_id = $2, status = 'in_progress' WHERE id = $1`, task, userID)
 
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ReassignClaimToUser(ctx, orgID, task, userID, userB)
@@ -606,9 +608,11 @@ func queuedForTeams(ctx context.Context, store db.TaskStore, orgID string, teamI
 // claimedForTeams is the board's Claimed column narrowed to teamIDs — the
 // claim axis, where the team filter's task_teams branch deliberately does not
 // apply (a claim consolidates the task to its owning team).
-func claimedForTeams(ctx context.Context, store db.TaskStore, orgID string, teamIDs []string) ([]domain.Task, error) {
+// inProgressForTeams reads the lane a claimed task sits in — claiming is what
+// puts it there — narrowed to the given teams.
+func inProgressForTeams(ctx context.Context, store db.TaskStore, orgID string, teamIDs []string) ([]domain.Task, error) {
 	tasks, _, err := store.List(ctx, orgID, db.TaskListFilter{
-		Statuses:       []string{db.TaskListStatusClaimed},
+		Statuses:       []string{"in_progress"},
 		TeamIDs:        teamIDs,
 		IncludeSnoozed: true,
 	}, db.ListOpts{Limit: 200})

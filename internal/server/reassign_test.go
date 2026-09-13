@@ -254,7 +254,7 @@ func TestTaskClaim_ReassignRefusalReasons(t *testing.T) {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
-			 VALUES ('00000000-0000-4000-8000-000000000014', 'e_reb', 'github:pr:opened', 'ev_reb', 'queued', ?)`,
+			 VALUES ('00000000-0000-4000-8000-000000000014', 'e_reb', 'github:pr:opened', 'ev_reb', 'in_progress', ?)`,
 			runmode.LocalDefaultAgentID,
 		); err != nil {
 			t.Fatalf("seed bot-claimed task: %v", err)
@@ -307,7 +307,7 @@ func TestTaskClaim_ReassignIdempotentToCurrentClaimant(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('00000000-0000-4000-8000-000000000015', 'e_rei', 'github:pr:opened', 'ev_rei', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000015', 'e_rei', 'github:pr:opened', 'ev_rei', 'in_progress', ?)`,
 		runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed claimed task: %v", err)
@@ -365,8 +365,8 @@ func TestTaskClaimReassign_PermissionModel(t *testing.T) {
 		}
 		var taskID string
 		if err := r.h.AdminDB.QueryRow(`
-			INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id, claimed_by_user_id)
-			VALUES ($1, $2, $3, $4, 'github:pr:opened', $5, $6) RETURNING id
+			INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id, claimed_by_user_id, status)
+			VALUES ($1, $2, $3, $4, 'github:pr:opened', $5, $6, 'in_progress') RETURNING id
 		`, r.orgID, r.admin, r.teamID, entityID, evtID, claimant).Scan(&taskID); err != nil {
 			t.Fatalf("seed claimed task: %v", err)
 		}

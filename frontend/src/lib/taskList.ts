@@ -59,9 +59,10 @@ export const TASK_PAGE_SIZE = 200
  *  window itself, invisibly; now the surface that wants it asks for it. */
 const DONE_WINDOW_DAYS = 7
 
-/** The pickable-right-now projection: the triage deck, and the board's Queued
- *  column. Unclaimed, still queued, not sleeping — the exact set the queue
- *  view has always shown.
+/** The queue: the triage deck, the board's Queued lane, and the rail's count.
+ *  Still queued and not sleeping — and unclaimed by construction, since
+ *  assigning a task is what lands it in progress, so no `only_unclaimed`
+ *  narrowing is needed to get the pickable set.
  *
  *  `showSnoozed` is the board's "show snoozed" toggle: it widens the lanes to
  *  include the snoozed one and keeps rows that are still inside their snooze
@@ -74,18 +75,17 @@ export function queueListBody(
   return {
     statuses: showSnoozed ? ['queued', 'snoozed'] : ['queued'],
     team_ids: teamIds,
-    only_unclaimed: true,
     include_snoozed: showSnoozed,
     page_size: TASK_PAGE_SIZE,
     ...filters,
   }
 }
 
-/** The queue's DEPTH: the same filter set the Queued column renders, with the
+/** The queue's DEPTH: the same filter set the Queued lane renders, with the
  *  page removed. `page_size: 0` is the count-only read — no items, the total
  *  under those filters — which is what a count of rows is on this API, and
  *  building it from queueListBody is what keeps the shell rail's number and
- *  the column it names from drifting apart.
+ *  the lane it names from drifting apart.
  *
  *  No team narrowing, matching the board's own default: the viewer's whole
  *  visible set under RLS. */
@@ -93,30 +93,9 @@ export function queueCountBody(): TaskListRequest {
   return { ...queueListBody([]), page_size: 0 }
 }
 
-/** The board's Queued lane: every task still queued, held or not. A task
- *  someone has claimed but not started sits here wearing its assignee mark
- *  rather than in a lane of its own, so the lane deliberately does not narrow
- *  by `only_unclaimed` the way the pickable projection above does — the rail's
- *  queued count keeps that narrowing, since the number it names is the depth
- *  of what can still be picked up. */
-export function queuedLaneBody(
-  teamIds: string[],
-  showSnoozed = false,
-  filters: TaskListFilters = {},
-): TaskListRequest {
-  return {
-    statuses: showSnoozed ? ['queued', 'snoozed'] : ['queued'],
-    team_ids: teamIds,
-    include_snoozed: showSnoozed,
-    page_size: TASK_PAGE_SIZE,
-    ...filters,
-  }
-}
-
 /** One lane of the board by status. The vocabulary also carries `claimed` —
- *  a queued task someone has taken, the claim axis rather than a lifecycle
- *  status — which no lane is built from; it stays a legitimate headless
- *  question. */
+ *  the claim axis rather than a lifecycle status — which no lane is built
+ *  from, and which the queue-holds-no-assignee rule now empties. */
 export function statusListBody(
   status: string,
   teamIds: string[],

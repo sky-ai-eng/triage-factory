@@ -2534,13 +2534,17 @@ func TestRLS_TasksClaimXorRejection(t *testing.T) {
 	}
 	assertPgCode(t, err, "23514", "tasks_claim_xor double-set")
 
-	// Single-column UPDATEs of course succeed. Sanity check.
-	if _, err := h.AdminDB.Exec(`UPDATE tasks SET claimed_by_agent_id = $1 WHERE id = $2`,
+	// Single-column UPDATEs of course succeed — each carrying the stage the
+	// claim doors write, since tasks_queue_unclaimed refuses a queued row with
+	// a claimant on it.
+	if _, err := h.AdminDB.Exec(
+		`UPDATE tasks SET claimed_by_agent_id = $1, status = 'in_progress' WHERE id = $2`,
 		agentID, taskID); err != nil {
 		t.Errorf("single agent claim UPDATE rejected: %v", err)
 	}
 	// Setting user clears agent (single UPDATE — the helper pattern):
-	if _, err := h.AdminDB.Exec(`UPDATE tasks SET claimed_by_user_id = $1, claimed_by_agent_id = NULL WHERE id = $2`,
+	if _, err := h.AdminDB.Exec(
+		`UPDATE tasks SET claimed_by_user_id = $1, claimed_by_agent_id = NULL WHERE id = $2`,
 		alice, taskID); err != nil {
 		t.Errorf("user-claim flip with explicit agent-clear rejected: %v", err)
 	}

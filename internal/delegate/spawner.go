@@ -1199,9 +1199,9 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, conversationID, claimI
 		display = "running"
 	}
 	s.broadcastConversationUpdate(orgID, conversationID, display)
-	// Setup progress moves no board column: the task was placed in_progress
-	// when its delegation was minted and stays there. updatePhase is a pure
-	// claim-phase + WS helper.
+	// Setup progress moves no board column: the task landed in_progress when
+	// the delegation's claim was stamped and stays there. updatePhase is a
+	// pure claim-phase + WS helper.
 	return false
 }
 
@@ -1242,30 +1242,44 @@ func (s *Spawner) setWorktreePath(ctx context.Context, orgID, conversationID, cl
 	return err
 }
 
-// placeTaskInProgress lands a delegated task in the In Progress column, and it
-// is the whole of the board placement a delegation does: one forward write at
-// the moment the blueprint run is minted, never a recomputation afterwards.
-// Nothing in the run's later life moves the card again — not a park, a step
-// advance, a completion that left a draft PR behind, or a wake. What still
-// needs a human rides the card frame and the attention order rather than the
-// lane the card sits in.
+// announceTaskPlacement publishes the placement the delegation's own claim
+// stamp already made. Stamping the bot claim IS the board move — the claim
+// doors land a queued task in_progress in the same UPDATE — so what is left
+// here is telling the two watchers about it: the board, over the websocket,
+// and the task's Jira ticket, through the system/bot mirror.
 //
-// Three guards, each of them about not writing over a decision that isn't this
-// delegation's to make: only a bot-claimed task is placed (a user takeover
-// flips the claim to the user, who owns the lifecycle from then on), a
-// done/dismissed task is never reopened, and a task already in_progress is
-// left alone — which also spares its Jira ticket a redundant mirror pass.
+// It runs once per delegation, when the blueprint run is minted, and that is
+// the whole of the board work a delegation does. Nothing in the run's later
+// life moves the card again — not a park, a step advance, a completion that
+// left a draft PR behind, or a wake. What still needs a human rides the card
+// frame and the attention order rather than the lane the card sits in.
 //
-// All failures are logged-not-fatal. The blueprint_run is committed and the
-// step is enqueued by the time this runs, so a failed board write costs a card
-// in the wrong lane, which a human can fix, rather than the run.
-func (s *Spawner) placeTaskInProgress(orgID, taskID string) {
+// Two guards, both about not speaking for a decision that isn't this
+// delegation's: only a bot-claimed task is announced (a user takeover flips
+// the claim to the user, who owns the lifecycle from then on), and a
+// done/dismissed task is never announced as in progress.
+//
+// A failed read is logged-not-fatal: the blueprint_run is committed and the
+// step is enqueued by the time this runs, so losing the announcement costs a
+// stale card until the next fetch, not the run. It is logged rather than
+// swallowed because this is the only thing that tells the board and Jira the
+// bot picked the task up — a silent return here reads downstream as "the
+// mirror stopped working", with nothing saying why. The two guards below are
+// not failures and say nothing.
+func (s *Spawner) announceTaskPlacement(orgID, taskID string) {
 	if s.tasks == nil {
 		return
 	}
 	ctx := context.Background()
 	task, err := s.tasks.GetSystem(ctx, orgID, taskID)
-	if err != nil || task == nil {
+	if err != nil {
+		delegateLog.Warn("announce task placement: task read failed, so neither the board nor Jira hears about this delegation",
+			"task", taskID, "org_id", orgID, "error", err)
+		return
+	}
+	if task == nil {
+		delegateLog.Warn("announce task placement: task is gone, so neither the board nor Jira hears about this delegation",
+			"task", taskID, "org_id", orgID)
 		return
 	}
 	if task.ClaimedByAgentID == "" {
@@ -1274,19 +1288,12 @@ func (s *Spawner) placeTaskInProgress(orgID, taskID string) {
 	if task.Status == "done" || task.Status == "dismissed" {
 		return
 	}
-	if task.Status == "in_progress" {
-		return
-	}
-	if _, err := s.tasks.SetStatusSystem(ctx, orgID, taskID, "in_progress"); err != nil {
-		delegateLog.Warn("place task in_progress failed", "task", taskID, "error", err)
-		return
-	}
-	s.broadcastTaskUpdate(orgID, taskID, "in_progress")
+	s.broadcastTaskUpdate(orgID, taskID, task.Status)
 
 	// Mirror the move onto the task's Jira ticket under the org's system/bot
 	// credential, so a watcher on Jira sees the bot pick the ticket up. Past
-	// the guards above, so it fires exactly as often as the board write does;
-	// task is bot-claimed here, so the write is bot-attributed by construction.
+	// the guards above, so it fires once per delegation; task is bot-claimed
+	// here, so the write is bot-attributed by construction.
 	s.mirrorJiraInProgress(orgID, task)
 }
 

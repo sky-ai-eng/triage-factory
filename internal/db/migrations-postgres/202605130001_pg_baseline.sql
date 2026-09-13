@@ -1145,6 +1145,10 @@ CREATE TABLE public.tasks (
     claimed_by_user_id uuid,
     CONSTRAINT tasks_claim_xor CHECK (((claimed_by_agent_id IS NULL) OR (claimed_by_user_id IS NULL))),
     CONSTRAINT tasks_claimed_requires_team CHECK ((((claimed_by_user_id IS NULL) AND (claimed_by_agent_id IS NULL)) OR (team_id IS NOT NULL))),
+    -- Assigning a task, to a person or to the bot, IS the stage marker: the
+    -- queue holds nobody's work. Returning a task to the queue is the only way
+    -- to clear a claim, and it already does.
+    CONSTRAINT tasks_queue_unclaimed CHECK (((status <> ALL (ARRAY['queued'::text, 'snoozed'::text])) OR ((claimed_by_user_id IS NULL) AND (claimed_by_agent_id IS NULL)))),
     CONSTRAINT tasks_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
     CONSTRAINT tasks_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'in_progress'::text, 'done'::text, 'dismissed'::text, 'snoozed'::text])))
 );

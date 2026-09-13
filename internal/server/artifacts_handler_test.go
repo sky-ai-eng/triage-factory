@@ -304,7 +304,7 @@ func TestArtifactApprove_ClosesOnlyWhileTheTaskIsStillTheRunsToClose(t *testing.
 		{
 			name: "a_human_took_the_task_over",
 			moveOn: func(t *testing.T, srv *Server, taskID string) {
-				execSQL(t, srv.db, `UPDATE tasks SET claimed_by_agent_id = NULL, claimed_by_user_id = ? WHERE id = ?`,
+				execSQL(t, srv.db, `UPDATE tasks SET claimed_by_agent_id = NULL, claimed_by_user_id = ?, status = 'in_progress' WHERE id = ?`,
 					runmode.LocalDefaultUserID, taskID)
 			},
 		},
@@ -852,7 +852,7 @@ func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner,
 	// The fixture's premise is a delegated run that opened a draft PR, so its
 	// task is bot-claimed — the state the terminal-on-last closing hooks
 	// require before a resolution may close anything.
-	execSQL(t, s.db, `UPDATE tasks SET claimed_by_agent_id = ? WHERE id = ?`, runmode.LocalDefaultAgentID, taskID)
+	execSQL(t, s.db, `UPDATE tasks SET claimed_by_agent_id = ?, status = 'in_progress' WHERE id = ?`, runmode.LocalDefaultAgentID, taskID)
 	// The conversation's own memory, as its completion gate would have filed it
 	// — what assertAgentMemoryUntouched checks the approval paths leave alone.
 	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "agent self-report", domain.MemorySourceAgent); err != nil {
@@ -898,7 +898,7 @@ func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, n
 	execSQL(t, s.db, `INSERT INTO entities (id, source, source_id, kind, state) VALUES ('e_ab', 'github', ?, 'pr', 'active')`, fmt.Sprintf("%s/%s#%d", owner, repo, number))
 	execSQL(t, s.db, `INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES ('ev_ab', 'e_ab', ?, '')`, eventType)
 	execSQL(t, s.db, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_ab', 'P', 'b', ?, ?)`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
-	execSQL(t, s.db, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id) VALUES ('00000000-0000-4000-8000-000000000023', 'e_ab', ?, 'ev_ab', 'queued', ?)`, eventType, runmode.LocalDefaultAgentID)
+	execSQL(t, s.db, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id) VALUES ('00000000-0000-4000-8000-000000000023', 'e_ab', ?, 'ev_ab', 'in_progress', ?)`, eventType, runmode.LocalDefaultAgentID)
 	brID := seedBlueprintRunSQLite(t, s.db, "00000000-0000-4000-8000-000000000023")
 	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES ('r_ab', '00000000-0000-4000-8000-000000000023', 'p_ab', 'completed', 'manual', ?, 0)`, brID)
 	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_ab", "", "agent self-report", domain.MemorySourceAgent); err != nil {

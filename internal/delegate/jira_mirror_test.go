@@ -495,7 +495,7 @@ func TestLookupJiraRuleForTaskSystem_NoRuleForProject_Nil(t *testing.T) {
 	}
 }
 
-// --- Hook 1: placeTaskInProgress -> in-progress mirror --------------------
+// --- Hook 1: announceTaskPlacement -> in-progress mirror ------------------
 
 // setupJiraMirrorFixture seeds a bot-claimable Jira run+task (its 1-step
 // blueprint_run starts 'running') plus the SKY status rule, and returns a
@@ -523,11 +523,11 @@ func setupJiraMirrorFixture(t *testing.T, suffix string, status, assignee string
 
 // A bot delegation against a Jira task assigns the service account and
 // transitions the ticket to InProgressCanonical when the run is minted.
-func TestPlaceTaskInProgress_JiraTask_MirrorsInProgress(t *testing.T) {
+func TestAnnounceTaskPlacement_JiraTask_MirrorsInProgress(t *testing.T) {
 	s, database, _, taskID, fake, res := setupJiraMirrorFixture(t, "ip", "To Do", "")
 	stampBotClaim(t, database, taskID)
 
-	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
+	s.announceTaskPlacement(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Fatalf("board status = %q, want in_progress", got)
@@ -545,13 +545,13 @@ func TestPlaceTaskInProgress_JiraTask_MirrorsInProgress(t *testing.T) {
 	}
 }
 
-// A user takeover flips the claim off the agent; placeTaskInProgress
+// A user takeover flips the claim off the agent; announceTaskPlacement
 // early-returns, so the bot never mirrors (no ForSystem, no Jira write).
-func TestPlaceTaskInProgress_UserClaimedJiraTask_NoMirror(t *testing.T) {
+func TestAnnounceTaskPlacement_UserClaimedJiraTask_NoMirror(t *testing.T) {
 	s, database, _, taskID, fake, res := setupJiraMirrorFixture(t, "user", "To Do", "")
 	stampUserClaim(t, database, taskID)
 
-	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
+	s.announceTaskPlacement(runmode.LocalDefaultOrgID, taskID)
 
 	if n := res.systemCalls(); n != 0 {
 		t.Errorf("ForSystem calls = %d, want 0 (user-claimed task: bot must not mirror)", n)
@@ -561,16 +561,50 @@ func TestPlaceTaskInProgress_UserClaimedJiraTask_NoMirror(t *testing.T) {
 	}
 }
 
+// An unclaimed task is nobody's delegation to speak for — the announcement
+// stands down rather than telling Jira the bot picked the ticket up.
+func TestAnnounceTaskPlacement_UnclaimedJiraTask_NoMirror(t *testing.T) {
+	s, _, _, taskID, fake, res := setupJiraMirrorFixture(t, "unclaimed", "To Do", "")
+
+	s.announceTaskPlacement(runmode.LocalDefaultOrgID, taskID)
+
+	if n := res.systemCalls(); n != 0 {
+		t.Errorf("ForSystem calls = %d, want 0 (unclaimed task: nothing to announce)", n)
+	}
+	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
+		t.Errorf("assigns=%d transitions=%v, want no Jira writes", assigns, transitions)
+	}
+}
+
+// A closed task is never announced as in progress: the ticket's terminal
+// state is not this delegation's to walk back.
+func TestAnnounceTaskPlacement_TerminalJiraTask_NoMirror(t *testing.T) {
+	s, database, _, taskID, fake, res := setupJiraMirrorFixture(t, "terminal", "To Do", "")
+	stampBotClaim(t, database, taskID)
+	if _, err := database.Exec(`UPDATE tasks SET status = 'dismissed' WHERE id = ?`, taskID); err != nil {
+		t.Fatalf("dismiss task: %v", err)
+	}
+
+	s.announceTaskPlacement(runmode.LocalDefaultOrgID, taskID)
+
+	if n := res.systemCalls(); n != 0 {
+		t.Errorf("ForSystem calls = %d, want 0 (terminal task: nothing to announce)", n)
+	}
+	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
+		t.Errorf("assigns=%d transitions=%v, want no Jira writes", assigns, transitions)
+	}
+}
+
 // A GitHub-backed task resolves no rule, so the mirror no-ops even when the
 // resolver is wired.
-func TestPlaceTaskInProgress_GitHubTask_NoMirror(t *testing.T) {
+func TestAnnounceTaskPlacement_GitHubTask_NoMirror(t *testing.T) {
 	s, database, _, taskID := setupAdvanceFixture(t, "gh-nomirror")
 	stampBotClaim(t, database, taskID)
 	fake := newRecordingJiraServer(t, "To Do", "")
 	res := &fakeJiraResolver{client: fake.client()}
 	s.SetJiraResolver(res)
 
-	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
+	s.announceTaskPlacement(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Fatalf("board status = %q, want in_progress", got)
@@ -580,25 +614,74 @@ func TestPlaceTaskInProgress_GitHubTask_NoMirror(t *testing.T) {
 	}
 }
 
-// The placement is the only board write a delegation makes, so the mirror it
-// carries fires once: a second call finds the task already in_progress, writes
-// nothing, and never reaches Jira. This is what keeps a Jira watcher from
-// seeing a ticket churn as a run parks and resumes.
-func TestPlaceTaskInProgress_SecondCallMirrorsNothing(t *testing.T) {
-	s, database, _, taskID, fake, res := setupJiraMirrorFixture(t, "once", "To Do", "")
-	stampBotClaim(t, database, taskID)
+// One delegation, one mirror pass. The announcement runs once, at mint, so a
+// Jira watcher sees the ticket move exactly once however long the run then
+// parks and resumes for.
+func TestDelegate_JiraTask_MirrorsInProgressExactlyOnce(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedLocalBotAgent(t, database)
+	seedJiraMirrorRule(t, database)
+	task, bpID := delegatableJiraFixture(t, database, "once")
+	stampBotClaim(t, database, task.ID)
 
-	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
+	fake := newRecordingJiraServer(t, "To Do", "")
+	res := &fakeJiraResolver{client: fake.client()}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	s.SetJiraResolver(res)
+
+	if _, err := s.Delegate(task, DelegateOpts{
+		OrgID: runmode.LocalDefaultOrgID, ExplicitBlueprintID: bpID,
+		TriggerType: "manual", CreatorUserID: runmode.LocalDefaultUserID,
+	}); err != nil {
+		t.Fatalf("Delegate: %v", err)
+	}
+
 	fake.waitTransition(t)
-	s.placeTaskInProgress(runmode.LocalDefaultOrgID, taskID)
-
 	if n := res.systemCalls(); n != 1 {
-		t.Errorf("ForSystem calls = %d, want 1 (the second placement is a no-op)", n)
+		t.Errorf("ForSystem calls = %d, want 1 (one delegation, one mirror pass)", n)
 	}
 	assigns, transitions := fake.snapshot()
-	if assigns != 1 || len(transitions) != 1 {
+	if assigns != 1 || len(transitions) != 1 || transitions[0] != "In Progress" {
 		t.Errorf("assigns = %d, transitions = %v, want 1 and one In Progress move", assigns, transitions)
 	}
+}
+
+// delegatableJiraFixture is delegatableFixture's Jira twin: a 1-step blueprint
+// on a fresh SKY-keyed ticket, so a manual Delegate has a rule to mirror
+// through.
+func delegatableJiraFixture(t *testing.T, database *sql.DB, suffix string) (domain.Task, string) {
+	t.Helper()
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	stores := sqlitestore.New(database)
+
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-"+suffix, "issue", "T", "https://x/"+suffix)
+	if err != nil {
+		t.Fatalf("entity: %v", err)
+	}
+	eventID, err := stores.Events.Record(ctx, org, domain.Event{
+		EventType: domain.EventJiraIssueAssigned, EntityID: &entity.ID, MetadataJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	task, _, err := stores.Tasks.FindOrCreate(ctx, org, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, suffix, eventID, 0.5)
+	if err != nil {
+		t.Fatalf("task: %v", err)
+	}
+
+	bpID := "jirabp-" + suffix
+	if _, err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
+		ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
+	}); err != nil {
+		t.Fatalf("blueprint: %v", err)
+	}
+	pid := "jirap-" + suffix
+	ensureTestPrompt(t, database, domain.Prompt{ID: pid, Name: pid, Body: "b", Source: "user"})
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{pid}, nil); err != nil {
+		t.Fatalf("ReplaceSteps: %v", err)
+	}
+	return *task, bpID
 }
 
 // --- Hook 2: terminateBlueprint completed -> in-progress mirror -----------

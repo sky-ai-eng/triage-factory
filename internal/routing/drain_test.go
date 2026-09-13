@@ -263,57 +263,16 @@ func TestDrainTask_ClosedTask(t *testing.T) {
 	}
 }
 
-// TestRevertTaskStatus_PreservesClaim pins the contract that
-// revertTaskStatus only touches the lifecycle axis. Its sole caller
-// (the mark-fired-failure rollback in DrainTask) leaves the
-// pending_firings row in 'pending' so the next drain retries; the
-// retry's attemptDrainOne gate requires the bot
-// claim to still be set or it skips with claim_changed. Clearing
-// the claim cols here would silently drop the queued intent — the
-// guard would fire and the retry never would. This test pins that
-// the bot claim survives the revert.
-func TestRevertTaskStatus_PreservesClaim(t *testing.T) {
-	database := newTestDB(t)
-	_, taskID, _, _ := setupDrainScenario(t, database)
-
-	// Move the task off 'queued' to simulate mid-flight state the
-	// rollback path would observe. (Pre-B+ fireDelegate flipped to
-	// 'delegated'; post-B+ the status stays 'queued' on commit, but
-	// we're testing revert independently of the caller path, so set
-	// status to something visibly distinct so the assertion catches
-	// a regression where SetStatus isn't called either.)
-	if _, err := testTaskStore(database).SetStatus(t.Context(), runmode.LocalDefaultOrgID, taskID, "snoozed"); err != nil {
-		t.Fatalf("pre-stage status: %v", err)
-	}
-
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
-	router.revertTaskStatus(context.Background(), runmode.LocalDefaultOrgID, taskID, "queued")
-
-	task, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
-	if err != nil || task == nil {
-		t.Fatalf("read task: task=%v err=%v", task, err)
-	}
-	if task.Status != "queued" {
-		t.Errorf("Status = %q, want queued (lifecycle revert must fire)", task.Status)
-	}
-	if task.ClaimedByAgentID != runmode.LocalDefaultAgentID {
-		t.Errorf("ClaimedByAgentID = %q, want %q (revert must NOT clear claim — retry needs it)",
-			task.ClaimedByAgentID, runmode.LocalDefaultAgentID)
-	}
-	if task.ClaimedByUserID != "" {
-		t.Errorf("ClaimedByUserID = %q, want empty", task.ClaimedByUserID)
-	}
-}
-
-// TestDrainTask_SnoozedTask pins the semantic that snooze is
-// a lifecycle-axis "do not act" signal that's orthogonal to claim. A
-// pending firing for a bot-claimed task that gets snoozed (e.g., user
-// said "wait until Tuesday" while the firing was queued behind a busy
-// entity) must not fire when the entity slot opens. The drain
-// classifies snoozed alongside done/dismissed under task_closed —
-// all three mean "task is not currently drain-eligible." A snooze
-// wake-on-bump creates a fresh event → new firing if the trigger
-// still matches; the deferred firing is the wrong wake path.
+// TestDrainTask_SnoozedTask pins the semantic that snooze is a
+// lifecycle-axis "do not act" signal. A pending firing for a task the user
+// snoozed (e.g. "wait until Tuesday" while the firing was queued behind a
+// busy entity) must not fire when the entity slot opens. The drain
+// classifies snoozed alongside done/dismissed under task_closed — all three
+// mean "task is not currently drain-eligible" — and reaches that answer
+// before the claim guard, which matters because a snooze releases the claim:
+// the skip reason names the lifecycle, not the missing claim. A snooze
+// wake-on-bump creates a fresh event → new firing if the trigger still
+// matches; the deferred firing is the wrong wake path.
 func TestDrainTask_SnoozedTask(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
@@ -322,13 +281,17 @@ func TestDrainTask_SnoozedTask(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	// Bot-claim the task (drain would otherwise short-circuit on
-	// claim_changed before the lifecycle check) AND snooze it.
-	if _, err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
-		t.Fatalf("stamp claim: %v", err)
-	}
+	// Snooze it, and drop the claim the fixture staged with it: the snooze
+	// route refuses a held task outright ("requeue or complete it first"), so
+	// the only way a task reaches the snoozed lane is unclaimed. The skip is
+	// still task_closed rather than claim_changed because the lifecycle check
+	// runs ahead of the claim guard — the reason names why the drain stood
+	// down, not which guard happened to be first to notice.
 	if _, err := database.Exec(
-		`UPDATE tasks SET status = 'snoozed', snooze_until = '2099-01-01 00:00:00' WHERE id = ?`,
+		`UPDATE tasks
+		    SET status = 'snoozed', snooze_until = '2099-01-01 00:00:00',
+		        claimed_by_agent_id = NULL, claimed_by_user_id = NULL
+		  WHERE id = ?`,
 		taskID,
 	); err != nil {
 		t.Fatalf("snooze task: %v", err)
@@ -642,8 +605,8 @@ func TestDrainTask_MarkFiredFailure_TearsDownTheBlueprintRun(t *testing.T) {
 			stopped[0], isBlueprintRun, isConversation)
 	}
 
-	// The other two thirds of the rollback still land: the firing goes back to
-	// 'pending' for a later drain, and the task's lifecycle reverts.
+	// The other half of the rollback still lands: the firing goes back to
+	// 'pending' for a later drain.
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("list firings: %v", err)
@@ -654,11 +617,18 @@ func TestDrainTask_MarkFiredFailure_TearsDownTheBlueprintRun(t *testing.T) {
 	if rows[0].Status != domain.PendingFiringStatusPending {
 		t.Errorf("firing status = %q, want %q (released for retry)", rows[0].Status, domain.PendingFiringStatusPending)
 	}
+	// The task row is untouched, and that is the contract: the retry needs the
+	// bot's claim — attemptDrainOne's guard skips a claim-less firing — and a
+	// held task is in progress, so there is no lifecycle to walk back.
 	task, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
 	if err != nil || task == nil {
 		t.Fatalf("read task: task=%v err=%v", task, err)
 	}
-	if task.Status != "queued" {
-		t.Errorf("task status = %q, want queued", task.Status)
+	if task.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+		t.Errorf("ClaimedByAgentID = %q, want %q (the retry needs the claim)",
+			task.ClaimedByAgentID, runmode.LocalDefaultAgentID)
+	}
+	if task.Status != "in_progress" {
+		t.Errorf("task status = %q, want in_progress (the bot still holds it)", task.Status)
 	}
 }
