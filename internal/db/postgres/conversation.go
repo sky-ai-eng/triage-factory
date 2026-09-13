@@ -1063,6 +1063,25 @@ func (s *conversationStore) EndConversationsForTaskSystem(ctx context.Context, o
 	return endConversationsForTask(ctx, s.admin, orgID, taskID, reason)
 }
 
+func (s *conversationStore) EndTerminalConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	if !domain.IsEndedReason(string(reason)) {
+		return nil, fmt.Errorf("%w: %q", db.ErrInvalidEndedReason, reason)
+	}
+	if !isValidUUID(taskID) {
+		return nil, nil
+	}
+	// The stored column, not the display ladder: `queued` and `running` are
+	// derived from the active claim and never written here, so a row whose
+	// status reads terminal in SQL is one no engagement is driving.
+	return writeConversationsReturning(ctx, s.admin, `
+		UPDATE conversations SET ended_at = $1, ended_reason = $2
+		WHERE org_id = $3 AND task_id = $4
+		  AND ended_at IS NULL AND parent_conversation_id IS NULL
+		  AND status IN (`+conversationTerminalStatusesSQL+`)
+		RETURNING *
+	`, time.Now().UTC(), string(reason), orgID, taskID)
+}
+
 func (s *conversationStore) EndConversation(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
 	return endConversation(ctx, s.q, orgID, conversationID, reason)
 }

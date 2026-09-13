@@ -413,6 +413,41 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		Status:       domain.BlueprintRunStatusRunning,
 		StepPlan:     stepPlan,
 	}
+	// The delegation boundary, and it lives here rather than at any one door so
+	// that every door inherits it: a person's re-delegate, the router's fire on
+	// a matching event, the pending-firings drain, and whatever calls this next.
+	// Step 0 must never open on a task whose prior conversation is still
+	// un-ended, or the task carries two and nothing can say which it is about —
+	// with the concrete costs that a concluded step still passes the follow-up
+	// composer while the claim arm reaches only the newest row, so a person's
+	// message strands, and an un-ended conversation owes no memory, so the new
+	// run opens without its predecessor's account of the work.
+	//
+	// Terminal rows only, and before the insert. A LIVE row belongs to whoever
+	// is driving it: the delegate route stops its conversations before calling
+	// here, the router never reaches this with one live (the task gate folds
+	// the event into it instead), and a race that made one live meets the
+	// one-active-run index below, which refuses the insert outright. Ending
+	// before the insert is what keeps the row this call is about to mint out of
+	// the set.
+	if s.conversations != nil {
+		ended, err := s.conversations.EndTerminalConversationsForTaskSystem(bgCtx, orgID, task.ID, domain.EndedDelegated)
+		if err != nil {
+			// Best-effort, like every other boundary stamp: an unstamped row is
+			// one the provisioner's sweep reaches later, while refusing the
+			// delegation would strand work a trigger asked for.
+			delegateLog.Warn("stamp the delegation boundary on the task's concluded conversations failed",
+				"task", task.ID, "error", err)
+		}
+		for _, c := range ended {
+			// One ring per row, after the stamp commits — the same shape the
+			// step-advance stamper uses. A conversation that ended owing memory
+			// is one the next run reads, so the sooner the brain starts the
+			// shorter the gap before step 0 can be claimed.
+			s.kickMemoryOwed(orgID, c.ID)
+		}
+	}
+
 	// Event-triggered firings go through the fenced insert: a replayed
 	// (triggering_event_id, trigger_id) under the at-least-once router queue
 	// returns ErrAlreadyFired, so the router skips cleanly instead of minting a
@@ -433,6 +468,12 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 			// holds a live engagement. The delegate route tears the prior one
 			// down before it calls here, so reaching this means something
 			// landed in between — a second gesture, or an auto-fire.
+			//
+			// The boundary stamp above has already run, and that is fine rather
+			// than something to unwind: it touched terminal rows only, which
+			// the winning engagement is not, and ending a finished transcript
+			// is idempotent — whoever wins the race stamps the same set to the
+			// same values.
 			if errors.Is(err, db.ErrTaskBusyActiveRun) {
 				return "", ErrTaskBusy
 			}
@@ -446,12 +487,18 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		// claim race has a winner either way and the run must still stand.
 		inserted, _, err := s.blueprints.CreateRunIfNotFiredSystem(bgCtx, orgID, brRow, opts.TaskClaim)
 		if err != nil {
+			// Harmless after the stamp — see the manual arm above for why a
+			// refusal here leaves nothing to unwind.
 			if errors.Is(err, db.ErrTaskBusyActiveRun) {
 				return "", ErrTaskBusy
 			}
 			return "", fmt.Errorf("create blueprint run: %w", err)
 		}
 		if !inserted {
+			// The (event, trigger) fence caught a replay: this firing's run
+			// committed already, and the stamp that ran with it ended the
+			// task's prior conversations then. The stamp above found nothing
+			// this time round, which is the correct answer, not a missed one.
 			return "", ErrAlreadyFired
 		}
 	}
