@@ -115,7 +115,12 @@ type Manager struct {
 	// the bound fire without waiting out the real one.
 	attemptTimeout time.Duration
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// base is the context the manager is running under — the brain's, set by
+	// Run and cancelled by the demotion that stops it. Every doorbell-driven
+	// attempt derives from it, so a demoted holder stops generating instead of
+	// racing its successor's sweep to the same upsert. nil until Run.
+	base     context.Context
 	inflight map[string]struct{}
 }
 

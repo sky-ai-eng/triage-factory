@@ -158,7 +158,13 @@ func (a *App) startBrain(term int64) {
 	// gap. The reaper runs right here, on a longer tick than this sweep, so a
 	// conversation it fails is picked up within one interval regardless; a
 	// doorbell would buy it nothing and cost it a fleet-wide re-sweep per tick.
-	go memoryprovision.RunSweep(brainCtx, a.memoryProvisioner, memoryprovision.DefaultSweepInterval)
+	//
+	// Not go-prefixed because Run spawns its own loop and returns: it arms the
+	// doorbell on the way, which has to have happened by the time this function
+	// returns — the gate a ringer passes is isBrainHolder, so a nudge arriving
+	// before a scheduler got round to the sweep would be dropped by a brain that
+	// is already running.
+	a.memoryProvisioner.Run(brainCtx, memoryprovision.DefaultSweepInterval)
 	// Shipped-defaults sync: bring every provisioned team's UNMODIFIED
 	// copies of the shipped prompts/blueprints up to the current
 	// compile-time content. Leader-only (this is the brain), idempotent, and

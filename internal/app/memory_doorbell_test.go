@@ -69,6 +69,13 @@ func newDoorbellApp(t *testing.T, role runmode.DeployRole) (*App, *doorbellConve
 	a.memoryProvisioner = memoryprovision.NewManager(
 		db.Stores{Conversations: conv}, nil, nil, nil, nil, nil,
 	)
+	// Running, as it is on a pod whose brain holds the lease: the doorbell hangs
+	// off the brain's context, so a provisioner nobody started drops every nudge
+	// — which is the right answer on a demoted pod and the wrong one here. The
+	// interval is one no test waits out; what these ring is the doorbell.
+	brainCtx, stopBrain := context.WithCancel(context.Background())
+	t.Cleanup(stopBrain)
+	a.memoryProvisioner.Run(brainCtx, time.Hour)
 	return a, conv
 }
 
