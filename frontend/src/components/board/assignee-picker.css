@@ -1,0 +1,534 @@
+/* Assignee picker — cloned from the design language document. Every value
+   here is the original; only the token names are this system's. Do not
+   "clean up" these rules: the magic numbers are the design.
+
+   Loaded by AssigneePicker.tsx, once. */
+
+/* THE PAGE RECEDES while a menu is open. One element on the body, created by
+   the first picker to open and shared by all of them — see the note in
+   AssigneePicker.tsx for why it cannot live inside a card.
+
+   Fill and blur together, and both dialled back from what either would need
+   alone: a wash lowers contrast while a blur destroys edges, and reading is
+   edge detection. 60% ground leaves the board legible as layout; 2.4px stops
+   the type parsing as type. Neither at full strength, which is what makes the
+   card in hand stand out without the page going black.
+
+   The radius never animates. Opacity is the only thing that moves, so the
+   backdrop pass runs once on open rather than per frame. */
+/* While a picker has the page receded, nothing else on the board volunteers
+   information: the scrim says one card is being operated, and a tooltip firing
+   under it from an unrelated card contradicts that. Suppressed everywhere
+   rather than only outside the open card — the picker IS the answer to "what
+   is this" for as long as it is up. */
+body:has(#tf-assign-scrim.on) .tip {
+  display: none !important;
+}
+
+#tf-assign-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  opacity: 0;
+  pointer-events: none;
+  cursor: default;
+  background: color-mix(in srgb, var(--color-ground) 60%, transparent);
+  backdrop-filter: blur(2.4px);
+  -webkit-backdrop-filter: blur(2.4px);
+  /* Trails on close: the page comes back only once the menu has gone. */
+  transition: opacity calc(0.16s * var(--tk-assign, 1)) cubic-bezier(0.4, 0, 0.9, 1)
+    calc(0.06s * var(--tk-assign, 1));
+}
+/* Leads on open, so the ground is ready before the first label lands.
+   Reversed, the two read as separate events. */
+#tf-assign-scrim.on {
+  opacity: 1;
+  /* Takes the pointer once it is up. The outside-click handler already
+     swallows the click and closes — but with the scrim inert, hover states and
+     the pointer cursor kept firing on cards underneath, so the receded page
+     advertised itself as live while every click was being eaten. Catching the
+     pointer here makes the page look as inert as it behaves, and a click still
+     reaches the document's capture-phase handler, which is what closes. */
+  pointer-events: auto;
+  transition: opacity calc(0.18s * var(--tk-assign, 1)) cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.assign {
+  --ink: var(--color-ink-1);
+  --mono: var(--font-mono);
+
+  /* MOTION. Two easings, because an entrance and an exit are not the same
+     event. In draws decisively and settles; out leaves immediately and does
+     not linger. Neither overshoots — a menu that bounces reads as a toy, and
+     the terminus lands on the mark's exact pixel, so any overshoot shows.
+
+     Two stagger steps, because the close is not the open reversed at the same
+     speed. Every duration and delay is multiplied by --tk-assign so a review
+     surface can watch the whole thing at quarter speed without a second set
+     of values; product pages leave it at 1. */
+  --in: cubic-bezier(0.22, 1, 0.36, 1);
+  --out: cubic-bezier(0.4, 0, 0.9, 1);
+  --row: 0.024s; /* per-row stagger, opening */
+  --rowx: 0.014s; /* per-row stagger, closing — tighter, so the exit reads as one gesture */
+}
+
+/* Assignee is always visible — who owns this is a scanning fact, not
+   hover-only information. Neutral at rest: a real avatar may carry its own
+   color, but a synthetic mark never invents one. Person and agent differ
+   by SHAPE, which is the same encoding used everywhere else. */
+.assign {
+  position: relative;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.assign.open {
+  z-index: 20;
+}
+/* Growing down, the card is NOT lifted (task-card.css) — the menu is on top of
+   it, so it recedes with the page. The picker itself still has to clear the
+   scrim, and .closing holds that through the fade for the same reason the
+   card's lift does. Same constraint as the card's: an ancestor with a
+   transform or filter becomes the containing block and this cannot clear a
+   body-level scrim. */
+.assign[data-side='down'].open,
+.assign[data-side='down'].closing {
+  z-index: 41;
+}
+/* .who's transition is declared with the motion block below, not here: the
+   mark's opacity is choreography, and its color/shadow are hover feedback. */
+.who {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  /* 500 is DM Mono's heaviest real weight; 700 is a synthesized smear. */
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  color: var(--color-ink-3);
+  box-shadow: inset 0 0 0 1.2px var(--color-line-2);
+  border-radius: 999px;
+  transition:
+    color 0.2s,
+    box-shadow 0.2s;
+}
+.who:hover {
+  color: var(--color-ink-2);
+  box-shadow: inset 0 0 0 1.2px var(--color-ink-4);
+}
+.who.bot {
+  border-radius: 4px;
+}
+/* Same mark, no verb. */
+.who.static,
+.who.static:hover {
+  cursor: default;
+  color: var(--color-ink-3);
+  box-shadow: inset 0 0 0 1.2px var(--color-line-2);
+}
+.who.static.none {
+  color: var(--color-ink-4);
+}
+.who.none {
+  color: var(--color-ink-4);
+  opacity: 0.6;
+}
+
+/* The picker is a structure that DRAWS itself: the spine grows from the
+   mark, ticks extend, labels arrive. No fill and no rectangle. The mark
+   itself retires while open so the line has a clean terminus. */
+/* visibility is held until the longest closing transition has finished, so a
+   half-faded label is never left clickable. */
+.picker {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  transition: visibility 0s calc(0.26s * var(--tk-assign, 1));
+}
+/* In the top layer. The UA gives a popover a centred fit-content box with a
+   border, padding, a canvas background and its own overflow — every one of
+   which has to come off, because this element is not a panel: it is the
+   mark's own 18px box, relocated in paint so no ancestor's overflow can clip
+   what grows out of it. left/top/width/height are written by placePicker. */
+.picker[popover] {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  overflow: visible;
+}
+.picker[popover]::backdrop {
+  display: none;
+}
+.assign.open .picker {
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+/* The mark and the terminus are one cross-fade at one point: the mark leaves
+   first on open, and comes back only after the terminus has gone on close. */
+.who {
+  transition:
+    color 0.2s,
+    box-shadow 0.2s,
+    opacity calc(0.1s * var(--tk-assign, 1)) var(--in) calc(0.11s * var(--tk-assign, 1));
+}
+.assign.open .who {
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    color 0.2s,
+    box-shadow 0.2s,
+    opacity calc(0.09s * var(--tk-assign, 1)) var(--out);
+}
+
+/* terminus ring where the mark was */
+/* A button, because it closes. The hit area is grown past the 9px glyph with
+   padding and pulled back with a negative offset, so the target is a comfortable
+   22px without moving the terminus off the spine's end. */
+.picker .term {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 9px;
+  height: 9px;
+  opacity: 0;
+  box-sizing: content-box;
+  padding: 6.5px;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  transform: scale(0.4) rotate(-30deg);
+  transition:
+    opacity calc(0.09s * var(--tk-assign, 1)) var(--out),
+    transform calc(0.1s * var(--tk-assign, 1)) var(--out);
+}
+.assign:not(.open) .picker .term {
+  pointer-events: none;
+}
+.picker .term:hover {
+  opacity: 1 !important;
+}
+.picker .term::before,
+.picker .term::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 6.5px;
+  width: 1px;
+  height: 9px;
+  background: var(--color-warm);
+}
+.picker .term::before {
+  transform: translateX(-50%) rotate(45deg);
+}
+.picker .term::after {
+  transform: translateX(-50%) rotate(-45deg);
+}
+/* The terminus arrives EARLY, not last: it is what the mark turned into, and a
+   ring that appears after the labels reads as a third thing rather than the
+   same thing moved. */
+.assign.open .picker .term {
+  opacity: 0.9;
+  transform: scale(1) rotate(0deg);
+  transition:
+    opacity calc(0.12s * var(--tk-assign, 1)) var(--in) calc(0.02s * var(--tk-assign, 1)),
+    transform calc(0.16s * var(--tk-assign, 1)) var(--in) calc(0.02s * var(--tk-assign, 1));
+}
+
+/* the spine grows up out of the terminus */
+.picker .stem {
+  position: absolute;
+  right: 8.5px;
+  bottom: 9px;
+  width: 1px;
+  height: 132px;
+  background: color-mix(in srgb, var(--color-warm) 55%, transparent);
+  transform: scaleY(0);
+  transform-origin: bottom;
+  transition: transform calc(0.1s * var(--tk-assign, 1)) var(--out)
+    calc(0.06s * var(--tk-assign, 1));
+}
+.assign.open .picker .stem {
+  transform: scaleY(1);
+  transition: transform calc(0.2s * var(--tk-assign, 1)) var(--in) calc(0.04s * var(--tk-assign, 1));
+}
+
+.picker .opts {
+  position: absolute;
+  right: 9px;
+  bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  padding: 5px 0;
+}
+
+/* GROWING DOWNWARD. The same structure with one axis flipped, for a mark whose
+   container has no room above it — a card near the top of a lane, where the
+   lane is a scroll container and clips the menu away entirely.
+
+   The list is NOT reversed. Reading order is the ranking, and a menu that
+   reads top-to-bottom on one side and bottom-to-top on the other is two
+   different menus. So the block still runs Agent → Unassign → count → filter
+   from top to bottom; what changes is which end sits against the mark.
+
+   The terminus does not move: it stands where the mark is on either side, so
+   the control opens and shuts under one cursor. */
+.assign[data-side='down'] .picker .stem {
+  bottom: auto;
+  top: 9px;
+  transform-origin: top;
+}
+.assign[data-side='down'] .picker .opts {
+  bottom: auto;
+  top: 20px;
+}
+/* The stagger radiates AWAY from the terminus, which on this side is the top
+   of the block, so the open delay switches from --i (counted from the last
+   row) to --j (counted from the first) and the close switches the other way.
+   Re-declared in full, because the shorthands these override carry their own
+   delays and a bare transition-delay would not reach the tick. */
+.assign[data-side='down'].open .picker .opt {
+  transition:
+    opacity calc(0.13s * var(--tk-assign, 1)) var(--in)
+      calc((0.15s + var(--j, 0) * var(--row)) * var(--tk-assign, 1)),
+    transform calc(0.16s * var(--tk-assign, 1)) var(--in)
+      calc((0.15s + var(--j, 0) * var(--row)) * var(--tk-assign, 1)),
+    color 0.15s;
+}
+.assign[data-side='down'].open .picker .opt::after {
+  transition:
+    transform calc(0.11s * var(--tk-assign, 1)) var(--in)
+      calc((0.13s + var(--j, 0) * var(--row)) * var(--tk-assign, 1)),
+    background 0.15s;
+}
+.assign[data-side='down'] .picker .opt {
+  transition:
+    opacity calc(0.09s * var(--tk-assign, 1)) var(--out)
+      calc(var(--i, 0) * var(--rowx) * var(--tk-assign, 1)),
+    transform calc(0.11s * var(--tk-assign, 1)) var(--out)
+      calc(var(--i, 0) * var(--rowx) * var(--tk-assign, 1)),
+    color 0.15s;
+}
+.assign[data-side='down'] .picker .opt::after {
+  transition:
+    transform calc(0.08s * var(--tk-assign, 1)) var(--out)
+      calc(var(--i, 0) * var(--rowx) * var(--tk-assign, 1)),
+    background 0.15s;
+}
+
+.picker .opt {
+  position: relative;
+  text-align: right;
+  white-space: nowrap;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 4px 16px 4px 10px;
+  font-size: 12px;
+  color: var(--color-ink-3);
+  opacity: 0;
+  transform: translateX(7px);
+  /* Closing runs top row first (--j counts from the top), so the block
+     retracts toward the terminus instead of all six rows vanishing together.
+     This is the whole reason the open and close delays are declared on
+     separate rules: a single transition-delay plays the same order in both
+     directions. */
+  transition:
+    opacity calc(0.09s * var(--tk-assign, 1)) var(--out)
+      calc(var(--j, 0) * var(--rowx) * var(--tk-assign, 1)),
+    transform calc(0.11s * var(--tk-assign, 1)) var(--out)
+      calc(var(--j, 0) * var(--rowx) * var(--tk-assign, 1)),
+    color 0.15s;
+}
+.assign.measuring .picker .opt,
+.assign.measuring .picker .frow,
+.assign.measuring .picker .rest {
+  transform: none !important;
+  transition: none !important;
+}
+.assign.open .picker .opt {
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity calc(0.13s * var(--tk-assign, 1)) var(--in)
+      calc((0.15s + var(--i, 0) * var(--row)) * var(--tk-assign, 1)),
+    transform calc(0.16s * var(--tk-assign, 1)) var(--in)
+      calc((0.15s + var(--i, 0) * var(--row)) * var(--tk-assign, 1)),
+    color 0.15s;
+}
+/* The tick scales rather than widening. Same 9px result, but width is a layout
+   property — six of them animating per open, on every card in a lane, is paint
+   work for a line one pixel tall. */
+.picker .opt::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  width: 9px;
+  transform: scaleX(0);
+  transform-origin: right;
+  background: color-mix(in srgb, var(--color-warm) 40%, transparent);
+  transition:
+    transform calc(0.08s * var(--tk-assign, 1)) var(--out)
+      calc(var(--j, 0) * var(--rowx) * var(--tk-assign, 1)),
+    background 0.15s;
+}
+.assign.open .picker .opt::after {
+  transform: scaleX(1);
+  transition:
+    transform calc(0.11s * var(--tk-assign, 1)) var(--in)
+      calc((0.13s + var(--i, 0) * var(--row)) * var(--tk-assign, 1)),
+    background 0.15s;
+}
+/* The filter is the bottom row of the same structure — same alignment, same
+   tick, same stem. It is not a search box bolted onto a menu. */
+.picker .frow {
+  position: relative;
+  align-self: flex-end;
+  padding: 4px 16px 4px 10px;
+}
+.picker .frow::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  width: 9px;
+  transform: scaleX(0);
+  transform-origin: right;
+  background: color-mix(in srgb, var(--color-warm) 40%, transparent);
+  transition: transform calc(0.08s * var(--tk-assign, 1)) var(--out)
+    calc(0.05s * var(--tk-assign, 1));
+}
+.assign.open .picker .frow::after {
+  transform: scaleX(1);
+  transition: transform calc(0.11s * var(--tk-assign, 1)) var(--in) calc(0.1s * var(--tk-assign, 1));
+}
+.picker .filter {
+  border: 0;
+  background: none;
+  outline: none;
+  text-align: right;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  width: 118px;
+  padding: 0;
+  caret-color: var(--color-warm);
+}
+.picker .filter::placeholder {
+  color: var(--color-ink-4);
+}
+/* The filter is the bottom row, so it arrives first and leaves last — the
+   block grows away from it and collapses back onto it. */
+.picker .frow {
+  opacity: 0;
+  transform: translateX(7px);
+  transition:
+    opacity calc(0.09s * var(--tk-assign, 1)) var(--out) calc(0.05s * var(--tk-assign, 1)),
+    transform calc(0.11s * var(--tk-assign, 1)) var(--out) calc(0.05s * var(--tk-assign, 1));
+}
+.assign.open .picker .frow {
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity calc(0.13s * var(--tk-assign, 1)) var(--in) calc(0.1s * var(--tk-assign, 1)),
+    transform calc(0.16s * var(--tk-assign, 1)) var(--in) calc(0.1s * var(--tk-assign, 1));
+}
+.assign.measuring .picker .frow {
+  transform: none !important;
+  transition: none !important;
+}
+/* how many matches are not shown — a count, never a scrollbar */
+.picker .rest {
+  align-self: flex-end;
+  text-align: right;
+  padding: 2px 16px 2px 10px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  color: var(--color-ink-4);
+  opacity: 0;
+  transition: opacity calc(0.08s * var(--tk-assign, 1)) var(--out);
+}
+.assign.open .picker .rest {
+  opacity: 0.85;
+  transition: opacity calc(0.13s * var(--tk-assign, 1)) var(--in) calc(0.19s * var(--tk-assign, 1));
+}
+/* Hover and selection re-declare their own transition, because the opening
+   rule's per-row delay would otherwise apply to them too and every hover would
+   arrive a fifth of a second late. */
+.picker .opt.cursor {
+  color: var(--ink);
+}
+.picker .opt.cursor::after {
+  transform: scaleX(1.45);
+  background: var(--color-warm);
+}
+
+.picker .opt:hover {
+  color: var(--ink);
+}
+.picker .opt:hover::after {
+  transform: scaleX(1.45);
+  background: var(--color-warm);
+  transition:
+    transform calc(0.12s * var(--tk-assign, 1)) var(--in),
+    background 0.12s;
+}
+.picker .opt.on {
+  color: var(--ink);
+  font-weight: 550;
+}
+.assign.open .picker .opt.on::after {
+  transform: scaleX(1.45);
+  background: var(--color-warm);
+  transition:
+    transform calc(0.12s * var(--tk-assign, 1)) var(--in)
+      calc((0.13s + var(--i, 0) * var(--row)) * var(--tk-assign, 1)),
+    background 0.12s;
+}
+
+/* Reduced motion keeps the cross-fade and drops the drawing: no stagger, no
+   travel, everything already in place. The structure still appears and
+   disappears, which is the information; the self-drawing is the flourish. */
+@media (prefers-reduced-motion: reduce) {
+  .assign {
+    --row: 0s;
+    --rowx: 0s;
+  }
+  #tf-assign-scrim,
+  #tf-assign-scrim.on {
+    transition-duration: calc(0.12s * var(--tk-assign, 1));
+  }
+  .picker .opt,
+  .picker .frow {
+    transform: none;
+  }
+  .picker .stem {
+    transform: scaleY(1);
+  }
+  .picker .opt::after,
+  .picker .frow::after {
+    transform: scaleX(1);
+  }
+  .picker .term {
+    transform: none;
+  }
+  .assign .picker *,
+  .assign .picker {
+    transition-duration: calc(0.12s * var(--tk-assign, 1)) !important;
+  }
+}

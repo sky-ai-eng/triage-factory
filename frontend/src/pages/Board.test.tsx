@@ -131,15 +131,11 @@ function laterBodies(): Array<Record<string, unknown>> {
   return listBodies.slice(3)
 }
 
-/** Walks the picker on the held card to its unassign row. The row is found by
- *  its sublabel rather than by role and name: the sortable card wrapper is a
- *  `role="button"` too, and once the picker is open its accessible name
- *  contains the row's text. */
+/** Walks the picker on the held card to its Unassign row: the mark names its
+ *  holder, and the rows are the listbox's options. */
 async function unassignHeld() {
-  fireEvent.click(await screen.findByRole('button', { name: 'You' }))
-  const row = screen.getByText('Click to unassign').closest('button')
-  if (!row) throw new Error('unassign row not found')
-  fireEvent.click(row)
+  fireEvent.click(await screen.findByRole('button', { name: 'Assigned to Aidan' }))
+  fireEvent.click(screen.getByRole('option', { name: 'Unassign' }))
 }
 
 describe('the board lanes', () => {

@@ -82,11 +82,23 @@ const COLUMN_TITLES: Record<ColumnId, string> = {
 }
 
 // Lane geometry, used to center the strip on the midpoint of the *open*
-// columns. COL_W must match the expanded BoardColumn width (w-[430px]); RAIL_W
+// columns. COL_W must match the expanded BoardColumn width (w-[360px]); RAIL_W
 // the collapsed CollapsedColumn (w-5 = 20px); GAP the row's gap-6 (24px).
-const COL_W = 430
+// Fixed, not viewport-relative, so cards do not compress as lanes scroll into
+// view.
+const COL_W = 360
 const RAIL_W = 20
 const GAP = 24
+// The gutter the strip keeps at each end once it overflows. Without it the
+// leftmost lane's edge sits flush against the nav rail at scroll 0 and the
+// two surfaces read as one. Matches GAP, so the outer margin is the same
+// measure as the space between lanes.
+const EDGE_PAD = 24
+// The horizontal fade is proportional to how much is LEFT to scroll on that
+// side, so an edge with nothing past it does not wear a gradient.
+const FADE_PX = 40
+// How many frames the park will retry a scroll write that did not stick.
+const PARK_TRIES = 12
 
 // How long a lane waits after the last keystroke or pill before asking the
 // server the new question. Every filter field is a server read now, so
@@ -1036,15 +1048,20 @@ export default function Board() {
     [conversations],
   )
 
-  // The board opens at the left (Queued first). Three lanes fit without a
-  // forced scroll offset, so we start at the natural left edge.
+  // The lane viewport (the scroller) and the strip inside it, which is
+  // `max-content` wide so its own box grows with the lanes — as a plain flex
+  // child its box would match the scroller and its children merely overflow,
+  // so an observer would never see it grow and nothing would recompute on
+  // collapse.
   const scrollRef = useRef<HTMLDivElement>(null)
+  const stripRef = useRef<HTMLDivElement>(null)
 
   // Dynamic edge-fade. The outermost walls — left of Queued, right of Done —
   // stay solid (there's nowhere further to scroll), and the fade ramps in on a
   // side only as content scrolls past it. `left`/`right` are 0→1 fractions of a
-  // full FADE_PX fade; recomputed on scroll + resize.
-  const FADE_PX = 40
+  // full FADE_PX fade; recomputed on scroll + resize. A scroll only recomputes
+  // the fades — re-parking on scroll would snap the strip back under the
+  // reader's own hand.
   const [edgeFade, setEdgeFade] = useState({ left: 0, right: 1 })
   // Viewport width of the scrollport — feeds the centered-lane geometry below.
   const [containerW, setContainerW] = useState(0)
@@ -1060,24 +1077,32 @@ export default function Board() {
   useEffect(() => {
     if (loading) return
     recomputeFade()
-    const el = scrollRef.current
-    if (!el) return
     const onResize = () => recomputeFade()
     window.addEventListener('resize', onResize)
+    // Both nodes, and never skipped on a ref that reads null on this pass: a
+    // skipped observe is silent and permanent, and the strip is the one whose
+    // growth the park depends on. Retried on frames until each attaches.
     const ro = new ResizeObserver(() => recomputeFade())
-    ro.observe(el)
+    const observed = { lane: false, strip: false }
+    let raf = 0
+    const attach = () => {
+      if (!observed.lane && scrollRef.current) {
+        ro.observe(scrollRef.current)
+        observed.lane = true
+      }
+      if (!observed.strip && stripRef.current) {
+        ro.observe(stripRef.current)
+        observed.strip = true
+      }
+      if (!observed.lane || !observed.strip) raf = requestAnimationFrame(attach)
+    }
+    attach()
     return () => {
       window.removeEventListener('resize', onResize)
+      cancelAnimationFrame(raf)
       ro.disconnect()
     }
   }, [loading, recomputeFade])
-
-  const fadeMask = useMemo(() => {
-    const l = FADE_PX * edgeFade.left
-    const r = FADE_PX * edgeFade.right
-    const grad = `linear-gradient(to right, rgba(0,0,0,${1 - edgeFade.left}) 0, #000 ${l}px, #000 calc(100% - ${r}px), rgba(0,0,0,${1 - edgeFade.right}) 100%)`
-    return { maskImage: grad, WebkitMaskImage: grad }
-  }, [edgeFade])
 
   // Centered-lane geometry. We want the viewport center to land on the midpoint
   // of the *open* (expanded) columns — one open → that column; two → their
@@ -1098,19 +1123,42 @@ export default function Board() {
       ? centers.reduce((a, b) => a + b, 0) / centers.length
       : stripW / 2
     const half = containerW / 2
-    const padLeft = Math.max(0, half - centroid)
-    const padRight = Math.max(0, half - (stripW - centroid))
-    return { padLeft, padRight, targetScroll: padLeft + centroid - half }
+    // The gutter is a floor on the padding, not an offset added to it: when
+    // the strip fits, the centring padding is already larger and nothing
+    // changes. The target carries padLeft, so the scroll absorbs the shift
+    // and the midpoint stays on the lane's centre either way.
+    const padLeft = Math.max(EDGE_PAD, half - centroid)
+    const padRight = Math.max(EDGE_PAD, half - (stripW - centroid))
+    // Clamped against the strip's OWN width rather than the element's
+    // scrollWidth: a card can overflow its lane and inflate scrollWidth, and
+    // the strip's geometry is known exactly, so there is nothing to measure.
+    const maxScroll = Math.max(0, padLeft + stripW + padRight - containerW)
+    const targetScroll = Math.max(0, Math.min(padLeft + centroid - half, maxScroll))
+    return { padLeft, padRight, targetScroll }
   }, [collapsed, containerW])
 
-  // Park the scroll so the open-columns midpoint is centered (clamped to the
-  // scrollable range for the overflow case). Re-runs on collapse + resize.
+  // Park the scroll so the open-columns midpoint is centered. Re-runs on
+  // collapse + resize — the lane geometry is a dependency, so a collapse
+  // re-parks in the same breath rather than waiting on a resize signal that
+  // may never come. The write is then CHECKED, because the browser clamps a
+  // scrollLeft write against the element's scrollWidth at that instant: at
+  // mount the children may not have laid out yet, so a correct target
+  // silently clamps to 0 and the strip parks hard left — intermittently,
+  // depending on which won the race. So: write, read back, and retry on the
+  // next frame until it sticks, bounded so an unreachable target cannot spin.
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el || loading) return
-    const max = el.scrollWidth - el.clientWidth
-    el.scrollLeft = Math.max(0, Math.min(lane.targetScroll, max))
-    recomputeFade()
+    let raf = 0
+    const park = (tries: number) => {
+      el.scrollLeft = lane.targetScroll
+      recomputeFade()
+      if (tries > 0 && Math.abs(el.scrollLeft - lane.targetScroll) > 1) {
+        raf = requestAnimationFrame(() => park(tries - 1))
+      }
+    }
+    park(PARK_TRIES)
+    return () => cancelAnimationFrame(raf)
   }, [lane, loading, recomputeFade])
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
@@ -1377,80 +1425,84 @@ export default function Board() {
           </div>
         )}
 
-        {/* Horizontal-scroll container for the three columns. The strip is
-            parked so the open-columns midpoint sits at the viewport center (see
-            `lane` above) via dynamic left/right padding + a scroll offset. The
-            dynamic mask dissolves columns into the page at whichever edge still
-            has more to scroll. */}
-        <div
-          ref={scrollRef}
-          onScroll={recomputeFade}
-          className="min-h-0 flex-1 overflow-x-auto pb-3 pt-1"
-          style={fadeMask}
-        >
+        {/* Horizontal-scroll container for the three columns — the only
+            horizontal scroller on the page, which is what keeps the nav rail
+            anchored while the columns travel under it. The strip is parked so
+            the open-columns midpoint sits at the viewport center (see `lane`
+            above) via dynamic left/right padding + a scroll offset. The two
+            fades dissolve columns into the page at whichever edge still has
+            more to scroll — painted over the lane, never a mask on it. */}
+        <div className="relative min-h-0 flex-1">
+          <span aria-hidden className="bc-fade bc-fade-l" style={{ opacity: edgeFade.left }} />
+          <span aria-hidden className="bc-fade bc-fade-r" style={{ opacity: edgeFade.right }} />
           <div
-            className="flex h-full gap-6"
-            style={{ paddingLeft: lane.padLeft, paddingRight: lane.padRight }}
+            ref={scrollRef}
+            onScroll={recomputeFade}
+            className="h-full overflow-x-auto pb-3 pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           >
-            {ALL_COLUMNS.map((colId, i) =>
-              collapsed[colId] ? (
-                <CollapsedColumn
-                  key={colId}
-                  index={i}
-                  title={COLUMN_TITLES[colId]}
-                  // The rail's number is the lane under its current query —
-                  // the same total the open lane's tail counts against — not
-                  // how much of it happens to be fetched.
-                  count={paging[colId].total ?? paging[colId].shown}
-                  onExpand={() => toggleCollapse(colId)}
-                />
-              ) : (
-                <BoardColumn
-                  key={colId}
-                  id={colId}
-                  index={i}
-                  dragOver={activeDropCol === colId}
-                  title={COLUMN_TITLES[colId]}
-                  filter={filters[colId]}
-                  onFilterChange={(next) => setFilters((prev) => ({ ...prev, [colId]: next }))}
-                  eventTypes={facets[colId]}
-                  paging={paging[colId]}
-                  onCollapse={() => toggleCollapse(colId)}
-                  headerExtra={colId === 'done' ? doneHeader : undefined}
-                  snooze={
-                    colId === 'queued'
-                      ? { shown: showSnoozed, onToggle: () => setShowSnoozed((v) => !v) }
-                      : undefined
-                  }
-                >
-                  <ColumnContents
-                    colId={colId}
-                    tasks={lists[colId].items}
-                    narrowed={narrows(filters[colId])}
-                    conversations={conversations}
-                    chainStepConversations={chainStepConversations}
-                    permQueues={permQueueMap}
-                    onResolvePermission={resolvePermission}
-                    currentUserID={currentUserID}
-                    members={members}
-                    bot={bot}
-                    delegateFailures={delegateFailures}
-                    onPickerClaim={handlePickerClaim}
-                    onPickerUnclaim={handlePickerUnclaim}
-                    onPickerDelegate={handlePickerDelegate}
-                    onPickerReassign={handlePickerReassign}
-                    onRetry={handlePickerDelegate}
+            <div
+              ref={stripRef}
+              className="bc-strip flex h-full w-max gap-6"
+              style={{ paddingLeft: lane.padLeft, paddingRight: lane.padRight }}
+            >
+              {ALL_COLUMNS.map((colId) =>
+                collapsed[colId] ? (
+                  <CollapsedColumn
+                    key={colId}
+                    title={COLUMN_TITLES[colId]}
+                    // The rail's number is the lane under its current query —
+                    // the same total the open lane's tail counts against — not
+                    // how much of it happens to be fetched.
+                    count={paging[colId].total ?? paging[colId].shown}
+                    onExpand={() => toggleCollapse(colId)}
                   />
-                </BoardColumn>
-              ),
-            )}
+                ) : (
+                  <BoardColumn
+                    key={colId}
+                    id={colId}
+                    dragOver={activeDropCol === colId}
+                    title={COLUMN_TITLES[colId]}
+                    filter={filters[colId]}
+                    onFilterChange={(next) => setFilters((prev) => ({ ...prev, [colId]: next }))}
+                    eventTypes={facets[colId]}
+                    paging={paging[colId]}
+                    onCollapse={() => toggleCollapse(colId)}
+                    headerExtra={colId === 'done' ? doneHeader : undefined}
+                    snooze={
+                      colId === 'queued'
+                        ? { shown: showSnoozed, onToggle: () => setShowSnoozed((v) => !v) }
+                        : undefined
+                    }
+                  >
+                    <ColumnContents
+                      colId={colId}
+                      tasks={lists[colId].items}
+                      narrowed={narrows(filters[colId])}
+                      conversations={conversations}
+                      chainStepConversations={chainStepConversations}
+                      permQueues={permQueueMap}
+                      onResolvePermission={resolvePermission}
+                      currentUserID={currentUserID}
+                      members={members}
+                      bot={bot}
+                      delegateFailures={delegateFailures}
+                      onPickerClaim={handlePickerClaim}
+                      onPickerUnclaim={handlePickerUnclaim}
+                      onPickerDelegate={handlePickerDelegate}
+                      onPickerReassign={handlePickerReassign}
+                      onRetry={handlePickerDelegate}
+                    />
+                  </BoardColumn>
+                ),
+              )}
+            </div>
           </div>
         </div>
       </div>
 
       <DragOverlay dropAnimation={null}>
         {activeTask && (
-          <div className="w-[400px]">
+          <div className="w-[336px]">
             <TaskCard
               title={activeTask.title}
               entity={activeTask.source_id}
