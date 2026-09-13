@@ -107,7 +107,9 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Taking a task onto a human's plate takes it off the agent's: stop any
-	// in-flight run and resolve every unresolved artifact the task holds.
+	// in-flight run. What the run left behind stays — the person claiming the
+	// task inherits its draft PRs and staged reviews rather than a cleared
+	// desk, and retires them one at a time through the artifact verbs.
 	//
 	// Only the takeover is a boundary, and the landing is what says so. A
 	// claim from unclaimed and an idempotent re-claim move the task off
@@ -120,7 +122,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	if landing == claimLandingFromAgent {
 		stopCause = delegate.StopCauseTaskTakenOver
 	}
-	s.teardownTaskConversations(cleanupCtx, orgID, userID, id, stopCause)
+	s.stopTaskConversations(cleanupCtx, orgID, userID, id, stopCause)
 	if landing == claimLandingFromAgent {
 		s.endTaskConversations(cleanupCtx, orgID, userID, id, domain.EndedTakenOver)
 	}
@@ -488,15 +490,16 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Re-delegating is still a handoff off whatever was in flight: stop the
-	// running conversation and resolve the task's unresolved artifacts before
-	// the new run starts.
+	// running conversation before the new run starts. Its artifacts carry —
+	// the next blueprint pushes to the draft PR the last one opened instead of
+	// opening a second.
 	//
 	// The boundary is stamped here and not after triggerDelegation, and the
 	// order is the invariant: step 0 of the new delegation must never be
 	// minted onto a task whose prior conversation is still un-ended, or the
 	// task momentarily has two live ones and nothing can say which it is about.
 	cleanupCtx := context.WithoutCancel(r.Context())
-	s.teardownTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDelegated)
+	s.stopTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDelegated)
 	s.endTaskConversations(cleanupCtx, orgID, userID, id, domain.EndedDelegated)
 
 	response := map[string]any{"status": newStatus}
@@ -615,40 +618,30 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 	return newStatus, true
 }
 
-// teardownTaskConversations takes a task off whoever was working on it: it
-// stops every run the task holds, then resolves every unresolved artifact
-// those runs left behind (teardownTaskArtifacts — closes all draft PRs,
-// dismisses all pending reviews, a no-op when none exist). Every handoff a
-// task can make comes through here — dismiss, complete, claim, re-delegate,
-// return to queue — so there is one stop pass rather than one per verb.
-//
-// Stop first, teardown second. The stop parks each conversation `open` and
-// releases its claim, so the teardown behind it operates on a settled
-// conversation rather than racing a live agent that can still land a fresh
-// draft PR into the window between the two.
-//
-// cause is the lifecycle event the caller is acting on. It reaches each
-// stopped transcript verbatim, so it is the whole explanation a human reading
-// that history gets. Best-effort throughout.
-//
-// ctx must already be detached from the request (context.WithoutCancel): a
-// client disconnect after the response must not leave a live agent running or
-// a GitHub draft stranded. The detach belongs to the caller because a caller
-// with further cleanup of its own needs every part of it on one context.
-func (s *Server) teardownTaskConversations(ctx context.Context, orgID, userID, id string, cause delegate.StopCause) {
-	s.stopTaskConversations(ctx, orgID, userID, id, cause)
-	s.teardownTaskArtifacts(ctx, orgID, userID, id)
-}
-
 // stopTaskConversations stops every active run on a task and cancels the
 // blueprint behind each. Its callers own a lifecycle one layer up and have
 // already decided this attempt at the task is over, so the blueprints go
 // terminal with their runs rather than freezing 'running' — the plain
 // conversation stop is for a user pausing work they mean to come back to.
 //
+// Every gesture that moves a task off whoever was working it comes through
+// here — dismiss, complete, claim, re-delegate, return to queue — so there is
+// one stop pass rather than one per verb. What does NOT come through here is
+// the artifact teardown: a task's draft PRs and staged reviews survive every
+// one of those gestures except the last, and only patchClose retires them.
+//
+// cause is the lifecycle event the caller is acting on. It reaches each stopped
+// transcript verbatim, so it is the whole explanation a human reading that
+// history gets.
+//
 // Best-effort per conversation: a failed stop is logged and the remaining ones
 // are still attempted, because the task has already moved and leaving its
 // other runs live is the worse half-state.
+//
+// ctx must already be detached from the request (context.WithoutCancel): a
+// client disconnect after the response must not leave a live agent running.
+// The detach belongs to the caller because a caller with further cleanup of its
+// own needs every part of it on one context.
 func (s *Server) stopTaskConversations(ctx context.Context, orgID, userID, taskID string, cause delegate.StopCause) {
 	if s.spawner == nil {
 		return
@@ -675,8 +668,8 @@ func (s *Server) stopTaskConversations(ctx context.Context, orgID, userID, taskI
 // whoever was working it (requeue/undo, takeover, delegate), because the row
 // they each write is identical and only the reason differs.
 //
-// It runs behind teardownTaskConversations, never instead of it: the stop ends
-// the PROCESS and this ends the CONVERSATION, and a stop that failed (a dead
+// It runs behind stopTaskConversations, never instead of it: the stop ends the
+// PROCESS and this ends the CONVERSATION, and a stop that failed (a dead
 // executor, a lost signal) must still leave a row that says the task moved on.
 // Which is also why it is unconditional on status — a conversation that
 // concluded on its own an hour ago is just as much not this task's live one.

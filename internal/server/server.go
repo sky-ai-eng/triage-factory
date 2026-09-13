@@ -1178,8 +1178,9 @@ func (s *Server) routes() {
 	// lives on GitHub rather than locally: GET serves the artifact + its live
 	// pending-review comments, PATCH stages body/event, the comment routes
 	// edit/delete inline comments on that pending review, approve submits it,
-	// and dismiss resolves a single artifact. The task-level resolve-all
-	// (drag-to-Done / Return-to-queue) flows through teardownTaskArtifacts.
+	// and dismiss resolves a single artifact. The task-level resolve-all runs
+	// once, when the task itself ends (drag-to-Done / dismiss), through
+	// teardownTaskArtifacts.
 	ah := &artifactsHandler{
 		tx: s.tx, ws: s.ws, ghResolver: s.ghResolver,
 		spawner:    func() *delegate.Spawner { return s.spawner },

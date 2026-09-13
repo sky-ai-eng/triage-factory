@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/artifactteardown"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -1433,4 +1434,76 @@ func (s *Spawner) broadcastMessage(orgID, conversationID string, msg *domain.Mes
 		ConversationID: conversationID,
 		Tools:          tools,
 	})
+}
+
+// TeardownTaskArtifactsSystem retires every unresolved artifact a task's
+// conversations hold, for a close nobody asked for: the event cascade finding
+// the PR merged, the reconciler finding an entity already terminal. The verb is
+// the router's — it stops the task's conversations and then calls this — and it
+// is here rather than on the server because a close driven by an event has no
+// request, no session and no user.
+//
+// Which is exactly what the System adapter below says: the admin pool answers
+// (a background job holds no JWT claims), and every audit row records
+// actor_user_id NULL, the autonomous-action spelling. A person who closes the
+// same task through the board gets the same teardown with their own name on the
+// rows, through the server's app-pool adapter.
+//
+// Best-effort by contract, like every other half of the close cascade: the task
+// is already terminal by the time this runs, so a failure is logged and the
+// artifacts stay unresolved for the next close to retry rather than unwinding a
+// close that landed.
+func (s *Spawner) TeardownTaskArtifactsSystem(ctx context.Context, orgID, taskID string) {
+	if s.conversations == nil || s.artifacts == nil || s.externalActions == nil {
+		return
+	}
+	// Detached from the caller's cancellation: the task is already closed, and
+	// a drain shutting down mid-pass would leave its artifacts half-retired
+	// with nothing able to reach them again — a replayed close finds no active
+	// task and never walks back here. WithoutCancel keeps the caller's values,
+	// so the writes stay inside the close's trace.
+	ctx = context.WithoutCancel(ctx)
+	if err := artifactteardown.Teardown(ctx, systemTeardown{s: s}, orgID, taskID, ""); err != nil {
+		delegateLog.Error("system artifact teardown failed; artifacts left unresolved for retry",
+			"task", taskID, "org", orgID, "error", err)
+	}
+}
+
+// systemTeardown is the artifact teardown's admin-pool adapter, and its store
+// surface too — the two are one type because the admin pool binds no
+// transaction to distinguish them. The `...System` store methods are per-call
+// with org_id bound by argument rather than by RLS, so a batch applies its
+// writes as they come. The retry that repairs a partial one is the same retry a
+// rolled-back app-pool batch gets: the flips re-target the same predicate set,
+// so running the teardown again is safe.
+type systemTeardown struct{ s *Spawner }
+
+func (d systemTeardown) Batch(_ context.Context, _ string, fn func(artifactteardown.Stores) error) error {
+	return fn(d)
+}
+
+// GitHub reads the resolver under the spawner's lock, like every other reader:
+// it is wired post-construction by SetRunCredentialResolvers and re-wired on a
+// GitHub config change, so a bare read races that swap.
+func (d systemTeardown) GitHub() ghclient.Resolver {
+	d.s.mu.Lock()
+	defer d.s.mu.Unlock()
+	return d.s.ghResolver
+}
+
+func (d systemTeardown) ConversationsForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error) {
+	return d.s.conversations.ListForTaskSystem(ctx, orgID, taskID)
+}
+
+func (d systemTeardown) ArtifactsForConversation(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error) {
+	return d.s.artifacts.ListByConversationSystem(ctx, orgID, conversationID)
+}
+
+func (d systemTeardown) UpsertArtifact(ctx context.Context, orgID string, a domain.Artifact) error {
+	_, err := d.s.artifacts.UpsertSystem(ctx, orgID, a)
+	return err
+}
+
+func (d systemTeardown) RecordExternalAction(ctx context.Context, orgID string, act domain.ExternalAction) error {
+	return d.s.externalActions.RecordSystem(ctx, orgID, act)
 }

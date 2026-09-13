@@ -472,7 +472,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	//
 	// The credential is classified outside the stamp tx, against the same repo
 	// the submit just went to, so the row names the credential that posted it.
-	credential := githubCredentialFor(cleanupCtx, ah.ghResolver, orgID, owner, repo)
+	credential := ghclient.CredentialForRepo(cleanupCtx, ah.ghResolver, orgID, owner, repo)
 	submitted := *fresh
 	submitted.State = domain.ArtifactStateReviewSubmitted
 	submitted.ExternalID = strconv.Itoa(res.ReviewID)
@@ -495,7 +495,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 				return fmt.Errorf("stamp CAS matched no row: artifact %s is missing or no longer submitted", art.ID)
 			}
 			return tx.ExternalActions.Record(cleanupCtx, orgID,
-				githubApprovalAction(&submitted, userID, domain.ActionReviewSubmitted, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, credential))
+				domain.ArtifactAction(&submitted, userID, domain.ActionReviewSubmitted, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, credential))
 		})
 	}
 	if err := stamp(); err != nil {

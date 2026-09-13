@@ -120,11 +120,10 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 // memory. wantTaskStatus lets callers vary the assertion across the requeue
 // (`queued`), dismiss (`dismissed`) and complete (`done`) paths.
 //
-// Decoupled-lifecycle invariant (TFAC-379): teardown NEVER flips
-// conversations.status — the completed conversation stays completed. The
-// live-conversation cancellation that the old park model folded in here is now
-// the spawner's job (only a still-running conversation is cancelled, by
-// teardownTaskConversations), so a terminal conversation is left untouched.
+// Decoupled-lifecycle invariant: the teardown NEVER flips
+// conversations.status — the completed conversation stays completed.
+// Cancelling a still-running one is the stop pass's job, one step ahead of
+// this, so a terminal conversation is left untouched.
 func assertPendingApprovalCleanedUp(
 	t *testing.T,
 	database *sql.DB,
@@ -192,14 +191,105 @@ func seedCallerGesture(t *testing.T, database *sql.DB, taskID, action string) {
 	}
 }
 
-// TestHandleUndo_CleansUpPendingApprovalConversation is the regression
-// for the swipe-toast UX path: Cards user dismissed/claimed the
-// task, agent ran and left an artifact awaiting approval, user hits Cmd-Z (or
-// the toast's Undo button). The full cleanup must run AND a swipe
-// audit row should be recorded since this is a swipe undo.
-func TestHandleUndo_CleansUpPendingApprovalConversation(t *testing.T) {
+// seedCarriedDraftPR stages a draft pull request on conversationID — the other
+// unresolved artifact a stopped run leaves behind, and the one whose survival
+// across a boundary actually costs something: the next attempt pushes to it
+// instead of opening a second PR for the same task. Returns the artifact id.
+func seedCarriedDraftPR(t *testing.T, database *sql.DB, conversationID string) string {
+	t.Helper()
+	art := domain.NewPullRequestArtifact("owner/repo", 7, "PR_node_pa", "tf/pa", "main",
+		"https://github.com/owner/repo/pull/7", "agent title", "agent body", true)
+	art.ConversationID = conversationID
+	art.OrgID = runmode.LocalDefaultOrgID
+	art.TeamID = runmode.LocalDefaultTeamID
+	stored, err := sqlitestore.New(database).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, art)
+	if err != nil {
+		t.Fatalf("seed draft PR artifact: %v", err)
+	}
+	return stored.ID
+}
+
+// assertPendingApprovalCarried is assertPendingApprovalCleanedUp's mirror for
+// every boundary that is NOT the end of the task: requeue, undo, claim and
+// re-delegate move the task off whoever was working it and leave what that work
+// produced exactly where it is. The draft PR stays draft and the staged review
+// stays pending, so the next claimant — human or agent — inherits the PR rather
+// than opening a second one for the same task.
+//
+// The conversation and the agent's memory are checked for the same reason they
+// are in the teardown's assertion: neither pass may touch them.
+func assertPendingApprovalCarried(
+	t *testing.T,
+	database *sql.DB,
+	taskID, conversationID, reviewID, prID string,
+	wantTaskStatus string,
+) {
+	t.Helper()
+
+	var taskStatus string
+	if err := database.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&taskStatus); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if taskStatus != wantTaskStatus {
+		t.Errorf("task.status = %q, want %q", taskStatus, wantTaskStatus)
+	}
+
+	var convStatus string
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
+		t.Fatalf("scan conversation: %v", err)
+	}
+	if convStatus != "completed" {
+		t.Errorf("conversation status = %q, want %q", convStatus, "completed")
+	}
+
+	var reviewState string
+	if err := database.QueryRow(`SELECT state FROM artifacts WHERE id = ?`, reviewID).Scan(&reviewState); err != nil {
+		t.Fatalf("scan review artifact state: %v", err)
+	}
+	if reviewState != domain.ArtifactStateReviewPending {
+		t.Errorf("review artifact state = %q, want %q (a staged review survives every boundary but task end)", reviewState, domain.ArtifactStateReviewPending)
+	}
+
+	var prState string
+	if err := database.QueryRow(`SELECT state FROM artifacts WHERE id = ?`, prID).Scan(&prState); err != nil {
+		t.Fatalf("scan draft PR artifact state: %v", err)
+	}
+	if prState != domain.ArtifactStatePRDraft {
+		t.Errorf("draft PR artifact state = %q, want %q (the next attempt pushes to this PR)", prState, domain.ArtifactStatePRDraft)
+	}
+
+	// No audit row either: nothing was written to GitHub, so nothing belongs
+	// in the log of org-credential writes.
+	var closes int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM external_actions WHERE conversation_id = ? AND action = ?`,
+		conversationID, domain.ActionPRClosed,
+	).Scan(&closes); err != nil {
+		t.Fatalf("count pr_closed audit rows: %v", err)
+	}
+	if closes != 0 {
+		t.Errorf("pr_closed audit rows = %d, want 0 — no PR was closed", closes)
+	}
+
+	mem, err := sqlitestore.New(database).TaskMemory.GetForConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	if err != nil {
+		t.Fatalf("GetForConversationSystem: %v", err)
+	}
+	if mem == nil || mem.Content != "agent self-report" || mem.Source != domain.MemorySourceAgent {
+		t.Errorf("memory = %+v, want the agent's self-report preserved", mem)
+	}
+}
+
+// TestHandleUndo_CarriesArtifactsBackToTheQueue is the swipe-toast UX path:
+// Cards user dismissed/claimed the task, the agent ran and left a draft PR and
+// a staged review behind, the user hits Cmd-Z (or the toast's Undo button). The
+// task returns to the queue carrying both — an undo reverses a gesture, and
+// closing the PR the agent opened is not part of the gesture it reverses. The
+// swipe audit row is still recorded, since this is a swipe undo.
+func TestHandleUndo_CarriesArtifactsBackToTheQueue(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
+	prID := seedCarriedDraftPR(t, s.db, conversationID)
 	seedCallerGesture(t, s.db, taskID, "claim")
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil)
@@ -207,7 +297,7 @@ func TestHandleUndo_CleansUpPendingApprovalConversation(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, "queued")
+	assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "queued")
 
 	// /undo must record an 'undo' swipe_events row — that's the
 	// audit signal for swipe-card analytics that distinguishes it
@@ -223,20 +313,21 @@ func TestHandleUndo_CleansUpPendingApprovalConversation(t *testing.T) {
 	}
 }
 
-// TestHandleRequeue_CleansUpPendingApprovalConversation is the parallel for
-// the state-driven path: Board's drag-to-Queue, the "Return
-// to queue" button. Same cleanup, but NO swipe row — drag/click
-// gestures aren't swipes and shouldn't muddy the swipe analytics.
-func TestHandleRequeue_CleansUpPendingApprovalConversation(t *testing.T) {
+// TestHandleRequeue_CarriesArtifactsBackToTheQueue is the parallel for the
+// state-driven path: Board's drag-to-Queue, the "Return to queue" button. Same
+// carry, and NO swipe row — drag/click gestures aren't swipes and shouldn't
+// muddy the swipe analytics.
+func TestHandleRequeue_CarriesArtifactsBackToTheQueue(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
+	prID := seedCarriedDraftPR(t, s.db, conversationID)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, "queued")
+	assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "queued")
 
 	// /requeue must NOT record a swipe_events row — this is a
 	// deliberate state change, not a swipe undo. Recording it
@@ -251,6 +342,25 @@ func TestHandleRequeue_CleansUpPendingApprovalConversation(t *testing.T) {
 	if swipeCount != 0 {
 		t.Errorf("/requeue should not record swipe_events; got %d rows", swipeCount)
 	}
+}
+
+// TestTaskDelegate_CarriesArtifactsToTheNextRun is the third non-terminal
+// boundary: handing the task back to the agent keeps the draft PR the last run
+// opened, so the blueprint that starts next pushes to it instead of opening a
+// second PR for the same task. The test server wires no spawner, so the route
+// stops right after the teardown decision — which is the whole thing under test.
+func TestTaskDelegate_CarriesArtifactsToTheNextRun(t *testing.T) {
+	s := newTestServer(t)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
+	prID := seedCarriedDraftPR(t, s.db, conversationID)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate",
+		map[string]any{"hesitation_ms": 0})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "queued")
 }
 
 // TestTaskPatch_DismissCleansUpPendingApprovalConversation is the third
@@ -281,6 +391,7 @@ func TestTaskPatch_DismissCleansUpPendingApprovalConversation(t *testing.T) {
 func TestTaskPatch_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
+	prID := seedCarriedDraftPR(t, s.db, conversationID)
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
 		map[string]any{"status": "done", "hesitation_ms": 0})
@@ -289,23 +400,39 @@ func TestTaskPatch_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 	}
 
 	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, "done")
+
+	// The draft PR is the half a close has to reach outward for: the artifact
+	// flips to closed and the org-credential write it authorizes is audited
+	// against the user who closed the task.
+	var prState string
+	if err := s.db.QueryRow(`SELECT state FROM artifacts WHERE id = ?`, prID).Scan(&prState); err != nil {
+		t.Fatalf("scan draft PR artifact state: %v", err)
+	}
+	if prState != domain.ArtifactStatePRClosed {
+		t.Errorf("draft PR artifact state = %q, want %q", prState, domain.ArtifactStatePRClosed)
+	}
+	var actor sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT actor_user_id FROM external_actions WHERE conversation_id = ? AND action = ?`,
+		conversationID, domain.ActionPRClosed,
+	).Scan(&actor); err != nil {
+		t.Fatalf("scan pr_closed audit row: %v", err)
+	}
+	if actor.String != runmode.LocalDefaultUserID {
+		t.Errorf("pr_closed actor_user_id = %q, want the closing user %q", actor.String, runmode.LocalDefaultUserID)
+	}
 }
 
-// TestTaskClaim_CleansUpPendingApprovalConversation guards the race the PR #77
-// review flagged: Board's drag-Agent-to-You issues /claim, but the
-// frontend's conversations map can be transiently empty during a fetchTasks
-// refresh — so any frontend gating on a stale conversation-status snapshot
-// would silently skip the cleanup, stranding the prepared review and leaving an
-// unresolved artifact behind.
-//
-// Backend-authoritative teardown closes that hole: the swipe handler runs
-// teardownTaskArtifacts for every claim, resolving every unresolved artifact (a
-// no-op for tasks without one). The claim-flavored marker carries its own
-// recalibration signal — "human took over manually" — distinct from
-// requeue/dismiss/complete.
-func TestTaskClaim_CleansUpPendingApprovalConversation(t *testing.T) {
+// TestTaskClaim_CarriesArtifactsToTheClaimant is the takeover half: a person
+// claiming a task the agent was working takes the work over, not a cleared
+// desk. The agent's draft PR and staged review are exactly what they are
+// claiming — they finish the PR, or dismiss it through the artifact verbs, and
+// either way the decision is theirs to make rather than one the claim makes for
+// them.
+func TestTaskClaim_CarriesArtifactsToTheClaimant(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
+	prID := seedCarriedDraftPR(t, s.db, conversationID)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim",
 		map[string]any{"hesitation_ms": 0})
@@ -313,11 +440,9 @@ func TestTaskClaim_CleansUpPendingApprovalConversation(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// Claim no longer transitions status; the task stays
-	// 'queued' and claimed_by_user_id is set instead. The
-	// pending-approval cleanup invariants (conversation cancelled, review row
-	// removed) are unchanged.
-	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, "queued")
+	// Claim no longer transitions status; the task stays 'queued' and
+	// claimed_by_user_id is set instead.
+	assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "queued")
 	// Pin the claim col too — it's the actual responsibility signal
 	// post-B+.
 	var claimedByUserID sql.NullString
@@ -331,11 +456,10 @@ func TestTaskClaim_CleansUpPendingApprovalConversation(t *testing.T) {
 	}
 }
 
-// TestTaskClaim_WithoutPendingApprovalIsNoOp pins the
-// idempotency contract: teardownTaskArtifacts must be a no-op
-// when the task has no unresolved artifact, so wiring the teardown
-// into the claim path doesn't disturb the queue → claim flow used by
-// Cards.tsx and the existing Board queue → you drag.
+// TestTaskClaim_WithoutPendingApprovalIsNoOp pins the plain path: a claim on a
+// task with no conversation and no artifact writes nothing beyond the claim
+// itself, so the queue → claim flow used by Cards.tsx and the Board's
+// queue → you drag is undisturbed by the stop pass in front of it.
 func TestTaskClaim_WithoutPendingApprovalIsNoOp(t *testing.T) {
 	s := newTestServer(t)
 
@@ -1441,8 +1565,7 @@ func TestHandleUndo_StopsTheRunWorkingTheTask(t *testing.T) {
 // stop pass enumerates ACTIVE conversations, so a task whose run already
 // finished has nothing to stop and the finished conversation is left exactly
 // as it was — no park, no stop note, no cancelled blueprint written over a
-// conversation that concluded on its own. The artifact teardown still runs,
-// which is the half that was already correct.
+// conversation that concluded on its own.
 //
 // A real spawner rather than a stub: what proves no stop happened is that the
 // spawner had every means to do one and the completed row is untouched.
@@ -1450,15 +1573,16 @@ func TestHandleRequeue_TerminalConversationIsNotStopped(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
+	prID := seedCarriedDraftPR(t, s.db, conversationID)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// The teardown half still ran: artifact resolved, memory note written,
-	// task back in the queue, the completed conversation left completed.
-	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, "queued")
+	// Task back in the queue, the completed conversation left completed, and
+	// its artifacts carried there with it.
+	assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "queued")
 
 	var parkReason sql.NullString
 	if err := s.db.QueryRow(`SELECT park_reason FROM conversations WHERE id = ?`, conversationID).Scan(&parkReason); err != nil {

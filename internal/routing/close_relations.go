@@ -493,11 +493,17 @@ func (r *Router) stopConversationsOnClosedTask(orgID, taskID string, conversatio
 // so a close that committed without the intent could leave a conversation the
 // system has forgotten it meant to stop, with no replay able to reach it.
 //
-// The kill then follows, post-commit and best-effort. Only a close this call
-// actually performed cascades: an already-terminal task returns no conversation
-// ids, so a replayed close neither stamps nor stops — the conversation under it
-// may be one a user resumed after the close, which the resume ladder
-// deliberately allows.
+// The kill then follows, post-commit and best-effort, and the artifact teardown
+// behind it: a closed task is over, so the draft PRs it opened are closed and
+// its staged reviews dismissed, with the audit rows naming no actor because no
+// person asked for this. The teardown is keyed on the task rather than on the
+// conversations the close stamped — it is the artifacts of every attempt the
+// task ever made that strand, not just the live one's.
+//
+// Only a close this call actually performed cascades: an already-terminal task
+// returns no conversation ids, so a replayed close neither stamps, stops nor
+// tears down — the conversation under it may be one a user resumed after the
+// close, which the resume ladder deliberately allows.
 func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingEventID, closeReason, closeEventType string) error {
 	closed, activeConversationIDs, err := r.tasks.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
 	if err != nil {
@@ -507,5 +513,11 @@ func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingE
 		return nil
 	}
 	r.stopConversationsOnClosedTask(orgID, taskID, activeConversationIDs)
+	// Behind the stop, never beside it: the stop parks each conversation and
+	// releases its claim, so the teardown operates on settled conversations
+	// rather than racing a live agent that can still land a fresh draft PR.
+	if r.spawner != nil {
+		r.spawner.TeardownTaskArtifactsSystem(ctx, orgID, taskID)
+	}
 	return nil
 }

@@ -336,7 +336,7 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 		FromState:   draftFrom,
 		ToState:     draftTo,
 		ActorUserID: userID,
-		Credential:  githubCredentialFor(r.Context(), dh.ghResolver, orgID, owner, repo),
+		Credential:  ghclient.CredentialForRepo(r.Context(), dh.ghResolver, orgID, owner, repo),
 	})
 
 	// Patch the local entity snapshot to match the state we just pushed to

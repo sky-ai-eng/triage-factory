@@ -908,8 +908,7 @@ export default function Board() {
   // when there's nothing to resolve and the caller should proceed directly.
   //
   // Completing is the only gesture that reaches it — ending a task is what
-  // resolves what it holds. Requeue does not; the TFAC-990 note at the requeue
-  // drag below says why, and what the server has yet to catch up on.
+  // resolves what it holds, and a requeue leaves the artifacts with the task.
   const requestResolveAll = useCallback(
     (taskId: string): boolean => {
       const conversation = conversations[taskId]
@@ -1092,17 +1091,9 @@ export default function Board() {
       }
 
       // Any → Queued: requeue. Clears the claim and resets status, and fires
-      // without a confirmation: a requeue is meant to be the reversible
-      // gesture — the attempt is over, the task goes back to the pool — and
-      // re-claiming is how you undo it.
-      //
-      // TODO(TFAC-990): the server does not hold up its end of that yet. It
-      // still tears a requeued task's artifacts down (draft PRs closed on
-      // GitHub, staged reviews dismissed; branches and commits untouched), so
-      // between here and that ticket the gesture is quietly lossier than it
-      // reads. Accepted deliberately rather than overlooked: the artifact
-      // teardown moves to task end there, and the confirmation this path used
-      // to raise counted artifacts that will no longer be destroyed.
+      // without a confirmation: a requeue is the reversible gesture — the
+      // attempt is over, the task goes back to the pool carrying its draft PRs
+      // and staged reviews — and re-claiming is how you undo it.
       if (targetCol === 'queued') {
         await fireRequeue(taskId)
         return
@@ -1175,7 +1166,7 @@ export default function Board() {
     async (task: Task) => {
       // Unclaim = requeue (clears both claim cols + resets status to
       // queued). Same path the drag-to-Queue gesture uses, ungated for the
-      // same reason and carrying the same TFAC-990 caveat recorded there.
+      // same reason recorded there.
       await fireRequeue(task.id)
     },
     [fireRequeue],

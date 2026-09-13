@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
+	"github.com/sky-ai-eng/triage-factory/internal/artifactteardown"
 	"github.com/sky-ai-eng/triage-factory/internal/conversationevent"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -381,8 +382,8 @@ func (ah *artifactsHandler) handleArtifactPRUpdate(w http.ResponseWriter, r *htt
 	// the snapshot refresh below (which is itself best-effort and skipped when
 	// details don't parse). No state transition — it's an in-place title/body edit.
 	recordExternalActionBestEffort(r.Context(), ah.tx, orgID, userID,
-		githubApprovalAction(art, userID, domain.ActionPREdited, "", "",
-			githubCredentialFor(r.Context(), ah.ghResolver, orgID, owner, repo)))
+		domain.ArtifactAction(art, userID, domain.ActionPREdited, "", "",
+			ghclient.CredentialForRepo(r.Context(), ah.ghResolver, orgID, owner, repo)))
 
 	// Refresh the artifact's mutable snapshot to the new title/body; proposed
 	// stays frozen. Best-effort-but-reported: the GitHub edit already landed, so
@@ -711,7 +712,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// The credential is classified before the tx opens — the classification can
 	// reach GitHub, and the tx the row composes into must not wait on a network
 	// round trip.
-	credential := githubCredentialFor(cleanupCtx, ah.ghResolver, orgID, owner, repo)
+	credential := ghclient.CredentialForRepo(cleanupCtx, ah.ghResolver, orgID, owner, repo)
 	openArt := *art
 	openArt.State = domain.ArtifactStatePROpen
 	if derr == nil {
@@ -728,7 +729,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 			return e
 		}
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
-			githubApprovalAction(art, userID, domain.ActionPRMarkedReady, domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen, credential))
+			domain.ArtifactAction(art, userID, domain.ActionPRMarkedReady, domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen, credential))
 	}); err != nil {
 		artifactsLog.Warn("flip PR artifact to open + record action failed", "artifact", art.ID, "error", err)
 	}
@@ -821,7 +822,7 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 			return e
 		}
 		return tx.ExternalActions.Record(r.Context(), orgID,
-			githubApprovalAction(art, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed, credential))
+			domain.ArtifactAction(art, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed, credential))
 	}); err != nil {
 		internalError(w, "artifacts", err)
 		return
@@ -830,7 +831,7 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	cleanupCtx := context.WithoutCancel(r.Context())
 	// Close the draft PR on GitHub (best-effort). The artifact is already closed; a
 	// GitHub hiccup leaves the PR for reconciliation to retire later. Branch kept.
-	closeDraftPRBestEffort(cleanupCtx, ah.ghResolver, orgID, art)
+	artifactteardown.CloseDraftPR(cleanupCtx, ah.ghResolver, orgID, art)
 	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 	// Tell the drafting agent its draft PR was dismissed (live or via the ledger).
@@ -951,7 +952,7 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 	// notice, and audit both writes — all in one tx, so the audit never
 	// disagrees with the state. The credential is classified before the tx
 	// opens: it can reach GitHub, and the tx must not wait on a round trip.
-	credential := githubCredentialFor(cleanupCtx, ah.ghResolver, orgID, owner, repo)
+	credential := ghclient.CredentialForRepo(cleanupCtx, ah.ghResolver, orgID, owner, repo)
 	details.Resolution = domain.PRResolutionRejected
 	closed := *art
 	closed.State = domain.ArtifactStatePRClosed
@@ -967,7 +968,7 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 			return e
 		}
 		if e := tx.ExternalActions.Record(cleanupCtx, orgID,
-			githubApprovalAction(art, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed, credential)); e != nil {
+			domain.ArtifactAction(art, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed, credential)); e != nil {
 			return e
 		}
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
@@ -1108,7 +1109,7 @@ func (ah *artifactsHandler) pingConversationsResolved(orgID string) {
 // non-blueprint run (origin <> 'blueprint' — a future interactive/ad-hoc run)
 // is task-less and is a no-op here. The "anything still unresolved?" check is
 // scoped to the whole TASK (all its conversations), matching
-// teardownTaskArtifacts, so a stranded artifact from a prior attempt blocks
+// the task-end teardown, so a stranded artifact from a prior attempt blocks
 // closure.
 //
 // Detached + best-effort: the caller already mutated the GitHub object and
@@ -1165,7 +1166,7 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 			return nil
 		}
 		// Step 3: unresolved check scoped to the TASK (all its conversations),
-		// matching teardownTaskArtifacts — not just the current blueprint's step
+		// matching the task-end teardown — not just the current blueprint's step
 		// conversations. A stranded artifact from a prior attempt (e.g. a
 		// teardown that partially failed on a network blip) must block closure
 		// rather than be silently skipped, so we never close the task with an
