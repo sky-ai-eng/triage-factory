@@ -172,11 +172,11 @@ func TestOpeningTurnBlocks_EveryRowIsDelivered(t *testing.T) {
 	}
 }
 
-// TestOpeningTurnBlocks_SessionReclaimMintsNothingAndResendsTheSameOpening is
-// the crash re-claim with a surviving session: the SDK process is new even when
-// the session it resumes is not, so it is told what its predecessor was told —
-// from the rows already on the transcript, without minting a second opening.
-func TestOpeningTurnBlocks_SessionReclaimMintsNothingAndResendsTheSameOpening(t *testing.T) {
+// TestComposeLaunchTurn_ResumedSessionSendsTheNoteAndNoOpening is the crash
+// re-claim whose session survived: the SDK is about to load a transcript that
+// already holds the opening and the turns taken on it, so the launch trusts it
+// and says the one thing the session cannot — that the process is a new one.
+func TestComposeLaunchTurn_ResumedSessionSendsTheNoteAndNoOpening(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-sdk-reclaim", "", "/tmp/wt-sdk-reclaim")
 	claimID := markEngaged(t, database, "r-sdk-reclaim")
@@ -184,35 +184,111 @@ func TestOpeningTurnBlocks_SessionReclaimMintsNothingAndResendsTheSameOpening(t 
 	sink := newConversationSink(s, runmode.LocalDefaultOrgID, "r-sdk-reclaim", claimID, "event", runmode.LocalDefaultUserID)
 	ctx := context.Background()
 
-	first, err := s.openingTurnBlocks(ctx, sink, runmode.LocalDefaultOrgID, "r-sdk-reclaim",
-		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext)
-	if err != nil {
-		t.Fatalf("first openingTurnBlocks: %v", err)
+	// The engagement that opened the conversation, and the turn it produced
+	// before it died.
+	opening := agentproc.RunOptions{}
+	if err := s.composeLaunchTurn(ctx, &opening, sink, runmode.LocalDefaultOrgID, "r-sdk-reclaim",
+		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext); err != nil {
+		t.Fatalf("the opening launch: %v", err)
 	}
-	before := len(allRows(t, s, "r-sdk-reclaim"))
-
-	// The engagement dies and a successor re-claims it. The agent it starts has
-	// already produced a turn, and a person typed while it was down.
 	if _, err := s.conversations.InsertMessageForClaimSystem(ctx, runmode.LocalDefaultOrgID, claimID, &domain.Message{
 		ConversationID: "r-sdk-reclaim", Role: "assistant", Content: "on it",
 	}); err != nil {
 		t.Fatalf("record the agent's turn: %v", err)
 	}
-	if _, err := s.conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID,
-		pendingUserInput("r-sdk-reclaim", runmode.LocalDefaultUserID, "and update the README")); err != nil {
-		t.Fatalf("queue the follow-up: %v", err)
+	before := len(allRows(t, s, "r-sdk-reclaim"))
+
+	// The successor found the session's transcript next to the warm tree, so
+	// its launch carries the id that becomes --resume. The blocks are put back
+	// on the options deliberately: RunInteractive prefers them over Message, so
+	// a launch that reached the SDK still carrying them would take its turn on
+	// the opening and the note would never be sent.
+	resumed := agentproc.RunOptions{
+		SessionID:     "sess-survived",
+		OpeningBlocks: opening.OpeningBlocks,
+	}
+	if err := s.composeLaunchTurn(ctx, &resumed, sink, runmode.LocalDefaultOrgID, "r-sdk-reclaim",
+		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext); err != nil {
+		t.Fatalf("the resuming launch: %v", err)
 	}
 
-	second, err := s.openingTurnBlocks(ctx, sink, runmode.LocalDefaultOrgID, "r-sdk-reclaim",
-		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext)
-	if err != nil {
-		t.Fatalf("second openingTurnBlocks: %v", err)
+	if len(resumed.OpeningBlocks) != 0 {
+		t.Errorf("the resuming launch carries opening blocks %q; the session it loads already holds them", blockTexts(resumed.OpeningBlocks))
 	}
-	if got := len(allRows(t, s, "r-sdk-reclaim")); got != before+2 {
-		t.Errorf("rows after a re-claim = %d, want %d — the opening must not be minted twice", got, before+2)
+	if resumed.Message != domain.SessionContinuationNote {
+		t.Errorf("RunOptions.Message = %q, want the continuation note %q", resumed.Message, domain.SessionContinuationNote)
 	}
-	if strings.Join(blockTexts(second), "\x00") != strings.Join(blockTexts(first), "\x00") {
-		t.Errorf("a re-claim sent a different opening;\ngot  %q\nwant %q", blockTexts(second), blockTexts(first))
+
+	rows := allRows(t, s, "r-sdk-reclaim")
+	if len(rows) != before+1 {
+		t.Fatalf("rows after the re-claim = %d, want %d — the note and nothing else: %+v", len(rows), before+1, rows)
+	}
+	note := rows[len(rows)-1]
+	if note.Role != "user" || note.Subtype != domain.MessageSubtypeInjectionNudge || note.Content != domain.SessionContinuationNote {
+		t.Errorf("the recorded row = {role %q subtype %q content %q}, want a user %q row carrying the note",
+			note.Role, note.Subtype, note.Content, domain.MessageSubtypeInjectionNudge)
+	}
+	// Delivered, or the note becomes the resume queue's head and the next
+	// claim replays it as a follow-up nobody typed.
+	if got := pendingRows(t, s, "r-sdk-reclaim"); len(got) != 0 {
+		t.Errorf("undelivered rows = %d, want 0: %+v", len(got), got)
+	}
+}
+
+// TestComposeLaunchTurn_ReclaimWithNoSessionResendsTheOpening is the other
+// crash re-claim: the session did not survive, so the SDK process starts on a
+// model that knows nothing and has to be sent the opening its predecessor was
+// sent — from the rows already on the transcript, without minting a second one
+// and without a note about a continuity that does not exist.
+func TestComposeLaunchTurn_ReclaimWithNoSessionResendsTheOpening(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-sdk-fresh", "", "/tmp/wt-sdk-fresh")
+	claimID := markEngaged(t, database, "r-sdk-fresh")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	sink := newConversationSink(s, runmode.LocalDefaultOrgID, "r-sdk-fresh", claimID, "event", runmode.LocalDefaultUserID)
+	ctx := context.Background()
+
+	first := agentproc.RunOptions{}
+	if err := s.composeLaunchTurn(ctx, &first, sink, runmode.LocalDefaultOrgID, "r-sdk-fresh",
+		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext); err != nil {
+		t.Fatalf("the opening launch: %v", err)
+	}
+
+	// The engagement dies and a successor re-claims it. The agent it started
+	// had already produced a turn, and a person typed while it was down.
+	if _, err := s.conversations.InsertMessageForClaimSystem(ctx, runmode.LocalDefaultOrgID, claimID, &domain.Message{
+		ConversationID: "r-sdk-fresh", Role: "assistant", Content: "on it",
+	}); err != nil {
+		t.Fatalf("record the agent's turn: %v", err)
+	}
+	if _, err := s.conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID,
+		pendingUserInput("r-sdk-fresh", runmode.LocalDefaultUserID, "and update the README")); err != nil {
+		t.Fatalf("queue the follow-up: %v", err)
+	}
+	before := len(allRows(t, s, "r-sdk-fresh"))
+
+	// Carrying a note it must not send, for the mirror of the reason above:
+	// the arm that sends the opening owns this field too.
+	second := agentproc.RunOptions{Message: domain.SessionContinuationNote}
+	if err := s.composeLaunchTurn(ctx, &second, sink, runmode.LocalDefaultOrgID, "r-sdk-fresh",
+		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext); err != nil {
+		t.Fatalf("the re-claiming launch: %v", err)
+	}
+
+	rows := allRows(t, s, "r-sdk-fresh")
+	if len(rows) != before {
+		t.Errorf("rows after a re-claim = %d, want %d — the opening must not be minted twice", len(rows), before)
+	}
+	if strings.Join(blockTexts(second.OpeningBlocks), "\x00") != strings.Join(blockTexts(first.OpeningBlocks), "\x00") {
+		t.Errorf("a re-claim sent a different opening;\ngot  %q\nwant %q", blockTexts(second.OpeningBlocks), blockTexts(first.OpeningBlocks))
+	}
+	if second.Message != "" {
+		t.Errorf("RunOptions.Message = %q; a launch with no session to resume has nothing to continue from", second.Message)
+	}
+	for _, r := range rows {
+		if r.Subtype == domain.MessageSubtypeInjectionNudge {
+			t.Errorf("the transcript carries a continuation note %q; nothing survived for this launch to continue", r.Content)
+		}
 	}
 }
 

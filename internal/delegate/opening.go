@@ -238,11 +238,11 @@ func conversationHasWork(rows []domain.Message) bool {
 // memories and the task context — picked out of a transcript that may hold
 // anything else besides.
 //
-// It exists for the one launch that does not mint: an engagement re-claiming a
-// conversation whose opening is already on the transcript still has to SEND
-// that opening, because the runtime it drives has no memory of the last
-// attempt. Selecting by subtype rather than by position is what makes that
-// true of a transcript the control plane wrote to in between.
+// It exists for the one launch that does not mint: a re-claim with no session
+// to resume, whose transcript already carries the opening the engagement that
+// died minted, and whose new SDK process has no memory of any of it. Selecting
+// by subtype rather than by position is what makes that true of a transcript
+// the control plane wrote to in between.
 //
 // Order is left to the assembler, which sorts by COALESCE(seq, id) — the same
 // key the hoist above stamps into.

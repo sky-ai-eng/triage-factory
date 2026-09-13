@@ -215,8 +215,10 @@ const (
 	// says the executor changed depends on the claims, and the name is the
 	// stored value rather than a summary of the text.
 	MessageSubtypeInjectionExecutorChanged = "injection:executor-changed"
-	// MessageSubtypeInjectionNudge marks a would-stop nudge the loop
-	// inserted on a hook's behalf (the artifact contract, today).
+	// MessageSubtypeInjectionNudge marks a row the machinery wrote to keep a
+	// conversation moving rather than to tell it something it did not know:
+	// the would-stop note a hook asks for (the artifact contract), and the
+	// continuation note a launch resuming a surviving session opens with.
 	MessageSubtypeInjectionNudge = "injection:nudge"
 	// MessageSubtypeInjectionOutputLimit marks the notice written when a
 	// model turn hit the output-token limit before producing any text or
@@ -287,6 +289,21 @@ const (
 func MemoryEnvelopeOpen(k int) string {
 	return fmt.Sprintf(memoryEnvelopeOpenFormat, k)
 }
+
+// SessionContinuationNote is the whole first message of a launch that resumes
+// an agent session that outlived the process driving it. The session carries
+// the conversation's opening and every turn taken since, so the only thing
+// left to say is that the process is new and the work is not.
+//
+// It sits beside the envelope above for the same reason that text does: the
+// machine authors it and the model reads it, and nothing per-run enters it, so
+// two executors resuming the same session send the same bytes. What the task
+// is and what has been done are what the session already holds.
+const SessionContinuationNote = "<system-note kind=\"continuation\">\n" +
+	"The process running this conversation ended unexpectedly and was restarted " +
+	"with the transcript intact. Continue from where it leaves off; do not " +
+	"restart the task.\n" +
+	"</system-note>"
 
 // Conversation is the durable agent-context row: one row per transcript,
 // regardless of surface (a delegated task conversation, a future interactive
