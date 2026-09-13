@@ -1140,11 +1140,12 @@ func inListArgs(ids []string) (string, []any) {
 	return strings.Join(placeholders, ", "), args
 }
 
-// liveTopLevelConversationSQL and liveConversationForTaskSQL are the Postgres
-// twins in the other dialect — see internal/db/postgres/conversation.go for
-// the three questions the store answers about a task's conversations, which
-// clause each one adds to the base, and why a subagent row answers none of
-// them.
+// liveTopLevelConversationSQL and liveConversationForTaskSQL are the SQLite
+// spellings of the base predicate and of the router's question over it.
+// Postgres holds the twin definitions in internal/db/postgres/conversation.go,
+// and with them the three questions the store answers about a task's
+// conversations, which clause each one adds to the base, and why a subagent
+// row answers none of them.
 func liveTopLevelConversationSQL(alias string) string {
 	return `(` + alias + `.ended_at IS NULL AND ` + alias + `.parent_conversation_id IS NULL)`
 }

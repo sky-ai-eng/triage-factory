@@ -95,15 +95,16 @@ var blueprintDrivableSQL = `((r.blueprint_run_id IS NULL
 	   AND (r.task_id IS NULL OR r.id = ` + taskLiveConversationSQL("r.org_id", "r.task_id") + `)
 	   AND (r.task_id IS NULL OR NOT ` + taskMemoryPendingSQL("r.org_id", "r.task_id") + `))`
 
-// taskLiveConversationSQL is the Postgres twin's predicate in the other
-// dialect — see internal/db/postgres/conversation_queue.go for why the task's
-// live conversation is its newest non-ended top-level row, why the boundary
-// rather than the status decides it, and why subagent rows are excluded. Same
-// words, same index (idx_conversations_task_open).
+// taskLiveConversationSQL is the SQLite spelling of the conversation that owns
+// the task's tree: the newest row of liveTopLevelConversationSQL
+// (conversation.go). Postgres holds the twin definition in
+// internal/db/postgres/conversation_queue.go, and with it why the boundary
+// rather than the status decides which conversation that is. Same words, same
+// index (idx_conversations_task_open).
 func taskLiveConversationSQL(orgExpr, taskExpr string) string {
 	return `(SELECT live.id FROM conversations live
 		WHERE live.org_id = ` + orgExpr + ` AND live.task_id = ` + taskExpr + `
-		  AND live.ended_at IS NULL AND live.parent_conversation_id IS NULL
+		  AND ` + liveTopLevelConversationSQL("live") + `
 		ORDER BY live.started_at DESC, live.id DESC
 		LIMIT 1)`
 }
