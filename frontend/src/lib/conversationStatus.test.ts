@@ -3,6 +3,8 @@ import type { Conversation } from '../types'
 import { CLAIM_PHASES, CONVERSATION_STATUSES, TERMINAL_CONVERSATION_STATUSES } from '../types'
 import {
   ACTIVE_STATUSES,
+  PHASE_PROSE,
+  activeProse,
   canResumeConversation,
   chainPosition,
   completionGloss,
@@ -87,6 +89,29 @@ describe('status classification', () => {
 // completion records under the native loop (every step, last one included),
 // while the SDK's terminal step reports `finish`. Branching on the outcome
 // alone would label an ordinary single-prompt native conversation as handed off.
+describe('activeProse', () => {
+  it('names every claim phase and nothing outside the active set', () => {
+    for (const phase of CLAIM_PHASES) {
+      expect(activeProse(base({ Status: phase }))).toBe(PHASE_PROSE[phase])
+    }
+    for (const status of ['queued', 'open', ...TERMINAL_CONVERSATION_STATUSES]) {
+      expect(activeProse(base({ Status: status, current_action: 'Editing x' }))).toBeUndefined()
+    }
+  })
+  it('leads a running conversation with its action and falls back to the state word', () => {
+    expect(activeProse(base({ current_action: 'Editing internal/server/agent.go' }))).toBe(
+      'Editing internal/server/agent.go',
+    )
+    expect(activeProse(base({}))).toBe('Working')
+    expect(activeProse(base({ current_action: '' }))).toBe('Working')
+  })
+  it('lets a setup phase win over a stale action', () => {
+    expect(activeProse(base({ Status: 'cloning', current_action: 'Editing x' }))).toBe(
+      'Cloning the repository',
+    )
+  })
+})
+
 describe('chain position and completion', () => {
   const step = (index: number, total: number, over: Partial<Conversation> = {}) =>
     base({
