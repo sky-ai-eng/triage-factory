@@ -903,10 +903,14 @@ CREATE TABLE public.messages (
     -- accounting. NULL outside any claim. Never read by assembly.
     claim_id uuid,
     -- role is app-validated, no CHECK: 'assistant' | 'tool' | 'user'. Only rows
-    -- deviating from normal role behavior carry a subtype. System-minted 'user'
-    -- subtypes: 'injection:compaction-request', 'injection:compaction-result',
-    -- 'injection:steer', 'injection:system-note', 'injection:context',
-    -- 'injection:nudge', 'stop-note'.
+    -- deviating from normal role behavior carry a subtype, so blank is a
+    -- person's own message. The vocabulary is owned in Go (see
+    -- db.ConversationStore's transcript section and domain's MessageSubtype*
+    -- constants): 'injection:steer', 'injection:executor-changed',
+    -- 'injection:nudge', 'injection:output-limit',
+    -- 'injection:compaction-request', 'injection:compaction-result',
+    -- 'injection:memory', 'injection:task-context', 'injection:system-note',
+    -- 'system_note', 'stop-note'.
     role text NOT NULL,
     content text,
     subtype text DEFAULT ''::text,

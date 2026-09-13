@@ -1287,9 +1287,9 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("enqueue step %d: %v", next, err), &stepIdx, false)
 			return
 		}
-		// The shared worktree stays on disk (cfg.isBlueprintStep kept runAgent
-		// from cleaning it), so the next claim warm-reuses it. Nudge the
-		// dispatcher to pick the step up now.
+		// The shared worktree stays on disk — it is the task's, reclaimed once
+		// when the blueprint terminates — so the next claim warm-reuses it.
+		// Nudge the dispatcher to pick the step up now.
 		s.wakeDispatcher()
 	case blueprintStepFinish:
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
@@ -1493,10 +1493,10 @@ func (s *Spawner) freshStepWorkspace(ctx context.Context, orgID string, br *doma
 //
 // The workspace is the TASK's, so the fresh-clone arm is not "the first claim
 // of this blueprint" — it is "nothing on this task has a tree". A second
-// delegation mints a second blueprint_run, and keying the clone on that row's
-// empty worktree_path is what used to throw the previous run's work away: a
-// cold clone onto the base branch, beside a snapshot blob nothing would ask
-// for again.
+// delegation mints a second blueprint_run with an empty worktree_path, so a
+// clone keyed on that row would throw the previous run's work away: a cold
+// clone onto the base branch, beside a snapshot blob nothing would ask for
+// again.
 func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, conv domain.Conversation, gh *ghclient.Client, sidecar *runSidecar, localChannels ...*localGitChannel) (runConfig, error) {
 	var localGit *localGitChannel
 	if len(localChannels) > 0 {
@@ -1723,11 +1723,10 @@ func (s *Spawner) taskHasWorkspace(ctx context.Context, orgID string, br *domain
 }
 
 // stampRunWorktreePath records the resolved tree on the blueprint_run, on the
-// first claim of a run that has none yet. The row is no longer what decides
-// where a step opens — the conversation's own path and the task's snapshot do
-// that — but the terminal cleanup and the cancel finalizers still read it to
-// find the tree they must remove, so a run that never stamped one would leave
-// its worktree behind.
+// first claim of a run that has none yet. The row does not decide where a step
+// opens — the conversation's own path and the task's snapshot do that — but
+// the terminal cleanup and the cancel finalizers read it to find the tree they
+// must remove, so a run that never stamped one leaves its worktree behind.
 func (s *Spawner) stampRunWorktreePath(ctx context.Context, orgID string, br *domain.BlueprintRun, path string) {
 	if br.WorktreePath != "" || path == "" {
 		return
@@ -1995,10 +1994,10 @@ func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reaso
 // failClaimedConversation writes the terminal and the boundary for a claimed
 // conversation this engagement is giving up on: the blueprint_run behind it
 // vanished, its task did, its setup budget ran out on a step that never ran,
-// or its model left the team's set. Every one of those used to leave the row
-// NULL-status with a released claim — neither failed nor ended, so the task
-// never read it as done with and the claim scan kept handing it back while its
-// blueprint sat `failed`.
+// or its model left the team's set. Both writes are load-bearing on every one
+// of those: a NULL-status row with a released claim is neither failed nor
+// ended, so the task never reads it as done with and the claim scan keeps
+// handing it back while its blueprint sits `failed`.
 //
 // Unclassified is the honest kind: what failed is the machinery around the
 // conversation, not anything the agent did, and every existing kind names the

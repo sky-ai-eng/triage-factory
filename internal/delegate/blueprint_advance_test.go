@@ -255,8 +255,9 @@ func TestTerminateBlueprint_CompletedWithNoUnresolvedArtifactClosesTask(t *testi
 
 // makeConversationBlueprintStep turns the fixture's conversation into a
 // blueprint step: it seeds a blueprint + blueprint_runs row and points the
-// conversation at it so processCompletion's isBlueprintStep branch trips.
-// Mirrors the setup the advance-task chain-step guard test uses.
+// conversation at it, so processCompletion takes the branch a step's
+// blueprint_run_id selects. Mirrors the setup the advance-task chain-step
+// guard test uses.
 func makeConversationBlueprintStep(t *testing.T, database *sql.DB, conversationID, taskID string) {
 	t.Helper()
 	if _, err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{

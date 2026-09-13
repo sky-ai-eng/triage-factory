@@ -122,7 +122,7 @@ func assertLaunchParamsSafe(t *testing.T, p LaunchParams) {
 	// TrustedAgentHostSocketPath) rather than re-deriving them — same as the
 	// netns check below reusing NetnsNameForRun — since these ARE the
 	// broker's own resolutions, not a parallel implementation to agree with.
-	orgPrefix, hasScope, scopeErr := worktreeScope(p.ConversationID, p.WorkspaceKey, p.Worktree)
+	orgPrefix, hasScope, scopeErr := worktreeScope(p.WorkspaceKey, p.Worktree)
 	if scopeErr != nil {
 		t.Fatalf("accepted worktree %q that fails its own scope re-check: %v", p.Worktree, scopeErr)
 	}
@@ -218,12 +218,14 @@ func assertLaunchParamsSafe(t *testing.T, p LaunchParams) {
 func FuzzValidateLaunchParams(f *testing.F) {
 	// realPath now requires the seed's Worktree/Mounts sources to actually
 	// exist (see realPath's doc), so materialize them here — the same
-	// on-disk fixtures a real "run-1" launch would have by RPC time. Plain
+	// on-disk fixtures a real "run-1" launch would have by RPC time. The tree
+	// is keyed by the WORKSPACE key, which is what worktreeScope pins against;
+	// "run-1" keys this run's socket and netns, which are its own. Plain
 	// files/dirs, not a live net.Listen: Go's fuzzing engine re-runs this
 	// setup independently in each of several worker PROCESSES against the
 	// SAME fixed path, and a second Listen on an already-bound socket path
 	// would fail (realPath only needs the path to exist, not be dialable).
-	if err := os.MkdirAll(RunTreeRoot("run-1"), 0o755); err != nil {
+	if err := os.MkdirAll(RunTreeRoot("task-1"), 0o755); err != nil {
 		f.Fatalf("mkdir seed worktree fixture: %v", err)
 	}
 	// Redirect the agenthost socket root to a per-process temp dir: the real
@@ -239,15 +241,23 @@ func FuzzValidateLaunchParams(f *testing.F) {
 	valid := LaunchParams{
 		ContainerID:    "tf-run1frag-3",
 		ConversationID: "run-1",
+		WorkspaceKey:   "task-1",
 		Env: []EnvVar{
 			{Key: "PATH", Value: "/usr/bin"},
 			{Key: "ANTHROPIC_BASE_URL", Value: "http://127.0.0.1:9"},
 		},
 		Args:      []string{TrustedToolHostBinaryDestination, toolHostServeVerb, "--connect", "/run/tf-tools/tools.sock"},
-		Worktree:  RunTreeRoot("run-1"),
+		Worktree:  RunTreeRoot("task-1"),
 		Mounts:    []Mount{{Source: seedSocket, Destination: TrustedAgentHostSocketDestination, Options: []string{"ro"}}},
 		Rlimits:   []Rlimit{{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 4096}},
 		NetnsPath: "/var/run/netns/" + NetnsNameForRun("run-1", 3),
+	}
+	// The accepted-path seed has to actually be accepted, or every invariant
+	// below it is checked against nothing: the fuzz body returns early on a
+	// rejected input, so a seed that stops validating costs coverage silently.
+	// Asserting it here is what makes a narrowed validator loud.
+	if err := ValidateLaunchParams(valid); err != nil {
+		f.Fatalf("the accepted-path seed no longer validates, so it seeds nothing: %v", err)
 	}
 	if vb, err := json.Marshal(valid); err == nil {
 		f.Add(vb)

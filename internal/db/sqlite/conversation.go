@@ -583,6 +583,22 @@ func (s *conversationStore) MarkFailedIfActive(ctx context.Context, orgID, conve
 // --- Boundaries ---
 
 func (s *conversationStore) EndConversationsForTask(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	return s.endConversationsForTask(ctx, orgID, taskID, reason, "")
+}
+
+func (s *conversationStore) EndTerminalConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	// The stored column, not the display ladder: `queued` and `running` are
+	// derived from the active claim and never written here, so a row whose
+	// status reads terminal in SQL is one no engagement is driving.
+	return s.endConversationsForTask(ctx, orgID, taskID, reason,
+		` AND status IN (`+conversationTerminalStatusesSQL+`)`)
+}
+
+// endConversationsForTask is the body both task boundary doors share. The two
+// differ by one clause, and statusClause is it — empty for the unnarrowed
+// door, a status filter for the terminal-only one. It is a SQL fragment this
+// file composes, never a caller's string.
+func (s *conversationStore) endConversationsForTask(ctx context.Context, orgID, taskID string, reason domain.EndedReason, statusClause string) ([]domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -592,7 +608,7 @@ func (s *conversationStore) EndConversationsForTask(ctx context.Context, orgID, 
 	rows, err := s.q.QueryContext(ctx, `
 		UPDATE conversations SET ended_at = ?, ended_reason = ?
 		WHERE task_id = ?
-		  AND ended_at IS NULL AND parent_conversation_id IS NULL
+		  AND ended_at IS NULL AND parent_conversation_id IS NULL`+statusClause+`
 		RETURNING `+sqliteConversationReturningColumns, time.Now().UTC(), string(reason), taskID)
 	if err != nil {
 		return nil, err

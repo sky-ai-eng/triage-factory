@@ -99,12 +99,15 @@ func withStubPrepareBundle(t *testing.T) {
 // here rather than threading *testing.T through this function's several
 // call sites, since nothing writes into it.
 func validLaunchParams(containerID string) sandbox.LaunchParams {
-	_ = os.MkdirAll(sandbox.RunTreeRoot("run"), 0o755)
+	_ = os.MkdirAll(sandbox.RunTreeRoot("task"), 0o755)
 	return sandbox.LaunchParams{
 		ConversationID: "run",
-		ContainerID:    containerID,
-		Worktree:       sandbox.RunTreeRoot("run"),
-		Args:           []string{sandbox.TrustedToolHostBinaryDestination, "serve", "--connect", "/run/tf-tools/tools.sock"},
+		// The run tree is keyed by the workspace key — the task id — which is
+		// the only key the validator's worktree pin accepts.
+		WorkspaceKey: "task",
+		ContainerID:  containerID,
+		Worktree:     sandbox.RunTreeRoot("task"),
+		Args:         []string{sandbox.TrustedToolHostBinaryDestination, "serve", "--connect", "/run/tf-tools/tools.sock"},
 		// The netns name must be the one ConversationID derives — the ownership check
 		// binds it to the run, not just the tf-<hex>-<idx> shape.
 		NetnsPath: "/var/run/netns/" + sandbox.NetnsNameForRun("run", 1),

@@ -355,8 +355,8 @@ type nativeLaunchText struct {
 // event fields and PR history it renders are read fresh, and it is a transcript
 // row, where the opening gate decides whether it is written at all.
 //
-// Nothing in it fails: the one read it makes degrades to a context block with
-// no event fields, exactly as it did when this was the whole opening turn.
+// Nothing in it fails: the one read it makes degrades to a task context with no
+// event fields rather than refusing the launch.
 func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, mission string, cfg runConfig, knowledge, replayed string) nativeLaunchText {
 	metadataJSON, err := s.events.GetMetadataSystem(context.WithoutCancel(ctx), cfg.orgID, task.PrimaryEventID)
 	if err != nil {

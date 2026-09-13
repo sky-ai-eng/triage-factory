@@ -102,21 +102,30 @@ func stubWorkspaceCreates(t *testing.T, rec *createRecorder) {
 }
 
 // TestLocalClient_WorkspaceRoots pins the host-root derivation: the run's
-// recorded worktree_path when present (the value resume maintains — after a
-// cold rehydrate the conversationID-derived path diverges from the real cwd), the
-// worktree.RunRoot(conversationID) fallback otherwise; and both views equal for the
-// in-process client (no sandbox boundary on this transport).
+// recorded worktree_path when present (the value resume maintains, so a cold
+// rehydrate's re-keyed tree stays findable), and otherwise the run root the
+// conversation's TASK names — the one key a tree is ever built under. Both
+// views are equal for the in-process client (no sandbox boundary on this
+// transport).
 func TestLocalClient_WorkspaceRoots(t *testing.T) {
 	stores, conn := newTestDB(t)
 	seedConversation(t, stores, conn, "conv-roots", runmode.LocalDefaultUserID, "manual")
 	client := NewLocal(stores, workspaceInfo("conv-roots"))
 
+	conv, err := stores.Conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "conv-roots")
+	if err != nil || conv == nil {
+		t.Fatalf("read the seeded conversation: err=%v got=%v", err, conv)
+	}
+
 	host, agent, err := client.WorkspaceRoots(context.Background())
 	if err != nil {
 		t.Fatalf("WorkspaceRoots: %v", err)
 	}
-	if want := worktree.RunRoot("conv-roots"); host != want {
-		t.Errorf("host root (no worktree_path) = %q, want RunRoot fallback %q", host, want)
+	if want := worktree.RunRoot(conv.TaskID); host != want {
+		t.Errorf("host root (no worktree_path) = %q, want the task-keyed fallback %q", host, want)
+	}
+	if host == worktree.RunRoot("conv-roots") {
+		t.Error("host root fell back to the conversation id, which names a directory nothing builds")
 	}
 	if host != agent {
 		t.Errorf("LocalClient views differ: host %q, agent %q — no sandbox boundary on this transport", host, agent)
@@ -131,6 +140,32 @@ func TestLocalClient_WorkspaceRoots(t *testing.T) {
 	}
 	if host != "/data/runs/rehydrated-root" || agent != host {
 		t.Errorf("roots = (%q, %q), want the recorded worktree_path for both", host, agent)
+	}
+}
+
+// TestLocalClient_WorkspaceRoots_NoTaskFailsClosed: with neither a recorded
+// worktree_path nor a task to key one from, there is no directory to name.
+// It refuses rather than hand back a path that was never created — every
+// caller here goes on to clone into what it is given.
+func TestLocalClient_WorkspaceRoots_NoTaskFailsClosed(t *testing.T) {
+	stores, conn := newTestDB(t)
+	seedConversation(t, stores, conn, "conv-taskless", runmode.LocalDefaultUserID, "manual")
+	// A non-blueprint conversation: origin moves with the parents it no longer
+	// carries, or conversations_origin_requires_parents refuses the write.
+	if _, err := conn.Exec(
+		`UPDATE conversations SET origin = 'manual', task_id = NULL, blueprint_run_id = NULL WHERE id = ?`,
+		"conv-taskless",
+	); err != nil {
+		t.Fatalf("unlink the conversation from its task: %v", err)
+	}
+
+	client := NewLocal(stores, workspaceInfo("conv-taskless"))
+	host, agent, err := client.WorkspaceRoots(context.Background())
+	if err == nil {
+		t.Fatalf("WorkspaceRoots = (%q, %q, nil), want a refusal", host, agent)
+	}
+	if host != "" || agent != "" {
+		t.Errorf("refusal still returned roots (%q, %q), want both empty", host, agent)
 	}
 }
 
@@ -254,8 +289,12 @@ func TestLocalClient_CreateWorkspaceCheckout_DefaultPath(t *testing.T) {
 	if rec.coConversationID != "conv-co" {
 		t.Errorf("conversationID = %q, want conv-co", rec.coConversationID)
 	}
-	if want := worktree.RunRoot("conv-co"); rec.coRunRoot != want {
-		t.Errorf("runRoot = %q, want the host root %q", rec.coRunRoot, want)
+	hostRoot, _, err := client.WorkspaceRoots(context.Background())
+	if err != nil {
+		t.Fatalf("WorkspaceRoots: %v", err)
+	}
+	if rec.coRunRoot != hostRoot {
+		t.Errorf("runRoot = %q, want the host root %q", rec.coRunRoot, hostRoot)
 	}
 	if rec.coAuth != (worktree.CloneAuth{}) {
 		t.Errorf("local mode threaded a clone credential %+v; want none (operator's own git path)", rec.coAuth)

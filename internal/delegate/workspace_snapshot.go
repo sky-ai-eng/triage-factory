@@ -1019,17 +1019,6 @@ func snapshotReader(r io.Reader) (io.ReadCloser, string, error) {
 	return gzr, "gzip", nil
 }
 
-// DiscardWorkspaceSnapshot is the exported seam onto the snapshot discard, for
-// a caller outside the package that has established a task's workspace is not
-// wanted again. Idempotent and nil-safe.
-//
-// It takes the task id, not a conversation id: the snapshot key is the
-// workspace key (see snapshotKey), so a conversation id names a blob that
-// was never written and the discard silently does nothing.
-func (s *Spawner) DiscardWorkspaceSnapshot(orgID, taskID string) {
-	s.discardWorkspaceSnapshot(context.Background(), orgID, taskID)
-}
-
 // discardWorkspaceSnapshot deletes a parked workspace's snapshot blob once the
 // work it belonged to reaches a terminal state, so durable storage
 // doesn't accumulate orphans. keyID is workspaceKey(taskID).

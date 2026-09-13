@@ -50,6 +50,15 @@ const maxCompletionRetries = 3
 // conversation id or a blueprint run id reads as an equally plausible argument
 // and silently keys a tree nothing else will look under.
 func workspaceKey(taskID string) string {
+	// An empty key names the runs directory itself, not a tree inside it, so a
+	// path built from one is a path that reclaims every run on the host.
+	// Unreachable today — blueprint_runs.task_id is NOT NULL in both dialects
+	// — and guarded anyway, because the cost of being wrong is the whole
+	// directory.
+	if taskID == "" {
+		delegateLog.Error("workspace key asked for with no task id; refusing to key a run tree")
+		return ""
+	}
 	return taskID
 }
 

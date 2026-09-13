@@ -159,7 +159,7 @@ func (s *Spawner) terminateBlueprint(
 			}
 		}
 
-		// TFAC-442: a clean completion means the agent opened its PR and the work is now
+		// A clean completion means the agent opened its PR and the work is now
 		// awaiting human review + merge — "in progress" to a Jira watcher, NOT
 		// done. Re-assert the InProgress bucket (idempotent; usually a no-op
 		// since the dispatch-time mirror already moved the ticket) rather than
@@ -262,11 +262,11 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID, wsKey string, cfg 
 			worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.prNumber, filepath.Base(cfg.wtPath))
 		}
 	} else if cfg.runRoot != "" {
-		// Jira blueprints materialize worktrees lazily via `workspace add`, which
-		// keys conversation_worktrees rows AND the on-disk run-root (runDir) by each
-		// *step's* conversation_id (the agent's TRIAGE_FACTORY_CONVERSATION_ID), not the
-		// workspace key. Iterate every step conversation so we find + remove their
-		// worktrees and their run-root dirs.
+		// Jira blueprints materialize worktrees lazily via `workspace add`,
+		// which records a conversation_worktrees row per *step* conversation
+		// (the agent's TRIAGE_FACTORY_CONVERSATION_ID) under the task's one
+		// run root. Iterate every step conversation so we find and remove the
+		// checkouts each of them made; the root itself comes off below, once.
 		stepConversations, err := s.blueprints.ConversationsForBlueprintSystem(context.Background(), cfg.orgID, blueprintRunID)
 		if err != nil {
 			blueprintLog.Warn("list step conversations for cleanup failed", "blueprint_run", blueprintRunID, "error", err)
@@ -314,10 +314,9 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID, wsKey string, cfg 
 // `workspace add --pr N` worktree left in the shared bare, keyed off the
 // conversation_worktrees row's ref (pr-<N>) and conversation_id (the conversation that created it, so the
 // per-run branch namespace matches). A no-op for non-PR refs (default, branch
-// slugs) — those leave detached checkouts with no per-PR config. Folds the
-// eager path's inline cleanup into the lazy teardown so the bootstrap sweep
-// stays a pure crash backstop (Decision D / TFAC-502). Shared by both lazy
-// teardown paths (runAgent's Jira defer and runBlueprintWorktreeCleanup).
+// slugs) — those leave detached checkouts with no per-PR config. The blueprint
+// teardown above is its only caller: reclaiming inline there is what keeps the
+// bootstrap sweep a pure crash backstop rather than the ordinary path.
 func reclaimWorkspaceAddPRConfig(w domain.ConversationWorktree) {
 	prNum, ok := prNumberFromRef(w.Ref)
 	if !ok {
@@ -555,8 +554,9 @@ func (s *Spawner) CancelBlueprintRun(orgID, blueprintRunID, userID string) error
 //     synthetic claims, a system cancel (empty — router cleanup / drain sweep)
 //     through the admin pool;
 //   - runs the shared-worktree cleanup;
-//   - discards the blueprint_run-keyed snapshot (idempotent — a no-op when
-//     terminateBlueprint already dropped it, or when none was taken).
+//   - leaves the task's workspace snapshot in place: it is the parked
+//     workspace this cancel just retained, and the retention TTL is what
+//     collects it.
 //
 // This path only runs with no live goroutine, so the blueprint is sequentially
 // paused (no other step is executing) and finalizing the whole blueprint_run on

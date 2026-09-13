@@ -289,8 +289,8 @@ type Spawner struct {
 	// process, so a bare "is anyone claimed on this key" read is a check
 	// against a fact that can change a line later; holding this across the
 	// decision is what makes the answer still true at the removal. Keyed by
-	// (org, blueprint_run_id) — the key a tree belongs to, not a conversation.
-	// Its own keyed lock, independent of mu; zero value ready.
+	// (org, task_id) — the key a tree belongs to, which every conversation on
+	// the task shares. Its own keyed lock, independent of mu; zero value ready.
 	workspaceLocks keyedMutex
 
 	// blobs is the durable blob/object store handle for the blueprint
@@ -1455,6 +1455,11 @@ func (s *Spawner) broadcastMessage(orgID, conversationID string, msg *domain.Mes
 // close that landed.
 func (s *Spawner) TeardownTaskArtifactsSystem(ctx context.Context, orgID, taskID string) {
 	if s.conversations == nil || s.artifacts == nil || s.externalActions == nil {
+		// The close already happened, and nothing walks back here for it, so
+		// the artifacts this pass would have retired stay open with no record
+		// of why. Say so rather than returning into silence.
+		delegateLog.Warn("artifact teardown skipped: the spawner holds no store for it; the task's artifacts stay unresolved",
+			"task", taskID, "org", orgID)
 		return
 	}
 	// Detached from the caller's cancellation: the task is already closed, and

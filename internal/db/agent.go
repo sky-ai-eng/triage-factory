@@ -40,12 +40,11 @@ type Park struct {
 	// It is a field because it is a fact about the park, and the three things
 	// that hang off it (see ParkOpen) are too load-bearing to infer.
 	//
-	// It used to be inferred, from Reason being non-empty. That made "someone
-	// deliberately stopped this" and "there is a string to display" the same
-	// bit: a park that wanted to record why it happened without being a
-	// cancellation would have released its claim 'cancelled', and nothing
-	// would have failed. `idle` is exactly such a reason, and it is why this
-	// is now stated.
+	// It cannot be inferred from Reason being non-empty, which would make
+	// "someone deliberately stopped this" and "there is a string to display"
+	// the same bit: a park recording why it happened without being a
+	// cancellation would release its claim 'cancelled', and nothing would
+	// fail. `idle` is exactly such a reason.
 	Deliberate bool
 	// Reason is recorded on conversations.park_reason — the closed
 	// domain.ParkReason vocabulary, never free text and never the model's
@@ -577,12 +576,12 @@ type ConversationStore interface {
 	// ActiveIDsForTaskSystem mirrors ActiveIDsForTask but routes through
 	// the admin pool in Postgres, for a claims-less background caller.
 	//
-	// No production caller today: the router's task-close cascade used to
-	// enumerate here, and now takes the same set from the close transaction
-	// itself (TaskStore.CloseWithConversationCancelIntentSystem) so the
-	// conversations it stops are the conversations it stamped. Kept as the
-	// admin-pool arm of a pair whose app-pool half is live, and covered by
-	// the store conformance.
+	// No production caller today: the router's task-close cascade takes the
+	// same set from the close transaction itself
+	// (TaskStore.CloseWithConversationCancelIntentSystem) so the conversations
+	// it stops are the conversations it stamped. Kept as the admin-pool arm of
+	// a pair whose app-pool half is live, and covered by the store
+	// conformance.
 	ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// ActiveIDsForTeamSystem returns the IDs of every active conversation owned by the
@@ -605,14 +604,16 @@ type ConversationStore interface {
 	// --- Transcript / messages ---
 	//
 	// messages.role is app-validated (no CHECK): "assistant" | "tool" |
-	// "user". "user" covers both a human's free-form message and the native
-	// loop's injected input; subtype further discriminates the latter via
-	// the "injection:*" subtypes. "injection:steer" (input drained between
-	// turns, while the model was mid-work) and "injection:executor-changed"
-	// (the claim-time notice that the workspace was restored from its last
-	// snapshot) are minted by the native loop;
-	// "injection:compaction-request" and "injection:compaction-result" are
-	// reserved and not yet minted by any code in this repo.
+	// "user". "user" covers both a human's free-form message and the
+	// machine-authored rows around it; subtype discriminates the latter, and
+	// blank is a person's own message. Neither dialect CHECKs the column, so
+	// the vocabulary lives in Go: domain's MessageSubtype* constants —
+	// "injection:steer", "injection:executor-changed", "injection:nudge",
+	// "injection:output-limit", "injection:compaction-request",
+	// "injection:compaction-result", "injection:memory",
+	// "injection:task-context" and "stop-note" — plus two values owned where
+	// they are written, the staged-injection stores' "injection:system-note"
+	// and the artifact feedback row's "system_note".
 	//
 	// InsertMessage/InsertMessageSystem/Messages/MessagesForConversations below serve
 	// today's readers (the SDK runtime's live stream, the UI transcript
@@ -893,6 +894,26 @@ type ConversationStore interface {
 	// may not even be a member of the team whose conversations it is ending.
 	EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error)
 	EndConversationSystem(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error)
+
+	// EndTerminalConversationsForTaskSystem is EndConversationsForTaskSystem
+	// narrowed to the rows whose transcript has already finished — status is
+	// one of domain.AllTerminalConversationStatuses. Everything else about it
+	// is the same door: top-level rows only, already-ended rows untouched, the
+	// stamped rows returned as Get projects them.
+	//
+	// The narrowing is what makes it safe for a caller that has NOT stopped
+	// the task's conversations first. A delegation opening on a task whose
+	// prior conversation concluded must end that row or the task carries two
+	// un-ended conversations and nothing can say which one it is about; a
+	// still-live row, by contrast, is somebody else's to stop, and ending it
+	// underneath its engagement would strand the work it is still doing.
+	// Whoever owns the stop (the delegate route, the requeue, the takeover)
+	// calls the unnarrowed door.
+	//
+	// Admin-pool only, with no app-pool twin: its caller is Spawner.Delegate,
+	// which runs claimless on the router's and the drain's event path as much
+	// as on a person's.
+	EndTerminalConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error)
 
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 

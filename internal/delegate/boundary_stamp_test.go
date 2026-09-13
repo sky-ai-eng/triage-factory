@@ -1,6 +1,6 @@
 // The boundary stamps the executor writes: the step advance, the failure
-// terminal, and the three blueprint dispositions that used to leave a claimed
-// conversation neither failed nor ended.
+// terminal, and the three blueprint dispositions that would otherwise leave a
+// claimed conversation neither failed nor ended.
 
 package delegate
 

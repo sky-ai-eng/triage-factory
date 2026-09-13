@@ -12,15 +12,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
-// ensureRunTreeFixture creates the on-disk directory RunTreeRoot(conversationID)
-// resolves to. The worktree/mount-scope check now requires a launch's
-// Worktree to actually exist (realPath resolves symlinks, which needs the
-// path to be there) — in production internal/worktree.CreateForPR /
-// MakeRunRoot always materialize it before agentproc.Run ever issues the
-// launch RPC, so tests that want an ACCEPTED launch must do the same.
-func ensureRunTreeFixture(t *testing.T, conversationID string) string {
+// ensureRunTreeFixture creates the on-disk directory RunTreeRoot(rootKey)
+// resolves to. The worktree/mount-scope check requires a launch's Worktree to
+// actually exist (realPath resolves symlinks, which needs the path to be
+// there) — in production internal/worktree.CreateForPR / MakeRunRoot always
+// materialize it before agentproc.Run ever issues the launch RPC, so tests
+// that want an ACCEPTED launch must do the same. Callers pass the workspace
+// key, which is the key a run tree is built under.
+func ensureRunTreeFixture(t *testing.T, rootKey string) string {
 	t.Helper()
-	dir := RunTreeRoot(conversationID)
+	dir := RunTreeRoot(rootKey)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir run-tree fixture %q: %v", dir, err)
 	}
@@ -75,14 +76,15 @@ func ensureAgentHostSocketFixture(t *testing.T, conversationID string) string {
 // each rejection test can mutate exactly one field and prove that field's
 // gate — the boundary the broker enforces before it builds or execs
 // anything from an orchestrator's request. The worktree is a package-wide
-// fixed path (RunTreeRoot("run-abc123")); tests don't need per-test
-// isolation on it (nothing writes into it), so it's created idempotently
-// here rather than threading *testing.T through every one of this
-// function's many call sites.
+// fixed path (RunTreeRoot of the workspace key, which is the only key a run
+// tree is built under); tests don't need per-test isolation on it (nothing
+// writes into it), so it's created idempotently here rather than threading
+// *testing.T through every one of this function's many call sites.
 func validParams() LaunchParams {
-	_ = os.MkdirAll(RunTreeRoot("run-abc123"), 0o755)
+	_ = os.MkdirAll(RunTreeRoot("task-abc123"), 0o755)
 	return LaunchParams{
 		ConversationID: "run-abc123",
+		WorkspaceKey:   "task-abc123",
 		ContainerID:    "tf-abc123-1",
 		Rootfs:         RootfsSelector{Name: "base"},
 		Env: []EnvVar{
@@ -92,7 +94,7 @@ func validParams() LaunchParams {
 			{Key: "GIT_CONFIG_VALUE_0", Value: "/hooks"},
 		},
 		Args:     []string{TrustedToolHostBinaryDestination, toolHostServeVerb, "--connect", "/run/tf-tools/tools.sock"},
-		Worktree: RunTreeRoot("run-abc123"),
+		Worktree: RunTreeRoot("task-abc123"),
 		Rlimits:  []Rlimit{{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 1024}},
 		// The netns name must be the one this run's id derives — the ownership
 		// check binds it, not just the tf-<hex>-<idx> shape.

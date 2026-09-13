@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -163,12 +162,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	defer s.ExpirePermissionsForClaim(orgID, cfg.claimID)
 
 	// parked is set true when this run ends dormant rather than terminating:
-	// a park flips it to `open` (runAgent, below). The per-run cleanup
-	// defers below read it to KEEP the worktree and session JSONL on disk as the
-	// warm resume cache — mirroring the isBlueprintStep skip. Captured by
-	// reference by the deferred closures, so they observe its final value at
-	// return. A completed run never parks anymore: a queued artifact is
-	// a sidecar, not a reason to hold the run open.
+	// a park flips it to `open` (runAgent, below). The ghost-projects cleanup
+	// defer below reads it to KEEP the session JSONL on disk as the warm
+	// resume cache — the same thing the isBlueprintStep skip beside it does.
+	// Captured by reference by the deferred closures, so they observe its
+	// final value at return. A completed run does not park: a queued artifact
+	// is a sidecar, not a reason to hold the run open.
 	var parked bool
 
 	// The mirror this engagement files its memory file through, built below
@@ -220,99 +219,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		}, sessionID)
 		parked = true
 		return fenced
-	}
-
-	if cfg.hasWT {
-		// GitHub PR cleanup. Best-effort cleanup on return; the worktree ID is unique per run
-		// so a failed remove just leaves a dangling directory under _worktrees.
-		defer func() {
-			if cfg.isBlueprintStep {
-				return
-			}
-			if parked {
-				// Dormant (idle-closed `open`): the worktree is the warm cache the
-				// resume reuses (a snapshot was taken too, for the cold path).
-				return
-			}
-			// Capture the RemoveAt error rather than discarding it. If the
-			// worktree dir failed to remove, the worktree is still on disk and
-			// still attached to the bare's branch tracking — stripping the
-			// per-PR config out from under a surviving checkout would break its
-			// push/pull, so that cleanup is skipped below; the next bootstrap
-			// sweep reclaims the orphan once the dir is gone.
-			rmErr := worktree.RemoveAt(cfg.wtPath, conversationID)
-			if rmErr != nil {
-				delegateLog.Warn("worktree remove failed; skipping per-PR config cleanup", "conversation", conversationID, "error", rmErr)
-			}
-			// Drop the eager worktree's conversation_worktrees row (recorded at setup with
-			// ref=pr-<N> so the least-privilege gates could authorize the task
-			// repo) — regardless of the RemoveAt outcome, since the row is
-			// run-scoped metadata, not the worktree, and a lingering dir doesn't
-			// need its ledger entry. Past the parked/blueprint early-returns
-			// above, so a resume or chain step keeps the row; only a real
-			// terminal teardown removes it. Best-effort: a leaked row is harmless
-			// (run-scoped, never collides a future run).
-			if s.conversationWorktrees != nil && cfg.owner != "" && cfg.repo != "" && cfg.prNumber > 0 {
-				if delErr := s.conversationWorktrees.DeleteByRepoRefSystem(context.WithoutCancel(ctx), orgID, conversationID, cfg.owner+"/"+cfg.repo, worktree.PRRefSlug(cfg.prNumber)); delErr != nil {
-					delegateLog.Warn("delete eager worktree conversation_worktrees row failed", "conversation", conversationID, "repo", cfg.owner+"/"+cfg.repo, "error", delErr)
-				}
-			}
-			// Per-PR config cleanup only when the worktree is actually gone (see
-			// above). Pass the creating run id (the worktree-dir basename, which
-			// CreateForPR set to conversationID) so CleanupPRConfig reclaims THIS run's
-			// per-run branch + push remote, never a sibling's. It uses a detached
-			// internal context so cancellation of the agent's ctx (timeout,
-			// server shutdown) doesn't short-circuit it.
-			if rmErr != nil {
-				return
-			}
-			if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
-				worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.prNumber, filepath.Base(cfg.wtPath))
-			}
-		}()
-	} else if cfg.runRoot != "" {
-		// Jira lazy cleanup: the agent materialized zero or more worktrees
-		// under cfg.runRoot via `workspace add`. Iterate conversation_worktrees,
-		// nuke each, then remove the run-root parent.
-		defer func() {
-			if cfg.isBlueprintStep {
-				return
-			}
-			if parked {
-				return
-			}
-			rows, err := s.conversationWorktrees.ListSystem(context.WithoutCancel(ctx), orgID, conversationID)
-			if err != nil {
-				delegateLog.Warn("list conversation_worktrees for cleanup failed", "conversation", conversationID, "error", err)
-			} else {
-				// Use a detached context so cleanup is not skipped if the
-				// agent ctx has already been canceled.
-				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-				defer cancel()
-				for _, w := range rows {
-					if rmErr := worktree.RemoveAt(w.Path, conversationID); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-						delegateLog.Warn("remove worktree failed", "conversation", conversationID, "path", w.Path, "error", rmErr)
-						// Fall through to drop the DB row anyway — it's ephemeral
-						// run-coordination state, and a lingering on-disk dir is
-						// reclaimed by the startup sweep regardless. Mirrors the
-						// blueprint teardown loop (runBlueprintWorktreeCleanup).
-					} else {
-						// Inline per-PR config reclaim (Decision D): a finishing
-						// workspace-add'd PR run reclaims its own per-run branch +
-						// push remote here, so the bootstrap sweep stays a pure crash
-						// backstop. Gated on the worktree being gone — `git branch -D`
-						// is refused while a checkout survives. w.ConversationID == conversationID
-						// (created the worktree), so this targets this run's branch,
-						// never a concurrent run's.
-						reclaimWorkspaceAddPRConfig(w)
-					}
-					if delErr := s.conversationWorktrees.DeleteByPathSystem(cleanupCtx, orgID, conversationID, w.Path); delErr != nil {
-						delegateLog.Warn("delete conversation_worktrees row failed", "conversation", conversationID, "path", w.Path, "error", delErr)
-					}
-				}
-			}
-			worktree.RemoveRunRoot(conversationID)
-		}()
 	}
 
 	// Initial cwd for the child claude. Always the run-root: the worktree
@@ -966,10 +872,9 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 // that keeps content the agent never wrote from being ingested as its work.
 //
 // Returns parked: true when the run ended dormant (open) rather than terminal,
-// so runAgent's cleanup defers keep the worktree + session JSONL on disk as the
-// warm resume cache. A terminal completion (including one that produced a draft
-// PR / pending review) returns false — the artifact is a resolvable sidecar, not
-// a reason to park.
+// which is what keeps the session JSONL on disk as the warm resume cache. A
+// terminal completion (including one that produced a draft PR / pending review)
+// returns false — the artifact is a resolvable sidecar, not a reason to park.
 //
 // claimID names the engagement that produced this result, so its terminal
 // write goes through the claim fence. Empty on paths with no claimed run in

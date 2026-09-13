@@ -56,9 +56,16 @@ type RunOptions struct {
 	SessionID string
 
 	// Message is the value passed to `-p`, and the opening user message of
-	// an interactive run that carries no OpeningBlocks. For an initial
-	// invocation this is the full prompt (mission + envelope); for a resume
-	// it's just the new user turn.
+	// an interactive run that carries no OpeningBlocks. What it holds follows
+	// from what the session on the other side already knows: a resume sends
+	// the new user turn alone, and a launch that resumes a surviving session
+	// sends only a continuation note, because in both the session carries the
+	// rest; the two toolless one-shots — the system-LLM completion and the
+	// model probe — send the whole request, having no session at all. A launch
+	// with nothing to resume sets OpeningBlocks instead and leaves this empty
+	// (internal/delegate.composeLaunchTurn owns that fork and clears whichever
+	// field it did not write); a delegated agent's instructions are never here
+	// — they ride SystemPrompt.
 	Message string
 
 	// OpeningBlocks, when non-empty, is the opening user message of an
@@ -87,10 +94,14 @@ type RunOptions struct {
 	AddDirs []string
 
 	// SystemPrompt, if non-empty, is passed as --append-system-prompt.
-	// Sits after Claude Code's default system prompt rather than
-	// replacing it; useful for runtime-specific role-shaping (e.g. a
-	// non-terminal blueprint step's completion-protocol addendum)
-	// without clobbering CC's safety / tool-use defaults.
+	// Sits after Claude Code's default system prompt rather than replacing
+	// it, so CC's safety / tool-use defaults stand. Everything TF tells a
+	// delegated agent rides here: the framework blocks and the conversation's
+	// own block — its mission, its run context, its verb reference and its
+	// step addendum — composed by the caller
+	// (internal/delegate.sdkSystemPrompt). A resume re-sends the same bytes,
+	// because the harness replays the session's history but not the prompt
+	// that was appended to it.
 	SystemPrompt string
 
 	// MaxTurns sets --max-turns. Zero omits the flag.
@@ -192,9 +203,9 @@ type RunOptions struct {
 	// system jobs) and on the local/direct path, which measures nothing.
 	RecordSandboxActuals func(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error
 
-	// WorkspaceKey is the run's task id, passed to the sandbox as
-	// the second run-tree key its worktree pin accepts (a cold-rehydrated
-	// worktree lives at RunTreeRoot(WorkspaceKey), not RunTreeRoot(TraceID)).
+	// WorkspaceKey is the run's task id, passed to the sandbox as the one
+	// run-tree key its worktree pin accepts — the worktree lives at
+	// RunTreeRoot(WorkspaceKey), on a first launch and a cold rehydrate alike.
 	// Empty for a taskless run, or for callers with no rehydrate path.
 	WorkspaceKey string
 

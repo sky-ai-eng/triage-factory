@@ -673,14 +673,14 @@ func realPath(p string) (string, error) {
 //
 //   - The ephemeral per-run tree: GitHub PR / Jira / Slack delegated task
 //     runs materialize (or park) their whole working tree under
-//     os.TempDir()/triagefactory-runs/<key>. The key is one of the run's OWN
-//     two lifetime keys: its run id on the first launch (MakeRunRoot(conversationID)),
-//     or its workspace key — the task id — after a cold rehydrate
-//     rebuilds the tree at RunRoot(workspaceKey) (internal/delegate's snapshot
-//     restore). Either of this run's keys is accepted; a THIRD run's tree is
-//     not. These runs are org-blind by construction (the tree doesn't outlive
-//     the run), so hasScope is false and no OTHER mount may claim an org scope
-//     either — there is nothing for it to be consistent with.
+//     os.TempDir()/triagefactory-runs/<key>. The key is the run's workspace
+//     key — the task id, which every conversation on the task shares and
+//     which a cold rehydrate rebuilds the tree under
+//     (internal/delegate's snapshot restore). Only that key is accepted;
+//     another task's tree is not. These runs are org-blind by construction
+//     (the tree doesn't outlive the task), so hasScope is false and no OTHER
+//     mount may claim an org scope either — there is nothing for it to be
+//     consistent with.
 //   - The org-scoped state-root tree: paths.BareCacheDir(orgID, owner, repo),
 //     i.e. <StateRoot>/orgs/<orgID>/… in multi mode. orgPrefix is
 //     <StateRoot>/orgs/<orgID>; every other mount under this run must live
@@ -689,20 +689,16 @@ func realPath(p string) (string, error) {
 // Anything else — an arbitrary host path, a worktree one level too
 // shallow to name an org, a symlink-clean but out-of-tree path — is
 // rejected outright.
-func worktreeScope(conversationID, workspaceKey, worktree string) (orgPrefix string, hasScope bool, err error) {
+func worktreeScope(workspaceKey, worktree string) (orgPrefix string, hasScope bool, err error) {
 	realWorktree, err := realPath(worktree)
 	if err != nil {
 		return "", false, fmt.Errorf("sandbox: worktree %q: %w", worktree, err)
 	}
-	// Either of the run's own two lifetime keys is a legitimate ephemeral tree:
-	// its run id (first launch) or its workspace key (a tree rebuilt by a cold
-	// rehydrate). Matching either short-circuits with hasScope=false — no org
-	// scope for an org-blind tree.
-	for _, key := range [2]string{conversationID, workspaceKey} {
-		if key == "" {
-			continue
-		}
-		if realRunTree, rtErr := realPath(RunTreeRoot(key)); rtErr == nil && realWorktree == realRunTree {
+	// The run's workspace key is the one key an ephemeral tree is built under —
+	// both the first launch and a cold rehydrate use it. Matching it
+	// short-circuits with hasScope=false: no org scope for an org-blind tree.
+	if workspaceKey != "" {
+		if realRunTree, rtErr := realPath(RunTreeRoot(workspaceKey)); rtErr == nil && realWorktree == realRunTree {
 			return "", false, nil
 		}
 	}
@@ -757,7 +753,7 @@ func worktreeScope(conversationID, workspaceKey, worktree string) (orgPrefix str
 //     scope (the delegated-task-run shape), NO mount may fall in this
 //     bucket at all — there is no legitimate one for that shape.
 func validateWorktreeAndMounts(conversationID, workspaceKey, worktree string, mounts []Mount) error {
-	orgPrefix, hasScope, err := worktreeScope(conversationID, workspaceKey, worktree)
+	orgPrefix, hasScope, err := worktreeScope(workspaceKey, worktree)
 	if err != nil {
 		return err
 	}
