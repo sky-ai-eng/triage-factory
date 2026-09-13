@@ -1259,16 +1259,27 @@ func (s *Spawner) setWorktreePath(ctx context.Context, orgID, conversationID, cl
 // the claim to the user, who owns the lifecycle from then on), and a
 // done/dismissed task is never announced as in progress.
 //
-// A read failure is logged-not-fatal by omission: the blueprint_run is
-// committed and the step is enqueued by the time this runs, so a missed
-// announcement costs a stale card until the next fetch, not the run.
+// A failed read is logged-not-fatal: the blueprint_run is committed and the
+// step is enqueued by the time this runs, so losing the announcement costs a
+// stale card until the next fetch, not the run. It is logged rather than
+// swallowed because this is the only thing that tells the board and Jira the
+// bot picked the task up — a silent return here reads downstream as "the
+// mirror stopped working", with nothing saying why. The two guards below are
+// not failures and say nothing.
 func (s *Spawner) announceTaskPlacement(orgID, taskID string) {
 	if s.tasks == nil {
 		return
 	}
 	ctx := context.Background()
 	task, err := s.tasks.GetSystem(ctx, orgID, taskID)
-	if err != nil || task == nil {
+	if err != nil {
+		delegateLog.Warn("announce task placement: task read failed, so neither the board nor Jira hears about this delegation",
+			"task", taskID, "org_id", orgID, "error", err)
+		return
+	}
+	if task == nil {
+		delegateLog.Warn("announce task placement: task is gone, so neither the board nor Jira hears about this delegation",
+			"task", taskID, "org_id", orgID)
 		return
 	}
 	if task.ClaimedByAgentID == "" {

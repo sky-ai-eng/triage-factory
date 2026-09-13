@@ -259,10 +259,11 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 
 	// Audit post-mutation, best-effort: the claim helpers already cleared
 	// snooze_until and landed the row in_progress atomically, so RecordSwipe is
-	// a no-op on lifecycle and the load-bearing effect is the swipe_events row. If it
-	// doesn't land — an insert failure, or the task closing under us, which
-	// RecordSwipe's own status predicate refuses — the claim still landed, so
-	// log and continue rather than 500-ing on a committed state change.
+	// a no-op on lifecycle and the load-bearing effect is the swipe_events row.
+	// If it doesn't land — an insert failure, or the task closing under us,
+	// which RecordSwipe's own status predicate refuses — the claim still
+	// landed, so log and continue rather than 500-ing on a committed state
+	// change.
 	var audited bool
 	swipeErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
