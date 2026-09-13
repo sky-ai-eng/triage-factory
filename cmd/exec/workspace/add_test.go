@@ -182,6 +182,12 @@ func seedJiraConversation(t *testing.T, database *db.DB, conversationID, issueKe
 	dbtest.SeedConversation(t, database.Conn, domain.Conversation{
 		ID: conversationID, TaskID: task.ID, PromptID: "p-" + conversationID,
 		Status: "running", Model: "m",
+		// The recorded run root, as setup writes it. These tests key their
+		// expected paths on the conversation id, so the seed pins the root
+		// there rather than leaning on WorkspaceRoots' derivation — which is
+		// the task's, and is the fallback for a setup that failed to record
+		// one at all.
+		WorktreePath:   worktree.RunRoot(conversationID),
 		BlueprintRunID: seedBlueprintRun(t, database.Conn, task.ID),
 	})
 }
@@ -210,6 +216,12 @@ func seedGitHubConversation(t *testing.T, database *db.DB, conversationID string
 	dbtest.SeedConversation(t, database.Conn, domain.Conversation{
 		ID: conversationID, TaskID: task.ID, PromptID: "p-" + conversationID,
 		Status: "running", Model: "m",
+		// The recorded run root, as setup writes it. These tests key their
+		// expected paths on the conversation id, so the seed pins the root
+		// there rather than leaning on WorkspaceRoots' derivation — which is
+		// the task's, and is the fallback for a setup that failed to record
+		// one at all.
+		WorktreePath:   worktree.RunRoot(conversationID),
 		BlueprintRunID: seedBlueprintRun(t, database.Conn, task.ID),
 	})
 }

@@ -50,22 +50,29 @@ var (
 //
 // The host root is the run's recorded worktree_path — the directory the agent
 // process was started in (and, in multi mode, the one bind-mounted at /work).
-// That beats re-deriving worktree.RunRoot(conversationID): after a cold rehydrate the
-// run root is rebuilt keyed by the run's workspace key (the task id), so the
-// conversationID-derived path and the actual cwd diverge — worktree_path is
-// the value the resume path maintains. The derivation is only the fallback for
-// a run whose worktree_path write failed at setup.
+// That is the value the resume path maintains, so it is what a cold rehydrate
+// leaves correct.
+//
+// The fallback, for a run whose worktree_path write failed at setup, derives
+// the root from the conversation's TASK: a run tree is built under the task id
+// and under nothing else, by the first launch and the rehydrate alike, so the
+// task is the only id that names a directory that exists. A conversation with
+// no task has no tree to name, and this fails closed rather than hand back a
+// path that was never created.
 func (c *LocalClient) WorkspaceRoots(ctx context.Context) (hostRoot, agentRoot string, err error) {
 	conv, err := c.GetConversation(ctx)
 	if err != nil {
 		return "", "", fmt.Errorf("load conversation for workspace roots: %w", err)
 	}
-	root := ""
-	if conv != nil {
-		root = conv.WorktreePath
+	if conv == nil {
+		return "", "", fmt.Errorf("workspace roots: conversation %s not found", c.info.ConversationID)
 	}
+	root := conv.WorktreePath
 	if root == "" {
-		root = worktree.RunRoot(c.info.ConversationID)
+		if conv.TaskID == "" {
+			return "", "", fmt.Errorf("workspace roots: conversation %s recorded no worktree_path and belongs to no task", c.info.ConversationID)
+		}
+		root = worktree.RunRoot(conv.TaskID)
 	}
 	return root, root, nil
 }

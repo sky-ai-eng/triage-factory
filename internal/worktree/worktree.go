@@ -428,6 +428,14 @@ func MakeRunRoot(rootKey string) (string, error) {
 // handled by RemoveAt + pruneAll for each individual worktree before
 // this is called; this is the final sweep of the parent dir itself.
 func RemoveRunRoot(rootKey string) {
+	// runDir("") is the runs directory itself — every run on the host — so an
+	// empty key is refused rather than resolved. The same guard workspaceKey
+	// carries, restated at the removal because this is where it would cost
+	// something.
+	if rootKey == "" {
+		worktreeLog.Error("run-root removal asked for with no key; refusing to remove the runs directory")
+		return
+	}
 	// Privileged seam (see RemoveAt's doc): the run root is sandbox-owned
 	// by teardown time in multi mode.
 	_ = sandbox.RemoveRunTree(context.Background(), runDir(rootKey))

@@ -1104,10 +1104,11 @@ func (ah *artifactsHandler) pingConversationsResolved(orgID string) {
 // ONLY lifecycle effect of a resolve: it never flips conversations.status or
 // resumes/terminates a blueprint.
 //
-// Governing signals: only a blueprint run is a task run, so only it can close a
-// task — clean completion is its blueprint run reaching status=completed. A
-// non-blueprint run (origin <> 'blueprint' — a future interactive/ad-hoc run)
-// is task-less and is a no-op here. The "anything still unresolved?" check is
+// Governing signals: closure keys on the blueprint run behind the conversation
+// reaching status=completed, so only a conversation that has one can close its
+// task. A non-blueprint conversation (origin <> 'blueprint' — a future
+// interactive/ad-hoc one) may well carry a task_id, but it has no blueprint run
+// to read a terminal from, so it is a no-op here. The "anything still unresolved?" check is
 // scoped to the whole TASK (all its conversations), matching
 // the task-end teardown, so a stranded artifact from a prior attempt blocks
 // closure.
@@ -1127,10 +1128,9 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		unresolved    bool
 	)
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		// Step 1: only a blueprint run is task-linked, so only it can drive
-		// terminal-on-last task closure. A non-blueprint conversation (origin <>
-		// 'blueprint' — a future interactive/ad-hoc conversation) is task-less
-		// by construction (NULL task_id), so there is nothing to close: leave taskID empty and no-op below.
+		// Step 1: the blueprint run is what carries the terminal this closure
+		// keys on, so a conversation with none cannot drive it — whether or not
+		// it carries a task_id of its own. Leave taskID empty and no-op below.
 		br, _, bpErr := tx.Blueprints.GetRunForConversation(ctx, orgID, conversationID)
 		if bpErr != nil {
 			return fmt.Errorf("blueprint lookup: %w", bpErr)

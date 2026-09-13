@@ -542,10 +542,10 @@ func removePRConfigLocked(ctx context.Context, bareDir, localBranch string, prNu
 // SweepStaleForkPRConfig walks every branch the bare has marked as
 // triagefactory-managed (via the trackedBranchMarkerKey config
 // configurePRPushTracking writes) and removes any whose branch isn't
-// currently checked out by a live worktree. Backstop for the cases where
-// inline CleanupPRConfig in the runAgent defer doesn't fire:
+// currently checked out by a live worktree. Backstop for the cases where the
+// blueprint teardown's inline CleanupPRConfig doesn't fire:
 //
-//   - Run was cancelled at a layer above the runAgent defer (rare):
+//   - the run was cancelled at a layer above that teardown (rare), so the
 //     inline cleanup never runs.
 //
 // Walking markers (rather than per-run push remotes alone) is what

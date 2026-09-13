@@ -36,11 +36,11 @@ var hostToolHostBinaryPath = sandboxToolHostBinary
 // much narrower than RunOptions: the jail runs a tool server, not an agent,
 // so there is no model, no prompt, no allowlist, and no stream to parse.
 type ToolHostOptions struct {
-	// ConversationID is the conversation id — the sandbox container id, the run-tree
-	// key, and what the socket directory is named after.
+	// ConversationID is the conversation id — the sandbox container id, and
+	// what the socket directory is named after.
 	ConversationID string
-	// WorkspaceKey is the task id, the run tree's second
-	// legitimate key (a cold rehydrate rebuilds under it).
+	// WorkspaceKey is the task id, the key the run tree is built under (a
+	// cold rehydrate rebuilds under the same one).
 	WorkspaceKey string
 	// Worktree is the host path bind-mounted at /work and the working
 	// directory every tool call resolves against.

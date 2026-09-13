@@ -66,14 +66,14 @@ type runConfig struct {
 
 	extraAllowedTools string // comma-separated extra tools from prompt.AllowedTools + agent scans; merged into --allowedTools at spawn time
 
-	// Chain-mode toggles. When isBlueprintStep is true the chain
-	// orchestrator owns the worktree lifecycle: runAgent's cleanup
-	// defers (RemoveAt, RemoveRunRoot, RemoveClaudeProjectDir) all
-	// short-circuit so the worktree survives across steps. The
-	// orchestrator runs the equivalent cleanup once after the chain
-	// terminates. appendSysPrompt is forwarded to agentproc as
-	// --append-system-prompt so the chain protocol reaches the model
-	// without modifying the step's prompt body.
+	// Chain-mode toggles. The blueprint orchestrator owns the worktree
+	// lifecycle — it reclaims the task's tree once, after the chain
+	// terminates — so runAgent holds no worktree cleanup of its own. What
+	// isBlueprintStep still gates is the ghost ~/.claude/projects tidy, which
+	// short-circuits so a step's session state survives into the next one.
+	// appendSysPrompt is forwarded to agentproc as --append-system-prompt so
+	// the chain protocol reaches the model without modifying the step's prompt
+	// body.
 	blueprintRunID  string
 	blueprintStep   int
 	isBlueprintStep bool

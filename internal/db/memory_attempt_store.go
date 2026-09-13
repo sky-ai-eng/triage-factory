@@ -27,11 +27,6 @@ var ErrNoSuchMemoryAttempt = errors.New("db: no open memory attempt with that id
 // goroutine with no JWT-claims context, and the org-scoped RLS policy gates
 // the app-pool reads (tf_app holds SELECT alone). org_id is bound by
 // argument on every call as defense in depth. SQLite is N=1 and unscoped.
-//
-// The provisioner is a sibling change and is not wired yet, so today the
-// only callers are the conformance suites. The ledger lands ahead of its
-// writer deliberately, so that work and the read over these rows can
-// proceed in parallel.
 type MemoryAttemptStore interface {
 	// BeginAttemptSystem opens an attempt on conversationID: one INSERT with
 	// started_at = now and every verdict column NULL. Returns the stored row,

@@ -100,10 +100,10 @@ func RunBlueprintRunWriteConformance(t *testing.T, mk BlueprintRunWriteFactory) 
 // second running run on the task whatever minted it, and both mint doors report
 // the refusal as db.ErrTaskBusyActiveRun rather than a raw driver error.
 //
-// The trigger-type axis is the point. The index used to be auto-only, so a
-// human's delegation could mint a second live engagement beside an auto-fired
-// one and the task had two conversations with nothing able to say which it was
-// about.
+// The trigger-type axis is the point: the index spans every trigger type, so a
+// human's delegation cannot mint a second live engagement beside an auto-fired
+// one and leave the task with two conversations and nothing able to say which
+// it is about.
 func RunOneActiveRunPerTaskConformance(t *testing.T, mk BlueprintRunWriteFactory) {
 	t.Helper()
 

@@ -223,9 +223,9 @@ func (s *Spawner) persistSystemBlock(ctx context.Context, orgID, conversationID,
 // launchedSystemBlock reads that block back for a resume.
 //
 // A read failure degrades to the empty block rather than refusing the turn, and
-// the asymmetry is deliberate. Resuming on the framework blocks alone is what
-// every SDK resume did until this column existed — the agent keeps its session
-// history, and loses the mission for one turn. Handing the claim back instead
+// the asymmetry is deliberate. Resuming on the framework blocks alone costs one
+// turn its mission and nothing more — the agent keeps its session history.
+// Handing the claim back instead
 // would spend an attempt against TF_MAX_CLAIM_ATTEMPTS on a read that is
 // transient, and running out of those ends the conversation outright.
 func (s *Spawner) launchedSystemBlock(ctx context.Context, orgID, conversationID string) string {

@@ -240,16 +240,12 @@ const eligibleForDrivingSQL = needsDrivingSQL
 // blueprint clause alone; its doc carries what that costs, when it costs
 // anything, and what closes it.
 //
-// The third clause is the task's, and it is the ceiling the blueprint clause
-// used to carry alone. The workspace is one per TASK now, not one per
-// blueprint run, so "two driven at once means two agents in one git tree"
-// spans every conversation the task has ever held — a second blueprint's step
-// as much as a sibling step of the same one. The task's live conversation is
-// its newest non-ended top-level row, and nothing else on it is drivable.
-//
-// TODO(TFAC-991): nothing generates the owed memory yet, so a task that
-// reaches this state stays gated until the memory provisioner lands and
-// starts filing rows for the conversations this predicate waits on.
+// The third clause is the task's, and it carries the ceiling. The workspace is
+// one per TASK, not one per blueprint run, so "two driven at once means two
+// agents in one git tree" spans every conversation the task has ever held — a
+// second blueprint's step as much as a sibling step of the same one. The
+// task's live conversation is its newest non-ended top-level row, and nothing
+// else on it is drivable.
 var blueprintDrivableSQL = `((r.blueprint_run_id IS NULL
 	    OR (br.cancel_requested = false AND br.status <> 'cancelled'
 	        AND r.blueprint_step_index = br.current_step_index))

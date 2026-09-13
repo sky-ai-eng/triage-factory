@@ -669,9 +669,9 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	})
 
 	// The task gate. The workspace is keyed by the task, so the ceiling is one
-	// driven conversation per TASK — not per blueprint run, which is where it
-	// used to sit and which let a second delegation's step open in a tree the
-	// first delegation's step was still working in. The task's live
+	// driven conversation per TASK, not per blueprint run: a per-run ceiling
+	// would let a second delegation's step open in a tree the first
+	// delegation's step is still working in. The task's live
 	// conversation is its newest un-ended top-level row; nothing else on it is
 	// drivable, whatever its own state says.
 	t.Run("OnlyTheTasksNewestUnEndedConversationIsClaimed", func(t *testing.T) {

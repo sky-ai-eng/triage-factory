@@ -7,56 +7,53 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
-// TestWorktreeScope_AcceptsRunAndWorkspaceKeys pins the resumed-run fix: a run's
-// ephemeral tree lives under its run id on first launch and under its workspace
-// key (the task id) after a cold rehydrate rebuilds it, so worktreeScope must
-// accept EITHER of the run's own keys. It must still reject a THIRD run's tree,
-// and — on a fresh deploy with no orgs subtree — reject with a clean message
-// rather than the bare lstat of the absent orgs dir.
-func TestWorktreeScope_AcceptsRunAndWorkspaceKeys(t *testing.T) {
+// TestWorktreeScope_AcceptsTheWorkspaceKeyedTree pins the tree shape the
+// broker will accept: a run's ephemeral tree lives under its workspace key —
+// the task id — on the first launch and after a cold rehydrate rebuilds it,
+// and nothing builds one under a conversation id. So the workspace key is the
+// only key that resolves. It must still reject another task's tree, and — on a
+// fresh deploy with no orgs subtree — reject with a clean message rather than
+// the bare lstat of the absent orgs dir.
+func TestWorktreeScope_AcceptsTheWorkspaceKeyedTree(t *testing.T) {
 	paths.SetForTest(t, t.TempDir()) // state root with no orgs/ subtree
 
 	const (
 		conversationID = "run-aaaaaaaa"
 		wsKey          = "task-bbbbbbbb"
-		other          = "run-cccccccc"
+		other          = "task-cccccccc"
 	)
-	runTree := ensureRunTreeFixture(t, conversationID)
+	conversationTree := ensureRunTreeFixture(t, conversationID)
 	wsTree := ensureRunTreeFixture(t, wsKey)
 	otherTree := ensureRunTreeFixture(t, other)
 
-	t.Run("run-id-keyed tree (first launch)", func(t *testing.T) {
-		_, hasScope, err := worktreeScope(conversationID, wsKey, runTree)
-		if err != nil || hasScope {
-			t.Fatalf("worktreeScope(run-id tree) = (hasScope=%v, %v), want (false, nil)", hasScope, err)
-		}
-	})
-
-	t.Run("workspace-keyed tree (cold rehydrate)", func(t *testing.T) {
-		// The regression: worktree == RunTreeRoot(workspaceKey) while conversationID
-		// differs. A resumed run's re-keyed tree must be accepted.
-		_, hasScope, err := worktreeScope(conversationID, wsKey, wsTree)
+	t.Run("the workspace-keyed tree", func(t *testing.T) {
+		_, hasScope, err := worktreeScope(wsKey, wsTree)
 		if err != nil || hasScope {
 			t.Fatalf("worktreeScope(workspace tree) = (hasScope=%v, %v), want (false, nil)", hasScope, err)
 		}
 	})
 
-	t.Run("a third run's tree is rejected cleanly", func(t *testing.T) {
-		_, _, err := worktreeScope(conversationID, wsKey, otherTree)
+	t.Run("another task's tree is rejected cleanly", func(t *testing.T) {
+		_, _, err := worktreeScope(wsKey, otherTree)
 		if err == nil {
-			t.Fatal("worktreeScope accepted a tree keyed by neither the run nor its workspace")
+			t.Fatal("worktreeScope accepted a tree keyed by something other than this run's workspace")
 		}
 		if strings.Contains(err.Error(), "lstat") || strings.Contains(err.Error(), "no such file") {
 			t.Errorf("rejection surfaced the bare lstat of the missing orgs dir: %v", err)
 		}
 	})
 
-	t.Run("empty workspace key falls back to the run id alone", func(t *testing.T) {
-		if _, _, err := worktreeScope(conversationID, "", runTree); err != nil {
-			t.Fatalf("worktreeScope(conversationID, \"\", run tree) = %v, want nil", err)
+	t.Run("a conversation-keyed tree is not a shape the broker knows", func(t *testing.T) {
+		// Nothing builds a tree under a conversation id, so one presented as a
+		// worktree is indistinguishable from any other stranger's path.
+		if _, _, err := worktreeScope(wsKey, conversationTree); err == nil {
+			t.Fatal("worktreeScope accepted a conversation-keyed tree")
 		}
-		if _, _, err := worktreeScope(conversationID, "", wsTree); err == nil {
-			t.Fatal("worktreeScope accepted the workspace tree with no workspace key supplied")
+	})
+
+	t.Run("no workspace key accepts no ephemeral tree at all", func(t *testing.T) {
+		if _, _, err := worktreeScope("", wsTree); err == nil {
+			t.Fatal("worktreeScope accepted an ephemeral tree with no workspace key supplied")
 		}
 	})
 }

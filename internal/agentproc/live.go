@@ -234,9 +234,9 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		stream:  NewStreamState(),
 	}
 
-	// opts travels whole (rather than the two fields the loop used to take)
-	// because the teardown stamp at the end of the loop needs the run's claim
-	// + recorder as well.
+	// opts travels whole because the teardown stamp at the end of the loop
+	// needs the run's claim + recorder as well, not just the two fields the
+	// loop itself reads.
 	go l.readLoop(runCtx, opts, proc, sink, perms)
 
 	// Send the opening message once the wrapper is ready. Done in its own

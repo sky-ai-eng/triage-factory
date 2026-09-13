@@ -40,12 +40,11 @@ type Park struct {
 	// It is a field because it is a fact about the park, and the three things
 	// that hang off it (see ParkOpen) are too load-bearing to infer.
 	//
-	// It used to be inferred, from Reason being non-empty. That made "someone
-	// deliberately stopped this" and "there is a string to display" the same
-	// bit: a park that wanted to record why it happened without being a
-	// cancellation would have released its claim 'cancelled', and nothing
-	// would have failed. `idle` is exactly such a reason, and it is why this
-	// is now stated.
+	// It cannot be inferred from Reason being non-empty, which would make
+	// "someone deliberately stopped this" and "there is a string to display"
+	// the same bit: a park recording why it happened without being a
+	// cancellation would release its claim 'cancelled', and nothing would
+	// fail. `idle` is exactly such a reason.
 	Deliberate bool
 	// Reason is recorded on conversations.park_reason — the closed
 	// domain.ParkReason vocabulary, never free text and never the model's
@@ -577,12 +576,12 @@ type ConversationStore interface {
 	// ActiveIDsForTaskSystem mirrors ActiveIDsForTask but routes through
 	// the admin pool in Postgres, for a claims-less background caller.
 	//
-	// No production caller today: the router's task-close cascade used to
-	// enumerate here, and now takes the same set from the close transaction
-	// itself (TaskStore.CloseWithConversationCancelIntentSystem) so the
-	// conversations it stops are the conversations it stamped. Kept as the
-	// admin-pool arm of a pair whose app-pool half is live, and covered by
-	// the store conformance.
+	// No production caller today: the router's task-close cascade takes the
+	// same set from the close transaction itself
+	// (TaskStore.CloseWithConversationCancelIntentSystem) so the conversations
+	// it stops are the conversations it stamped. Kept as the admin-pool arm of
+	// a pair whose app-pool half is live, and covered by the store
+	// conformance.
 	ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// ActiveIDsForTeamSystem returns the IDs of every active conversation owned by the
@@ -605,14 +604,16 @@ type ConversationStore interface {
 	// --- Transcript / messages ---
 	//
 	// messages.role is app-validated (no CHECK): "assistant" | "tool" |
-	// "user". "user" covers both a human's free-form message and the native
-	// loop's injected input; subtype further discriminates the latter via
-	// the "injection:*" subtypes. "injection:steer" (input drained between
-	// turns, while the model was mid-work) and "injection:executor-changed"
-	// (the claim-time notice that the workspace was restored from its last
-	// snapshot) are minted by the native loop;
-	// "injection:compaction-request" and "injection:compaction-result" are
-	// reserved and not yet minted by any code in this repo.
+	// "user". "user" covers both a human's free-form message and the
+	// machine-authored rows around it; subtype discriminates the latter, and
+	// blank is a person's own message. Neither dialect CHECKs the column, so
+	// the vocabulary lives in Go: domain's MessageSubtype* constants —
+	// "injection:steer", "injection:executor-changed", "injection:nudge",
+	// "injection:output-limit", "injection:compaction-request",
+	// "injection:compaction-result", "injection:memory",
+	// "injection:task-context" and "stop-note" — plus two values owned where
+	// they are written, the staged-injection stores' "injection:system-note"
+	// and the artifact feedback row's "system_note".
 	//
 	// InsertMessage/InsertMessageSystem/Messages/MessagesForConversations below serve
 	// today's readers (the SDK runtime's live stream, the UI transcript

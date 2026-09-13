@@ -237,10 +237,11 @@ type LaunchParams struct {
 	// key; ConversationID is descriptive.
 	ConversationID string
 
-	// WorkspaceKey is the run's task id — the second run-tree key
-	// worktreeScope accepts, so a cold-rehydrated worktree (rebuilt at
-	// RunTreeRoot(WorkspaceKey)) passes the launch-time pin. Empty for a
-	// taskless run. Descriptive of the run like ConversationID, not a lifecycle key.
+	// WorkspaceKey is the run's task id — the one run-tree key worktreeScope
+	// accepts, so both a first launch and a cold-rehydrated worktree (each
+	// built at RunTreeRoot(WorkspaceKey)) pass the launch-time pin. Empty for
+	// a taskless run. Descriptive of the run like ConversationID, not a
+	// lifecycle key.
 	WorkspaceKey string
 
 	// ContainerID is the runsc container id — unique among LIVE wraps (a
