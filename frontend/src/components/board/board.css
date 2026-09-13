@@ -86,7 +86,12 @@
 
 /* Tooltips are noise mid-drag: the reader is aiming at a lane, not reading
    about a card — and a hint left open on a title follows the lifted card
-   around. The board root carries the class for the length of a drag. */
-.bc-dragging .tip {
+   around. The board root carries the class for the length of a drag, and the
+   rule reaches the whole page from the body rather than from that root: the
+   lifted card is the drag overlay, a sibling of the root, and its own title
+   sits under the pointer for the entire drag — a hint scoped to the root
+   would leave exactly that one showing. Same construction as the scrim's
+   rule in assignee-picker.css. */
+body:has(.bc-dragging) .tip {
   display: none !important;
 }
