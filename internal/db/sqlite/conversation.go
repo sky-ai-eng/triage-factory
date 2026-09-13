@@ -320,6 +320,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 			                    `+newestEngagementFirstSQL("c")+`
 			                    LIMIT 1)
 			WHERE id = ?
+			  AND ended_at IS NULL
 			  AND (status = 'open'
 			       OR (status = 'completed'
 			           AND NOT EXISTS (SELECT 1 FROM blueprint_runs br
@@ -583,22 +584,29 @@ func (s *conversationStore) MarkFailedIfActive(ctx context.Context, orgID, conve
 // --- Boundaries ---
 
 func (s *conversationStore) EndConversationsForTask(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
-	return s.endConversationsForTask(ctx, orgID, taskID, reason, "")
+	return s.endConversationsScoped(ctx, orgID, reason, "task_id = ?", taskID, "")
+}
+
+func (s *conversationStore) EndConversationsForTeamSystem(ctx context.Context, orgID, teamID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	return s.endConversationsScoped(ctx, orgID, reason, "team_id = ?", teamID, "")
 }
 
 func (s *conversationStore) EndTerminalConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
 	// The stored column, not the display ladder: `queued` and `running` are
 	// derived from the active claim and never written here, so a row whose
 	// status reads terminal in SQL is one no engagement is driving.
-	return s.endConversationsForTask(ctx, orgID, taskID, reason,
+	return s.endConversationsScoped(ctx, orgID, reason, "task_id = ?", taskID,
 		` AND status IN (`+conversationTerminalStatusesSQL+`)`)
 }
 
-// endConversationsForTask is the body both task boundary doors share. The two
-// differ by one clause, and statusClause is it — empty for the unnarrowed
-// door, a status filter for the terminal-only one. It is a SQL fragment this
-// file composes, never a caller's string.
-func (s *conversationStore) endConversationsForTask(ctx context.Context, orgID, taskID string, reason domain.EndedReason, statusClause string) ([]domain.Conversation, error) {
+// endConversationsScoped is the body every many-row boundary door shares.
+// scopeSQL names the set the stamp covers — one task's conversations, one
+// team's — and statusClause is the terminal-only door's narrowing, empty for
+// the others. Both are SQL fragments this file composes, never a caller's
+// string. The rest of the predicate is every door's: un-ended and top-level,
+// so a concluded row ends with the rest and a subagent's boundary stays its
+// spawner's.
+func (s *conversationStore) endConversationsScoped(ctx context.Context, orgID string, reason domain.EndedReason, scopeSQL string, scopeArg any, statusClause string) ([]domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -607,9 +615,9 @@ func (s *conversationStore) endConversationsForTask(ctx context.Context, orgID, 
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		UPDATE conversations SET ended_at = ?, ended_reason = ?
-		WHERE task_id = ?
+		WHERE `+scopeSQL+`
 		  AND ended_at IS NULL AND parent_conversation_id IS NULL`+statusClause+`
-		RETURNING `+sqliteConversationReturningColumns, time.Now().UTC(), string(reason), taskID)
+		RETURNING `+sqliteConversationReturningColumns, time.Now().UTC(), string(reason), scopeArg)
 	if err != nil {
 		return nil, err
 	}
@@ -1132,11 +1140,17 @@ func inListArgs(ids []string) (string, []any) {
 	return strings.Join(placeholders, ", "), args
 }
 
-// liveConversationForTaskSQL is this dialect's one spelling of "the task's
-// live conversation", over the alias `r`: un-ended and non-terminal. See
-// db.ConversationStore for why both clauses are there and why there is one
-// spelling rather than one per door.
-const liveConversationForTaskSQL = `(r.ended_at IS NULL
+// liveTopLevelConversationSQL and liveConversationForTaskSQL are the SQLite
+// spellings of the base predicate and of the router's question over it.
+// Postgres holds the twin definitions in internal/db/postgres/conversation.go,
+// and with them the three questions the store answers about a task's
+// conversations, which clause each one adds to the base, and why a subagent
+// row answers none of them.
+func liveTopLevelConversationSQL(alias string) string {
+	return `(` + alias + `.ended_at IS NULL AND ` + alias + `.parent_conversation_id IS NULL)`
+}
+
+var liveConversationForTaskSQL = `(` + liveTopLevelConversationSQL("r") + `
 		       AND (r.status IS NULL
 		            OR r.status NOT IN (` + conversationTerminalStatusesSQL + `)))`
 
@@ -1205,7 +1219,7 @@ func (s *conversationStore) LiveConversationIDForTaskSystem(ctx context.Context,
 		SELECT r.id FROM conversations r
 		WHERE r.task_id = ?
 		  AND `+liveConversationForTaskSQL+`
-		ORDER BY r.started_at DESC
+		ORDER BY r.started_at DESC, r.id DESC
 		LIMIT 1
 	`, taskID).Scan(&id)
 	if err == sql.ErrNoRows {

@@ -446,6 +446,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 		                    `+newestEngagementFirstSQL("c")+`
 		                    LIMIT 1)
 		WHERE org_id = $1 AND id = $2
+		  AND ended_at IS NULL
 		  AND (status = 'open'
 		       OR (status = 'completed'
 		           AND NOT tf.blueprint_run_is_running(
@@ -1064,6 +1065,16 @@ func (s *conversationStore) EndConversationsForTaskSystem(ctx context.Context, o
 	return endConversationsForTask(ctx, s.admin, orgID, taskID, reason)
 }
 
+func (s *conversationStore) EndConversationsForTeamSystem(ctx context.Context, orgID, teamID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	if !domain.IsEndedReason(string(reason)) {
+		return nil, fmt.Errorf("%w: %q", db.ErrInvalidEndedReason, reason)
+	}
+	if !isValidUUID(teamID) {
+		return nil, nil
+	}
+	return endConversationsScoped(ctx, s.admin, orgID, reason, `team_id = $4`, teamID)
+}
+
 func (s *conversationStore) EndTerminalConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
 	if !domain.IsEndedReason(string(reason)) {
 		return nil, fmt.Errorf("%w: %q", db.ErrInvalidEndedReason, reason)
@@ -1098,12 +1109,23 @@ func endConversationsForTask(ctx context.Context, q queryer, orgID, taskID strin
 	if !isValidUUID(taskID) {
 		return nil, nil
 	}
+	return endConversationsScoped(ctx, q, orgID, reason, `task_id = $4`, taskID)
+}
+
+// endConversationsScoped is the statement the many-row boundary doors share,
+// each of which validates its own reason and id first. scopeSQL names the set
+// the stamp covers — one task's conversations, one team's — and binds $4; it
+// is a fragment this file composes, never a caller's string. The rest of the
+// predicate is every door's: un-ended and top-level, whatever the status, so
+// a concluded row ends with the rest and a subagent's boundary stays its
+// spawner's.
+func endConversationsScoped(ctx context.Context, q queryer, orgID string, reason domain.EndedReason, scopeSQL string, scopeArg any) ([]domain.Conversation, error) {
 	return writeConversationsReturning(ctx, q, `
 		UPDATE conversations SET ended_at = $1, ended_reason = $2
-		WHERE org_id = $3 AND task_id = $4
+		WHERE org_id = $3 AND `+scopeSQL+`
 		  AND ended_at IS NULL AND parent_conversation_id IS NULL
 		RETURNING *
-	`, time.Now().UTC(), string(reason), orgID, taskID)
+	`, time.Now().UTC(), string(reason), orgID, scopeArg)
 }
 
 func endConversation(ctx context.Context, q queryer, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
@@ -1653,11 +1675,33 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 	return out, rows.Err()
 }
 
-// liveConversationForTaskSQL is this dialect's one spelling of "the task's
-// live conversation", over the alias `r`: un-ended and non-terminal. See
-// db.ConversationStore for why both clauses are there and why there is one
-// spelling rather than one per door.
-const liveConversationForTaskSQL = `(r.ended_at IS NULL
+// liveTopLevelConversationSQL is the base under every "is this conversation
+// the task's" question, over the alias the caller names: un-ended, and
+// top-level. A subagent row is part of its spawner's engagement rather than a
+// conversation of the task's own, so it answers none of them.
+//
+// The store answers three such questions, and they are not one question:
+//
+//   - Which conversation owns the task's tree? The base, newest-first —
+//     taskLiveConversationSQL (conversation_queue.go), which the claim gate
+//     compares a candidate against. The boundary decides it and the status
+//     does not: a conversation that concluded its transcript still owns the
+//     workspace until something ends it.
+//   - Will a conversation read new input on its own? The base plus the status
+//     clause — liveConversationForTaskSQL below, which the router asks before
+//     folding an event into a conversation instead of minting one. A
+//     concluded conversation reads nothing until a resume re-queues it.
+//   - Is anyone engaged on the task? Neither of the two: that is a claims
+//     question (workspaceKeyUnclaimedSQL), and the sweeps ask it because an
+//     engagement holds the key's one tree whatever any conversation row says.
+func liveTopLevelConversationSQL(alias string) string {
+	return `(` + alias + `.ended_at IS NULL AND ` + alias + `.parent_conversation_id IS NULL)`
+}
+
+// liveConversationForTaskSQL is the router's question over the alias `r`: the
+// base plus the status clause. See liveTopLevelConversationSQL for the three
+// questions and why each carries the clauses it does.
+var liveConversationForTaskSQL = `(` + liveTopLevelConversationSQL("r") + `
 		       AND (r.status IS NULL
 		            OR r.status NOT IN (` + conversationTerminalStatusesSQL + `)))`
 
@@ -1703,7 +1747,7 @@ func (s *conversationStore) LiveConversationIDForTaskSystem(ctx context.Context,
 		WHERE r.org_id = $1
 		  AND r.task_id = $2
 		  AND `+liveConversationForTaskSQL+`
-		ORDER BY r.started_at DESC
+		ORDER BY r.started_at DESC, r.id DESC
 		LIMIT 1
 	`, orgID, taskID).Scan(&id)
 	if err == sql.ErrNoRows {

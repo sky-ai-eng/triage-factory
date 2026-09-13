@@ -29,10 +29,11 @@ import (
 // casts, RLS parameters, and driver NULL scanning are deliberately out of
 // scope for sharing.
 //
-// That last rule is why the task*SQL and workspaceKey*SQL fragment builders
-// are listed below rather than hoisted: they compose SQL text, and they are
-// identical today only because the predicate they spell happens to need no
-// placeholder, cast or json guard yet. Sharing them would mean undoing the
+// That last rule is why the liveTopLevelConversationSQL, task*SQL and
+// workspaceKey*SQL fragment builders are listed below rather than hoisted:
+// they compose SQL text, and they are identical today only because the
+// predicate they spell happens to need no placeholder, cast or json guard
+// yet. Sharing them would mean undoing the
 // abstraction the first time one dialect needs its own spelling — the same
 // reason Tier B stays duplicated. What must NOT drift is the predicate's
 // meaning, and that is pinned where it belongs: the dual-dialect conformance
@@ -45,6 +46,14 @@ import (
 // normalize the mixed on-disk formats a bare MAX would order lexically. Two
 // members of one family matching while the third cannot is the shape this rule
 // describes, not a coincidence to hoist.
+//
+// liveTopLevelConversationSQL is ratcheted for the same reason and one more of
+// its own: it is a base other fragment builders in its dialect compose over
+// (taskLiveConversationSQL, and the live-conversation readers beside it), so a
+// shared version would pull their composition across the dialect boundary with
+// it. Its meaning is pinned the way the rest of the family's is — the
+// dual-dialect conformance suites assert both backends answer alike about a
+// concluded row, an ended row and a subagent row.
 
 // identicalHelperRatchet is the SHRINKING section. Every name is a top-level
 // helper whose complete func declaration (excluding its doc comment) is
@@ -61,6 +70,7 @@ var identicalHelperRatchet = []string{
 	"floatPtrFromNull",
 	"int64PtrFromNull",
 	"intPtrFromNull",
+	"liveTopLevelConversationSQL",
 	"normalizeEmail",
 	"normalizeReachable",
 	"nullBotUserID",
