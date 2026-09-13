@@ -135,7 +135,11 @@ export function deriveCard(
     elapsed,
     age,
     ageTitle,
-    chain: chainShape(chainSteps),
+    // The chain is the run's shape, so it goes with the run: a task returned
+    // to the queue keeps the artifacts its conversation produced, but the
+    // steps that produced them are over, and a queued card carrying their
+    // segments would read as a plan still in motion.
+    chain: hasRun ? chainShape(chainSteps) : undefined,
     liveState: conversation?.Status === 'queued' ? 'idle' : 'running',
     ticking,
   }
