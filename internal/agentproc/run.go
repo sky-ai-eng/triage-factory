@@ -56,12 +56,16 @@ type RunOptions struct {
 	SessionID string
 
 	// Message is the value passed to `-p`, and the opening user message of
-	// an interactive run that carries no OpeningBlocks. Three callers set it:
-	// a resume, where it is the new user turn alone (the session carries the
-	// rest); and the two toolless one-shots, the system-LLM completion and
-	// the model probe, where it is the whole request. A delegated launch does
-	// not — its opening rows go through OpeningBlocks and its instructions
-	// through SystemPrompt.
+	// an interactive run that carries no OpeningBlocks. What it holds follows
+	// from what the session on the other side already knows: a resume sends
+	// the new user turn alone, and a launch that resumes a surviving session
+	// sends only a continuation note, because in both the session carries the
+	// rest; the two toolless one-shots — the system-LLM completion and the
+	// model probe — send the whole request, having no session at all. A launch
+	// with nothing to resume sets OpeningBlocks instead and leaves this empty
+	// (internal/delegate.composeLaunchTurn owns that fork and clears whichever
+	// field it did not write); a delegated agent's instructions are never here
+	// — they ride SystemPrompt.
 	Message string
 
 	// OpeningBlocks, when non-empty, is the opening user message of an

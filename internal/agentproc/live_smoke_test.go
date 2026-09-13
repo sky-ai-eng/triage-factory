@@ -661,6 +661,95 @@ func TestSDK_LiveSmoke_OpeningTurnIsTheAssembledRows(t *testing.T) {
 	}
 }
 
+// TestSDK_LiveSmoke_ResumedSessionTakesOneTurnOnTheContinuationNote is the
+// acceptance for what a crash re-claim sends: a bare `--resume` in
+// streaming-input mode takes no turn until something arrives, and what arrives
+// is the continuation note alone — not a second copy of the opening.
+//
+// Two things it proves that a unit test cannot. The resumed session really does
+// take exactly one turn on the note (one assistant reply, one result), so the
+// note is a turn rather than a no-op or a restart. And the session file records
+// it as the newest thing said to the model, which is what a further resume
+// would replay.
+//
+// Gated like TestSDK_LiveSmoke.
+func TestSDK_LiveSmoke_ResumedSessionTakesOneTurnOnTheContinuationNote(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	// The engagement that opens the conversation, and dies with its session
+	// file on disk next to the warm tree.
+	cwd := t.TempDir()
+	sink := newLiveSink()
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd: cwd,
+		OpeningBlocks: []ContentBlock{
+			{Type: "text", Text: "<task_context>\nMARKER-DELTA: NARWHAL\n</task_context>"},
+			{Type: "text", Text: "Reply with exactly the word that follows MARKER-DELTA's colon, and nothing else. Use no tools."},
+		},
+		Model:   "haiku",
+		TraceID: "live-continuation-open",
+	}, sink, denyAllPermissions)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	opened := sink.waitAssistant(t, 90*time.Second)
+	t.Logf("opening turn reply: %q", opened.Content)
+	sid := lr.SessionID()
+	if sid == "" {
+		t.Fatal("no session id; there is no session for a successor to resume")
+	}
+	if err := lr.Close(); err != nil {
+		t.Logf("close returned (non-fatal): %v", err)
+	}
+	<-lr.Done()
+
+	// The successor: the surviving session, and the note as its only message.
+	resumed := newLiveSink()
+	rlr, err := RunInteractive(ctx, RunOptions{
+		Cwd:       cwd,
+		SessionID: sid,
+		Message:   domain.SessionContinuationNote,
+		Model:     "haiku",
+		TraceID:   "live-continuation-resume",
+	}, resumed, denyAllPermissions)
+	if err != nil {
+		t.Fatalf("RunInteractive (resume) failed: %v", err)
+	}
+	reply := resumed.waitAssistant(t, 90*time.Second)
+	t.Logf("resumed turn reply: %q", reply.Content)
+	resumedSID := rlr.SessionID()
+	if err := rlr.Close(); err != nil {
+		t.Logf("close returned (non-fatal): %v", err)
+	}
+	<-rlr.Done()
+
+	if got := countAssistants(resumed.snapshot()); got != 1 {
+		t.Errorf("assistant messages = %d, want 1 — the note is one turn", got)
+	}
+	if rlr.Result() == nil {
+		t.Error("expected a terminal Result for the turn the note bought")
+	}
+
+	// The session the resumed process wrote to — the same file when the SDK
+	// appends, a fork carrying the replayed history when it does not. Either
+	// way the note is the newest thing said to the model, and the opening is
+	// still the first.
+	if resumedSID == "" {
+		t.Fatal("the resumed run reported no session id")
+	}
+	if got := entryText(lastUserEntry(t, resumedSID)); got != domain.SessionContinuationNote {
+		t.Errorf("the session's last user entry = %q, want the continuation note %q", got, domain.SessionContinuationNote)
+	}
+	if got := entryText(firstUserEntry(t, resumedSID)); !strings.Contains(got, "MARKER-DELTA") {
+		t.Errorf("the session's first user entry = %q, want the opening the predecessor sent", got)
+	}
+}
+
 // snapshot copies the sink's messages under its lock, for the assertions that
 // run after the process is gone.
 func (s *liveSink) snapshot() []*domain.Message {
@@ -679,14 +768,14 @@ func countAssistants(msgs []*domain.Message) int {
 	return n
 }
 
-// firstUserEntry decodes the first `type: "user"` line of the session
-// transcript the SDK wrote for sessionID.
+// userEntries decodes the `type: "user"` lines of the session transcript the
+// SDK wrote for sessionID, in the order they were appended.
 //
 // Found by walking ~/.claude/projects for the session's own file rather than by
 // re-deriving the cwd-encoded directory name: that encoding belongs to
 // internal/worktree, which imports this package, so the test locates the file
 // by the one name it already knows.
-func firstUserEntry(t *testing.T, sessionID string) map[string]any {
+func userEntries(t *testing.T, sessionID string) []map[string]any {
 	t.Helper()
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -711,6 +800,7 @@ func firstUserEntry(t *testing.T, sessionID string) map[string]any {
 	if err != nil {
 		t.Fatalf("read the session transcript: %v", err)
 	}
+	var out []map[string]any
 	for _, line := range strings.Split(string(raw), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -726,8 +816,47 @@ func firstUserEntry(t *testing.T, sessionID string) map[string]any {
 		if !ok {
 			continue
 		}
-		return msg
+		out = append(out, msg)
 	}
-	t.Fatalf("no user entry in the session transcript at %s", found)
-	return nil
+	if len(out) == 0 {
+		t.Fatalf("no user entry in the session transcript at %s", found)
+	}
+	return out
+}
+
+// firstUserEntry is the opening the session records — what a `--resume`
+// replays as the conversation's first turn.
+func firstUserEntry(t *testing.T, sessionID string) map[string]any {
+	t.Helper()
+	return userEntries(t, sessionID)[0]
+}
+
+// lastUserEntry is the newest thing said to the model — what a launch that
+// just sent one message put there.
+func lastUserEntry(t *testing.T, sessionID string) map[string]any {
+	t.Helper()
+	entries := userEntries(t, sessionID)
+	return entries[len(entries)-1]
+}
+
+// entryText renders a session entry's content as text, whether the SDK
+// recorded it as a bare string (a `Send`) or as a block array (`SendBlocks`).
+func entryText(msg map[string]any) string {
+	switch c := msg["content"].(type) {
+	case string:
+		return c
+	case []any:
+		var b strings.Builder
+		for _, raw := range c {
+			blk, _ := raw.(map[string]any)
+			if blk["type"] != "text" {
+				continue
+			}
+			if s, ok := blk["text"].(string); ok {
+				b.WriteString(s)
+			}
+		}
+		return b.String()
+	}
+	return ""
 }
