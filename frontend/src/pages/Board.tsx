@@ -1,12 +1,11 @@
 import { memo, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react'
-import { TERMINAL_CONVERSATION_STATUSES } from '../types'
 import type { Task, Conversation, Message, WSEvent, TeamMember, TeamBot } from '../types'
 import { useWebSocket, setPresenceView } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
 import {
   isActiveConversation,
   isActiveStatus,
-  isFailedStatus,
+  isLiveRun,
   isPermissionTerminalStatus,
   isTerminalStatus,
 } from '../lib/conversationStatus'
@@ -23,7 +22,16 @@ import { useTeamMembers } from '../hooks/useDeploymentConfig'
 import { usableBot } from '../lib/teamRoster'
 import { usePagedList } from '../hooks/usePagedList'
 import type { PagedList } from '../hooks/usePagedList'
-import { TASK_LIST_PATH, doneListBody, queueListBody, statusListBody } from '../lib/taskList'
+import {
+  TASK_FACETS_PATH,
+  TASK_LIST_PATH,
+  doneListBody,
+  facetsBody,
+  queuedLaneBody,
+  statusListBody,
+  type TaskFacetsResponse,
+  type TaskListRequest,
+} from '../lib/taskList'
 import { useOrgRole } from '../hooks/useOrgRole'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import ZeroTeamState from '../components/ZeroTeamState'
@@ -34,14 +42,16 @@ import ReviewOverlay from '../components/ReviewOverlay'
 import PendingPROverlay from '../components/PendingPROverlay'
 import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import AssigneePicker from '../components/board/AssigneePicker'
+import RequeueConfirm from '../components/board/RequeueConfirm'
 import { toast } from '../components/Toast/toastStore'
 import { apiErrors, apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
-import BoardColumn, { CollapsedColumn } from '../components/board/BoardColumn'
+import BoardColumn, { CollapsedColumn, type LanePaging } from '../components/board/BoardColumn'
 import {
-  applyColumnFilter,
-  emptyFilter,
-  type ColumnFilterState,
-} from '../components/board/columnFilter'
+  emptyLaneFilter,
+  laneFilterFields,
+  narrows,
+  type LaneFilter,
+} from '../components/board/laneFilter'
 import { GlassBackdrop } from './setup/glass'
 import {
   DndContext,
@@ -57,17 +67,18 @@ import {
 import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 
-// Four columns on the board. Default view scrolls so Claimed
-// is leftmost-visible; user scrolls left for Queued, right for Done.
-// Column ids double as drop targets — keep them lowercase + stable
-// since they're persisted in localStorage filter keys.
-type ColumnId = 'queued' | 'claimed' | 'in_progress' | 'done'
+// Three lanes on the board: the task lifecycle, and nothing else. A held-but-
+// unstarted task sits in Queued wearing its assignee mark rather than in a
+// lane of its own, and needs-you lives on the card (its frame, its place at
+// the head of the lane) rather than in a column. Column ids double as drop
+// targets — keep them lowercase + stable since they're persisted in
+// localStorage filter keys.
+type ColumnId = 'queued' | 'in_progress' | 'done'
 
-const ALL_COLUMNS: ColumnId[] = ['queued', 'claimed', 'in_progress', 'done']
+const ALL_COLUMNS: ColumnId[] = ['queued', 'in_progress', 'done']
 
 const COLUMN_TITLES: Record<ColumnId, string> = {
   queued: 'Queued',
-  claimed: 'Claimed',
   in_progress: 'In Progress',
   done: 'Done',
 }
@@ -78,6 +89,11 @@ const COLUMN_TITLES: Record<ColumnId, string> = {
 const COL_W = 430
 const RAIL_W = 20
 const GAP = 24
+
+// How long a lane waits after the last keystroke or pill before asking the
+// server the new question. Every filter field is a server read now, so
+// without this a search would fire a list read per character.
+const FILTER_DEBOUNCE_MS = 250
 
 // Filter persistence: per-user, per-column. Storage key is namespaced
 // by the user's id so a re-login (different user on the same browser)
@@ -91,7 +107,7 @@ function filterStorageKey(userID: string): string {
   return `${FILTER_STORAGE_PREFIX}.${userID || 'anon'}`
 }
 
-type FilterMap = Record<ColumnId, ColumnFilterState>
+type FilterMap = Record<ColumnId, LaneFilter>
 
 function loadFilters(userID: string): FilterMap {
   try {
@@ -101,7 +117,7 @@ function loadFilters(userID: string): FilterMap {
     const out = defaultFilters()
     for (const col of ALL_COLUMNS) {
       if (parsed[col]) {
-        out[col] = { ...emptyFilter, ...parsed[col] }
+        out[col] = { ...emptyLaneFilter, ...parsed[col] }
       }
     }
     return out
@@ -112,18 +128,23 @@ function loadFilters(userID: string): FilterMap {
 
 function defaultFilters(): FilterMap {
   return {
-    queued: { ...emptyFilter },
-    claimed: { ...emptyFilter },
-    in_progress: { ...emptyFilter },
-    done: { ...emptyFilter },
+    queued: { ...emptyLaneFilter },
+    in_progress: { ...emptyLaneFilter },
+    done: { ...emptyLaneFilter },
   }
 }
 
-// Collapse persistence: same per-user localStorage scheme as filters. Claimed
-// starts collapsed — a fresh board greets you with Queued / In Progress / Done
-// (the lanes that hold work) plus one thin rail, so four lanes fit without
-// shrinking anything. (A per-user backend UI-prefs store is the eventual home;
-// localStorage holds the line until then.)
+// filterSignature is the lane's query as the server would see it: two
+// filters that send the same body are the same question, so a stored filter
+// that matches the one already fetched with earns no second read.
+function filterSignature(f: LaneFilter): string {
+  return JSON.stringify(laneFilterFields(f))
+}
+
+// Collapse persistence: same per-user localStorage scheme as filters. Every
+// lane starts open — three lanes fit without shrinking anything. (A per-user
+// backend UI-prefs store is the eventual home; localStorage holds the line
+// until then.)
 type CollapseMap = Record<ColumnId, boolean>
 
 const COLLAPSE_STORAGE_PREFIX = 'sky330.board.collapsed.v1'
@@ -133,7 +154,7 @@ function collapseStorageKey(userID: string): string {
 }
 
 function defaultCollapsed(): CollapseMap {
-  return { queued: false, claimed: true, in_progress: false, done: false }
+  return { queued: false, in_progress: false, done: false }
 }
 
 function loadCollapsed(userID: string): CollapseMap {
@@ -151,25 +172,32 @@ function loadCollapsed(userID: string): CollapseMap {
   }
 }
 
+// The two gestures that end a task, each gated behind the resolve-all
+// confirmation when the task still carries unresolved artifacts: ending a
+// task is what tears them down.
+type EndAction = 'complete' | 'dismiss'
+
 export default function Board() {
-  // One paged list per column — four filter sets over the one tasks list
-  // route. Bot/user auto-routing keeps them disjoint at the backend, so a task
-  // only appears in one column. Each holds its own page token, so a deep
-  // column pages independently of the others.
+  // One paged list per column — three filter sets over the one tasks list
+  // route. Each holds its own page token, so a deep column pages
+  // independently of the others.
   const queuedList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the queue.')
-  const claimedList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the claimed tasks.')
   const inProgressList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the in-progress tasks.')
   const doneList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the finished tasks.')
+  const lists: Record<ColumnId, PagedList<Task>> = {
+    queued: queuedList,
+    in_progress: inProgressList,
+    done: doneList,
+  }
   const queued = queuedList.items
-  const claimed = claimedList.items
   const inProgress = inProgressList.items
   const done = doneList.items
   // The loaders are stable across renders; the list objects around them are
-  // not. fetchTasks closes over these rather than the lists so its own
+  // not. The fetchers close over these rather than the lists so their own
   // identity stays stable — the WS refresh and the mount effect both key off
-  // it, and a per-render identity would refetch the board on every render.
+  // fetchTasks, and a per-render identity would refetch the board on every
+  // render.
   const loadQueued = queuedList.load
-  const loadClaimed = claimedList.load
   const loadInProgress = inProgressList.load
   const loadDone = doneList.load
   const [loading, setLoading] = useState(true)
@@ -229,9 +257,9 @@ export default function Board() {
   const [currentUserID, setCurrentUserID] = useState<string>('')
 
   // multi-team. teamFilter is the per-page read scope (threaded
-  // into all four column fetches as team_id); `teams` backs the row
+  // into every lane fetch as team_id); `teams` backs the row
   // color-coding. Both render their UI only at ≥2 teams. teamFilterRef
-  // keeps fetchTasks's identity stable while always reading the latest.
+  // keeps the fetchers' identity stable while always reading the latest.
   const { teams, loaded: teamsLoaded } = useTeams()
   const { isAdmin: orgIsAdmin } = useOrgRole()
   const [teamFilter, setTeamFilter] = useTeamFilter('board')
@@ -271,6 +299,9 @@ export default function Board() {
       // Quota / disabled storage — silently skip; filters work in-memory.
     }
   }, [filters, filtersOwnerID, currentUserID])
+  // The fetchers read the filters through a ref so their identity stays
+  // stable; the filter effect below is what turns a change into a read.
+  const filtersRef = useRef(filters)
 
   // Collapsed-lane state — same per-user persistence dance as filters.
   const [collapsed, setCollapsed] = useState<CollapseMap>(() => loadCollapsed(''))
@@ -298,6 +329,16 @@ export default function Board() {
   // the column. When on, they render at the tail with a "wakes Mar 5"
   // badge (handled by TaskCard's existing SnoozedBadge).
   const [showSnoozed, setShowSnoozed] = useState(false)
+  const showSnoozedRef = useRef(showSnoozed)
+
+  // The event types each lane holds under its current query, from the facet
+  // read beside each lane read. The chips are drawn from this rather than
+  // from the page, so a type on an unfetched page still gets its chip.
+  const [facets, setFacets] = useState<Record<ColumnId, string[]>>({
+    queued: [],
+    in_progress: [],
+    done: [],
+  })
 
   // Drag state. The "over column" highlight is owned by BoardColumn
   // itself (via useDroppable's isOver), so we don't need to track it
@@ -322,23 +363,31 @@ export default function Board() {
     artifactId: string
   } | null>(null)
 
-  // Resolve-all confirmation (TFAC-384 §4): drag-to-Done (complete) and
-  // Return-to-queue (requeue) force-resolve every unresolved artifact and cancel
-  // a live conversation. When the target task has unresolved artifacts we stash the
-  // intended action here and gate the request behind the confirmation modal.
+  // Resolve-all confirmation (TFAC-384 §4): the two gestures that END a task —
+  // drag-to-Done from In Progress (complete) and from Queued (dismiss) —
+  // force-resolve every unresolved artifact and cancel a live conversation.
+  // When the target task has unresolved artifacts we stash the intended
+  // action here and gate the request behind the confirmation modal.
   const [confirmResolve, setConfirmResolve] = useState<{
     taskId: string
+    action: EndAction
     prCount: number
     reviewCount: number
     isLive: boolean
   } | null>(null)
   const [confirmBusy, setConfirmBusy] = useState(false)
 
+  // The task awaiting the return-to-queue confirmation, when its run is in
+  // flight. Null the rest of the time: a requeue with nothing running fires
+  // without asking.
+  const [pendingRequeue, setPendingRequeue] = useState<{ taskId: string } | null>(null)
+
   // Fetches a blueprint run's step structure and pads it into a length-N
   // array of step conversations — synthetic 'pending' placeholders for steps without
   // a conversation yet — the shape the chain rail renders. Pure: returns the array
-  // (null on error / empty) and writes no state, so fetchTasks can resolve
-  // many chains in parallel and apply them in one batched setChainStepConversations.
+  // (null on error / empty) and writes no state, so the enrichment pass can
+  // resolve many chains in parallel and apply them in one batched
+  // setChainStepConversations.
   const fetchChainStepConversations = useCallback(
     async (blueprintRunID: string): Promise<Conversation[] | null> => {
       try {
@@ -373,7 +422,7 @@ export default function Board() {
 
   // Seeds chainStepConversations for one task from its blueprint run. Thin wrapper
   // over fetchChainStepConversations for the WS handlers (which seed one task at a
-  // time); fetchTasks batches via fetchChainStepConversations directly.
+  // time); the enrichment pass batches via fetchChainStepConversations directly.
   const seedChainStepConversations = useCallback(
     async (taskID: string, blueprintRunID: string) => {
       const steps = await fetchChainStepConversations(blueprintRunID)
@@ -397,48 +446,15 @@ export default function Board() {
     })()
   }, [])
 
-  // Derive the four column lists from four filter sets over the tasks list
-  // route. The Queued column is the queue projection (unclaimed, awake); the
-  // others are their own lane. Done carries its seven-day window explicitly —
-  // the server applies none of its own.
-  const fetchTasks = useCallback(async () => {
-    try {
-      // Thread the per-page team filter into every column
-      // fetch. Empty = the union of the viewer's teams (the default).
-      const tf = teamFilterRef.current
-      // A column that fails keeps whatever it was showing rather than taking
-      // the other three down with it — the board is four independent reads,
-      // not one. The hook holds each column's items, so a failed refresh
-      // paints the previous page instead of blanking the lane.
-      //
-      // The queued page is loaded but not read here: an unclaimed task has no
-      // conversation, so it skips the enrichment pass below.
-      const [, claimedRes, inProgressRes, doneRes] = await Promise.all([
-        loadQueued(queueListBody(tf, showSnoozed)),
-        // "claimed" is the claim axis, not a lifecycle status: a queued task
-        // someone (or the bot) has taken.
-        loadClaimed(statusListBody('claimed', tf)),
-        loadInProgress(statusListBody('in_progress', tf)),
-        loadDone(doneListBody(tf)),
-      ])
-
-      // Paint the board as soon as the four columns are in state. The agent-conversation
-      // enrichment below fills cards progressively and must not hold the
-      // spinner — it used to: setLoading sat in `finally` after the whole serial
-      // loop, so first paint waited on every per-task round-trip (TFAC-98).
-      setLoading(false)
-
-      // Agent conversations for any task that might carry one — claimed,
-      // in_progress and done can all have conversations attached. Queued never
-      // does (claim cleared = no active conversation). ONE aggregated call returns
-      // every task's conversations plus each task's primary-conversation transcript,
-      // replacing the old per-task serial loop of 2–3 round-trips each (TFAC-98).
-      const withConversations: Task[] = [
-        ...(claimedRes?.items ?? []),
-        ...(inProgressRes?.items ?? []),
-        ...(doneRes?.items ?? []),
-      ]
-      if (withConversations.length === 0) return
+  // Agent conversations for every task on the board — a queued task can be
+  // carrying the conversation a requeue handed back with it, along with that
+  // conversation's artifacts, so the Queued lane is enriched like the other
+  // two. ONE aggregated call returns every task's conversations plus each
+  // task's primary-conversation transcript, replacing the old per-task serial
+  // loop of 2–3 round-trips each (TFAC-98).
+  const enrich = useCallback(
+    async (tasks: Task[]) => {
+      if (tasks.length === 0) return
       // The window is over CONVERSATIONS, ordered so a task's conversations stay
       // contiguous — so a board page's worth of tasks needs a page large
       // enough to hold all their conversations. The board reads the first page and
@@ -451,7 +467,7 @@ export default function Board() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          task_ids: withConversations.map((t) => t.id),
+          task_ids: tasks.map((t) => t.id),
           include_messages: true,
           page_size: 200,
         }),
@@ -467,7 +483,7 @@ export default function Board() {
       const nextFeeds: Record<string, ConversationCardFeed> = {}
       const chainSeeds: Array<Promise<{ taskID: string; steps: Conversation[] } | null>> = []
 
-      for (const task of withConversations) {
+      for (const task of tasks) {
         const taskConversations = conversationsByTask[task.id]
         if (!taskConversations || taskConversations.length === 0) continue
         const latestConversation = taskConversations[0]
@@ -520,20 +536,151 @@ export default function Board() {
           })
         }
       }
+    },
+    [fetchChainStepConversations],
+  )
+
+  // The list body for one lane: the lane itself (its statuses, the per-page
+  // team scope, Done's seven-day window, the snoozed toggle) plus the
+  // reader's own narrowing of it, every field of which the server applies.
+  const laneBody = useCallback((col: ColumnId): TaskListRequest => {
+    const tf = teamFilterRef.current
+    const fields = laneFilterFields(filtersRef.current[col])
+    switch (col) {
+      case 'queued':
+        return queuedLaneBody(tf, showSnoozedRef.current, fields)
+      case 'in_progress':
+        return statusListBody('in_progress', tf, fields)
+      case 'done':
+        return doneListBody(tf, fields)
+    }
+  }, [])
+
+  const loaderFor = useCallback(
+    (col: ColumnId) =>
+      col === 'queued' ? loadQueued : col === 'in_progress' ? loadInProgress : loadDone,
+    [loadQueued, loadInProgress, loadDone],
+  )
+
+  // The filter signature each lane was last fetched under, so a filter change
+  // that asks the same question the lane already answered — the per-user
+  // filters landing after mount, most often as the defaults — costs nothing.
+  const fetchedRef = useRef<Record<ColumnId, string>>({ queued: '', in_progress: '', done: '' })
+
+  // One lane's read: its page and, beside it, its facet. A lane that fails
+  // keeps whatever it was showing rather than taking the others down with it
+  // — the board is three independent reads, not one. The hook holds each
+  // lane's items, so a failed refresh paints the previous page instead of
+  // blanking the lane; a failed facet read keeps the previous chip set, since
+  // the chips are a menu and a stale menu beats an empty one.
+  const fetchLane = useCallback(
+    async (col: ColumnId): Promise<Task[]> => {
+      // The signature is taken with the body, not after the read: the
+      // per-user filters can land while the mount read is in flight, and the
+      // record has to say what was sent, not what is current.
+      const signature = filterSignature(filtersRef.current[col])
+      const body = laneBody(col)
+      const [page] = await Promise.all([
+        loaderFor(col)(body),
+        apiJSON<TaskFacetsResponse>(TASK_FACETS_PATH, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(facetsBody(body)),
+        })
+          .then((res) => {
+            const values = (res.event_types ?? []).map((f) => f.value).sort()
+            setFacets((prev) => ({ ...prev, [col]: values }))
+          })
+          .catch(() => {}),
+      ])
+      fetchedRef.current[col] = signature
+      return page?.items ?? []
+    },
+    [laneBody, loaderFor],
+  )
+
+  // Derive the three column lists from three filter sets over the tasks list
+  // route. Done carries its seven-day window explicitly — the server applies
+  // none of its own.
+  const fetchTasks = useCallback(async () => {
+    try {
+      const [queuedItems, inProgressItems, doneItems] = await Promise.all(
+        ALL_COLUMNS.map((col) => fetchLane(col)),
+      )
+
+      // Paint the board as soon as the three columns are in state. The agent-conversation
+      // enrichment below fills cards progressively and must not hold the
+      // spinner — it used to: setLoading sat in `finally` after the whole serial
+      // loop, so first paint waited on every per-task round-trip (TFAC-98).
+      setLoading(false)
+
+      await enrich([...queuedItems, ...inProgressItems, ...doneItems])
     } catch {
       // Network error — keep stale data
     } finally {
       setLoading(false)
     }
-  }, [fetchChainStepConversations, showSnoozed, loadQueued, loadClaimed, loadInProgress, loadDone])
+  }, [fetchLane, enrich])
+
+  // One lane's refresh, for a change that is that lane's alone: its filter,
+  // or the Queued lane's snoozed toggle.
+  const refetchLane = useCallback(
+    async (col: ColumnId) => {
+      try {
+        await enrich(await fetchLane(col))
+      } catch {
+        // Network error — keep stale data
+      }
+    },
+    [fetchLane, enrich],
+  )
 
   useEffect(() => {
     fetchTasks()
   }, [fetchTasks])
 
+  // A filter change is a NEW QUERY, so the lane it belongs to goes back to
+  // its first page: the rows it was holding were the answer to a different
+  // question. Debounced, because a search is typed; per lane, because the
+  // other two lanes were not asked anything.
+  const filterRefetchTimer = useRef<number | null>(null)
+  useEffect(() => {
+    filtersRef.current = filters
+    // The mount fetch reads the ref itself; until it has run there is nothing
+    // to compare against.
+    if (loading) return
+    const stale = ALL_COLUMNS.filter(
+      (col) => filterSignature(filters[col]) !== fetchedRef.current[col],
+    )
+    if (stale.length === 0) return
+    if (filterRefetchTimer.current != null) window.clearTimeout(filterRefetchTimer.current)
+    filterRefetchTimer.current = window.setTimeout(() => {
+      filterRefetchTimer.current = null
+      for (const col of stale) void refetchLane(col)
+    }, FILTER_DEBOUNCE_MS)
+  }, [filters, loading, refetchLane])
+  useEffect(
+    () => () => {
+      if (filterRefetchTimer.current != null) window.clearTimeout(filterRefetchTimer.current)
+    },
+    [],
+  )
+
+  // The snoozed toggle widens the Queued lane's own read, so it refreshes
+  // that lane alone.
+  const showSnoozedDidMount = useRef(false)
+  useEffect(() => {
+    showSnoozedRef.current = showSnoozed
+    if (!showSnoozedDidMount.current) {
+      showSnoozedDidMount.current = true
+      return
+    }
+    void refetchLane('queued')
+  }, [showSnoozed, refetchLane])
+
   // Debounced board refresh for websocket-driven refetches. A poll cycle or a
   // scoring pass lands as a burst of task_updated / scoring_completed events,
-  // and each used to fire its own four-column refetch. Trailing debounce: each
+  // and each used to fire its own three-column refetch. Trailing debounce: each
   // event pushes the fetch out another FETCH_DEBOUNCE_MS so the whole burst
   // costs one round-trip after it ends — with a FETCH_MAX_WAIT_MS fence from
   // the first deferred event, so a sustained event stream can't starve the
@@ -567,7 +714,7 @@ export default function Board() {
     [],
   )
 
-  // Re-fetch all columns when the team filter changes — fetchTasks reads
+  // Re-fetch all columns when the team filter changes — the fetchers read
   // the latest filter via its ref, so this picks up the new scope.
   const teamFilterDidMount = useRef(false)
   useEffect(() => {
@@ -633,7 +780,7 @@ export default function Board() {
           // only emit conversation_update (review/PR approval flips
           // task='done', then broadcasts the conversation completion). Without
           // a refetch here the card stays in its old column until a
-          // manual refresh. Cheap to re-pull all four buckets — the
+          // manual refresh. Cheap to re-pull all three lanes — the
           // queries are indexed and short.
           if (isPermissionTerminalStatus(status)) {
             // The conversation is no longer running a turn, so any prompt parked on it is
@@ -710,10 +857,10 @@ export default function Board() {
             return { ...prev, [conversationID]: next }
           })
         } else if (event.type === 'task_updated' || event.type === 'task_claimed') {
-          // Any column-affecting change re-pulls the whole
-          // board. The 5-column buckets are cheap to refetch (each is
-          // a single indexed query) and this avoids the per-column
-          // patch logic getting out of sync with backend rules.
+          // Any column-affecting change re-pulls the whole board. The three
+          // lanes are cheap to refetch (each is a single indexed query) and
+          // this avoids the per-column patch logic getting out of sync with
+          // backend rules.
           scheduleFetchTasks()
         } else if (event.type === 'tasks_updated' || event.type === 'scoring_completed') {
           // scoring_completed: the scorer just landed priority_score
@@ -772,122 +919,67 @@ export default function Board() {
     }
   }, [conversations, dropPermissionConversation])
 
-  // Sort tasks with active conversations in a meaningful order. Used for the
-  // In Progress lane, the one column whose rows all carry a conversation whose
-  // state decides the order. Needs-you (a parked permission prompt or an
-  // unresolved artifact) > failed > everything in flight > completed.
-  const sortByConversationAttention = useCallback(
-    (tasks: Task[]) => {
-      const weight = (t: Task) => {
-        const conversation = conversations[t.id]
-        if (!conversation) return 2
-        // A live tool-permission prompt or an unresolved artifact set is the most
-        // urgent "needs you" — top weight — so it can't be missed in the column.
-        if ((permQueueMap[conversation.ID]?.length ?? 0) > 0) return 0
-        if (hasUnresolvedArtifacts(conversation)) return 0
-        if (isFailedStatus(conversation.Status)) return 1
-        if (conversation.Status === 'completed') return 3
-        return 2
-      }
-      return [...tasks].sort((a, b) => weight(a) - weight(b))
-    },
-    [conversations, permQueueMap],
-  )
-
-  // Resolve a task's claimee to a display name for the claimee sort. Agent
-  // claims read the bot's name; user claims read the roster (with "You" for the
-  // viewer); unclaimed returns '' (sorts last).
-  const resolveClaimee = useCallback(
-    (t: Task): string => {
-      if (t.claimed_by_agent_id) return bot?.display_name ?? 'Agent'
-      if (t.claimed_by_user_id) {
-        const m = members.find((mm) => mm.user_id === t.claimed_by_user_id)
-        if (m) return m.is_current_user ? 'You' : m.display_name
-        return t.claimed_by_user_id === currentUserID ? 'You' : 'User'
-      }
-      return ''
-    },
-    [members, bot, currentUserID],
-  )
-
-  const filtered = useMemo<Record<ColumnId, Task[]>>(() => {
-    const opts = { resolveClaimee }
-    return {
-      queued: applyColumnFilter(queued, filters.queued, opts),
-      claimed: applyColumnFilter(claimed, filters.claimed, opts),
-      in_progress: applyColumnFilter(
-        sortByConversationAttention(inProgress),
-        filters.in_progress,
-        opts,
-      ),
-      done: applyColumnFilter(done, filters.done, opts),
-    }
-  }, [queued, claimed, inProgress, done, filters, sortByConversationAttention, resolveClaimee])
-
-  // Each column's paging state, so a lane deeper than one page can say so and
-  // fetch the rest. Rebuilt per render (the lists change every load) and read
-  // only at the column tail.
-  const paging: Record<ColumnId, PagedList<Task>> = {
-    queued: queuedList,
-    claimed: claimedList,
-    in_progress: inProgressList,
-    done: doneList,
+  // Each column's paging, as the column tail reads it. Rebuilt per render (the
+  // lists change every load); the loader inside is stable.
+  const paging: Record<ColumnId, LanePaging> = {
+    queued: lanePaging(queuedList),
+    in_progress: lanePaging(inProgressList),
+    done: lanePaging(doneList),
   }
-
-  const rawByColumn = useMemo<Record<ColumnId, Task[]>>(
-    () => ({
-      queued,
-      claimed,
-      in_progress: inProgress,
-      done,
-    }),
-    [queued, claimed, inProgress, done],
-  )
 
   const allTasks = useMemo(() => {
     const map = new Map<string, Task>()
-    for (const t of [...queued, ...claimed, ...inProgress, ...done]) {
+    for (const t of [...queued, ...inProgress, ...done]) {
       map.set(t.id, t)
     }
     return map
-  }, [queued, claimed, inProgress, done])
+  }, [queued, inProgress, done])
 
   // taskId → column lookup, built once per board state. getColumn is called
   // per dnd onDragOver event (which fires rapidly while dragging), so an O(1)
-  // map beats re-scanning all four lists on every move.
+  // map beats re-scanning all three lists on every move.
   const columnByTask = useMemo<Map<string, ColumnId>>(() => {
     const m = new Map<string, ColumnId>()
     for (const t of queued) m.set(t.id, 'queued')
-    for (const t of claimed) m.set(t.id, 'claimed')
     for (const t of inProgress) m.set(t.id, 'in_progress')
     for (const t of done) m.set(t.id, 'done')
     return m
-  }, [queued, claimed, inProgress, done])
+  }, [queued, inProgress, done])
 
   const getColumn = useCallback(
     (taskId: string): ColumnId | null => columnByTask.get(taskId) ?? null,
     [columnByTask],
   )
 
-  // The raw task-level task-end request: complete = drag-to-Done, which keeps
-  // the card in Done. Ending the task force-resolves every unresolved artifact
-  // server-side and cancels a live conversation; we only confirm first.
-  const fireComplete = useCallback(
-    async (taskId: string) => {
+  // A status write on the task. Complete (drag-to-Done from In Progress)
+  // keeps the card in Done; dismiss (drag-to-Done from Queued) closes it
+  // unworked; in_progress is the human's one stage marker. Ending the task
+  // force-resolves every unresolved artifact server-side and cancels a live
+  // conversation; we only confirm first.
+  const patchStatus = useCallback(
+    async (taskId: string, status: 'done' | 'dismissed' | 'in_progress', failure: string) => {
       try {
         // A failure (e.g. a teardown that partially failed) must surface — a
         // silent fetchTasks would repaint as if the move succeeded.
         await apiFetch(`/api/tasks/${taskId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'done' }),
+          body: JSON.stringify({ status }),
         })
         fetchTasks()
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'Could not mark the task done.'))
+        toast.error(httpErrorMessage(err, failure))
       }
     },
     [fetchTasks],
+  )
+
+  const fireEnd = useCallback(
+    (taskId: string, action: EndAction) =>
+      action === 'complete'
+        ? patchStatus(taskId, 'done', 'Could not mark the task done.')
+        : patchStatus(taskId, 'dismissed', 'Could not dismiss the task.'),
+    [patchStatus],
   )
 
   const fireRequeue = useCallback(
@@ -902,20 +994,41 @@ export default function Board() {
     [fetchTasks],
   )
 
-  // requestResolveAll gates a complete behind the confirmation modal when the
-  // task's conversation still has unresolved artifacts. Returns true when it
-  // deferred to the modal (the caller must NOT fire its own request); false
-  // when there's nothing to resolve and the caller should proceed directly.
+  // requestRequeue is the one door every return-to-queue gesture takes — the
+  // drop into Queued, and the picker's unassign. It asks only when a run is in
+  // flight, because that is the one thing the gesture destroys: the requeue
+  // stops it. With nothing running the move is reversible by re-claiming, so
+  // it fires without a word. The artifacts are not in question either way —
+  // a requeue hands them back to the queue with the task.
+  const requestRequeue = useCallback(
+    (taskId: string) => {
+      const conversation = conversations[taskId]
+      if (conversation && isLiveRun(conversation)) {
+        setPendingRequeue({ taskId })
+        return
+      }
+      void fireRequeue(taskId)
+    },
+    [conversations, fireRequeue],
+  )
+
+  // requestResolveAll gates a task-ending gesture behind the confirmation
+  // modal when the task's conversation still has unresolved artifacts.
+  // Returns true when it deferred to the modal (the caller must NOT fire its
+  // own request); false when there's nothing to resolve and the caller should
+  // proceed directly.
   //
-  // Completing is the only gesture that reaches it — ending a task is what
-  // resolves what it holds, and a requeue leaves the artifacts with the task.
+  // Only the gestures that END a task reach it — ending a task is what
+  // resolves what it holds. A queued task can be carrying a draft PR back in
+  // the queue, so dismissing it is gated the same as completing.
   const requestResolveAll = useCallback(
-    (taskId: string): boolean => {
+    (taskId: string, action: EndAction): boolean => {
       const conversation = conversations[taskId]
       if (!conversation || !hasUnresolvedArtifacts(conversation)) return false
       const c = approvalCounts(conversation)
       setConfirmResolve({
         taskId,
+        action,
         prCount: c.pr,
         reviewCount: c.review,
         isLive: isActiveConversation(conversation),
@@ -925,11 +1038,8 @@ export default function Board() {
     [conversations],
   )
 
-  // The board opens at the left (Queued first). With Claimed collapsed by
-  // default, the lane strip is compact enough that the work-bearing lanes fit
-  // without a forced scroll offset — so we start at the natural left edge
-  // rather than snapping past Queued (the old fixed 544px offset assumed every
-  // column was a full 520px, which no longer holds).
+  // The board opens at the left (Queued first). Three lanes fit without a
+  // forced scroll offset, so we start at the natural left edge.
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // Dynamic edge-fade. The outermost walls — left of Queued, right of Done —
@@ -1024,6 +1134,11 @@ export default function Board() {
     setActiveDropCol(ALL_COLUMNS.includes(id as ColumnId) ? (id as ColumnId) : getColumn(id))
   }
 
+  // Every card is draggable, whatever its run is doing: the drop is what the
+  // gestures are, and each one either confirms first or is reversible. The
+  // server is the boundary for a move it will not make — a refused write
+  // surfaces as a toast and the next fetch reconciles — rather than a card
+  // that silently snaps back.
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event
     setActiveId(null)
@@ -1047,88 +1162,45 @@ export default function Board() {
       // Same column — no-op (we don't persist intra-column order).
       if (sourceCol === targetCol) return
 
-      // Externally terminal tasks (merged/closed PRs) can't be dragged.
-      const terminalEvents = ['github:pr:merged', 'github:pr:closed']
-      if (terminalEvents.includes(task.event_type)) return
-
-      // Bot-claimed tasks in In Progress are bot-managed — the user shouldn't
-      // drag them around (the spawner placed the card there when it minted the
-      // delegation). Reassignment happens via the assignee picker. Silently
-      // refuse the drag rather than nag.
-      if (task.claimed_by_agent_id && sourceCol === 'in_progress') {
-        return
-      }
-
-      // Queue → anywhere: requires a claim first. Queue → Claimed is
-      // the natural drag; Queue → In Progress skips a step (rare but allowed
-      // for the user's convenience — claims then advances). Queue → Done is
-      // dismiss.
       if (sourceCol === 'queued') {
+        // Queued → Done: dismiss. Ending the task is what tears its
+        // artifacts down, and a task can be carrying a draft PR back in the
+        // queue, so the gate that guards completing guards this too.
         if (targetCol === 'done') {
-          await apiFetch(`/api/tasks/${taskId}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: 'dismissed' }),
-          })
-          fetchTasks()
+          if (requestResolveAll(taskId, 'dismiss')) return
+          await fireEnd(taskId, 'dismiss')
           return
         }
-        // Claim first, then advance if needed.
+        // Queued → In Progress: the human's one stage marker. Claim first —
+        // idempotent when the caller already holds it — then advance.
         await apiFetch(`/api/tasks/${taskId}/claim`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({}),
         })
-        if (targetCol === 'in_progress') {
-          await apiFetch(`/api/tasks/${taskId}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: targetCol }),
-          })
-        }
-        fetchTasks()
+        await patchStatus(taskId, 'in_progress', 'Could not start the task.')
         return
       }
 
-      // Any → Queued: requeue. Clears the claim and resets status, and fires
-      // without a confirmation: a requeue is the reversible gesture — the
-      // attempt is over, the task goes back to the pool carrying its draft PRs
-      // and staged reviews — and re-claiming is how you undo it.
+      // Any → Queued: requeue. Clears the claim and resets status; asks first
+      // only when a run is in flight, since that is what the move stops.
       if (targetCol === 'queued') {
-        await fireRequeue(taskId)
+        requestRequeue(taskId)
         return
       }
 
-      // Any → Done: complete (preserves the card in Done; distinct from queue →
+      // Any → Done: complete (preserves the card in Done; distinct from queued →
       // done which dismisses). Ending the task IS what resolves its artifacts,
       // so this gesture keeps the confirmation.
       if (targetCol === 'done') {
-        if (requestResolveAll(taskId)) return
-        await fireComplete(taskId)
+        if (requestResolveAll(taskId, 'complete')) return
+        await fireEnd(taskId, 'complete')
         return
       }
 
-      // Claimed / In Progress transitions (user-claimed only — bot tasks
-      // short-circuited above).
-      if (targetCol === 'claimed') {
-        // Claimed isn't a real status — it's "status=queued + claim
-        // held". Going "back to Claimed" from In Progress means flipping
-        // status to queued without releasing the claim. The current store
-        // doesn't expose that exact transition; the closest is requeue
-        // (which clears claim too). For v1, the back-to-Claimed gesture
-        // isn't supported — the user can drag forward to In Progress or
-        // all the way back to Queued.
-        return
-      }
-      if (targetCol === 'in_progress') {
-        await apiFetch(`/api/tasks/${taskId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: targetCol }),
-        })
-        fetchTasks()
-        return
-      }
+      // Done → In Progress: the server decides whether a closed task can be
+      // reopened; the card follows its answer.
+      await patchStatus(taskId, 'in_progress', 'Could not move the task — please try again.')
     } catch (err) {
       // A failed status/claim/requeue mutation would otherwise leave the board
       // silently in the wrong state; surface it and let the next fetchTasks
@@ -1136,13 +1208,6 @@ export default function Board() {
       toast.error(httpErrorMessage(err, 'Could not move the task — please try again.'))
     }
   }
-
-  const handleRequeue = useCallback(
-    async (taskId: string) => {
-      await fireRequeue(taskId)
-    },
-    [fireRequeue],
-  )
 
   // Assignee picker callbacks. The picker is the primary surface for
   // claim mutations in the board; drag is for column moves.
@@ -1165,11 +1230,11 @@ export default function Board() {
   const handlePickerUnclaim = useCallback(
     async (task: Task) => {
       // Unclaim = requeue (clears both claim cols + resets status to
-      // queued). Same path the drag-to-Queue gesture uses, ungated for the
-      // same reason recorded there.
-      await fireRequeue(task.id)
+      // queued). Same door the drag-to-Queue gesture takes, confirmed on
+      // the same condition.
+      requestRequeue(task.id)
     },
-    [fireRequeue],
+    [requestRequeue],
   )
 
   const handlePickerDelegate = useCallback((task: Task) => {
@@ -1324,7 +1389,7 @@ export default function Board() {
           </div>
         )}
 
-        {/* Horizontal-scroll container for the four columns. The strip is
+        {/* Horizontal-scroll container for the three columns. The strip is
             parked so the open-columns midpoint sits at the viewport center (see
             `lane` above) via dynamic left/right padding + a scroll offset. The
             dynamic mask dissolves columns into the page at whichever edge still
@@ -1345,7 +1410,10 @@ export default function Board() {
                   key={colId}
                   index={i}
                   title={COLUMN_TITLES[colId]}
-                  count={rawByColumn[colId].length}
+                  // The rail's number is the lane under its current query —
+                  // the same total the open lane's tail counts against — not
+                  // how much of it happens to be fetched.
+                  count={paging[colId].total ?? paging[colId].shown}
                   onExpand={() => toggleCollapse(colId)}
                 />
               ) : (
@@ -1355,9 +1423,10 @@ export default function Board() {
                   index={i}
                   dragOver={activeDropCol === colId}
                   title={COLUMN_TITLES[colId]}
-                  tasks={rawByColumn[colId]}
                   filter={filters[colId]}
                   onFilterChange={(next) => setFilters((prev) => ({ ...prev, [colId]: next }))}
+                  eventTypes={facets[colId]}
+                  paging={paging[colId]}
                   onCollapse={() => toggleCollapse(colId)}
                   headerExtra={colId === 'done' ? doneHeader : undefined}
                   snooze={
@@ -1368,7 +1437,8 @@ export default function Board() {
                 >
                   <ColumnContents
                     colId={colId}
-                    tasks={filtered[colId]}
+                    tasks={lists[colId].items}
+                    narrowed={narrows(filters[colId])}
                     conversations={conversations}
                     conversationFeeds={conversationFeeds}
                     chainStepConversations={chainStepConversations}
@@ -1378,7 +1448,6 @@ export default function Board() {
                     members={members}
                     bot={bot}
                     delegateFailures={delegateFailures}
-                    onRequeue={handleRequeue}
                     onPickerClaim={handlePickerClaim}
                     onPickerUnclaim={handlePickerUnclaim}
                     onPickerDelegate={handlePickerDelegate}
@@ -1387,14 +1456,6 @@ export default function Board() {
                     onArtifactResolved={fetchTasks}
                     onRetry={handlePickerDelegate}
                   />
-                  {paging[colId].hasMore && (
-                    <ColumnMore
-                      shown={rawByColumn[colId].length}
-                      total={paging[colId].total}
-                      loading={paging[colId].loading}
-                      onLoadMore={paging[colId].loadMore}
-                    />
-                  )}
                 </BoardColumn>
               ),
             )}
@@ -1450,13 +1511,13 @@ export default function Board() {
         prCount={confirmResolve?.prCount ?? 0}
         reviewCount={confirmResolve?.reviewCount ?? 0}
         isLive={confirmResolve?.isLive ?? false}
-        actionLabel="Mark done"
+        actionLabel={confirmResolve?.action === 'dismiss' ? 'Dismiss' : 'Mark done'}
         busy={confirmBusy}
         onConfirm={async () => {
           if (!confirmResolve) return
           setConfirmBusy(true)
           try {
-            await fireComplete(confirmResolve.taskId)
+            await fireEnd(confirmResolve.taskId, confirmResolve.action)
             setConfirmResolve(null)
           } finally {
             setConfirmBusy(false)
@@ -1464,8 +1525,31 @@ export default function Board() {
         }}
         onCancel={() => setConfirmResolve(null)}
       />
+
+      <RequeueConfirm
+        open={pendingRequeue !== null}
+        onConfirm={() => {
+          if (!pendingRequeue) return
+          const { taskId } = pendingRequeue
+          setPendingRequeue(null)
+          void fireRequeue(taskId)
+        }}
+        onCancel={() => setPendingRequeue(null)}
+      />
     </DndContext>
   )
+}
+
+// lanePaging is the column tail's view of a paged list: what is held, what the
+// query matches, and the ask for the next page.
+function lanePaging(list: PagedList<Task>): LanePaging {
+  return {
+    shown: list.items.length,
+    total: list.total,
+    hasMore: list.hasMore,
+    loading: list.loading,
+    onNearEnd: list.loadMore,
+  }
 }
 
 // PickerProps is the assignee-picker wiring shared by both card wrappers —
@@ -1493,6 +1577,7 @@ interface PickerProps {
 function ColumnContents({
   colId,
   tasks,
+  narrowed,
   conversations,
   conversationFeeds,
   chainStepConversations,
@@ -1502,7 +1587,6 @@ function ColumnContents({
   members,
   bot,
   delegateFailures,
-  onRequeue,
   onPickerClaim,
   onPickerUnclaim,
   onPickerDelegate,
@@ -1513,6 +1597,9 @@ function ColumnContents({
 }: {
   colId: ColumnId
   tasks: Task[]
+  // True when the reader has narrowed the lane — an empty lane then has no
+  // matches, which is not the same as being empty.
+  narrowed: boolean
   conversations: Record<string, Conversation>
   conversationFeeds: Record<string, ConversationCardFeed>
   chainStepConversations: Record<string, Conversation[]>
@@ -1523,13 +1610,12 @@ function ColumnContents({
     decision: PermissionDecisionInput,
   ) => Promise<void>
   delegateFailures: Record<string, string>
-  onRequeue: (taskID: string) => void
   onOpenApproval: (conversationID: string, kind: 'review' | 'pr', artifactId: string) => void
   onArtifactResolved: () => void
   onRetry: (task: Task) => void
 } & Omit<PickerProps, 'pickerReadOnly'>) {
   if (tasks.length === 0) {
-    return <EmptyColumn>{emptyLabelFor(colId)}</EmptyColumn>
+    return <EmptyColumn>{narrowed ? 'No matches' : emptyLabelFor(colId)}</EmptyColumn>
   }
 
   const picker: PickerProps = {
@@ -1546,13 +1632,11 @@ function ColumnContents({
   return (
     <SortableContext items={tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
       {tasks.map((task) => {
-        // Queued tasks never render as AgentCards even if the
-        // conversations map has a stale entry from a prior delegate.
-        // After requeue, the conversation row stays in the DB but the task
-        // is back in the team queue with claim cols cleared —
-        // showing an AgentCard there would lie about who's working
-        // on it. The map is cleaned up on the next WS update; this
-        // gate covers the window before that lands.
+        // A queued task renders as a task, not as the run it may still be
+        // carrying: nobody is working on it, and the agent card's whole
+        // vocabulary — elapsed, a live feed, a cancel — would say someone is.
+        // Its conversation is still enriched, since the artifacts a requeue
+        // handed back with it are the task's now.
         const conversation = colId === 'queued' ? undefined : conversations[task.id]
         if (conversation) {
           return (
@@ -1564,7 +1648,6 @@ function ColumnContents({
               feed={conversationFeeds[conversation.ID]}
               pendingPermissions={permQueues[conversation.ID]}
               onResolvePermission={onResolvePermission}
-              onRequeue={onRequeue}
               onOpenApproval={onOpenApproval}
               onArtifactResolved={onArtifactResolved}
               {...picker}
@@ -1576,7 +1659,6 @@ function ColumnContents({
             key={task.id}
             task={task}
             delegateFailure={delegateFailures[task.id]}
-            onRequeue={onRequeue}
             onRetry={onRetry}
             {...picker}
           />
@@ -1590,8 +1672,6 @@ function emptyLabelFor(colId: ColumnId): string {
   switch (colId) {
     case 'queued':
       return 'Queue is empty'
-    case 'claimed':
-      return 'Nothing claimed'
     case 'in_progress':
       return 'Nothing in progress'
     case 'done':
@@ -1621,13 +1701,11 @@ function CardAssigneePicker({ task, picker }: { task: Task; picker: PickerProps 
 const SortableTaskCard = memo(function SortableTaskCard({
   task,
   delegateFailure,
-  onRequeue,
   onRetry,
   ...picker
 }: {
   task: Task
   delegateFailure?: string
-  onRequeue: (taskID: string) => void
   onRetry: (task: Task) => void
 } & PickerProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -1652,7 +1730,6 @@ const SortableTaskCard = memo(function SortableTaskCard({
       // the in-place card fades via style.opacity (set in useSortable above).
       // isDragging only drives a redundant z-50 here, so we never forward it.
       isDragging={false}
-      onRequeue={() => onRequeue(task.id)}
       delegateFailed={delegateFailure ? { message: delegateFailure } : undefined}
       onRetry={delegateFailure ? () => onRetry(task) : undefined}
       assigneeSlot={<CardAssigneePicker task={task} picker={picker} />}
@@ -1662,12 +1739,6 @@ const SortableTaskCard = memo(function SortableTaskCard({
   )
 })
 
-// Conversation statuses where the AgentCard is safe to drag between columns: the
-// terminals, and nothing else. A conversation still setting up or executing stays
-// anchored — the cancel button is the right intent there, and dragging
-// mid-flight would race with the spawner's status transitions.
-const draggableConversationStatuses: ReadonlySet<string> = new Set(TERMINAL_CONVERSATION_STATUSES)
-
 const SortableAgentCard = memo(function SortableAgentCard({
   task,
   conversation,
@@ -1675,7 +1746,6 @@ const SortableAgentCard = memo(function SortableAgentCard({
   feed,
   pendingPermissions,
   onResolvePermission,
-  onRequeue,
   onOpenApproval,
   onArtifactResolved,
   ...picker
@@ -1690,45 +1760,27 @@ const SortableAgentCard = memo(function SortableAgentCard({
     toolCallID: string,
     decision: PermissionDecisionInput,
   ) => Promise<void>
-  onRequeue: (taskID: string) => void
   onOpenApproval: (conversationID: string, kind: 'review' | 'pr', artifactId: string) => void
   onArtifactResolved: () => void
 } & PickerProps) {
-  // Bot-managed cards in in_progress are read-only — the spawner placed the
-  // card there when it minted the delegation. The drop handler also
-  // short-circuits these drags, but baking the guard into `disabled` here
-  // removes the misleading grab cursor + drag preview so the user doesn't see
-  // a draggable affordance that always snaps back.
-  const botManaged = !!task.claimed_by_agent_id && task.status === 'in_progress'
-  // A terminal conversation is draggable; so is a settled conversation (idle/open) that still has
-  // unresolved artifacts — drag-to-Done / Return-to-queue is how you resolve them
-  // (behind the confirmation). An actively-executing turn stays anchored (cancel
-  // is the right intent; dragging mid-flight races the spawner).
-  const draggable =
-    (draggableConversationStatuses.has(conversation.Status) ||
-      (hasUnresolvedArtifacts(conversation) && !isActiveConversation(conversation))) &&
-    !botManaged
+  // Draggable whatever the run is doing — a working run's drop into Queued
+  // asks before it stops the run, and every other drop is reversible or
+  // gated, so there is no state where the grab has to be refused.
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
-    disabled: !draggable,
   })
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.3 : 1,
-    cursor: draggable ? 'grab' : undefined,
+    cursor: 'grab',
   }
   // assigneeSlot forwarded into AgentCard's header cluster
   // so it shares the gap-2 spacing with elapsed/expand/cancel
   // instead of overlapping them via absolute positioning. Same
   // reasoning as the TaskCard wrapper above.
   return (
-    <div
-      ref={setNodeRef}
-      style={style}
-      {...(draggable ? attributes : {})}
-      {...(draggable ? listeners : {})}
-    >
+    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
       <AgentCard
         task={task}
         conversation={conversation}
@@ -1738,7 +1790,6 @@ const SortableAgentCard = memo(function SortableAgentCard({
         onResolvePermission={(toolCallID, decision) =>
           onResolvePermission(conversation.ID, toolCallID, decision)
         }
-        onRequeue={() => onRequeue(task.id)}
         onOpenArtifact={(kind, artifactId) => onOpenApproval(conversation.ID, kind, artifactId)}
         onArtifactResolved={onArtifactResolved}
         assigneeSlot={<CardAssigneePicker task={task} picker={picker} />}
@@ -1749,34 +1800,4 @@ const SortableAgentCard = memo(function SortableAgentCard({
 
 function EmptyColumn({ children }: { children: React.ReactNode }) {
   return <p className="text-ui text-ink-3 text-center py-12">{children}</p>
-}
-
-// ColumnMore is the tail of a column that holds more than one page. A lane
-// that silently stopped at its page size would read as "that's all there is",
-// which is the failure the list contract exists to prevent — so the count is
-// stated and the next page is one click away.
-function ColumnMore({
-  shown,
-  total,
-  loading,
-  onLoadMore,
-}: {
-  shown: number
-  total: number | null
-  loading: boolean
-  onLoadMore: () => void
-}) {
-  // A null total means the server did not count the result set (a proxy
-  // list). Say what we know — "showing 40" — rather than inventing an "of 0".
-  const label = total === null ? `showing ${shown}` : `showing ${shown} of ${total}`
-  return (
-    <button
-      type="button"
-      onClick={onLoadMore}
-      disabled={loading}
-      className="w-full py-2 text-[12px] text-ink-3 hover:text-ink-2 disabled:opacity-50"
-    >
-      {loading ? 'Loading…' : `Load more — ${label}`}
-    </button>
-  )
 }

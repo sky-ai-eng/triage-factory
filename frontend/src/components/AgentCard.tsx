@@ -52,7 +52,6 @@ interface Props {
   // the card renders an inline Allow/Deny control and takes the attention tone.
   pendingPermissions?: PendingPermission[]
   onResolvePermission?: (toolCallID: string, decision: PermissionDecisionInput) => Promise<void>
-  onRequeue?: () => void
   // Open a PR/review artifact's approval overlay by id — from a row in the
   // artifacts popover, or directly from the attention row when exactly one
   // item is unresolved.
@@ -78,7 +77,6 @@ export default function AgentCard({
   feed,
   pendingPermissions,
   onResolvePermission,
-  onRequeue,
   onOpenArtifact,
   onArtifactResolved,
   assigneeSlot,
@@ -118,7 +116,6 @@ export default function AgentCard({
   // whenever has_unresolved_artifacts is true, live or terminal.
   const needsApproval = hasUnresolvedArtifacts(conversation)
   const approval = approvalCounts(conversation)
-  const isFailed = isFailedStatus(conversation.Status)
   // Parked: the turn ended without concluding — stopped from this card's own ✕,
   // or ended mid-thought — so the conversation is neither working nor settled. Its
   // workspace stays warm and it is resumable from the conversation view, which is why it
@@ -331,14 +328,6 @@ export default function AgentCard({
           </div>
 
           <div className="flex items-center gap-3">
-            {(isFailed || isParked || needsApproval) && onRequeue && (
-              <button
-                onClick={onRequeue}
-                className="text-ui font-medium text-ink-3 transition-colors hover:text-ink-2"
-              >
-                Return to queue
-              </button>
-            )}
             {task.source_url && (
               <a
                 href={task.source_url}

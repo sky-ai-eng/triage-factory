@@ -258,21 +258,17 @@ describe('AgentCard parked rendering', () => {
   // — and the card has to say so itself. Left to the live-feed fallback it shows a
   // motionless ticker of the turn that already ended, which reads as a
   // conversation still in flight.
-  it('names the parked state and offers the conversation’s two exits', () => {
-    const onRequeue = vi.fn()
+  it('names the parked state and offers the resume exit', () => {
     render(
       <MemoryRouter>
-        <AgentCard
-          task={task}
-          conversation={conversation({ Status: 'open' })}
-          onRequeue={onRequeue}
-        />
+        <AgentCard task={task} conversation={conversation({ Status: 'open' })} />
       </MemoryRouter>,
     )
     expect(screen.getByText(/idle — stopped without concluding, resumable/)).toBeInTheDocument()
-    // Return to queue is the give-up exit; the expand link is the resume one
-    // (the composer lives in RunStation).
-    expect(screen.getByRole('button', { name: 'Return to queue' })).toBeInTheDocument()
+    // The expand link is the resume exit (the composer lives in RunStation).
+    // The give-up exit is the board's drag back to the queue, not a button on
+    // the card — one gesture for one move.
+    expect(screen.queryByRole('button', { name: 'Return to queue' })).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: /expand run details/i })).toBeInTheDocument()
   })
 

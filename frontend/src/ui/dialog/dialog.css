@@ -303,6 +303,18 @@
   opacity: 1;
   color: var(--color-alarm);
 }
+/* A destructive verb that is a press rather than a hold answers on the press:
+   hard on, hard off, tied to :active rather than a timer so nothing delays
+   the return. An eased fade would read as a hover, and a hover is not an
+   answer. Only the bare verb — a held one sits inside .dlg-hold and the rings
+   are its answer. */
+.dlg.bad .dlg-acts > .dlg-btn.go:active {
+  background: var(--color-alarm);
+  border-color: var(--color-alarm);
+  color: var(--color-ground);
+  opacity: 1;
+  transition: none;
+}
 /* A held confirm is the trigger inside a surface-mode Hold: the wrapper draws
    the rings, and the verb keeps its ink above them. A surface fills whatever
    box it is given, which is right for a bar and wrong for a button in a flex

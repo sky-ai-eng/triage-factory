@@ -9,7 +9,6 @@ interface Props {
   task: Task
   style?: React.CSSProperties
   isDragging?: boolean
-  onRequeue?: () => void
   // When a task is bot-claimed but the delegate run failed
   // to spawn (or no run materialized yet for the bot-claimed task),
   // the agent-lane card surfaces the failure here. delegateFailed
@@ -27,10 +26,7 @@ interface Props {
 // to fire. No frame, no badge soup — the event reads as a quiet uppercase tag,
 // the title leads.
 const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDivElement>>(
-  (
-    { task, style, isDragging, onRequeue, delegateFailed, onRetry, assigneeSlot, ...props },
-    ref,
-  ) => {
+  ({ task, style, isDragging, delegateFailed, onRetry, assigneeSlot, ...props }, ref) => {
     const age = formatAge(task.created_at)
     const subtaskCount = task.open_subtask_count ?? 0
     const slackMessageCount = task.slack_message_count ?? 0
@@ -91,19 +87,6 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
                     title="Re-attempt the delegate run"
                   >
                     Retry
-                  </button>
-                )}
-                {onRequeue && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onRequeue()
-                    }}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    className="text-ui font-medium text-ink-3 transition-colors hover:text-ink-2"
-                    title="Return to queue"
-                  >
-                    Requeue
                   </button>
                 )}
                 {task.source_url && (
@@ -183,7 +166,7 @@ function DelegateFailedBadge({ message }: { message: string }) {
 function SnoozedBadge({ until }: { until: Date }) {
   return (
     <span
-      title={`Snoozed until ${until.toLocaleString()}. Wakes automatically on next matching event, or via the Requeue affordance.`}
+      title={`Snoozed until ${until.toLocaleString()}. Wakes automatically on the next matching event, or when it is claimed.`}
       className="inline-flex shrink-0 items-center gap-1 text-label font-medium text-ink-2"
     >
       <span aria-hidden>⏾</span>

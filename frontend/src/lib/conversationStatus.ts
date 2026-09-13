@@ -50,6 +50,15 @@ export function isActiveStatus(status: ConversationStatusValue): boolean {
   return (ACTIVE_STATUSES as readonly string[]).includes(status)
 }
 
+// A run that returning its task to the queue would STOP: minted and waiting
+// for a slot, setting up, or executing a turn. `open` is excluded — a parked
+// conversation is between turns, and ending it stops nothing — and so are the
+// terminals. The board confirms a requeue on this, not on whether a run
+// exists: with nothing in flight the move is reversible by re-claiming.
+export function isLiveRun(conversation: Conversation): boolean {
+  return conversation.Status === 'queued' || isActiveStatus(conversation.Status)
+}
+
 export function isFailedStatus(status: ConversationStatusValue): boolean {
   return (FAILED_STATUSES as readonly string[]).includes(status)
 }
