@@ -5,14 +5,12 @@ import { setPresenceView } from '../hooks/useWebSocket'
 import { useConversationDetail } from '../hooks/useConversationDetail'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { isActiveConversation } from '../lib/conversationStatus'
-import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
 import RunStation, {
   type ChainStepLabel,
   type StationActions,
 } from '../components/runstation/RunStation'
 import ReviewOverlay from '../components/ReviewOverlay'
 import PendingPROverlay from '../components/PendingPROverlay'
-import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import { GlassBackdrop } from './setup/glass'
 import { toast } from '../components/Toast/toastStore'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
@@ -52,14 +50,11 @@ export default function RunDetail() {
   // at the top of the station's artifact lists (the dock popover + the
   // telemetry rail). `activeArtifact` is the one per-item editor currently open
   // (you edit one at a time — ReviewOverlay / PendingPROverlay key off a single
-  // artifact id); `confirmRequeueOpen` gates the destructive resolve-all on
-  // Return-to-queue.
+  // artifact id).
   const [activeArtifact, setActiveArtifact] = useState<{
     kind: 'review' | 'pr'
     id: string
   } | null>(null)
-  const [confirmRequeueOpen, setConfirmRequeueOpen] = useState(false)
-  const [requeueBusy, setRequeueBusy] = useState(false)
 
   // Presence (TFAC-392): this run's detail page is an answer-capable surface for
   // ITS run's permission prompts. Report run:<id> while mounted (re-firing if the
@@ -155,34 +150,20 @@ export default function RunDetail() {
     [conversation],
   )
 
-  // doRequeue fires the actual requeue. Return-to-queue is a task-level
-  // force-resolve-all: the backend tears down every unresolved artifact (closes
-  // draft PRs, discards pending reviews — branches kept) and cancels a live
-  // conversation.
-  const doRequeue = useCallback(async () => {
+  // handleRequeue returns the task to the queue. It cancels a live conversation
+  // and nothing else: the draft PRs and staged reviews the run produced go back
+  // to the pool with the task, for whoever picks it up next to finish or
+  // dismiss. So it fires straight from the button — there is nothing
+  // destructive to confirm.
+  const handleRequeue = useCallback(async () => {
     if (!conversation?.TaskID) return
-    setRequeueBusy(true)
     try {
       await apiFetch(`/api/tasks/${conversation.TaskID}/requeue`, { method: 'POST' })
       navigate(orgHref('/board'))
     } catch (err) {
       toast.error(httpErrorMessage(err, 'Could not return the task to the queue.'))
-    } finally {
-      setRequeueBusy(false)
     }
   }, [navigate, orgHref, conversation?.TaskID])
-
-  // handleRequeue gates the destructive teardown behind the confirmation modal
-  // whenever the conversation still has unresolved artifacts; otherwise it
-  // requeues straight away (nothing to resolve).
-  const handleRequeue = useCallback(() => {
-    if (!conversation) return
-    if (hasUnresolvedArtifacts(conversation)) {
-      setConfirmRequeueOpen(true)
-      return
-    }
-    void doRequeue()
-  }, [conversation, doRequeue])
 
   // Open one artifact's editor overlay by id — from the dock's approval
   // popover, or from the rail's Artifacts list. The per-item editors
@@ -237,8 +218,6 @@ export default function RunDetail() {
     onResolvePermission: resolvePermission,
   }
 
-  const counts = approvalCounts(conversation)
-
   return (
     <div className="relative h-screen p-3">
       <GlassBackdrop />
@@ -260,18 +239,6 @@ export default function RunDetail() {
           setActiveArtifact(null)
           softRefresh()
         }}
-      />
-
-      {/* Resolve-all confirmation — the second gesture (Return to queue). */}
-      <ResolveAllConfirm
-        open={confirmRequeueOpen}
-        prCount={counts.pr}
-        reviewCount={counts.review}
-        isLive={isActiveConversation(conversation)}
-        actionLabel="Return to queue"
-        busy={requeueBusy}
-        onConfirm={() => void doRequeue()}
-        onCancel={() => setConfirmRequeueOpen(false)}
       />
 
       <RunStation

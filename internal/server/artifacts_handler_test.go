@@ -355,9 +355,9 @@ func TestArtifactApprove_ClosesOnlyWhileTheTaskIsStillTheRunsToClose(t *testing.
 	}
 }
 
-// TestArtifactAbandon_ClosesDraftPR pins the "Return to queue" path: requeueing
-// a task whose conversation opened a draft PR closes that PR on GitHub (ClosePR
-// → state closed) and flips its artifact to closed. The pushed branch is
+// TestArtifactAbandon_ClosesDraftPR pins the walk-away path: dismissing a task
+// whose conversation opened a draft PR closes that PR on GitHub (ClosePR →
+// state closed) and flips its artifact to closed. The pushed branch is
 // untouched.
 func TestArtifactAbandon_ClosesDraftPR(t *testing.T) {
 	keyring.MockInit()
@@ -375,9 +375,10 @@ func TestArtifactAbandon_ClosesDraftPR(t *testing.T) {
 	seedApp(t, srv, stub, acmeInstall())
 
 	taskID, _, artID := seedClaimedPRApprovalFixture(t, srv, "acme", "api", 7)
-	rec := doJSON(t, srv, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
+	rec := doJSON(t, srv, http.MethodPatch, "/api/tasks/"+taskID,
+		map[string]any{"status": "dismissed", "hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("requeue = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	if closeState != "closed" {
 		t.Errorf("ClosePR sent state=%q, want closed", closeState)
@@ -388,9 +389,9 @@ func TestArtifactAbandon_ClosesDraftPR(t *testing.T) {
 }
 
 // TestArtifactTeardown_ResolvesAllArtifacts pins the task-level resolve-all
-// gesture (Return-to-queue): a task whose conversation holds MULTIPLE
-// unresolved artifacts — a draft PR and a pending review — has them ALL
-// resolved. The draft PR is closed on GitHub; the review is flipped to
+// gesture (the card reaching done or dismissed): a task whose conversation
+// holds MULTIPLE unresolved artifacts — a draft PR and a pending review — has
+// them ALL resolved. The draft PR is closed on GitHub; the review is flipped to
 // dismissed with NO GitHub call (it was staged TF-side, TFAC-494). Branches are
 // kept.
 func TestArtifactTeardown_ResolvesAllArtifacts(t *testing.T) {
@@ -433,9 +434,10 @@ func TestArtifactTeardown_ResolvesAllArtifacts(t *testing.T) {
 		t.Fatalf("seed review artifact: %v", err)
 	}
 
-	rec := doJSON(t, srv, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
+	rec := doJSON(t, srv, http.MethodPatch, "/api/tasks/"+taskID,
+		map[string]any{"status": "done", "hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("requeue = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("complete = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	if !prClosed {
 		t.Error("resolve-all must close the draft PR on GitHub")

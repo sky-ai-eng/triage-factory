@@ -72,8 +72,8 @@ export function approvalKicker({ pr, review, total }: ApprovalCounts): string {
   return review === 1 ? 'Review ready' : `${review} reviews ready`
 }
 
-// resolveAllSummary is the resolve-all confirmation copy (drag-to-Done /
-// Return-to-queue): "Close 2 draft PRs and discard 1 pending review? Pushed
+// resolveAllSummary is the resolve-all confirmation copy the task-end gesture
+// raises: "Close 2 draft PRs and discard 1 pending review? Pushed
 // branches are kept." A clause is dropped when its count is 0; the live note is
 // appended only when the conversation is still executing (the teardown cancels it).
 export function resolveAllSummary(pr: number, review: number, isLive: boolean): string {

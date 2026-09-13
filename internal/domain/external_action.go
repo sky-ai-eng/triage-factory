@@ -445,3 +445,36 @@ type ExternalActionListOpts struct {
 	Since time.Time
 	Until time.Time
 }
+
+// ArtifactAction builds the external_actions row for an artifact-backed GitHub
+// write. ConversationID is the drafting conversation (art.ConversationID),
+// actorUserID is the human who authorized it (empty for an autonomous one),
+// team_id is the artifact's team, and the object coordinates come from the
+// artifact. from/to carry the lifecycle transition (draft→open,
+// pending→submitted, …). credential is the org credential the write is made
+// under, classified by the caller before it opens whatever transaction this row
+// lands in.
+func ArtifactAction(art *Artifact, actorUserID, action, from, to, credential string) ExternalAction {
+	// A PR artifact carries its html_url; a review artifact carries none (its
+	// target is the PR), so fall back to the PR web URL from the target — the
+	// audit row links somewhere rather than render non-clickable.
+	url := art.URL
+	if url == "" {
+		if owner, repo, number, ok := ParsePRTarget(art.Target); ok {
+			url = GitHubPullURL(owner+"/"+repo, number)
+		}
+	}
+	return ExternalAction{
+		TeamID:         art.TeamID,
+		Provider:       ArtifactProviderGitHub,
+		Action:         action,
+		Target:         art.Target,
+		ExternalID:     art.ExternalID,
+		URL:            url,
+		FromState:      from,
+		ToState:        to,
+		ConversationID: art.ConversationID,
+		ActorUserID:    actorUserID,
+		Credential:     credential,
+	}
+}

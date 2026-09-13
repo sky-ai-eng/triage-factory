@@ -51,7 +51,7 @@ func (r identityResolver) OrgIdentityFor(context.Context, string) (string, strin
 	panic("OrgIdentityFor is not used by the credential classification")
 }
 
-func TestGithubCredentialFor(t *testing.T) {
+func TestCredentialForRepo(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		resolver ghclient.Resolver
@@ -65,9 +65,9 @@ func TestGithubCredentialFor(t *testing.T) {
 		{"unclassified", identityResolver{identity: ghclient.IdentityUnknown}, domain.CredentialGitHubApp},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := githubCredentialFor(t.Context(), tc.resolver, "org", "octo", "repo")
+			got := ghclient.CredentialForRepo(t.Context(), tc.resolver, "org", "octo", "repo")
 			if got != tc.want {
-				t.Errorf("githubCredentialFor = %q, want %q", got, tc.want)
+				t.Errorf("ghclient.CredentialForRepo = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -84,20 +84,5 @@ func TestGithubCredentialForArtifact(t *testing.T) {
 	malformed := &domain.Artifact{Target: "not-a-pr-target"}
 	if got := githubCredentialForArtifact(t.Context(), pat, "org", malformed); got != domain.CredentialGitHubApp {
 		t.Errorf("credential for an unparseable target = %q, want the app fallback", got)
-	}
-}
-
-// TestCredentialForTarget pins the teardown's map lookup, including the miss a
-// draft PR opened between the pre-pass and the tx would produce.
-func TestCredentialForTarget(t *testing.T) {
-	credentials := map[string]string{"octo/repo": domain.CredentialGitHubPAT}
-	if got := credentialForTarget(credentials, "octo/repo#3"); got != domain.CredentialGitHubPAT {
-		t.Errorf("hit = %q, want github_pat", got)
-	}
-	if got := credentialForTarget(credentials, "other/repo#3"); got != domain.CredentialGitHubApp {
-		t.Errorf("miss = %q, want the app fallback", got)
-	}
-	if got := credentialForTarget(credentials, "garbage"); got != domain.CredentialGitHubApp {
-		t.Errorf("unparseable target = %q, want the app fallback", got)
 	}
 }

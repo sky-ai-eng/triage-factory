@@ -141,8 +141,7 @@ describe('returning a task to the queue', () => {
     )
     // The resolve-all dialog gates completing the task, not requeueing it —
     // completing is what ends a task and resolves what it holds, while a
-    // requeue is meant to be undone by re-claiming. See the TFAC-990 note at
-    // the requeue drag for the window where the server has not caught up.
+    // requeue hands the artifacts to the queue along with the task.
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
     expect(screen.queryByText('Resolve open artifacts?')).not.toBeInTheDocument()
   })

@@ -35,6 +35,9 @@ type stubDelegator struct {
 	// stopped is every blueprint-run id handed to StopBlueprintRun, so a test
 	// can assert the rollback tore down the run it actually spawned.
 	stopped []string
+	// tornDown is every task id handed to TeardownTaskArtifactsSystem, so a
+	// test can assert a close reached the artifact pass and a rollback did not.
+	tornDown []string
 }
 
 func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
@@ -129,6 +132,25 @@ func (s *stubDelegator) StopBlueprintRun(orgID, blueprintRunID string, cause del
 	s.stopped = append(s.stopped, blueprintRunID)
 	s.mu.Unlock()
 	return nil
+}
+
+// TeardownTaskArtifactsSystem records the task whose artifacts the close asked
+// to retire. Recording only: what the real teardown writes is
+// artifactteardown's to prove, and what a router test can prove is that the
+// close cascade reached it with the task it closed.
+func (s *stubDelegator) TeardownTaskArtifactsSystem(_ context.Context, orgID, taskID string) {
+	s.mu.Lock()
+	s.tornDown = append(s.tornDown, taskID)
+	s.mu.Unlock()
+}
+
+// tornDownCopy is the task ids TeardownTaskArtifactsSystem was called with.
+func (s *stubDelegator) tornDownCopy() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.tornDown))
+	copy(out, s.tornDown)
+	return out
 }
 
 // stoppedCopy is the blueprint-run ids StopBlueprintRun was called with.

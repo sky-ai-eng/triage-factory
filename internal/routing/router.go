@@ -41,6 +41,13 @@ type Delegator interface {
 	// Which verb a caller wants follows from which id it is holding — neither
 	// id resolves against the other's table.
 	StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error
+	// TeardownTaskArtifactsSystem retires the unresolved artifacts a closed
+	// task's conversations hold — the draft PRs closed, the staged reviews
+	// dismissed. It rides only the close, because a task's artifacts survive
+	// every other boundary: a firing rolled back or a conversation stopped
+	// leaves them for whatever picks the task up next. Nobody authorized an
+	// event-driven close, so the audit rows it writes name no actor.
+	TeardownTaskArtifactsSystem(ctx context.Context, orgID, taskID string)
 	// StageOrDeliverAdditiveEvent routes one agent-facing additive-event
 	// injection for a run by its live state — local process, live remote
 	// executor (TFAC-585's `inject` conversation_signals kind), or the durable

@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/artifactteardown"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -1238,9 +1239,15 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 		writeTaskTerminal(w, "status")
 		return false
 	}
-	// Closing a task takes it off the agent's hands: stop any in-flight run
-	// and resolve every unresolved artifact it holds.
-	s.teardownTaskConversations(context.WithoutCancel(r.Context()), orgID, userID, id, delegate.StopCauseTaskDispositioned)
+	// A closed task is over, so this is the one disposition that retires what
+	// the work left behind: stop any in-flight run, then resolve every
+	// unresolved artifact the task holds. Stop first — the stop parks each
+	// conversation and releases its claim, so the teardown behind it operates
+	// on a settled conversation rather than racing a live agent that can still
+	// land a fresh draft PR into the window between the two.
+	cleanupCtx := context.WithoutCancel(r.Context())
+	s.stopTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDispositioned)
+	s.teardownTaskArtifacts(cleanupCtx, orgID, userID, id)
 	s.broadcastTaskStatus(orgID, id, newStatus)
 	return true
 }
@@ -1399,24 +1406,19 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 //   - stop: every run still working the task is stopped and the blueprint
 //     behind it cancelled. A requeued task is unclaimed and unowned, so an
 //     agent left executing against it keeps writing messages and landing
-//     artifacts on a task whose columns say nobody owns it — and the
-//     spawner's board-column recompute puts the card straight back out of
-//     Queued the moment it re-derives that agent's claim. The stop is what
+//     artifacts on a task whose columns say nobody owns it. The stop is what
 //     makes returning a live run to the queue safe, which is why the routes
 //     above take every status rather than guarding on one.
 //
-//   - artifact teardown: resolve every unresolved artifact the task's
-//     conversations hold (close all draft PRs, dismiss all pending reviews), so
-//     a returned-to-queue task leaves no stranded GitHub draft / pending
-//     review. It rides inside teardownTaskConversations behind the stop, so it
-//     operates on settled conversations; it never flips conversations.status
-//     itself.
+//     The artifacts the stopped runs left are deliberately NOT resolved: a
+//     requeued task carries its draft PRs and staged reviews to whoever picks
+//     it up next, who pushes to the same PR rather than opening a second.
 //
 //   - boundary: every conversation the task still had is stamped `requeued`,
-//     so nothing resumes into a task the next claimant will start fresh on and
-//     the reason a person reads is the gesture that ended it. It follows the
-//     stop rather than replacing it — a stop that failed still has to leave a
-//     row saying the task moved on.
+//     so nothing resumes into a task the next claimant will open its own
+//     conversation on, and the reason a person reads is the gesture that ended
+//     it. It follows the stop rather than replacing it — a stop that failed
+//     still has to leave a row saying the task moved on.
 //
 //   - Jira reversal: if the task is Jira-backed and we have a
 //     SourceStatus snapshot (recorded at claim time), unassign and
@@ -1445,7 +1447,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 	// against a queued task. WithoutCancel inherits the request's values
 	// (claims among them) while breaking the cancel chain.
 	cleanupCtx := context.WithoutCancel(r.Context())
-	s.teardownTaskConversations(cleanupCtx, orgID, userID, taskID, delegate.StopCauseTaskRequeued)
+	s.stopTaskConversations(cleanupCtx, orgID, userID, taskID, delegate.StopCauseTaskRequeued)
 	s.endTaskConversations(cleanupCtx, orgID, userID, taskID, domain.EndedRequeued)
 	s.revertJiraStateIfApplicable(cleanupCtx, orgID, userID, task)
 	// Requeue clears both claim cols and flips status to
@@ -1464,182 +1466,66 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 	}
 }
 
-// teardownTaskArtifacts is the task-level "force-resolve-all" gesture: the user
-// dragged a card to Done / dismissed it / claimed it / returned it to the queue
-// while it still had unresolved artifacts (draft PRs, pending reviews — same or
-// different repos). It resolves EVERY unresolved artifact the task's conversations hold so
-// nothing strands: each draft PR is closed on GitHub + flipped to closed; each
-// pending review (finalized or not) has its GitHub pending review deleted +
-// flipped to dismissed. Pushed branches are kept (retention is separate).
+// teardownTaskArtifacts retires every unresolved artifact the task's
+// conversations hold — each draft PR closed on GitHub and flipped to closed,
+// each pending review dismissed. It is the task-END pass and has exactly one
+// caller, patchClose: a task that is done or dismissed is over, so nothing will
+// come back for its draft PR. Every other disposition — requeue, claim,
+// re-delegate — leaves the artifacts standing for whoever picks the task up.
 //
 // This never flips conversations.status. A live conversation is stopped by
-// teardownTaskConversations one step ahead of this pass, which owns that
-// transition; a terminal conversation simply stays terminal. Keyed on the
-// task's conversations (ListForTask spans the blueprint's step conversations and
-// any standalone conversation) rather than on a conversation status.
+// stopTaskConversations one step ahead of this pass, which owns that
+// transition; a terminal conversation simply stays terminal.
 //
-// All-or-nothing per call: any DB error inside the closure rolls back the whole
-// batch (flips + audit rows), leaving the artifacts unresolved for a retry on
-// the next /undo, /requeue, dismiss, or complete. The flips re-target the same
-// predicate set, so retry is safe. All failures are logged, not fatal: the
-// calling handler has already flipped the task to its new state.
+// The adapter is the app pool under the closing user's claims, so every audit
+// row names that user as the authorizer — the same identity the artifact verbs
+// record when they retire one artifact at a time. All failures are logged, not
+// fatal: the calling handler has already flipped the task to its new state, and
+// the artifacts stay unresolved for a retry on the next close.
 func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskID string) {
-	// Draft PRs captured inside the tx (state already flipped) and closed on GitHub
-	// AFTER it commits — a network call must not hold the tx open. Dismissed reviews
-	// need no post-tx pass: a review is staged TF-side (TFAC-494), so the in-tx flip
-	// to dismissed is the whole resolution — there is no GitHub object to retire.
-	//
-	// Which credential each draft PR's close is made under is classified BEFORE
-	// the tx opens, for the same reason the closes themselves run after it: the
-	// audit rows are composed inside that tx, and a classification can reach
-	// GitHub.
-	credentials := s.draftPRCredentials(ctx, orgID, userID, taskID)
-
-	var prArtifacts []domain.Artifact
-	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		convs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
-		if err != nil {
-			return fmt.Errorf("list conversations for task: %w", err)
-		}
-		for i := range convs {
-			conversationID := convs[i].ID
-			arts, artErr := tx.Artifacts.ListByConversation(ctx, orgID, conversationID)
-			if artErr != nil {
-				return fmt.Errorf("artifacts.ListByConversation(%s): %w", conversationID, artErr)
-			}
-			draftPRs := domain.AllDraftPullRequests(arts)
-			pendingReviews := domain.AllPendingReviewArtifacts(arts)
-			if len(draftPRs) == 0 && len(pendingReviews) == 0 {
-				continue
-			}
-
-			// Abandon each pending review by flipping its artifact to dismissed. No
-			// GitHub call and no audit row: the review is staged TF-side (TFAC-494), so
-			// a dismiss is a purely local state change, not an org-credential write
-			// (external_actions records only writes). The flip is the whole teardown;
-			// the proposed snapshot is preserved on the row.
-			for j := range pendingReviews {
-				rv := pendingReviews[j]
-				dismissed := rv
-				dismissed.State = domain.ArtifactStateReviewDismissed
-				if _, err := tx.Artifacts.Upsert(ctx, orgID, dismissed); err != nil {
-					return fmt.Errorf("artifacts.Upsert(dismissed): %w", err)
-				}
-			}
-			// Abandon each draft PR by flipping its artifact to closed (the GitHub
-			// close runs after the tx). The pushed branch and the proposed snapshot
-			// are preserved — abandonment retires the PR object, not the work.
-			for j := range draftPRs {
-				pr := draftPRs[j]
-				closed := pr
-				closed.State = domain.ArtifactStatePRClosed
-				if _, err := tx.Artifacts.Upsert(ctx, orgID, closed); err != nil {
-					return fmt.Errorf("artifacts.Upsert(closed): %w", err)
-				}
-				if err := tx.ExternalActions.Record(ctx, orgID,
-					githubApprovalAction(&pr, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed,
-						credentialForTarget(credentials, pr.Target))); err != nil {
-					return fmt.Errorf("external_actions.Record(closed): %w", err)
-				}
-				prArtifacts = append(prArtifacts, pr)
-			}
-		}
-		return nil
-	})
-	if err != nil {
+	if err := artifactteardown.Teardown(ctx, userTeardownDeps{s: s, userID: userID}, orgID, taskID, userID); err != nil {
 		approvalDiscardLog.Error("task artifact teardown failed; artifacts left unresolved for retry", "task", taskID, "error", err)
-		return
 	}
-
-	// Resolve on GitHub (best-effort, outside the tx). The artifacts are already
-	// marked closed/dismissed; a GitHub failure leaves the object for reconciliation
-	// to retire later and must never fail the requeue/complete. Branches stay.
-	for i := range prArtifacts {
-		closeDraftPRBestEffort(ctx, s.ghResolver, orgID, &prArtifacts[i])
-	}
-	// Dismissed reviews need no post-tx pass — they were staged TF-side and the
-	// in-tx flip is their whole resolution (TFAC-494).
 }
 
-// draftPRCredentials classifies the acting GitHub credential for every repo the
-// task's unresolved draft PRs live in, keyed by "owner/repo". It exists so the
-// teardown's audit rows can name that credential without probing GitHub from
-// inside the write tx those rows are composed into — the read pass and the
-// classification are both finished before that tx opens.
-//
-// Best-effort: a read failure yields an empty map and every row falls back to
-// the App, exactly as an unclassifiable repo does. The teardown itself is
-// unaffected — it re-reads the artifacts under its own tx and is the authority
-// on which ones it resolves.
-func (s *Server) draftPRCredentials(ctx context.Context, orgID, userID, taskID string) map[string]string {
-	type ownerRepo struct{ owner, repo string }
-	repos := map[string]ownerRepo{}
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		convs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
-		if err != nil {
-			return err
-		}
-		for i := range convs {
-			arts, artErr := tx.Artifacts.ListByConversation(ctx, orgID, convs[i].ID)
-			if artErr != nil {
-				return artErr
-			}
-			for _, pr := range domain.AllDraftPullRequests(arts) {
-				if owner, repo, _, ok := domain.ParsePRTarget(pr.Target); ok {
-					repos[owner+"/"+repo] = ownerRepo{owner: owner, repo: repo}
-				}
-			}
-		}
-		return nil
-	}); err != nil {
-		approvalDiscardLog.Warn("pre-read draft PRs for credential attribution failed; teardown rows will record the app",
-			"task", taskID, "error", err)
-		return nil
-	}
-	out := make(map[string]string, len(repos))
-	for repoID, or := range repos {
-		out[repoID] = githubCredentialFor(ctx, s.ghResolver, orgID, or.owner, or.repo)
-	}
-	return out
+// userTeardownDeps is the artifact teardown's app-pool adapter: every read and
+// write runs inside one claims-bearing transaction as the closing user, so the
+// flips and their audit rows commit together and RLS scopes them exactly as the
+// per-artifact verbs are scoped.
+type userTeardownDeps struct {
+	s      *Server
+	userID string
 }
 
-// credentialForTarget looks a PR target's repo up in the map draftPRCredentials
-// built. A miss — an unparseable target, or a draft PR that appeared between the
-// pre-pass and the tx — reports the App, the same answer an unclassifiable repo
-// gets.
-func credentialForTarget(credentials map[string]string, target string) string {
-	owner, repo, _, ok := domain.ParsePRTarget(target)
-	if !ok {
-		return domain.CredentialGitHubApp
-	}
-	if cred, hit := credentials[owner+"/"+repo]; hit {
-		return cred
-	}
-	return domain.CredentialGitHubApp
+// Batch binds one transaction per call. The teardown makes two — a read pass
+// for credential attribution and the write pass — which is what keeps the
+// GitHub probe between them out of a write transaction.
+func (d userTeardownDeps) Batch(ctx context.Context, orgID string, fn func(artifactteardown.Stores) error) error {
+	return d.s.tx.WithTx(ctx, orgID, d.userID, func(tx db.TxStores) error {
+		return fn(txTeardownStores{tx: tx})
+	})
 }
 
-// closeDraftPRBestEffort closes the abandoned draft PR on GitHub. Best-effort:
-// every failure is logged, never returned — the artifact is already marked
-// closed and the conversation/task already resolved, so a GitHub hiccup mustn't
-// unwind that. owner/repo/number come from the artifact's target; the per-repo
-// client resolves App-installation-token → PAT like every other PR mutation. A
-// free function (taking the resolver) so both the task-level teardown and the
-// per-artifact dismiss endpoint share one GitHub-resolution path. The pushed
-// branch is never touched (retention is a separate concern).
-func closeDraftPRBestEffort(ctx context.Context, resolver ghclient.Resolver, orgID string, art *domain.Artifact) {
-	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
-		approvalDiscardLog.Warn("draft PR artifact has a malformed target; skipping GitHub close", "artifact", art.ID, "target", art.Target)
-		return
-	}
-	gh, err := resolver.ClientForRepo(ctx, orgID, owner, repo)
-	if err != nil {
-		approvalDiscardLog.Warn("resolve github client for draft PR close failed", "artifact", art.ID, "owner", owner, "repo", repo, "error", err)
-		return
-	}
-	if err := gh.ClosePR(ctx, owner, repo, number); err != nil {
-		approvalDiscardLog.Warn("close draft PR on github failed (artifact already marked closed)", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-	}
+func (d userTeardownDeps) GitHub() ghclient.Resolver { return d.s.ghResolver }
+
+// txTeardownStores binds the teardown's store surface to one transaction.
+type txTeardownStores struct{ tx db.TxStores }
+
+func (t txTeardownStores) ConversationsForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error) {
+	return t.tx.Conversations.ListForTask(ctx, orgID, taskID)
+}
+
+func (t txTeardownStores) ArtifactsForConversation(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error) {
+	return t.tx.Artifacts.ListByConversation(ctx, orgID, conversationID)
+}
+
+func (t txTeardownStores) UpsertArtifact(ctx context.Context, orgID string, a domain.Artifact) error {
+	_, err := t.tx.Artifacts.Upsert(ctx, orgID, a)
+	return err
+}
+
+func (t txTeardownStores) RecordExternalAction(ctx context.Context, orgID string, act domain.ExternalAction) error {
+	return t.tx.ExternalActions.Record(ctx, orgID, act)
 }
 
 // revertJiraStateIfApplicable was the body of handleUndo's Jira
