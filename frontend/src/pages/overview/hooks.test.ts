@@ -198,9 +198,9 @@ describe('useTasksIndex', () => {
     await settle()
 
     const tasksRead = bodies[paths.findIndex((p) => p.startsWith('/api/tasks/list'))]
-    // 'in_review' left the vocabulary, and 'claimed' is a subset of 'queued'
-    // that would hide a queued task holding a carried artifact — the join asks
-    // for the three lanes that can answer instead.
+    // The join asks for the three lanes a task can carry a conversation in;
+    // 'snoozed' and 'dismissed' hold none, so asking for them would only widen
+    // the read.
     expect(tasksRead.statuses).toEqual(['queued', 'in_progress', 'done'])
     expect(result.current?.get('t-a')?.title).toBe('a')
     expect(result.current?.get('t-b')?.title).toBe('b')

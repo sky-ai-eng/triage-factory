@@ -429,28 +429,11 @@ func sqliteTaskListWhere(f db.TaskListFilter) (string, []any) {
 	var args []any
 
 	if len(f.Statuses) > 0 {
-		var arms []string
-		var lifecycle []string
+		ph := strings.TrimRight(strings.Repeat("?, ", len(f.Statuses)), ", ")
+		clauses = append(clauses, fmt.Sprintf("t.status IN (%s)", ph))
 		for _, s := range f.Statuses {
-			if s == db.TaskListStatusClaimed {
-				// The claim axis, not a lifecycle status — see
-				// db.TaskListStatusClaimed. Bot claims count: they surface the
-				// window between a delegate stamp and the run's first
-				// transition, plus spawn-failure rows that stay claimed-queued
-				// until someone retries.
-				arms = append(arms, "(t.status = 'queued' AND (t.claimed_by_user_id IS NOT NULL OR t.claimed_by_agent_id IS NOT NULL))")
-				continue
-			}
-			lifecycle = append(lifecycle, s)
+			args = append(args, s)
 		}
-		if len(lifecycle) > 0 {
-			ph := strings.TrimRight(strings.Repeat("?, ", len(lifecycle)), ", ")
-			arms = append(arms, fmt.Sprintf("t.status IN (%s)", ph))
-			for _, s := range lifecycle {
-				args = append(args, s)
-			}
-		}
-		clauses = append(clauses, "("+strings.Join(arms, " OR ")+")")
 	}
 	if f.OnlyUnclaimed {
 		clauses = append(clauses, "t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL")

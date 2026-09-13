@@ -505,6 +505,17 @@ func TestTaskList_StrictBody(t *testing.T) {
 			wantField:  "statuses",
 		},
 		{
+			// 'claimed' named the claim axis rather than a lane. A claim is
+			// the stage marker now — it lands the row in progress — so the
+			// vocabulary is five lifecycle statuses and nothing else, and a
+			// client still asking for that projection is told the field is
+			// wrong rather than handed the empty page it can never fill.
+			name:       "retired claim projection",
+			body:       map[string]any{"statuses": []string{"claimed"}},
+			wantReason: "INVALID_FIELD",
+			wantField:  "statuses",
+		},
+		{
 			name:       "malformed team id",
 			body:       map[string]any{"team_ids": []string{"junk"}},
 			wantReason: "INVALID_FIELD",

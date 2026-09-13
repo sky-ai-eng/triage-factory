@@ -61,7 +61,7 @@ const TASKS = [
     source: 'jira',
     source_id: 'SKY-412',
     title: 'Triage the flaking rebalance test',
-    status: 'claimed',
+    status: 'queued',
   },
 ]
 
