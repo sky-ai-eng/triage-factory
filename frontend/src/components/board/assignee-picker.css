@@ -351,12 +351,6 @@ body:has(#tf-assign-scrim.on) .tip {
       calc(var(--j, 0) * var(--rowx) * var(--tk-assign, 1)),
     color 0.15s;
 }
-.assign.measuring .picker .opt,
-.assign.measuring .picker .frow,
-.assign.measuring .picker .rest {
-  transform: none !important;
-  transition: none !important;
-}
 .assign.open .picker .opt {
   opacity: 1;
   transform: none;
@@ -446,10 +440,6 @@ body:has(#tf-assign-scrim.on) .tip {
   transition:
     opacity calc(0.13s * var(--tk-assign, 1)) var(--in) calc(0.1s * var(--tk-assign, 1)),
     transform calc(0.16s * var(--tk-assign, 1)) var(--in) calc(0.1s * var(--tk-assign, 1));
-}
-.assign.measuring .picker .frow {
-  transform: none !important;
-  transition: none !important;
 }
 /* how many matches are not shown — a count, never a scrollbar */
 .picker .rest {

@@ -83,3 +83,10 @@
   height: 44px;
   background: linear-gradient(to top, var(--color-ground), transparent);
 }
+
+/* Tooltips are noise mid-drag: the reader is aiming at a lane, not reading
+   about a card — and a hint left open on a title follows the lifted card
+   around. The board root carries the class for the length of a drag. */
+.bc-dragging .tip {
+  display: none !important;
+}

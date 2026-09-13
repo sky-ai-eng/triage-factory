@@ -368,7 +368,12 @@ export default function AssigneePicker({
     stem.current.style.height = Math.round(far / s) + 'px'
   }, [])
 
+  // Measured while the menu is up or on its way down, and not otherwise: a
+  // closed picker has nothing on screen to keep aligned, and every card on the
+  // board carries one — a working card re-renders each second for its clock,
+  // so an ungated pass here would be a layout read per second per card.
   useLayoutEffect(() => {
+    if (!open && !closing) return
     placePicker()
     // Which side has room is a fact of layout, which only an effect can read.
     // eslint-disable-next-line react-hooks/set-state-in-effect -- measured from layout
