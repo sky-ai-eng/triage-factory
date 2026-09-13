@@ -299,11 +299,20 @@ export function Tooltip({
   // A tap toggles. Stopping the event is the load-bearing half: this mark is
   // often inside a link, and a tap that navigates instead of explaining leaves
   // touch with no route to the hint at all.
+  //
+  // The other way round — a host WRAPPED AROUND a link or a button, the
+  // scenery mode's second case — the click is that control's, and the hint
+  // is its definition, not its gate. So a click that lands on an interactive
+  // descendant passes through untouched: the link navigates, and the hint
+  // follows the pointer as it already does.
   const tap = (e: MouseEvent) => {
     // The press flag is consumed by focus on a fresh press and cleared here
     // for a press on an already-focused host, which fires no focus event.
     pointer.current = false
     if (!live) return
+    const target = e.target as Element | null
+    const control = target?.closest('a[href], button')
+    if (control && control !== host.current && host.current?.contains(control)) return
     e.preventDefault()
     e.stopPropagation()
     if (timer.current) clearTimeout(timer.current)
