@@ -218,7 +218,7 @@ export default function Board() {
   const loadDone = doneList.load
   const [loading, setLoading] = useState(true)
 
-  // Presence (TFAC-392): the board is an answer-capable surface for permission
+  // Presence: the board is an answer-capable surface for permission
   // prompts (it renders + answers them inline), so report it while mounted and
   // fall back to 'other' on unmount so an unattended conversation fast-denies once the
   // operator leaves the board.
@@ -370,7 +370,7 @@ export default function Board() {
   // to fire. Cleared when a conversation for the task lands.
   const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
 
-  // Resolve-all confirmation (TFAC-384 §4): the two gestures that END a task —
+  // Resolve-all confirmation: the two gestures that END a task —
   // drag-to-Done from In Progress (complete) and from Queued (dismiss) —
   // force-resolve every unresolved artifact and cancel a live conversation.
   // When the target task has unresolved artifacts we stash the intended
@@ -458,7 +458,7 @@ export default function Board() {
   // conversation a requeue handed back with it, along with that
   // conversation's artifacts, so the Queued lane is enriched like the other
   // two. ONE aggregated call returns every task's conversations, replacing
-  // the old per-task serial loop of 2–3 round-trips each (TFAC-98).
+  // a per-task serial loop of 2–3 round-trips each.
   const enrich = useCallback(
     async (taskIDs: string[]) => {
       if (taskIDs.length === 0) return
@@ -597,8 +597,7 @@ export default function Board() {
 
       // Paint the board as soon as the three columns are in state. The agent-conversation
       // enrichment below fills cards progressively and must not hold the
-      // spinner — it used to: setLoading sat in `finally` after the whole serial
-      // loop, so first paint waited on every per-task round-trip (TFAC-98).
+      // spinner, so it is cleared here rather than waiting for `enrich` to settle.
       setLoading(false)
 
       await enrich([...queuedItems, ...inProgressItems, ...doneItems].map((t) => t.id))
@@ -840,7 +839,7 @@ export default function Board() {
             }
           }
         } else if (event.type === 'artifact_updated') {
-          // Reconciler (TFAC-464): an artifact this conversation produced changed state
+          // Reconciler: an artifact this conversation produced changed state
           // on GitHub. The conversation's own status is unchanged — only its
           // artifact-derived surface (the strip, the frame) — so refetch
           // the conversation, with NO optimistic Status write (unlike conversation_update).
@@ -1364,7 +1363,7 @@ export default function Board() {
 
   const activeTask = activeId ? allTasks.get(activeId) : null
 
-  // Zero-team safe landing (TFAC-445) — a multi-mode user on no team has no
+  // Zero-team safe landing — a multi-mode user on no team has no
   // team-scoped tasks to show. Surface the friendly empty state instead of an
   // empty board (local mode always has its default team, so this is multi-only
   // in practice). Gated on teamsLoaded so it doesn't flash during cold load.

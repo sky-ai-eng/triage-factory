@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { Dialog } from '../../ui/dialog/Dialog'
 
 // RequeueConfirm gates returning a task to the queue while a run is in
@@ -17,6 +18,15 @@ export default function RequeueConfirm({
   onConfirm: () => void
   onCancel: () => void
 }) {
+  // A press, not a hold, means nothing stops a fast double-click from landing
+  // both clicks on the confirm button before the caller's onConfirm has a
+  // chance to close the dialog — this latch makes the second one a no-op
+  // instead of a second requeue request. Rearmed each time the dialog opens.
+  const firedRef = useRef(false)
+  useEffect(() => {
+    if (open) firedRef.current = false
+  }, [open])
+
   return (
     <Dialog
       open={open}
@@ -26,7 +36,11 @@ export default function RequeueConfirm({
       body="This stops the run. Its work stays with the task."
       confirmLabel="Return to queue"
       cancelLabel="Cancel"
-      onConfirm={onConfirm}
+      onConfirm={() => {
+        if (firedRef.current) return
+        firedRef.current = true
+        onConfirm()
+      }}
       onCancel={onCancel}
     />
   )

@@ -38,11 +38,10 @@ export const GLYPH_PATHS = {
   team: 'M6 7.5a2 2 0 100-4 2 2 0 000 4zM2.5 13c0-2 1.6-3.2 3.5-3.2S9.5 11 9.5 13M10.5 5.2a2 2 0 011 3.6M11.5 10.2c1.3.4 2 1.4 2 2.8',
   org: 'M3 13.5V3.5h6v10M9 7.5h4v6M5 6h2M5 9h2',
   gov: 'M8 2.5l5 2v4c0 3-2.4 4.6-5 5-2.6-.4-5-2-5-5v-4z',
-  // The governance tail's mark. The design bundle asked for `alert` here and
-  // never drew it, so the glyph table returned undefined and the fallback fed
-  // the literal string "alert" to a path's `d` — an invalid path, which renders
-  // as nothing at all. Silent, and invisible until someone wonders why the one
-  // warm mark in the rail has no icon beside its count.
+  // `alert` needs its own entry: a `GlyphName` missing from this table
+  // resolves to `undefined`, and a caller that falls back to the name itself
+  // as a path's `d` draws an invalid path — nothing renders, silently. The
+  // governance rail's warm mark depends on this entry existing.
   alert: 'M8 5.4v3.2M8 11.1h.01M8 2.2l6 10.4H2z',
   prefs:
     'M2.5 4.5h11M2.5 11.5h11' +
@@ -82,6 +81,6 @@ export const GLYPH_PATHS = {
 } as const
 
 /** Every mark the table can draw. Exported as a TYPE so a consumer cannot
- * name a glyph that was never drawn — the governance alert did exactly that
- * once, and rendered nothing at all. */
+ * name a glyph that isn't in the table — one that isn't renders nothing,
+ * silently, since there is no path behind it to draw. */
 export type GlyphName = keyof typeof GLYPH_PATHS
