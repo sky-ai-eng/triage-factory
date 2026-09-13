@@ -114,8 +114,15 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 
 	// The SDK path's twin again: the task team's knowledge base plus every
 	// other team's published root, copied in before the jail starts so it is
-	// present at first read. Skipped on a warm step for the same reason the
-	// memory clear is — the tree belongs to the sandbox identity by then.
+	// present at first read. Skipped on a tree that already belongs to the
+	// sandbox identity, which this process cannot write inside: a warm blueprint
+	// step keeps the first step's copy and renders no manifest for it.
+	//
+	// So the manifest is not what decides what block 2 says about it. The rule a
+	// few lines down decides, and it is one rule for every section of the block:
+	// a new step composes its own, and a conversation that has already been
+	// opened replays the one its launch composed — manifest included, whoever
+	// owns its tree by then.
 	knowledge := ""
 	if handedOff {
 		delegateLog.Debug("run tree already handed to the sandbox identity; team knowledge not refreshed for this step", "conversation", conversationID, "cwd", claudeCwd)
@@ -123,7 +130,8 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		knowledge = s.stageTeamKnowledge(stagingCtx, orgID, cfg.teamID, claudeCwd, owned)
 	}
 
-	priorMemory := s.prepareInheritedMemory(stagingCtx, orgID, conversationID, claudeCwd, owned, handedOff)
+	opened, replayedBlock := s.nativeClaimReplay(stagingCtx, orgID, conversationID)
+	priorMemory := prepareInheritedMemory(claudeCwd, owned, handedOff, opened)
 	mirror = s.newMemoryMirror(orgID, conversationID, cfg.blueprintRunID, task.EntityID, claudeCwd, priorMemory)
 	stagingSpan.End()
 
@@ -131,7 +139,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// into the memory tree the launch is about to mount read-only. Block 1 is the
 	// same for every native run; everything about this one is block 2 and the
 	// opening row.
-	launchText := s.buildNativeLaunchText(ctx, task, mission, cfg, knowledge)
+	launchText := s.buildNativeLaunchText(ctx, task, mission, cfg, knowledge, replayedBlock)
 	systemPrompt := nativeSystemPrompt()
 
 	// The task context's retention. Nothing is pinned through a compaction, so
@@ -147,6 +155,17 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// then reserved for a claim that went away with no cancel behind it.
 	if ctx.Err() != nil {
 		return stopped()
+	}
+	// Block 2 goes on the row before the agent gets it, so the next claim of this
+	// conversation is handed these bytes rather than composing a second set that
+	// agrees with them by care. A claim that replayed writes nothing: the row
+	// already holds what this engagement is running under.
+	//
+	// Below the stop read for the same reason the phase write is: a fence
+	// refusal means a successor owns the conversation, which is not what a user
+	// cancel is, and only one of the two parks with a cancel recorded.
+	if replayedBlock == "" && s.persistSystemBlock(ctx, orgID, conversationID, cfg.claimID, launchText.systemBlock) {
+		return engagementDisposition{fenced: true}
 	}
 	if s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting) {
 		return engagementDisposition{fenced: true}
@@ -311,19 +330,33 @@ func nativeSystemPrompt() string {
 type nativeLaunchText struct {
 	// systemBlock is block 2 — the run's facts, its verb reference, its
 	// mission and its step addendum, sent behind block 1's cache breakpoint.
+	// Composed by the claim that opens the conversation and replayed verbatim by
+	// every claim after it, so it is the same string for the life of the row.
 	systemBlock string
 	// taskContext is the opening user row: the rendered <task_context>, and
 	// the same bytes the launch retains as a file.
 	taskContext string
 }
 
-// buildNativeLaunchText resolves this run's inputs and composes both halves.
+// buildNativeLaunchText resolves this claim's inputs and produces both halves.
 // The compositions themselves are composeConversationSystemBlock and
-// composeNativeOpeningTurn; what lives here is the reads they need.
+// BuildTaskContext; what lives here is the reads they need.
+//
+// replayed is the block 2 the conversation was launched with, empty when this
+// claim IS that launch. Given one, block 2 is neither composed nor read for:
+// the stored bytes are the answer, and every live input a fresh composition
+// would reach for is one that may have moved since — a team's branch
+// convention, and the knowledge manifest, which is empty on a run tree this
+// process no longer owns. Recomposing would change the model's own instructions
+// mid-conversation and miss the cache entry those bytes were warmed on.
+//
+// The task context is built either way. It is per claim by construction: the
+// event fields and PR history it renders are read fresh, and it is a transcript
+// row, where the opening gate decides whether it is written at all.
 //
 // Nothing in it fails: the one read it makes degrades to a context block with
 // no event fields, exactly as it did when this was the whole opening turn.
-func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, mission string, cfg runConfig, knowledge string) nativeLaunchText {
+func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, mission string, cfg runConfig, knowledge, replayed string) nativeLaunchText {
 	metadataJSON, err := s.events.GetMetadataSystem(context.WithoutCancel(ctx), cfg.orgID, task.PrimaryEventID)
 	if err != nil {
 		delegateLog.Warn("load event metadata for task failed; the task context will carry no event fields",
@@ -332,25 +365,31 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, m
 	}
 	artifacts := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
 
-	// The handoff addendum is this step's, not this spec's, so it rides block 2
-	// rather than the shared prompt. appendSysPrompt is the same signal the SDK
-	// path hands its harness — set exactly when a later step follows this one.
-	nonTerminal := ""
-	if cfg.appendSysPrompt != "" {
-		nonTerminal = agentprompt.NonTerminalCompletion(nativeSpec())
-	}
+	systemBlock := replayed
+	if systemBlock == "" {
+		// The handoff addendum is this step's, not this spec's, so it rides
+		// block 2 rather than the shared prompt. appendSysPrompt is the same
+		// signal the SDK path hands its harness — set exactly when a later step
+		// follows this one.
+		nonTerminal := ""
+		if cfg.appendSysPrompt != "" {
+			nonTerminal = agentprompt.NonTerminalCompletion(nativeSpec())
+		}
 
-	// The native blocks name the in-jail paths and the `tfac` applet outright,
-	// so the run context carries only the branch convention and this run's
-	// staged knowledge — the two facts that differ per team and per run, and
-	// the ones those blocks cannot state for themselves.
-	return nativeLaunchText{
-		systemBlock: composeConversationSystemBlock(
+		// The native blocks name the in-jail paths and the `tfac` applet
+		// outright, so the run context carries only the branch convention and
+		// this run's staged knowledge — the two facts that differ per team and
+		// per run, and the ones those blocks cannot state for themselves.
+		systemBlock = composeConversationSystemBlock(
 			mission,
 			runContext("", "", s.resolveBranchTemplate(ctx, task), "", knowledge),
 			cfg.toolsRef,
 			nonTerminal,
-		),
+		)
+	}
+
+	return nativeLaunchText{
+		systemBlock: systemBlock,
 		// The task context is the one section that stays a transcript row.
 		// It is built entirely from external data — PR titles, commit
 		// subjects, issue bodies — which is why it carries untrusted markers,
@@ -358,6 +397,38 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, m
 		// instruction however it is marked.
 		taskContext: BuildTaskContext(task, metadataJSON, cfg.prSkeleton, artifacts),
 	}
+}
+
+// nativeClaimReplay reads what this claim inherits from the conversation it is
+// picking up: whether that conversation has already been opened, and the block 2
+// its launch ran under.
+//
+// One transcript read answers both, because both turn on one question — has
+// this conversation run? The transcript is the native runtime's answer to it,
+// standing in for the prior session id the SDK path has and this runtime has no
+// counterpart to, and the stored block is only the launch's for a conversation
+// that reached the model. It reads the task-context row rather than any row, so
+// a conversation handed nothing but a claim-time notice is still fresh.
+//
+// A read failure answers "not opened", so the claim behaves as a launch:
+// composing block 2, and distrusting any memory file it finds. Both are the
+// cheap mistake. Crediting this run with a predecessor's memory corrupts the
+// entity's durable record, and a replay is an assertion about a turn that has
+// already happened; composing costs one run's notes and one cache entry.
+//
+// The block comes back empty for a conversation opened before this runtime
+// stored one. That claim composes live, once, and stamps what it composed.
+func (s *Spawner) nativeClaimReplay(ctx context.Context, orgID, conversationID string) (opened bool, systemBlock string) {
+	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
+	if err != nil {
+		delegateLog.Warn("read transcript to classify this claim failed; treating it as this conversation's launch",
+			"conversation", conversationID, "error", err)
+		return false, ""
+	}
+	if !conversationOpened(rows) {
+		return false, ""
+	}
+	return true, s.launchedSystemBlock(ctx, orgID, conversationID)
 }
 
 // nativeSpec is the prompt selector for every native engagement.
@@ -387,24 +458,12 @@ func nativeSpec() agentprompt.Spec {
 // sandbox identity — digest it instead, so termination can refuse to ingest
 // content this agent never wrote.
 //
-// Both are skipped for a conversation that has already been opened: a parked
-// engagement picking up a steer, whose own memory file is at that path. The
-// transcript is this runtime's "has it run before". It stands in for the SDK
-// path's prior session id, which the native runtime has no counterpart to, and
-// it is the same conversationOpened reading mintOpeningRows makes a few calls
-// later — the task-context row, not any row, so a conversation that has only
-// been handed a claim-time notice still clears the path it is about to be
-// judged on.
-func (s *Spawner) prepareInheritedMemory(ctx context.Context, orgID, conversationID, cwd string, owned repoFiles, handedOff bool) *memoryFingerprint {
-	driven, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
-	if err != nil {
-		// An unreadable transcript is treated as a fresh claim. The two ways of
-		// being wrong are not symmetric: crediting this run with a predecessor's
-		// memory corrupts the entity's durable record, while distrusting a
-		// re-claimed engagement's own notes costs one run's notes and nothing
-		// downstream.
-		delegateLog.Warn("read transcript to classify the inherited memory file failed; treating this claim as fresh", "conversation", conversationID, "error", err)
-	} else if conversationOpened(driven) {
+// Both are skipped for an opened conversation: a parked engagement picking up a
+// steer, whose own memory file is at that path. opened is nativeClaimReplay's
+// answer, which is the same conversationOpened reading mintOpeningRows makes a
+// few calls later.
+func prepareInheritedMemory(cwd string, owned repoFiles, handedOff, opened bool) *memoryFingerprint {
+	if opened {
 		return nil
 	}
 	if !handedOff {

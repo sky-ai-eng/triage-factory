@@ -873,7 +873,8 @@ type ConversationStore interface {
 	SetWorktreePathSystem(ctx context.Context, orgID, conversationID, path string) (*domain.Conversation, error)
 
 	// SystemBlockSystem reads back what SetSystemBlockForClaimSystem stored —
-	// the only read of that column, on the resume path.
+	// the only read of that column, made by the engagement picking the
+	// conversation back up.
 	//
 	// Its own narrow read rather than a column on the conversation projection:
 	// the value is kilobytes of composed prompt text that exactly one code path
@@ -995,22 +996,23 @@ type ConversationStore interface {
 	SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) (*domain.Conversation, error)
 
 	// SetSystemBlockForClaimSystem records the system append this engagement
-	// launched the SDK harness with — conversations.system_block, the
-	// conversation's own block: the run's facts, its verb reference, its
-	// mission and its step addendum, exactly as composed. The framework blocks
-	// in front of it are not stored; agentprompt.Build reproduces them from a
-	// fixed spec.
+	// launched with — conversations.system_block, the conversation's own block:
+	// the run's facts, its verb reference, its mission and its step addendum,
+	// exactly as composed. The framework blocks in front of it are not stored;
+	// agentprompt.Build reproduces them from a fixed spec.
 	//
-	// A resume coordinate, and fenced for the reason the other two are. The
-	// harness takes its append once, at launch, so a resumed turn is handed
-	// this string back; a zombie engagement's late write would hand the
-	// successor's next turn the mission the zombie was launched with. There is
-	// no unfenced door because there is no claimless writer: only the
-	// engagement that composes the append knows it.
+	// Written by the claim that launches the conversation, on either runtime,
+	// and read by every claim after it — so the bytes a later turn is sent are
+	// the launch's rather than a second composition from inputs that have since
+	// moved. Fenced for the reason the other two coordinates are: a zombie
+	// engagement's late write would hand the successor's next turn the mission
+	// the zombie was launched with. There is no unfenced door because there is
+	// no claimless writer: only the engagement that composes the append knows
+	// it.
 	//
 	// The empty string is a value, not a clear — every section of the block is
 	// optional, so a conversation with nothing to say in any of them stores
-	// nothing and resumes on the framework blocks alone.
+	// nothing and continues on the framework blocks alone.
 	//
 	// Return shape matches SetSessionForClaimSystem.
 	SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (*domain.Conversation, error)
