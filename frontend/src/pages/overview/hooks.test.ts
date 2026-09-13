@@ -198,9 +198,9 @@ describe('useTasksIndex', () => {
     await settle()
 
     const tasksRead = bodies[paths.findIndex((p) => p.startsWith('/api/tasks/list'))]
-    // The join asks for the three lanes a task can carry a conversation in;
-    // 'snoozed' and 'dismissed' hold none, so asking for them would only widen
-    // the read.
+    // The join asks for the three statuses this Overview view needs; including
+    // other statuses like 'snoozed'/'dismissed' would just widen the read.
+    // (The 'done' lane is additionally bounded by closed_since in the request.)
     expect(tasksRead.statuses).toEqual(['queued', 'in_progress', 'done'])
     expect(result.current?.get('t-a')?.title).toBe('a')
     expect(result.current?.get('t-b')?.title).toBe('b')
