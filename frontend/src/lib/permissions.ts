@@ -137,3 +137,40 @@ export async function resolvePermission(
     }
   }
 }
+
+// summarizePermissionInput renders a compact one-line preview of a tool call's
+// input — the command for Bash, the path for file tools, the pattern for
+// search, else the first short string field or a trimmed JSON blob. Collapsed
+// whitespace, capped length. Always the real input, never the agent's
+// description: a permission is a security decision, so the reader approves
+// what will run, not what the agent says it will do. Shared by the run
+// station's prompt and the board card's permission row so the two show the
+// same line.
+export function summarizePermissionInput(tool: string, input: Record<string, unknown>): string {
+  const str = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : '')
+  let s = ''
+  if (tool === 'Bash') s = str('command')
+  else if (tool === 'Read' || tool === 'Write' || tool === 'Edit') s = str('file_path')
+  else if (tool === 'Glob' || tool === 'Grep') s = str('pattern')
+  else if (tool === 'WebFetch') s = str('url')
+  else if (tool === 'WebSearch') s = str('query')
+  // Arbitrary tools (MCP servers, etc.) fall through to the first string field
+  // below — best-effort, since their input shape isn't known here.
+  if (!s) {
+    for (const v of Object.values(input)) {
+      if (typeof v === 'string' && v) {
+        s = v
+        break
+      }
+    }
+  }
+  if (!s) {
+    try {
+      s = JSON.stringify(input)
+    } catch {
+      s = ''
+    }
+  }
+  s = s.replace(/\s+/g, ' ').trim()
+  return s.length > 80 ? s.slice(0, 79) + '…' : s
+}

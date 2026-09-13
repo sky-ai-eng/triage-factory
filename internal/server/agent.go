@@ -422,8 +422,9 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 }
 
 // conversationResponse projects a Conversation into the wire shape the frontend consumes,
-// augmented with `artifact_count` (so the Board card can show how many artifacts
-// a conversation produced without a per-card fetch) and the derived approval signal:
+// augmented with `artifact_count` and the per-kind `artifact_counts` (so the
+// Board card can show what a conversation produced without a per-card fetch) and
+// the derived approval signal:
 // `has_unresolved_artifacts` (bool), `unresolved_pr_count` /
 // `unresolved_review_count`, and `pending_artifact_ids` (the set of unresolved
 // approvable artifact ids — all draft PRs + all ready reviews — for the per-item
@@ -546,6 +547,12 @@ func conversationResponse(conv *domain.Conversation, artifactCount int, arts []d
 		out["has_unresolved_artifacts"] = prCount > 0 || reviewCount > 0
 		out["unresolved_pr_count"] = prCount
 		out["unresolved_review_count"] = reviewCount
+		// What the conversation wrote, by kind — the board card's footer
+		// strip. Under the same definitive-only guard as the counts above and
+		// off the same artifact set, so the strip's totals and the warm marks
+		// it draws from the unresolved counts can never disagree. {} when the
+		// conversation produced nothing.
+		out["artifact_counts"] = domain.ArtifactCountsByKind(arts)
 		// The set of unresolved approvable artifact ids (all draft PRs + all ready
 		// reviews) — what the approval UI lists for per-item resolve. Emitted under
 		// the same definitive-only guard as the counts above, and always non-nil so

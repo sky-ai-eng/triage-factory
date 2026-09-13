@@ -3,7 +3,7 @@ import type { Task } from '../types'
 /**
  * Displays a source badge ("PR", "GH", "Jira", "Slack") with entity_kind-aware
  * text and consistent styling. Use size="lg" for the Cards swipe card, default
- * "sm" for TaskCard / Board sidebar / AgentCard.
+ * "sm" elsewhere.
  */
 export default function SourceBadge({ task, size = 'sm' }: { task: Task; size?: 'sm' | 'lg' }) {
   const isGitHub = task.source === 'github'

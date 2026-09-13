@@ -42,6 +42,19 @@ func UnresolvedArtifactIDs(arts []Artifact) []string {
 	return ids
 }
 
+// ArtifactCountsByKind is how many artifacts of each kind a conversation
+// produced, keyed by the kind string with absent kinds omitted. It is what the
+// board card's footer strip states — what the run WROTE, by kind — and it is
+// taken off the same artifact set as UnresolvedArtifactCounts so the strip's
+// totals and its warm marks can never disagree.
+func ArtifactCountsByKind(arts []Artifact) map[string]int {
+	out := map[string]int{}
+	for _, a := range arts {
+		out[a.Kind]++
+	}
+	return out
+}
+
 // UnresolvedArtifactCounts returns how many draft pull requests and ready
 // (finalized) pending reviews in arts are still awaiting resolution. Same
 // predicates as HasUnresolvedArtifacts, broken out per kind for the run

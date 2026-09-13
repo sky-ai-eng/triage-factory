@@ -1,0 +1,201 @@
+/* TaskCard — the board's atom. Reasoning in TaskCard.tsx; geometry here. */
+
+/* The surface. Filled rather than bare: on dark ground a hairline alone leaves
+   a card floating on the lane, and the tint is what makes it a surface rather
+   than an outline. Every card sits on the SAME ground, a failed one included —
+   a lane is read by scanning down it, and two card grounds put a texture
+   difference in the way of that scan. */
+.tc {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 11px;
+  border-radius: var(--radius-inflow);
+  background: var(--color-raised);
+  box-shadow: inset 0 0 0 1px var(--color-line-1);
+}
+
+/* The title row: status mark, title, out-arrow, assignee mark. */
+.tc-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+/* The title's tooltip host has to disappear into the flex row it sits in —
+   Tooltip renders a <span class="tip-host"> around its trigger, and an
+   unstyled inline host would not shrink, so a long title would push the
+   assignee mark off the card instead of clamping. Tooltip merges a className
+   for exactly this and takes no style prop, which is why one class exists
+   here rather than an inline rule. */
+.tc-title {
+  display: block;
+  min-width: 0;
+  flex: 1;
+}
+/* The title is a link and says so: pointer, and warm on hover. Color lives
+   here rather than inline so :hover can reach it. */
+.tc-clamp {
+  color: var(--color-ink-1);
+  font-family: var(--font-sans);
+  font-size: var(--text-card-title);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-card-title);
+}
+.tc-link {
+  text-decoration: none;
+  cursor: pointer;
+  transition: color var(--dur-hover, 0.15s);
+}
+.tc-link:hover {
+  color: var(--color-warm);
+}
+/* The link takes the tab stop, so it owes a focus ring like anything else.
+   Without a link the tooltip host is the stop, and it owes the same ring. */
+.tc-link:focus-visible,
+.tc-title:focus-visible {
+  outline: 2px solid var(--color-warm);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+/* The out-arrow: dim at rest, lit with the title. Aligned to the first line
+   by a fixed top offset, since it sits beside a block that may be two lines. */
+.tc-out {
+  flex-shrink: 0;
+  display: inline-flex;
+  margin-top: 3px;
+  color: var(--color-ink-4);
+  opacity: 0.55;
+  text-decoration: none;
+  transition:
+    opacity var(--dur-hover, 0.15s),
+    transform var(--dur-hover, 0.15s) var(--ease-default),
+    color var(--dur-hover, 0.15s);
+}
+.tc-title:hover ~ .tc-out,
+.tc-out:hover {
+  opacity: 1;
+  transform: translate(1px, -1px);
+  color: var(--color-warm);
+}
+/* The other direction. The title warms the arrow through `~`, but the arrow
+   cannot warm the title the same way — it FOLLOWS the title in the row and CSS
+   has no previous-sibling combinator. So the shared row is asked instead: the
+   div holding both matches `:has(> .tc-out:hover)`, and the title is reached
+   downward from there. Without it the pair advertises itself as one affordance
+   from one side only, and hovering the arrow lights half of it. */
+.tc-head:has(> .tc-out:hover) > .tc-title .tc-link {
+  color: var(--color-warm);
+}
+
+/* Two lines, then an ellipsis. The clamp caps the height; the ellipsis is
+   painted by hand, because -webkit-line-clamp here crops without drawing one —
+   measured: line two ended 40px short of the box with room for the glyph, and
+   the title read "…it recorded at" with the last word simply gone. The card
+   sets data-clipped when scrollHeight exceeds clientHeight, and this paints a
+   glyph over the tail of line two on a short fade to the card's ground. The
+   max-height is the hard cap in case -webkit-box is unsupported. */
+.tc-clamp {
+  position: relative;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  max-height: 2.8em;
+}
+.tc-clamp[data-clipped]::after {
+  content: '…';
+  position: absolute;
+  bottom: 0;
+  left: var(--tc-ell, auto);
+  right: 0;
+  padding-left: 1px;
+  color: inherit;
+  line-height: inherit;
+  /* Only matters when line two runs to the edge and the glyph has to sit on
+     the tail of a word; after a clean break there is nothing under it. */
+  background: linear-gradient(to right, transparent, var(--color-raised) 60%);
+}
+
+/* What the work is, in the reporter's words. */
+.tc-summary {
+  font-size: var(--text-secondary);
+  line-height: var(--leading-body);
+  color: var(--color-ink-2);
+}
+
+/* The footer: elapsed (or age) on the left, the artifact strip on the right. */
+.tc-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 16px;
+}
+/* A readout, one rung up from ink-4 so elapsed and the strip read at the same
+   weight. */
+.tc-readout {
+  font-family: var(--font-mono);
+  font-size: var(--text-readout);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-readout);
+  color: color-mix(in srgb, var(--color-ink-3) 80%, transparent);
+  white-space: nowrap;
+}
+
+/* A delegation the bot took but that never fired. The one alarm line a card
+   carries, because it is the one thing on a card a reader can fix from it. */
+.tc-retry {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  border: 0;
+  background: none;
+  padding: 1px 0;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: var(--text-reported);
+  color: var(--color-alarm);
+  cursor: pointer;
+}
+.tc-retry-verb {
+  margin-left: auto;
+  font-family: var(--font-sans);
+  font-size: var(--text-ui);
+  font-weight: 500;
+  color: var(--color-ink-3);
+  transition: color var(--dur-hover);
+}
+.tc-retry:hover .tc-retry-verb {
+  color: var(--color-ink-1);
+}
+
+/* The card in hand lifts above the picker's scrim, so the surface being
+   operated stays at full contrast while the rest of the board recedes.
+   :has(), because the open state lives on .assign several levels down and the
+   scrim is a body-level sibling — nothing here can be reached by descending.
+   41 clears the scrim's 40 by one.
+
+   .closing is held for the scrim's fade, and it is not optional: z-index does
+   not interpolate, so a lift that ends with .open leaves the card behind a
+   scrim that is still at full strength — it dims hard and then brightens,
+   which reads as a flash on the row you just used.
+
+   This needs the card's ancestors to stay out of the way: a plain overflow
+   scroller on a lane is fine, but a transform, filter or will-change makes
+   that lane the containing block and the card can no longer clear the scrim. */
+.tc:has(.assign.open),
+.tc:has(.assign.closing) {
+  z-index: 41;
+}
+/* Except when the menu has flipped DOWN, onto the card itself. The lift exists
+   so the card in hand stays readable beside the menu; with the menu on top of
+   it the card is not readable either way, so the card goes under the scrim
+   with the page and the picker lifts itself instead. */
+.tc:has(.assign[data-side='down'].open),
+.tc:has(.assign[data-side='down'].closing) {
+  z-index: auto;
+}

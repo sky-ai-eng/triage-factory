@@ -126,6 +126,21 @@ describe('Tooltip', () => {
     expect(tip()).toBeNull()
   })
 
+  it('lets a click through to a link the host wraps — the hint is its definition, not its gate', () => {
+    const navigated = vi.fn((e: { preventDefault: () => void }) => e.preventDefault())
+    render(
+      <Tooltip content="acme/api#761" focusable={false}>
+        <a href="https://example.test/761" onClick={navigated}>
+          the title
+        </a>
+      </Tooltip>,
+    )
+    fireEvent.click(screen.getByText('the title'))
+    expect(navigated).toHaveBeenCalledTimes(1)
+    // The click was the link's, not a tap on the hint: nothing toggled.
+    expect(tip()).toBeNull()
+  })
+
   // jsdom does no layout, so the trigger's position is stubbed: a scroll
   // moves it by setting `y` before firing.
   const triggerAt = (y: { v: number }) =>

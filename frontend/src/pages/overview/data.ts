@@ -1,6 +1,11 @@
 import type { ReactNode } from 'react'
 import type { Conversation, Task } from '../../types'
-import { ACTIVE_STATUSES, isFailedStatus, workStartedAt } from '../../lib/conversationStatus'
+import {
+  ACTIVE_STATUSES,
+  activeProse,
+  isFailedStatus,
+  workStartedAt,
+} from '../../lib/conversationStatus'
 import type { ActivityDay } from '../../hooks/useTeamActivity'
 import type { RunLifecycle, RunRowItem, RunSource } from '../../ui/runrow/RunRows'
 
@@ -64,24 +69,14 @@ export function lifecycleOf(conv: Conversation): RunLifecycle {
   return 'done'
 }
 
-/** What a setting-up run is doing, in the words the state actually means.
- *  `running` deliberately has no entry: a running row prefers the server's
- *  derived current_action, and the honest fallback when it had nothing to say
- *  is the bare word — never a fabricated action. */
-const PHASE_PROSE: Record<string, string> = {
-  fetching: 'Fetching the workspace',
-  cloning: 'Cloning the repository',
-  agent_starting: 'Starting the agent',
-  awaiting_credentials: 'Waiting on credentials',
-}
-
-/** A working (or queued) row's one prose string. Working rows lead with the
- *  agent's own action; setup phases have real labels; a queued run's prose
- *  names the work it will do — the wait itself is the hourglass mark's job. */
+/** A working (or queued) row's one prose string. A queued run's prose names
+ *  the work it will do — the wait itself is the hourglass mark's job. From
+ *  the claim on it is the line every surface narrates a live conversation
+ *  with (lib/conversationStatus activeProse): the setup phase, then the
+ *  agent's own action, with the bare state word until it has one. */
 export function workingProse(conv: Conversation, task: Task | undefined): string {
   if (conv.Status === 'queued') return task?.title || 'Waiting for a slot'
-  if (conv.current_action) return conv.current_action
-  return PHASE_PROSE[conv.Status] ?? 'Working'
+  return activeProse(conv) ?? 'Working'
 }
 
 /** Why a failed run failed, from the machine-readable kind — never parsed out

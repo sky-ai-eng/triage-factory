@@ -35,8 +35,8 @@ interface Props {
   // alongside a button text rename so the prop, the
   // user-facing label, and the actual behavior all agree. The
   // genuinely destructive "throw the prepared review away and
-  // re-queue the task" action lives on AgentCard's "Return to
-  // queue" button.
+  // re-queue the task" action is the board's drag back to the
+  // queue.
   onClose: () => void
   submitting: boolean
   // readOnly renders the resolved-review view: the verdict as a static chip, no

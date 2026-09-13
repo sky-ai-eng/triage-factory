@@ -187,7 +187,7 @@ export function liveHeat(base: number, lastMessageAt: number | null, now: number
   return Math.min(1, base + flare)
 }
 
-// compactNum — 1.2k / 3.4M for the gauge readouts (M-aware; cardStyle's is k-only).
+// compactNum — 1.2k / 3.4M for the gauge readouts.
 export function compactNum(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M'
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'

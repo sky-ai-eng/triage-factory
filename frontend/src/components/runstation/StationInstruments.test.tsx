@@ -24,9 +24,9 @@ function renderRail(over: Partial<Conversation>, now: number = T0 + 60_000) {
   render(<TelemetryRail conversation={r} messages={[]} state={stationState(r)} now={now} />)
 }
 
-// The rail's settled queued readout must share AgentCard's visibility
-// threshold (QUEUE_DWELL_VISIBLE_MS) — the two surfaces previously used
-// different magic numbers and disagreed for short waits.
+// The rail's settled queued readout keys on the shared visibility threshold
+// (QUEUE_DWELL_VISIBLE_MS), so every surface that reads a dwell agrees on
+// which short waits are worth a readout.
 describe('TelemetryRail queued readout', () => {
   it('hides a settled dwell below the shared threshold (normal dispatch latency)', () => {
     renderRail({
