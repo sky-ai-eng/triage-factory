@@ -1503,7 +1503,7 @@ export default function Board() {
 
       <DragOverlay dropAnimation={null}>
         {activeTask && (
-          <div className="w-[336px]">
+          <div className="bc-lift w-[336px]">
             <TaskCard
               title={activeTask.title}
               entity={activeTask.source_id}

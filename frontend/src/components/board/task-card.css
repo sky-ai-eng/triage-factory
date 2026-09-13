@@ -1,19 +1,26 @@
 /* TaskCard — the board's atom. Reasoning in TaskCard.tsx; geometry here. */
 
-/* The surface. Filled rather than bare: on dark ground a hairline alone leaves
-   a card floating on the lane, and the tint is what makes it a surface rather
-   than an outline. Every card sits on the SAME ground, a failed one included —
-   a lane is read by scanning down it, and two card grounds put a texture
-   difference in the way of that scan. */
+/* The surface. The card is the same material as the lane, one step warmer:
+   a tint composited onto the lane's own ground, not an opaque slab above it.
+   `raised` is the ground a floating surface stands on, and a lane of raised
+   cards reads as a stack of slabs whose edges the eye finds before the
+   titles — and whose second box the brackets, the one drawn frame, were never
+   meant to sit on. The inset hairline is what ends the card. Every card sits
+   on the SAME ground, a failed one included — a lane is read by scanning down
+   it, and two card grounds put a texture difference in the way of that scan.
+   Because the fill is translucent, whatever a lane paints under its cards
+   reaches them; the lane is bare today, and the drag overlay backs its lifted
+   card with the ground for the same reason (board.css). The padding and gap
+   are the card scale's tokens, which every other surface is set against. */
 .tc {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px 14px 11px;
+  gap: var(--card-gap);
+  padding: var(--card-pad-y) var(--card-pad-x) 10px;
   border-radius: var(--radius-inflow);
-  background: var(--color-raised);
-  box-shadow: inset 0 0 0 1px var(--color-line-1);
+  background: var(--color-tint-1);
+  box-shadow: var(--shadow-edge);
 }
 
 /* The title row: status mark, title, out-arrow, assignee mark. */
@@ -115,8 +122,12 @@
   color: inherit;
   line-height: inherit;
   /* Only matters when line two runs to the edge and the glyph has to sit on
-     the tail of a word; after a clean break there is nothing under it. */
-  background: linear-gradient(to right, transparent, var(--color-raised) 60%);
+     the tail of a word; after a clean break there is nothing under it. The
+     fade has to end on the card's own colour, and the card has none of its
+     own — it composites onto the lane — so it ends on the ground the lane
+     sits on. Ending on any other surface puts a visible swatch behind the
+     title's last word. */
+  background: linear-gradient(to right, transparent, var(--color-ground) 60%);
 }
 
 /* What the work is, in the reporter's words. */

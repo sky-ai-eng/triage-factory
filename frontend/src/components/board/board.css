@@ -105,3 +105,12 @@ body:has(.bc-dragging),
 body:has(.bc-dragging) * {
   cursor: grabbing !important;
 }
+
+/* The lifted card. The card's fill is a tint over whatever is behind it, and
+   behind a card in hand is the rest of the board — other cards, their titles
+   — which would show through. The overlay backs it with the lane's ground,
+   so the card in flight looks exactly as it does at rest. */
+.bc-lift {
+  border-radius: var(--radius-inflow);
+  background: var(--color-ground);
+}
