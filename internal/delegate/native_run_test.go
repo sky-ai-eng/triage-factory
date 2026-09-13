@@ -139,9 +139,15 @@ func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
 				}
 			}
 
+			// Through the read that answers it in production, so the gate is
+			// exercised against a transcript rather than a hand-set bool.
+			replay := s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, "r-mem")
+			if replay.opened != tc.drive {
+				t.Fatalf("nativeClaimReplay opened = %v, want %v", replay.opened, tc.drive)
+			}
 			// handedOff=true: the warm-step shape, where the orchestrator can
 			// read the file but not delete it.
-			got := s.prepareInheritedMemory(context.Background(), runmode.LocalDefaultOrgID, "r-mem", cwd, nil, true)
+			got := prepareInheritedMemory(cwd, nil, true, replay.opened)
 			if (got != nil) != tc.wantDigest {
 				t.Fatalf("fingerprint present = %v, want %v", got != nil, tc.wantDigest)
 			}
