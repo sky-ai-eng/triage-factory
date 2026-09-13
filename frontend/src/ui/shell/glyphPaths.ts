@@ -72,7 +72,8 @@ export const GLYPH_PATHS = {
   // The board card's marks, on the same grid and construction. `shield` is
   // `gov` above: the product's one drawing of that shape.
   branch: 'M14 4a2 2 0 11-4 0 2 2 0 014 0M6 12a2 2 0 11-4 0 2 2 0 014 0M4 2v8M12 6a6 6 0 01-6 6',
-  review: 'M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8zM10 8a2 2 0 11-4 0 2 2 0 014 0',
+  review:
+    'M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8zM10 8a2 2 0 11-4 0 2 2 0 014 0',
   comment: 'M14 10a1.3 1.3 0 01-1.3 1.3H4.7L2 14V3.3A1.3 1.3 0 013.3 2h9.4A1.3 1.3 0 0114 3.3z',
   check: 'M13.3 4.7L6 12l-3.3-3.3',
   cross: 'M12 4L4 12M4 4l8 8',

@@ -44,5 +44,10 @@ describe('CrateMark', () => {
     expect(svg.getAttribute('data-state')).toBe('idle')
     expect(svg.getAttribute('role')).toBe('img')
     expect(svg.querySelector('title')?.textContent).toBe('Working')
+    // No crate carries an inline animation: an element's own style would beat
+    // the stylesheet's still, and the pile would keep cycling.
+    for (const g of svg.querySelectorAll<SVGGElement>('g.cm-crate, g.cm-flash')) {
+      expect(g.style.animation).toBe('')
+    }
   })
 })

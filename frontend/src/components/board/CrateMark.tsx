@@ -91,12 +91,15 @@ function Crate({
 }: {
   cls: string
   pos: { cx: number; cy: number }
-  anim: string
+  /** The crate's keyframe animation, or none for a still. Inline, so it has
+   *  to be absent rather than overridden: an element's own style beats any
+   *  stylesheet rule, whatever the selector. */
+  anim?: string
   shade: number[]
 }) {
   const F = faces(pos.cx, pos.cy)
   return (
-    <g className={cls} style={{ animation: anim }}>
+    <g className={cls} style={anim ? { animation: anim } : undefined}>
       <path d={F.left} fill={mix(shade[0])} {...EDGE} />
       <path d={F.right} fill={mix(shade[1])} {...EDGE} />
       <path d={F.top} fill={shade[2] === 100 ? WARM : mix(shade[2])} {...EDGE} />
@@ -128,7 +131,11 @@ export function CrateMark({
   style,
 }: CrateMarkProps) {
   const cycle = `${duration}s`
-  const a = (name: string) => `tf-crate-${name} ${cycle} linear infinite both`
+  // Idle holds the pile built and unlit: no crate animates, and the flash and
+  // rebuild copies are hidden by the stylesheet, which leaves the floor row
+  // and the crate stacked on the back cell at rest.
+  const idle = state === 'idle'
+  const a = (name: string) => (idle ? undefined : `tf-crate-${name} ${cycle} linear infinite both`)
   // Row A's crates and Row B's crates share the two flash keyframes, so the
   // whole row lights and leaves on one frame however many crates are in it.
   // Each cell is trailed by its own flash copy — painter order, see above.
@@ -136,8 +143,8 @@ export function CrateMark({
     key: string
     cls: string
     pos: { cx: number; cy: number }
-    anim: string
-    flash: string
+    anim?: string
+    flash?: string
     flashPos: { cx: number; cy: number }
   }> = [
     {
