@@ -97,9 +97,31 @@ describe('deriveCard lifecycle', () => {
     expect(m.elapsed).toBe('2m 0s')
   })
 
-  it('names the setup phase as activity', () => {
-    const m = deriveCard(task(), conversation({ Status: 'cloning' }), undefined, NOW)
-    expect(m.command).toBe('Cloning the repository')
+  it('names the setup phase as activity, in the words the Overview uses', () => {
+    const phase = (s: string) => deriveCard(task(), conversation({ Status: s }), undefined, NOW)
+    expect(phase('fetching').command).toBe('Fetching the workspace')
+    expect(phase('cloning').command).toBe('Cloning the repository')
+    expect(phase('agent_starting').command).toBe('Starting the agent')
+    expect(phase('awaiting_credentials').command).toBe('Waiting on credentials')
+    // A phase wins over a stale action: on a resume the transcript still
+    // carries the previous turn's last call, and a cloning run edits nothing.
+    expect(
+      deriveCard(
+        task(),
+        conversation({ Status: 'cloning', current_action: 'Editing internal/server/agent.go' }),
+        undefined,
+        NOW,
+      ).command,
+    ).toBe('Cloning the repository')
+  })
+
+  it('keeps the live line while the agent is up but has not acted yet', () => {
+    // Between the agent coming live and its first tool call the server has
+    // no action to derive, and the row says the state rather than going back
+    // to the destination label.
+    const m = deriveCard(task(), conversation({ Status: 'running' }), undefined, NOW)
+    expect(m.lifecycle).toBe('working')
+    expect(m.command).toBe('Working')
   })
 
   it('reads the terminals: done, failed, and the stop that is not a finish', () => {

@@ -50,6 +50,34 @@ export function isActiveStatus(status: ConversationStatusValue): boolean {
   return (ACTIVE_STATUSES as readonly string[]).includes(status)
 }
 
+// PHASE_PROSE — what a setting-up conversation is doing, in the words the
+// state actually means. One table for every surface that narrates a live
+// conversation (an Overview row, a board card), so the same run never reads
+// as two different procedures on two pages.
+export const PHASE_PROSE: Record<ClaimPhase, string> = {
+  fetching: 'Fetching the workspace',
+  cloning: 'Cloning the repository',
+  agent_starting: 'Starting the agent',
+  awaiting_credentials: 'Waiting on credentials',
+}
+
+// activeProse — the one prose line an ACTIVE conversation shows in place of
+// the title it does not have. A setup phase names the step it is on, and it
+// wins over the action line: on a resume the newest transcript row still
+// carries the previous turn's last tool call, and a conversation cloning its
+// workspace is not editing anything. A running conversation leads with the
+// server's derived current_action, and the honest fallback when it had
+// nothing to say yet — the agent is live and thinking, its first tool call
+// still to come — is the bare state word, never a fabricated action. Not
+// active (queued, parked, ended) is undefined: each surface has its own
+// words for those.
+export function activeProse(conversation: Conversation): string | undefined {
+  const s = conversation.Status
+  if (isClaimPhase(s)) return PHASE_PROSE[s]
+  if (s === 'running') return conversation.current_action || 'Working'
+  return undefined
+}
+
 // A run that returning its task to the queue would STOP: minted and waiting
 // for a slot, setting up, or executing a turn. `open` is excluded — a parked
 // conversation is between turns, and ending it stops nothing — and so are the

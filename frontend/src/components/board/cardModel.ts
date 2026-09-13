@@ -1,10 +1,10 @@
-import type { ClaimPhase, Conversation, Task } from '../../types'
+import type { Conversation, Task } from '../../types'
 import {
+  activeProse,
   completionKind,
   formatDurationMs,
   formatElapsed,
   isActiveStatus,
-  isClaimPhase,
   isFailedStatus,
   workStartedAt,
 } from '../../lib/conversationStatus'
@@ -63,14 +63,6 @@ export interface CardModel {
   ticking: boolean
 }
 
-// The setup phases are activity too — the row is never empty on a live card.
-const PHASE_LABEL: Record<ClaimPhase, string> = {
-  fetching: 'Fetching the repository',
-  cloning: 'Cloning the repository',
-  agent_starting: 'Starting the agent',
-  awaiting_credentials: 'Awaiting credentials',
-}
-
 export function deriveCard(
   task: Task,
   conversation: Conversation | undefined,
@@ -89,16 +81,18 @@ export function deriveCard(
       ? undefined
       : (hasRun && conversation?.ResultSummary) || task.ai_summary || undefined
 
+  // The row is never empty on a live card. A queued run is waiting on a
+  // slot, and the board says so in the same moving line it keeps using once
+  // the agent starts talking; from the claim on, the line is the one every
+  // surface narrates a live conversation with — the setup phase, then the
+  // agent's own action, with the bare state word standing in until it has
+  // one — so a card and an Overview row never tell two stories about one run.
   let command: string | undefined
   if (working && conversation) {
-    const s = conversation.Status
-    if (isClaimPhase(s)) command = PHASE_LABEL[s]
-    else if (s === 'queued') {
-      // A queued run is waiting on a slot, and the board says so in the same
-      // moving line it keeps using once the agent starts talking.
+    if (conversation.Status === 'queued') {
       const ahead = (conversation.queue_position ?? 1) - 1
       command = ahead > 0 ? `Waiting for a run slot · ${ahead} ahead` : 'Waiting for a run slot'
-    } else command = conversation.current_action
+    } else command = activeProse(conversation)
   }
 
   let elapsed: string | undefined
