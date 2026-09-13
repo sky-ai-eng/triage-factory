@@ -130,8 +130,8 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		knowledge = s.stageTeamKnowledge(stagingCtx, orgID, cfg.teamID, claudeCwd, owned)
 	}
 
-	opened, replayedBlock := s.nativeClaimReplay(stagingCtx, orgID, conversationID)
-	priorMemory := prepareInheritedMemory(claudeCwd, owned, handedOff, opened)
+	replay := s.nativeClaimReplay(stagingCtx, orgID, conversationID)
+	priorMemory := prepareInheritedMemory(claudeCwd, owned, handedOff, replay.opened)
 	mirror = s.newMemoryMirror(orgID, conversationID, cfg.blueprintRunID, task.EntityID, claudeCwd, priorMemory)
 	stagingSpan.End()
 
@@ -139,7 +139,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// into the memory tree the launch is about to mount read-only. Block 1 is the
 	// same for every native run; everything about this one is block 2 and the
 	// opening row.
-	launchText := s.buildNativeLaunchText(ctx, task, mission, cfg, knowledge, replayedBlock)
+	launchText := s.buildNativeLaunchText(ctx, task, mission, cfg, knowledge, replay.block)
 	systemPrompt := nativeSystemPrompt()
 
 	// The task context's retention. Nothing is pinned through a compaction, so
@@ -158,13 +158,14 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	}
 	// Block 2 goes on the row before the agent gets it, so the next claim of this
 	// conversation is handed these bytes rather than composing a second set that
-	// agrees with them by care. A claim that replayed writes nothing: the row
-	// already holds what this engagement is running under.
+	// agrees with them by care. Only a claim that knows the row holds nothing
+	// writes — see claimReplay.stampable, which is what keeps a failed read from
+	// overwriting a launch's block with a recomposition of it.
 	//
 	// Below the stop read for the same reason the phase write is: a fence
 	// refusal means a successor owns the conversation, which is not what a user
 	// cancel is, and only one of the two parks with a cancel recorded.
-	if replayedBlock == "" && s.persistSystemBlock(ctx, orgID, conversationID, cfg.claimID, launchText.systemBlock) {
+	if replay.stampable && s.persistSystemBlock(ctx, orgID, conversationID, cfg.claimID, launchText.systemBlock) {
 		return engagementDisposition{fenced: true}
 	}
 	if s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting) {
@@ -399,36 +400,62 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, m
 	}
 }
 
-// nativeClaimReplay reads what this claim inherits from the conversation it is
-// picking up: whether that conversation has already been opened, and the block 2
-// its launch ran under.
+// claimReplay is what a native claim inherits from the conversation it is
+// picking up, resolved before it composes anything.
+type claimReplay struct {
+	// opened is whether that conversation has already been opened — the
+	// transcript's task-context row, which is this runtime's "has it run
+	// before" and stands in for the prior session id the SDK path has. It
+	// decides both which memory file the claim may trust and whether block 2 is
+	// this claim's to compose.
+	opened bool
+	// block is the block 2 to run under, verbatim: what the launch stamped on an
+	// opened conversation. Empty when this claim must compose its own.
+	block string
+	// stampable is whether this claim may put what it composes on the row, and
+	// it is true only when the row is KNOWN to hold nothing. A read that failed
+	// is not that: an opened conversation's row may already carry the launch's
+	// bytes, and a claim that overwrote them on a transient error would make one
+	// failed read the permanent prompt of every claim after it. Such a claim
+	// composes — it still needs a block to run — and leaves the row alone, so
+	// the next one can reach the launch's bytes.
+	stampable bool
+}
+
+// nativeClaimReplay resolves that, over at most two reads.
 //
-// One transcript read answers both, because both turn on one question — has
-// this conversation run? The transcript is the native runtime's answer to it,
-// standing in for the prior session id the SDK path has and this runtime has no
-// counterpart to, and the stored block is only the launch's for a conversation
-// that reached the model. It reads the task-context row rather than any row, so
-// a conversation handed nothing but a claim-time notice is still fresh.
+// It reads the stored block directly rather than through launchedSystemBlock,
+// which degrades a failed read to the empty block. That is the right answer for
+// the SDK resume, whose only use of the value is the string it sends and which
+// never writes the column back; here the difference between "empty" and
+// "unreadable" decides a write, so it has to survive.
 //
-// A read failure answers "not opened", so the claim behaves as a launch:
-// composing block 2, and distrusting any memory file it finds. Both are the
-// cheap mistake. Crediting this run with a predecessor's memory corrupts the
-// entity's durable record, and a replay is an assertion about a turn that has
-// already happened; composing costs one run's notes and one cache entry.
-//
-// The block comes back empty for a conversation opened before this runtime
-// stored one. That claim composes live, once, and stamps what it composed.
-func (s *Spawner) nativeClaimReplay(ctx context.Context, orgID, conversationID string) (opened bool, systemBlock string) {
+// Neither read failing refuses the claim. A transcript this process cannot read
+// is treated as unopened, which is the cheap mistake for the memory file it
+// gates — crediting this run with a predecessor's notes corrupts the entity's
+// durable record, while distrusting its own costs one run's notes. Both failures
+// then cost this turn a recomposed block 2, and neither costs the row its own.
+func (s *Spawner) nativeClaimReplay(ctx context.Context, orgID, conversationID string) claimReplay {
 	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("read transcript to classify this claim failed; treating it as this conversation's launch",
+		delegateLog.Warn("read transcript to classify this claim failed; composing this engagement's block 2 and leaving the row's to the next claim",
 			"conversation", conversationID, "error", err)
-		return false, ""
+		return claimReplay{}
 	}
 	if !conversationOpened(rows) {
-		return false, ""
+		// This claim IS the launch, so the block it composes is the one the row
+		// owes every claim after it.
+		return claimReplay{stampable: true}
 	}
-	return true, s.launchedSystemBlock(ctx, orgID, conversationID)
+	block, err := s.conversations.SystemBlockSystem(ctx, orgID, conversationID)
+	if err != nil {
+		delegateLog.Warn("read the launch's system block failed; this engagement composes its own block 2 and leaves the row's to the next claim",
+			"conversation", conversationID, "org_id", orgID, "error", err)
+		return claimReplay{opened: true}
+	}
+	// An empty block on an opened conversation is a row from before this runtime
+	// stamped one. It composes live, once, and stamps what it composed.
+	return claimReplay{opened: true, block: block, stampable: block == ""}
 }
 
 // nativeSpec is the prompt selector for every native engagement.

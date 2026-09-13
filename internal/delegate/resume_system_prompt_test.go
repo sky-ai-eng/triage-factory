@@ -3,11 +3,13 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -244,11 +246,14 @@ func TestNativeReclaim_ReplaysTheStampedBlockByteForByte(t *testing.T) {
 	// The team rewrites its branch convention while the conversation is parked.
 	f.setBranchTemplate(t, "after-the-park/<ticket-id>")
 
-	opened, replayed := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
-	if !opened {
+	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	if !replay.opened {
 		t.Fatal("an opened conversation read as fresh; the wake would compose a second block")
 	}
-	woke := f.nativeLaunchText(t, "review the failing check", "", replayed)
+	if replay.stampable {
+		t.Error("a wake with the launch's block in hand reported the row as writable")
+	}
+	woke := f.nativeLaunchText(t, "review the failing check", "", replay.block)
 	if woke.systemBlock != launched {
 		t.Errorf("the wake's block is not the launch's;\ngot:\n%s\n\nwant:\n%s", woke.systemBlock, launched)
 	}
@@ -289,8 +294,8 @@ func TestNativeReclaim_KeepsTheManifestOnAHandedOffTree(t *testing.T) {
 
 	// The wake, on a tree handed off: nothing is staged, so the manifest this
 	// claim could render is empty. The replay is what keeps the section.
-	_, replayed := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
-	if got := f.nativeLaunchText(t, "review the failing check", "", replayed).systemBlock; got != launched {
+	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	if got := f.nativeLaunchText(t, "review the failing check", "", replay.block).systemBlock; got != launched {
 		t.Errorf("the wake's block is not the launch's;\ngot:\n%s\n\nwant:\n%s", got, launched)
 	}
 	// The control: composing on that same empty manifest is what the wake used
@@ -308,9 +313,9 @@ func TestNativeClaim_OpenedRowWithNoBlockComposesOnceAndStamps(t *testing.T) {
 	f := newLaunchFixture(t, "native-legacy")
 	f.open(t)
 
-	opened, replayed := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
-	if !opened || replayed != "" {
-		t.Fatalf("nativeClaimReplay = (%v, %q), want an opened row with nothing to replay", opened, replayed)
+	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	if !replay.opened || replay.block != "" || !replay.stampable {
+		t.Fatalf("nativeClaimReplay = %+v, want an opened row with nothing to replay and nothing to lose", replay)
 	}
 
 	if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
@@ -320,8 +325,97 @@ func TestNativeClaim_OpenedRowWithNoBlockComposesOnceAndStamps(t *testing.T) {
 	if !strings.Contains(stamped, "review the failing check") {
 		t.Errorf("the claim composed nothing onto the empty row;\n%s", stamped)
 	}
-	if _, replayed = f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID); replayed != stamped {
-		t.Errorf("the next claim would not replay what this one composed;\ngot:\n%s\n\nwant:\n%s", replayed, stamped)
+	if next := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID); next.block != stamped {
+		t.Errorf("the next claim would not replay what this one composed;\ngot:\n%s\n\nwant:\n%s", next.block, stamped)
+	}
+}
+
+// storeReadDown is a conversation store with exactly one read broken, the rest
+// of it intact — the shape of a transient failure on the call that decides
+// whether a claim replays or composes.
+type storeReadDown struct {
+	db.ConversationStore
+	transcript bool
+	block      bool
+}
+
+func (d storeReadDown) ListForAssemblySystem(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
+	if d.transcript {
+		return nil, errors.New("read transcript: connection reset")
+	}
+	return d.ConversationStore.ListForAssemblySystem(ctx, orgID, conversationID)
+}
+
+func (d storeReadDown) SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error) {
+	if d.block {
+		return "", errors.New("read system block: connection reset")
+	}
+	return d.ConversationStore.SystemBlockSystem(ctx, orgID, conversationID)
+}
+
+// TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne is the asymmetry the stamp is
+// gated on. A claim that cannot read what the row holds has to compose a block 2
+// to get its turn moving — but it must not then write that block back, because
+// the row may already carry the launch's, and a stamp would make one failed read
+// the permanent prompt of every claim after it. So the turn degrades and the row
+// does not: the next claim still reaches the launch's bytes.
+//
+// Both reads that answer the question are covered. Whichever fails, the claim
+// cannot tell an empty row from an unreadable one, which is the whole reason
+// "empty" is not what it writes on.
+func TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		down       storeReadDown
+		wantOpened bool
+	}{
+		{name: "the system-block read is down", down: storeReadDown{block: true}, wantOpened: true},
+		// An unreadable transcript cannot say the conversation was opened, and
+		// the claim reads as fresh — which is the memory gate's cheap mistake,
+		// and must still not cost the row its block.
+		{name: "the transcript read is down", down: storeReadDown{transcript: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaunchFixture(t, "native-readfail")
+			f.setBranchTemplate(t, "at-launch/<ticket-id>")
+			if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
+				t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the stamp")
+			}
+			launched := f.storedSystemBlock(t)
+			if launched == "" {
+				t.Fatal("the launch stamped nothing; this test would pass vacuously")
+			}
+			f.open(t)
+			f.setBranchTemplate(t, "after-the-park/<ticket-id>")
+
+			// The read goes down between the park and the wake. The write does
+			// not, so a stamp would land if this claim made one.
+			down := tc.down
+			down.ConversationStore = f.s.conversations
+			f.s.conversations = down
+
+			replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+			if replay.opened != tc.wantOpened {
+				t.Errorf("opened = %v, want %v", replay.opened, tc.wantOpened)
+			}
+			if replay.block != "" {
+				t.Errorf("block = %q, want nothing to replay — the read failed", replay.block)
+			}
+			// Error rather than Fatal: the row assertion below is the damage
+			// this one predicts, and a regression should report both.
+			if replay.stampable {
+				t.Error("a claim that could not read the row reported it as writable; a transient read would rewrite a parked conversation's prompt")
+			}
+
+			// The turn runs on a recomposed block, and the row keeps the
+			// launch's for the claim after it.
+			if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
+				t.Fatal("the wake's tool host launched")
+			}
+			if got := f.storedSystemBlock(t); got != launched {
+				t.Errorf("a failed read rewrote the row;\ngot:\n%s\n\nwant:\n%s", got, launched)
+			}
+		})
 	}
 }
 
@@ -344,11 +438,11 @@ func TestNativeNextStep_ComposesItsOwnBlock(t *testing.T) {
 	f.setBranchTemplate(t, "step-two/<ticket-id>")
 	stepTwo := f.nextStep(t)
 
-	opened, replayed := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, stepTwo)
-	if opened || replayed != "" {
-		t.Fatalf("nativeClaimReplay for a new step = (%v, %q), want a fresh conversation", opened, replayed)
+	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, stepTwo)
+	if replay.opened || replay.block != "" || !replay.stampable {
+		t.Fatalf("nativeClaimReplay for a new step = %+v, want a fresh conversation with a block of its own to stamp", replay)
 	}
-	composed := f.nativeLaunchText(t, "open the pull request", "", replayed).systemBlock
+	composed := f.nativeLaunchText(t, "open the pull request", "", replay.block).systemBlock
 	if !strings.Contains(composed, "step-two/<ticket-id>") {
 		t.Errorf("the new step did not compose against today's inputs;\n%s", composed)
 	}
