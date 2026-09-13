@@ -206,7 +206,7 @@ export default function Board() {
   const loadDone = doneList.load
   const [loading, setLoading] = useState(true)
 
-  // Presence (TFAC-392): the board is an answer-capable surface for permission
+  // Presence: the board is an answer-capable surface for permission
   // prompts (it renders + answers them inline), so report it while mounted and
   // fall back to 'other' on unmount so an unattended conversation fast-denies once the
   // operator leaves the board.
@@ -1315,7 +1315,7 @@ export default function Board() {
 
   const activeTask = activeId ? allTasks.get(activeId) : null
 
-  // Zero-team safe landing (TFAC-445) — a multi-mode user on no team has no
+  // Zero-team safe landing — a multi-mode user on no team has no
   // team-scoped tasks to show. Surface the friendly empty state instead of an
   // empty board (local mode always has its default team, so this is multi-only
   // in practice). Gated on teamsLoaded so it doesn't flash during cold load.
