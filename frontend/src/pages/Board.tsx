@@ -358,7 +358,7 @@ export default function Board() {
   // to fire. Cleared when a conversation for the task lands.
   const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
 
-  // Resolve-all confirmation (TFAC-384 §4): the two gestures that END a task —
+  // Resolve-all confirmation: the two gestures that END a task —
   // drag-to-Done from In Progress (complete) and from Queued (dismiss) —
   // force-resolve every unresolved artifact and cancel a live conversation.
   // When the target task has unresolved artifacts we stash the intended
@@ -446,7 +446,7 @@ export default function Board() {
   // conversation a requeue handed back with it, along with that
   // conversation's artifacts, so the Queued lane is enriched like the other
   // two. ONE aggregated call returns every task's conversations, replacing
-  // the old per-task serial loop of 2–3 round-trips each (TFAC-98).
+  // a per-task serial loop of 2–3 round-trips each.
   const enrich = useCallback(
     async (taskIDs: string[]) => {
       if (taskIDs.length === 0) return
@@ -585,8 +585,7 @@ export default function Board() {
 
       // Paint the board as soon as the three columns are in state. The agent-conversation
       // enrichment below fills cards progressively and must not hold the
-      // spinner — it used to: setLoading sat in `finally` after the whole serial
-      // loop, so first paint waited on every per-task round-trip (TFAC-98).
+      // spinner, so it is cleared here rather than waiting for `enrich` to settle.
       setLoading(false)
 
       await enrich([...queuedItems, ...inProgressItems, ...doneItems].map((t) => t.id))
@@ -828,7 +827,7 @@ export default function Board() {
             }
           }
         } else if (event.type === 'artifact_updated') {
-          // Reconciler (TFAC-464): an artifact this conversation produced changed state
+          // Reconciler: an artifact this conversation produced changed state
           // on GitHub. The conversation's own status is unchanged — only its
           // artifact-derived surface (the strip, the frame) — so refetch
           // the conversation, with NO optimistic Status write (unlike conversation_update).
