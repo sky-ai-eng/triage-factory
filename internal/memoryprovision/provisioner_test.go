@@ -83,7 +83,15 @@ type fixture struct {
 	taskID         string
 	entityID       string
 	notified       []string
+
+	// stopBrain cancels the context the Manager is running under, exactly as
+	// internal/app's stopBrain cancels brainCtx when the lease goes.
+	stopBrain context.CancelFunc
 }
+
+// testModels is the resolver every Manager in this file takes: an org whose
+// background-jobs model is set.
+var testModels systemllm.ModelFunc = func(context.Context, string) (string, error) { return testModel, nil }
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
@@ -130,12 +138,28 @@ func newFixture(t *testing.T) *fixture {
 		orgID: orgID, conversationID: conversationID, taskID: task.ID, entityID: entity.ID,
 	}
 	f.fake = &fakeCompleter{text: "The branch aa/fix-build was pushed and a pull request opened.", runs: stores.SystemLLMRuns}
-	f.mgr = NewManager(stores, nil, func(context.Context, string) (string, error) { return testModel, nil }, nil, nil,
-		func(orgID, taskID, taskStatus string) {
-			f.notified = append(f.notified, taskID+":"+taskStatus)
-		})
-	f.mgr.complete = f.fake
+	f.mgr = f.newManager(func(orgID, taskID, taskStatus string) {
+		f.notified = append(f.notified, taskID+":"+taskStatus)
+	})
+
+	// Running, as it is on the pod that holds the brain: the doorbell hangs off
+	// this context, so a Manager nobody started would drop every nudge. The
+	// interval is one no test waits out — these ring the doorbell or call sweep
+	// directly, and a tick landing underneath would race their attempt counts.
+	brainCtx, stopBrain := context.WithCancel(context.Background())
+	t.Cleanup(stopBrain)
+	f.stopBrain = stopBrain
+	f.mgr.Run(brainCtx, time.Hour)
 	return f
+}
+
+// newManager builds a Manager over the fixture's stores and completer. Separate
+// from newFixture for the doorbell cases that need a second one — in particular
+// one that was never Run.
+func (f *fixture) newManager(notify func(orgID, taskID, taskStatus string)) *Manager {
+	m := NewManager(f.stores, nil, testModels, nil, nil, notify)
+	m.complete = f.fake
+	return m
 }
 
 // end stamps the boundary that makes the memory owed.
@@ -171,6 +195,16 @@ func (f *fixture) newestAttempt() *domain.MemoryAttempt {
 		f.t.Fatalf("read newest attempt: %v", err)
 	}
 	return a
+}
+
+// attemptInFlight reports whether an attempt on this conversation still holds
+// the Manager's in-process slot — the one observable that says a doorbell's
+// goroutine has actually unwound, rather than being about to write.
+func (f *fixture) attemptInFlight() bool {
+	f.mgr.mu.Lock()
+	defer f.mgr.mu.Unlock()
+	_, busy := f.mgr.inflight[f.conversationID]
+	return busy
 }
 
 func (f *fixture) attemptCount() int {
@@ -555,21 +589,92 @@ func TestNudge_SettlesOneConversation(t *testing.T) {
 	}
 }
 
-// TestRunSweep_StopsWithTheBrain: stopBrain cancels brainCtx, and the sweep
-// must stop rather than tick on against a pod that no longer holds the lease.
-func TestRunSweep_StopsWithTheBrain(t *testing.T) {
-	RunSweep(t.Context(), nil, time.Millisecond) // nil manager is a no-op, not a panic
+// TestRun_StopsWithTheBrain: stopBrain cancels brainCtx, and the sweep must
+// stop rather than tick on against a pod that no longer holds the lease.
+func TestRun_StopsWithTheBrain(t *testing.T) {
+	var absent *Manager
+	absent.Run(t.Context(), time.Millisecond) // nil manager is a no-op, not a panic
 
 	f := newFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { RunSweep(ctx, f.mgr, time.Millisecond); close(done) }()
+	go func() { f.mgr.sweepLoop(ctx, time.Millisecond); close(done) }()
 
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("RunSweep did not return after its context was cancelled")
+		t.Fatal("the sweep did not return after its context was cancelled")
+	}
+}
+
+// TestNudge_StopsWithTheBrain is the doorbell's half of the same property, and
+// the reason the doorbell derives its context from the brain's rather than from
+// Background: an attempt that outlived its demotion would run on for up to its
+// 90s bound while the successor's sweep — which reads the same debt from the
+// same rows — starts a second generation of the same memory. Two attempt rows,
+// two spends, last upsert wins.
+//
+// The completion is never released, so the only thing that can end this attempt
+// is the cancellation under test.
+func TestNudge_StopsWithTheBrain(t *testing.T) {
+	f := newFixture(t)
+	f.message(roleAssistant, "", "worked on it")
+	f.end()
+	f.fake.block = make(chan struct{})
+
+	f.mgr.Nudge(f.orgID, f.conversationID)
+	waitFor(t, func() bool { return f.fake.callCount() == 1 })
+
+	f.stopBrain()
+	waitFor(t, func() bool { return !f.attemptInFlight() })
+
+	attempt := f.newestAttempt()
+	if attempt == nil {
+		t.Fatal("the attempt row must still be there")
+	}
+	if attempt.CompletedAt != nil || attempt.Outcome != "" {
+		t.Errorf("attempt = %+v, want it left open — abandonment is derived from started_at, never stamped", attempt)
+	}
+	if f.memory() != nil {
+		t.Error("an abandoned doorbell attempt writes no memory row")
+	}
+}
+
+// TestNudge_OnAManagerThatIsNotRunning_IsDropped covers both ends of a brain's
+// life: a nudge before it started, and one after the demotion that stopped it.
+// Both are dropped rather than run on a context of their own, and the cost is
+// nothing — the relay only ever rings the holder, and the sweep on whichever
+// pod holds the lease is what settles the debt either way.
+//
+// Asserted against a conversation that IS owed, so a guard that let the call
+// through would generate and fail this.
+func TestNudge_OnAManagerThatIsNotRunning_IsDropped(t *testing.T) {
+	f := newFixture(t)
+	f.message(roleAssistant, "", "worked on it")
+	f.end()
+
+	// Never started. A second Manager over the same stores, because the
+	// fixture's own is running by construction.
+	unstarted := f.newManager(nil)
+	unstarted.Nudge(f.orgID, f.conversationID)
+	unstarted.Nudge(f.orgID, "")
+
+	// Started, then demoted.
+	f.stopBrain()
+	f.mgr.Nudge(f.orgID, f.conversationID)
+	f.mgr.Nudge(f.orgID, "")
+
+	time.Sleep(50 * time.Millisecond) // the goroutines the guard must never start
+
+	if f.attemptCount() != 0 {
+		t.Errorf("attempts = %d, want 0 — a manager that is not running must not generate", f.attemptCount())
+	}
+	if f.fake.callCount() != 0 {
+		t.Errorf("model called %d times by a manager that is not running, want 0", f.fake.callCount())
+	}
+	if f.memory() != nil {
+		t.Error("a dropped doorbell settled a memory")
 	}
 }
 

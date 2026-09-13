@@ -5,19 +5,40 @@ import (
 	"time"
 )
 
-// RunSweep settles every conversation owing a memory, on a ticker, until ctx
-// is cancelled — brain-owned and started/stopped with the rest of the brain
-// exactly like credprovision.RunAwaitingSweep. mgr nil is a no-op, the same
+// Run starts the manager under ctx: it arms the doorbell and spawns the
+// backstop sweep, both of which stop when ctx is cancelled — brain-owned and
+// started/stopped with the rest of the brain exactly like
+// credprovision.RunAwaitingSweep. A nil Manager is a no-op, the same
 // nil-checked shape every other brain-unit member uses.
+//
+// Arming is this call's own work rather than the spawned loop's, so a doorbell
+// rung the instant startBrain returns finds a running manager: the gate the
+// ringer passes (internal/app's isBrainHolder) flips with the lease, not with
+// whenever a goroutine first gets scheduled, and a nudge landing in that gap
+// would be dropped by a brain that is in fact running.
+//
+// Everything the manager generates hangs off ctx, the doorbell's attempts as
+// much as the sweep's. That is what makes a demoted holder provably done
+// generating before its successor starts: the successor's sweep sees the same
+// debt and, once the backoff ages out, begins its own attempt on it.
+func (m *Manager) Run(ctx context.Context, interval time.Duration) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.base = ctx
+	m.mu.Unlock()
+	go m.sweepLoop(ctx, interval)
+}
+
+// sweepLoop settles every conversation owing a memory, on a ticker, until ctx
+// is cancelled.
 //
 // It is the completion path, not the fast one: the doorbell shortens the wait
 // from a boundary to its memory, but the relay is lossy by contract and this
 // is what makes the debt settle anyway. Without a doorbell at all, latency is
 // one interval.
-func RunSweep(ctx context.Context, mgr *Manager, interval time.Duration) {
-	if mgr == nil {
-		return
-	}
+func (m *Manager) sweepLoop(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -25,9 +46,22 @@ func RunSweep(ctx context.Context, mgr *Manager, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			mgr.sweep(ctx, AttemptBackoff, "")
+			m.sweep(ctx, AttemptBackoff, "")
 		}
 	}
+}
+
+// running returns the context the manager was last started under, or nil when
+// it is not running — never started, or started by a brain since demoted. One
+// answer for both, because a caller does the same thing with either: this pod
+// is not the one that should be generating.
+func (m *Manager) running() context.Context {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.base == nil || m.base.Err() != nil {
+		return nil
+	}
+	return m.base
 }
 
 // Nudge is the doorbell: a boundary that just ended a conversation, or a
@@ -48,9 +82,13 @@ func RunSweep(ctx context.Context, mgr *Manager, interval time.Duration) {
 // whatever arrived on the wire, so the door that knows what an empty value
 // would mean is the one that has to say no.
 //
-// Fire-and-forget, and bounded: the caller is a relay dispatch that must not
-// block on a model call, and must not be able to leak a goroutine per
-// notification either.
+// Fire-and-forget, and bounded twice: by nudgeTimeout, because the caller is a
+// relay dispatch that must not block on a model call or leak a goroutine per
+// notification; and by the context the manager is RUNNING under, because a
+// generation that outlived its brain is the second one — the successor sweeps
+// the same debt. So a nudge to a manager that is not running is dropped rather
+// than given a context of its own: the sweep is the completion path, and the
+// relay only ever rings the holder.
 func (m *Manager) Nudge(orgID, conversationID string) {
 	if m == nil {
 		return
@@ -59,8 +97,14 @@ func (m *Manager) Nudge(orgID, conversationID string) {
 		log.Warn("memory doorbell: empty org; dropping the nudge", "conversation", conversationID)
 		return
 	}
+	base := m.running()
+	if base == nil {
+		log.Warn("memory doorbell: the provisioner is not running; dropping the nudge",
+			"org", orgID, "conversation", conversationID)
+		return
+	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), nudgeTimeout)
+		ctx, cancel := context.WithTimeout(base, nudgeTimeout)
 		defer cancel()
 		if conversationID == "" {
 			m.sweep(ctx, 0, orgID)
