@@ -441,50 +441,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	// The derived "claimed" member of the list vocabulary is scoped to
-	// status='queued' so the Board's Claimed column doesn't double-render a
-	// user-claimed task that's also in In Progress. Distinct from the broader
-	// "any non-terminal user-claimed task" set.
-	// The Claimed projection is "status queued plus a claim column set", and
-	// the queue-holds-no-assignee rule empties it: every claim door lands its
-	// row in progress, and tasks_queue_unclaimed refuses anything that would
-	// put a held row back in the queue. So the filter is still answerable and
-	// its answer is nothing, whoever holds the task.
-	//
-	// TODO(TFAC-1009): the value leaves the list vocabulary, and this test
-	// with it.
-	t.Run("List_claimed_projection_is_empty_because_the_queue_holds_no_claims", func(t *testing.T) {
-		s, orgID, _, agentID, userID, seed, _ := mk(t)
-		_, _, byUser := seed(t, "bs-claimed-user")
-		_, _, byAgent := seed(t, "bs-claimed-bot")
-		if ok, err := s.ClaimQueuedForUser(ctx, orgID, byUser, userID); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
-		if ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, byAgent, agentID, ""); err != nil || !ok {
-			t.Fatalf("stamp agent: ok=%v err=%v", ok, err)
-		}
-
-		claimed, total, err := s.List(ctx, orgID, claimedFilter(), db.ListOpts{Limit: 50})
-		if err != nil {
-			t.Fatalf("List claimed: %v", err)
-		}
-		if len(claimed) != 0 || total != 0 {
-			t.Errorf("Claimed projection returned %d rows / total %d, want none — a claimed task is in progress", len(claimed), total)
-		}
-		// Both rows are findable, on the lane the claim put them in.
-		inProgress, _, err := s.List(ctx, orgID, db.TaskListFilter{Statuses: []string{"in_progress"}}, db.ListOpts{Limit: 50})
-		if err != nil {
-			t.Fatalf("List in_progress: %v", err)
-		}
-		seen := map[string]bool{}
-		for _, x := range inProgress {
-			seen[x.ID] = true
-		}
-		if !seen[byUser] || !seen[byAgent] {
-			t.Errorf("in_progress lane missing a claimed task: user=%v bot=%v", seen[byUser], seen[byAgent])
-		}
-	})
-
 	t.Run("FindOrCreate_idempotent_on_dedup_key", func(t *testing.T) {
 		s, orgID, teamID, _, _, seed, _ := mk(t)
 		entityID, eventID, _ := seed(t, "foc-dedup")
@@ -1491,12 +1447,6 @@ func queueWithSnoozedFilter() db.TaskListFilter {
 	}
 }
 
-// claimedFilter is the board's Claimed column — the claim axis, not a
-// lifecycle status.
-func claimedFilter() db.TaskListFilter {
-	return db.TaskListFilter{Statuses: []string{db.TaskListStatusClaimed}, IncludeSnoozed: true}
-}
-
 // runTaskListConformance covers what pagination adds on top of the filter
 // semantics the subtests above pin: that a page is a *window* on a stable
 // total order, so walking every page yields each matching row exactly once,
@@ -1861,15 +1811,12 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		if _, total := listIDs(t, s, orgID, both, db.ListOpts{Limit: 50}); total != 2 {
 			t.Errorf("queued+in_progress total = %d, want 2", total)
 		}
-		// Contradictory but well-formed: the queue lane narrowed to the
-		// claimed is empty rather than an error. (So is the claimed lane
-		// under only_unclaimed — see the claimed-projection test above, where
-		// it is empty for the stronger reason that nothing is there at all.)
-		contradiction := queueFilter()
-		contradiction.OnlyUnclaimed = false
-		contradiction.Statuses = []string{db.TaskListStatusClaimed}
+		// Contradictory but well-formed: the in-progress lane narrowed to
+		// the unclaimed set is empty rather than an error, because a claim is
+		// what puts a row in that lane.
+		contradiction := db.TaskListFilter{Statuses: []string{"in_progress"}, OnlyUnclaimed: true, IncludeSnoozed: true}
 		if ids, total := listIDs(t, s, orgID, contradiction, db.ListOpts{Limit: 50}); len(ids) != 0 || total != 0 {
-			t.Errorf("claimed lane = %v (total %d), want empty", ids, total)
+			t.Errorf("unclaimed in_progress lane = %v (total %d), want empty", ids, total)
 		}
 	})
 

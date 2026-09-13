@@ -366,22 +366,8 @@ func pgTaskListWhere(orgID string, f db.TaskListFilter) (string, []any) {
 	clauses := []string{"t.org_id = $1"}
 
 	if len(f.Statuses) > 0 {
-		var arms []string
-		var lifecycle []string
-		for _, s := range f.Statuses {
-			if s == db.TaskListStatusClaimed {
-				// The claim axis, not a lifecycle status — see
-				// db.TaskListStatusClaimed and the SQLite mirror.
-				arms = append(arms, "(t.status = 'queued' AND (t.claimed_by_user_id IS NOT NULL OR t.claimed_by_agent_id IS NOT NULL))")
-				continue
-			}
-			lifecycle = append(lifecycle, s)
-		}
-		if len(lifecycle) > 0 {
-			args = append(args, lifecycle)
-			arms = append(arms, fmt.Sprintf("t.status = ANY($%d)", len(args)))
-		}
-		clauses = append(clauses, "("+strings.Join(arms, " OR ")+")")
+		args = append(args, f.Statuses)
+		clauses = append(clauses, fmt.Sprintf("t.status = ANY($%d)", len(args)))
 	}
 	if f.OnlyUnclaimed {
 		clauses = append(clauses, "t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL")

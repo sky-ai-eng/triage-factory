@@ -59,25 +59,13 @@ type AgentClaimStamp struct {
 	ActingTeamID string
 }
 
-// TaskListStatusClaimed is the one member of the list vocabulary that is not
-// a lifecycle status: it names the claim axis instead — a task at
-// status='queued' that someone (a user or the bot) has taken. "Queued and
-// held by someone" is a question a headless caller can legitimately ask, and
-// it can't be spelled with a lifecycle status because a claim doesn't change
-// one. It stays scoped to status='queued'.
-//
-// TODO(TFAC-1009): the tasks_queue_unclaimed CHECK empties this projection —
-// assigning a task lands it in progress, so a queued row holds no claim and
-// nothing can match. The value leaves the vocabulary with that ticket.
-const TaskListStatusClaimed = "claimed"
-
 // TaskListStatuses is the full vocabulary TaskListFilter.Statuses accepts:
-// the five lifecycle statuses the tasks CHECK constraint enforces, plus the
-// derived "claimed". A value outside it is a caller fault, not an empty
-// result — the HTTP layer rejects it before the store is reached.
+// the five lifecycle statuses the tasks CHECK constraint enforces, and
+// nothing else — a lane is a status, so every member is one value of the
+// column. A value outside it is a caller fault, not an empty result: the HTTP
+// layer rejects it before the store is reached.
 var TaskListStatuses = []string{
 	"queued", "in_progress", "done", "dismissed", "snoozed",
-	TaskListStatusClaimed,
 }
 
 // TaskListFilter is the filter set for TaskStore.List. Every field is

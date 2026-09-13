@@ -93,9 +93,7 @@ export function queueCountBody(): TaskListRequest {
   return { ...queueListBody([]), page_size: 0 }
 }
 
-/** One lane of the board by status. The vocabulary also carries `claimed` —
- *  the claim axis rather than a lifecycle status — which no lane is built
- *  from, and which the queue-holds-no-assignee rule now empties. */
+/** One lane of the board by status. */
 export function statusListBody(
   status: string,
   teamIds: string[],
