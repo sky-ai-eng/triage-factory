@@ -529,6 +529,13 @@ func parseForcedCompaction(completion *inference.Completion) (analysis, summary 
 
 // compactionSections is the summary's section contract, shared verbatim by
 // both prompts so the two paths produce the same document.
+//
+// TODO(TFAC-378): nothing verifies the model actually wrote section 1, and a
+// summary that skips it commits normally. That costs a delegation nothing —
+// its mission is a system block, re-sent on every call whatever the summary
+// says — but a taskless conversation's opening message is its only statement
+// of purpose, so the interactive surface needs a carrier outside the summary
+// (or a check here) before it mints one.
 const compactionSections = `1. Request — what this conversation was asked for: the person's ask, or the mission it was started to carry out, in one short paragraph, in their words where a person wrote them.
 2. Progress — what has been accomplished and where the work stands.
 3. User messages — every message the user sent, listed near-verbatim. Do not paraphrase them into a gestalt.

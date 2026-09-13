@@ -115,10 +115,11 @@ func TestWarmCompaction_TripsCommitsAndOrdersQueue(t *testing.T) {
 	if !strings.Contains(resultRow.Content, "everything that happened") {
 		t.Errorf("result row content = %q, want the summary", resultRow.Content)
 	}
-	// Nothing is re-injected verbatim, not even the opening human message:
-	// the result row is the preamble and the summary, and the summary is what
-	// carries the request.
-	if strings.Contains(resultRow.Content, "<original_request>") || strings.Contains(resultRow.Content, "the mission") {
+	// Nothing is re-injected verbatim, not even the opening human message.
+	// The tag is the assertion, not the opening's text: a summary is allowed
+	// to contain any words it likes, this one's included, since restating the
+	// request is now the summary's job.
+	if strings.Contains(resultRow.Content, "<original_request>") {
 		t.Errorf("result row = %q, want no verbatim re-injection of the opening", resultRow.Content)
 	}
 
