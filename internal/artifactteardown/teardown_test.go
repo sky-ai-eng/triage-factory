@@ -52,9 +52,10 @@ func (f *fakeStores) RecordExternalAction(_ context.Context, _ string, act domai
 // It counts batches, because the split between the credential pre-pass and the
 // write pass is what keeps a GitHub probe out of a write transaction.
 type fakeDeps struct {
-	stores   *fakeStores
-	resolver ghclient.Resolver
-	batches  int
+	stores      *fakeStores
+	resolver    ghclient.Resolver
+	batches     int
+	githubReads int
 }
 
 func (d *fakeDeps) Batch(_ context.Context, _ string, fn func(Stores) error) error {
@@ -62,7 +63,10 @@ func (d *fakeDeps) Batch(_ context.Context, _ string, fn func(Stores) error) err
 	return fn(d.stores)
 }
 
-func (d *fakeDeps) GitHub() ghclient.Resolver { return d.resolver }
+func (d *fakeDeps) GitHub() ghclient.Resolver {
+	d.githubReads++
+	return d.resolver
+}
 
 // oneClientResolver answers every repo with the same client. Only the arm the
 // teardown uses answers; the rest panic so a test that starts depending on them
@@ -91,9 +95,16 @@ func (r oneClientResolver) OrgIdentityFor(context.Context, string) (string, stri
 
 // draftPR and stagedReview are the two unresolved shapes a stopped run leaves.
 func draftPR(conversationID string) domain.Artifact {
-	a := domain.NewPullRequestArtifact("owner/repo", 7, "PR_node", "tf/fix", "main",
-		"https://example.test/owner/repo/pull/7", "Proposed title", "Proposed body", true)
-	a.ID = "art_pr"
+	return draftPRIn(conversationID, "owner/repo", 7, "art_pr")
+}
+
+// draftPRIn is draftPR addressed at a named repo and number, for the tests that
+// need several — the credential classification is keyed per repo and the closes
+// are per artifact, so "once" only means something across more than one of each.
+func draftPRIn(conversationID, repoPath string, number int, id string) domain.Artifact {
+	a := domain.NewPullRequestArtifact(repoPath, number, "PR_node", "tf/fix", "main",
+		"https://example.test/"+repoPath+"/pull/7", "Proposed title", "Proposed body", true)
+	a.ID = id
 	a.ConversationID = conversationID
 	a.TeamID = "team"
 	return a
@@ -255,6 +266,37 @@ func TestTeardown_NoGitHubResolverStillFlips(t *testing.T) {
 	}
 	if len(stores.recorded) != 1 || stores.recorded[0].Credential != domain.CredentialGitHubApp {
 		t.Errorf("audit rows = %+v, want one recording the app fallback", stores.recorded)
+	}
+}
+
+// TestTeardown_ReadsTheResolverOnce is the consistency contract, not a
+// micro-optimization. The credential an audit row names and the client the
+// close that row describes is made through have to be the same resolver: an
+// adapter's is swapped under a running teardown on a GitHub config change, so a
+// re-read per repo or per artifact could file a row asserting a tier no close
+// used. Three PRs across two repos, and the resolver is still read once.
+func TestTeardown_ReadsTheResolverOnce(t *testing.T) {
+	client, closes := closingGitHub(t)
+	stores := &fakeStores{
+		convs: []domain.Conversation{{ID: "conv-a"}, {ID: "conv-b"}},
+		artifacts: map[string][]domain.Artifact{
+			"conv-a": {draftPRIn("conv-a", "owner/one", 7, "art_1"), draftPRIn("conv-a", "owner/two", 8, "art_2")},
+			"conv-b": {draftPRIn("conv-b", "owner/two", 9, "art_3"), stagedReview("conv-b")},
+		},
+	}
+	deps := &fakeDeps{stores: stores, resolver: oneClientResolver{client: client}}
+
+	if err := Teardown(context.Background(), deps, "org", "task", "user-1"); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if deps.githubReads != 1 {
+		t.Errorf("GitHub() reads = %d, want 1 — both halves must see one resolver", deps.githubReads)
+	}
+	if *closes != 3 {
+		t.Errorf("PR closes on GitHub = %d, want 3", *closes)
+	}
+	if len(stores.recorded) != 3 {
+		t.Errorf("audit rows = %d, want one per closed PR", len(stores.recorded))
 	}
 }
 

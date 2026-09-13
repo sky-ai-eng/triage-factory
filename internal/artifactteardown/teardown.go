@@ -57,8 +57,10 @@ type Deps interface {
 	Batch(ctx context.Context, orgID string, fn func(Stores) error) error
 	// GitHub is the per-repo client source the draft-PR closes are made
 	// through, and the same source their credential attribution is classified
-	// against. Nil is tolerated: the closes are skipped and every audit row
-	// records the App, exactly as an unclassifiable repo does.
+	// against. Read exactly once per teardown, so an adapter is free to take a
+	// lock or otherwise pay for the read. Nil is tolerated: the closes are
+	// skipped and every audit row records the App, exactly as an
+	// unclassifiable repo does.
 	GitHub() ghclient.Resolver
 }
 
@@ -80,11 +82,19 @@ type Deps interface {
 // is expected. A GitHub close that fails is not an error — the artifact is
 // already marked closed and reconciliation retires the object later.
 func Teardown(ctx context.Context, deps Deps, orgID, taskID, actorUserID string) error {
+	// One resolver for the whole pass, read once and threaded through both
+	// halves. An adapter's resolver is swapped under it on a GitHub config
+	// change, and the two halves are two views of the same act: the credential
+	// each audit row names, and the client the close that row describes is
+	// actually made through. Re-reading per repo or per artifact would let a
+	// swap land between them and file a row asserting a tier no close used.
+	resolver := deps.GitHub()
+
 	// Which credential each draft PR's close is made under is classified
 	// BEFORE the write batch opens, for the same reason the closes themselves
 	// run after it: the audit rows are composed inside that batch, and a
 	// classification can reach GitHub.
-	credentials := credentialsForTask(ctx, deps, orgID, taskID)
+	credentials := credentialsForTask(ctx, deps, resolver, orgID, taskID)
 
 	// Draft PRs captured inside the batch (state already flipped) and closed on
 	// GitHub after it lands — a network call must not hold a write transaction
@@ -149,7 +159,7 @@ func Teardown(ctx context.Context, deps Deps, orgID, taskID, actorUserID string)
 	// reconciliation to retire later and must never fail the close that
 	// triggered this. Branches stay.
 	for i := range prArtifacts {
-		CloseDraftPR(ctx, deps.GitHub(), orgID, &prArtifacts[i])
+		CloseDraftPR(ctx, resolver, orgID, &prArtifacts[i])
 	}
 	return nil
 }
@@ -164,7 +174,10 @@ func Teardown(ctx context.Context, deps Deps, orgID, taskID, actorUserID string)
 // the App, exactly as an unclassifiable repo does. The teardown itself is
 // unaffected — it re-reads the artifacts under its own batch and is the
 // authority on which ones it resolves.
-func credentialsForTask(ctx context.Context, deps Deps, orgID, taskID string) map[string]string {
+//
+// resolver is passed in rather than read from deps: it must be the same one the
+// closes these rows describe are made through (see Teardown).
+func credentialsForTask(ctx context.Context, deps Deps, resolver ghclient.Resolver, orgID, taskID string) map[string]string {
 	type ownerRepo struct{ owner, repo string }
 	repos := map[string]ownerRepo{}
 	if err := deps.Batch(ctx, orgID, func(st Stores) error {
@@ -191,7 +204,7 @@ func credentialsForTask(ctx context.Context, deps Deps, orgID, taskID string) ma
 	}
 	out := make(map[string]string, len(repos))
 	for repoID, or := range repos {
-		out[repoID] = ghclient.CredentialForRepo(ctx, deps.GitHub(), orgID, or.owner, or.repo)
+		out[repoID] = ghclient.CredentialForRepo(ctx, resolver, orgID, or.owner, or.repo)
 	}
 	return out
 }
