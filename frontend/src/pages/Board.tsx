@@ -363,7 +363,7 @@ export default function Board() {
     artifactId: string
   } | null>(null)
 
-  // Resolve-all confirmation (TFAC-384 §4): the two gestures that END a task —
+  // Resolve-all confirmation: the two gestures that END a task —
   // drag-to-Done from In Progress (complete) and from Queued (dismiss) —
   // force-resolve every unresolved artifact and cancel a live conversation.
   // When the target task has unresolved artifacts we stash the intended
@@ -451,7 +451,7 @@ export default function Board() {
   // conversation's artifacts, so the Queued lane is enriched like the other
   // two. ONE aggregated call returns every task's conversations plus each
   // task's primary-conversation transcript, replacing the old per-task serial
-  // loop of 2–3 round-trips each (TFAC-98).
+  // loop of 2–3 round-trips each.
   const enrich = useCallback(
     async (tasks: Task[]) => {
       if (tasks.length === 0) return
@@ -611,7 +611,7 @@ export default function Board() {
       // Paint the board as soon as the three columns are in state. The agent-conversation
       // enrichment below fills cards progressively and must not hold the
       // spinner — it used to: setLoading sat in `finally` after the whole serial
-      // loop, so first paint waited on every per-task round-trip (TFAC-98).
+      // loop, so first paint waited on every per-task round-trip.
       setLoading(false)
 
       await enrich([...queuedItems, ...inProgressItems, ...doneItems])
