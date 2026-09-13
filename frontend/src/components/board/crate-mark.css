@@ -1,0 +1,255 @@
+/* CrateMark — the working run's mark. One cycle is 7.2s by default and every
+   time below is a percentage of it, so `duration` retimes the whole sequence
+   without touching a keyframe.
+
+     4  a          the back crate falls in
+    12  b          20  c          the middles
+    28  top        stacks on the back crate
+    36  e          the front crate — floor row complete at 40
+    42  flash      the finished row goes to full warm and STAYS lit
+    47  clear      all four floor crates and the flash go out on the SAME
+                   frame, which is what makes it one event rather than four
+    47-53  fall    the survivor drops one crate-height into the gap
+    58  f   64  g   70  h        the floor is rebuilt around it
+    76  flash      81  clear     the same beat again, survivor included
+    81-100 rest    the empty pallet, 1.4s
+
+   An arrival FALLS: 3px above its cell, landing over 4% (288ms), fading up
+   across the first half of the drop and accelerating into the last — the
+   waypoint is short of half the distance, which is what makes it fall rather
+   than slide. Only the two clears step hard. Do not soften them into fades:
+   the hard step is the entire difference between a row clearing and a row
+   drifting away. */
+
+@keyframes tf-crate-1 {
+  0%,
+  4% {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  6% {
+    opacity: 1;
+    transform: translateY(-2.25px);
+  }
+  8%,
+  46% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  47%,
+  100% {
+    opacity: 0;
+    transform: translateY(0);
+  }
+}
+@keyframes tf-crate-2 {
+  0%,
+  12% {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  14% {
+    opacity: 1;
+    transform: translateY(-2.25px);
+  }
+  16%,
+  46% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  47%,
+  100% {
+    opacity: 0;
+    transform: translateY(0);
+  }
+}
+@keyframes tf-crate-3 {
+  0%,
+  20% {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  22% {
+    opacity: 1;
+    transform: translateY(-2.25px);
+  }
+  24%,
+  46% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  47%,
+  100% {
+    opacity: 0;
+    transform: translateY(0);
+  }
+}
+@keyframes tf-crate-4 {
+  0%,
+  36% {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  38% {
+    opacity: 1;
+    transform: translateY(-2.25px);
+  }
+  40%,
+  46% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  47%,
+  100% {
+    opacity: 0;
+    transform: translateY(0);
+  }
+}
+/* The survivor falls TWICE: in from the ceiling onto the stack, then one
+   crate-height into the gap the first clear leaves. Same acceleration both
+   times, so it is recognisably the same crate obeying the same gravity. */
+@keyframes tf-crate-top {
+  0%,
+  28% {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2.25px);
+  }
+  32%,
+  47% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(1.1px);
+  }
+  53%,
+  80% {
+    opacity: 1;
+    transform: translateY(4px);
+  }
+  81%,
+  100% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@keyframes tf-crate-5 {
+  0%,
+  58% {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(-2.25px);
+  }
+  62%,
+  80% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  81%,
+  100% {
+    opacity: 0;
+    transform: translateY(0);
+  }
+}
+@keyframes tf-crate-6 {
+  0%,
+  64% {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  66% {
+    opacity: 1;
+    transform: translateY(-2.25px);
+  }
+  68%,
+  80% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  81%,
+  100% {
+    opacity: 0;
+    transform: translateY(0);
+  }
+}
+@keyframes tf-crate-7 {
+  0%,
+  70% {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  72% {
+    opacity: 1;
+    transform: translateY(-2.25px);
+  }
+  74%,
+  80% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  81%,
+  100% {
+    opacity: 0;
+    transform: translateY(0);
+  }
+}
+@keyframes tf-crate-rowa {
+  0%,
+  41% {
+    opacity: 0;
+  }
+  42%,
+  46% {
+    opacity: 1;
+  }
+  47%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes tf-crate-rowb {
+  0%,
+  75% {
+    opacity: 0;
+  }
+  76%,
+  80% {
+    opacity: 1;
+  }
+  81%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Idle and reduced motion resolve to the SAME still: the pile built, one crate
+   stacked on the back cell, nothing lit. Pausing the animation instead would
+   freeze it wherever it happened to be, and a fifth of this cycle is an empty
+   pallet — a working card showing nothing at all is the one still it must
+   never land on. The reduced-motion arm is needed even under tokens/motion.css's
+   blanket `animation: none`: that blanket leaves every crate at opacity 1 and
+   the two flash copies drawn over them, so the row would read as lit. */
+.tf-crates[data-state='idle'] .cm-crate {
+  animation: none;
+}
+.tf-crates[data-state='idle'] .cm-flash,
+.tf-crates[data-state='idle'] .cm-rebuild {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tf-crates .cm-crate {
+    animation: none;
+  }
+  .tf-crates .cm-flash,
+  .tf-crates .cm-rebuild {
+    display: none;
+  }
+}

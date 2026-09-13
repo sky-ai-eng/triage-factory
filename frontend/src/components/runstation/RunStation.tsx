@@ -867,8 +867,7 @@ function DockButton({
   )
 }
 
-// stepStateOf maps one chain step to its progress-track state (the same mapping
-// AgentCard uses, so the station's chain bar matches the board card's).
+// stepStateOf maps one chain step to its progress-track state.
 function stepStateOf(
   s: Conversation,
   i: number,

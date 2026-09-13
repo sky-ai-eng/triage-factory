@@ -47,6 +47,21 @@ export interface Task {
   // when the viewer belongs to ≥2 teams.
   // TODO: board row color-coding consumes this.
   team_id?: string
+  // memory_pending says a conversation on this task ended without leaving the
+  // memory its successor is owed, and the dispatcher will not claim the task's
+  // next delegation until one exists. Never absent: false is a real answer
+  // about the task.
+  memory_pending: boolean
+  // memory_attempt is the newest try at that memory — absent when none has run
+  // yet, which is the ordinary case for a wait that has just begun. `outcome`
+  // is empty while the attempt is still running; the error pair is set exactly
+  // when it is 'failed', and the message is TF's own wording.
+  memory_attempt?: {
+    outcome?: string
+    error_kind?: string
+    error_message?: string
+    started_at: string
+  }
 }
 
 // TranscriptPage is GET /api/agent/conversations/{id}/messages.
@@ -272,9 +287,15 @@ export interface Conversation {
   unresolved_review_count?: number
   // artifact_count is the number of artifacts this conversation produced (the
   // conversationResponse projection — branch / PR / review / issue / comment, the
-  // primary gating one included). The Board card shows it as a footer
-  // affordance without a per-card fetch; 0 / undefined hides the affordance.
+  // primary gating one included), without a per-card fetch.
   artifact_count?: number
+  // artifact_counts is the same set by kind — what the run WROTE, which the
+  // board card's footer strip states kind by kind. Emitted under the same
+  // definitive-only guard as has_unresolved_artifacts and off the same
+  // artifact set, so the strip's totals and its warm marks never disagree;
+  // {} for a conversation that produced nothing, absent under the transient
+  // guard.
+  artifact_counts?: Partial<Record<ArtifactKind, number>>
   // actor_agent_id / actor_agent_name identify the bot that executed this
   // conversation (conversations.actor_agent_id), denormalized from
   // agents.display_name via a JOIN on the conversation read projections. The card

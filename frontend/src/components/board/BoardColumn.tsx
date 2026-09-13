@@ -42,9 +42,9 @@ import {
 //     another lane has focus — a camera focal plane across the board, and
 //   • the drag-over receive glow.
 //
-// The lane no longer carries a "work is live" glow — that signal moved onto the
-// card that's actually working (CardPlane's status glow in cardChrome.tsx), so
-// the light rides the work, not the column around it.
+// The lane carries no "work is live" glow of its own — that signal is the
+// working card's status mark, so the light rides the work, not the column
+// around it.
 //
 // IMPORTANT: the recede blur is a `backdrop-filter` overlay *in front* of the
 // column, never a CSS `filter`/`transform` on an ancestor — either of those

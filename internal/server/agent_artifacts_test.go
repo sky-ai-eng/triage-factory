@@ -208,6 +208,12 @@ func TestConversationResponse_ArtifactCount_Unresolved(t *testing.T) {
 	if m["unresolved_pr_count"] != float64(1) {
 		t.Errorf("unresolved_pr_count = %v, want 1", m["unresolved_pr_count"])
 	}
+	// The per-kind breakdown rides the same guard as the unresolved counts and
+	// is taken off the same set: one draft PR and one comment.
+	counts, _ := m["artifact_counts"].(map[string]any)
+	if counts["pull_request"] != float64(1) || counts["comment"] != float64(1) || len(counts) != 2 {
+		t.Errorf("artifact_counts = %v, want {pull_request:1 comment:1}", m["artifact_counts"])
+	}
 }
 
 // TestConversationResponse_HasUnresolved_List pins that the derived approval
@@ -230,6 +236,10 @@ func TestConversationResponse_HasUnresolved_List(t *testing.T) {
 	}
 	if got := convs[0]["unresolved_pr_count"]; got != float64(1) {
 		t.Errorf("unresolved_pr_count = %v, want 1", got)
+	}
+	counts, _ := convs[0]["artifact_counts"].(map[string]any)
+	if counts["pull_request"] != float64(1) || len(counts) != 1 {
+		t.Errorf("artifact_counts = %v, want {pull_request:1}", convs[0]["artifact_counts"])
 	}
 }
 

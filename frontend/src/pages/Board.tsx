@@ -1,5 +1,5 @@
 import { memo, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react'
-import type { Task, Conversation, Message, WSEvent, TeamMember, TeamBot } from '../types'
+import type { Task, Conversation, WSEvent, TeamMember, TeamBot } from '../types'
 import { useWebSocket, setPresenceView } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
 import {
@@ -11,14 +11,14 @@ import {
 } from '../lib/conversationStatus'
 import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
 import {
-  appendToFeed,
-  feedFromMessages,
-  EMPTY_FEED,
-  type ConversationCardFeed,
-} from '../lib/conversationFeed'
-import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
+  summarizePermissionInput,
+  type PendingPermission,
+  type PermissionDecisionInput,
+} from '../lib/permissions'
+import { stripWorktree } from '../lib/worktree'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
 import { useTeamMembers } from '../hooks/useDeploymentConfig'
+import { useOrgHref } from '../hooks/useOrgHref'
 import { usableBot } from '../lib/teamRoster'
 import { usePagedList } from '../hooks/usePagedList'
 import type { PagedList } from '../hooks/usePagedList'
@@ -35,14 +35,12 @@ import {
 import { useOrgRole } from '../hooks/useOrgRole'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import ZeroTeamState from '../components/ZeroTeamState'
-import AgentCard from '../components/AgentCard'
-import TaskCard from '../components/TaskCard'
 import PromptPicker from '../components/PromptPicker'
-import ReviewOverlay from '../components/ReviewOverlay'
-import PendingPROverlay from '../components/PendingPROverlay'
 import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import AssigneePicker from '../components/board/AssigneePicker'
 import RequeueConfirm from '../components/board/RequeueConfirm'
+import { TaskCard } from '../components/board/TaskCard'
+import { deriveCard } from '../components/board/cardModel'
 import { toast } from '../components/Toast/toastStore'
 import { apiErrors, apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import BoardColumn, { CollapsedColumn, type LanePaging } from '../components/board/BoardColumn'
@@ -94,6 +92,12 @@ const GAP = 24
 // server the new question. Every filter field is a server read now, so
 // without this a search would fire a list read per character.
 const FILTER_DEBOUNCE_MS = 250
+
+// How long a working card's live line waits after the last transcript tick
+// before its task's conversations are re-read. The line is the server's
+// current_action, composed on the list read from the newest tool call, so a
+// tick means it may have moved — and a burst of ticks costs one read.
+const ACTION_REFRESH_MS = 1000
 
 // Filter persistence: per-user, per-column. Storage key is namespaced
 // by the user's id so a re-login (different user on the same browser)
@@ -211,17 +215,15 @@ export default function Board() {
     return () => setPresenceView('other')
   }, [])
 
-  // Agent conversation state — conversations render on cards regardless of which column
-  // the card is in (a user-claimed in_progress task can also have a
-  // conversation; a bot-claimed one definitely has).
+  // Agent conversation state — every task's newest (or active-step)
+  // conversation, keyed by task id. A card reads its run from here whatever
+  // lane it is in: a queued task carries the conversation a requeue handed
+  // back with it, and its artifacts along with it.
   const [conversations, setConversations] = useState<Record<string, Conversation>>({})
-  // Per-conversation card feed (running stats + last few ticker lines), keyed by conversation
-  // ID. Bounded by construction — the board used to accumulate every conversation's
-  // full message array here, growing without limit for the lifetime of the
-  // page while each card re-derived its stats from scratch per render.
-  const [conversationFeeds, setConversationFeeds] = useState<Record<string, ConversationCardFeed>>(
-    {},
-  )
+  const conversationsRef = useRef(conversations)
+  useEffect(() => {
+    conversationsRef.current = conversations
+  }, [conversations])
   const [chainStepConversations, setChainStepConversations] = useState<
     Record<string, Conversation[]>
   >({})
@@ -326,8 +328,8 @@ export default function Board() {
 
   // Snoozed visibility toggle for the Queued column. Off by default;
   // snoozed tasks are intentionally deferred and don't need to clutter
-  // the column. When on, they render at the tail with a "wakes Mar 5"
-  // badge (handled by TaskCard's existing SnoozedBadge).
+  // the column. When on, they render at the tail with a "wakes in 2h"
+  // readout in place of their age.
   const [showSnoozed, setShowSnoozed] = useState(false)
   const showSnoozedRef = useRef(showSnoozed)
 
@@ -356,13 +358,6 @@ export default function Board() {
   // to fire. Cleared when a conversation for the task lands.
   const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
 
-  // Per-item approval overlay (open one unresolved artifact's editor).
-  const [approvalCtx, setApprovalCtx] = useState<{
-    conversationID: string
-    kind: 'review' | 'pr'
-    artifactId: string
-  } | null>(null)
-
   // Resolve-all confirmation (TFAC-384 §4): the two gestures that END a task —
   // drag-to-Done from In Progress (complete) and from Queued (dismiss) —
   // force-resolve every unresolved artifact and cancel a live conversation.
@@ -384,9 +379,9 @@ export default function Board() {
 
   // Fetches a blueprint run's step structure and pads it into a length-N
   // array of step conversations — synthetic 'pending' placeholders for steps without
-  // a conversation yet — the shape the chain rail renders. Pure: returns the array
-  // (null on error / empty) and writes no state, so the enrichment pass can
-  // resolve many chains in parallel and apply them in one batched
+  // a conversation yet — the shape the card's chain reads. Pure: returns the
+  // array (null on error / empty) and writes no state, so the enrichment pass
+  // can resolve many chains in parallel and apply them in one batched
   // setChainStepConversations.
   const fetchChainStepConversations = useCallback(
     async (blueprintRunID: string): Promise<Conversation[] | null> => {
@@ -446,45 +441,38 @@ export default function Board() {
     })()
   }, [])
 
-  // Agent conversations for every task on the board — a queued task can be
-  // carrying the conversation a requeue handed back with it, along with that
+  // Agent conversations for the given tasks — every task on the board on a
+  // refresh, one task on a transcript tick. A queued task can be carrying the
+  // conversation a requeue handed back with it, along with that
   // conversation's artifacts, so the Queued lane is enriched like the other
-  // two. ONE aggregated call returns every task's conversations plus each
-  // task's primary-conversation transcript, replacing the old per-task serial
-  // loop of 2–3 round-trips each (TFAC-98).
+  // two. ONE aggregated call returns every task's conversations, replacing
+  // the old per-task serial loop of 2–3 round-trips each (TFAC-98).
   const enrich = useCallback(
-    async (tasks: Task[]) => {
-      if (tasks.length === 0) return
+    async (taskIDs: string[]) => {
+      if (taskIDs.length === 0) return
       // The window is over CONVERSATIONS, ordered so a task's conversations stay
       // contiguous — so a board page's worth of tasks needs a page large
       // enough to hold all their conversations. The board reads the first page and
       // paints what it has; a card whose conversation fell past the window fills in on
       // the next refresh rather than blocking first paint on a second call.
-      const agg = await apiJSON<{
-        runs?: Record<string, Conversation[]>
-        messages?: Record<string, Message[]>
-      }>('/api/agent/conversations/list', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          task_ids: tasks.map((t) => t.id),
-          include_messages: true,
-          page_size: 200,
-        }),
-      })
+      const agg = await apiJSON<{ runs?: Record<string, Conversation[]> }>(
+        '/api/agent/conversations/list',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_ids: taskIDs, page_size: 200 }),
+        },
+      )
       const conversationsByTask = agg.runs ?? {}
-      const messagesByConversation = agg.messages ?? {}
 
-      // Accumulate into plain objects, then commit each map in ONE setState
-      // (the old loop fired up to three setState calls per task — a render per
-      // iteration). Chains need a second per-chain fetch for their blueprint
-      // step structure; resolve those concurrently rather than serially.
+      // Accumulate into a plain object, then commit the map in ONE setState.
+      // Chains need a second per-chain fetch for their blueprint step
+      // structure; resolve those concurrently rather than serially.
       const nextConversations: Record<string, Conversation> = {}
-      const nextFeeds: Record<string, ConversationCardFeed> = {}
       const chainSeeds: Array<Promise<{ taskID: string; steps: Conversation[] } | null>> = []
 
-      for (const task of tasks) {
-        const taskConversations = conversationsByTask[task.id]
+      for (const taskID of taskIDs) {
+        const taskConversations = conversationsByTask[taskID]
         if (!taskConversations || taskConversations.length === 0) continue
         const latestConversation = taskConversations[0]
         const blueprintRunID = latestConversation.blueprint_run_id
@@ -495,34 +483,21 @@ export default function Board() {
           const activeStep =
             stepConversations.find((r) => isActiveStatus(r.Status)) ??
             stepConversations[stepConversations.length - 1]
-          nextConversations[task.id] = activeStep
-          // messagesByConversation is keyed by each task's PRIMARY (newest-started) conversation.
-          // For a sequential chain the most recently started step IS the active
-          // step, so activeStep.ID === taskConversations[0].ID and this lookup hits. If they
-          // ever differ, the WS `message` handler seeds the active step
-          // shortly — keep this keyed by activeStep.ID so it stays aligned.
-          const msgs = messagesByConversation[activeStep.ID]
-          if (msgs) nextFeeds[activeStep.ID] = feedFromMessages(msgs)
+          nextConversations[taskID] = activeStep
           chainSeeds.push(
             fetchChainStepConversations(blueprintRunID).then((steps) =>
-              steps ? { taskID: task.id, steps } : null,
+              steps ? { taskID, steps } : null,
             ),
           )
         } else {
-          nextConversations[task.id] = latestConversation
-          const msgs = messagesByConversation[latestConversation.ID]
-          if (msgs) nextFeeds[latestConversation.ID] = feedFromMessages(msgs)
+          nextConversations[taskID] = latestConversation
         }
       }
 
       setConversations((prev) => ({ ...prev, ...nextConversations }))
-      // A fetched feed replaces the incrementally-built one wholesale — the
-      // server transcript is authoritative, so any WS/fetch race drift
-      // self-corrects here.
-      setConversationFeeds((prev) => ({ ...prev, ...nextFeeds }))
 
       // Apply all chain step rails in one batch once their blueprint fetches
-      // settle (concurrent above), so the whole refresh costs ~3 renders, not
+      // settle (concurrent above), so the whole refresh costs ~2 renders, not
       // one per task.
       if (chainSeeds.length > 0) {
         const seeded = (await Promise.all(chainSeeds)).filter(
@@ -614,7 +589,7 @@ export default function Board() {
       // loop, so first paint waited on every per-task round-trip (TFAC-98).
       setLoading(false)
 
-      await enrich([...queuedItems, ...inProgressItems, ...doneItems])
+      await enrich([...queuedItems, ...inProgressItems, ...doneItems].map((t) => t.id))
     } catch {
       // Network error — keep stale data
     } finally {
@@ -627,7 +602,7 @@ export default function Board() {
   const refetchLane = useCallback(
     async (col: ColumnId) => {
       try {
-        await enrich(await fetchLane(col))
+        await enrich((await fetchLane(col)).map((t) => t.id))
       } catch {
         // Network error — keep stale data
       }
@@ -710,6 +685,38 @@ export default function Board() {
   useEffect(
     () => () => {
       if (fetchDebounceTimer.current != null) window.clearTimeout(fetchDebounceTimer.current)
+    },
+    [],
+  )
+
+  // A transcript tick on a conversation the board shows means its task's
+  // live line may have moved: re-read that task's conversations, trailing-
+  // debounced per task. The tick itself carries a message, not the line —
+  // the line is composed server-side on the list read.
+  const actionRefreshTimers = useRef<Map<string, number>>(new Map())
+  const scheduleActionRefresh = useCallback(
+    (conversationID: string) => {
+      const entry = Object.entries(conversationsRef.current).find(
+        ([, c]) => c.ID === conversationID,
+      )
+      if (!entry) return
+      const [taskID] = entry
+      const timers = actionRefreshTimers.current
+      const pending = timers.get(taskID)
+      if (pending != null) window.clearTimeout(pending)
+      timers.set(
+        taskID,
+        window.setTimeout(() => {
+          timers.delete(taskID)
+          enrich([taskID]).catch(() => {})
+        }, ACTION_REFRESH_MS),
+      )
+    },
+    [enrich],
+  )
+  useEffect(
+    () => () => {
+      for (const t of actionRefreshTimers.current.values()) window.clearTimeout(t)
     },
     [],
   )
@@ -823,7 +830,7 @@ export default function Board() {
         } else if (event.type === 'artifact_updated') {
           // Reconciler (TFAC-464): an artifact this conversation produced changed state
           // on GitHub. The conversation's own status is unchanged — only its
-          // artifact-derived surface (pending kind / approval card) — so refetch
+          // artifact-derived surface (the strip, the frame) — so refetch
           // the conversation, with NO optimistic Status write (unlike conversation_update).
           apiJSON<Conversation>(`/api/agent/conversations/${event.conversation_id}`)
             .then((fullConversation) => {
@@ -841,21 +848,11 @@ export default function Board() {
             })
             .catch(() => {})
         } else if (event.type === 'message') {
-          // Live conversation-log tick. AgentCard renders from the bounded per-conversation feed
-          // keyed by conversation ID; without this, new agent output only surfaces
-          // after a status-change fetchTasks pass. Folding into the feed
-          // (rather than appending to a full message array) keeps board state
-          // bounded and the per-event work O(1). appendToFeed returns the same
-          // reference for a display-no-op message (tool results, mostly) —
-          // return prev in that case so React skips the board re-render.
+          // Live conversation-log tick. The card's activity row is the
+          // server's current_action, so a tick means the line may have moved.
           const conversationID = event.conversation_id
           if (!conversationID) return
-          setConversationFeeds((prev) => {
-            const cur = prev[conversationID]
-            const next = appendToFeed(cur, event.data)
-            if (next === (cur ?? EMPTY_FEED)) return prev
-            return { ...prev, [conversationID]: next }
-          })
+          scheduleActionRefresh(conversationID)
         } else if (event.type === 'task_updated' || event.type === 'task_claimed') {
           // Any column-affecting change re-pulls the whole board. The three
           // lanes are cheap to refetch (each is a single indexed query) and
@@ -882,6 +879,7 @@ export default function Board() {
       },
       [
         scheduleFetchTasks,
+        scheduleActionRefresh,
         seedChainStepConversations,
         refreshPermissions,
         dropPermissionConversation,
@@ -1242,16 +1240,6 @@ export default function Board() {
     setShowPromptPicker(true)
   }, [])
 
-  // Open a conversation's approval overlay (review or PR editor) by artifact id. Hoisted
-  // to a stable callback (rather than an inline closure in the column JSX) so
-  // the memoized cards' props don't churn on every board render.
-  const handleOpenApproval = useCallback(
-    (conversationID: string, kind: 'review' | 'pr', artifactId: string) => {
-      setApprovalCtx({ conversationID, kind, artifactId })
-    },
-    [],
-  )
-
   const handlePickerReassign = useCallback(
     async (task: Task, targetUserID: string) => {
       try {
@@ -1440,7 +1428,6 @@ export default function Board() {
                     tasks={lists[colId].items}
                     narrowed={narrows(filters[colId])}
                     conversations={conversations}
-                    conversationFeeds={conversationFeeds}
                     chainStepConversations={chainStepConversations}
                     permQueues={permQueueMap}
                     onResolvePermission={resolvePermission}
@@ -1452,8 +1439,6 @@ export default function Board() {
                     onPickerUnclaim={handlePickerUnclaim}
                     onPickerDelegate={handlePickerDelegate}
                     onPickerReassign={handlePickerReassign}
-                    onOpenApproval={handleOpenApproval}
-                    onArtifactResolved={fetchTasks}
                     onRetry={handlePickerDelegate}
                   />
                 </BoardColumn>
@@ -1466,7 +1451,15 @@ export default function Board() {
       <DragOverlay dropAnimation={null}>
         {activeTask && (
           <div className="w-[400px]">
-            <TaskCard task={activeTask} isDragging />
+            <TaskCard
+              title={activeTask.title}
+              entity={activeTask.source_id}
+              {...deriveCard(
+                activeTask,
+                conversations[activeTask.id],
+                chainStepConversations[activeTask.id],
+              )}
+            />
           </div>
         )}
       </DragOverlay>
@@ -1486,23 +1479,6 @@ export default function Board() {
           setShowPromptPicker(false)
           pendingDelegateTask.current = null
           window.location.href = '/prompts'
-        }}
-      />
-
-      <ReviewOverlay
-        artifactId={approvalCtx?.kind === 'review' ? approvalCtx.artifactId : ''}
-        open={approvalCtx?.kind === 'review'}
-        onClose={() => {
-          setApprovalCtx(null)
-          fetchTasks()
-        }}
-      />
-      <PendingPROverlay
-        artifactId={approvalCtx?.kind === 'pr' ? approvalCtx.artifactId : ''}
-        open={approvalCtx?.kind === 'pr'}
-        onClose={() => {
-          setApprovalCtx(null)
-          fetchTasks()
         }}
       />
 
@@ -1552,10 +1528,10 @@ function lanePaging(list: PagedList<Task>): LanePaging {
   }
 }
 
-// PickerProps is the assignee-picker wiring shared by both card wrappers —
-// the roster data plus the four claim-mutation callbacks (all useCallback-
-// stable in Board), threaded down so the wrappers can build the AssigneePicker
-// element themselves, below their memo boundary.
+// PickerProps is the assignee-picker wiring — the roster data plus the four
+// claim-mutation callbacks (all useCallback-stable in Board), threaded down
+// so the card wrapper can build the AssigneePicker element itself, below its
+// memo boundary.
 interface PickerProps {
   currentUserID: string
   members: TeamMember[]
@@ -1567,19 +1543,18 @@ interface PickerProps {
   onPickerReassign: (task: Task, targetUserID: string) => Promise<void>
 }
 
-// ColumnContents is the per-column body — handles empty state, the
-// SortableContext, and the per-task card-vs-agentcard branching. The card
-// wrappers it renders are memoized with identity-stable props (per-conversation slices
-// of the board maps + useCallback'd handlers, with the per-card closures and
-// the AssigneePicker element built inside the wrapper, below its memo
-// boundary), so a live-feed tick for one conversation re-renders that conversation's card only —
-// not every card on the board.
+// ColumnContents is the per-column body — the empty state, the
+// SortableContext, and one card per task. The card wrapper it renders is
+// memoized with identity-stable props (per-task slices of the board maps +
+// useCallback'd handlers, with the per-card closures and the AssigneePicker
+// element built inside the wrapper, below its memo boundary), so a change to
+// one task's conversation re-renders that task's card only — not every card
+// on the board.
 function ColumnContents({
   colId,
   tasks,
   narrowed,
   conversations,
-  conversationFeeds,
   chainStepConversations,
   permQueues,
   onResolvePermission,
@@ -1591,8 +1566,6 @@ function ColumnContents({
   onPickerUnclaim,
   onPickerDelegate,
   onPickerReassign,
-  onOpenApproval,
-  onArtifactResolved,
   onRetry,
 }: {
   colId: ColumnId
@@ -1601,7 +1574,6 @@ function ColumnContents({
   // matches, which is not the same as being empty.
   narrowed: boolean
   conversations: Record<string, Conversation>
-  conversationFeeds: Record<string, ConversationCardFeed>
   chainStepConversations: Record<string, Conversation[]>
   permQueues: Record<string, PendingPermission[]>
   onResolvePermission: (
@@ -1610,8 +1582,6 @@ function ColumnContents({
     decision: PermissionDecisionInput,
   ) => Promise<void>
   delegateFailures: Record<string, string>
-  onOpenApproval: (conversationID: string, kind: 'review' | 'pr', artifactId: string) => void
-  onArtifactResolved: () => void
   onRetry: (task: Task) => void
 } & Omit<PickerProps, 'pickerReadOnly'>) {
   if (tasks.length === 0) {
@@ -1632,32 +1602,15 @@ function ColumnContents({
   return (
     <SortableContext items={tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
       {tasks.map((task) => {
-        // A queued task renders as a task, not as the run it may still be
-        // carrying: nobody is working on it, and the agent card's whole
-        // vocabulary — elapsed, a live feed, a cancel — would say someone is.
-        // Its conversation is still enriched, since the artifacts a requeue
-        // handed back with it are the task's now.
-        const conversation = colId === 'queued' ? undefined : conversations[task.id]
-        if (conversation) {
-          return (
-            <SortableAgentCard
-              key={task.id}
-              task={task}
-              conversation={conversation}
-              chainSteps={chainStepConversations[task.id]}
-              feed={conversationFeeds[conversation.ID]}
-              pendingPermissions={permQueues[conversation.ID]}
-              onResolvePermission={onResolvePermission}
-              onOpenApproval={onOpenApproval}
-              onArtifactResolved={onArtifactResolved}
-              {...picker}
-            />
-          )
-        }
+        const conversation = conversations[task.id]
         return (
-          <SortableTaskCard
+          <SortableCard
             key={task.id}
             task={task}
+            conversation={conversation}
+            chainSteps={chainStepConversations[task.id]}
+            pendingPermissions={conversation ? permQueues[conversation.ID] : undefined}
+            onResolvePermission={onResolvePermission}
             delegateFailure={delegateFailures[task.id]}
             onRetry={onRetry}
             {...picker}
@@ -1679,90 +1632,33 @@ function emptyLabelFor(colId: ColumnId): string {
   }
 }
 
-// CardAssigneePicker builds the per-card AssigneePicker element from the
-// shared PickerProps bundle — inside the memoized wrappers, so the element is
-// only recreated when the wrapper itself re-renders.
-function CardAssigneePicker({ task, picker }: { task: Task; picker: PickerProps }) {
-  return (
-    <AssigneePicker
-      task={task}
-      currentUserID={picker.currentUserID}
-      members={picker.members}
-      bot={picker.bot}
-      onClaim={picker.onPickerClaim}
-      onUnclaim={picker.onPickerUnclaim}
-      onDelegate={picker.onPickerDelegate}
-      onReassign={picker.onPickerReassign}
-      readOnly={picker.pickerReadOnly}
-    />
-  )
-}
-
-const SortableTaskCard = memo(function SortableTaskCard({
+// SortableCard is one task on a lane: the card, derived from the task and the
+// conversation it carries, inside the sortable wrapper the lane drags. The
+// wrapper takes the drag, so every target inside the card — the title, the
+// activity row, the strip, the picker, Allow and Deny — keeps its own click.
+const SortableCard = memo(function SortableCard({
   task,
+  conversation,
+  chainSteps,
+  pendingPermissions,
+  onResolvePermission,
   delegateFailure,
   onRetry,
   ...picker
 }: {
   task: Task
-  delegateFailure?: string
-  onRetry: (task: Task) => void
-} & PickerProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: task.id,
-  })
-  const style: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.3 : 1,
-  }
-  // assigneeSlot is forwarded into TaskCard's header instead
-  // of overlaid via absolute positioning — the prior approach
-  // collided with the bottom-row affordances on tall cards and with
-  // AgentCard's elapsed-time / expand cluster after a conversation completes.
-  // Card owns its own layout; we just hand it the slot to render.
-  return (
-    <TaskCard
-      ref={setNodeRef}
-      task={task}
-      style={style}
-      // Deliberately false: the lifted "ghost" is rendered by DragOverlay, and
-      // the in-place card fades via style.opacity (set in useSortable above).
-      // isDragging only drives a redundant z-50 here, so we never forward it.
-      isDragging={false}
-      delegateFailed={delegateFailure ? { message: delegateFailure } : undefined}
-      onRetry={delegateFailure ? () => onRetry(task) : undefined}
-      assigneeSlot={<CardAssigneePicker task={task} picker={picker} />}
-      {...attributes}
-      {...listeners}
-    />
-  )
-})
-
-const SortableAgentCard = memo(function SortableAgentCard({
-  task,
-  conversation,
-  chainSteps,
-  feed,
-  pendingPermissions,
-  onResolvePermission,
-  onOpenApproval,
-  onArtifactResolved,
-  ...picker
-}: {
-  task: Task
-  conversation: Conversation
+  conversation?: Conversation
   chainSteps?: Conversation[]
-  feed?: ConversationCardFeed
   pendingPermissions?: PendingPermission[]
   onResolvePermission: (
     conversationID: string,
     toolCallID: string,
     decision: PermissionDecisionInput,
   ) => Promise<void>
-  onOpenApproval: (conversationID: string, kind: 'review' | 'pr', artifactId: string) => void
-  onArtifactResolved: () => void
+  delegateFailure?: string
+  onRetry: (task: Task) => void
 } & PickerProps) {
+  const orgHref = useOrgHref()
   // Draggable whatever the run is doing — a working run's drop into Queued
   // asks before it stops the run, and every other drop is reversible or
   // gated, so there is no state where the grab has to be refused.
@@ -1775,24 +1671,74 @@ const SortableAgentCard = memo(function SortableAgentCard({
     opacity: isDragging ? 0.3 : 1,
     cursor: 'grab',
   }
-  // assigneeSlot forwarded into AgentCard's header cluster
-  // so it shares the gap-2 spacing with elapsed/expand/cancel
-  // instead of overlapping them via absolute positioning. Same
-  // reasoning as the TaskCard wrapper above.
+
+  // The clock the working card's elapsed reads, ticked once a second while
+  // the model says it moves and left alone otherwise.
+  const [now, setNow] = useState(() => Date.now())
+  const model = deriveCard(task, conversation, chainSteps, now)
+  useEffect(() => {
+    if (!model.ticking) return
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [model.ticking])
+
+  const href = conversation ? orgHref(`/runs/${conversation.ID}`) : undefined
+
+  // The head of the permission queue, as the card's plate: the real input the
+  // agent wants to run, never its description. Single-flight — the first
+  // click wins, so a quick Deny→Allow cannot put two resolves in flight for
+  // the broker to honour in whichever order they land.
+  const resolving = useRef(false)
+  const head = pendingPermissions?.[0]
+  const resolve = async (behavior: 'allow' | 'deny') => {
+    if (resolving.current || !conversation || !head) return
+    resolving.current = true
+    try {
+      await onResolvePermission(conversation.ID, head.tool_call_id, { behavior })
+    } finally {
+      resolving.current = false
+    }
+  }
+  const permission =
+    head && conversation
+      ? {
+          command: stripWorktree(
+            summarizePermissionInput(head.tool_name, head.input),
+            conversation.WorktreePath,
+          ),
+          count: pendingPermissions?.length ?? 1,
+          onAllow: () => void resolve('allow'),
+          onDeny: () => void resolve('deny'),
+        }
+      : undefined
+
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
-      <AgentCard
-        task={task}
-        conversation={conversation}
-        chainSteps={chainSteps}
-        feed={feed}
-        pendingPermissions={pendingPermissions}
-        onResolvePermission={(toolCallID, decision) =>
-          onResolvePermission(conversation.ID, toolCallID, decision)
+      <TaskCard
+        title={task.title}
+        entity={task.source_id}
+        entityHref={task.source_url || undefined}
+        href={href}
+        permission={permission}
+        waiting={task.memory_pending}
+        retry={
+          delegateFailure ? { message: delegateFailure, onRetry: () => onRetry(task) } : undefined
         }
-        onOpenArtifact={(kind, artifactId) => onOpenApproval(conversation.ID, kind, artifactId)}
-        onArtifactResolved={onArtifactResolved}
-        assigneeSlot={<CardAssigneePicker task={task} picker={picker} />}
+        interactive={!picker.pickerReadOnly}
+        assigneeSlot={
+          <AssigneePicker
+            task={task}
+            currentUserID={picker.currentUserID}
+            members={picker.members}
+            bot={picker.bot}
+            onClaim={picker.onPickerClaim}
+            onUnclaim={picker.onPickerUnclaim}
+            onDelegate={picker.onPickerDelegate}
+            onReassign={picker.onPickerReassign}
+            readOnly={picker.pickerReadOnly}
+          />
+        }
+        {...model}
       />
     </div>
   )
