@@ -199,8 +199,14 @@ func TestComposeLaunchTurn_ResumedSessionSendsTheNoteAndNoOpening(t *testing.T) 
 	before := len(allRows(t, s, "r-sdk-reclaim"))
 
 	// The successor found the session's transcript next to the warm tree, so
-	// its launch carries the id that becomes --resume.
-	resumed := agentproc.RunOptions{SessionID: "sess-survived"}
+	// its launch carries the id that becomes --resume. The blocks are put back
+	// on the options deliberately: RunInteractive prefers them over Message, so
+	// a launch that reached the SDK still carrying them would take its turn on
+	// the opening and the note would never be sent.
+	resumed := agentproc.RunOptions{
+		SessionID:     "sess-survived",
+		OpeningBlocks: opening.OpeningBlocks,
+	}
 	if err := s.composeLaunchTurn(ctx, &resumed, sink, runmode.LocalDefaultOrgID, "r-sdk-reclaim",
 		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the resuming launch: %v", err)
@@ -261,7 +267,9 @@ func TestComposeLaunchTurn_ReclaimWithNoSessionResendsTheOpening(t *testing.T) {
 	}
 	before := len(allRows(t, s, "r-sdk-fresh"))
 
-	second := agentproc.RunOptions{}
+	// Carrying a note it must not send, for the mirror of the reason above:
+	// the arm that sends the opening owns this field too.
+	second := agentproc.RunOptions{Message: domain.SessionContinuationNote}
 	if err := s.composeLaunchTurn(ctx, &second, sink, runmode.LocalDefaultOrgID, "r-sdk-fresh",
 		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the re-claiming launch: %v", err)

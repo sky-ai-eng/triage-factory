@@ -801,8 +801,14 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 }
 
 // composeLaunchTurn puts the launch's first user message on opts and records
-// it on the transcript. Exactly one of opts.OpeningBlocks and opts.Message is
-// set; the SDK sends whichever it finds.
+// it on the transcript. It OWNS both message fields: each arm writes its own
+// and clears the other, so on return exactly one of opts.OpeningBlocks and
+// opts.Message is set whatever the caller had already put there.
+//
+// Clearing is not tidiness. RunInteractive prefers blocks over Message, so a
+// block array left on a resuming launch would take the turn and the
+// continuation note would never be sent — the exact failure this function
+// exists to prevent, arriving silently.
 //
 // The fork is opts.SessionID, which is the same value that becomes `--resume`,
 // so what the agent is sent cannot disagree with what it loads. A resumed
@@ -823,6 +829,7 @@ func (s *Spawner) composeLaunchTurn(
 		if err := s.recordContinuationNote(sink, conversationID, creatorUserID); err != nil {
 			return err
 		}
+		opts.OpeningBlocks = nil
 		opts.Message = domain.SessionContinuationNote
 		return nil
 	}
@@ -830,6 +837,7 @@ func (s *Spawner) composeLaunchTurn(
 	if err != nil {
 		return err
 	}
+	opts.Message = ""
 	opts.OpeningBlocks = blocks
 	return nil
 }
