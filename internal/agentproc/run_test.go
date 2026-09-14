@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -318,7 +319,9 @@ func TestNewDirectCommand_ComposesLocalGitProxyPairs(t *testing.T) {
 // agentRuntimeEnv appends, and which one "wins" is platform/libc
 // dependent. newDirectCommand must strip the inherited copy so the
 // entry is unambiguous in both directions — default-off, and the
-// TF_AGENT_JSC_JIT=1 opt-in.
+// TF_AGENT_JSC_JIT=1 opt-in. On Darwin the strip is the whole story:
+// nothing is appended, so an operator's stray export must not survive
+// into an engine that cannot boot without the JIT there.
 func TestNewDirectCommand_FiltersInheritedJSCJITKey(t *testing.T) {
 	t.Setenv("BUN_JSC_useJIT", "1")
 
@@ -332,6 +335,12 @@ func TestNewDirectCommand_FiltersInheritedJSCJITKey(t *testing.T) {
 		if strings.HasPrefix(kv, "BUN_JSC_useJIT=") {
 			matches = append(matches, kv)
 		}
+	}
+	if runtime.GOOS == "darwin" {
+		if len(matches) != 0 {
+			t.Fatalf("expected no BUN_JSC_useJIT entry in cmd.Env on darwin, got %v", matches)
+		}
+		return
 	}
 	if len(matches) != 1 {
 		t.Fatalf("expected exactly one BUN_JSC_useJIT entry in cmd.Env, got %v", matches)

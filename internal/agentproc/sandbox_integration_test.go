@@ -3,6 +3,7 @@ package agentproc
 import (
 	"errors"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -144,8 +145,11 @@ func TestBuildSandboxEnv_JSCJITDefaultOff(t *testing.T) {
 		return false
 	}
 
-	if !contains(buildSandboxEnv(nil), "BUN_JSC_useJIT=0") {
+	if runtime.GOOS != "darwin" && !contains(buildSandboxEnv(nil), "BUN_JSC_useJIT=0") {
 		t.Error("sandbox env missing BUN_JSC_useJIT=0; the JIT should be off by default")
+	}
+	if runtime.GOOS == "darwin" && contains(buildSandboxEnv(nil), "BUN_JSC_useJIT=0") {
+		t.Error("sandbox env carries BUN_JSC_useJIT=0 on darwin; the engine cannot boot there without the JIT")
 	}
 
 	t.Setenv("TF_AGENT_JSC_JIT", "1")

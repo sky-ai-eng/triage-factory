@@ -209,4 +209,9 @@ under the interpreter:
 export TF_AGENT_JSC_JIT=1
 ```
 
-Applies on both the sandbox and direct/local spawn paths.
+Applies on both the sandbox and direct/local spawn paths, on every host
+**except macOS**. There the JIT is always left on and `TF_AGENT_JSC_JIT` has no
+effect:
+JavaScriptCore treats a disabled JIT there as a signal that signal-handler-based
+features are off limits and removes `SharedArrayBuffer` along with the JIT, and
+the engine needs that global to start at all.
