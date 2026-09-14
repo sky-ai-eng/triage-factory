@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.14.2](https://github.com/sky-ai-eng/triage-factory/compare/v1.14.1...v1.14.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* **agentproc:** bump the bundled Agent SDK to 0.3.270 and drop the @hono/node-server override ([#1106](https://github.com/sky-ai-eng/triage-factory/issues/1106)) ([56d08d7](https://github.com/sky-ai-eng/triage-factory/commit/56d08d7dd9ba2dde43d8c2cc4f1b6ecf8fa7c668))
+* **agentproc:** keep the engine JIT on under macOS so SharedArrayBuffer exists at boot ([#1109](https://github.com/sky-ai-eng/triage-factory/issues/1109)) ([9e5ec83](https://github.com/sky-ai-eng/triage-factory/commit/9e5ec8393fc1a713e8781e75091e755759652615))
+* **board:** re-show the assignee picker's popover whenever the menu opens ([#1108](https://github.com/sky-ai-eng/triage-factory/issues/1108)) ([a47ba94](https://github.com/sky-ai-eng/triage-factory/commit/a47ba948e39b37fb8ab97cd11bbd36faaa51d888))
+
 ## [1.14.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.14.0...v1.14.1) (2026-09-14)
 
 
