@@ -18,17 +18,7 @@ import (
 // Pinned SDK version. Bump on Triage Factory release after verifying the
 // new release in a spike — see scripts/clean-slate.sh notes. Keep the
 // package.json template in sync with this constant.
-const sdkVersion = "0.3.195"
-
-// Floor for @hono/node-server, forced past the range its own consumer
-// declares. It reaches this tree only as a required dependency of
-// @modelcontextprotocol/sdk (a peer of the Agent SDK), which pins
-// ^1.19.9 — and every 1.x carries a serve-static path-traversal
-// advisory whose fix landed only in 2.0.5. MCP's sole use of the package
-// is getRequestListener, which 2.x still exports, so raising the major
-// past the declared range costs nothing here. Retire this override once
-// @modelcontextprotocol/sdk admits 2.x on its own.
-const honoNodeServerOverride = "^2.0.5"
+const sdkVersion = "0.3.270"
 
 // Embedded shim that translates the flag-based argv BuildArgs emits into
 // Agent SDK Options. Materialized to disk at first install so the Node
@@ -158,7 +148,7 @@ func sdkAlreadyInstalled(sdkDir string) bool {
 // own printf — the sdk-builder stage has no Go available to call this —
 // so a drift test compares the two renderings. Drift is not cosmetic:
 // npm ci hard-refuses to install when the manifest and the lockfile
-// disagree about a dependency or an override.
+// disagree about a dependency.
 func sdkPackageJSON() []byte {
 	return []byte(fmt.Sprintf(`{
   "name": "triagefactory-sdk-runtime",
@@ -166,12 +156,9 @@ func sdkPackageJSON() []byte {
   "type": "module",
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "%s"
-  },
-  "overrides": {
-    "@hono/node-server": "%s"
   }
 }
-`, sdkVersion, honoNodeServerOverride))
+`, sdkVersion))
 }
 
 // writePackageJSON pins the SDK version. We re-write every install pass
