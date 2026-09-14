@@ -329,24 +329,41 @@ export default function AssigneePicker({
   // commit that adds .open has no previous style to transition FROM — the
   // structure would appear rather than draw itself. Held visible, the picker
   // keeps its visibility gate and its transitions; the top layer only changes
-  // where it is painted. Declared before the measurement effect, because a
-  // hidden popover measures as nothing.
-  useLayoutEffect(() => {
+  // where it is painted.
+  //
+  // "Held" is not a one-time act. A popover that leaves the document is hidden
+  // by the browser, silently — no toggle event, nothing React can see — and a
+  // card is moved in the DOM every time its lane reorders around it, which the
+  // queued lane does on every scoring pass. Once hidden, .open still lands: the
+  // mark retires and the page recedes, over a menu that is display:none. So
+  // the show is re-asserted at every point that is about to depend on it. The
+  // forced style resolution gives a re-shown popover a settled style to
+  // transition FROM, the same reason the scrim node takes one.
+  const ensureShown = useCallback(() => {
     const el = picker.current
     if (!el || !lifted) return
     try {
-      if (!el.matches(':popover-open')) el.showPopover()
+      if (el.matches(':popover-open')) return
+      el.showPopover()
+      void el.offsetHeight
     } catch {
       /* already shown, or not connected yet */
     }
+  }, [lifted])
+
+  // Declared before the measurement effect, because a hidden popover measures
+  // as nothing.
+  useLayoutEffect(() => {
+    ensureShown()
+    const el = picker.current
     return () => {
       try {
-        el.hidePopover()
+        el?.hidePopover()
       } catch {
-        /* already hidden */
+        /* already hidden, or never lifted */
       }
     }
-  }, [lifted])
+  }, [ensureShown])
 
   const sizeStem = useCallback(() => {
     const a = host.current
@@ -374,6 +391,7 @@ export default function AssigneePicker({
   // so an ungated pass here would be a layout read per second per card.
   useLayoutEffect(() => {
     if (!open && !closing) return
+    ensureShown()
     placePicker()
     // Which side has room is a fact of layout, which only an effect can read.
     // eslint-disable-next-line react-hooks/set-state-in-effect -- measured from layout
@@ -388,7 +406,11 @@ export default function AssigneePicker({
     // ResizeObserver per card on the board, all firing on every scroll,
     // whether or not that card's picker has ever been opened.
     if (!open) return
+    // A lane reordering under an open menu hides the popover (see
+    // ensureShown); the ResizeObserver on .opts sees that as a collapse to
+    // nothing and lands here, which is what brings the menu back.
     const remeasure = () => {
+      ensureShown()
       placePicker()
       chooseSide()
       sizeStem()
@@ -414,7 +436,7 @@ export default function AssigneePicker({
       document.removeEventListener('scroll', remeasure, true)
       ro?.disconnect()
     }
-  }, [open, sizeStem, chooseSide, placePicker])
+  }, [open, sizeStem, chooseSide, placePicker, ensureShown])
 
   // Closing returns the focus it took. Without this, dismissing with Escape
   // leaves the tab ring on a button that is now invisible, and the next Tab
@@ -591,6 +613,10 @@ export default function AssigneePicker({
         onClick={(e) => {
           e.stopPropagation()
           const was = open
+          // Before the commit that adds .open, so a popover the browser hid
+          // is back with its style settled by the time the class lands, and
+          // the structure still draws itself rather than appearing.
+          if (!was) ensureShown()
           setOpen(!was)
           setCursor(-1)
           if (!was) {
