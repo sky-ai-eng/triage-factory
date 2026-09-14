@@ -556,9 +556,16 @@ export function TaskCard({
         </span>
       ) : summary ? (
         <div className="tc-summary">
+          {/* The label ends in a real space, INSIDE the span: the gap the eye
+              sees is the rule's margin, but a reader that does not see —
+              assistive technology, a copy of the text — needs a word
+              separator in the DOM, or the label and the first word of the
+              summary are one word. task-card.css makes the span an
+              inline-block so the trailing space collapses at the end of its
+              own line and the visible gap stays exactly the margin. */}
           {event && (
             <span className="tc-event" data-tone={event.tone}>
-              {event.label}
+              {event.label}{' '}
             </span>
           )}
           {summary}

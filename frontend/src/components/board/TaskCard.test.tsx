@@ -137,9 +137,11 @@ describe('TaskCard, the event', () => {
   it("opens the summary with the label, in the event's tone", () => {
     renderCard({ age: '4h ago', summary: 'Two readers hit the cgroup file at once.', event: ci })
     const summary = document.querySelector('.tc-summary')
-    expect(summary?.textContent).toBe('CI FailedTwo readers hit the cgroup file at once.')
+    // A word boundary in the DOM, not only a margin on screen: a copy of the
+    // text and a screen reader both get "CI Failed Two", never "CI FailedTwo".
+    expect(summary?.textContent).toBe('CI Failed Two readers hit the cgroup file at once.')
     const label = summary?.querySelector('.tc-event')
-    expect(label?.textContent).toBe('CI Failed')
+    expect(label?.textContent).toBe('CI Failed ')
     expect(label?.getAttribute('data-tone')).toBe('problem')
     expect(document.querySelector('.tc-event-line')).toBeNull()
   })

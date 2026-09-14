@@ -145,8 +145,15 @@
 
    500, not 600: DM Mono has no semibold and the browser synthesises one. The
    run station's EventTag sets `font-semibold` and gets a faked weight for it;
-   worth correcting there too, and out of scope here. */
+   worth correcting there too, and out of scope here.
+
+   Inline-block, because the label's text ends in a real space (TaskCard.tsx)
+   so that a copy or a screen reader gets a word boundary between the label
+   and the summary. A trailing collapsible space at the end of a line is
+   removed, and an inline-block's content is its own line, so the space never
+   paints and the gap the eye sees stays exactly the margin. */
 .tc-event {
+  display: inline-block;
   font-family: var(--font-mono);
   font-size: var(--text-label);
   font-weight: 500;
