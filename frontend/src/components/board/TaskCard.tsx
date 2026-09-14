@@ -34,8 +34,7 @@ import './task-card.css'
 // mono because the system classified it and the sentence stays sans because a
 // person wrote it — one line, two registers, no extra row. The slot always
 // says something: with no summary the event's own DESCRIPTION takes the whole
-// line, which is why a failed run — `cardModel` drops its summary by design —
-// is the card this helps most.
+// line, so a task the scorer left without one still says what it is about.
 //
 // Tone spends hue only where the event is a problem or an ask. `eventTone`
 // also has a `good`, and the language has no success colour; a green

@@ -202,7 +202,7 @@ export function BoardCard() {
               entityHref={done.source_url}
               lifecycle="done"
               elapsed="4:12"
-              summary="Ran the sampler test fifty times; every run serialized the read."
+              summary="The mutex fix needs proving under load before it ships: fifty runs of the sampler, none of them splitting a line."
               event={EV.changes}
               artifacts={{ branch: 1, pulls: 1, comment: 3 }}
               href="/runs/c3"
@@ -213,6 +213,7 @@ export function BoardCard() {
               entity="acme/api#702"
               entityHref="https://github.com/acme/api/pull/702"
               lifecycle="failed"
+              summary="The GitHub and Jira pollers walk the same repos twice a cycle; one pass should serve both."
               event={EV.atomic}
               elapsed="2:06"
               href="/runs/c4"

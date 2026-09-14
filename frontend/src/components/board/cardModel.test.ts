@@ -62,8 +62,8 @@ describe('deriveCard lifecycle', () => {
     expect(m.lifecycle).toBe('queued')
     expect(m.elapsed).toBeUndefined()
     expect(m.age).toBe('4h ago')
-    // The reporter's words: nobody is working on it, so the run's account is
-    // not the card's.
+    // The reporter's words, as on every card: the run's account never
+    // reaches one.
     expect(m.summary).toBe('Two readers hit the cgroup file at once.')
     expect(m.artifacts).toEqual({ branch: 1, pulls: 1 })
     expect(m.pending).toEqual({ pulls: 1 })
@@ -136,8 +136,9 @@ describe('deriveCard lifecycle', () => {
       NOW,
     )
     expect(failed.lifecycle).toBe('failed')
-    // No failure reason on the card: why is a run-page fact.
-    expect(failed.summary).toBeUndefined()
+    // Still the reporter's words: why it failed is a run-page fact, and what
+    // the work is stays on the card.
+    expect(failed.summary).toBe('Two readers hit the cgroup file at once.')
     expect(failed.elapsed).toBe('1m 0s')
     expect(
       deriveCard(
@@ -166,14 +167,14 @@ describe('deriveCard lifecycle', () => {
     expect(m.ticking).toBe(false)
   })
 
-  it('prefers the run’s own account of the work once it wrote one', () => {
+  it('keeps the reporter’s summary once the run has written its own account', () => {
     const m = deriveCard(
       task(),
       conversation({ Status: 'completed', ResultSummary: 'Serialized the read behind a mutex.' }),
       undefined,
       NOW,
     )
-    expect(m.summary).toBe('Serialized the read behind a mutex.')
+    expect(m.summary).toBe('Two readers hit the cgroup file at once.')
   })
 
   it('marks the summary pending while the scorer has not written one', () => {

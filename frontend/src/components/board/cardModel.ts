@@ -42,8 +42,8 @@ export type Lifecycle = 'queued' | 'working' | 'idle' | 'done' | 'failed' | 'can
 
 export interface CardModel {
   lifecycle: Lifecycle
-  /** What the work is: the run's own account when it wrote one, the
-   *  reporter's description when it did not, nothing on a failure. */
+  /** What the work is, in the reporter's words: the task's summary, in
+   *  every state. */
   summary?: string
   /** The summary is still being generated — the row arrived whole and only
    *  its description is pending. */
@@ -81,12 +81,11 @@ export function deriveCard(
   const lifecycle = lifecycleOf(task, hasRun ? conversation : undefined)
   const working = lifecycle === 'working'
 
-  // The run's own account supersedes the reporter's once there is one; a
-  // failure reports nothing here, because why it failed is a run-page fact.
-  const summary =
-    lifecycle === 'failed'
-      ? undefined
-      : (hasRun && conversation?.ResultSummary) || task.ai_summary || undefined
+  // The reporter's words in every state, a finished or failed run included.
+  // A lane is scanned to find the work, and every card has to read the same
+  // way for that scan to hold: what the run made of the work is the run
+  // page's to tell, and why it failed is too.
+  const summary = task.ai_summary || undefined
 
   // The row is never empty on a live card. A queued run is waiting on a
   // slot, and the board says so in the same moving line it keeps using once
