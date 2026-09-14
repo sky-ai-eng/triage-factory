@@ -3,6 +3,7 @@ package agentproc
 import (
 	"errors"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,7 +26,30 @@ const jscJITEnvKey = "BUN_JSC_useJIT"
 //
 // TF_AGENT_JSC_JIT=1 restores the JIT for operators whose workloads
 // regress under the interpreter.
+//
+// The engine runs on the same OS as this process (the sandbox path is
+// Linux-only by construction), so the host's GOOS decides whether the
+// tuning is safe to apply — see agentRuntimeEnvFor.
 func agentRuntimeEnv() []string {
+	return agentRuntimeEnvFor(runtime.GOOS)
+}
+
+// agentRuntimeEnvFor is agentRuntimeEnv with the engine's OS as a
+// parameter, so both arms are testable from one host.
+//
+// On Darwin the JIT stays on unconditionally. JavaScriptCore treats a
+// disabled JIT there as a proxy for a sandbox that forbids mach
+// exception handlers and switches off every signal-handler-based
+// feature with it — SharedArrayBuffer included, which then never
+// exists as a global. The engine constructs one at module load, so
+// the tuning would crash every spawn on a Mac before the agent ran a
+// single turn. The memory saving is not worth a runtime that cannot
+// boot, and no env override reaches past that derivation, so the
+// opt-in is a no-op there too.
+func agentRuntimeEnvFor(goos string) []string {
+	if goos == "darwin" {
+		return nil
+	}
 	if os.Getenv("TF_AGENT_JSC_JIT") == "1" {
 		return nil
 	}
