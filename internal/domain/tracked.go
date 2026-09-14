@@ -70,6 +70,12 @@ type PRSnapshot struct {
 	// brings fresh timeline data; we just need it during the diff that
 	// consumes the same wire response.
 	Timeline []TimelineEvent `json:"-"`
+
+	// Body is the PR description as authored (markdown). The tracker
+	// mirrors it into entities.description, where the scorer reads it;
+	// it is never diffed. json:"-" for the same reason as Timeline: bulk
+	// text stays out of snapshot_json, which every poll's diff reads.
+	Body string `json:"-"`
 }
 
 // TimelineEvent is one entry from GitHub's PullRequest.timelineItems.

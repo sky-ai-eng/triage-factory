@@ -879,6 +879,7 @@ type restPR struct {
 	Number    int    `json:"number"`
 	NodeID    string `json:"node_id"`
 	Title     string `json:"title"`
+	Body      string `json:"body"`
 	State     string `json:"state"`
 	Draft     bool   `json:"draft"`
 	HTMLURL   string `json:"html_url"`
@@ -1003,6 +1004,7 @@ func (pr restPR) toDiscoverySnapshot(owner, repo string) domain.PRSnapshot {
 		NodeID:    pr.NodeID,
 		Number:    pr.Number,
 		Title:     pr.Title,
+		Body:      pr.Body,
 		Author:    pr.User.Login,
 		Repo:      owner + "/" + repo,
 		URL:       pr.HTMLURL,

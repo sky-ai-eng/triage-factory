@@ -47,12 +47,12 @@ const (
 	jiraBatchSize = 100 // max issues per JQL key IN (...) query
 
 	// descriptionStoreMaxRunes caps what we persist on entities.description.
-	// Jira descriptions are unbounded (teams regularly paste multi-KB specs,
-	// stack traces, etc.); storing them raw would bloat the column for no
-	// current benefit — the scorer already truncates at 1500 runes for the
-	// LLM prompt, so 2000 gives a small buffer while keeping rows compact.
-	// If a future UI wants to render the full body it should re-fetch from
-	// Jira directly rather than relying on this mirror.
+	// Jira descriptions and PR bodies are unbounded (teams regularly paste
+	// multi-KB specs, stack traces, etc.); storing them raw would bloat the
+	// column for no current benefit — the scorer already truncates at 1500
+	// runes for the LLM prompt, so 2000 gives a small buffer while keeping
+	// rows compact. If a future UI wants to render the full body it should
+	// re-fetch from the source directly rather than relying on this mirror.
 	descriptionStoreMaxRunes = 2000
 )
 
@@ -283,6 +283,11 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			} else if !ok {
 				trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", sid)
 			}
+			if desc := prDescription(snap); desc != "" {
+				if _, err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, desc); err != nil {
+					trackerLog.Error("seed description failed", "source_id", sid, "error", err)
+				}
+			}
 			// If the PR is already terminal, mark the entity closed immediately
 			// so it doesn't sit in the active refresh set forever (Phase 3
 			// won't emit a merged/closed event because prev==curr).
@@ -316,9 +321,12 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 				}
 			}
 		} else {
-			// Update title if changed.
+			// Update title and description if changed.
 			if entity.Title != snap.Title {
 				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Title)
+			}
+			if desc := prDescription(snap); entity.Description != desc {
+				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, desc)
 			}
 			// Reactivate if a previously-closed entity reappears as open
 			// (e.g., reopened PR).
@@ -556,6 +564,9 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			if item.entity.Title != newSnap.Title {
 				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
 			}
+			if desc := prDescription(newSnap); item.entity.Description != desc {
+				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, item.entity.ID, desc)
+			}
 			if newSnap.Merged || newSnap.State == "CLOSED" || newSnap.State == "MERGED" {
 				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, item.entity.ID); err != nil {
 					trackerLog.ErrorContext(ctx, "mark stub closed failed", "source_id", item.entity.SourceID, "error", err)
@@ -590,11 +601,15 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		}
 		eventsEmitted += len(events)
 
-		// Best-effort, outside the transaction: the title is display-only
-		// mirroring, so a failure here costs a stale string until the next
-		// cycle, never an event.
+		// Best-effort, outside the transaction: the title and description
+		// are mirrors read outside the diff (display, the scorer), so a
+		// failure here costs a stale string until the next cycle, never an
+		// event.
 		if item.entity.Title != newSnap.Title {
 			_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
+		}
+		if desc := prDescription(newSnap); item.entity.Description != desc {
+			_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, item.entity.ID, desc)
 		}
 	}
 
@@ -1973,6 +1988,13 @@ func countOpenSubtasks(issue jiraclient.Issue, doneStatuses []domain.JiraStatusR
 		}
 	}
 	return open
+}
+
+// prDescription is the stored form of a PR snapshot's body: trimmed and
+// capped exactly as the Jira arm caps an issue description, so
+// entities.description holds one shape whichever source wrote it.
+func prDescription(snap domain.PRSnapshot) string {
+	return truncateDescription(strings.TrimSpace(snap.Body), descriptionStoreMaxRunes)
 }
 
 // truncateDescription caps the stored description at maxRunes codepoints

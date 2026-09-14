@@ -16,6 +16,7 @@ const prBaseFields = `
 	id
 	number
 	title
+	body
 	author { login }
 	state
 	isDraft
@@ -328,6 +329,7 @@ type gqlPR struct {
 	ID             string        `json:"id"`
 	Number         int           `json:"number"`
 	Title          string        `json:"title"`
+	Body           string        `json:"body"`
 	Author         gqlAuthor     `json:"author"`
 	State          string        `json:"state"`
 	IsDraft        bool          `json:"isDraft"`
@@ -514,6 +516,7 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 	snap := domain.PRSnapshot{
 		Number:       pr.Number,
 		Title:        pr.Title,
+		Body:         pr.Body,
 		Author:       pr.Author.Login,
 		Repo:         pr.Repository.NameWithOwner,
 		URL:          pr.URL,
