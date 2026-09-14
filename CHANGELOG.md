@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.14.0...v1.14.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* **board:** the card's summary is the task's in every state, never the run's result (TFAC-1011) ([#1104](https://github.com/sky-ai-eng/triage-factory/issues/1104)) ([046a316](https://github.com/sky-ai-eng/triage-factory/commit/046a316dfc2f12ca05920744f73b317145819cda))
+
 ## [1.14.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.13.3...v1.14.0) (2026-09-14)
 
 
