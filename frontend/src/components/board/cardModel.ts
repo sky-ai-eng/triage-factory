@@ -42,7 +42,7 @@ export type Lifecycle = 'queued' | 'working' | 'idle' | 'done' | 'failed' | 'can
 
 export interface CardModel {
   lifecycle: Lifecycle
-  /** What the work is, in the reporter's words: the task's summary, in
+  /** What the work is, as the scorer summarized it: the task's summary, in
    *  every state. */
   summary?: string
   /** The summary is still being generated — the row arrived whole and only
@@ -81,7 +81,7 @@ export function deriveCard(
   const lifecycle = lifecycleOf(task, hasRun ? conversation : undefined)
   const working = lifecycle === 'working'
 
-  // The reporter's words in every state, a finished or failed run included.
+  // The scorer's summary in every state, a finished or failed run included.
   // A lane is scanned to find the work, and every card has to read the same
   // way for that scan to hold: what the run made of the work is the run
   // page's to tell, and why it failed is too.

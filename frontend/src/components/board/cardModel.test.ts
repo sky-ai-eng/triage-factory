@@ -4,9 +4,9 @@ import type { Conversation, Task } from '../../types'
 
 // What a card shows follows from what it HAS. These pin the derivation the
 // board and the card both read: a task is queued until it is being worked and
-// a conversation is attached; the run's account outranks the reporter's; a
-// failure reports nothing; a queued task keeps the artifacts a requeue handed
-// back with it while showing none of the run.
+// a conversation is attached; the scorer's summary shows in every state, a
+// run's own account never reaching the card; a queued task keeps the
+// artifacts a requeue handed back with it while showing none of the run.
 
 const NOW = Date.parse('2026-09-13T12:00:00Z')
 
@@ -62,8 +62,8 @@ describe('deriveCard lifecycle', () => {
     expect(m.lifecycle).toBe('queued')
     expect(m.elapsed).toBeUndefined()
     expect(m.age).toBe('4h ago')
-    // The reporter's words, as on every card: the run's account never
-    // reaches one.
+    // The scorer's summary, as on every card: the run's account never
+    // reaches it.
     expect(m.summary).toBe('Two readers hit the cgroup file at once.')
     expect(m.artifacts).toEqual({ branch: 1, pulls: 1 })
     expect(m.pending).toEqual({ pulls: 1 })
@@ -136,7 +136,7 @@ describe('deriveCard lifecycle', () => {
       NOW,
     )
     expect(failed.lifecycle).toBe('failed')
-    // Still the reporter's words: why it failed is a run-page fact, and what
+    // Still the scorer's summary: why it failed is a run-page fact, and what
     // the work is stays on the card.
     expect(failed.summary).toBe('Two readers hit the cgroup file at once.')
     expect(failed.elapsed).toBe('1m 0s')
@@ -167,7 +167,7 @@ describe('deriveCard lifecycle', () => {
     expect(m.ticking).toBe(false)
   })
 
-  it('keeps the reporter’s summary once the run has written its own account', () => {
+  it('keeps the scorer’s summary once the run has written its own account', () => {
     const m = deriveCard(
       task(),
       conversation({ Status: 'completed', ResultSummary: 'Serialized the read behind a mutex.' }),
