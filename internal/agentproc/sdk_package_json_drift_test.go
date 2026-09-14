@@ -9,19 +9,19 @@ import (
 )
 
 // dockerfilePrintfRE captures the sdk-builder stage's package.json printf:
-// the single-quoted shell format string, then the two shell variables it
-// interpolates, in order. Anchoring on the manifest's name field keeps the
-// match off any other printf in the file.
-var dockerfilePrintfRE = regexp.MustCompile(`printf '(\{\\n  "name": "triagefactory-sdk-runtime".*?)' "\$([A-Z_]+)" "\$([A-Z_]+)"`)
+// the single-quoted shell format string, then the shell variable it
+// interpolates. Anchoring on the manifest's name field keeps the match
+// off any other printf in the file.
+var dockerfilePrintfRE = regexp.MustCompile(`printf '(\{\\n  "name": "triagefactory-sdk-runtime".*?)' "\$([A-Z_]+)"`)
 
 // TestSDKPackageJSON_MatchesDockerfileTemplate is the drift guard for the
 // SDK manifest, which is rendered twice: by sdkPackageJSON for a local
 // install, and by docker/Dockerfile's printf when the image bakes the SDK
 // at build time (that stage has no Go to call the Go path). The two must
 // agree byte-for-byte, because `npm ci` refuses to install whenever the
-// manifest disagrees with the embedded lockfile about a dependency or an
-// override — so a divergence here breaks either the image build or every
-// fresh local install, depending on which side moved.
+// manifest disagrees with the embedded lockfile about a dependency — so a
+// divergence here breaks either the image build or every fresh local
+// install, depending on which side moved.
 func TestSDKPackageJSON_MatchesDockerfileTemplate(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", "docker", "Dockerfile"))
 	if err != nil {
@@ -34,30 +34,22 @@ func TestSDKPackageJSON_MatchesDockerfileTemplate(t *testing.T) {
 	}
 
 	// The printf format is shell-escaped; \n is the only escape in play.
-	// Substituting the Go constants for the shell variables reproduces
+	// Substituting the Go constant for the shell variable reproduces
 	// exactly what the build stage writes to package.json.
 	got := strings.ReplaceAll(m[1], `\n`, "\n")
-	for _, sub := range []struct {
-		shellVar string
-		value    string
-	}{
-		{m[2], sdkVersion},
-		{m[3], honoNodeServerOverride},
-	} {
-		got = strings.Replace(got, "%s", sub.value, 1)
-	}
+	got = strings.Replace(got, "%s", sdkVersion, 1)
 
 	if want := string(sdkPackageJSON()); got != want {
 		t.Errorf("Dockerfile-rendered package.json differs from sdkPackageJSON()\n--- Dockerfile ---\n%s\n--- sdkPackageJSON ---\n%s", got, want)
 	}
 }
 
-// TestDockerfilePrintf_InterpolatesPinConstantsInOrder pins the argument
-// order the Dockerfile feeds its printf. The rendering test above would
-// still pass if the two %s arguments were swapped *and* the Go template
-// were swapped to match, leaving the image installing an SDK version of
-// "^2.0.5"; asserting the shell variable names catches that directly.
-func TestDockerfilePrintf_InterpolatesPinConstantsInOrder(t *testing.T) {
+// TestDockerfilePrintf_InterpolatesPinConstant pins which shell variable
+// the Dockerfile feeds its printf. The rendering test above compares the
+// two renderings only after substituting sdkVersion for whatever variable
+// the printf names, so it would still pass against a printf interpolating
+// something else entirely; asserting the name catches that directly.
+func TestDockerfilePrintf_InterpolatesPinConstant(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", "docker", "Dockerfile"))
 	if err != nil {
 		t.Fatalf("read Dockerfile: %v", err)
@@ -69,10 +61,7 @@ func TestDockerfilePrintf_InterpolatesPinConstantsInOrder(t *testing.T) {
 	}
 
 	if m[2] != "SDK_VERSION" {
-		t.Errorf("first printf argument = $%s, want $SDK_VERSION", m[2])
-	}
-	if m[3] != "HONO_OVERRIDE" {
-		t.Errorf("second printf argument = $%s, want $HONO_OVERRIDE", m[3])
+		t.Errorf("printf argument = $%s, want $SDK_VERSION", m[2])
 	}
 }
 
@@ -93,11 +82,11 @@ func TestDockerfile_ExtractsPinConstantsFromInstallGo(t *testing.T) {
 
 	// Recover each grep pattern from the Dockerfile and run it against
 	// install.go the way the build stage does, so a constant rename that
-	// misses one of the two call sites fails here.
+	// misses the Dockerfile side fails here.
 	grepRE := regexp.MustCompile(`grep -E '(\^const [a-zA-Z]+ = "\[\^"\]\+")'`)
 	patterns := grepRE.FindAllStringSubmatch(string(dockerfile), -1)
-	if len(patterns) != 2 {
-		t.Fatalf("found %d constant greps in docker/Dockerfile, want 2 (sdkVersion, honoNodeServerOverride)", len(patterns))
+	if len(patterns) != 1 {
+		t.Fatalf("found %d constant greps in docker/Dockerfile, want 1 (sdkVersion)", len(patterns))
 	}
 
 	for _, p := range patterns {
