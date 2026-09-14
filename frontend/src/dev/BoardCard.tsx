@@ -33,6 +33,38 @@ const MEMBERS: TeamMember[] = PEOPLE.map(
 )
 const BOT = { agent_id: 'a1', display_name: 'machinist' } as TeamBot
 
+// The events the specimens carry, in the vocabulary `lib/eventDisplay` holds.
+// Two of the four tones draw colour; `good` is deliberately absent from the
+// set because the card draws it as ink.
+const EV = {
+  ci: { label: 'CI Failed', description: 'A CI check failed on a PR', tone: 'problem' as const },
+  review: {
+    label: 'Review Requested',
+    description: 'Someone requested your review on a PR',
+    tone: 'attention' as const,
+  },
+  commits: {
+    label: 'New Commits',
+    description: 'A tracked PR has new commits since the last poll',
+    tone: 'neutral' as const,
+  },
+  conflicts: {
+    label: 'Conflicts',
+    description: 'A PR has merge conflicts',
+    tone: 'problem' as const,
+  },
+  changes: {
+    label: 'Changes Requested',
+    description: 'A reviewer requested changes on a PR',
+    tone: 'problem' as const,
+  },
+  atomic: {
+    label: 'Now Actionable',
+    description: 'All subtasks closed — parent ticket is now an atomic work unit',
+    tone: 'neutral' as const,
+  },
+}
+
 function task(id: string, title: string, over: Partial<Task> = {}): Task {
   return {
     id,
@@ -99,6 +131,7 @@ export function BoardCard() {
               lifecycle="queued"
               age="4h ago"
               summary="Two readers hit the cgroup file at once and the second gets a partial line."
+              event={EV.ci}
               artifacts={{ branch: 1, pulls: 1 }}
               pending={{ pulls: 1 }}
               href="/runs/c0"
@@ -111,6 +144,7 @@ export function BoardCard() {
               lifecycle="queued"
               age="1h ago"
               summary="The executor budget snapshot never sees what the runtime recorded."
+              event={EV.review}
               assigneeSlot={picker(held)}
             />
           </div>
@@ -127,6 +161,7 @@ export function BoardCard() {
               elapsed="08:22"
               command="Reading internal/delegate/teardown.go"
               summary="Worktrees left by crashed runs pile up under the state root."
+              event={EV.commits}
               artifacts={{ branch: 1, comment: 2 }}
               href="/runs/c1"
               chain={{ done: 1, total: 3 }}
@@ -140,6 +175,7 @@ export function BoardCard() {
               liveState="idle"
               elapsed="0:12"
               command="Waiting for a run slot · 2 ahead"
+              event={EV.conflicts}
               href="/runs/c2"
               permission={{
                 command: 'psql -f migrations/0042_up.sql',
@@ -167,6 +203,7 @@ export function BoardCard() {
               lifecycle="done"
               elapsed="4:12"
               summary="Ran the sampler test fifty times; every run serialized the read."
+              event={EV.changes}
               artifacts={{ branch: 1, pulls: 1, comment: 3 }}
               href="/runs/c3"
               assigneeSlot={picker(done, true)}
@@ -176,6 +213,7 @@ export function BoardCard() {
               entity="acme/api#702"
               entityHref="https://github.com/acme/api/pull/702"
               lifecycle="failed"
+              event={EV.atomic}
               elapsed="2:06"
               href="/runs/c4"
               assigneeSlot={picker(
