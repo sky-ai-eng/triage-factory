@@ -19,9 +19,9 @@ var dockerfilePrintfRE = regexp.MustCompile(`printf '(\{\\n  "name": "triagefact
 // install, and by docker/Dockerfile's printf when the image bakes the SDK
 // at build time (that stage has no Go to call the Go path). The two must
 // agree byte-for-byte, because `npm ci` refuses to install whenever the
-// manifest disagrees with the embedded lockfile about a dependency or an
-// override — so a divergence here breaks either the image build or every
-// fresh local install, depending on which side moved.
+// manifest disagrees with the embedded lockfile about a dependency — so a
+// divergence here breaks either the image build or every fresh local
+// install, depending on which side moved.
 func TestSDKPackageJSON_MatchesDockerfileTemplate(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", "docker", "Dockerfile"))
 	if err != nil {
