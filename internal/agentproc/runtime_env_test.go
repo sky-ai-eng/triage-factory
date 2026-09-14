@@ -29,8 +29,8 @@ func TestRunMemoryLimitMB(t *testing.T) {
 }
 
 // TestAgentRuntimeEnvFor pins the engine tuning per OS: the JIT is off
-// by default on Linux and restored by the opt-in, while Darwin never
-// carries the flag at all — JavaScriptCore drops SharedArrayBuffer there
+// by default on every host but Darwin and restored by the opt-in, while
+// Darwin never carries the flag at all — JavaScriptCore drops SharedArrayBuffer there
 // whenever the JIT is disabled, and the engine needs it to boot.
 func TestAgentRuntimeEnvFor(t *testing.T) {
 	tests := []struct {
