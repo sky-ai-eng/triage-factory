@@ -22,20 +22,20 @@ import './task-card.css'
 // activity and no result is what queued MEANS, and every run-shaped element is
 // absent for exactly the reason its data is.
 //
-// The SUMMARY belongs to neither. It says what the work is, in the reporter's
-// words, and it shows in every lifecycle, beside whatever the run is producing
-// right now: the reader scanning a lane of working cards wants to know what
-// each one is about, and the live line under it says what the agent is doing
-// about it. Two paragraphs on a card is the accepted cost.
+// The SUMMARY belongs to neither. It says what the work is, in the scorer's
+// own words, and it shows in every lifecycle, beside whatever the run is
+// producing right now: the reader scanning a lane of working cards wants to
+// know what each one is about, and the live line under it says what the
+// agent is doing about it. Two paragraphs on a card is the accepted cost.
 //
 // The EVENT opens that sentence. A title names the entity; it does not say
 // what happened to it, and a lane of PR titles reads as a list of pull
 // requests rather than a list of things that need something. The label is
-// mono because the system classified it and the sentence stays sans because a
-// person wrote it — one line, two registers, no extra row. The slot always
-// says something: with no summary the event's own DESCRIPTION takes the whole
-// line, which is why a failed run — `cardModel` drops its summary by design —
-// is the card this helps most.
+// mono because the system classified it and the sentence stays sans because
+// it's prose, not a category — one line, two registers, no extra row. The
+// slot always says something: with no summary the event's own DESCRIPTION
+// takes the whole line, so a task the scorer left without one still says
+// what it is about.
 //
 // Tone spends hue only where the event is a problem or an ask. `eventTone`
 // also has a `good`, and the language has no success colour; a green
@@ -529,7 +529,7 @@ export function TaskCard({
 
       <Chain chain={chain} working={working} />
 
-      {/* What the work IS, in the reporter's own words rather than the run's,
+      {/* What the work IS, in the scorer's own words rather than the run's,
           opened by the event that made the task. Shown in every state: the
           caller decides — pass it or do not.
 

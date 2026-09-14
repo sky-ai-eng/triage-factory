@@ -130,18 +130,18 @@
   background: linear-gradient(to right, transparent, var(--color-ground) 60%);
 }
 
-/* What the work is, in the reporter's words. */
+/* What the work is, in the scorer's words. */
 .tc-summary {
   font-size: var(--text-secondary);
   line-height: var(--leading-body);
   color: var(--color-ink-2);
 }
 
-/* The event that made the task, opening the sentence the reporter wrote.
-   Mono because the system classified it; the summary stays sans because a
-   person wrote it. Inline rather than a row of its own — a long label pushes
-   the first words along instead of reserving height every card pays for, and
-   the card is already two paragraphs deep.
+/* The event that made the task, opening the sentence the scorer wrote.
+   Mono because the system classified it; the summary stays sans because it's
+   prose, not a category. Inline rather than a row of its own — a long label
+   pushes the first words along instead of reserving height every card pays
+   for, and the card is already two paragraphs deep.
 
    500, not 600: DM Mono has no semibold and the browser synthesises one. The
    run station's EventTag sets `font-semibold` and gets a faked weight for it;
@@ -165,10 +165,9 @@
 
 /* With no summary the event takes the whole line, and it takes the
    DESCRIPTION rather than the label: the slot is a sentence's worth of room,
-   and two words in it read as a heading for nothing. A failed run is the
-   case — cardModel drops its summary deliberately, because why it failed is
-   a run-page fact, and this is then the only line saying what the work was
-   about. */
+   and two words in it read as a heading for nothing. A task the scorer left
+   without a summary is the case, and this is then the only line saying what
+   the work is about. */
 .tc-event-line {
   font-family: var(--font-mono);
   font-size: var(--text-reported);
