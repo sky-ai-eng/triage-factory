@@ -127,6 +127,51 @@ describe('TaskCard, working', () => {
   })
 })
 
+describe('TaskCard, the event', () => {
+  const ci = {
+    label: 'CI Failed',
+    description: 'A CI check failed on a PR',
+    tone: 'problem' as const,
+  }
+
+  it("opens the summary with the label, in the event's tone", () => {
+    renderCard({ age: '4h ago', summary: 'Two readers hit the cgroup file at once.', event: ci })
+    const summary = document.querySelector('.tc-summary')
+    // A word boundary in the DOM, not only a margin on screen: a copy of the
+    // text and a screen reader both get "CI Failed Two", never "CI FailedTwo".
+    expect(summary?.textContent).toBe('CI Failed Two readers hit the cgroup file at once.')
+    const label = summary?.querySelector('.tc-event')
+    expect(label?.textContent).toBe('CI Failed ')
+    expect(label?.getAttribute('data-tone')).toBe('problem')
+    expect(document.querySelector('.tc-event-line')).toBeNull()
+  })
+
+  it('takes the whole line with the description when there is no summary', () => {
+    renderCard({ lifecycle: 'failed', elapsed: '2:06', href: '/runs/c4', event: ci })
+    const line = document.querySelector('.tc-event-line')
+    expect(line?.textContent).toBe('A CI check failed on a PR')
+    expect(line?.getAttribute('data-tone')).toBe('problem')
+    expect(document.querySelector('.tc-event')).toBeNull()
+  })
+
+  it('keeps the label beside the hairlines while the summary is written', () => {
+    renderCard({ age: '4h ago', summaryPending: true, event: ci })
+    expect(document.querySelector('.tc-event')?.textContent).toBe('CI Failed')
+    expect(
+      document.querySelectorAll('.tc span[aria-hidden] > span[style*="tf-draw"]'),
+    ).toHaveLength(2)
+  })
+
+  it('renders no event markup without the prop', () => {
+    renderCard({ age: '4h ago', summary: 'Two readers hit the cgroup file at once.' })
+    expect(document.querySelector('.tc-event')).toBeNull()
+    expect(document.querySelector('.tc-event-line')).toBeNull()
+    expect(document.querySelector('.tc-summary')?.textContent).toBe(
+      'Two readers hit the cgroup file at once.',
+    )
+  })
+})
+
 describe('TaskCard, settled', () => {
   it('folds the row into the footer with the ending on it', () => {
     renderCard({

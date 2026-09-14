@@ -187,6 +187,50 @@ describe('deriveCard lifecycle', () => {
     expect(m.summary).toBeUndefined()
   })
 
+  it('derives the event that made the task, and keeps it on every card', () => {
+    // A known type in the vocabulary EventTag already reads, with its tone.
+    const m = deriveCard(
+      task({ event_type: 'github:pr:ci_check_failed' }),
+      undefined,
+      undefined,
+      NOW,
+    )
+    expect(m.event).toEqual({
+      label: 'CI Failed',
+      description: 'A CI check failed on a PR',
+      tone: 'problem',
+    })
+    expect(
+      deriveCard(task({ event_type: 'github:pr:review_requested' }), undefined, undefined, NOW)
+        .event?.tone,
+    ).toBe('attention')
+    // A type this build does not know falls back to the generic entry rather
+    // than vanishing: the summary slot always says something.
+    expect(
+      deriveCard(task({ event_type: 'slack:thread:unheard_of' }), undefined, undefined, NOW).event,
+    ).toEqual({ label: 'Event', description: 'A triage event occurred', tone: 'neutral' })
+    // No type, no event.
+    expect(deriveCard(task(), undefined, undefined, NOW).event).toBeUndefined()
+    // A fact about the task, not the run: it survives a requeue and shows on
+    // a done card.
+    expect(
+      deriveCard(
+        task({ status: 'queued', event_type: 'github:pr:ci_check_failed' }),
+        conversation({ Status: 'open' }),
+        undefined,
+        NOW,
+      ).event?.label,
+    ).toBe('CI Failed')
+    expect(
+      deriveCard(
+        task({ status: 'done', event_type: 'github:pr:ci_check_failed' }),
+        conversation({ Status: 'completed', DurationMs: 60_000 }),
+        undefined,
+        NOW,
+      ).event?.label,
+    ).toBe('CI Failed')
+  })
+
   it('reads a task ended by hand with no run as done', () => {
     expect(deriveCard(task({ status: 'done' }), undefined, undefined, NOW).lifecycle).toBe('done')
   })

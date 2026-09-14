@@ -1,4 +1,5 @@
 import type { Conversation, Task } from '../../types'
+import { eventDisplay, eventTone, type EventTone } from '../../lib/eventDisplay'
 import {
   activeProse,
   completionKind,
@@ -34,6 +35,8 @@ export function pendingCount(pending?: PendingTotals): number {
   return (pending?.pulls ?? 0) + (pending?.review ?? 0)
 }
 
+export type { EventTone }
+
 /** Where the run is, as the status mark encodes it. */
 export type Lifecycle = 'queued' | 'working' | 'idle' | 'done' | 'failed' | 'canceled'
 
@@ -45,6 +48,10 @@ export interface CardModel {
   /** The summary is still being generated — the row arrived whole and only
    *  its description is pending. */
   summaryPending: boolean
+  /** What made the task, as the card's summary line opens with. Derived here
+   *  rather than in the card so the lookup happens once beside every other
+   *  thing a card shows, and so the card stays free of `lib/`. */
+  event?: { label: string; description: string; tone: EventTone }
   /** The agent's live line while working: its current action, or the setup
    *  phase or the queue wait that stands in for one. */
   command?: string
@@ -129,6 +136,10 @@ export function deriveCard(
     lifecycle,
     summary,
     summaryPending: !summary && task.scoring_status !== 'scored',
+    // The event is a fact about the TASK, not the run, so it survives a
+    // requeue and it is on a done card too: a settled lane is read to find
+    // what got handled, and "what happened" is half of that.
+    event: eventOf(task),
     command,
     artifacts: artifactTotals(conversation),
     pending: pendingTotals(conversation),
@@ -143,6 +154,17 @@ export function deriveCard(
     liveState: conversation?.Status === 'queued' ? 'idle' : 'running',
     ticking,
   }
+}
+
+// The event that made the task, in the vocabulary EventBadge and the run
+// station's EventTag already read. An unknown type falls back to the generic
+// "Event" entry rather than being dropped: the card's summary slot always
+// says something, and a blank there would be a card that looks like it has
+// nothing to report when in fact the type is one this build does not know.
+function eventOf(task: Task): { label: string; description: string; tone: EventTone } | undefined {
+  if (!task.event_type) return undefined
+  const info = eventDisplay(task.event_type)
+  return { label: info.label, description: info.description, tone: eventTone(task.event_type) }
 }
 
 function lifecycleOf(task: Task, run: Conversation | undefined): Lifecycle {

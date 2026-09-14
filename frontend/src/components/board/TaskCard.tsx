@@ -5,7 +5,13 @@ import { PermissionRow } from './PermissionRow'
 import { ArtifactStrip } from './ArtifactStrip'
 import { Glyph, type GlyphKind } from './Glyph'
 import { CrateMark } from './CrateMark'
-import { pendingCount, type ArtifactTotals, type Lifecycle, type PendingTotals } from './cardModel'
+import {
+  pendingCount,
+  type ArtifactTotals,
+  type EventTone,
+  type Lifecycle,
+  type PendingTotals,
+} from './cardModel'
 import './task-card.css'
 
 // TaskCard — the board's atom, and the only card on it.
@@ -21,6 +27,20 @@ import './task-card.css'
 // right now: the reader scanning a lane of working cards wants to know what
 // each one is about, and the live line under it says what the agent is doing
 // about it. Two paragraphs on a card is the accepted cost.
+//
+// The EVENT opens that sentence. A title names the entity; it does not say
+// what happened to it, and a lane of PR titles reads as a list of pull
+// requests rather than a list of things that need something. The label is
+// mono because the system classified it and the sentence stays sans because a
+// person wrote it — one line, two registers, no extra row. The slot always
+// says something: with no summary the event's own DESCRIPTION takes the whole
+// line, which is why a failed run — `cardModel` drops its summary by design —
+// is the card this helps most.
+//
+// Tone spends hue only where the event is a problem or an ask. `eventTone`
+// also has a `good`, and the language has no success colour; a green
+// "CI PASSED" would be the one celebration on the board, so good and neutral
+// both draw ink. Two hues on the line, both meaning act.
 //
 // Attention comes in two shapes that look alike and behave nothing alike:
 //
@@ -60,6 +80,10 @@ export interface TaskCardProps {
   summary?: string
   /** Draw the summary's line boxes in hairlines while it is generated. */
   summaryPending?: boolean
+  /** What made the task, opening the summary line. Resolved by `cardModel`
+   *  from `task.event_type` rather than looked up here: the card reads what
+   *  it is handed, and every other derivation on it lives in that one file. */
+  event?: { label: string; description: string; tone: EventTone }
   /** The agent's live command. Scans. Ignored unless `working`. */
   command?: string
   /** A blocked run. Its presence removes the activity row. */
@@ -310,6 +334,7 @@ export function TaskCard({
   lifecycle,
   summary,
   summaryPending = false,
+  event,
   command,
   permission,
   artifacts,
@@ -504,15 +529,53 @@ export function TaskCard({
 
       <Chain chain={chain} working={working} />
 
-      {/* What the work IS, in the reporter's own words rather than the run's.
-          Shown in every state: the caller decides — pass it or do not. */}
+      {/* What the work IS, in the reporter's own words rather than the run's,
+          opened by the event that made the task. Shown in every state: the
+          caller decides — pass it or do not.
+
+          Pending keeps the lead-in. The event is known the moment the row
+          arrives and the summary is not, so the label lands first and the
+          bars fill beside and under it; the first bar takes the rest of the
+          label's own line, which is why it is the one that flexes. */}
       {summaryPending ? (
-        <span style={{ display: 'flex', flexDirection: 'column' }}>
-          <Bar w="92%" i={0} />
-          <Bar w="64%" i={1} />
+        <span style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', columnGap: 7 }}>
+          {event && (
+            <span className="tc-event" data-tone={event.tone}>
+              {event.label}
+            </span>
+          )}
+          <span style={{ flex: 1, minWidth: 90 }}>
+            <Bar w="100%" i={0} />
+          </span>
+          {/* The wrapper carries the width, not the bar: Bar's own percentage
+              resolves against its parent, and a bare flex item is
+              content-sized — so `w="64%"` inside one is 64% of nothing. */}
+          <span style={{ width: '64%' }}>
+            <Bar w="100%" i={1} />
+          </span>
         </span>
+      ) : summary ? (
+        <div className="tc-summary">
+          {/* The label ends in a real space, INSIDE the span: the gap the eye
+              sees is the rule's margin, but a reader that does not see —
+              assistive technology, a copy of the text — needs a word
+              separator in the DOM, or the label and the first word of the
+              summary are one word. task-card.css makes the span an
+              inline-block so the trailing space collapses at the end of its
+              own line and the visible gap stays exactly the margin. */}
+          {event && (
+            <span className="tc-event" data-tone={event.tone}>
+              {event.label}{' '}
+            </span>
+          )}
+          {summary}
+        </div>
       ) : (
-        summary && <div className="tc-summary">{summary}</div>
+        event && (
+          <div className="tc-event-line" data-tone={event.tone}>
+            {event.description}
+          </div>
+        )
       )}
 
       {slot}

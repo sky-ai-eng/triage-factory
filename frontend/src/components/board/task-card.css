@@ -137,6 +137,63 @@
   color: var(--color-ink-2);
 }
 
+/* The event that made the task, opening the sentence the reporter wrote.
+   Mono because the system classified it; the summary stays sans because a
+   person wrote it. Inline rather than a row of its own — a long label pushes
+   the first words along instead of reserving height every card pays for, and
+   the card is already two paragraphs deep.
+
+   500, not 600: DM Mono has no semibold and the browser synthesises one. The
+   run station's EventTag sets `font-semibold` and gets a faked weight for it;
+   worth correcting there too, and out of scope here.
+
+   Inline-block, because the label's text ends in a real space (TaskCard.tsx)
+   so that a copy or a screen reader gets a word boundary between the label
+   and the summary. A trailing collapsible space at the end of a line is
+   removed, and an inline-block's content is its own line, so the space never
+   paints and the gap the eye sees stays exactly the margin. */
+.tc-event {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  margin-right: 7px;
+  white-space: nowrap;
+}
+
+/* With no summary the event takes the whole line, and it takes the
+   DESCRIPTION rather than the label: the slot is a sentence's worth of room,
+   and two words in it read as a heading for nothing. A failed run is the
+   case — cardModel drops its summary deliberately, because why it failed is
+   a run-page fact, and this is then the only line saying what the work was
+   about. */
+.tc-event-line {
+  font-family: var(--font-mono);
+  font-size: var(--text-reported);
+  line-height: var(--leading-body);
+}
+
+/* Hue only where the event is a problem or an ask. `eventTone` also returns
+   `good`, and the language has no success colour — a green "CI PASSED" would
+   be the one celebration on the board — so good and neutral both draw ink.
+   Two hues on the line and both of them mean act. */
+.tc-event[data-tone='problem'],
+.tc-event-line[data-tone='problem'] {
+  color: var(--color-alarm);
+}
+.tc-event[data-tone='attention'],
+.tc-event-line[data-tone='attention'] {
+  color: var(--color-warm);
+}
+.tc-event[data-tone='good'],
+.tc-event[data-tone='neutral'],
+.tc-event-line[data-tone='good'],
+.tc-event-line[data-tone='neutral'] {
+  color: var(--color-ink-3);
+}
+
 /* The footer: elapsed (or age) on the left, the artifact strip on the right. */
 .tc-foot {
   display: flex;
