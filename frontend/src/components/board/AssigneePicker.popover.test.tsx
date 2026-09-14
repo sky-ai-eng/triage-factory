@@ -37,6 +37,10 @@ afterAll(() => {
   delete (HTMLElement.prototype as Partial<HTMLElement>).hidePopover
 })
 
+// The feature check is a module-level constant, so the component has to be
+// evaluated AFTER the stubs land. Resetting first means a copy another file in
+// this worker already evaluated (with no popover API in sight) is never reused.
+vi.resetModules()
 const { default: AssigneePicker } = await import('./AssigneePicker')
 
 const ME = {
