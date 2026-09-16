@@ -876,15 +876,15 @@ func (c *Client) DeleteCommentScoped(ctx context.Context, owner, repo string, co
 // prDiscoveryFragment produces so both discovery paths feed the same
 // snapshot shape into the gate (updated_at + head.sha) and entity seeding.
 type restPR struct {
-	Number    int    `json:"number"`
-	NodeID    string `json:"node_id"`
-	Title     string `json:"title"`
-	Body      string `json:"body"`
-	State     string `json:"state"`
-	Draft     bool   `json:"draft"`
-	HTMLURL   string `json:"html_url"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	Number    int             `json:"number"`
+	NodeID    string          `json:"node_id"`
+	Title     string          `json:"title"`
+	Body      json.RawMessage `json:"body"`
+	State     string          `json:"state"`
+	Draft     bool            `json:"draft"`
+	HTMLURL   string          `json:"html_url"`
+	CreatedAt string          `json:"created_at"`
+	UpdatedAt string          `json:"updated_at"`
 	User      struct {
 		Login string `json:"login"`
 	} `json:"user"`
@@ -1000,11 +1000,13 @@ func parseOpenPRs(owner, repo string, data []byte) ([]DiscoveredPR, error) {
 // org login, matching the "org/slug" form GraphQL discovery and
 // GET /user/teams produce.
 func (pr restPR) toDiscoverySnapshot(owner, repo string) domain.PRSnapshot {
+	body, bodyHash := snapshotBody(pr.Body)
 	snap := domain.PRSnapshot{
 		NodeID:    pr.NodeID,
 		Number:    pr.Number,
 		Title:     pr.Title,
-		Body:      pr.Body,
+		Body:      body,
+		BodyHash:  bodyHash,
 		Author:    pr.User.Login,
 		Repo:      owner + "/" + repo,
 		URL:       pr.HTMLURL,

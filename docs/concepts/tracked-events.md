@@ -35,6 +35,7 @@ Events are emitted once per transition, not continuously. If a PR stays in the s
 | **CI Passed** | `github:pr:ci_passed` | The head commit's `statusCheckRollup` transitions to `SUCCESS` |
 | **Authored PR** | `github:pr:opened` | First time an authored PR is discovered |
 | **PR Merged** | `github:pr:merged` | The PR's `merged` field changes to `true` |
+| **PR Body Updated** | `github:pr:body_updated` | The complete PR body changes, including clearing it |
 
 ## Jira Events
 
@@ -54,6 +55,35 @@ Events are emitted once per transition, not continuously. If a PR stays in the s
 | **Status Changed** | `jira:issue:status_changed` | The `status` field changes (e.g. To Do → In Progress) |
 | **Issue Completed** | `jira:issue:completed` | The `status` changes to Done, Closed, or Resolved |
 | **Issue Unreachable** | `jira:issue:unreachable` | Jira will no longer resolve a tracked issue's key — see below |
+| **Issue Body Updated** | `jira:issue:body_updated` | The complete issue description changes, including clearing it |
+
+#### Body updates
+
+Both body-update events compare a SHA-256 fingerprint of the complete source
+body, before the 2,000-codepoint `entities.description` preview is truncated.
+Jira's batch refresh requests `description`, so edits are detected even when an
+issue no longer matches discovery's assignment/pickup queries. Jira ADF is
+fingerprinted as canonical JSON: link and formatting edits count, while object
+key order and JSON whitespace do not. GitHub's REST and GraphQL reads produce
+the same fingerprint for the same markdown. Explicit `null` and an empty string
+both mean cleared; an omitted field preserves the last observed revision and
+preview.
+
+First observations, snapshot-less seeds, and existing snapshots without a body
+fingerprint establish a baseline without emitting a body-update event. Later
+transitions commit with the snapshot through the existing atomic CAS/outbox
+path, so retries do not duplicate events. As with other snapshot diffs, multiple
+edits between polls collapse to the final observed change.
+
+Metadata includes `previous_body_hash`, `body_hash`, and source identity/context,
+without either full body. The source's issue/PR `updated` timestamp is the
+available time approximation, not a dedicated body-edit timestamp. Author and
+assignee identify ownership, not who edited the body. No default task rule or
+delegation trigger is added; handlers can opt in through the event catalog.
+
+The preview remains a best-effort display/scoring mirror and can lag the event.
+A consumer needing full, revision-consistent content must obtain that body and
+check its fingerprint rather than treat the preview as a complete document.
 
 #### Issue Unreachable
 

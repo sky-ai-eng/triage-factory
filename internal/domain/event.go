@@ -93,6 +93,7 @@ const (
 	EventGitHubPRNewCommits     = "github:pr:new_commits"
 	EventGitHubPRConflicts      = "github:pr:conflicts"
 	EventGitHubPRMentioned      = "github:pr:mentioned"
+	EventGitHubPRBodyUpdated    = "github:pr:body_updated"
 )
 
 // Jira events
@@ -105,6 +106,7 @@ const (
 	EventJiraIssueCommented       = "jira:issue:commented"
 	EventJiraIssueBecameAtomic    = "jira:issue:became_atomic"
 	EventJiraIssueUnreachable     = "jira:issue:unreachable"
+	EventJiraIssueBodyUpdated     = "jira:issue:body_updated"
 )
 
 // Slack events. Registered from ee/slack (an out-of-core source; see
@@ -190,6 +192,7 @@ func AllEventTypes() []EventType {
 
 		// --- GitHub PR — state events ---
 		{ID: EventGitHubPRNewCommits, Source: "github", Category: "pr", Label: "New Commits", Description: "A tracked PR has new commits since the last poll"},
+		{ID: EventGitHubPRBodyUpdated, Source: "github", Category: "pr", Label: "PR Body Updated", Description: "The body of a tracked pull request was edited or cleared"},
 		{ID: EventGitHubPRConflicts, Source: "github", Category: "pr", Label: "Merge Conflicts", Description: "A PR has merge conflicts"},
 		{ID: EventGitHubPRReadyForReview, Source: "github", Category: "pr", Label: "Ready for Review", Description: "A draft PR was marked ready for review"},
 		{ID: EventGitHubPRMentioned, Source: "github", Category: "pr", Label: "Mentioned", Description: "You were @mentioned in a PR"},
@@ -203,6 +206,7 @@ func AllEventTypes() []EventType {
 		{ID: EventJiraIssueStatusChanged, Source: "jira", Category: "issue", Label: "Status Changed", Description: "Issue status changed (uses dedup_key=new_status)"},
 		{ID: EventJiraIssuePriorityChanged, Source: "jira", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed (uses dedup_key=new_priority)"},
 		{ID: EventJiraIssueCommented, Source: "jira", Category: "issue", Label: "New Comment", Description: "A new comment was added to an issue"},
+		{ID: EventJiraIssueBodyUpdated, Source: "jira", Category: "issue", Label: "Issue Body Updated", Description: "The description of a tracked issue was edited or cleared"},
 		{ID: EventJiraIssueCompleted, Source: "jira", Category: "issue", Label: "Issue Completed", Description: "Issue was marked as done"},
 		{ID: EventJiraIssueBecameAtomic, Source: "jira", Category: "issue", Label: "Issue Became Atomic", Description: "Last open subtask closed — parent is now an atomic work unit"},
 		{ID: EventJiraIssueUnreachable, Source: "jira", Category: "issue", Label: "Issue Unreachable", Description: "A tracked issue can no longer be resolved in Jira — deleted, or no longer visible to the configured credential (Jira answers both the same way). Confirmed by asking about the issue directly, not inferred from its absence in a search"},

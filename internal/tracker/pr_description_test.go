@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -153,6 +154,9 @@ func TestRefreshGitHub_PhaseTwoMirrorsPRBodyIntoDescription(t *testing.T) {
 	if ent.Description != "Refreshed body" {
 		t.Errorf("stub seed description = %q; want the refreshed body", ent.Description)
 	}
+	if len(pub.nonSystemEvents()) != 0 {
+		t.Fatal("stub seed must not emit a body update")
+	}
 
 	mu.Lock()
 	body = "Edited after seed"
@@ -169,5 +173,33 @@ func TestRefreshGitHub_PhaseTwoMirrorsPRBodyIntoDescription(t *testing.T) {
 	}
 	if strings.Contains(ent.SnapshotJSON, "Edited after seed") {
 		t.Errorf("snapshot_json carries the PR body; it must stay in-memory only")
+	}
+	if emitted := pub.nonSystemEvents(); len(emitted) != 1 || emitted[0].EventType != domain.EventGitHubPRBodyUpdated {
+		t.Fatalf("body edit events = %v", eventTypes(emitted))
+	}
+	// A failed snapshot/event commit must leave the transition available
+	// for retry; the successful retry records it once in the durable queue.
+	mu.Lock()
+	body = ""
+	mu.Unlock()
+	failed := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, &failingBatchQueue{EventQueueStore: stores.EventQueue}, org)
+	if _, _, err := failed.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if emitted := pub.nonSystemEvents(); len(emitted) != 1 {
+		t.Fatalf("lost CAS published a body event: %v", eventTypes(emitted))
+	}
+	for range 2 {
+		if _, _, err := tr.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	queued, err := stores.EventQueue.ListForEntity(ctx, org, ent.ID)
+	if err != nil || len(queued) != 2 {
+		t.Fatalf("durable body events = %d, want edit + clear exactly once: %v", len(queued), err)
+	}
+	ent, err = stores.Entities.Get(ctx, org, ent.ID)
+	if err != nil || ent.Description != "" {
+		t.Fatalf("cleared description not mirrored: %v", err)
 	}
 }
