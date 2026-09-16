@@ -7,8 +7,12 @@ import (
 )
 
 func snapshotBody(raw json.RawMessage) (body, hash string) {
-	if len(raw) == 0 || json.Unmarshal(raw, &body) != nil {
+	hash = domain.JSONBodyHash(raw)
+	if hash == "" {
 		return "", ""
 	}
-	return body, domain.JSONBodyHash(raw)
+	// Explicit null hashes as cleared but fails this unmarshal; body
+	// correctly stays "" since it's never assigned from the zero value.
+	_ = json.Unmarshal(raw, &body)
+	return body, hash
 }
