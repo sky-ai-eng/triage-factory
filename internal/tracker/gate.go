@@ -79,6 +79,10 @@ func shouldSkipRefresh(stored, fresh domain.PRSnapshot, age time.Duration) bool 
 	if stored.HeadSHA != fresh.HeadSHA {
 		return false
 	}
+	// A fresh body also fills a missing baseline on deployed snapshots.
+	if fresh.BodyHash != "" && stored.BodyHash != fresh.BodyHash {
+		return false
+	}
 	if stored.CheckRuns == nil {
 		return false
 	}

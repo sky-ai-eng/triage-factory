@@ -325,7 +325,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			if entity.Title != snap.Title {
 				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Title)
 			}
-			if desc := prDescription(snap); entity.Description != desc {
+			if desc := prDescription(snap); snap.BodyHash != "" && entity.Description != desc {
 				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, desc)
 			}
 			// Reactivate if a previously-closed entity reappears as open
@@ -545,6 +545,10 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// Preserve NodeID through the refresh (RefreshPRs returns map[nodeID]→snap
 		// but doesn't set snap.NodeID).
 		newSnap.NodeID = item.nodeID
+		bodyFetched := newSnap.BodyHash != ""
+		if !bodyFetched {
+			newSnap.BodyHash = item.snap.BodyHash
+		}
 
 		if item.seed {
 			// Quiet-seed a snapshot-less entity: populate it like the
@@ -564,7 +568,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			if item.entity.Title != newSnap.Title {
 				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
 			}
-			if desc := prDescription(newSnap); item.entity.Description != desc {
+			if desc := prDescription(newSnap); bodyFetched && item.entity.Description != desc {
 				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, item.entity.ID, desc)
 			}
 			if newSnap.Merged || newSnap.State == "CLOSED" || newSnap.State == "MERGED" {
@@ -608,7 +612,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		if item.entity.Title != newSnap.Title {
 			_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
 		}
-		if desc := prDescription(newSnap); item.entity.Description != desc {
+		if desc := prDescription(newSnap); bodyFetched && item.entity.Description != desc {
 			_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, item.entity.ID, desc)
 		}
 	}
@@ -1163,7 +1167,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 			if entity.Title != snap.Summary {
 				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Summary)
 			}
-			if entity.Description != state.Description {
+			if snap.BodyHash != "" && entity.Description != state.Description {
 				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description)
 			}
 			// Reactivate if a previously-closed issue reappears as open.
@@ -1219,11 +1223,9 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 			// assigned/available/completed event for state that predates our
 			// tracking — spuriously minting a task, and after a pause minting
 			// one per known issue at once. Seed it like the discovery
-			// create-branch (snapshot + title, close if terminal) WITHOUT
+			// create-branch (snapshot + title + description, close if terminal) WITHOUT
 			// diffing instead. Normal discovery seeds in Phase 1, so this only
-			// ever fires for rows that arrived without one. Description isn't carried by batchFetchJira;
-			// a rediscovered stub picks it up from Phase 1's else-branch,
-			// otherwise it fills in on a later discovery pass.
+			// ever fires for rows that arrived without one.
 			snapJSON, _ := json.Marshal(newSnap)
 			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq); err != nil {
 				trackerLog.Error("seed jira stub snapshot failed", "source_id", e.SourceID, "error", err)
@@ -1232,6 +1234,9 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 			}
 			if e.Title != newSnap.Summary {
 				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
+			}
+			if newState.Snap.BodyHash != "" && e.Description != newState.Description {
+				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, e.ID, newState.Description)
 			}
 			if terminal(newSnap) {
 				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, e.ID); err != nil {
@@ -1267,6 +1272,12 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 			continue
 		}
 
+		// An omitted description is unknown; retain the last observed body
+		// revision so a later response can still detect the next real edit.
+		if newSnap.BodyHash == "" {
+			newSnap.BodyHash = prevSnap.BodyHash
+		}
+
 		// Per-project Done.Members for this entity's project_key. Falls
 		// back to the union across all projects when the entity is in
 		// a project that's no longer configured (defensive — terminal
@@ -1293,17 +1304,14 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		}
 		diffEventsEmitted += len(events)
 
-		// Best-effort, outside the transaction: display-only mirroring, so
-		// a failure costs a stale title until the next cycle, never an event.
+		// Best-effort display/scorer mirrors. The event's body hash is the
+		// revision authority; these capped strings can lag a committed event.
 		if e.Title != newSnap.Summary {
 			_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
 		}
-		// Description intentionally not updated here — batchFetchJira
-		// excludes the description field to save bandwidth, so newState's
-		// description would be the empty-string parse result of an absent
-		// field and writing it back would wipe the stored value. Description
-		// is seeded and refreshed by phase 1 (discoverJira), which is the
-		// only place that actually carries the field in the response.
+		if newState.Snap.BodyHash != "" && e.Description != newState.Description {
+			_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, e.ID, newState.Description)
+		}
 	}
 
 	diffSpan.SetAttributes(telemetry.Count(diffEventsEmitted))
@@ -1820,14 +1828,8 @@ func (t *Tracker) salvageJiraQuery(
 	return build(surviving), dropped
 }
 
-// batchFetchJira fetches current state for tracked Jira issues. Description
-// is deliberately excluded from the field list — it's seeded on discovery
-// and only relevant to the scorer, which reads from the stored column rather
-// than the API response. Skipping the multi-KB body on every poll saves
-// bandwidth and latency; the tradeoff is that descriptions for entities
-// that stop matching discovery's JQL (e.g. reassigned to someone else) stay
-// pinned at their last-captured value. Acceptable — description relevance
-// drops fast once a ticket is off the user's plate.
+// batchFetchJira includes descriptions so tracked issues keep detecting body
+// edits even after reassignment takes them out of the discovery queries.
 func (t *Tracker) batchFetchJira(ctx context.Context, client *jiraclient.Client, baseURL string, keys []string, projects JiraRules) (map[string]jiraIssueState, error) {
 	// Serial, with one iteration per batch of tracked issues — so its cost
 	// grows with every issue TF tracks, making it the cycle's most likely
@@ -1840,7 +1842,7 @@ func (t *Tracker) batchFetchJira(ctx context.Context, client *jiraclient.Client,
 	results := make(map[string]jiraIssueState, len(keys))
 	// "updated" is required for the diff layer's source-time fallback.
 	// See the comment on the discovery field list for context.
-	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
+	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
 
 	allDone := projects.AllDoneMembers()
 
@@ -1919,9 +1921,10 @@ type jiraIssueState struct {
 // to decide which subtasks count as "open" when populating OpenSubtaskCount.
 func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []domain.JiraStatusRef) jiraIssueState {
 	snap := domain.JiraSnapshot{
-		Key:     issue.Key,
-		Summary: issue.Fields.Summary,
-		URL:     fmt.Sprintf("%s/browse/%s", strings.TrimRight(baseURL, "/"), issue.Key),
+		Key:      issue.Key,
+		Summary:  issue.Fields.Summary,
+		URL:      fmt.Sprintf("%s/browse/%s", strings.TrimRight(baseURL, "/"), issue.Key),
+		BodyHash: domain.JSONBodyHash(issue.Fields.Description),
 	}
 	if issue.Fields.Status != nil {
 		snap.Status = issue.Fields.Status.Name

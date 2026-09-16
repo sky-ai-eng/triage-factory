@@ -71,10 +71,11 @@ type PRSnapshot struct {
 	// consumes the same wire response.
 	Timeline []TimelineEvent `json:"-"`
 
-	// Body is the PR description as authored (markdown). The tracker
-	// mirrors it into entities.description, where the scorer reads it;
-	// it is never diffed. json:"-" for the same reason as Timeline: bulk
-	// text stays out of snapshot_json, which every poll's diff reads.
+	// BodyHash fingerprints the complete body, before preview truncation.
+	// Empty means no body has been observed, including pre-field snapshots.
+	BodyHash string `json:"body_hash,omitempty"`
+	// Body is mirrored into entities.description. Only its fingerprint is
+	// persisted in the snapshot so each diff reads fixed-size body state.
 	Body string `json:"-"`
 }
 
@@ -223,9 +224,12 @@ func DedupCheckRunsByName(runs []CheckRun) []CheckRun {
 // PR bodies) lives on entities.description instead so diff reads don't
 // drag it through every refresh cycle.
 type JiraSnapshot struct {
-	Key     string `json:"key"`
-	Summary string `json:"summary"`
-	Status  string `json:"status"`
+	// BodyHash covers the full description, including ADF links/formatting.
+	// Empty means unknown rather than an explicitly cleared description.
+	BodyHash string `json:"body_hash,omitempty"`
+	Key      string `json:"key"`
+	Summary  string `json:"summary"`
+	Status   string `json:"status"`
 	// StatusID is Jira's identifier for the status Status names. It is the
 	// stable half of the pair: a workflow status can be renamed, and matching
 	// on the id is what keeps rule membership and change detection right when

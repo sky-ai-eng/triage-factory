@@ -326,34 +326,34 @@ func (c *Client) refreshPRsBatch(ctx context.Context, nodeIDs []string, includeC
 // --- GraphQL response types ---
 
 type gqlPR struct {
-	ID             string        `json:"id"`
-	Number         int           `json:"number"`
-	Title          string        `json:"title"`
-	Body           string        `json:"body"`
-	Author         gqlAuthor     `json:"author"`
-	State          string        `json:"state"`
-	IsDraft        bool          `json:"isDraft"`
-	Merged         bool          `json:"merged"`
-	Mergeable      string        `json:"mergeable"`
-	HeadRefName    string        `json:"headRefName"`
-	BaseRefName    string        `json:"baseRefName"`
-	URL            string        `json:"url"`
-	Repository     gqlRepo       `json:"repository"`
-	HeadRepository *gqlRepo      `json:"headRepository"`
-	Additions      int           `json:"additions"`
-	Deletions      int           `json:"deletions"`
-	ChangedFiles   int           `json:"changedFiles"`
-	ReviewRequests gqlRRNodes    `json:"reviewRequests"`
-	LatestReviews  gqlRevNodes   `json:"latestReviews"`
-	Reviews        gqlCount      `json:"reviews"`
-	Commits        gqlCommits    `json:"commits"`
-	Labels         gqlLabelNodes `json:"labels"`
-	Comments       gqlCount      `json:"comments"`
-	CreatedAt      string        `json:"createdAt"`
-	UpdatedAt      string        `json:"updatedAt"`
-	MergedAt       string        `json:"mergedAt"`
-	ClosedAt       string        `json:"closedAt"`
-	TimelineItems  gqlTimeline   `json:"timelineItems"`
+	ID             string          `json:"id"`
+	Number         int             `json:"number"`
+	Title          string          `json:"title"`
+	Body           json.RawMessage `json:"body"`
+	Author         gqlAuthor       `json:"author"`
+	State          string          `json:"state"`
+	IsDraft        bool            `json:"isDraft"`
+	Merged         bool            `json:"merged"`
+	Mergeable      string          `json:"mergeable"`
+	HeadRefName    string          `json:"headRefName"`
+	BaseRefName    string          `json:"baseRefName"`
+	URL            string          `json:"url"`
+	Repository     gqlRepo         `json:"repository"`
+	HeadRepository *gqlRepo        `json:"headRepository"`
+	Additions      int             `json:"additions"`
+	Deletions      int             `json:"deletions"`
+	ChangedFiles   int             `json:"changedFiles"`
+	ReviewRequests gqlRRNodes      `json:"reviewRequests"`
+	LatestReviews  gqlRevNodes     `json:"latestReviews"`
+	Reviews        gqlCount        `json:"reviews"`
+	Commits        gqlCommits      `json:"commits"`
+	Labels         gqlLabelNodes   `json:"labels"`
+	Comments       gqlCount        `json:"comments"`
+	CreatedAt      string          `json:"createdAt"`
+	UpdatedAt      string          `json:"updatedAt"`
+	MergedAt       string          `json:"mergedAt"`
+	ClosedAt       string          `json:"closedAt"`
+	TimelineItems  gqlTimeline     `json:"timelineItems"`
 }
 
 // gqlTimeline is the heterogeneous PullRequest.timelineItems connection,
@@ -513,10 +513,12 @@ func (pr gqlPR) toDiscoverySnapshot() domain.PRSnapshot { return pr.buildSnapsho
 //     section, preventing spurious events on first startup or for
 //     terminal PRs that don't need CI tracking.
 func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
+	body, bodyHash := snapshotBody(pr.Body)
 	snap := domain.PRSnapshot{
 		Number:       pr.Number,
 		Title:        pr.Title,
-		Body:         pr.Body,
+		Body:         body,
+		BodyHash:     bodyHash,
 		Author:       pr.Author.Login,
 		Repo:         pr.Repository.NameWithOwner,
 		URL:          pr.URL,

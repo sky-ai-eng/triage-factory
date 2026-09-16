@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // TestPRBody_CarriedByBothFetchPathsAndKeptOutOfSnapshotJSON pins the
@@ -47,4 +49,35 @@ func TestPRBody_CarriedByBothFetchPathsAndKeptOutOfSnapshotJSON(t *testing.T) {
 	if strings.Contains(string(raw), "frobnicates") {
 		t.Errorf("snapshot_json carries the body; it must stay in-memory only: %s", raw)
 	}
+}
+
+func TestPRBodyFingerprint_PresenceAndTransportParity(t *testing.T) {
+	for _, field := range []string{"", `,"body":null`, `,"body":""`, `,"body":"first"`, `,"body":"` + strings.Repeat("x", 2500) + `tail"`} {
+		t.Run(fmtBodyCase(field), func(t *testing.T) {
+			wire := `{"number":1,"id":"PR_1","node_id":"PR_1"` + field + `}`
+			var pr gqlPR
+			if err := json.Unmarshal([]byte(wire), &pr); err != nil {
+				t.Fatal(err)
+			}
+			rest, err := parseOpenPRs("o", "r", []byte("["+wire+"]"))
+			if err != nil || len(rest) != 1 {
+				t.Fatalf("parse REST: %v", err)
+			}
+			for _, snap := range []domain.PRSnapshot{pr.toSnapshot(), pr.toDiscoverySnapshot(), rest[0].Snapshot} {
+				if (snap.BodyHash == "") != (field == "") {
+					t.Fatalf("absent and cleared body conflated: %+v", snap)
+				}
+				if snap.BodyHash != rest[0].Snapshot.BodyHash {
+					t.Fatal("REST and GraphQL disagree on body revision")
+				}
+			}
+		})
+	}
+}
+
+func fmtBodyCase(field string) string {
+	if len(field) > 40 {
+		return "long body"
+	}
+	return field
 }

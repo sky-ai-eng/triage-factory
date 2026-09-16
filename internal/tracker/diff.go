@@ -103,6 +103,15 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 		return evts
 	}
 
+	// A missing fingerprint is an unknown baseline, never a body deletion.
+	if prev.BodyHash != "" && curr.BodyHash != "" && prev.BodyHash != curr.BodyHash {
+		emitAt(domain.EventGitHubPRBodyUpdated, "", curr.UpdatedAt, events.GitHubPRBodyUpdatedMetadata{
+			Author: curr.Author, Repo: curr.Repo, PRNumber: curr.Number,
+			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+			Title: curr.Title, PreviousBodyHash: prev.BodyHash, BodyHash: curr.BodyHash,
+		})
+	}
+
 	// --- Entity-terminating transitions ------------------------------------
 
 	if !prev.Merged && curr.Merged {
@@ -406,6 +415,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 	}
 
 	project := extractProject(curr.Key)
+	if prev.BodyHash != "" && curr.BodyHash != "" && prev.BodyHash != curr.BodyHash {
+		emit(domain.EventJiraIssueBodyUpdated, "", events.JiraIssueBodyUpdatedMetadata{
+			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
+			IssueKey: curr.Key, Project: project, IssueType: curr.IssueType,
+			Summary: curr.Summary, Labels: curr.Labels,
+			PreviousBodyHash: prev.BodyHash, BodyHash: curr.BodyHash,
+		})
+	}
 
 	// Status change — dedup_key = new status name.
 	if !prev.StatusRef().SameStatus(curr.StatusRef()) && curr.Status != "" {

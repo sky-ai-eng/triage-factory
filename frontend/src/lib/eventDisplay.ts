@@ -74,6 +74,11 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
   },
 
   // --- GitHub PR: state events ---
+  'github:pr:body_updated': {
+    label: 'PR Body Updated',
+    description: 'The pull request body was edited or cleared',
+    color: 'bg-slate-500/10 text-slate-600',
+  },
   'github:pr:new_commits': {
     label: 'New Commits',
     description: 'A tracked PR has new commits since the last poll',
@@ -111,6 +116,11 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
   },
 
   // --- Jira ---
+  'jira:issue:body_updated': {
+    label: 'Issue Body Updated',
+    description: 'The issue description was edited or cleared',
+    color: 'bg-slate-500/10 text-slate-600',
+  },
   'jira:issue:assigned': {
     label: 'Assigned',
     description: 'Issue was assigned to you',
