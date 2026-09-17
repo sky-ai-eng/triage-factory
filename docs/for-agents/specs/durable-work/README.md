@@ -14,7 +14,7 @@ one table at a time.
 - **Deferred trigger firings:** `pending_firings` adopts the same lifecycle (P2).
 - **Score-driven task re-evaluation:** a new `task_rederive_queue` makes this follow-on work
   durable and safe when scores change during evaluation (§4, P3).
-- **Executor claims:** an adapter applies shared leases, ownership checks, renewal, and deadlines
+- **Executor claims:** an adapter applies shared leases, ownership checks, and renewal
   to `claims`, with dispatcher takeover and stop/cancel settlement (D2–D4, P4).
 - **Internal handoffs:** discovery seeding, pre-fire owner consolidation, and blueprint creation
   with its first step adopt the same-transaction obligation rule (§2).
@@ -364,7 +364,14 @@ work complete on the strength of an older evaluation.
 
 Add `tasks.score_revision BIGINT` and increment it in the same `UpdateTaskScores` statement that
 writes the scores. Add `task_rederive_queue`, with a task foreign key and `UniqueWhileUnsettled`.
-It tracks two revisions:
+
+**Coverage is required:** every path that persists task scoring results must use this same
+operation, including any manually initiated re-score. Saving results, incrementing the revision,
+and recording the re-evaluation obligation commit together. Requesting a re-score does not itself
+advance the revision; saving its results does. Before implementation, enumerate all score writers
+and prove their coverage in both dialects. A future writer must satisfy the same requirement.
+
+The queue tracks two revisions:
 
 - **`requested_revision`:** the latest requested score revision, stored on the queue row. The
   score transaction raises it through an upsert, even if the item is currently leased. It never
@@ -383,7 +390,9 @@ Always compare the frozen receipt value. Comparing two mutable row values could 
 request for an evaluation that already happened. Drop `rederive_owed`.
 
 Barrier tests cover both orders of the leased-row upsert race: the new score commits before the
-completion read, and it commits after that read.
+completion read, and it commits after that read. Tests also cover every score-result write path,
+including a manual re-score if that path exists, and prove that revision and obligation cannot
+be omitted or committed separately from the scores.
 
 ## 5. Repairs, stops, and executor claims
 
@@ -393,8 +402,21 @@ A repair must use compare-and-swap against a version that the live path advances
 that version is `poll_seq`.
 
 Reactivation writes the fresh snapshot and changes state in one transaction. Closing an entity
-also needs a CAS guard. The terminal reconciler becomes a counting checker, or enforcement moves
-into tracker Phase 3; that choice remains open in O3.
+also needs a CAS guard.
+
+O3 proposes moving terminal-state enforcement into tracker Phase 3, the part of each poll that
+compares and records state. The check runs even when the snapshot has not changed: if a PR is
+already merged but TF still has active work for it, that poll performs the missing cleanup or
+records its durable obligation. It must not depend on another merged/closed transition event.
+Use the same close semantics and version guards as the normal path, preserving task closure,
+audit records, and stop/cancel intent. This does not synthesize historical events or new tasks.
+
+This change can ship independently of the shared queue framework. Before removing the periodic
+repair sweep, tests must cover pre-existing inconsistencies, unchanged snapshots, reopening
+races, failed/partial cleanup, and records skipped or no longer reached by polling. Specify how
+those records are handled without changing source-pause or untracking behavior. Keep the repair
+path until that coverage is demonstrated; afterward retain a read-only checker that counts and
+alerts on violations. O3 remains the choice to adopt this approach.
 
 ### D2. Record stop intent before settling the run
 
@@ -406,14 +428,12 @@ The live holder, or the dispatcher handling expired/unclaimed work, parks the co
 requested. User follow-up clears the request to re-arm the conversation. A plain stop leaves the
 blueprint unchanged. Cancellation uses the same request/disposition separation (§1.7).
 
-### D3. Give claims leases, deadlines, and takeover
+### D3. Give claims leases and takeover
 
 Claims use an explicit adapter. They adopt:
 
 - `lease_expires_at` and `lease_generation`.
 - Strict renewal (§1.6), included in every fenced write and on a `RenewEvery` ticker.
-- `deadline_at`: expiry follows the existing system-stop path — durable intent, kill signal,
-  and parking the conversation `open`.
 
 Claims do not adopt work-item `status`, `unique_key`, or per-row attempt accounting. Their
 existing loss-episode accounting remains; D4 defines the outcomes.
@@ -430,8 +450,9 @@ For claims, `policy.Lease = takeover_after`. Acquisition and successful renewal 
 `lease_expires_at = database_now + takeover_after`. Takeover is eligible at that expiry, with no
 additional delay.
 
-Proposed defaults (O4): renewal every 20s, self-fence after 45s, claim lease/takeover after 75s,
-and `TF_RUN_DEADLINE` of 6h. Ordinary work items keep their 60s default lease.
+Initial defaults: renewal every 20s, self-fence after 45s, and claim lease/takeover after 75s.
+Validate these values in failure tests; configuration must preserve the ordering above.
+Ordinary work items keep their 60s default lease.
 
 If renewal succeeds at database time T and none succeeds afterward, the worker aims to
 self-fence by roughly T+45s. A successor can take over at T+75s.
@@ -444,6 +465,20 @@ Self-fencing stops new claims, refuses writes and egress, and kills the sidecar 
 A paused process can miss its cleanup deadline. Database generation and expiry checks must still
 reject its writes. Test a paused holder returning after takeover. External requests already in
 flight remain outside this contract (§3).
+
+#### Run health
+
+Healthy runs have no automatic total-duration limit. Claim age alone must not stop a run; this
+contract adds no `deadline_at` or `TF_RUN_DEADLINE`. Preserve existing operation-specific timeouts
+and explicit stop/cancel controls. The work-item `UnitDeadline` and renewal RPC deadlines bound
+individual operations, not the lifetime of an agent conversation.
+
+Lease renewal proves ownership and database connectivity, not agent progress. An executor can
+keep renewing while its agent or tool is stuck, and ongoing activity does not prove useful
+progress. O4 must define what detects and handles a stalled but renewing run, accounting for both
+SDK and native runtimes, long-running tools, and deliberate waits. Do not treat renewal alone as
+a complete health signal or substitute a fixed maximum run age for that decision. Any resulting
+system stop uses D2's durable intent, kill signal, and parking the conversation `open`.
 
 #### Takeover transaction
 
@@ -609,21 +644,28 @@ lease as P1. Add lease columns and rebuild the active partial unique index as
 `UniqueWhileUnsettled`, including parked rows. Delete `RequeueStaleDraining` and document the
 task-transition transaction required by §1.5.
 
+Keep `pending_firings` and `event_queue` separate for this implementation. Revisit consolidation
+only after both have operated under the shared framework and experience shows a concrete benefit.
+Consolidation is not an adoption gate.
+
 #### P3 — Score re-evaluation
 
-Implement §4 with `SingleTx` and barrier tests for both orders of the score-revision race.
+Implement §4 with `SingleTx`, coverage of every score-result writer, and barrier tests for both
+orders of the score-revision race.
 
 #### P4 — Claims
 
-Implement D3/D4: leases, renewal, deadlines, dispatcher takeover in both dialects, reaper removal,
+Implement D3/D4: leases, renewal, dispatcher takeover in both dialects, reaper removal,
 all reassigned cleanup jobs, and startup ordering. Include settlement under full capacity and
-independent stale-claim monitoring. This addresses claim liveness, wall-clock limits, and durable
-stop intent.
+independent stale-claim monitoring. Resolve O4's stalled-run health policy; test that healthy
+renewing runs are not stopped because of their age. This addresses claim ownership, recovery,
+and durable stop intent without adding a blanket run-duration limit.
 
 #### P5 — Entity repair
 
 Implement D1: atomic snapshot updates on reactivation, CAS on close, and a counting checker for
-the reconciler, subject to O3.
+the reconciler, subject to O3 and its repair-coverage gate. This phase is independently shippable;
+its position in this list does not make it depend on P0–P4.
 
 **Dependencies:** TFAC-773, TFAC-774, and TFAC-775 land first. P1 subsumes the mechanisms in
 TFAC-761 and TFAC-765; coordinate those changes rather than developing competing implementations.
@@ -637,10 +679,9 @@ delivery ID and retains tombstones. This is a design check, not an implementatio
 ## 8. Open decisions
 
 - **O3 — Entity reconciliation:** move enforcement into tracker Phase 3 and keep a counting
-  checker? This is the recommendation.
-- **O4 — Timing defaults:** adopt renewal at 20s, self-fencing at 45s, claim lease/takeover at 75s,
-  and `TF_RUN_DEADLINE` at 6h? D3 defines exactly what each duration measures.
-- **O5 — Queue consolidation:** revisit merging `pending_firings` into `event_queue` after P2
-  has run long enough to evaluate it.
-- **O6 — Score revision writers:** should only `UpdateTaskScores` increment `score_revision`,
-  or must a manual re-score path do so too?
+  checker? This is the recommendation and can ship independently. D1 defines what each poll must
+  enforce and the coverage required before removing the repair sweep.
+- **O4 — Stalled-run health:** which operation bounds or progress signals should detect and
+  handle a stalled agent whose executor still renews its lease? Healthy runs have no total-duration
+  cap. D3 sets initial lease timings and distinguishes ownership from progress; P4 must resolve
+  the remaining health policy for both runtimes, including long tools and deliberate waits.
