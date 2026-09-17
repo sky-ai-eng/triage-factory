@@ -8,6 +8,22 @@ another worker now owns. Today, its queues and claim lifecycle solve these probl
 This design gives them shared recovery rules, implemented in `internal/db/workitem` and adopted
 one table at a time.
 
+**Adoption scope** (see §7.2 for sequencing):
+
+- **Event routing:** `event_queue` adopts the shared work-item lifecycle (P1).
+- **Deferred trigger firings:** `pending_firings` adopts the same lifecycle (P2).
+- **Score-driven task re-evaluation:** a new `task_rederive_queue` makes this follow-on work
+  durable and safe when scores change during evaluation (§4, P3).
+- **Executor claims:** an adapter applies shared leases, ownership checks, renewal, and deadlines
+  to `claims`, with dispatcher takeover and stop/cancel settlement (D2–D4, P4).
+- **Internal handoffs:** discovery seeding, pre-fire owner consolidation, and blueprint creation
+  with its first step adopt the same-transaction obligation rule (§2).
+- **Entity repair:** reactivation and closing use version-checked writes; reconciliation becomes
+  an invariant check, subject to O3 (D1, P5).
+
+The first three use the full work-item contract. Claims retain their own lifecycle; internal
+handoffs and entity repair adopt the relevant transaction and fencing rules.
+
 The central rule is simple: **when a database change creates an obligation, save that obligation
 in the same transaction.** A worker can then find it, take temporary ownership, and either finish
 it, retry it later, or leave it visibly parked for an operator.
