@@ -1,140 +1,178 @@
-# The Durable Work Contract — design of record (DRAFT, rev 3.3)
+# The Durable Work Contract
 
-**Status:** draft rev 3.3, 2026-09-16. Rev 1 reviewed (12 blockers, 8 hardening — all incorporated
-in rev 2, one partial dissent on M8). Rev 2 reviewed (9 blockers R2-B1–B9, 4 clarifications
-R2-H1–H4 — all incorporated in rev 3). Rev 3.1: the claims mixed-version cutover is collapsed per
-deployment reality — no multi-mode deployment has ever shipped, so there is no rolling upgrade to
-survive (user call, 2026-08-19). Rev 3.2: **`internal/reaper` is deleted** — takeover is a claim,
-not a sweep (user call, 2026-09-16); its four chores are rehomed in D3. Rev 3.3: **external-effect
-durability is separate work**, outside this implementation (user call, 2026-09-16). This revision
-also makes lease expiry authoritative for every holder write, defines a single takeover clock,
-and separates expected deferral from failed attempts. The scope decision is settled; the remaining
-contract stays draft. P0/P1 tickets may be cut once the contract is approved.
+**Status: Draft.** The scope is agreed: internal durability is included; external-effect durability
+is separate work. Approve the contract before creating the P0/P1 implementation tickets.
 
-**Problem statement.** The 2026-08 durability audits and the 15-ticket hardening wave showed one
-root cause behind ~25 findings: **work that exists only as a side effect of a function call rather
-than as a row with a lifecycle.** Every queue-shaped surface re-implements the same lifecycle
-locally and each copy shipped its own bug set. This spec replaces the approximations with one
-contract, implemented once, adopted table by table. The prize is that the *next* obligation costs a
-small typed table that inherits retry, backoff, leases, fencing, recovery, parking, idempotency, an
-operator surface, and metrics — instead of re-deriving all of them and re-shipping their bugs.
+TF must remember unfinished work after a crash and prevent an old worker from changing work that
+another worker now owns. Today, its queues and claim lifecycle solve these problems separately.
+This design gives them shared recovery rules, implemented in `internal/db/workitem` and adopted
+one table at a time.
 
-**Industry grounding** (patterns, never dependencies): Postgres job-queue semantics (River / Oban;
-SQS visibility timeouts) → §1; transactional outbox/inbox → §2; fencing tokens → §1.3/D1.
+The central rule is simple: **when a database change creates an obligation, save that obligation
+in the same transaction.** A worker can then find it, take temporary ownership, and either finish
+it, retry it later, or leave it visibly parked for an operator.
 
-**Delivery model, stated once:** at-least-once execution with repeat-safe **internal state changes**.
-§1.5 makes each work kind declare how its database mutations survive duplicate execution. Claim
-recovery may resume an agent whose external actions have uncertain outcomes; this contract does
-not promise to deduplicate those actions. §3 defines that scope boundary.
+Work may run more than once. Each work kind must therefore make repeated execution safe for its
+internal database state. This guarantee does not extend to external actions such as posting a
+GitHub comment. Section 3 defines that boundary.
 
-**Non-goals.** No third-party queue/orchestrator dependencies. No polymorphic `jobs` table — a
-*shared shape*, one table per kind, keeping FKs, typed stores, dbtest discipline. No event-sourcing
-expansion. No external-action journal, provider verification framework, or recovery hold on agent
-writes. Local-mode N=1 exemptions preserved, stated per surface. `conversation_signals` out of
-scope (directed, acked doorbell outbox — different contract, sound today).
+The design uses database job queues, transactional outbox/inbox records, and fencing tokens
+(numbered ownership receipts). River, Oban, and SQS visibility timeouts are reference patterns;
+this work adds no queue service or orchestration dependency.
 
----
+Each kind keeps its own typed table, foreign keys, stores, and conformance tests. There is no
+shared polymorphic `jobs` table and no expansion of event sourcing. Local mode keeps its stated
+single-instance exemptions. `conversation_signals` keeps its existing directed, acknowledged
+notification contract and is not converted to a work-item queue.
 
-## 1. The work-item contract (`internal/db/workitem`)
+## 1. Shared work-item rules
 
-### 1.1 Columns (the shared block)
+A **work item** is a database row recording an obligation. A **lease** gives one worker temporary
+ownership of that row. Each acquisition returns a **receipt** containing a new generation number;
+subsequent writes must present that receipt. This prevents a delayed worker from writing after
+another worker has taken over, even if both workers have the same instance identity.
+
+### 1.1 Shared columns
+
+Every adopting table includes these columns alongside its typed payload and foreign keys.
 
 | Column | Meaning |
 |---|---|
 | `status` | `ready \| leased \| done \| parked \| cancelled` |
-| `attempt` | Charged execution attempts, including the current claim. Claim increments it; a verified non-failure deferral returns that claim's charge (§1.6). |
-| `max_attempts` | Per-row budget, from the kind's policy at insert. |
-| `next_attempt_at` | NULL = claimable now; future = deferred. **This column is the retry model** — a retrying row defers; it never blocks the queue head. |
-| `lease_generation` | **The fence.** Monotonic per row, incremented on *every* acquisition, including reclaim by the same owner in the same boot. |
-| `lease_owner`, `lease_epoch` | Provenance (display/debug/boot fast-path), **not the fence**. |
-| `leased_at`, `lease_expires_at` | The visibility timeout. Renewable (§1.6). |
-| `cancel_requested_at`, `cancel_requested_by` | The cancellation *request* (§1.7). Never flips status directly. |
-| `last_error`, `last_outcome` | Most recent attempt's failure + typed outcome (§1.6). |
-| `unique_key` | Admission idempotency (§1.4). |
-| `first_enqueued_at` | Preserved across operator redrives. |
-| `org_id`, `created_at`, `done_at` | Standard. |
+| `attempt` | Charged execution attempts, including the current claim. Claim increments it; a verified non-failure deferral returns that charge (§1.6). |
+| `max_attempts` | Attempt budget, copied from the kind's policy when the row is inserted. |
+| `next_attempt_at` | Earliest retry time. NULL means eligible now. A future timestamp lets other items proceed. |
+| `lease_generation` | Ownership generation. Increases on every acquisition, including reacquisition by the same owner in the same boot. |
+| `lease_owner`, `lease_epoch` | Ownership provenance for display, debugging, and startup recovery. The generation is the write fence. |
+| `leased_at`, `lease_expires_at` | Lease start and expiry. The lease can be renewed (§1.6). |
+| `cancel_requested_at`, `cancel_requested_by` | Cancellation intent. Setting them does not change status (§1.7). |
+| `last_error`, `last_outcome` | Most recent attempt's error and typed outcome. |
+| `unique_key` | Prevents duplicate admission (§1.4). |
+| `first_enqueued_at` | Original enqueue time, preserved when an operator retries parked work. |
+| `org_id`, `created_at`, `done_at` | Organization and lifecycle timestamps. |
 
-Kind-specific columns (FKs, payload) live beside the block, typed, with real foreign keys.
+### 1.2 Claiming and recovery
 
-### 1.2 Status machine, the claim, and the receipt
+The normal path is `ready → leased → done`. A leased item can also:
 
+- Return to `ready` after failure, with a retry time and a remaining attempt budget.
+- Return to `ready` for expected waiting, refunding that attempt's charge (§1.6).
+- Become `parked` because it exhausted its budget, appears to be poison work, or failed permanently.
+- Become `cancelled` when a cancellation request is settled.
+
+An operator can redrive a parked item to `ready`, or supersede it to `cancelled` (§1.4).
+An expired `leased` item is claimable directly, without a separate reset or sweeper.
+
+The Postgres claim query selects:
+
+```sql
+(status = 'ready' AND ripe)
+OR (status = 'leased' AND lease_expires_at <= now())
 ```
-insert → ready ── claim ──► leased ── complete ──► done
-            ▲                 │ │ │
-            │                 │ │ └─ cancel settle (request observed) ─► cancelled
-            │                 │ └─── park (budget / poison / permanent) ─► parked ─ redrive ─► ready
-            └── requeue (attempt<max): next_attempt_at=now()+backoff        └───── supersede ─► cancelled
-            └── defer (expected wait): return current attempt charge; set next_attempt_at
-            └── lease expiry: row claimable AS-IS (attempt++, generation++)
+
+Here, `ripe` means `next_attempt_at` is NULL or has arrived. Selection uses
+`ORDER BY id FOR UPDATE SKIP LOCKED LIMIT n`, with optional per-org interleaving (§1.6).
+For each selected row, the claimer:
+
+1. Settles a cancellation request if present. Cancellation takes precedence over the budget.
+2. Otherwise parks the item if its attempt budget is already exhausted.
+3. Otherwise increments `attempt` and `lease_generation`, stamps lease ownership and times, and
+   returns the item to the worker.
+
+Keep one implementation of each disposition. Claimer settlement is a locked acquisition path;
+it does not authorize an expired holder to settle its own item.
+
+Every acquisition returns a receipt:
+
+```text
+{item_id, lease_generation, lease_expires_at, attempt, unique_key}
 ```
 
-The claim (Postgres) selects `(status='ready' AND ripe) OR (status='leased' AND lease_expires_at <=
-now())` with `ORDER BY id FOR UPDATE SKIP LOCKED LIMIT n` (optionally org-interleaved, §1.6), and
-stamps `attempt+1`, `lease_generation+1`, the lease triple. A selected row already at budget is
-parked by the claimer; a selected row with `cancel_requested_at` set is settled `cancelled` by the
-claimer, with cancellation taking precedence over the budget. Parking and cancel-settling each
-have exactly one code path.
+A kind can add fields frozen at claim time, such as `processing_revision` (§4). The receipt is
+the holder's authority for disposition writes and renewal. A stale generation matches no rows.
+Recovery becomes possible on the next claim attempt; it does not depend on a cleanup worker.
 
-Every claim returns a **receipt**: `{item_id, lease_generation, lease_expires_at, attempt,
-unique_key}` — plus any kind-declared claim-frozen fields (e.g. §4's `processing_revision`). The
-receipt is the only token that authorizes terminal writes and renewals.
+SQLite uses `BEGIN IMMEDIATE` with an update-returning statement instead of `SKIP LOCKED`.
+Its single-instance model permits this; generation behavior and conformance tests are identical.
 
-Load-bearing properties: expired leases are claimable **directly in the claim query** (no sweeper
-exists to orphan, mistune, or wedge; recovery latency = next claim), and same-owner ABA is
-impossible (a straggler's receipt carries a stale generation; its writes match zero rows).
+No startup reset is required. An optional early handback can move rows matching
+`lease_owner=me AND lease_epoch<myEpoch` to `ready` and increment their generation. If work can
+leave surviving processes, startup must first confirm their teardown. D3 defines this ordering
+for claims and their sandbox cells.
 
-SQLite: `BEGIN IMMEDIATE` update-returning instead of `SKIP LOCKED` — correct under the standing
-N=1 exemption; generations maintained identically so conformance is dialect-uniform.
+### 1.3 Checking ownership on every write
 
-**Boot behavior:** none required. The optional fast-path release (`lease_owner=me AND
-lease_epoch<myEpoch` → `ready`, generation++) is subject to D3's boot ordering where the kind's
-work can have surviving external presence (claims: cells torn down **before** release — §D3).
+Every holder operation — `complete`, `park`, `cancel-settle`, `requeue`, `defer`, and `renew` —
+requires this guard:
 
-### 1.3 Terminal writes are generation-fenced; the loser contract is universal
+```sql
+WHERE id = $1
+  AND status = 'leased'
+  AND lease_generation = $gen
+  AND lease_expires_at > now()
+```
 
-Every **holder** write — `complete/park/cancel-settle/requeue/defer/renew` — requires
-`WHERE id=$1 AND status='leased' AND lease_generation=$gen AND lease_expires_at > now()`.
-Zero rows ⇒ `ErrLeaseLost`: stop, write nothing else about this item, log at info. Expiry itself
-ends authority even when no successor has claimed yet; the next claimer owns disposition. The
-claimer's budget/cancellation settlement in §1.2 is a separate locked acquisition path, never a
-way for an expired holder to settle its own row.
+Zero matching rows returns `ErrLeaseLost`. The worker stops, makes no further writes for the
+item, and logs at info level. Expiry ends authority even if no successor has claimed yet.
+Disposition belongs to the next claimer.
 
-For expiry guards, `now()` here means **fresh database time at the guard**, not a timestamp frozen
-when a long transaction began (Postgres: `clock_timestamp()`). Validate after acquiring the row
-lock. In `SingleTx`, repeat the expiry guard at the final disposition write; failure rolls back
-the closure's mutations. In `FencedReplay`, each constituent transaction checks the live receipt
-under lock as well as its domain replay fence. Claim-adapter writes inherit this rule.
+For expiry guards, `now()` means fresh database time at the guard, not the start time of a long
+transaction. In Postgres, use `clock_timestamp()`. Validate ownership after acquiring the row lock.
 
-### 1.4 Admission idempotency — and what it does *not* buy
+- **`SingleTx`:** check again at the final disposition write. Failure rolls back the transaction's
+  domain mutations as well as the disposition.
+- **`FencedReplay`:** every constituent transaction checks the live receipt under lock, in addition
+  to its domain replay fence.
+- **Claims adapter:** apply the same generation and expiry rule to claim-owned writes.
 
-`unique_key` modes per kind: **`UniqueForever`** (partial unique across all rows; retention
-requires terminal rows kept or pruned into a tombstone ledger preserving the key) and
-**`UniqueWhileUnsettled`** (partial unique `WHERE status IN ('ready','leased','parked')` — parked
-rows are uniqueness-bearing; re-admission requires operator `redrive` — fresh budget, generation++,
-history preserved — or `supersede` → `cancelled` with `superseded_by`). Insert helpers return
-`(id, deduplicated)`. Domain fences stay authoritative; `unique_key` complements them. Admission
-dedup does not make consumption idempotent — that is §1.5.
+### 1.4 Preventing duplicate admission
 
-### 1.5 Consumption idempotency: every kind declares its strategy
+Each kind chooses how long its `unique_key` remains reserved:
 
-One of: **`SingleTx`** — domain mutation + generation-fenced completion in one transaction via
-`Complete(ctx, receipt, func(tx) error)`; **`FencedReplay`** — multi-tx handler, every constituent
-write idempotent under replay via named domain fences. These strategies cover database effects;
-provider calls and arbitrary agent tool execution are outside their guarantee (§3).
+- **`UniqueForever`:** the key is unique across all rows. Retain terminal rows, or preserve their
+  keys in a tombstone ledger when pruning them.
+- **`UniqueWhileUnsettled`:** a partial unique index covers
+  `WHERE status IN ('ready','leased','parked')`. Parked work continues to reserve its key.
 
-**Lock and cancellation ordering inside `SingleTx`** (R2-H1): `Complete` locks the item row
-(`FOR UPDATE`, verifying status+generation+expiry) **first**, then runs the closure's domain writes,
-then flips terminal — one acquisition order with the cancel-request writer (which touches only the
-`cancel_requested_*` columns, never the lease columns). A request committed before the lock is
-observed before domain writes; one arriving behind a successful completion finds a terminal row
-and cannot cancel it retroactively. The conformance suite pins both orders.
+For a parked item, an operator must either:
 
-The suite includes barrier crash tests per strategy: for `SingleTx`, crash before and after the
-combined commit and prove domain mutation and completion either both exist or neither does; for
-`FencedReplay`, crash between a domain commit and completion, reclaim, and re-execute without
-duplicate domain state. A kind that can't pass its declared strategy's test doesn't ship.
+- **Redrive** the same row with a fresh budget and incremented generation, preserving its history.
+- **Supersede** it: set `cancelled` and record `superseded_by`, allowing replacement work.
 
-### 1.6 Policy, renewal, and typed outcomes
+Insert helpers return `(id, deduplicated)`. Existing domain fences remain authoritative;
+`unique_key` complements them. Preventing duplicate rows does not make repeated execution safe.
+That requires the next rule.
+
+### 1.5 Making repeated execution safe
+
+Every work kind declares one of two strategies:
+
+- **`SingleTx`:** commit the domain mutation and item completion together through
+  `Complete(ctx, receipt, func(tx) error)`.
+- **`FencedReplay`:** use multiple transactions, with a named domain fence making each constituent
+  write safe to repeat.
+
+These strategies cover database changes. Provider calls and arbitrary agent tools are outside
+their guarantee (§3).
+
+For `SingleTx`, `Complete` locks the work-item row first with `FOR UPDATE`, verifies status,
+generation, and expiry, then runs the domain writes and records the final disposition. Cancellation
+writers touch only `cancel_requested_*`, never lease columns. A cancellation committed before the
+lock is observed before domain writes. A cancellation arriving behind a successful completion
+finds a terminal row; it cannot cancel completed work retroactively. Test both lock orders.
+
+Each kind must pass crash tests for its strategy. Use barriers to place crashes at these boundaries:
+
+- For `SingleTx`, crash before and after the combined commit. The domain mutation and completion
+  must both exist or both be absent.
+- For `FencedReplay`, crash between a domain commit and item completion. Reclaim and re-execute;
+  there must be no duplicate domain state.
+
+A kind cannot ship until these tests pass.
+
+### 1.6 Timing, retries, and expected waiting
+
+Each kind supplies a policy:
 
 ```go
 type Policy struct {
@@ -148,352 +186,446 @@ type Policy struct {
 }
 ```
 
-**Renewal cannot resurrect an expired lease** (R2-B7): `RenewLease(receipt)` requires
-`lease_generation=$gen AND lease_expires_at > now()` **on DB time**, and sets
-`lease_expires_at = now() + policy.Lease` (never old-timestamp-plus-extension). A late renewal
-returns `ErrLeaseLost` even if no successor has claimed — expiry alone ends authority. The renewal
-RPC is itself deadline-bounded, and the holder's self-fence timer (where the kind has one, D3) runs
-on the local monotonic clock independent of the renewal call's fate.
+**Renewal.** `RenewLease(receipt)` requires the current generation and an unexpired lease, using
+database time. It sets `lease_expires_at = now() + policy.Lease`; it never extends the old timestamp.
+A late renewal returns `ErrLeaseLost`, even if no successor exists. The renewal RPC has its own
+deadline. Where a worker has a self-fence watchdog, that timer runs independently on its local
+monotonic clock (D3).
 
-`Requeue(receipt, outcome, err)` takes a typed outcome: `transient | dependency_down |
-poison_suspected | deadline | permanent` (R2-H2). **`permanent` parks immediately regardless of
-remaining budget** — a validation failure or a 4xx-class rejection does not earn four more
-identical attempts. Parking reasons and metrics key on the outcome.
+**Failure.** `Requeue(receipt, outcome, err)` accepts these typed outcomes:
+`transient | dependency_down | poison_suspected | deadline | permanent`.
+A `permanent` outcome parks immediately, regardless of remaining budget. Retrying the same
+permanent validation failure or rejection would only consume more attempts. Parking reasons and
+metrics use the typed outcome.
 
-**Expected waiting is not failure.** Workers check known prerequisites before claiming where
-possible (for example, a pending firing waits for the task's active run to finish). A race found
-after claim, or a newer score revision invalidating an evaluation, uses
-`Defer(receipt, reason, nextAttemptAt)` instead of `Requeue`. In one fenced transaction it returns
-the current attempt's charge (`attempt-1`), returns the row to `ready`, and sets a future
-`next_attempt_at`. Generation never decreases: a later claim always gets a new receipt. The kind
-declares the predicate that justifies deferral and checks it in that same transaction, without
-committing any domain mutation for that attempt. A database error, expired lease, or unknown
-outcome is not a deferral and never gets a refund. Cancellation wins if requested. Repeated healthy waiting cannot exhaust
-the failure budget; deferred depth/age and a deferrals counter still expose a stuck prerequisite.
+**Expected waiting.** Check known prerequisites before claiming where possible. For example, a
+pending firing waits for the task's active run to finish. If a prerequisite race is discovered
+after claim, or a newer score invalidates an evaluation, call
+`Defer(receipt, reason, nextAttemptAt)` instead of `Requeue`.
 
-### 1.7 Cancellation: request vs disposition
+In one fenced transaction, `Defer`:
 
-`cancel_requested_at/by` is a request any authorized actor may set on a `ready` or `leased` row; it
-never flips status. A `ready` row with the request set is settled `cancelled` at claim time; a
-`leased` holder observes it at its next fenced write or renewal and settles. Terminal `cancelled`
-records who and why.
+1. Verifies the kind's declared deferral predicate without committing any domain mutation for
+   that attempt. Cancellation takes precedence if requested.
+2. Returns the current attempt's charge with `attempt-1`.
+3. Returns the row to `ready` and sets a future `next_attempt_at`.
 
-### 1.8 Observability and the operator surface — two postures, stated separately (R2-B8)
+Generation never decreases; the next claim gets a new receipt. A database error, expired lease,
+or unknown outcome cannot justify deferral and gets no refund. Repeated healthy waiting
+cannot exhaust the failure budget. Deferred depth, age, and counts still reveal stuck prerequisites.
 
-**Worker posture:** background workers use admin-pool `...System` methods, org bound by argument,
-never request-path. Brain-gated workers re-verify the lease term between batches.
+### 1.7 Cancellation
 
-**Operator posture:** the parked/redrive surface *is* request-path, and each kind declares its
-authorization explicitly rather than inheriting a default: either **org-admin-only** following the
-`failedEventsHandler` pattern (admin-pool store behind `RequireOrgAdminRole`, no RLS backstop —
-stated, tested), or a **named visibility join** where rows are team- or user-scoped. Each kind
-defines how that authorization survives its retention and parent-deletion rules. Every kind ships
-handler authorization tests alongside its pgtest.
+An authorized actor can set `cancel_requested_at/by` on a `ready` or `leased` row. This records a
+request, without changing status.
 
-Metrics per table (emitted by the package): gauges — `ready` depth, `leased`, `parked`,
-oldest-ready age, deferred depth/age; counters — claims, completions, parks by reason, deferrals,
-requeues by typed outcome, expired-lease reclaims (the crash canary). Paired with stated objectives
-per kind (oldest-ready age target; parked==0 steady state) and alerts on objective breach — "queue
-stopped draining" and "idle
-system" are distinguishable by construction. The parked surface generalizes TFAC-780's panel with
-true counts and per-row redrive/supersede.
+A claimer settles a requested `ready` item as `cancelled`. A live lease holder observes the
+request at its next fenced write or renewal and settles it. The terminal record retains who
+requested cancellation and why.
 
-### 1.9 Conformance: a crash matrix
+### 1.8 Access, metrics, and operator controls
 
-`internal/db/workitemtest`, both dialects, every adopting table: lifecycle basics; same-owner
-stale-receipt loser; barrier crash per consumption strategy; reclaim-mid-execution with straggler
-writes; **every holder write after expiry loses**, even before takeover; expiry while waiting for
-a row lock and during a `SingleTx` closure; parked-uniqueness + redrive/supersede conflicts;
-cancel-request races; repeated expected deferral without budget exhaustion; stale-receipt deferral
-cannot refund twice; real failure and crash still consume budget; `SingleTx` lock ordering;
-backoff monotonicity; fairness interleaving; metrics-query correctness.
+**Background workers** use admin-pool `...System` methods, with `org_id` bound by argument.
+These methods are not request paths. Workers requiring the background-brain lease recheck its
+term between batches.
 
-### 1.10 What the package owns vs what the table owns (R2-H4)
+**Operator controls** are request paths. Every kind declares one access policy:
 
-The package owns and generates: the claim/renew/terminal/requeue/defer SQL shapes parameterized by
-table name and the shared-block columns **only** (builders never touch kind columns); the receipt
-type; the policy enforcement; the metrics queries; the conformance suite. The table owns: its
-kind columns and their reads/writes inside `Complete` closures; its insert statements (composing
-the package's admission helper); its indexes — the package *documents* the required partial
-indexes (`(next_attempt_at, id) WHERE status='ready'`; `(lease_expires_at) WHERE
-status='leased'`; the unique-mode index) and the conformance suite asserts they exist. The
-boundary is: **semantics in the package, schema in the table, and no SQL string in an adopting
-package reimplements a shape the builders provide.**
+- Org-admin-only, following `failedEventsHandler`: admin-pool access behind `RequireOrgAdminRole`,
+  with no RLS backstop. Document and test that responsibility explicitly.
+- A named visibility join for team- or user-scoped rows.
 
-### 1.11 Worker adoption checklist
+Each kind must preserve its authorization rules through retention and parent deletion, and ship
+handler authorization tests alongside its Postgres tests.
 
-Every adopting worker states in its package doc and ticket: owner (brain-gated leader loop /
-executor dispatcher / request path), wake source, lease-term re-verification between batches,
-pool + authorization posture per §1.8, the partial indexes, and pgtest coverage including the
-ex-leader/straggler case.
+The shared package supplies these metrics per table:
 
----
+- **Gauges:** ready depth, leased count, parked count, oldest-ready age, deferred depth and age.
+- **Counters:** claims, completions, parks by reason, deferrals, requeues by typed outcome, and
+  expired-lease reclaims. Reclaims are a signal of interrupted work.
 
-## 2. The obligation rule
+Each kind declares an oldest-ready-age objective and a steady-state target of zero parked items,
+with alerts when those objectives are breached. Monitoring must distinguish an idle queue from
+one that has stopped draining.
 
-> **Any transaction whose state change implies internal follow-on work writes the work row — or
-> an inbox receipt — in the same transaction.**
+Generalize the TFAC-780 failed-event panel to show parked work across kinds, with accurate total
+counts and per-row redrive and supersede controls.
 
-Corollaries: sweeps demote from delivery mechanism to invariant checker; best-effort tails must
-name what re-runs them or be promoted; existing conformants (events+event_queue, 777's atomic
-CAS+enqueue, 779's close-tx intent, 775's stamp) are recognized, not rebuilt. Violations retired at
-adoption: the discovery-seed backfill (joins the seed CAS tx), pre-fire owner consolidation (joins
-the fire tx or aborts it), scores→re-derive (§4), mint→step (763's sweep remains as checker).
+### 1.9 Required conformance tests
 
----
+`internal/db/workitemtest` runs against both dialects for every adopting table. It covers:
 
-## 3. Scope boundary: external effects are separate work
+- Lifecycle transitions and crash tests for the declared execution strategy.
+- Reacquisition by the same owner, rejecting its old receipt.
+- Takeover during execution, rejecting the previous worker's later writes.
+- Every holder operation after expiry, including before a successor exists.
+- Expiry while waiting for a row lock or inside a `SingleTx` closure.
+- Parked-key uniqueness and redrive/supersede conflicts.
+- Cancellation races and `SingleTx` lock ordering.
+- Repeated expected deferral without budget exhaustion; stale deferral cannot refund twice.
+- Real failures and crashes consuming the attempt budget.
+- Backoff monotonicity, per-org fairness, and metric-query correctness.
 
-**This implementation covers TF's internal obligations and state transitions.** It does not add
-`effect_receipts`, an effect-reconciliation queue, durable provider-operation identities,
-provider-specific probes or retry policies, or a recovery hold on agent writes. The shared package
-has no external-effect strategy or unclaimed-backstop discharge API to build in anticipation of
-that separate work.
+### 1.10 Package and table responsibilities
 
-The boundary includes `tfac exec` calls to GitHub/Jira, `git push`, real `gh` through the credential
-injector, EE integrations such as Slack, arbitrary allowed egress, and future third-party tools.
-Their existing behavior, audit records, and provider-specific protections remain in place. A
-crash can still leave an external action's result unknown, and an agent reissuing it can still
-produce a duplicate. That tradeoff is accepted for this work; it does not block internal durability
-improvements or the launch of another integration.
+`internal/db/workitem` owns:
 
-**No new authority crosses the sandbox boundary.** Jails retain their current credential and
-network restrictions. Neither an agent nor a sidecar gains extra provider access to verify an
-external effect. Internal ownership fencing and existing cell teardown remain required, but they
-are not an external-effect deduplication guarantee. Transcript repair keeps its current behavior:
-report interrupted tool results as unknown; do not blindly replay the tool call.
+- SQL builders for claim, renewal, disposition, requeue, and deferral. Builders use only the table
+  name and shared columns; they never read or write kind-specific columns.
+- The receipt type, policy enforcement, metric queries, and conformance suite.
 
-The [third-party MCP converter (TFAC-875)](https://linear.app/sky-ai-eng/issue/TFAC-875) deliberately
-admits tools whose effect semantics TF may not know. This contract therefore imposes no
-per-provider verification matrix, tool classification requirement, or new connector admission gate.
-Any external-effect durability design must be considered separately against that integration and
-credential architecture. The external-effects design area is recorded on
-[TFAC-760](https://linear.app/sky-ai-eng/issue/TFAC-760); it is not an implementation phase or
-acceptance gate for this specification.
+Each adopting table owns:
 
----
+- Its schema, payload, foreign keys, and domain reads/writes inside `Complete` closures.
+- Insert statements that compose the package's admission helper.
+- Required indexes: `(next_attempt_at, id) WHERE status='ready'`,
+  `(lease_expires_at) WHERE status='leased'`, and its chosen uniqueness index.
 
-## 4. Re-derive, revision-safe (R2-B1)
+The package documents the required indexes; conformance tests assert they exist. Adopting
+packages must use the shared SQL builders rather than reimplementing their lifecycle operations.
 
-`tasks.score_revision BIGINT`, bumped in the same `UpdateTaskScores` statement that writes scores.
-The obligation row (`task_rederive_queue`, task FK, `UniqueWhileUnsettled`) carries **two**
-revision fields:
+### 1.11 Adoption checklist
 
-- **`requested_revision`** — on the row, monotonic: the scores-write upsert raises it (including on
-  a currently-`leased` row) in the same tx as the score commit. Never lowered.
-- **`processing_revision`** — **stamped into the claim receipt at claim time and immutable for that
-  generation.** This is what the worker evaluates.
+Each worker's package documentation and implementation ticket must name:
 
-Completion runs under `SingleTx`: before committing the evaluation's domain writes, the closure
-compares **`receipt.processing_revision`** (never the mutable row value) to the task's current
-`score_revision`. Equal ⇒ the evaluation is current; complete. Different ⇒ commit no evaluation
-effects and **defer under the same receipt fence** (§1.6), preserving the row's higher
-`requested_revision` — the newer score's obligation survives without charging a failed attempt.
-The rev 2 bug — a leased-row upsert making completion compare the *raised* target to the *raised*
-task and conclude freshness for an evaluation of the old score — is structurally impossible: the compared value is
-frozen in the receipt. `rederive_owed` is dropped. Barrier tests: the leased-row upsert race in
-both orders (score-commit before completion-read and after).
+- Its owner: background-brain leader loop, executor dispatcher, or request path.
+- Its wake source and lease-term checks between batches.
+- Its database pool and access policy (§1.8).
+- Its required partial indexes.
+- Its Postgres tests, including a former leader or delayed worker attempting stale writes.
 
----
+## 2. Save follow-on work atomically
 
-## 5. Standing disciplines
+> Any transaction whose state change implies internal follow-on work writes the work row — or
+> an inbox receipt — in the same transaction.
 
-**D1 — Repairs carry fencing tokens.** Sweep/reconciler writes CAS on a version the live path
-advances (`poll_seq` for entities; reactivate writes the fresh snapshot in the same tx as the state
-flip; close grows a CAS arm; the terminal reconciler demotes to a counting checker or folds into
-tracker Phase 3 per O3).
+A periodic sweep should check this invariant, not be the mechanism that delivers the work.
+Any best-effort callback must name its recovery path or become a durable obligation.
 
-**D2 — State records intent.** A request path writes `conversations.stop_requested` and its durable
-stop signal in one transaction; it does not park the conversation directly. The live holder, or
-the dispatcher settling an expired/unclaimed conversation, parks it `open` and releases any claim
-in one transaction. The claim gate refuses execution while stop is requested; user follow-up clears
-the request (explicit re-arm). A plain stop leaves the blueprint unchanged. Cancellation follows
-§1.7's request-vs-disposition split everywhere.
+Preserve the paths that already satisfy this rule: `events` with `event_queue`, atomic snapshot
+CAS and enqueue (TFAC-777), close-transaction intent (TFAC-779), and recording the task's agent
+claim with its engagement (TFAC-775).
 
-**D3 — Claims adopt time semantics via an explicit adapter.** Claims adopt exactly:
-`lease_expires_at` + `lease_generation`, renewal per §1.6's strict rule (free on every fenced
-write + `RenewEvery` ticker), `deadline_at` (expiry = system stop through the stop machinery: D2
-intent + kill signal + park open). Claims do **not** adopt `status`, `unique_key`, or the per-row
-attempt model (episode accounting stays, with D4's vocabulary).
+Apply the rule to these remaining paths:
 
-**One takeover clock**, validated at boot: `renew_interval < self_fence_deadline < takeover_after`.
-For the claims adapter, **`policy.Lease = takeover_after`**: acquisition and each successful renewal
-set `lease_expires_at = database_now + takeover_after`. Takeover becomes eligible at that expiry;
-there is no additional delay after expiry. The proposed defaults (O4) are renew 20s / self-fence
-45s / claim lease and takeover 75s / `TF_RUN_DEADLINE` 6h. The ordinary work-item default lease
-remains 60s.
+- **Discovery seed:** include the backfill obligation in the seed's compare-and-swap (CAS)
+  transaction.
+- **Pre-fire owner consolidation:** include it in the firing transaction, or abort the firing.
+- **Score update:** enqueue re-evaluation with the score commit (§4).
+- **Blueprint creation:** create the run and enqueue its first step together. The TFAC-763 sweep
+  remains as an invariant checker.
 
-With a successful renewal granted at DB time T and no later renewal: self-fencing aims to stop the
-holder by roughly T+45s, and takeover becomes eligible at T+75s. The self-fence watchdog uses the
-**local monotonic clock**, conservatively anchored to the request start of the last successful
-acquisition/renewal; network delay must not extend the watchdog beyond that bound. Renewal calls
-are bounded, the watchdog runs independently, and a late response cannot revive a fenced claim.
-On self-fence: stop claiming, refuse writes and egress, and kill sidecar and sandbox. A process
-pause can delay that cleanup, so internal correctness rests on the database's generation and
-expiry checks, not on assuming a timer always fires on schedule. Test paused holders that return
-after takeover. External requests already in flight retain the §3 boundary.
+## 3. External actions are separate work
 
-**Cutover — collapsed (rev 3.1).** No multi-mode deployment has ever shipped, so there is no
-old-executor population and no rolling upgrade to survive: rev 3's three-step mixed-version
-choreography (the NULL-lease legacy arm, the expired-AND-stale conjunction, the zero-count
-retirement assertion) is **deleted, not deferred**. The shape that ships:
+This implementation adds no external-action journal (`effect_receipts`), reconciliation queue,
+durable provider-operation IDs, provider-specific probes or retry policies, or recovery hold on
+agent writes. The shared package has no external-effect strategy or unclaimed-backstop discharge
+API to prepare for that work.
 
-- Lease columns land in the Postgres baseline directly (standing rule: the baseline is freely
-  editable until a persistent multi deployment exists). SQLite — the one deployment shape with
-  real installed DBs — gets an ordinary forward migration; the backfill is trivial: terminal
-  claims keep NULL lease columns (inert history), and a claim live across a local upgrade is a
-  predecessor-boot leftover the existing boot self-sweep already handles.
-- There is no reaper predicate because there is no reaper (below). The instance heartbeat exits
-  claim liveness entirely and remains the registry's signal (instance GC, fleet dashboard,
-  placement's dead-preferred-executor check) — one liveness signal per concern.
-- Deployment-reality gate, restated: if a persistent multi deployment exists before this phase
-  cuts, the rev 3 mixed-version choreography comes back as written — it was correct for that
-  world and is dead weight in this one.
+This boundary applies to all external channels: GitHub/Jira through `tfac exec`, `git push`, real
+`gh` through the credential injector, EE integrations such as Slack, arbitrary allowed egress,
+and future third-party tools.
 
-**Takeover is a claim, not a sweep (rev 3.2) — `internal/reaper` is deleted.** The contract's
-rule holds for claims exactly as for work items: an expired lease is reclaimed *inside the claim
-path*, never by a sweeper. `needsDrivingSQL`'s "no active claim" arm becomes "no active claim
-within takeover": an unreleased claim with `lease_expires_at <= now()` (DB time)
-does not count as driving. On selecting such a row, the dispatcher's claim transaction performs
-the following dispositions in order, mirroring §1.2's claimer-settles rule:
+Existing behavior, audit records, and provider protections remain in place. After a crash, an
+external result may still be unknown, and reissuing the action may produce a duplicate. This is
+an accepted limit; it does not block internal durability work or new integrations.
 
-- blueprint `cancel_requested` → settle: park `open` / `system_cancelled`, blueprint `cancelled`,
-  claim released `reaped`. No mint; keep scanning.
-- plain `stop_requested` → settle: park `open`, release the claim, leave the blueprint unchanged.
-  No mint; keep scanning. The same stop disposition handles queued work with no claim.
-- loss episode ≥ `TF_MAX_CLAIM_ATTEMPTS` → terminal-fail exactly as today (`executor_lost`,
-  blueprint `failed`, ended stamps), claim released `reaped`. No mint; keep scanning.
-- otherwise → release the expired claim (`reaped`, generation++) and mint the successor **in the
-  same transaction**. `preferred_executor_id` is not consulted: an expired lease is unowned.
+Jails retain their current credential and network restrictions. Agents and sidecars gain no
+extra access to verify provider state. Internal ownership checks and cell teardown remain
+required. Transcript repair continues to report interrupted tool results as unknown without
+blindly replaying the calls. These controls do not guarantee external-effect deduplication.
 
-`idx_claims_one_active` stays the sole mutual-exclusion primitive, which is why the release is a
-statement *ahead of* the mint inside the transaction rather than a sibling CTE: a same-statement
-uniqueness check still sees the pre-release tuple. The settlement arms run on every
-dispatcher tick regardless of free capacity (bookkeeping, not work); a mint requires a slot. The
-tick must not block waiting on the execution semaphore: settlement runs before capacity/memory
-gates, then execution claims acquire only available slots and yield to the next tick when full.
-Conformance covers all slots occupied, memory-gated dispatch, and queued stop intent. That
-asymmetry is deliberate: a takeover *is* placement, and queue-is-truth means a dead executor's
-conversations are redriven when and where capacity exists, not flipped by a leader that cannot
-run them. Dialect-uniform — SQLite's `ClaimNextConversation` adopts the same arms, so local mode
-gains takeover semantics it never had (today it has boot reconcile only). The display projection's
-derived `running` rung reads lease expiry, not `released_at` alone, so a dead engagement shows as
-awaiting takeover rather than running. The visibility the reaper's prompt stamping used to provide
-comes from a package gauge instead — active claims past expiry, alerted on age — so "dead and
-not yet taken over" is a number, never a log line. Collect this database-derived gauge outside
-the dispatcher loop so a wedged or absent dispatcher cannot suppress its own alarm.
+The [third-party MCP converter (TFAC-875)](https://linear.app/sky-ai-eng/issue/TFAC-875) will admit
+tools whose effects TF may not understand. This contract imposes no provider verification matrix,
+tool classification requirement, or new connector admission gate. External-effect durability
+requires a separate design compatible with that integration and credential architecture.
+It remains a design area on [TFAC-760](https://linear.app/sky-ai-eng/issue/TFAC-760), not a phase
+or acceptance gate in this specification.
 
-The reaper's other chores, each with a named home:
+## 4. Re-evaluate tasks against the correct score revision
 
-- **Claim-desync janitor** (a terminal conversation with a dangling active claim — app-pool
-  terminal writes commit the status flip and the claim release separately because `tf_app` holds
-  no claims UPDATE grant) — **retired by D2, not swept.** Request paths write *intent*
-  (`stop_requested` / cancel request), never terminal status; the holder settles at its next
-  fenced write in the same transaction as its claim release, and a dead holder is settled by
-  takeover. Terminal status then has exactly two writers — holder and takeover — both releasing
-  the claim in the same transaction, so the desync cannot arise. The boot arm demotes to an
-  invariant checker (count + alert, no write). Ticket gate: enumerate every app-pool terminal
-  writer and convert each to an intent write.
-- **Orphaned-at-mint blueprint runs** — retired by §2 (mint and first-step enqueue in one
-  transaction); the boot arm stays as checker, the periodic copy is deleted.
-- **Registry GC** (instances rows heartbeat-stale > 7d) — registry housekeeping, not claim
-  liveness; moves to `internal/instance` as the registry's own brain-gated daily loop, behavior
-  unchanged.
-- **Config.** `TF_REAPER_STALE_SEC` retires; `takeover_after` takes its role under a
-  claim-vocabulary name, and the boot validation becomes the D3 triple `renew < self-fence <
-  takeover`. `TF_SELF_FENCE_SEC` stays as the *instance-wide* coarse fence (heartbeat write
-  failing → kill every cell, stop claiming); per-claim renewal failure is the fine-grained fence
-  beneath it; both are bounded strictly below takeover. `TF_MAX_CLAIM_ATTEMPTS` stays — it is the
-  episode budget the takeover path consumes.
+A score can change while a worker is evaluating it. The worker must not mark the newer score's
+work complete on the strength of an older evaluation.
 
-**Boot supersession ordering:** the instance-id flock proves a same-id predecessor *process* has
-exited — but not that its **cells** (jails/sidecars) are dead. Therefore boot order is: predecessor
-cell teardown sweep completes **first**, then claim release/fast-path handback. A fast-path release
-must never make a successor eligible before predecessor cell teardown is confirmed. Where
-teardown cannot be confirmed, fast-path release is withheld and the ordinary lease-expiry path
-applies. This does not assert that waiting proves an external effect absent (§3). Timelines for
-duplicate-state-root (excluded by the flock, asserted) and old-executor-crash are test cases.
+Add `tasks.score_revision BIGINT` and increment it in the same `UpdateTaskScores` statement that
+writes the scores. Add `task_rederive_queue`, with a task foreign key and `UniqueWhileUnsettled`.
+It tracks two revisions:
 
-**D4 — One attempt vocabulary.** §1.2's definition for work items. For claims: episode accounting
-stays; only `reaped` counts toward the takeover loss budget; `requeued_credentials` and
-`requeued_boot` become their own outcomes and never extend a loss episode. Boot/credential outcome
-changes land with the same migration (there is no stepped cutover — see D3).
+- **`requested_revision`:** the latest requested score revision, stored on the queue row. The
+  score transaction raises it through an upsert, even if the item is currently leased. It never
+  decreases.
+- **`processing_revision`:** the revision frozen into the receipt when the worker claims the
+  item. It cannot change within that generation.
 
----
+Completion uses `SingleTx`. Before committing evaluation effects, compare
+`receipt.processing_revision` with the task's current `score_revision`:
 
-## 6. What this explicitly does NOT change
+- If equal, commit the evaluation and complete the item.
+- If different, commit no evaluation effects. Defer under the same receipt fence (§1.6), keeping
+  the higher `requested_revision` and refunding the current attempt charge.
 
-Domain fences stay authoritative; conversations stay queue-is-truth derived; the eventbus and
-`tf_ctl` stay lossy-by-design; CAS-before-publish ordering stands; `external_actions` stays
-append-only; local-mode exemptions restated per surface, none silently widened. External-effect
-durability is excluded across all channels (§3); the existing security controls remain in force.
+Always compare the frozen receipt value. Comparing two mutable row values could mistake a newer
+request for an evaluation that already happened. Drop `rederive_owed`.
 
----
+Barrier tests cover both orders of the leased-row upsert race: the new score commits before the
+completion read, and it commits after that read.
+
+## 5. Repairs, stops, and executor claims
+
+### D1. Fence repair writes
+
+A repair must use compare-and-swap against a version that the live path advances. For entities,
+that version is `poll_seq`.
+
+Reactivation writes the fresh snapshot and changes state in one transaction. Closing an entity
+also needs a CAS guard. The terminal reconciler becomes a counting checker, or enforcement moves
+into tracker Phase 3; that choice remains open in O3.
+
+### D2. Record stop intent before settling the run
+
+A request path writes `conversations.stop_requested` and its durable stop signal in one
+transaction. It does not park the conversation itself.
+
+The live holder, or the dispatcher handling expired/unclaimed work, parks the conversation
+`open` and releases any claim in one transaction. Execution cannot be claimed while stop is
+requested. User follow-up clears the request to re-arm the conversation. A plain stop leaves the
+blueprint unchanged. Cancellation uses the same request/disposition separation (§1.7).
+
+### D3. Give claims leases, deadlines, and takeover
+
+Claims use an explicit adapter. They adopt:
+
+- `lease_expires_at` and `lease_generation`.
+- Strict renewal (§1.6), included in every fenced write and on a `RenewEvery` ticker.
+- `deadline_at`: expiry follows the existing system-stop path — durable intent, kill signal,
+  and parking the conversation `open`.
+
+Claims do not adopt work-item `status`, `unique_key`, or per-row attempt accounting. Their
+existing loss-episode accounting remains; D4 defines the outcomes.
+
+#### Timing
+
+Validate this ordering at startup:
+
+```text
+renew_interval < self_fence_deadline < takeover_after
+```
+
+For claims, `policy.Lease = takeover_after`. Acquisition and successful renewal set
+`lease_expires_at = database_now + takeover_after`. Takeover is eligible at that expiry, with no
+additional delay.
+
+Proposed defaults (O4): renewal every 20s, self-fence after 45s, claim lease/takeover after 75s,
+and `TF_RUN_DEADLINE` of 6h. Ordinary work items keep their 60s default lease.
+
+If renewal succeeds at database time T and none succeeds afterward, the worker aims to
+self-fence by roughly T+45s. A successor can take over at T+75s.
+
+The watchdog uses the local monotonic clock, anchored conservatively to the request start of the
+last successful acquisition or renewal. Network delay must not extend that bound. Renewal calls
+have deadlines; the watchdog runs independently; a late response cannot revive a fenced claim.
+Self-fencing stops new claims, refuses writes and egress, and kills the sidecar and sandbox.
+
+A paused process can miss its cleanup deadline. Database generation and expiry checks must still
+reject its writes. Test a paused holder returning after takeover. External requests already in
+flight remain outside this contract (§3).
+
+#### Takeover transaction
+
+Remove `internal/reaper`. The dispatcher reclaims expired claims as part of acquiring work.
+In `needsDrivingSQL`, an unreleased claim stops counting as an active driver when
+`lease_expires_at <= now()` on database time.
+
+The claim transaction applies these rules in order:
+
+1. **Blueprint cancellation requested:** park the conversation `open` with `system_cancelled`,
+   mark the blueprint `cancelled`, and release the claim as `reaped`. Do not create a successor.
+2. **Plain stop requested:** park the conversation `open`, release the claim, and leave the
+   blueprint unchanged. Do not create a successor. Apply the same stop settlement to queued
+   conversations with no claim.
+3. **Loss episode at or above `TF_MAX_CLAIM_ATTEMPTS`:** fail with `executor_lost`, mark the
+   blueprint `failed`, stamp end times, and release the claim as `reaped`. No successor.
+4. **Otherwise:** release the expired claim as `reaped`, increment its generation, and create
+   the successor in the same transaction. Ignore `preferred_executor_id`; the expired lease
+   no longer owns the work.
+
+`idx_claims_one_active` remains the mutual-exclusion constraint. Release the old claim in a
+statement before inserting the new one, not in a sibling CTE: a uniqueness check in the same
+statement can still see the old active tuple.
+
+Settlement runs on every dispatcher tick, even with no execution capacity. Starting a successor
+requires a slot. Run settlement before capacity and memory gates; acquire only available
+execution slots and return to the next tick when full. Never block the tick on the execution
+semaphore. Test full capacity, memory-gated dispatch, and queued stop intent.
+
+This places work only where capacity exists. Implement the same rules in SQLite's
+`ClaimNextConversation`, so local mode can recover during operation as well as at startup.
+
+#### Display and monitoring
+
+Derive the display's `running` state from lease expiry, not just `released_at`. A dead engagement
+must appear as awaiting takeover.
+
+Expose a database-derived gauge of active claims past expiry and alert on their age. Collect it
+outside the dispatcher loop so a missing or stuck dispatcher cannot suppress its own alarm.
+
+#### Other cleanup responsibilities
+
+Removing the reaper requires assigning each of its other jobs:
+
+- **Terminal conversations with unreleased claims:** prevent this inconsistent state through D2.
+  Request paths cannot update claims (`tf_app` has no claims UPDATE grant), so they write intent
+  only. The holder and dispatcher are the only settlement writers; each releases the claim in
+  the same transaction as the conversation status change. The startup checker counts and alerts
+  on violations without repairing them. Before implementation, enumerate every app-pool terminal
+  writer and convert it to an intent write.
+- **Blueprint runs created without a first conversation:** prevent this through the atomic
+  creation rule (§2). Keep the startup invariant checker; delete the periodic repair sweep.
+- **Stale instance records:** move garbage collection to `internal/instance`, in a daily loop
+  gated by the background-brain lease. Continue deleting instances heartbeat-stale for over 7d.
+
+Retire `TF_REAPER_STALE_SEC`; its replacement uses claim vocabulary and the `takeover_after`
+meaning above. Keep `TF_SELF_FENCE_SEC` as the instance-wide fence: prolonged heartbeat-write
+failure kills every cell and stops claiming. Per-claim renewal failure is a finer-grained fence.
+Both self-fence deadlines must be strictly below takeover. Keep `TF_MAX_CLAIM_ATTEMPTS` as the
+loss-episode budget.
+
+The instance heartbeat remains responsible for registry garbage collection, fleet display, and
+placement's dead-preferred-executor check. It no longer determines claim liveness.
+
+#### Startup ordering
+
+The instance-ID file lock (`flock`) proves the preceding process with that ID has exited. It
+does not prove its jails and sidecars have exited.
+
+Complete predecessor cell teardown before early claim release or handback. If teardown cannot
+be confirmed, withhold the fast path and use ordinary lease expiry. Waiting alone does not prove
+an external action absent (§3).
+
+Test an old executor crashing and an attempt to reuse the same state root concurrently. Assert
+that the file lock excludes the latter.
+
+#### Claim migration
+
+No multi-mode deployment has shipped. Until a persistent one exists, add lease columns directly
+to the Postgres baseline; there is no older executor population to support.
+
+SQLite has installed databases and needs a forward migration. Terminal claims keep NULL lease
+columns as historical records. A live claim surviving an upgrade belongs to the previous boot
+and is handled by startup self-recovery.
+
+Recheck deployment reality before this phase begins. If a persistent multi deployment exists,
+use the staged upgrade rules in §7.1. The transition must support legacy NULL leases, require
+both lease expiry and a stale heartbeat while old executors remain, and verify that no active
+claims still require legacy handling before retiring it.
+
+### D4. Count loss episodes consistently
+
+Work items use the attempt rules in §1.2 and §1.6. Claims keep episode-based accounting:
+only `reaped` counts toward the takeover loss budget. `requeued_credentials` and `requeued_boot`
+are separate outcomes and do not extend a loss episode.
+
+Ship those outcome changes with the claim migration. The deployment rules in D3 determine
+whether that migration needs a staged cutover.
+
+## 6. Existing guarantees to preserve
+
+- Domain replay fences remain authoritative.
+- Whether a conversation needs driving remains derived from queue state.
+- The eventbus and `tf_ctl` remain intentionally lossy notifications.
+- Snapshot CAS still precedes publication.
+- `external_actions` remains append-only.
+- Local-mode exemptions must be stated per surface, not silently broadened.
+- Existing security controls remain in force. External-effect durability is separate (§3).
 
 ## 7. Adoption plan
 
-### 7.1 Migration posture (M8 dissent, adopted as a gate)
+### 7.1 Migration rules
 
-Every phase lands as forward migrations in both dialect trees. The standing rule (no multi
-deployment; pg baseline freely editable) holds today; every phase re-checks deployment reality at
-cut time — the moment a persistent multi deployment exists, expand→dual-read→backfill→switch→
-contract plus previous-head upgrade tests become mandatory, and vocabulary swaps stop shipping in
-one release. P4 is written to that discipline from the start.
+Plan schema changes for both dialects. SQLite requires forward migrations. Postgres can still
+change its baseline while no persistent multi deployment exists. Recheck that condition before
+every phase.
 
-### 7.2 Phases
+Once a persistent multi deployment exists, upgrades must proceed through compatible expansion,
+dual reads, backfill, switching to the new representation, and removal of the old representation.
+Include upgrade tests from the previous head. Do not change stored vocabularies in one release
+while older workers still run. P4 follows the claim-specific conditions in D3.
 
-- **P0 — the contract.** `workitem` + `workitemtest` crash matrix + metrics/SLO emitters + the
-  generalized parked surface with per-kind authorization postures (§1.8). Gate: the §1.9 lifecycle,
-  expiry, deferral, and crash semantics demonstrated in the suite before any consumer ships.
-- **P1 — `event_queue` retrofit.** Forward migrations with the **explicit backfill** (R2-B9):
-  `pending→ready`; `failed→parked` (attempts/last_error preserved); **`processing→leased` with a
-  synthetic already-expired lease** (`lease_generation=1`, `lease_expires_at=now()-1s`, owner
-  carried from `executor_id`) so in-flight rows are immediately reclaimable through the normal
-  claim path — no special recovery arm. CHECK/index replacement enumerated in the migration.
-  Migration runs before workers start, which both deployment shapes guarantee today (single binary
-  boots goose before the drain worker; multi runs migrate on boot the same way) — stated in the
-  ticket, asserted in the runbook. **There is no kill switch: rollback is a forward fix.** The
-  vocabulary swap is not old-worker-compatible, and a flag-retained legacy worker would need a
-  compatibility adapter against the new schema — cost without benefit while both deployment shapes
-  ship worker and schema together (single binary; no persistent multi). This is the honest version
-  of rev 2's claim. Worker declares `FencedReplay` naming its three fences; per-org fairness arm;
-  `UnitDeadline`; sweeper and boot-reset deleted; 780's panel moves to `parked`; the sibling-close
-  `prepare` error arm rides the rewrite.
-- **P2 — `pending_firings` conformance.** Explicit migration (R2-H3): status mapping
-  (`pending→ready`, `draining→leased` with the same synthetic-expired-lease backfill), the active
-  partial unique index rebuilt as the `UniqueWhileUnsettled` index (parked rows included), lease
-  columns added, `RequeueStaleDraining` deleted. The task-transition tx documented per §1.5.
-- **P3 — re-derive** per §4. `SingleTx` + both-orders revision barrier tests.
-- **P4 — claims time-semantics** per D3/D4: lease columns + renewal + deadline, takeover folded
-  into the dispatcher claim path in both dialects, `internal/reaper` deleted with its four chores
-  rehomed as D3 states, boot ordering, settlement under full capacity, and independent stale-claim
-  monitoring. Resolves the claim-liveness, wall-clock, and durable-stop P1s.
-- **P5 — D1 completions.** Reactivate-writes-snapshot-in-tx, close CAS, reconciler demoted to a
-  counting checker (O3).
+### 7.2 Implementation phases
 
-P0 and P1 are the first delivery milestone: build the smallest shared contract against the real
-event-queue adopter, prove crash recovery and upgrades, then migrate the remaining consumers.
-The event queue already has transactional admission, replay fences, and recovery; it is the first
-adopter because it is concrete and close to the target contract, not because it lacks durability.
-Preserve those guarantees. Do not build provider journals or generic external-effect adapters as
-part of the shared package.
+**Start with P0 and P1 together.** Build the smallest shared contract against the existing event
+queue, prove crash recovery and upgrades, then migrate the remaining consumers. The event queue
+already has transactional admission, replay fences, and recovery. Preserve them while adopting
+the shared mechanism. Provider journals and generic external-effect adapters are not part of P0.
 
-Sequencing: 773/774/775 land first; P1 subsumes 761/765's mechanisms and must not race them.
+#### P0 — Shared package
 
-### 7.3 Future kinds (sketch)
+Build `workitem`, `workitemtest`, metrics and objective alerts, and the shared parked-work controls
+with per-kind authorization (§1.8). The lifecycle, expiry, deferral, and crash tests in §1.9 must
+pass before any consumer ships.
 
-A webhook ingress lane remains the contract's forward test case: verified delivery → inbox row
-(`UniqueForever` on provider delivery id, tombstoned) → routed by a contract worker. Checked
-against the contract before P0 freezes; not designed here.
+#### P1 — Event queue
 
----
+Migrate `event_queue` with these explicit mappings:
 
-## 8. Open questions
+- `pending → ready`.
+- `failed → parked`, preserving attempts and `last_error`.
+- `processing → leased`, with an already-expired synthetic lease:
+  `lease_generation=1`, `lease_expires_at=now()-1s`, and owner copied from `executor_id`.
+  Normal claiming then recovers these rows without a special recovery path.
 
-- **O3** — reconciler end-state: fold enforcement into tracker Phase 3 + keep a counting checker
-  (recommendation unchanged).
-- **O4** — timing defaults: renew 20s / self-fence 45s / claim lease and takeover 75s /
-  `TF_RUN_DEADLINE` 6h. The values remain proposed; D3 fixes what each duration measures.
-- **O5** — `pending_firings` collapse into `event_queue`: deferred, revisit after P2 soak.
-- **O6** — `score_revision` writers: `UpdateTaskScores` only, or does a manual re-score path need
-  to bump it?
+List every CHECK constraint and index replacement in the migration. Migrations run before
+workers: the local binary runs goose before its drain worker, and multi mode migrates before
+starting workers. State this requirement in the ticket and assert it in the runbook.
+
+There is no legacy-worker kill switch. The vocabulary change is incompatible with the old worker,
+so rollback requires a forward fix. Retaining an old worker behind a flag would also require a
+schema adapter. With no persistent multi deployment, worker and schema ship together; if that
+changes, §7.1 applies.
+
+The worker uses `FencedReplay` and names its three domain fences. Add per-org fairness and
+`UnitDeadline`; remove the sweeper and startup reset. Move the TFAC-780 panel to `parked` and fix
+the sibling-close `prepare` error path as part of the rewrite.
+
+#### P2 — Pending firings
+
+Migrate `pending_firings`: `pending → ready`; `draining → leased` with the same synthetic expired
+lease as P1. Add lease columns and rebuild the active partial unique index as
+`UniqueWhileUnsettled`, including parked rows. Delete `RequeueStaleDraining` and document the
+task-transition transaction required by §1.5.
+
+#### P3 — Score re-evaluation
+
+Implement §4 with `SingleTx` and barrier tests for both orders of the score-revision race.
+
+#### P4 — Claims
+
+Implement D3/D4: leases, renewal, deadlines, dispatcher takeover in both dialects, reaper removal,
+all reassigned cleanup jobs, and startup ordering. Include settlement under full capacity and
+independent stale-claim monitoring. This addresses claim liveness, wall-clock limits, and durable
+stop intent.
+
+#### P5 — Entity repair
+
+Implement D1: atomic snapshot updates on reactivation, CAS on close, and a counting checker for
+the reconciler, subject to O3.
+
+**Dependencies:** TFAC-773, TFAC-774, and TFAC-775 land first. P1 subsumes the mechanisms in
+TFAC-761 and TFAC-765; coordinate those changes rather than developing competing implementations.
+
+### 7.3 Future applicability check
+
+Before P0 is finalized, check the contract against a future webhook ingress path:
+verified delivery → inbox row → contract worker. The inbox uses `UniqueForever` on the provider's
+delivery ID and retains tombstones. This is a design check, not an implementation phase here.
+
+## 8. Open decisions
+
+- **O3 — Entity reconciliation:** move enforcement into tracker Phase 3 and keep a counting
+  checker? This is the recommendation.
+- **O4 — Timing defaults:** adopt renewal at 20s, self-fencing at 45s, claim lease/takeover at 75s,
+  and `TF_RUN_DEADLINE` at 6h? D3 defines exactly what each duration measures.
+- **O5 — Queue consolidation:** revisit merging `pending_firings` into `event_queue` after P2
+  has run long enough to evaluate it.
+- **O6 — Score revision writers:** should only `UpdateTaskScores` increment `score_revision`,
+  or must a manual re-score path do so too?
