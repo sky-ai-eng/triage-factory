@@ -341,13 +341,6 @@ extra access to verify provider state. Internal ownership checks and cell teardo
 required. Transcript repair continues to report interrupted tool results as unknown without
 blindly replaying the calls. These controls do not guarantee external-effect deduplication.
 
-The [third-party MCP converter (TFAC-875)](https://linear.app/sky-ai-eng/issue/TFAC-875) will admit
-tools whose effects TF may not understand. This contract imposes no provider verification matrix,
-tool classification requirement, or new connector admission gate. External-effect durability
-requires a separate design compatible with that integration and credential architecture.
-It remains a design area on [TFAC-760](https://linear.app/sky-ai-eng/issue/TFAC-760), not a phase
-or acceptance gate in this specification.
-
 ## 4. Re-evaluate tasks against the correct score revision
 
 A score can change while a worker is evaluating it. The worker must not mark the newer score's
