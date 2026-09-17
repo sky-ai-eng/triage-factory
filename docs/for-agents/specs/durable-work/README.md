@@ -268,6 +268,12 @@ counts and per-row redrive and supersede controls.
 
 ### 1.10 Package and table responsibilities
 
+**A shared developer experience is part of the contract.** Every adopting work kind uses the
+same lifecycle API and outcome types, metrics, operator controls, and conformance suite. Adding
+a kind supplies its typed storage, business logic, and explicit policies; it must not require
+another queue framework. Kind-specific wake sources, transaction boundaries, and authorization
+remain explicit as described below and in §1.8 and §1.11.
+
 `internal/db/workitem` owns:
 
 - SQL builders for claim, renewal, disposition, requeue, and deferral. Builders use only the table
