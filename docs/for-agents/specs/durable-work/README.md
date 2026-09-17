@@ -83,12 +83,17 @@ The Postgres claim query selects:
 
 ```sql
 (status = 'ready' AND ripe)
+OR (status = 'ready' AND cancel_requested_at IS NOT NULL)
 OR (status = 'leased' AND lease_expires_at <= now())
 ```
 
-Here, `ripe` means `next_attempt_at` is NULL or has arrived. Selection uses
+Here, `ripe` means `next_attempt_at` is NULL or has arrived. The second arm exists because a
+cancellation request must not wait for a deferred item's retry time: a `ready` item with a future
+`next_attempt_at` has no holder to observe the request, and without this arm it would keep its
+`unique_key` reserved and count toward ready depth until it ripened. Selection uses
 `ORDER BY id FOR UPDATE SKIP LOCKED LIMIT n`, with optional per-org interleaving (§1.6).
-For each selected row, the claimer:
+Settling a selected row does not consume the worker's execution capacity; the claimer continues
+to the next row. For each selected row, the claimer:
 
 1. Settles a cancellation request if present. Cancellation takes precedence over the budget.
 2. Otherwise parks the item if its attempt budget is already exhausted.
@@ -235,8 +240,9 @@ cannot exhaust the failure budget. Deferred depth, age, and counts still reveal 
 An authorized actor can set `cancel_requested_at/by` on a `ready` or `leased` row. This records a
 request, without changing status.
 
-A claimer settles a requested `ready` item as `cancelled`. A live lease holder observes the
-request at its next fenced write or renewal and settles it. The terminal record retains who
+A claimer settles a requested `ready` item as `cancelled` on its next pass, whether or not the
+item's `next_attempt_at` has arrived (§1.2). A live lease holder observes the request at its next
+fenced write or renewal and settles it. The terminal record retains who
 requested cancellation and why.
 
 ### 1.8 Access, metrics, and operator controls
@@ -278,6 +284,7 @@ counts and per-row redrive and supersede controls.
 - Expiry while waiting for a row lock or inside a `SingleTx` closure.
 - Parked-key uniqueness and redrive/supersede conflicts.
 - Cancellation races and `SingleTx` lock ordering.
+- Cancellation of a deferred `ready` item settles on the next claim pass, before its retry time.
 - Repeated expected deferral without budget exhaustion; stale deferral cannot refund twice.
 - Real failures and crashes consuming the attempt budget.
 - Backoff monotonicity, per-org fairness, and metric-query correctness.
@@ -301,6 +308,7 @@ Each adopting table owns:
 - Its schema, payload, foreign keys, and domain reads/writes inside `Complete` closures.
 - Insert statements that compose the package's admission helper.
 - Required indexes: `(next_attempt_at, id) WHERE status='ready'`,
+  `(id) WHERE status='ready' AND cancel_requested_at IS NOT NULL`,
   `(lease_expires_at) WHERE status='leased'`, and its chosen uniqueness index.
 
 The package documents the required indexes; conformance tests assert they exist. Adopting
@@ -379,20 +387,36 @@ The queue tracks two revisions:
 - **`processing_revision`:** the revision frozen into the receipt when the worker claims the
   item. It cannot change within that generation.
 
-Completion uses `SingleTx`. Before committing evaluation effects, compare
-`receipt.processing_revision` with the task's current `score_revision`:
+Completion uses `SingleTx`. `Complete` locks the queue row and hands the closure the row as
+locked. Before committing evaluation effects, compare `receipt.processing_revision` with that
+locked row's `requested_revision`:
 
-- If equal, commit the evaluation and complete the item.
-- If different, commit no evaluation effects. Defer under the same receipt fence (§1.6), keeping
-  the higher `requested_revision` and refunding the current attempt charge.
+- If equal, no score has landed since the claim. Commit the evaluation and complete the item.
+- If the row's value is higher, commit no evaluation effects. Defer under the same receipt fence
+  (§1.6), keeping the higher `requested_revision` and refunding the current attempt charge.
+
+Why this is race-safe: every score writer raises `requested_revision` on this same row, in the
+same transaction as the score, so the write takes the row lock the completor already holds. A
+concurrent score write therefore either committed before the lock (the completor sees the raised
+value and defers) or waits behind it (the completor completes, and the writer's upsert then finds
+a `done` row and inserts a fresh `ready` one for the new revision). The queue row is the
+serialization point; `tasks.score_revision` is not. Do not compare against `tasks.score_revision`
+read through any other path: a read taken before the row lock, or over a snapshot older than it,
+can see the old revision and mark the newer obligation done.
 
 Always compare the frozen receipt value. Comparing two mutable row values could mistake a newer
 request for an evaluation that already happened. Drop `rederive_owed`.
 
+**Lock order in the score transaction:** upsert every affected `task_rederive_queue` row before
+writing any `tasks` row. The completor locks its queue row first and may write the task inside its
+closure; a score writer that locked `tasks` first and then waited on the queue row would deadlock
+with it. Both transactions taking the queue row first removes the cycle.
+
 Barrier tests cover both orders of the leased-row upsert race: the new score commits before the
-completion read, and it commits after that read. Tests also cover every score-result write path,
-including a manual re-score if that path exists, and prove that revision and obligation cannot
-be omitted or committed separately from the scores.
+completion lock, and it commits after that lock. Tests also cover the score transaction's lock
+order against a completor writing its task, every score-result write path, including a manual
+re-score if that path exists, and prove that revision and obligation cannot be omitted or
+committed separately from the scores.
 
 ## 5. Repairs, stops, and executor claims
 
@@ -452,7 +476,8 @@ additional delay.
 
 Initial defaults: renewal every 20s, self-fence after 45s, and claim lease/takeover after 75s.
 Validate these values in failure tests; configuration must preserve the ordering above.
-Ordinary work items keep their 60s default lease.
+Ordinary work items keep their 60s default lease. P4 in §7.2 records how these values differ
+from the current reaper defaults and why.
 
 If renewal succeeds at database time T and none succeeds afterward, the worker aims to
 self-fence by roughly T+45s. A successor can take over at T+75s.
@@ -660,6 +685,16 @@ all reassigned cleanup jobs, and startup ordering. Include settlement under full
 independent stale-claim monitoring. Resolve O4's stalled-run health policy; test that healthy
 renewing runs are not stopped because of their age. This addresses claim ownership, recovery,
 and durable stop intent without adding a blanket run-duration limit.
+
+**Timing change, stated explicitly.** The takeover defaults are a deliberate step up from the
+current multi-mode reaper defaults (self-fence 15s, stale-reap 30s, on a 4s instance heartbeat)
+to self-fence 45s and takeover 75s on a 20s renewal. The old numbers priced a per-instance
+heartbeat; the new ones price a per-claim renewal that also rides every fenced write. They also
+weigh a false takeover of an agent run (sandbox killed, workspace re-cloned, transcript replayed,
+visible to the user) as far costlier than an extra 45s before a genuinely dead run is retaken.
+No deployment slows down: no multi-mode deployment has shipped, and local mode has no takeover
+at all until restart today, so it goes from never to 75s. Revisit the values with the failure
+tests D3 requires.
 
 #### P5 — Entity repair
 
