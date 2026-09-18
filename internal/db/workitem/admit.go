@@ -113,9 +113,16 @@ func (k Kind) onConflictClause() string {
 // ON CONFLICT DO NOTHING reports no conflicting row. Under
 // UniqueWhileUnsettled that leaves a window: if the blocking row settles and a
 // different admission takes the freed key before this read runs, the caller is
-// told it deduplicated against a row it never raced. The window is real and
-// widens when q is a bare *sql.DB rather than the caller's transaction — pass
-// a transaction where the answer matters.
+// told it deduplicated against a row it never raced.
+//
+// Composing into the caller's transaction closes that on SQLite, where the
+// insert holds the file's write lock until commit, and does NOT close it on
+// Postgres, where ON CONFLICT DO NOTHING releases what it locked and each
+// statement reads its own snapshot. Closing it there needs a shape that returns
+// the conflicting row from the write itself — DO UPDATE with a no-op SET — and
+// that shape cannot report whether it inserted or updated without a
+// dialect-specific trick, which is why admission is two statements here. The
+// id is right in every case but this one; deduplicated is the part to distrust.
 func (k Kind) existingByKey(ctx context.Context, q DBTX, orgID, uniqueKey string) (int64, error) {
 	a := newArgs(k.Dialect)
 	stmt := "SELECT id FROM " + k.Table +

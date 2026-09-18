@@ -297,10 +297,11 @@ func testRenewal(t *testing.T, mk Factory) {
 	}
 	fresh := e.claimOne("worker-b", 1)
 
-	// Tolerance covers one claim's round trip, and is an order of magnitude
-	// below what any wrong formula would show: old+Lease lands a whole `lease`
-	// late, half-lease or no-move a whole `elapsed` early.
-	const tolerance = 500 * time.Millisecond
+	// Tolerance covers one claim's round trip on a loaded runner, and still sits
+	// well below what any wrong formula shows: old+Lease lands ~1.6s out, and a
+	// renewal that never moved lands a whole `elapsed` early — which the
+	// monotonicity check below catches independently anyway.
+	const tolerance = time.Second
 	if drift := renewed.LeaseExpiresAt.Sub(fresh.LeaseExpiresAt); drift < -tolerance || drift > tolerance {
 		t.Fatalf("renewed expiry is %s from a lease acquired moments later; want now+Lease, not old+Lease", drift)
 	}

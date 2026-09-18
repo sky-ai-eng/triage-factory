@@ -20,6 +20,13 @@ func Measure(ctx context.Context, q DBTX, k Kind, orgID string) (Depths, error) 
 
 	a := newArgs(k.Dialect)
 	now := k.nowExpr()
+	// Ripe and deferred partition status='ready' on the retry time alone, which
+	// is narrower than Claim's eligibility: Claim also takes a ready row whose
+	// cancellation was requested, whatever its retry time. So a deferred row
+	// with a pending request counts as Deferred here for the seconds before the
+	// next pass settles it. Depth is about work waiting, and that row is waiting
+	// to be cancelled rather than run — neither bucket describes it, and a third
+	// is not in the contract.
 	ripe := "status = 'ready' AND (next_attempt_at IS NULL OR next_attempt_at <= " + now + ")"
 	deferred := "status = 'ready' AND next_attempt_at > " + now
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,6 +73,12 @@ func testExpiryUnderRowLock(t *testing.T, mk Factory) {
 	// the lock is held across the wait below rather than across a hand-rolled
 	// transaction this test would have to unwind itself.
 	locked, release := make(chan struct{}), make(chan struct{})
+	// Releasing through a once means the failure paths below can hand the
+	// blocker its exit without racing the success path's own release. Without
+	// it a t.Fatal here strands that goroutine holding a row lock, which turns
+	// one failing assertion into a hanging package.
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	defer releaseOnce()
 	blocked := make(chan error, 1)
 	go func() {
 		blocked <- db.InTx(e.ctx, e.conn, func(tx *sql.Tx) error {
@@ -100,7 +107,7 @@ func testExpiryUnderRowLock(t *testing.T, mk Factory) {
 	// waits, then release: the guard is evaluated after the lock, on fresh
 	// database time, so it must find the lease gone.
 	e.expireLease()
-	close(release)
+	releaseOnce()
 	if err := <-blocked; err != nil {
 		t.Fatalf("blocking session: %v", err)
 	}

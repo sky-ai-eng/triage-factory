@@ -72,13 +72,24 @@ type picked struct {
 //
 // SQLite takes neither, and its mutual exclusion comes from outside this
 // package: db.OpenAt caps the pool at one connection, so every claimer in the
-// process queues behind the same handle and the transaction cannot interleave
-// with another. That is a property of the handle, not of the file. Two
-// PROCESSES over one database would both open a deferred transaction here, and
-// the second to reach its first write would meet SQLITE_BUSY on the lock
-// upgrade rather than double-lease a row — noisy, not unsafe, but outside what
-// this shape was built for. An adopting kind that can be claimed from more than
-// one process needs a stronger begin than db.InTx's.
+// process queues behind the same handle and no two transactions interleave.
+//
+// That is a property of the handle, not of the file, and db.InTx begins
+// DEFERRED — so the pick and the per-row writes take their locks in two steps.
+// A second PROCESS on the same file that holds the write lock at that upgrade,
+// or that commits anything at all between the two, fails this transaction
+// immediately: busy_timeout does not cover a lock upgrade, because waiting
+// there can deadlock. Nothing is double-leased — the round rolls back whole,
+// receipts and all — so the cost is a lost cycle, not a lost fence.
+//
+// This is local mode's shape rather than this package's: db.InTx is shared, the
+// read-then-write stores beside it are exposed identically, and the fix belongs
+// at the handle where one begin mode covers all of them.
+//
+// TODO(TFAC-1027): local mode's DSN gains _txlock=immediate, which makes the
+// busy handler apply here. Until it lands, a SQLite consumer claiming while an
+// unsandboxed agent's exec verbs write must treat a "database is locked" from
+// Claim as retryable rather than as a fault.
 //
 // The round's work accumulates locally and is merged into the caller's result
 // only after the commit. A round is one transaction, so a row that fails partway
