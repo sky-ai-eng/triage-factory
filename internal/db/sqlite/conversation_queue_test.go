@@ -1086,7 +1086,7 @@ func TestConversationQueueStore_SQLite_ReturnedRow(t *testing.T) {
 
 		task := seedEntityEventTask(t, conn, "cqrr")
 		next := 0
-		scaffold := func(t *testing.T) (taskID, promptID, blueprintRunID string) {
+		scaffold := func(t *testing.T) (taskID, promptID, blueprintRunID, creatorUserID string) {
 			t.Helper()
 			next++
 			suffix := fmt.Sprintf("cqrr-%d", next)
@@ -1105,7 +1105,7 @@ func TestConversationQueueStore_SQLite_ReturnedRow(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateRun: %v", err)
 			}
-			return task.ID, promptID, created.ID
+			return task.ID, promptID, created.ID, runmode.LocalDefaultUserID
 		}
 		return stores.ConversationQueue, stores.Conversations, org, scaffold
 	})

@@ -746,12 +746,18 @@ func TestMigrate_RepairsOrphanedAtMintBlueprintRuns(t *testing.T) {
 			VALUES ('t-orphan', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'orphan', 'ev1')`,
 		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id)
 			VALUES ('t-healthy', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'healthy', 'ev1')`,
+		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id)
+			VALUES ('t-settled', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'settled', 'ev1')`,
 		`INSERT INTO blueprints (id, name, creator_user_id) VALUES ('bp1', 'BP', '` + userID + `')`,
 		`INSERT INTO prompts (id, name, body, creator_user_id) VALUES ('p1', 'P', 'b', '` + userID + `')`,
 		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, step_plan, worktree_path)
 			VALUES ('br-orphan', 'bp1', 't-orphan', 'manual', '` + userID + `', 'running', '[]', '')`,
 		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, step_plan, worktree_path)
 			VALUES ('br-healthy', 'bp1', 't-healthy', 'manual', '` + userID + `', 'running', '[]', '')`,
+		// Childless, but already settled: the repair claims 'running' rows
+		// only, so a finished run keeps the verdict it recorded.
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, abort_reason, step_plan, worktree_path)
+			VALUES ('br-settled', 'bp1', 't-settled', 'manual', '` + userID + `', 'cancelled', 'user_cancelled', '[]', '')`,
 		`INSERT INTO conversations (id, task_id, prompt_id, trigger_type, creator_user_id, blueprint_run_id, blueprint_step_index)
 			VALUES ('conv-healthy', 't-healthy', 'p1', 'manual', '` + userID + `', 'br-healthy', 0)`,
 	} {
@@ -792,6 +798,9 @@ func TestMigrate_RepairsOrphanedAtMintBlueprintRuns(t *testing.T) {
 
 	if status, reason, completed := readRun("br-healthy"); status != "running" || reason != "" || completed {
 		t.Errorf("run with a step = (%q, %q, completed=%v), want (running, \"\", false) — ordinary work was swept", status, reason, completed)
+	}
+	if status, reason, _ := readRun("br-settled"); status != "cancelled" || reason != "user_cancelled" {
+		t.Errorf("settled childless run = (%q, %q), want (cancelled, user_cancelled) — the repair overwrote a recorded verdict", status, reason)
 	}
 
 	// The freed index is the whole point: the orphan's task can fire again.

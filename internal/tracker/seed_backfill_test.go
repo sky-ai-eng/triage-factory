@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -14,11 +16,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedBackfillServer answers the discovery listing with one open PR that
-// already has two requested reviewers, and reports the node inaccessible on
-// the Phase-2 refresh so the discovery seed is the only thing that writes.
-func seedBackfillServer(t *testing.T) *httptest.Server {
+// seedBackfillServer answers the discovery listing with one open PR carrying
+// the given requested reviewers, and reports the node inaccessible on the
+// Phase-2 refresh so the discovery seed is the only thing that writes.
+func seedBackfillServer(t *testing.T, reviewers ...string) *httptest.Server {
 	t.Helper()
+	if len(reviewers) == 0 {
+		reviewers = []string{"bob", "carol"}
+	}
+	requested := make([]string, len(reviewers))
+	for i, login := range reviewers {
+		requested[i] = `{"login": ` + strconv.Quote(login) + `}`
+	}
+	requestedJSON := "[" + strings.Join(requested, ", ") + "]"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/graphql"):
@@ -32,7 +42,7 @@ func seedBackfillServer(t *testing.T) *httptest.Server {
 				"number": 42, "node_id": "PR_42", "title": "Add widget", "state": "open",
 				"html_url": "https://github.com/octo/repo/pull/42",
 				"user": {"login": "alice"},
-				"requested_reviewers": [{"login": "bob"}, {"login": "carol"}],
+				"requested_reviewers": ` + requestedJSON + `,
 				"head": {"sha": "sha1", "ref": "feat"}, "base": {"ref": "main"},
 				"created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z"
 			}]`))
@@ -186,7 +196,68 @@ func (k knownLogins) KnownUser(login string) bool { return k[login] }
 func (k knownLogins) KnownTeam(_, _ string) bool  { return false }
 
 // newSeedClient points a GitHub client at seedBackfillServer.
-func newSeedClient(t *testing.T) *ghclient.Client {
+func newSeedClient(t *testing.T, reviewers ...string) *ghclient.Client {
 	t.Helper()
-	return ghclient.NewClient(seedBackfillServer(t).URL, "tok")
+	return ghclient.NewClient(seedBackfillServer(t, reviewers...).URL, "tok")
+}
+
+// TestRefreshGitHub_SeedBackfillsOnlyTheKnownReviewers is the counting half of
+// the seed's contract: one event per TF-KNOWN requested reviewer, and none for
+// the rest. A PR routinely carries reviewers TF has no identity for — an
+// outside collaborator, a bot, a team nobody here belongs to — and an event
+// for one of those is a task nobody can act on, keyed to a person the router
+// cannot route to.
+func TestRefreshGitHub_SeedBackfillsOnlyTheKnownReviewers(t *testing.T) {
+	ctx := context.Background()
+	database := newMigratedSQLite(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
+		t.Fatalf("SetConfigured: %v", err)
+	}
+
+	pub := &recordingPreEnqueuedPublisher{}
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	// Five requested reviewers, three of them TF-known — and the unknown ones
+	// deliberately sit first, last and in the middle, so an off-by-one in the
+	// skip would show up as a wrong id rather than only a wrong count.
+	client := newSeedClient(t, "outsider", "bob", "dependabot", "carol", "dave", "nobody")
+	known := knownLogins{"bob": true, "carol": true, "dave": true}
+
+	if _, _, err := tr.RefreshGitHub(ctx, client, "", []string{"octo/repo"}, known); err != nil {
+		t.Fatalf("RefreshGitHub: %v", err)
+	}
+
+	ent, err := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#42")
+	if err != nil || ent == nil {
+		t.Fatalf("GetBySource: ent=%v err=%v", ent, err)
+	}
+	rows, err := database.Query(
+		`SELECT dedup_key FROM events WHERE entity_id = ? AND event_type = ? ORDER BY dedup_key`,
+		ent.ID, domain.EventGitHubPRReviewRequested)
+	if err != nil {
+		t.Fatalf("read backfilled events: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, key)
+	}
+	want := []string{reviewerDedupKey("bob"), reviewerDedupKey("carol"), reviewerDedupKey("dave")}
+	sort.Strings(want)
+	if len(got) != len(want) {
+		t.Fatalf("backfilled %d events (%v), want %d (%v)", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("backfilled event %d keyed %q, want %q", i, got[i], want[i])
+		}
+	}
+	if pre, _ := pub.snapshot(); len(pre) != len(want) {
+		t.Errorf("post-commit fan-out carried %d events, want %d", len(pre), len(want))
+	}
 }

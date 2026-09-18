@@ -41,16 +41,25 @@ var (
 	// The event path always supplies both, so an empty value is a programming
 	// error surfaced loud.
 	ErrBlueprintRunFenceRequiresEventAndTrigger = errors.New("db: an event-triggered blueprint run requires non-empty TriggeringEventID and TriggerID")
-	// ErrManualRunNeedsCreator is returned by CreateRunWithFirstStepSystem's
-	// manual arm, in multi mode, when the firing names no creator.
+	// ErrManualCreatorRequired is returned by the Postgres manual-delegation
+	// inserts — the blueprint_runs row and the conversations row beside it —
+	// when the caller names no creator, or names the local sentinel, which has
+	// no users row in multi.
 	//
-	// The arm runs on the admin pool, which has neither a tf.current_user_id()
-	// to read an identity from nor the blueprint_runs_insert WITH CHECK that
-	// held one to the caller. The creator therefore has to arrive on the call,
-	// and an absent one is a programming error in a new firing door rather
-	// than a value to default: attributing a person's run to the org owner
-	// would put it on the wrong person's reads with nothing to notice it by.
-	ErrManualRunNeedsCreator = errors.New("db: a manual blueprint run must name its creator")
+	// Both run on the admin pool, which has neither a tf.current_user_id() to
+	// read an identity from nor an RLS WITH CHECK holding one to the caller.
+	// The creator therefore has to arrive on the call, and an absent one is a
+	// programming error in a new door rather than a value to default:
+	// attributing a person's delegation to the org owner would put it on the
+	// wrong person's reads, since both tables' SELECT policies are
+	// creator-scoped, with nothing to notice it by.
+	//
+	// Defense in depth rather than a live fix. Every manual delegation today
+	// passes through SyntheticClaimsWithTx first, which refuses both values
+	// outright — so this refuses what cannot currently reach it, and says so
+	// at the row it protects instead of resting on an upstream accident in
+	// another package.
+	ErrManualCreatorRequired = errors.New("db: a manual delegation must name its creator")
 	// ErrTaskBusyActiveRun is returned by both mint doors, in both dialects,
 	// when the insert loses to the one-active-run-per-task partial unique
 	// index: something else already holds this task's single live engagement.

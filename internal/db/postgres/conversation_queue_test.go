@@ -1193,14 +1193,14 @@ func TestConversationQueueStore_Postgres_ReturnedRow(t *testing.T) {
 		h.Reset(t)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
 
-		scaffold := func(t *testing.T) (taskID, promptID, blueprintRunID string) {
+		scaffold := func(t *testing.T) (taskID, promptID, blueprintRunID, creatorUserID string) {
 			t.Helper()
 			bpID := "cqrr-bp-" + uuid.New().String()[:8]
 			seedPgBlueprint(t, h, orgID, userID, bpID)
 			promptID = "cqrr-p-" + uuid.New().String()[:8]
 			seedPgPrompt(t, h, orgID, userID, promptID)
 			taskID = seedPgTask(t, h, orgID, userID)
-			return taskID, promptID, seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID)
+			return taskID, promptID, seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID), userID
 		}
 		return stores.ConversationQueue, stores.Conversations, orgID, scaffold
 	})

@@ -311,15 +311,55 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		}
 
 		taskID := sc.NewTask(t)
+		ownerBefore := sc.TaskOwnerTeam(t, taskID)
 		br := sc.ManualFiring(t, taskID)
 		br.ID = uuid.New().String()
 		step := sc.FirstStep(br)
 		step.ID = occupied.ID
-		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", step); err == nil {
+		// Everything the event arm's rollback asserts, on the manual arm too:
+		// the two arms share one transaction body, and a regression that let a
+		// claim or a consolidation outlive a rolled-back step would otherwise
+		// only be caught on one of them.
+		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
+			db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, step); err == nil {
 			t.Fatal("a duplicate conversation id must fail the manual firing too")
 		}
 		if n := sc.RunCount(t, taskID); n != 0 {
 			t.Errorf("blueprint_runs on the task = %d, want 0 — the manual arm committed a run without its step", n)
+		}
+		if n := sc.ConversationCount(t, taskID); n != 0 {
+			t.Errorf("conversations on the task = %d, want 0", n)
+		}
+		if got := sc.TaskAgentClaim(t, taskID); got != "" {
+			t.Errorf("claimed_by_agent_id = %q, want empty — the claim outlived a rolled-back firing", got)
+		}
+		if got := sc.TaskOwnerTeam(t, taskID); got != ownerBefore {
+			t.Errorf("task owner team = %q, want %q — the consolidation outlived a rolled-back firing", got, ownerBefore)
+		}
+	})
+
+	t.Run("A_firing_against_a_task_that_does_not_exist_is_refused", func(t *testing.T) {
+		// The first statement's job, and the only one that runs: a firing
+		// naming no task writes nothing and says why, rather than failing
+		// later on a foreign key with the run insert's error.
+		store, sc := mk(t)
+		real := sc.NewTask(t)
+		br := sc.Firing(t, real)
+		br.ID = uuid.New().String()
+		br.TaskID = "00000000-0000-0000-0000-0000000000ba"
+		step := sc.FirstStep(br)
+		step.TaskID = br.TaskID
+
+		_, _, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
+			db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, step)
+		if !errors.Is(err, db.ErrNoSuchTask) {
+			t.Fatalf("CreateRunWithFirstStepSystem against a missing task = %v, want db.ErrNoSuchTask", err)
+		}
+		if conv != nil {
+			t.Error("a refused firing returned a conversation")
+		}
+		if n := sc.RunCount(t, real); n != 0 {
+			t.Errorf("blueprint_runs on the real task = %d, want 0", n)
 		}
 	})
 

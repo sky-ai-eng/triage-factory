@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -120,13 +121,13 @@ func insertConversation(ctx context.Context, q queryer, orgID string, conv domai
 			nullIfEmpty(conv.TriggerID), nullIfEmpty(conv.ActorAgentID),
 			nullIfEmpty(conv.BlueprintRunID), stepIdx, conv.PreferredExecutorID)
 	}
-	// Manual: the local sentinel user has no FK target in multi-mode; filter it
-	// so the COALESCE walks to the org owner. There is no tf.current_user_id()
-	// on the admin pool, so the creator must arrive on the row or fall back to
-	// the org owner (the schema CHECK requires a non-NULL creator for manual).
-	creatorBind := conv.CreatorUserID
-	if creatorBind == runmode.LocalDefaultUserID {
-		creatorBind = ""
+	// Manual: the creator has to arrive on the row, for the same reason and on
+	// the same terms as the blueprint_runs row this helper's other caller
+	// commits beside it — see db.ErrManualCreatorRequired. Refused rather than
+	// defaulted to the org owner, whose reads conversations_select would then
+	// show someone else's delegation on.
+	if conv.CreatorUserID == "" || conv.CreatorUserID == runmode.LocalDefaultUserID {
+		return nil, fmt.Errorf("insert conversation (manual delegation): %w", db.ErrManualCreatorRequired)
 	}
 	return writeConversationReturning(ctx, q, `
 		INSERT INTO conversations (id, org_id, type, runtime, task_id, prompt_id, model, worktree_path,
@@ -136,11 +137,11 @@ func insertConversation(ctx context.Context, q queryer, orgID string, conv domai
 		VALUES ($1, $2, 'delegation', 'native', $3, $4, $5, $6, 'manual', $7,
 		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
 		        'team',
-		        COALESCE(NULLIF($8, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $2)),
+		        $8::uuid,
 		        $9, $10, $11, NULLIF($12, ''), now())
 		RETURNING *
 	`, conv.ID, orgID, conv.TaskID, nullIfEmpty(conv.PromptID), conv.Model, conv.WorktreePath,
-		nullIfEmpty(conv.TriggerID), creatorBind, nullIfEmpty(conv.ActorAgentID),
+		nullIfEmpty(conv.TriggerID), conv.CreatorUserID, nullIfEmpty(conv.ActorAgentID),
 		nullIfEmpty(conv.BlueprintRunID), stepIdx, conv.PreferredExecutorID)
 }
 

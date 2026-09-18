@@ -16,7 +16,11 @@ import (
 // suite enqueues at index 0 is drivable and ClaimNextConversation can find
 // it. Minted fresh per call so the enqueue subtest and the requeue subtest
 // never share a blueprint_run's single current step.
-type ConversationQueueReturnedRowScaffold func(t *testing.T) (taskID, promptID, blueprintRunID string)
+//
+// creatorUserID is the person the minted step is attributed to. A manual
+// delegation names one in production and the Postgres insert refuses without
+// it, so the suite supplies a real user rather than leaning on a default.
+type ConversationQueueReturnedRowScaffold func(t *testing.T) (taskID, promptID, blueprintRunID, creatorUserID string)
 
 // ConversationQueueReturnedRowFactory is what a per-backend test file hands to
 // RunConversationQueueReturnedRowConformance: the ConversationQueueStore
@@ -51,13 +55,14 @@ func RunConversationQueueReturnedRowConformance(t *testing.T, mk ConversationQue
 
 	t.Run("EnqueueConversation_returns_the_minted_row", func(t *testing.T) {
 		queue, store, orgID, scaffold := mk(t)
-		taskID, promptID, brID := scaffold(t)
+		taskID, promptID, brID, creatorUserID := scaffold(t)
 		step0 := 0
 		conversationID := uuid.New().String()
 
 		conv, err := queue.EnqueueConversation(ctx, orgID, domain.Conversation{
 			ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "claude-sonnet-4-6",
-			TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
+			TriggerType: "manual", CreatorUserID: creatorUserID,
+			BlueprintRunID: brID, BlueprintStepIndex: &step0,
 		})
 		if err != nil {
 			t.Fatalf("EnqueueConversation: %v", err)
@@ -71,13 +76,14 @@ func RunConversationQueueReturnedRowConformance(t *testing.T, mk ConversationQue
 
 	t.Run("RequeueConversation_returns_the_requeued_row_then_declines", func(t *testing.T) {
 		queue, store, orgID, scaffold := mk(t)
-		taskID, promptID, brID := scaffold(t)
+		taskID, promptID, brID, creatorUserID := scaffold(t)
 		step0 := 0
 		conversationID := uuid.New().String()
 
 		if _, err := queue.EnqueueConversation(ctx, orgID, domain.Conversation{
 			ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "claude-sonnet-4-6",
-			TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
+			TriggerType: "manual", CreatorUserID: creatorUserID,
+			BlueprintRunID: brID, BlueprintStepIndex: &step0,
 		}); err != nil {
 			t.Fatalf("EnqueueConversation: %v", err)
 		}

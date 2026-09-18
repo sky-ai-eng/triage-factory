@@ -982,19 +982,11 @@ func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.Blu
 			nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
 	} else {
 		// A manual run is attributed to the person who asked for it, and the
-		// creator has to arrive on the row: this runs on the admin pool, where
-		// there is no tf.current_user_id() to read it from and no
-		// blueprint_runs_insert WITH CHECK to hold it to the caller's identity.
-		//
-		// So an absent one is refused rather than defaulted. The value reaching
-		// here is the request's authenticated subject, threaded through
-		// DelegateOpts.CreatorUserID and onto the first step; substituting the
-		// org owner for it would attribute someone's run to somebody else and
-		// show it on that person's reads, which is worse than a failed firing
-		// and impossible to notice afterwards. The local sentinel counts as
-		// absent — it has no users row to point at in multi.
+		// creator has to arrive on the row — see db.ErrManualCreatorRequired.
+		// The value reaching here is the request's authenticated subject,
+		// threaded through DelegateOpts.CreatorUserID and onto the first step.
 		if creatorUserID == "" || creatorUserID == runmode.LocalDefaultUserID {
-			return fmt.Errorf("insert blueprint_run (manual firing): %w", db.ErrManualRunNeedsCreator)
+			return fmt.Errorf("insert blueprint_run (manual firing): %w", db.ErrManualCreatorRequired)
 		}
 		res, err = q.ExecContext(ctx, `
 			INSERT INTO blueprint_runs

@@ -53,8 +53,8 @@ func TestBlueprintStore_Postgres_ManualFiringNeedsACreator(t *testing.T) {
 				BlueprintRunID: br.ID, BlueprintStepIndex: &step0,
 			}
 			_, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, orgID, br, db.AgentClaimStamp{}, "", step)
-			if !errors.Is(err, db.ErrManualRunNeedsCreator) {
-				t.Fatalf("CreateRunWithFirstStepSystem = %v, want db.ErrManualRunNeedsCreator", err)
+			if !errors.Is(err, db.ErrManualCreatorRequired) {
+				t.Fatalf("CreateRunWithFirstStepSystem = %v, want db.ErrManualCreatorRequired", err)
 			}
 			var runs int
 			if err := h.AdminDB.QueryRow(`SELECT count(*) FROM blueprint_runs WHERE task_id = $1`, taskID).Scan(&runs); err != nil {
