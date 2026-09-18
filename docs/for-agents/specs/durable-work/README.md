@@ -61,9 +61,10 @@ Every adopting table includes these columns alongside its typed payload and fore
 | `lease_generation` | Ownership generation. Increases on every acquisition, including reacquisition by the same owner in the same boot. |
 | `lease_owner`, `lease_epoch` | Ownership provenance for display, debugging, and startup recovery. The generation is the write fence. |
 | `leased_at`, `lease_expires_at` | Lease start and expiry. The lease can be renewed (§1.6). |
-| `cancel_requested_at`, `cancel_requested_by` | Cancellation intent. Setting them does not change status (§1.7). |
+| `cancel_requested_at`, `cancel_requested_by`, `cancel_reason` | Cancellation intent: when it was asked for, by whom, and why. Setting them does not change status (§1.7), and the terminal record retains all three. |
 | `last_error`, `last_outcome` | Most recent attempt's error and typed outcome. |
 | `unique_key` | Prevents duplicate admission (§1.4). |
+| `superseded_by` | The row that replaced this one, recorded when an operator supersedes parked work (§1.4). |
 | `first_enqueued_at` | Original enqueue time, preserved when an operator retries parked work. |
 | `org_id`, `created_at`, `done_at` | Organization and lifecycle timestamps. |
 
