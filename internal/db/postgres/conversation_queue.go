@@ -50,12 +50,33 @@ var _ db.ConversationQueueStore = (*conversationQueueStore)(nil)
 // a value at a time.
 const conversationTerminalStatusesSQL = `'completed','failed'`
 
-// EnqueueConversation mints a delegation conversation with NO status — the absence of
-// an outcome is what makes it claimable, so the mint writes nothing to the
-// column and queued_at carries the enqueue moment. runtime is stamped
-// 'native' here and 'sdk' in the SQLite sibling: the dialect IS the mode
-// (Postgres is multi-only, SQLite is local-only), so the split lands where
-// the row is written rather than as a caller-passed knob.
+// EnqueueConversation mints a queued delegation conversation on its own
+// transaction and rings the wake doorbell for it. The step-advance path takes
+// this door; a blueprint's FIRST step takes
+// BlueprintStore.CreateRunWithFirstStepSystem instead, so it commits with the
+// run that implies it.
+func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) (*domain.Conversation, error) {
+	r, err := insertConversation(ctx, s.conn, orgID, conv)
+	if err != nil {
+		return nil, err
+	}
+	s.notifyWake(ctx, orgID)
+	return r, nil
+}
+
+// insertConversation is the mint statement itself, taking the queryer so the
+// firing path can run it on the transaction that also commits the
+// blueprint_run it belongs to rather than as a second, separately-failing
+// write. One copy of the row shape, so the two doors cannot drift on what a
+// queued delegation looks like. The wake doorbell is NOT rung here: it
+// announces a committed row, so it belongs to whoever owns the commit.
+//
+// The row carries NO status — the absence of an outcome is what makes it
+// claimable, so the mint writes nothing to the column and queued_at carries
+// the enqueue moment. runtime is stamped 'native' here and 'sdk' in the
+// SQLite sibling: the dialect IS the mode (Postgres is multi-only, SQLite is
+// local-only), so the split lands where the row is written rather than as a
+// caller-passed knob.
 //
 // Both arms stamp it explicitly, which is what makes the SDK engine
 // unreachable for a multi delegation: the ratchet means no conversation ever
@@ -63,12 +84,13 @@ const conversationTerminalStatusesSQL = `'completed','failed'`
 // That is the whole enforcement — there is no claim-side exclusion, because
 // there is no row for one to exclude. Leaving either arm to the column
 // DEFAULT (still 'sdk') would quietly undo it.
+//
 // Returns the minted row via writeConversationReturning, sharing
 // ConversationStore.Get's projection — a fresh mint has no claims/messages/
 // memory rows yet, so the claim/ledger laterals and the memory/agent LEFT
 // JOINs read exactly as a Get immediately afterward would (NULL/zero
 // defaults throughout).
-func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) (*domain.Conversation, error) {
+func insertConversation(ctx context.Context, q queryer, orgID string, conv domain.Conversation) (*domain.Conversation, error) {
 	if err := db.AssertBlueprintStepIndexed(conv); err != nil {
 		return nil, err
 	}
@@ -85,7 +107,7 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 	// event rows insert here; the schema CHECK pairing trigger_type with
 	// creator_user_id nullability is satisfied by the branch below.
 	if triggerType == "event" {
-		r, err := writeConversationReturning(ctx, s.conn, `
+		return writeConversationReturning(ctx, q, `
 			INSERT INTO conversations (id, org_id, type, runtime, task_id, prompt_id, model, worktree_path,
 			                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
 			                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id,
@@ -97,11 +119,6 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 		`, conv.ID, orgID, conv.TaskID, nullIfEmpty(conv.PromptID), conv.Model, conv.WorktreePath,
 			nullIfEmpty(conv.TriggerID), nullIfEmpty(conv.ActorAgentID),
 			nullIfEmpty(conv.BlueprintRunID), stepIdx, conv.PreferredExecutorID)
-		if err != nil {
-			return nil, err
-		}
-		s.notifyWake(ctx, orgID)
-		return r, nil
 	}
 	// Manual: the local sentinel user has no FK target in multi-mode; filter it
 	// so the COALESCE walks to the org owner. There is no tf.current_user_id()
@@ -111,7 +128,7 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 	if creatorBind == runmode.LocalDefaultUserID {
 		creatorBind = ""
 	}
-	r, err := writeConversationReturning(ctx, s.conn, `
+	return writeConversationReturning(ctx, q, `
 		INSERT INTO conversations (id, org_id, type, runtime, task_id, prompt_id, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
 		                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id,
@@ -125,11 +142,6 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 	`, conv.ID, orgID, conv.TaskID, nullIfEmpty(conv.PromptID), conv.Model, conv.WorktreePath,
 		nullIfEmpty(conv.TriggerID), creatorBind, nullIfEmpty(conv.ActorAgentID),
 		nullIfEmpty(conv.BlueprintRunID), stepIdx, conv.PreferredExecutorID)
-	if err != nil {
-		return nil, err
-	}
-	s.notifyWake(ctx, orgID)
-	return r, nil
 }
 
 // notifyWake fires the tf_wake doorbell after a row lands
@@ -812,7 +824,7 @@ func (s *conversationQueueStore) FleetQueueShares(ctx context.Context) ([]db.Org
 	return scanOrgQueueShares(rows)
 }
 
-func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Context) (int, error) {
+func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Context) (int, db.OrphanedAtMintCheck, error) {
 	// Boot self-heal — see ConversationQueueStore.ReconcileOrphanedConversations and the
 	// SQLite mirror. Admin pool (BYPASSRLS): a cross-org system sweep with no
 	// per-user identity, the same posture as ResetProcessingConversations.
@@ -826,6 +838,7 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 	// Any active claim on a parked row releases as 'cancelled' in the same
 	// statement — the engagement was ended from outside.
 	var total int
+	var check db.OrphanedAtMintCheck
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		var parked int
 		if err := q.QueryRowContext(ctx, `
@@ -860,22 +873,21 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 			return err
 		}
 
-		// Mint-crash arm: the mirror of the park above, one level up. That arm
-		// heals a live child under a dead parent; this one heals a live parent
-		// with no child at all. Order between the two is immaterial — a parent
-		// this arm fails has no child for the park to owe anything to, which is
-		// the whole reason it needs its own arm.
-		orphaned, err := failBlueprintRunsOrphanedAtMint(ctx, q)
+		// Mint-crash CHECKER — the shape the park above cannot see, one level
+		// up: a live parent with no child at all. It repairs nothing, and its
+		// count stays out of the healed total, because counting is not
+		// healing.
+		check, err = countBlueprintRunsOrphanedAtMint(ctx, q)
 		if err != nil {
 			return err
 		}
-		total = parked + released + orphaned
+		total = parked + released
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, db.OrphanedAtMintCheck{}, err
 	}
-	return total, nil
+	return total, check, nil
 }
 
 // healClaimDesyncs is the janitor for the one state the app-pool
@@ -913,41 +925,43 @@ func healClaimDesyncs(ctx context.Context, q queryer) (released int, err error) 
 	return int(n), nil
 }
 
-// failBlueprintRunsOrphanedAtMint terminal-fails every 'running' blueprint_run
-// that holds no child conversation and is older than the shared grace: the
-// firing path's mint→enqueue crash window, where the parent committed and its
-// first step never did. With no child there is no claim and no conversation, so
-// every other recovery arm — here, in ResetProcessingConversations, in the leader reaper
-// — joins straight past it while it keeps holding the one-active-run index
-// against its task.
+// countBlueprintRunsOrphanedAtMint counts 'running' blueprint_runs that hold
+// no child conversation, and samples the oldest few. It writes nothing.
 //
-// Own DB time, and nothing but the parent row to write: no child to park, no
-// claim to release, and no task touch. Freeing the index is the point — the
-// task's already-queued firing intent then drains into a fresh, fully-minted
-// run, which is why this fails rather than trying to re-mint the step (that
-// would duplicate the firing path's config derivation inside a recovery path).
+// A firing commits its blueprint_run and its first step in one transaction, so
+// no reader can observe one without the other and there is no window for this
+// shape to appear in — which is why there is no grace here, and why a repair
+// would be the wrong answer: it would quietly absorb a broken invariant that
+// should be looked at instead. What can still turn up is a survivor from
+// before that was true, in an installed local database.
 //
-// The grace makes racing a live mint impossible rather than unlikely. Retention
-// can't manufacture a false positive either: nothing purges conversation rows,
-// and archival keeps the row.
-func failBlueprintRunsOrphanedAtMint(ctx context.Context, q queryer) (int, error) {
-	res, err := q.ExecContext(ctx, `
-		UPDATE blueprint_runs
-		SET status = 'failed', completed_at = now(), abort_reason = $2
+// `count(*) OVER ()` is evaluated before LIMIT, so one statement gives both
+// the full count and the bounded sample without the two disagreeing about
+// which rows they describe.
+func countBlueprintRunsOrphanedAtMint(ctx context.Context, q queryer) (db.OrphanedAtMintCheck, error) {
+	var out db.OrphanedAtMintCheck
+	rows, err := q.QueryContext(ctx, `
+		SELECT id, count(*) OVER ()
+		FROM blueprint_runs
 		WHERE status = 'running'
-		  AND started_at < now() - make_interval(secs => $1)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM conversations c WHERE c.blueprint_run_id = blueprint_runs.id
 		  )
-	`, domain.BlueprintOrphanedAtMintGrace.Seconds(), domain.BlueprintAbortOrphanedAtMint)
+		ORDER BY started_at, id
+		LIMIT $1
+	`, db.OrphanedAtMintSampleLimit)
 	if err != nil {
-		return 0, err
+		return out, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, err
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id, &out.Count); err != nil {
+			return db.OrphanedAtMintCheck{}, err
+		}
+		out.Sample = append(out.Sample, id)
 	}
-	return int(n), nil
+	return out, rows.Err()
 }
 
 // scanOrgQueueShares reads FleetQueueShares rows, mapping a NULL or

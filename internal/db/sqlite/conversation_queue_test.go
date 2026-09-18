@@ -995,17 +995,20 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 		ctx := context.Background()
 		org := runmode.LocalDefaultOrgID
 
-		task := seedEntityEventTask(t, conn, "rq-recon")
 		insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqrc-p0", Name: "Step 0", Body: "b", Source: "user"})
 		insertBlueprintForTest(t, conn, "rqrc-bp", "RQ Reconcile Blueprint")
 		if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "rqrc-bp", []string{"rqrc-p0"}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 
+		// One task per run: blueprint_runs_one_active_run_per_task refuses a
+		// second 'running' row on a task, and the suite stages several at once.
+		runTask := map[string]string{}
 		nextStep := 0
 		seed := dbtest.ReconcileOrphanSeeder{
 			BlueprintRun: func(t *testing.T, age time.Duration) string {
 				t.Helper()
+				task := seedEntityEventTask(t, conn, fmt.Sprintf("rq-recon-%d", len(runTask)))
 				created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 					ID: uuid.New().String(), BlueprintID: "rqrc-bp", TaskID: task.ID,
 					TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
@@ -1015,6 +1018,7 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 					t.Fatalf("CreateRun: %v", err)
 				}
 				brID := created.ID
+				runTask[brID] = task.ID
 				if age > 0 {
 					// SQLite's own clock, in the CURRENT_TIMESTAMP shape the
 					// insert paths write, so the backdate can't smuggle in a
@@ -1032,7 +1036,7 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 				nextStep++
 				convID := uuid.New().String()
 				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
-					ID: convID, TaskID: task.ID, PromptID: "rqrc-p0", Model: "m",
+					ID: convID, TaskID: runTask[brID], PromptID: "rqrc-p0", Model: "m",
 					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
 					t.Fatalf("EnqueueConversation: %v", err)

@@ -1156,13 +1156,21 @@ func (s *taskStore) SetOwnerTeam(ctx context.Context, orgID, taskID, teamID stri
 	if err := assertLocalOrg(orgID); err != nil {
 		return domain.Task{}, err
 	}
-	// Empty teamID keeps the stored team_id (COALESCE/NULLIF, the same idiom
-	// stampAgentClaimIfUnclaimed uses below) rather than skipping the
-	// statement — the row still has to exist for the write to answer
-	// anything, so a bogus id reports ErrNoSuchTask on this path too instead
-	// of the prior silent no-op.
+	return setOwnerTeam(ctx, s.q, taskID, teamID)
+}
+
+// setOwnerTeam is the owner-only update itself, taking the queryer so the
+// firing path can run it on the transaction that also commits the run whose
+// conversation derives its team from this write. Mirrors the Postgres helper
+// of the same name.
+//
+// Empty teamID keeps the stored team_id (COALESCE/NULLIF, the same idiom
+// stampAgentClaimIfUnclaimed uses) rather than skipping the statement — the
+// row still has to exist for the write to answer anything, so a bogus id
+// reports ErrNoSuchTask on this path too instead of a silent no-op.
+func setOwnerTeam(ctx context.Context, q queryer, taskID, teamID string) (domain.Task, error) {
 	var t domain.Task
-	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
+	return scanTaskBareRow(q.QueryRowContext(ctx, `
 		UPDATE tasks SET team_id = COALESCE(NULLIF(?, ''), team_id) WHERE id = ?
 		RETURNING `+sqliteTaskBareColumns,
 		teamID, taskID), &t)

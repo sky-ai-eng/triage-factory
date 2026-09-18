@@ -8,6 +8,8 @@ import (
 
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // openMigrationsTestDB returns a fresh, schema-less in-memory SQLite
@@ -702,5 +704,100 @@ func TestMigrate_CollapsesSetupTransientOntoClaimPhase(t *testing.T) {
 	}
 	if released {
 		t.Error("claim released, want active (mid-flight at migration time)")
+	}
+}
+
+// TestMigrate_RepairsOrphanedAtMintBlueprintRuns pins the one-time repair in
+// 202609180001. A firing now commits its blueprint_run and its first step
+// conversation in one transaction, so the shape below can no longer be
+// produced — but an installed local database may still hold one from the
+// window where the two were separate writes, where it holds
+// blueprint_runs_one_active_run_per_task against its task forever. The
+// migration fails it, freeing the index; a run with a step is ordinary work at
+// any age and must survive.
+func TestMigrate_RepairsOrphanedAtMintBlueprintRuns(t *testing.T) {
+	database, err := sql.Open("sqlite", TestDSNMemory)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+
+	goose.SetBaseFS(migrationsSQLiteFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("set dialect: %v", err)
+	}
+	// Up to the migration *before* the repair, then seed both shapes.
+	const priorVersion = 202609130001
+	if err := goose.UpTo(database, "migrations-sqlite", priorVersion); err != nil {
+		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
+	}
+	if err := SeedEventTypes(database, "sqlite3"); err != nil {
+		t.Fatalf("seed event types: %v", err)
+	}
+
+	// One task per run: the one-active-run index refuses a second 'running'
+	// row on a task, which is the very thing the orphan is holding.
+	const userID = "00000000-0000-0000-0000-000000000100"
+	for _, stmt := range []string{
+		`INSERT INTO users (id) VALUES ('` + userID + `')`,
+		`INSERT INTO entities (id, source, source_id, kind) VALUES ('e1', 'github', 'o/r#1', 'pr')`,
+		`INSERT INTO events (id, event_type) VALUES ('ev1', (SELECT id FROM events_catalog LIMIT 1))`,
+		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id)
+			VALUES ('t-orphan', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'orphan', 'ev1')`,
+		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id)
+			VALUES ('t-healthy', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'healthy', 'ev1')`,
+		`INSERT INTO blueprints (id, name, creator_user_id) VALUES ('bp1', 'BP', '` + userID + `')`,
+		`INSERT INTO prompts (id, name, body, creator_user_id) VALUES ('p1', 'P', 'b', '` + userID + `')`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, step_plan, worktree_path)
+			VALUES ('br-orphan', 'bp1', 't-orphan', 'manual', '` + userID + `', 'running', '[]', '')`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, step_plan, worktree_path)
+			VALUES ('br-healthy', 'bp1', 't-healthy', 'manual', '` + userID + `', 'running', '[]', '')`,
+		`INSERT INTO conversations (id, task_id, prompt_id, trigger_type, creator_user_id, blueprint_run_id, blueprint_step_index)
+			VALUES ('conv-healthy', 't-healthy', 'p1', 'manual', '` + userID + `', 'br-healthy', 0)`,
+	} {
+		if _, err := database.Exec(stmt); err != nil {
+			t.Fatalf("seed %q: %v", stmt, err)
+		}
+	}
+
+	if err := goose.Up(database, "migrations-sqlite"); err != nil {
+		t.Fatalf("goose Up: %v", err)
+	}
+
+	readRun := func(id string) (status, abortReason string, completedAtSet bool) {
+		t.Helper()
+		var reason sql.NullString
+		var completedAt any
+		if err := database.QueryRow(
+			`SELECT status, abort_reason, completed_at FROM blueprint_runs WHERE id = ?`, id,
+		).Scan(&status, &reason, &completedAt); err != nil {
+			t.Fatalf("read blueprint_run %s: %v", id, err)
+		}
+		return status, reason.String, completedAt != nil
+	}
+
+	status, reason, completed := readRun("br-orphan")
+	if status != "failed" {
+		t.Errorf("orphan status = %q, want failed", status)
+	}
+	if reason != domain.BlueprintAbortOrphanedAtMint {
+		t.Errorf("orphan abort_reason = %q, want %q", reason, domain.BlueprintAbortOrphanedAtMint)
+	}
+	if !completed {
+		t.Error("orphan completed_at is NULL on a terminal blueprint_run")
+	}
+
+	if status, reason, completed := readRun("br-healthy"); status != "running" || reason != "" || completed {
+		t.Errorf("run with a step = (%q, %q, completed=%v), want (running, \"\", false) — ordinary work was swept", status, reason, completed)
+	}
+
+	// The freed index is the whole point: the orphan's task can fire again.
+	if _, err := database.Exec(`
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, step_plan, worktree_path)
+		VALUES ('br-refire', 'bp1', 't-orphan', 'manual', '` + userID + `', 'running', '[]', '')
+	`); err != nil {
+		t.Fatalf("re-fire after the repair: %v — the orphan is still holding the one-active-run index", err)
 	}
 }

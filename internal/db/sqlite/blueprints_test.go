@@ -108,6 +108,24 @@ func TestBlueprintStore_SQLite_DuplicationConformance(t *testing.T) {
 	})
 }
 
+// firstStepConv is the step-0 conversations row a firing commits alongside its
+// blueprint_run, reduced to the columns these tests care about. prompt_id is
+// left NULL: a real firing names one, but nothing here reads it and seeding a
+// prompt per fixture would only add FK bookkeeping.
+func firstStepConv(id, taskID, blueprintRunID, triggerID string) domain.Conversation {
+	step0 := 0
+	return domain.Conversation{
+		ID: id, TaskID: taskID, PromptID: firstStepPromptID, Model: "claude-sonnet-4-6",
+		TriggerType: "event", TriggerID: triggerID,
+		BlueprintRunID: blueprintRunID, BlueprintStepIndex: &step0,
+	}
+}
+
+// firstStepPromptID is the prompt every firstStepConv points at. A
+// blueprint-origin conversation must name one (conversations_origin_requires_parents),
+// and nothing in these tests reads it, so one seeded row serves them all.
+const firstStepPromptID = "first-step-p0"
+
 // insertPromptForBlueprintTest seeds a prompt row directly. PromptStore.Create
 // exists but takes the full create-shape; for FK-only seeding we want a
 // minimal raw INSERT, matching the pattern other sqlite_test files use
@@ -319,6 +337,7 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 	}
 	task := seedEntityEventTask(t, conn, "actor-rt")
 	insertBlueprintForTest(t, conn, "actor-bp", "Actor BP")
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: firstStepPromptID, Name: "Step 0", Body: "b", Source: "user"})
 
 	// Manual CreateRun freezes + reads back the actor.
 	if _, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
@@ -336,7 +355,7 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 		t.Errorf("manual actor round-trip = %q, want %q", got.ActorAgentID, agentID)
 	}
 
-	// Fenced event insert (CreateRunIfNotFiredSystem — the auto-fire hot path)
+	// The firing door (CreateRunWithFirstStepSystem — the auto-fire hot path)
 	// carries the actor too. Needs a real triggering_event_id (the task's event)
 	// and trigger_id (an event_handler) for the fence FKs.
 	eventTask := seedEntityEventTask(t, conn, "actor-rt-event")
@@ -350,12 +369,12 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 	`, domain.EventGitHubPRCICheckFailed, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 		t.Fatalf("seed trigger: %v", err)
 	}
-	if inserted, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, org, domain.BlueprintRun{
+	if inserted, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, domain.BlueprintRun{
 		ID: "actor-bpr-ev", BlueprintID: "actor-bp", TaskID: eventTask.ID,
 		TriggerType: domain.BlueprintTriggerEvent, TriggerID: "actor-trig", TriggeringEventID: eventID,
 		Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-actor-ev", ActorAgentID: agentID,
-	}, db.AgentClaimStamp{}); err != nil || !inserted {
-		t.Fatalf("CreateRunIfNotFiredSystem = (%v, %v), want (true, nil)", inserted, err)
+	}, db.AgentClaimStamp{}, "", firstStepConv("actor-bpr-ev-s0", eventTask.ID, "actor-bpr-ev", "actor-trig")); err != nil || !inserted {
+		t.Fatalf("CreateRunWithFirstStepSystem = (%v, %v), want (true, nil)", inserted, err)
 	}
 	ev, err := stores.Blueprints.GetRun(ctx, org, "actor-bpr-ev")
 	if err != nil || ev == nil {
@@ -383,18 +402,18 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 	}
 }
 
-// TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim pins the coupling
-// that makes "unclaimed with a live conversation" mean only what a user
-// requeue intends: the fenced insert is a delegation's commitment point, so
-// the task's agent claim commits in the same transaction as the blueprint_run
-// row. Three arms — the stamp lands with the blueprint run, a refused stamp
-// does NOT roll the blueprint run back, and a fenced replay re-stamps
-// nothing.
-func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
+// TestBlueprintStore_SQLite_FiringCarriesTaskClaim pins the coupling that
+// makes "unclaimed with a live conversation" mean only what a user requeue
+// intends: the firing is a delegation's commitment point, so the task's agent
+// claim commits in the same transaction as the blueprint_run row. Three arms —
+// the stamp lands with the blueprint run, a refused stamp does NOT roll the
+// blueprint run back, and a fenced replay re-stamps nothing.
+func TestBlueprintStore_SQLite_FiringCarriesTaskClaim(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: firstStepPromptID, Name: "Step 0", Body: "b", Source: "user"})
 
 	agentID, err := stores.Agents.Create(ctx, org, domain.Agent{DisplayName: "Bot"})
 	if err != nil {
@@ -427,13 +446,13 @@ func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
 		if prep != nil {
 			prep(task.ID)
 		}
-		inserted, claimed, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, org, domain.BlueprintRun{
+		inserted, claimed, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, domain.BlueprintRun{
 			ID: "bpr-" + suffix, BlueprintID: "claim-bp-" + suffix, TaskID: task.ID,
 			TriggerType: domain.BlueprintTriggerEvent, TriggerID: "trig-" + suffix, TriggeringEventID: eventID,
 			Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-" + suffix, ActorAgentID: claim.AgentID,
-		}, claim)
+		}, claim, "", firstStepConv("bpr-"+suffix+"-s0", task.ID, "bpr-"+suffix, "trig-"+suffix))
 		if err != nil {
-			t.Fatalf("CreateRunIfNotFiredSystem(%s): %v", suffix, err)
+			t.Fatalf("CreateRunWithFirstStepSystem(%s): %v", suffix, err)
 		}
 		return task.ID, inserted, claimed
 	}
@@ -495,7 +514,8 @@ func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
 				Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-replay", ActorAgentID: agentID,
 			}
 		}
-		if inserted, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, org, row("bpr-replay-1"), db.AgentClaimStamp{AgentID: agentID}); err != nil || !inserted {
+		if inserted, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, row("bpr-replay-1"), db.AgentClaimStamp{AgentID: agentID}, "",
+			firstStepConv("bpr-replay-1-s0", task.ID, "bpr-replay-1", "trig-claim-replay")); err != nil || !inserted {
 			t.Fatalf("first fire: inserted=%v err=%v", inserted, err)
 		}
 		// The user requeues the task while the run stays live — the documented,
@@ -504,9 +524,13 @@ func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
 		if ok, err := stores.Swipes.RequeueTask(ctx, org, task.ID); err != nil || !ok {
 			t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 		}
-		inserted, claimed, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, org, row("bpr-replay-2"), db.AgentClaimStamp{AgentID: agentID})
+		inserted, claimed, conv, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, row("bpr-replay-2"), db.AgentClaimStamp{AgentID: agentID}, "",
+			firstStepConv("bpr-replay-2-s0", task.ID, "bpr-replay-2", "trig-claim-replay"))
 		if err != nil {
 			t.Fatalf("replay fire: %v", err)
+		}
+		if conv != nil {
+			t.Error("a fenced replay minted a second step conversation")
 		}
 		if inserted || claimed {
 			t.Errorf("replay = (inserted=%v, claimed=%v), want (false, false)", inserted, claimed)

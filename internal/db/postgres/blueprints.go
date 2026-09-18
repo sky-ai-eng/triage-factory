@@ -12,6 +12,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/wakebus"
 )
 
 // blueprintStore is the Postgres impl of db.BlueprintStore. Holds two pools:
@@ -838,13 +840,19 @@ func isTaskBusyActiveRun(err error) bool {
 // means for it.
 const blueprintRunsOneActivePerTaskConstraint = "blueprint_runs_one_active_run_per_task"
 
-// CreateRunIfNotFiredSystem is the event-path fenced insert (admin pool).
-// Two independent unique constraints can turn this insert into a clean
-// no-op instead of a duplicate:
+// CreateRunWithFirstStepSystem commits a firing as one transaction — owner
+// consolidation, the blueprint_runs insert, the task's agent claim, and the
+// first step's conversations row. See the interface for the contract and the
+// statement order; this is that order on the admin pool (a firing carries no
+// JWT claims, on either arm).
+//
+// Two independent unique constraints can turn the run insert into something
+// other than a plain success:
 //
 //   - blueprint_runs_event_trigger_fence (ON CONFLICT, inference-targeted):
 //     a replayed (triggering_event_id, trigger_id) — the at-least-once event
 //     queue redelivering an event whose first auto-delegation already fired.
+//     Returns inserted=false with nothing committed.
 //   - blueprint_runs_one_active_run_per_task (caught below): a DIFFERENT
 //     (event, trigger) pair racing to fire on the SAME task, or a manual
 //     delegation, while a run is still active on it. A single INSERT's ON
@@ -853,14 +861,10 @@ const blueprintRunsOneActivePerTaskConstraint = "blueprint_runs_one_active_run_p
 //     translated to db.ErrTaskBusyActiveRun. NOT the inserted=false
 //     contract: a replay is permanently satisfied, task-busy is a
 //     deferral — the caller must queue the intent, not drop it.
-//
-// The blueprint run row and the task's agent claim commit together — see
-// db.AgentClaimStamp for why they are inseparable. A stamp refusal is not an
-// error and leaves the run committed; a stamp *failure* rolls the run back,
-// so the firing path retries the pair rather than committing half of it.
-func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim db.AgentClaimStamp) (bool, bool, error) {
-	if br.TriggeringEventID == "" || br.TriggerID == "" {
-		return false, false, db.ErrBlueprintRunFenceRequiresEventAndTrigger
+func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim db.AgentClaimStamp, ownerTeamID string, firstStep domain.Conversation) (bool, bool, *domain.Conversation, error) {
+	event := br.TriggerType == domain.BlueprintTriggerEvent
+	if event && (br.TriggeringEventID == "" || br.TriggerID == "") {
+		return false, false, nil, db.ErrBlueprintRunFenceRequiresEventAndTrigger
 	}
 	if br.ID == "" {
 		br.ID = uuid.New().String()
@@ -870,11 +874,75 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 	}
 	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
 	if err != nil {
-		return false, false, fmt.Errorf("marshal step plan: %w", err)
+		return false, false, nil, fmt.Errorf("marshal step plan: %w", err)
 	}
 	inserted, claimed := false, false
+	var conv *domain.Conversation
 	err = inTx(ctx, s.admin, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
+		// 1. Owner consolidation, and it runs on EVERY firing — an empty
+		// ownerTeamID writes team_id back to itself (COALESCE/NULLIF) rather
+		// than skipping the statement.
+		//
+		// Two reasons. It is the lock order: this row is touched again by the
+		// claim stamp below, after the run insert, so a firing that skipped it
+		// would take tasks AFTER blueprint_runs while a consolidating one took
+		// it before — and two firings racing on one task would then deadlock,
+		// which the deadlock detector turns into a lost firing that has to be
+		// replayed. Taking the task first, always, makes every firing agree.
+		// And a consolidation that IS asked for is written without comparing:
+		// the statement is idempotent, and reading first would cost a round
+		// trip to learn what the write already knows.
+		if _, err := setOwnerTeam(ctx, q, orgID, br.TaskID, ownerTeamID); err != nil {
+			return fmt.Errorf("consolidate owner team: %w", err)
+		}
+
+		// 2. The run.
+		if err := insertFiringRun(ctx, q, orgID, br, stepPlan, event, firstStep.CreatorUserID, &inserted); err != nil {
+			return err
+		}
+		if !inserted {
+			// The fence closed: this firing's run committed already, and so
+			// did its claim and its first step. Nothing else in this
+			// transaction may run — the replay must not re-stamp a claim the
+			// user may have deliberately cleared since, nor mint a second
+			// step for a run that has one.
+			return nil
+		}
+
+		// 3. The claim.
+		if claim.AgentID != "" {
+			claimed, err = stampAgentClaimIfUnclaimed(ctx, q, orgID, br.TaskID, claim.AgentID, claim.ActingTeamID)
+			if err != nil {
+				return err
+			}
+		}
+
+		// 4. The first step. Its team_id is derived from the task in-SQL, so
+		// it reads step 1's consolidation.
+		conv, err = insertConversation(ctx, q, orgID, firstStep)
+		return err
+	})
+	if err != nil {
+		return false, false, nil, err
+	}
+	if inserted {
+		// Committed: ring the doorbell so an idle executor claims the step
+		// within milliseconds instead of waiting out its scan interval.
+		s.notifyWake(ctx, orgID)
+	}
+	return inserted, claimed, conv, nil
+}
+
+// insertFiringRun writes the blueprint_runs row for a firing on the given
+// transaction, fenced on the event arm and plain on the manual one, and
+// reports through inserted whether a row landed. Split out so the two arms'
+// only difference — the fence and the creator column the schema CHECK pairs
+// with trigger_type — reads as the two statements it is.
+func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.BlueprintRun, stepPlan string, event bool, creatorUserID string, inserted *bool) error {
+	var res sql.Result
+	var err error
+	if event {
+		res, err = q.ExecContext(ctx, `
 			INSERT INTO blueprint_runs
 				(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
 				 actor_agent_id, status, worktree_path, started_at, step_plan)
@@ -884,31 +952,51 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 				$7, $8, $9, now(), $10
 			)
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-		`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
-		if err != nil {
-			if isTaskBusyActiveRun(err) {
-				return db.ErrTaskBusyActiveRun
-			}
-			return fmt.Errorf("insert blueprint_run (fenced): %w", err)
+		`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
+			nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
+	} else {
+		// The local sentinel user has no FK target in multi-mode; filter it so
+		// the COALESCE walks to the org owner. There is no tf.current_user_id()
+		// on the admin pool, so the creator must arrive on the row or fall back
+		// — the schema CHECK requires a non-NULL creator for a manual run. It
+		// comes off the first step, which the same person is creating.
+		creatorBind := creatorUserID
+		if creatorBind == runmode.LocalDefaultUserID {
+			creatorBind = ""
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		inserted = n > 0
-		// The fence closed: the original firing already stamped whatever claim
-		// this event was going to make, so a replay must not re-stamp one the
-		// user may have deliberately cleared since.
-		if !inserted || claim.AgentID == "" {
-			return nil
-		}
-		claimed, err = stampAgentClaimIfUnclaimed(ctx, q, orgID, br.TaskID, claim.AgentID, claim.ActingTeamID)
-		return err
-	})
-	if err != nil {
-		return false, false, err
+		res, err = q.ExecContext(ctx, `
+			INSERT INTO blueprint_runs
+				(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
+				 actor_agent_id, status, worktree_path, started_at, step_plan)
+			VALUES (
+				$1, $2,
+				COALESCE(NULLIF($3, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $2)),
+				$4, $5, $6, $7, NULL,
+				$8, $9, $10, now(), $11
+			)
+		`, br.ID, orgID, creatorBind, br.BlueprintID, br.TaskID, br.TriggerType,
+			nullIfEmpty(br.TriggerID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
 	}
-	return inserted, claimed, nil
+	if err != nil {
+		if isTaskBusyActiveRun(err) {
+			return db.ErrTaskBusyActiveRun
+		}
+		return fmt.Errorf("insert blueprint_run (firing): %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	*inserted = n > 0
+	return nil
+}
+
+// notifyWake fires the tf_wake doorbell after a firing's first step lands
+// claimable. Best-effort by contract (wakebus's "never the only path" rule) —
+// a notify failure is swallowed, since the write it announces already
+// committed and the scan-interval backstop covers a dropped doorbell.
+func (s *blueprintStore) notifyWake(ctx context.Context, orgID string) {
+	_ = wakebus.Publish(ctx, s.admin, wakebus.KindRun, orgID)
 }
 
 func (s *blueprintStore) SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) (domain.BlueprintRun, error) {

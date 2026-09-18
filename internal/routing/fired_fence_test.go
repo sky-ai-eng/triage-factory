@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -234,7 +233,9 @@ func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 		t.Fatalf("resolve blueprint id: %v", err)
 	}
 	priorBlueprintRunID := uuid.New().String()
-	inserted, _, err := sqlitestore.New(database).Blueprints.CreateRunIfNotFiredSystem(t.Context(), runmode.LocalDefaultOrgID, domain.BlueprintRun{
+	priorStepID := uuid.New().String()
+	stepIdx := 0
+	inserted, _, _, err := sqlitestore.New(database).Blueprints.CreateRunWithFirstStepSystem(t.Context(), runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:                priorBlueprintRunID,
 		BlueprintID:       blueprintID,
 		TaskID:            taskID,
@@ -243,21 +244,24 @@ func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 		TriggeringEventID: eventID,
 		Status:            domain.BlueprintRunStatusRunning,
 		WorktreePath:      "/tmp/wt-prior",
-	}, dbpkg.AgentClaimStamp{})
-	if err != nil || !inserted {
-		t.Fatalf("seed prior blueprint_run: inserted=%v err=%v", inserted, err)
-	}
-	stepIdx := 0
-	dbtest.SeedConversation(t, database, domain.Conversation{
-		ID:                 uuid.New().String(),
+	}, dbpkg.AgentClaimStamp{}, "", domain.Conversation{
+		ID:                 priorStepID,
 		TaskID:             taskID,
 		PromptID:           "p-drain",
-		Status:             "completed",
+		Model:              "m",
 		TriggerType:        "event",
 		TriggerID:          triggerID,
 		BlueprintRunID:     priorBlueprintRunID,
 		BlueprintStepIndex: &stepIdx,
 	})
+	if err != nil || !inserted {
+		t.Fatalf("seed prior blueprint_run: inserted=%v err=%v", inserted, err)
+	}
+	// The prior firing concluded: the drain must read it as already-fired, not
+	// as a live engagement it should defer behind.
+	if _, err := database.Exec(`UPDATE conversations SET status = 'completed' WHERE id = ?`, priorStepID); err != nil {
+		t.Fatalf("conclude prior step: %v", err)
+	}
 
 	// Queue a firing carrying the same triggering event.
 	if _, _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID, dbpkg.AgentClaimStamp{}); err != nil {

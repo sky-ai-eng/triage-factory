@@ -37,9 +37,8 @@ type Publisher interface {
 
 	// PublishPreEnqueued forwards an event the caller already committed to
 	// the durable outbox — the bus fan-out and the drain-worker nudge
-	// without a second enqueue. The tracker's diffed transitions take this
-	// path because they ride the snapshot CAS's transaction (see
-	// emitWithSnapshotCAS).
+	// without a second enqueue. Every emit that rides a snapshot CAS's
+	// transaction takes this path (see emitWithSnapshotCAS).
 	PublishPreEnqueued(ctx context.Context, evt domain.Event)
 }
 
@@ -69,11 +68,12 @@ type Tracker struct {
 	entities db.EntityStore     // entity lifecycle (find/create, snapshot, title/description, close/reactivate)
 	repos    db.RepositoryStore // per-repo conditional-request (ETag) state for GitHub open-PR discovery
 	// queue is the durable outbox, held directly rather than reached
-	// through pub because the diff arms need the ONE write that carries
-	// both halves of a cycle's result: the snapshot advance and the
-	// transitions diffed against it (EnqueueBatchWithSnapshotCAS). Every
-	// other emit the tracker makes — discovery backfills, poll-complete
-	// sentinels — has no snapshot to pair with and goes through pub.
+	// through pub because the snapshot-paired arms need the ONE write that
+	// carries both halves: the snapshot advance and the events that belong
+	// to it (EnqueueBatchWithSnapshotCAS) — a diffed cycle's transitions,
+	// and a discovery seed's review-request backfill. Every other emit the
+	// tracker makes — an unreachable Jira key, poll-complete sentinels —
+	// has no snapshot to pair with and goes through pub.
 	queue db.EventQueueStore
 	// orgID is the tenant this tracker emits events and reads/writes
 	// entities for. Set at construction and stable for the Tracker's
@@ -108,17 +108,21 @@ func (t *Tracker) publish(ctx context.Context, evt domain.Event) {
 	t.pub.Publish(ctx, evt)
 }
 
-// emitWithSnapshotCAS commits a diffed cycle's result for one entity: the
-// snapshot advance under its poll_seq CAS, and the transitions diffed
-// against that snapshot, in a single transaction. Reports ok=false when the
-// CAS lost, in which case nothing was written at all.
+// emitWithSnapshotCAS commits one entity's snapshot advance under its
+// poll_seq CAS together with the events that snapshot implies, in a single
+// transaction. Reports ok=false when the CAS lost, in which case nothing was
+// written at all.
 //
-// The pairing is the point. The snapshot-diff is the sole re-emit
-// prevention, so a snapshot that advances without its transitions retires
-// them permanently — the next cycle diffs new-against-new and finds
-// nothing. Committing both together means a failure before commit leaves
-// the entity exactly where the next cycle expects it, and a CAS miss (a
-// straggler ex-leader, stale by the time it lands) writes neither half.
+// The pairing is the point. The stored snapshot is the sole re-emit
+// prevention, so a snapshot that advances without its events retires them
+// permanently — the next cycle diffs new-against-new and finds nothing.
+// Committing both together means a failure before commit leaves the entity
+// exactly where the next cycle expects it, and a CAS miss (a straggler
+// ex-leader, stale by the time it lands) writes neither half.
+//
+// Two arms call it: a refreshed entity's diffed transitions, and a
+// first-discovery seed carrying the review requests that were already on the
+// PR when TF started watching.
 //
 // evts may be empty: a refreshed entity with no transitions is a pure
 // snapshot advance, and takes this same path rather than a second one.
@@ -213,9 +217,9 @@ func (t *Tracker) emitWithSnapshotCAS(ctx context.Context, orgID, entityID, snap
 // create→snapshot pair would not be re-seeded, since the next cycle's
 // FindOrCreate returns created=false). Threading cancellation into those
 // persistence calls is a separate concern, out of scope here. The one
-// exception is Phase 3's snapshot+events commit (emitWithSnapshotCAS),
-// which takes the cycle ctx precisely because it CAN'T half-apply — see
-// its doc.
+// exceptions are the snapshot+events commits (emitWithSnapshotCAS) — the
+// discovery seed and Phase 3's diff — which take the cycle ctx precisely
+// because they CAN'T half-apply; see its doc.
 // The third return, resumeFrom, is the round-robin resume point — see
 // discoverGitHub. It is only ever non-empty alongside a non-nil error
 // (the rate-limited discovery-interruption path); every other return path
@@ -275,14 +279,52 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		}
 
 		if created {
-			// Seed the discovery snapshot. CAS against entity.PollSeq (0 for
-			// a just-created row); a miss means a concurrent seed already won.
+			terminal := snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED"
+			// Backfill: a per-reviewer review_requested event for every
+			// TF-known requested reviewer on a just-discovered open PR.
+			// DiffPRSnapshots' "no events on initial load" rule means
+			// pr:review_requested would never fire for requests that existed
+			// before we started watching — the reviewer would only see them if
+			// someone re-requested. Synthesizing here lands existing
+			// review-requests in the queue on first connect.
+			//
+			// Self-authored PRs are skipped: GitHub forbids self-requests, so
+			// the only way a match fires here is via a team the user is on
+			// (CODEOWNERS auto-assigning them to their own PR). That isn't an
+			// ask — surfacing it pollutes the queue. Matches the guard in
+			// DiffPRSnapshots.
+			var backfilled []domain.Event
+			if !terminal && snap.Author != username {
+				for _, reviewer := range snap.ReviewRequests {
+					login, team, known := resolveReviewer(resolver, reviewer)
+					if !known {
+						continue
+					}
+					evt, err := backfillReviewRequestedEvent(entity.ID, snap, login, team)
+					if err != nil {
+						trackerLog.Error("build backfill review_requested failed", "source_id", sid, "reviewer", reviewer, "error", err)
+						continue
+					}
+					backfilled = append(backfilled, evt)
+				}
+			}
+			// Seed the discovery snapshot and the backfill it implies in ONE
+			// transaction, CAS'd against entity.PollSeq (0 for a just-created
+			// row). The snapshot-diff is the sole re-emit guard, so a seed that
+			// commits without its backfill retires those review requests
+			// permanently: the next cycle diffs same-against-same and never
+			// synthesizes them again. A CAS miss means a concurrent seed won
+			// and carried its own backfill — nothing to write and nothing to
+			// re-attempt.
 			snapJSON, _ := json.Marshal(snap)
-			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
-				trackerLog.Error("seed snapshot failed", "source_id", sid, "error", err)
+			if ok, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, backfilled); err != nil {
+				trackerLog.Error("seed snapshot+backfill failed", "source_id", sid, "error", err)
 			} else if !ok {
 				trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", sid)
 			}
+			// Best-effort display/scorer mirror, outside the transaction as in
+			// Phase 3: the snapshot is the revision authority and this capped
+			// string may lag it.
 			if desc := prDescription(snap); desc != "" {
 				if _, err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, desc); err != nil {
 					trackerLog.Error("seed description failed", "source_id", sid, "error", err)
@@ -291,33 +333,9 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			// If the PR is already terminal, mark the entity closed immediately
 			// so it doesn't sit in the active refresh set forever (Phase 3
 			// won't emit a merged/closed event because prev==curr).
-			if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
+			if terminal {
 				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
 					trackerLog.Error("mark entity closed on discovery failed", "source_id", sid, "error", err)
-				}
-			} else if snap.Author != username {
-				// Backfill: emit a per-reviewer review_requested event for
-				// every TF-known requested reviewer on a just-discovered open
-				// PR. DiffPRSnapshots' "no events on initial load"
-				// rule means pr:review_requested would never fire for requests
-				// that existed before we started watching — the reviewer would
-				// only see them if someone re-requested. Synthesizing here lands
-				// existing review-requests in the queue on first connect.
-				// Mirrors the Jira carry-over queue path in handleJiraStockQueue.
-				//
-				// Self-authored PRs are skipped: GitHub forbids self-requests,
-				// so the only way a match fires here is via a team the user is
-				// on (CODEOWNERS auto-assigning them to their own PR). That isn't
-				// an ask — surfacing it pollutes the queue. Matches the guard in
-				// DiffPRSnapshots.
-				for _, reviewer := range snap.ReviewRequests {
-					login, team, known := resolveReviewer(resolver, reviewer)
-					if !known {
-						continue
-					}
-					if err := t.backfillReviewRequested(ctx, entity.ID, snap, login, team); err != nil {
-						trackerLog.Error("backfill review_requested failed", "source_id", sid, "reviewer", reviewer, "error", err)
-					}
 				}
 			}
 		} else {
@@ -957,32 +975,31 @@ func splitOwnerRepo(s string) (owner, repo string) {
 	return s, ""
 }
 
-// backfillReviewRequested publishes a synthesized pr:review_requested
-// event for a PR being discovered for the first time with the session
-// user already in its requested-reviewer list. The router subscribes
-// to the bus, evaluates rules, and fans out to per-team tasks.
-// The task's primary_event_id FK is satisfied when the router records
-// the event in its HandleEvent step 1.
+// backfillReviewRequestedEvent builds a synthesized pr:review_requested
+// event for a PR being discovered for the first time with a TF-known
+// identity already in its requested-reviewer list. The caller commits it
+// inside the seed's snapshot-CAS transaction; the router then evaluates
+// rules off the queue row and fans out to per-team tasks, and the task's
+// primary_event_id FK is satisfied by the events row the same transaction
+// wrote.
 //
-// Previously the tracker bypassed the bus and called
-// tasks.FindOrCreateAt directly, which sidestepped rule evaluation —
-// every backfilled task ended up assigned to "the oldest team in the
-// org" regardless of which team's rule actually matched. Routing
-// through the bus gives backfill the same team-aware fanout every
-// other tracker-detected event already gets.
+// Returning the event rather than publishing it is what lets the seed carry
+// it: the stored snapshot is the sole re-emit guard, so an event published
+// after the snapshot committed is one the next cycle can no longer derive.
 //
 // The OccurredAt stamp uses the PR's CreatedAt as a lower bound:
 // GitHub doesn't expose per-review-request timestamps, so PR creation
 // time is the closest we have — better than "just now" on the card
 // for a PR that's been pending your review for weeks. Falls back to
-// time.Now() if the GraphQL timestamp is missing or unparseable.
+// the zero value (detection time) if the GraphQL timestamp is missing
+// or unparseable.
 //
 // The "is this reviewer TF-known" decision happens upstream at the
 // caller's resolveReviewer check, not here; this function just records the
 // requested identity (login or "org/slug" team) plus the PR author on the
 // metadata, and keys the event by that identity, so the router routes the
 // per-reviewer task and the predicate matcher can do its work.
-func (t *Tracker) backfillReviewRequested(ctx context.Context, entityID string, snap domain.PRSnapshot, requestedLogin, requestedTeam string) error {
+func backfillReviewRequestedEvent(entityID string, snap domain.PRSnapshot, requestedLogin, requestedTeam string) (domain.Event, error) {
 	reviewer := requestedLogin
 	if reviewer == "" {
 		reviewer = requestedTeam
@@ -999,7 +1016,7 @@ func (t *Tracker) backfillReviewRequested(ctx context.Context, entityID string, 
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
-		return err
+		return domain.Event{}, err
 	}
 	// Parse through the shared external-time parser (handles RFC3339Nano
 	// sub-second shapes + Jira offsets) so a fractional-seconds CreatedAt
@@ -1009,14 +1026,13 @@ func (t *Tracker) backfillReviewRequested(ctx context.Context, entityID string, 
 		occurredAt = parsed
 	}
 	eid := entityID
-	t.publish(ctx, domain.Event{
+	return domain.Event{
 		EntityID:     &eid,
 		EventType:    domain.EventGitHubPRReviewRequested,
 		DedupKey:     reviewerDedupKey(reviewer),
 		MetadataJSON: string(metaJSON),
 		OccurredAt:   occurredAt,
-	})
-	return nil
+	}, nil
 }
 
 // --- Jira ---

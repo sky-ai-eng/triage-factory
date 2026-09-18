@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -139,13 +138,27 @@ const conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALES
 	COALESCE(r.creator_user_id, ''), COALESCE(r.team_id, ''),
 	COALESCE(r.blueprint_run_id, ''), r.blueprint_step_index`
 
-// EnqueueConversation mints a delegation conversation with NO status — the absence of
-// an outcome is what makes it claimable, so the mint writes nothing to the
-// column and queued_at carries the enqueue moment. runtime is stamped
-// 'sdk': SQLite is local mode, which keeps the Claude Code SDK runtime.
-// The Postgres sibling stamps 'native' — the dialect IS the mode, so the
-// split lands where the row is written rather than as a caller-passed knob.
+// EnqueueConversation mints a queued delegation conversation on its own
+// statement. The step-advance path takes this door; a blueprint's FIRST step
+// takes BlueprintStore.CreateRunWithFirstStepSystem instead, so it commits
+// with the run that implies it.
 func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) (*domain.Conversation, error) {
+	return insertConversation(ctx, s.conn, orgID, conv)
+}
+
+// insertConversation is the mint statement itself, taking the queryer so the
+// firing path can run it on the transaction that also commits the
+// blueprint_run it belongs to rather than as a second, separately-failing
+// write. One copy of the row shape, so the two doors cannot drift on what a
+// queued delegation looks like. Mirrors the Postgres helper of the same name.
+//
+// The row carries NO status — the absence of an outcome is what makes it
+// claimable, so the mint writes nothing to the column and queued_at carries
+// the enqueue moment. runtime is stamped 'sdk': SQLite is local mode, which
+// keeps the Claude Code SDK runtime. The Postgres sibling stamps 'native' —
+// the dialect IS the mode, so the split lands where the row is written rather
+// than as a caller-passed knob.
+func insertConversation(ctx context.Context, q queryer, orgID string, conv domain.Conversation) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -163,7 +176,7 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 	if conv.BlueprintStepIndex != nil {
 		stepIdx = *conv.BlueprintStepIndex
 	}
-	row := s.conn.QueryRowContext(ctx, `
+	row := q.QueryRowContext(ctx, `
 		INSERT INTO conversations (id, type, runtime, task_id, prompt_id, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility,
 		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index,
@@ -575,7 +588,7 @@ func (s *conversationQueueStore) FleetQueueShares(ctx context.Context) ([]db.Org
 	return out, rows.Err()
 }
 
-func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Context) (int, error) {
+func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Context) (int, db.OrphanedAtMintCheck, error) {
 	// Boot self-heal: park child conversations left mid-flight under a
 	// blueprint_run that is already terminal. This is the mirror of ResetProcessingConversations
 	// (which requeues active conversations under a *running* parent): a child
@@ -635,7 +648,7 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 		return err
 	})
 	if err != nil {
-		return 0, err
+		return 0, db.OrphanedAtMintCheck{}, err
 	}
 
 	// Claim-desync janitor arm — the SQLite mirror of the Postgres twin's
@@ -669,61 +682,56 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 		return nil
 	})
 	if err != nil {
-		return count, err
+		return count, db.OrphanedAtMintCheck{}, err
 	}
 
-	// Mint-crash arm — the mirror of the blueprint-terminal park above, one
-	// level up: that arm heals a live child under a dead parent, this one heals
-	// a live parent with no child at all. The firing path commits the
-	// blueprint_run first and enqueues its first step second, so a hard death
-	// between the two leaves a 'running' parent that nothing drives and nothing
-	// recovers — every other arm here (and the Postgres-only leader reaper)
-	// joins through conversations, and this shape has none.
+	// Mint-crash CHECKER — the shape the park above cannot see, one level up:
+	// that arm heals a live child under a dead parent, this one only REPORTS a
+	// live parent with no child at all. It repairs nothing, and its count
+	// stays out of the healed total, because counting is not healing.
 	//
-	// Local mode has the crash window and no reaper, so boot is its only
-	// recovery surface. It carries the same one-active-run index, so the
-	// symptom is the same too: the childless parent holds its task's only
-	// running slot as well as reading in-flight forever. Failing frees both.
-	//
-	// Two clocks here on purpose, and the split is the opposite way round from
-	// the Postgres arm's all-now() statement:
-	//
-	// The GRACE runs on SQLite's own clock — datetime() on both sides, so the
-	// comparison survives whichever on-disk timestamp shape started_at carries
-	// (see parseDBDatetime) rather than only the CURRENT_TIMESTAMP one both
-	// insert paths write today.
-	//
-	// completed_at is bound from Go, like every other writer of this column
-	// (MarkRunStatus, CreateRun) and of conversations.completed_at. What the
-	// Postgres arm's now() buys is protection from DB/app clock skew, and an
-	// embedded engine has none to protect against — it reads the same host
-	// clock this process does. What the column does have is a text format:
-	// _time_format=sqlite serializes a Go bind as
-	// "2006-01-02 15:04:05.999999999-07:00", and datetime('now') would write a
-	// second shape into a column where every other row carries the first, for
-	// no gain.
-	err = inTx(ctx, s.conn, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
-			UPDATE blueprint_runs
-			SET status = 'failed', completed_at = ?, abort_reason = ?
-			WHERE status = 'running'
-			  AND datetime(started_at) < datetime('now', ?)
-			  AND NOT EXISTS (
-			      SELECT 1 FROM conversations c WHERE c.blueprint_run_id = blueprint_runs.id
-			  )
-		`, time.Now().UTC(), domain.BlueprintAbortOrphanedAtMint,
-			fmt.Sprintf("-%d seconds", int(domain.BlueprintOrphanedAtMintGrace.Seconds())))
-		if err != nil {
-			return err
+	// A firing commits its blueprint_run and its first step in one
+	// transaction, so no reader can observe one without the other and there is
+	// no window for the shape to appear in — which is why there is no grace
+	// here. What an installed database can still hold is a survivor from
+	// before that was true; the forward migration that fails those is what
+	// makes one turning up here worth shouting about rather than sweeping.
+	check, err := countBlueprintRunsOrphanedAtMint(ctx, s.conn)
+	if err != nil {
+		return count, db.OrphanedAtMintCheck{}, err
+	}
+	return count, check, nil
+}
+
+// countBlueprintRunsOrphanedAtMint counts 'running' blueprint_runs that hold
+// no child conversation, and samples the oldest few. It writes nothing.
+// Mirrors the Postgres twin, window function included: `count(*) OVER ()` is
+// evaluated before LIMIT, so one statement gives both the full count and the
+// bounded sample without the two disagreeing about which rows they describe.
+func countBlueprintRunsOrphanedAtMint(ctx context.Context, q queryer) (db.OrphanedAtMintCheck, error) {
+	var out db.OrphanedAtMintCheck
+	rows, err := q.QueryContext(ctx, `
+		SELECT id, count(*) OVER ()
+		FROM blueprint_runs
+		WHERE status = 'running'
+		  AND NOT EXISTS (
+		      SELECT 1 FROM conversations c WHERE c.blueprint_run_id = blueprint_runs.id
+		  )
+		ORDER BY started_at, id
+		LIMIT ?
+	`, db.OrphanedAtMintSampleLimit)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id, &out.Count); err != nil {
+			return db.OrphanedAtMintCheck{}, err
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		count += int(n)
-		return nil
-	})
-	return count, err
+		out.Sample = append(out.Sample, id)
+	}
+	return out, rows.Err()
 }
 
 func (s *conversationQueueStore) CountQueuedSystem(ctx context.Context) (int, error) {

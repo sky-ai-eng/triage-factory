@@ -349,7 +349,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 		t.Fatalf("seed healthy claim: %v", err)
 	}
 
-	n, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
+	n, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil || n != 2 {
 		t.Fatalf("ReconcileOrphanedConversations = (%d, %v), want (2, nil)", n, err)
 	}
@@ -364,7 +364,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
+	if n2, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
 		t.Errorf("second ReconcileOrphanedConversations = (%d, %v), want (0, nil)", n2, err)
 	}
 }
@@ -425,7 +425,7 @@ func TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T
 	healthyClaim := activeClaim(healthyID)
 	queuedID := seedChild("")
 
-	n, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
+	n, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil {
 		t.Fatalf("ReconcileOrphanedConversations: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
+	if n2, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
 		t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
 	}
 }
@@ -1114,22 +1114,22 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConforman
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
-		brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+		brID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 		bpID := pgBlueprintIDOfRun(t, h, brID)
+		// The fixture's own run is not one of the suite's: settle it so a spare
+		// childless 'running' row doesn't show up in the checker's counts.
+		pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET status = 'completed' WHERE id = $1`, brID)
 
+		// One task per run: blueprint_runs_one_active_run_per_task refuses a
+		// second 'running' row on a task, and the suite stages several at once.
+		runTask := map[string]string{}
 		nextStep := 0
-		// The fixture already minted one running blueprint_run; hand that one
-		// out first so the suite's exact counts aren't thrown off by a spare
-		// childless orphan sitting beside the one it staged.
-		spare := brID
 		seed := dbtest.ReconcileOrphanSeeder{
 			BlueprintRun: func(t *testing.T, age time.Duration) string {
 				t.Helper()
-				id := spare
-				if id == "" {
-					id = seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID)
-				}
-				spare = ""
+				taskID := seedPgTask(t, h, orgID, userID)
+				id := seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID)
+				runTask[id] = taskID
 				if age > 0 {
 					pgtest.MustExec(t, h.AdminDB,
 						`UPDATE blueprint_runs SET started_at = now() - $2::interval WHERE id = $1`, id, age.String())
@@ -1142,7 +1142,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConforman
 				nextStep++
 				convID := uuid.New().String()
 				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-					ID: convID, TaskID: taskID, PromptID: promptID, Model: "m",
+					ID: convID, TaskID: runTask[brID], PromptID: promptID, Model: "m",
 					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
 					t.Fatalf("EnqueueConversation: %v", err)

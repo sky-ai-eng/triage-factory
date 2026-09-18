@@ -601,13 +601,15 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 	if stub.calls != 1 {
 		t.Fatalf("expected exactly 1 bot run (team B only; team A disabled), got %d", stub.calls)
 	}
-	// The owner must have been consolidated to team B BEFORE the run was
-	// created — the run inherits its team from the task at insert time.
+	// The run belongs to team B: the firing consolidates the owner inside its
+	// own transaction, and everything the spawner resolves per team (the spend
+	// cap, the model default) must read that team rather than the task's
+	// creation-time owner.
 	stub.mu.Lock()
-	fired := stub.lastTaskTeamID
+	fired := stub.lastRunTeamID
 	stub.mu.Unlock()
 	if fired != teamB {
-		t.Errorf("run fired with task owner team %q, want teamB %q (owner must consolidate before the run is created)", fired, teamB)
+		t.Errorf("run fired as team %q, want teamB %q (a firing runs as its acting team)", fired, teamB)
 	}
 	active, _ := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if len(active) != 1 {

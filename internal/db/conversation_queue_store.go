@@ -25,6 +25,28 @@ func AssertBlueprintStepIndexed(conv domain.Conversation) error {
 	return nil
 }
 
+// OrphanedAtMintCheck is what ReconcileOrphanedConversations' checker arm
+// found: 'running' blueprint_runs holding no step conversation at all. The
+// store counts and samples; the caller logs, because the store layer holds no
+// logger and the finding is the caller's to report.
+//
+// A non-zero Count is a broken invariant, not a backlog: a firing commits its
+// blueprint_run and its first step in one transaction, so no other
+// transaction can observe one without the other. What it can still surface is
+// a row from before that was true — an installed local database carries its
+// history, and the forward migration that repairs those is what makes a
+// survivor here worth shouting about.
+type OrphanedAtMintCheck struct {
+	// Count is every matching row, not just the sampled ones.
+	Count int
+	// Sample is up to OrphanedAtMintSampleLimit blueprint_run ids, oldest
+	// first — enough to go look, bounded so one log line stays a log line.
+	Sample []string
+}
+
+// OrphanedAtMintSampleLimit caps OrphanedAtMintCheck.Sample.
+const OrphanedAtMintSampleLimit = 20
+
 // ConversationQueueStore owns the claim loop — the ONE scan that finds conversations
 // needing to be driven, on every surface. It is the sibling of
 // EventQueueStore: where the event queue feeds the router, this feeds the
@@ -48,7 +70,7 @@ func AssertBlueprintStepIndexed(conv domain.Conversation) error {
 //
 // The claim fence here (one worker claims one queued conversation) is distinct from the
 // replay fence (one blueprint_run per (triggering_event_id, trigger_id), at the
-// firing boundary in BlueprintStore.CreateRunIfNotFiredSystem). The queue does
+// firing boundary in BlueprintStore.CreateRunWithFirstStepSystem). The queue does
 // not subsume the replay fence — by the time a step is enqueued the blueprint_run
 // already exists.
 // ClaimPlacement configures the placement-aware, two-tier claim (TFAC-587,
@@ -281,22 +303,17 @@ type ConversationQueueStore interface {
 	// released with the outcome mapped from its status. The leader reaper
 	// repeats it periodically; here it runs at boot in both modes.
 	//
-	// And it runs the mint-crash arm, the exact mirror of the first: a
-	// 'running' blueprint_run holding NO child conversation, older than
-	// domain.BlueprintOrphanedAtMintGrace, is terminal-failed with
-	// abort_reason=domain.BlueprintAbortOrphanedAtMint. The firing path commits
-	// the blueprint_run first and enqueues its first step second, so a hard
-	// death between the two leaves a parent nothing drives — and nothing else
-	// recovers it, because every other arm (and the Postgres-only leader
-	// reaper) joins through conversations. Failing frees the
-	// one-active-run index the orphan was holding, so the task's
-	// already-queued firing intent drains into a fresh, fully-minted
-	// blueprint run instead of retrying against the index forever. Both
-	// dialects: local mode has the same crash window and no reaper.
+	// And it runs one CHECKER, which repairs nothing: a 'running'
+	// blueprint_run holding NO child conversation is counted and logged at
+	// error with a sample of ids. That shape is unreachable now that a firing
+	// commits its run and its first step in one transaction, so observing one
+	// means an invariant broke — and a repair would hide it. It is a check
+	// rather than nothing at all because the shape is invisible to every other
+	// arm: they all join through conversations, and this one has none.
 	//
-	// Cross-org system sweep; returns the total count of rows healed across
-	// all arms.
-	ReconcileOrphanedConversations(ctx context.Context) (int, error)
+	// Cross-org system sweep; returns the total count of rows healed — the
+	// checker's count is not in it, because counting is not healing.
+	ReconcileOrphanedConversations(ctx context.Context) (healed int, check OrphanedAtMintCheck, err error)
 
 	// CountQueuedSystem returns how many conversations currently match the
 	// needs-driving predicate across the whole deployment — the fleet-wide

@@ -144,13 +144,21 @@ func (s *Spawner) reconcileConversationQueue(ctx context.Context) {
 	// worktree.Cleanup sweep already reclaimed the on-disk dir for non-parked
 	// conversations). The atomic cancel in MarkRunStatus prevents new desyncs; this heals
 	// rows broken before that landed.
-	c, err := s.conversationQueue.ReconcileOrphanedConversations(ctx)
+	c, check, err := s.conversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil {
 		dispatchLog.Error("boot reconcile: cancel orphaned child conversations failed", "error", err)
 		return
 	}
 	if c > 0 {
 		dispatchLog.Info("boot reconcile: healed orphaned child conversations and conversation↔claim desyncs", "count", c)
+	}
+	// The one finding that is a report rather than a repair. A firing commits
+	// its blueprint_run and its first step in one transaction, so a 'running'
+	// parent with no child is a broken invariant — loud, and left alone for
+	// someone to look at, because a sweep here would absorb it silently.
+	if check.Count > 0 {
+		dispatchLog.Error("boot check: blueprint runs are 'running' with no step conversation — a firing commits both or neither, so these should not exist",
+			"count", check.Count, "blueprint_runs", check.Sample)
 	}
 }
 
@@ -1404,6 +1412,22 @@ func stepModelOrInherit(stepModel, inherited string, enabled domain.ModelSet) (s
 // relocated to blueprint_runs, and stamping it per step would collide a
 // multi-step chain on the leftover conversations_event_trigger_fence index.
 func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunID string, task domain.Task, step domain.BlueprintStep, model, triggerType, triggerID, creatorUserID, actorAgentID string) error {
+	_, err := s.conversationQueue.EnqueueConversation(ctx, orgID,
+		s.buildStepConversation(ctx, orgID, blueprintRunID, task, step, model, triggerType, triggerID, creatorUserID, actorAgentID))
+	return err
+}
+
+// buildStepConversation composes the conversations row for one blueprint step
+// — every field of it, plus the two reads that can only be taken outside the
+// write (the placement stamp and the inherited tree). Shared by the enqueue
+// above and by Delegate, which hands the composed row to the store method that
+// commits it inside the firing's own transaction; one composer, so the two
+// doors cannot produce different-shaped step 0s.
+//
+// Both reads are advisory, which is what makes them safe to take before the
+// transaction rather than inside it: a stale placement costs a tier-2 claim
+// and a missing tree costs a rehydrate.
+func (s *Spawner) buildStepConversation(ctx context.Context, orgID, blueprintRunID string, task domain.Task, step domain.BlueprintStep, model, triggerType, triggerID, creatorUserID, actorAgentID string) domain.Conversation {
 	stepIdx := step.StepIndex
 	conversationID := uuid.New().String()
 	// Placement stamp (TFAC-587): the rendezvous winner for this run's
@@ -1413,7 +1437,7 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 	// and never outlives one queue dwell. Empty = no affinity (placement off,
 	// non-repo task, or a failed read) → the claim treats it as unowned.
 	preferred := s.preferredExecutorFor(ctx, orgID, task, conversationID)
-	_, err := s.conversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	return domain.Conversation{
 		ID:                  conversationID,
 		TaskID:              task.ID,
 		PromptID:            step.StepPromptID,
@@ -1426,8 +1450,7 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 		BlueprintStepIndex:  &stepIdx,
 		PreferredExecutorID: preferred,
 		WorktreePath:        s.inheritedWorktreePath(ctx, orgID, task.ID),
-	})
-	return err
+	}
 }
 
 // inheritedWorktreePath is the tree the conversation being minted opens in:
