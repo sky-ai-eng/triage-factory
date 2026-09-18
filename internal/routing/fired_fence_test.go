@@ -20,7 +20,7 @@ import (
 )
 
 // fenceStubDelegator mirrors the production spawner's event-path fence
-// (delegate.Spawner.Delegate → BlueprintStore.CreateRunIfNotFiredSystem): the
+// (delegate.Spawner.Delegate → BlueprintStore.CreateRunWithFirstStepSystem): the
 // relocated replay fence lives on blueprint_runs, so it mints a blueprint_run
 // fenced on (triggering_event_id, trigger_id) + a linked conversation row,
 // and returns delegate.ErrAlreadyFired when the fence trips. This lets the

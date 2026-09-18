@@ -443,7 +443,7 @@ type Conversation struct {
 	// makes event-triggered auto-delegation exactly-once under the
 	// at-least-once router queue: a replayed event whose first conversation
 	// already committed conflicts on the fence and is skipped. Forward-only
-	// provenance — written via BlueprintStore.CreateRunIfNotFiredSystem, not
+	// provenance — written via BlueprintStore.CreateRunWithFirstStepSystem, not
 	// hydrated by Get.
 	TriggeringEventID string
 

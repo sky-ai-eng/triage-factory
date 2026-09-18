@@ -535,16 +535,11 @@ type BlueprintStore interface {
 	//
 	// Statement order inside the transaction is fixed:
 	//
-	//  1. ownerTeamID, when non-empty, becomes tasks.team_id — the acting
-	//     team taking ownership before anything reads it. The conversations
-	//     insert derives its own team_id from the task, so it sees this. Zero
-	//     rows (no such task) or an error aborts the whole firing: firing with
-	//     an owner the caller asked to change is the wrong card on the wrong
-	//     board, which no later write corrects. An EMPTY ownerTeamID still
-	//     runs the statement, writing the stored team back to itself, because
-	//     step 3 touches the same row after step 2 and every firing has to
-	//     reach these two rows in the same order or a pair racing on one task
-	//     can deadlock.
+	//  1. The task's row lock, taken by every firing whether or not it
+	//     consolidates. Steps 3 and 4 both write that row and both come AFTER
+	//     step 2, so without a fixed order two firings racing on one task can
+	//     take tasks and blueprint_runs in opposite orders and deadlock. No
+	//     such task aborts the firing here, before anything is written.
 	//  2. The blueprint_runs insert. An event-triggered run (TriggerType
 	//     "event") is fenced ON CONFLICT against
 	//     blueprint_runs_event_trigger_fence, making (triggering_event_id,
@@ -554,16 +549,27 @@ type BlueprintStore interface {
 	//     ErrBlueprintRunFenceRequiresEventAndTrigger. A manual run carries no
 	//     event and takes a plain insert. Either arm loses to
 	//     blueprint_runs_one_active_run_per_task as ErrTaskBusyActiveRun.
-	//  3. The task's agent claim (see AgentClaimStamp), skipped on the fenced
-	//     no-op — a replay must not re-stamp a claim the original firing
-	//     already settled, and may not steal one the user has since taken.
-	//     Returns claimed=true only when the stamp actually moved the claim; a
-	//     refusal is not an error and still commits the run and its step.
-	//  4. The first step's conversations row.
+	//     Everything below is skipped when the fence caught a replay, which is
+	//     what makes inserted=false mean nothing was written.
+	//  3. ownerTeamID, when non-empty, becomes tasks.team_id — the acting team
+	//     taking ownership before anything reads it. The conversations insert
+	//     derives its own team_id from the task, so it sees this. Zero rows
+	//     (no such task) or an error aborts the whole firing: firing with an
+	//     owner the caller asked to change is the wrong card on the wrong
+	//     board, which no later write corrects.
+	//  4. The task's agent claim (see AgentClaimStamp) — a replay never
+	//     reaches it, so it cannot re-stamp a claim the original firing
+	//     already settled or steal one the user has since taken. Returns
+	//     claimed=true only when the stamp actually moved the claim; a refusal
+	//     is not an error and still commits the run and its step.
+	//  5. The first step's conversations row.
 	//
 	// Returns inserted=false with nothing else committed when the fence caught
 	// a replay: the run for THIS event already exists, so the caller skips.
-	// That is deliberately distinct from ErrTaskBusyActiveRun, which is a
+	// "Nothing else" is literal and includes the owner — a replay carrying a
+	// different ownerTeamID than the original firing must not move the card,
+	// which is why the consolidation sits after the fence rather than before
+	// it. That is deliberately distinct from ErrTaskBusyActiveRun, which is a
 	// deferral the caller must queue rather than drop.
 	//
 	// Exempt from the returned-row rule for the run, by decision rather than

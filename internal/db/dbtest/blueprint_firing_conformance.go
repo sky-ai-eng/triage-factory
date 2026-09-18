@@ -192,6 +192,12 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 	})
 
 	t.Run("Replay_after_a_committed_firing_commits_nothing", func(t *testing.T) {
+		// "Nothing" is every write the firing makes, the owner included. The
+		// replay below deliberately asks for a DIFFERENT owner than the
+		// original firing settled — team-routing config can change between an
+		// event and its redelivery — and must be refused the move: the run it
+		// would have consolidated for already exists and belongs to the team
+		// that fired it.
 		store, sc := mk(t)
 		taskID := sc.NewTask(t)
 		br := sc.Firing(t, taskID)
@@ -199,6 +205,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		if inserted, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{AgentID: sc.AgentID}, "", sc.FirstStep(br)); err != nil || !inserted {
 			t.Fatalf("first fire: inserted=%v err=%v", inserted, err)
 		}
+		ownerAfterFirstFire := sc.TaskOwnerTeam(t, taskID)
 
 		replay := br
 		replay.ID = uuid.New().String()
@@ -214,6 +221,9 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		}
 		if n := sc.ConversationCount(t, taskID); n != 1 {
 			t.Errorf("conversations on the task = %d, want 1 (the replay minted a second step)", n)
+		}
+		if got := sc.TaskOwnerTeam(t, taskID); got != ownerAfterFirstFire {
+			t.Errorf("task owner team = %q, want %q — a fenced replay reassigned the card it reported not firing", got, ownerAfterFirstFire)
 		}
 	})
 

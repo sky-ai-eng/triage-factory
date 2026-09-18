@@ -828,13 +828,13 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 	inserted, claimed := false, false
 	var conv *domain.Conversation
 	err = inTx(ctx, s.q, func(q queryer) error {
-		// 1. Owner consolidation, on every firing — an empty ownerTeamID
-		// writes team_id back to itself (COALESCE/NULLIF) rather than skipping
-		// the statement. See the Postgres twin for why the statement is
-		// unconditional (one lock order for every firing) and why an asked-for
-		// consolidation is written without comparing first.
-		if _, err := setOwnerTeam(ctx, q, br.TaskID, ownerTeamID); err != nil {
-			return fmt.Errorf("consolidate owner team: %w", err)
+		// 1. The task exists. See the Postgres twin, where this same statement
+		// also takes the task's row lock and so fixes one lock order for every
+		// firing; SQLite is single-connection, so there is no second writer to
+		// order against and what survives here is the existence check, at the
+		// same point, refusing a firing against a task that is not there.
+		if err := lockFiringTask(ctx, q, br.TaskID); err != nil {
+			return err
 		}
 
 		// 2. The run.
@@ -843,14 +843,23 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		}
 		if !inserted {
 			// The fence closed: this firing's run committed already, and so
-			// did its claim and its first step. Nothing else in this
-			// transaction may run — the replay must not re-stamp a claim the
-			// user may have deliberately cleared since, nor mint a second
-			// step for a run that has one.
+			// did its owner, its claim and its first step. Everything below is
+			// skipped and this transaction commits nothing — a replay must not
+			// re-stamp a claim the user may have deliberately cleared since,
+			// move an owner the original firing already settled, nor mint a
+			// second step for a run that has one.
 			return nil
 		}
 
-		// 3. The claim.
+		// 3. Owner consolidation — after the fence, so a replay cannot move
+		// the card, and before the step insert.
+		if ownerTeamID != "" {
+			if _, err := setOwnerTeam(ctx, q, br.TaskID, ownerTeamID); err != nil {
+				return fmt.Errorf("consolidate owner team: %w", err)
+			}
+		}
+
+		// 4. The claim.
 		if claim.AgentID != "" {
 			claimed, err = stampAgentClaimIfUnclaimed(ctx, q, br.TaskID, claim.AgentID, claim.ActingTeamID)
 			if err != nil {
@@ -858,7 +867,7 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 			}
 		}
 
-		// 4. The first step.
+		// 5. The first step.
 		conv, err = insertConversation(ctx, q, orgID, firstStep)
 		return err
 	})
@@ -866,6 +875,20 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		return false, false, nil, err
 	}
 	return inserted, claimed, conv, nil
+}
+
+// lockFiringTask reports db.ErrNoSuchTask when a firing names a task that does
+// not exist — the firing's first statement, so it is refused before anything
+// is written. The Postgres twin takes a row lock in the same statement; SQLite
+// has one connection and nothing to order against, so this is the existence
+// check alone.
+func lockFiringTask(ctx context.Context, q queryer, taskID string) error {
+	var one int
+	err := q.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, taskID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.ErrNoSuchTask
+	}
+	return err
 }
 
 // insertFiringRun writes the blueprint_runs row for a firing on the given

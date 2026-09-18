@@ -777,8 +777,8 @@ func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID stri
 		RETURNING `+pgBlueprintRunColumns,
 		br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan).Scan)
 	if err != nil {
-		// Same one-active-per-task translation as the fenced insert:
-		// production event runs route through CreateRunIfNotFiredSystem
+		// Same one-active-per-task translation as the firing door:
+		// production event runs route through CreateRunWithFirstStepSystem
 		// today, but any caller reaching this path (tests seeding event
 		// runs, a future direct CreateRun user) deserves the documented
 		// sentinel, not a raw unique_violation.
@@ -879,21 +879,19 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 	inserted, claimed := false, false
 	var conv *domain.Conversation
 	err = inTx(ctx, s.admin, func(q queryer) error {
-		// 1. Owner consolidation, and it runs on EVERY firing — an empty
-		// ownerTeamID writes team_id back to itself (COALESCE/NULLIF) rather
-		// than skipping the statement.
+		// 1. Take the task's row lock, on every firing and before anything
+		// else. Steps 3 and 4 both write this row, AFTER the run insert — so
+		// a firing that reached it only there would hold blueprint_runs while
+		// waiting for tasks, while another firing on the same task held tasks
+		// and waited for blueprint_runs. That is a deadlock, and the detector
+		// resolves it by killing one firing. Taking the task first, always,
+		// means two firings on one task queue instead of colliding.
 		//
-		// Two reasons. It is the lock order: this row is touched again by the
-		// claim stamp below, after the run insert, so a firing that skipped it
-		// would take tasks AFTER blueprint_runs while a consolidating one took
-		// it before — and two firings racing on one task would then deadlock,
-		// which the deadlock detector turns into a lost firing that has to be
-		// replayed. Taking the task first, always, makes every firing agree.
-		// And a consolidation that IS asked for is written without comparing:
-		// the statement is idempotent, and reading first would cost a round
-		// trip to learn what the write already knows.
-		if _, err := setOwnerTeam(ctx, q, orgID, br.TaskID, ownerTeamID); err != nil {
-			return fmt.Errorf("consolidate owner team: %w", err)
+		// A lock and not the consolidation write, which is what step 3 is for:
+		// the fence below may end this transaction having written nothing, and
+		// a row locked but never written is exactly that.
+		if err := lockFiringTask(ctx, q, orgID, br.TaskID); err != nil {
+			return err
 		}
 
 		// 2. The run.
@@ -902,14 +900,24 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		}
 		if !inserted {
 			// The fence closed: this firing's run committed already, and so
-			// did its claim and its first step. Nothing else in this
-			// transaction may run — the replay must not re-stamp a claim the
-			// user may have deliberately cleared since, nor mint a second
-			// step for a run that has one.
+			// did its owner, its claim and its first step. Everything below is
+			// skipped and this transaction commits nothing — a replay must not
+			// re-stamp a claim the user may have deliberately cleared since,
+			// move an owner the original firing already settled, nor mint a
+			// second step for a run that has one.
 			return nil
 		}
 
-		// 3. The claim.
+		// 3. Owner consolidation — after the fence, so a replay cannot move
+		// the card, and before the step insert, which derives its team from
+		// this row.
+		if ownerTeamID != "" {
+			if _, err := setOwnerTeam(ctx, q, orgID, br.TaskID, ownerTeamID); err != nil {
+				return fmt.Errorf("consolidate owner team: %w", err)
+			}
+		}
+
+		// 4. The claim.
 		if claim.AgentID != "" {
 			claimed, err = stampAgentClaimIfUnclaimed(ctx, q, orgID, br.TaskID, claim.AgentID, claim.ActingTeamID)
 			if err != nil {
@@ -917,8 +925,8 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 			}
 		}
 
-		// 4. The first step. Its team_id is derived from the task in-SQL, so
-		// it reads step 1's consolidation.
+		// 5. The first step. Its team_id is derived from the task in-SQL, so
+		// it reads step 3's consolidation.
 		conv, err = insertConversation(ctx, q, orgID, firstStep)
 		return err
 	})
@@ -931,6 +939,24 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		s.notifyWake(ctx, orgID)
 	}
 	return inserted, claimed, conv, nil
+}
+
+// lockFiringTask takes the row lock on a firing's task, and reports
+// db.ErrNoSuchTask when there is no such row — the firing's first statement,
+// so a task that does not exist is refused before anything is written.
+//
+// SELECT … FOR UPDATE rather than a write: this is about lock ORDER (see the
+// call site), and a firing whose fence catches a replay has to leave the task
+// exactly as it found it. Readers are unaffected; only another writer of the
+// same task waits.
+func lockFiringTask(ctx context.Context, q queryer, orgID, taskID string) error {
+	var one int
+	err := q.QueryRowContext(ctx,
+		`SELECT 1 FROM tasks WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, taskID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.ErrNoSuchTask
+	}
+	return err
 }
 
 // insertFiringRun writes the blueprint_runs row for a firing on the given

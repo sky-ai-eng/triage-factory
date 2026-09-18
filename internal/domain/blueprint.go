@@ -189,7 +189,7 @@ type BlueprintRun struct {
 	// TriggeringEventID is the event instance that fired this blueprint run,
 	// for event-triggered runs; empty for manual. Paired with TriggerID it
 	// drives the replay fence: the firing path mints the blueprint_run via
-	// CreateRunIfNotFiredSystem, whose (triggering_event_id, trigger_id) unique
+	// CreateRunWithFirstStepSystem, whose (triggering_event_id, trigger_id) unique
 	// index returns ErrAlreadyFired on an at-least-once event replay. The
 	// blueprint_run is the firing unit, so the fence lives here rather than on
 	// the per-step conversations. Forward-only provenance — not read back into the run

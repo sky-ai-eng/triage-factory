@@ -310,12 +310,18 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			}
 			// Seed the discovery snapshot and the backfill it implies in ONE
 			// transaction, CAS'd against entity.PollSeq (0 for a just-created
-			// row). The snapshot-diff is the sole re-emit guard, so a seed that
-			// commits without its backfill retires those review requests
+			// row). The stored snapshot is the sole re-emit guard, so a seed
+			// that commits without its backfill retires those review requests
 			// permanently: the next cycle diffs same-against-same and never
-			// synthesizes them again. A CAS miss means a concurrent seed won
-			// and carried its own backfill — nothing to write and nothing to
-			// re-attempt.
+			// synthesizes them again.
+			//
+			// A CAS miss writes nothing and is not re-attempted — the seed
+			// CAS's existing contract. What it rests on is that one org polls
+			// on one pod at a time (the background-brain lease): the only
+			// writer that can advance poll_seq under a seed is another cycle
+			// on this same entity, so the loser is a straggler whose read is
+			// stale by the time it lands rather than the only cycle that saw
+			// these review requests.
 			snapJSON, _ := json.Marshal(snap)
 			if ok, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, backfilled); err != nil {
 				trackerLog.Error("seed snapshot+backfill failed", "source_id", sid, "error", err)
