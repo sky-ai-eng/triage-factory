@@ -677,8 +677,7 @@ func setOwnerTeam(ctx context.Context, q queryer, orgID, taskID, teamID string) 
 		}
 	}
 	// The row still has to exist for the write to answer anything, so a
-	// bogus id reports ErrNoSuchTask on this path too instead of the prior
-	// silent no-op — see SetOwnerTeam's doc comment on the interface.
+	// bogus id reports ErrNoSuchTask on this path rather than a silent no-op.
 	var t domain.Task
 	return scanTaskBareRow(q.QueryRowContext(ctx, `
 		UPDATE tasks SET team_id = COALESCE(NULLIF($1, '')::uuid, team_id)
