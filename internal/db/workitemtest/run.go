@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ func Run(t *testing.T, mk Factory) {
 	t.Run("Renewal", func(t *testing.T) { testRenewal(t, mk) })
 	t.Run("ExpiryWhileWaitingForRowLock", func(t *testing.T) { testExpiryUnderRowLock(t, mk) })
 	t.Run("ExpiryInsideSingleTxClosure", func(t *testing.T) { testExpiryInsideClosure(t, mk) })
+	t.Run("ExpiryInsideDeferPredicate", func(t *testing.T) { testExpiryInsideDeferPredicate(t, mk) })
 	t.Run("SingleTxLockOrderingWithCancel", func(t *testing.T) { testLockOrderingWithCancel(t, mk) })
 	t.Run("HolderObservesCancelAtNextOperation", func(t *testing.T) { testHolderObservesCancel(t, mk) })
 	t.Run("CancelOfDeferredReadyItem", func(t *testing.T) { testCancelDeferred(t, mk) })
@@ -37,6 +39,7 @@ func Run(t *testing.T, mk Factory) {
 	t.Run("Backoff", func(t *testing.T) { testBackoff(t) })
 	t.Run("Fairness", func(t *testing.T) { testFairness(t, mk) })
 	t.Run("ClaimBatch", func(t *testing.T) { testClaimBatch(t, mk) })
+	t.Run("ClaimRoundIsAllOrNothing", func(t *testing.T) { testClaimRoundIsAllOrNothing(t, mk) })
 	t.Run("FrozenColumns", func(t *testing.T) { testFrozenColumns(t, mk) })
 	t.Run("Measure", func(t *testing.T) { testMeasure(t, mk) })
 	t.Run("IndexPresence", func(t *testing.T) { testIndexPresence(t, mk) })
@@ -278,17 +281,31 @@ func testRenewal(t *testing.T, mk Factory) {
 	id := e.admit("renew", "p", 0)
 	r := e.claimOne("worker-a", 1)
 
+	// A second row, claimed straight after the renewal, is the yardstick: a
+	// fresh acquisition's expiry IS database-now plus the policy lease, so a
+	// renewal that computes the same thing must land beside it. Comparing
+	// against it rather than against a window around the old expiry keeps the
+	// assertion entirely on database time and tight enough that a wrong formula
+	// has nowhere to hide.
+	e.admit("yardstick", "p", 0)
+
 	const elapsed = 400 * time.Millisecond
 	time.Sleep(elapsed)
 	renewed, err := workitem.RenewLease(e.ctx, e.conn, e.kind, r)
 	if err != nil {
 		t.Fatalf("RenewLease: %v", err)
 	}
-	// now+Lease, never old+Lease: the gap the renewal buys is the time already
-	// spent, not another whole lease on top of the old expiry.
-	gained := renewed.LeaseExpiresAt.Sub(r.LeaseExpiresAt)
-	if gained < elapsed/2 || gained > lease/2 {
-		t.Fatalf("renewal moved expiry by %s; want roughly the %s elapsed, not the %s lease", gained, elapsed, lease)
+	fresh := e.claimOne("worker-b", 1)
+
+	// Tolerance covers one claim's round trip, and is an order of magnitude
+	// below what any wrong formula would show: old+Lease lands a whole `lease`
+	// late, half-lease or no-move a whole `elapsed` early.
+	const tolerance = 500 * time.Millisecond
+	if drift := renewed.LeaseExpiresAt.Sub(fresh.LeaseExpiresAt); drift < -tolerance || drift > tolerance {
+		t.Fatalf("renewed expiry is %s from a lease acquired moments later; want now+Lease, not old+Lease", drift)
+	}
+	if !renewed.LeaseExpiresAt.After(r.LeaseExpiresAt) {
+		t.Fatalf("renewal left expiry at %s, no later than the original %s", renewed.LeaseExpiresAt, r.LeaseExpiresAt)
 	}
 	e.requireStatus(id, "leased")
 
@@ -328,6 +345,43 @@ func testClaimBatch(t *testing.T, mk Factory) {
 	for _, id := range ids[:2] {
 		e.requireStatus(id, "cancelled")
 		e.requireLeaseCleared(id)
+	}
+}
+
+// testClaimRoundIsAllOrNothing pins the boundary between a round and the result
+// it reports. A round is one transaction; a row that fails partway through
+// rolls its predecessors' leases back, and a receipt for a rolled-back lease is
+// worse than no receipt — its holder would act on authority the database never
+// granted, and every later operation would answer ErrLeaseLost.
+func testClaimRoundIsAllOrNothing(t *testing.T, mk Factory) {
+	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
+	cancelled := e.admit("settles", "p", 0)
+	first := e.admit("leases-first", "p", 0)
+	breaks := e.admit("breaks-the-round", "p", 0)
+	untouched := e.admit("never-picked", "p", 0)
+	if err := workitem.RequestCancel(e.ctx, e.conn, e.kind, e.org, cancelled, "operator", "not needed"); err != nil {
+		t.Fatalf("RequestCancel: %v", err)
+	}
+
+	// One live lease per owner: a constraint the round's SECOND lease violates.
+	// It makes the mid-round failure deterministic on both dialects without a
+	// trigger, and it fails on exactly the statement the package issues.
+	e.exec("CREATE UNIQUE INDEX one_lease_per_owner ON " + e.kind.Table + " (lease_owner) WHERE status = 'leased'")
+
+	before := e.table()
+	res, err := workitem.Claim(e.ctx, e.conn, e.kind, workitem.Owner{ID: "worker-a", Epoch: 1}, e.org, 3)
+	if err == nil {
+		t.Fatal("Claim succeeded despite a constraint its second lease violates")
+	}
+	if len(res.Claimed) != 0 || res.Cancelled != 0 || res.Parked != 0 {
+		t.Fatalf("a rolled-back round reported %d receipts, %d cancelled, %d parked; want nothing",
+			len(res.Claimed), res.Cancelled, res.Parked)
+	}
+	if after := e.table(); !reflect.DeepEqual(before, after) {
+		t.Errorf("a rolled-back round left changes behind\nbefore: %v\nafter:  %v", before, after)
+	}
+	for _, id := range []int64{cancelled, first, breaks, untouched} {
+		e.requireStatus(id, "ready")
 	}
 }
 

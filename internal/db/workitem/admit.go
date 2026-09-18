@@ -108,6 +108,14 @@ func (k Kind) onConflictClause() string {
 // existingByKey reads the row the admission conflicted with. Under
 // UniqueWhileUnsettled it repeats the index's status predicate, since settled
 // rows with the same key are not what the insert lost to.
+//
+// It identifies that row by its key rather than by identity, because
+// ON CONFLICT DO NOTHING reports no conflicting row. Under
+// UniqueWhileUnsettled that leaves a window: if the blocking row settles and a
+// different admission takes the freed key before this read runs, the caller is
+// told it deduplicated against a row it never raced. The window is real and
+// widens when q is a bare *sql.DB rather than the caller's transaction — pass
+// a transaction where the answer matters.
 func (k Kind) existingByKey(ctx context.Context, q DBTX, orgID, uniqueKey string) (int64, error) {
 	a := newArgs(k.Dialect)
 	stmt := "SELECT id FROM " + k.Table +

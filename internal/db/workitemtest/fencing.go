@@ -147,6 +147,35 @@ func testExpiryInsideClosure(t *testing.T, mk Factory) {
 	}
 }
 
+// testExpiryInsideDeferPredicate is testExpiryInsideClosure's twin for the
+// package's other closure-taking operation. Defer runs a caller's predicate
+// under the item's lock and then writes the refund under a freshly-timed guard,
+// so a predicate that outlives its own lease must lose the refund — and take
+// its own writes down with it.
+func testExpiryInsideDeferPredicate(t *testing.T, mk Factory) {
+	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
+	id := e.admit("defer-expire", "original", 0)
+	r := e.claimOne("worker-a", 1)
+	before := e.row(id)
+
+	err := workitem.Defer(e.ctx, e.conn, e.kind, r, "waiting", time.Now().Add(time.Hour), func(tx *sql.Tx) (bool, error) {
+		if _, err := tx.ExecContext(e.ctx, e.q("UPDATE "+e.kind.Table+" SET payload = ? WHERE id = ?"), "predicate", id); err != nil {
+			return false, err
+		}
+		_, err := tx.ExecContext(e.ctx,
+			e.q("UPDATE "+e.kind.Table+" SET lease_expires_at = "+e.pastExpr()+" WHERE id = ?"), id)
+		return err == nil, err
+	})
+	if !errors.Is(err, workitem.ErrLeaseLost) {
+		t.Fatalf("Defer with a lease that lapsed inside the predicate = %v, want ErrLeaseLost", err)
+	}
+	// The whole row, so this covers the refund not landing and the predicate's
+	// own writes rolling back in one assertion.
+	if after := e.row(id); !reflect.DeepEqual(before, after) {
+		t.Errorf("the row changed under a lapsed deferral\nbefore: %v\nafter:  %v", before, after)
+	}
+}
+
 // testLockOrderingWithCancel pins both orders of the SingleTx cancellation
 // race. The item row is locked first, so which side of that lock a request
 // lands on decides the outcome — and both outcomes are correct.

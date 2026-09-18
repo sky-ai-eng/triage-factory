@@ -9,6 +9,7 @@ package workitem
 // indexes since 3.8 — so the text does not vary by dialect, only by the
 // uniqueness mode the kind declared.
 func IndexDDL(k Kind) []string {
+	k.mustBeValid("IndexDDL")
 	t := k.Table
 	out := []string{
 		// Claim's first arm: the ripe-ready scan, in FIFO order.
@@ -42,6 +43,7 @@ const unsettledStatusList = "'ready','leased','parked'"
 // suite asserts presence by name, and an adopting table's migration needs them
 // to drop or rename in step with the DDL above.
 func IndexNames(k Kind) []string {
+	k.mustBeValid("IndexNames")
 	out := []string{
 		indexName(k.Table, "ready_next"),
 		indexName(k.Table, "ready_cancel"),
@@ -51,6 +53,16 @@ func IndexNames(k Kind) []string {
 		out = append(out, uniqueIndexName(k.Table))
 	}
 	return out
+}
+
+// mustBeValid panics on a kind the package would otherwise interpolate
+// unchecked. The DDL builders take no error return and run at schema-authoring
+// time, so an invalid kind here is a programming error — the same class
+// quoteLiteral refuses, and the same answer.
+func (k Kind) mustBeValid(op string) {
+	if err := k.Validate(); err != nil {
+		panic("workitem: " + op + ": " + err.Error())
+	}
 }
 
 func indexName(table, suffix string) string { return "idx_" + table + "_" + suffix }

@@ -52,10 +52,12 @@ func RequestCancel(ctx context.Context, q DBTX, k Kind, orgID string, itemID int
 // A parked row carrying a cancellation request is deliberately not redrivable.
 // Somebody asked for the work to stop; the answer to that is Supersede.
 //
-// by is validated but not stored. The shared block has no column for who
-// redrove a row — cancel_requested_by belongs to the cancellation path — and
-// inventing one here would put a second meaning into a column the contract
-// already assigns.
+// by is validated but not stored, and the asymmetry with Supersede below is
+// the point rather than an oversight. A supersede produces a cancelled row, so
+// cancel_requested_by names the actor behind a cancellation that did happen. A
+// redrive produces a ready row, where that column would name a cancellation
+// nobody asked for. The block has no other column for an actor, and minting a
+// second meaning for this one is worse than not recording the name.
 func Redrive(ctx context.Context, q DBTX, k Kind, orgID string, itemID int64, by string) error {
 	if err := k.Validate(); err != nil {
 		return err
@@ -82,6 +84,14 @@ func Redrive(ctx context.Context, q DBTX, k Kind, orgID string, itemID int64, by
 // Supersede settles a parked row as cancelled and records the row that
 // replaces it, which is how a UniqueWhileUnsettled key is released for
 // replacement work without destroying the parked row's history.
+//
+// It stamps cancel_requested_by and deliberately leaves cancel_requested_at and
+// cancel_reason alone, so the resulting row carries an actor without a request.
+// That reads odd beside §1.1's "when, by whom and why", and it is what the
+// contract specifies: a supersede IS the cancellation rather than a request for
+// one, so there is no request time to record, and last_outcome already says
+// why. Nothing reads the partial triple — every predicate in this package keys
+// on cancel_requested_at, which stays NULL — so it is provenance, not state.
 func Supersede(ctx context.Context, q DBTX, k Kind, orgID string, itemID int64, by string, supersededBy int64) error {
 	if err := k.Validate(); err != nil {
 		return err

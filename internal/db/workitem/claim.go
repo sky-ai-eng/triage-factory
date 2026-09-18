@@ -22,9 +22,11 @@ const claimRounds = 10
 // of work rather than a batch diluted by bookkeeping. That is why this loops:
 // it re-picks until it holds n receipts or a pick comes back empty.
 //
-// A non-nil error still returns the receipts already committed. They are real
-// leases on real rows, and dropping them on the floor would leave that work
-// leased until expiry with nobody holding the authority to dispose of it.
+// A non-nil error still returns the receipts from rounds that COMMITTED before
+// it. They are real leases on real rows, and dropping them on the floor would
+// leave that work leased until expiry with nobody holding authority to dispose
+// of it. The failing round itself contributes nothing, receipts and counters
+// alike: it rolled back.
 func Claim(ctx context.Context, conn *sql.DB, k Kind, owner Owner, orgID string, n int) (ClaimResult, error) {
 	var out ClaimResult
 	if err := k.Validate(); err != nil {
@@ -38,10 +40,13 @@ func Claim(ctx context.Context, conn *sql.DB, k Kind, owner Owner, orgID string,
 	}
 
 	for round := 0; round < claimRounds && len(out.Claimed) < n; round++ {
-		picked, err := k.claimRound(ctx, conn, owner, orgID, n-len(out.Claimed), &out)
+		picked, committed, err := k.claimRound(ctx, conn, owner, orgID, n-len(out.Claimed))
 		if err != nil {
 			return out, err
 		}
+		out.Claimed = append(out.Claimed, committed.Claimed...)
+		out.Cancelled += committed.Cancelled
+		out.Parked += committed.Parked
 		if picked == 0 {
 			break
 		}
@@ -62,12 +67,33 @@ type picked struct {
 }
 
 // claimRound picks and disposes of up to limit rows in one transaction,
-// returning how many it picked. Postgres takes row locks with SKIP LOCKED so
-// concurrent claimers pick disjoint sets; SQLite's pool is a single connection,
-// so the transaction itself is the serialization.
-func (k Kind) claimRound(ctx context.Context, conn *sql.DB, owner Owner, orgID string, limit int, out *ClaimResult) (int, error) {
-	n := 0
+// returning how many it picked and what it committed. Postgres takes row locks
+// with SKIP LOCKED so concurrent claimers pick disjoint sets.
+//
+// SQLite takes neither, and its mutual exclusion comes from outside this
+// package: db.OpenAt caps the pool at one connection, so every claimer in the
+// process queues behind the same handle and the transaction cannot interleave
+// with another. That is a property of the handle, not of the file. Two
+// PROCESSES over one database would both open a deferred transaction here, and
+// the second to reach its first write would meet SQLITE_BUSY on the lock
+// upgrade rather than double-lease a row — noisy, not unsafe, but outside what
+// this shape was built for. An adopting kind that can be claimed from more than
+// one process needs a stronger begin than db.InTx's.
+//
+// The round's work accumulates locally and is merged into the caller's result
+// only after the commit. A round is one transaction, so a row that fails partway
+// through takes its predecessors' leases down with it — and a receipt for a
+// rolled-back lease is worse than no receipt at all, since its holder would act
+// on authority the database never granted.
+func (k Kind) claimRound(ctx context.Context, conn *sql.DB, owner Owner, orgID string, limit int) (int, ClaimResult, error) {
+	var (
+		n     int
+		round ClaimResult
+	)
 	err := db.InTx(ctx, conn, func(tx *sql.Tx) error {
+		// Reset per attempt: database/sql may retry the begin, and a partially
+		// filled result from an abandoned run must not survive into this one.
+		n, round = 0, ClaimResult{}
 		rows, err := k.pick(ctx, tx, orgID, limit)
 		if err != nil {
 			return err
@@ -81,23 +107,26 @@ func (k Kind) claimRound(ctx context.Context, conn *sql.DB, owner Owner, orgID s
 				if err := k.settleAtClaim(ctx, tx, row); err != nil {
 					return err
 				}
-				out.Cancelled++
+				round.Cancelled++
 			case row.attempt >= row.maxTries:
 				if err := k.parkAtClaim(ctx, tx, row); err != nil {
 					return err
 				}
-				out.Parked++
+				round.Parked++
 			default:
 				r, err := k.lease(ctx, tx, row, owner)
 				if err != nil {
 					return err
 				}
-				out.Claimed = append(out.Claimed, r)
+				round.Claimed = append(round.Claimed, r)
 			}
 		}
 		return nil
 	})
-	return n, err
+	if err != nil {
+		return 0, ClaimResult{}, err
+	}
+	return n, round, nil
 }
 
 // pick selects claimable rows. The three arms are: a ripe ready row, a ready
