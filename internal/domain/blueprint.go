@@ -55,17 +55,6 @@ func (s BlueprintRunStatus) Terminal() bool {
 	}
 }
 
-// BlueprintAbortOrphanedAtMint is the abort_reason carried by a blueprint run
-// that was failed for holding no step conversation at all.
-//
-// No live writer produces it: a firing commits its blueprint_run and its first
-// step in one transaction, so the shape it names cannot be created. It is
-// stored history — an installed local database can hold rows from before that
-// was true, which the forward migration repairing them stamps with this value
-// — and it is what the boot checker's counterpart looks for when it reports a
-// survivor.
-const BlueprintAbortOrphanedAtMint = "orphaned_at_mint"
-
 // BlueprintTriggerType distinguishes how a blueprint run was initiated.
 type BlueprintTriggerType string
 

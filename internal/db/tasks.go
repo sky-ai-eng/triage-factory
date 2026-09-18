@@ -450,19 +450,6 @@ type TaskStore interface {
 	// Order is unspecified.
 	VisibilityTeams(ctx context.Context, orgID, taskID string) ([]string, error)
 
-	// SetOwnerTeam updates a task's owning/attributed team_id without
-	// touching the claim columns. The router uses it to consolidate the
-	// owner to the acting team just before an auto-fired conversation is
-	// created, so the conversation — which inherits conversations.team_id
-	// from tasks.team_id at insert — is attributed to the team that acted
-	// even when the creation-time owner team was skipped (e.g. it had auto-
-	// delegation disabled while a lower-priority team fires). The Postgres
-	// impl resolves the LocalDefaultTeamID sentinel to the org's canonical
-	// team. Empty teamID is a no-op on the column (the stored team_id is
-	// unchanged) but still requires taskID to name a row: a miss is
-	// ErrNoSuchTask, same as every other write here.
-	SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error)
-
 	// Bump records a new matching event on an existing task — if
 	// the task is snoozed, un-snoozes it (wake-on-bump). Does NOT
 	// update primary_event_id; subsequent events are tracked via
@@ -678,7 +665,6 @@ type TaskStore interface {
 	// SetVisibilityTeams.
 	SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error
 	VisibilityTeamsSystem(ctx context.Context, orgID, taskID string) ([]string, error)
-	SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error)
 	BumpSystem(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error)
 	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error)
 

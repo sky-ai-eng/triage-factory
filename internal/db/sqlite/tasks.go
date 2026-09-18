@@ -643,10 +643,6 @@ func (s *taskStore) VisibilityTeamsSystem(ctx context.Context, orgID, taskID str
 	return s.VisibilityTeams(ctx, orgID, taskID)
 }
 
-func (s *taskStore) SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error) {
-	return s.SetOwnerTeam(ctx, orgID, taskID, teamID)
-}
-
 func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error) {
 	return s.Bump(ctx, orgID, taskID, eventID)
 }
@@ -1151,13 +1147,6 @@ const sqliteActingTeamExpr = `COALESCE(
 // claim on is already held, so it is already in progress. The
 // `tasks_queue_unclaimed` CHECK is the backstop underneath.
 const sqliteClaimStageExpr = `CASE WHEN status IN ('queued', 'snoozed') THEN 'in_progress' ELSE status END`
-
-func (s *taskStore) SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return domain.Task{}, err
-	}
-	return setOwnerTeam(ctx, s.q, taskID, teamID)
-}
 
 // setOwnerTeam is the owner-only update itself, taking the queryer so the
 // firing path can run it on the transaction that also commits the run whose

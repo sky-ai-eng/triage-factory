@@ -8,8 +8,6 @@ import (
 
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
-
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // openMigrationsTestDB returns a fresh, schema-less in-memory SQLite
@@ -782,8 +780,11 @@ func TestMigrate_RepairsOrphanedAtMintBlueprintRuns(t *testing.T) {
 	if status != "failed" {
 		t.Errorf("orphan status = %q, want failed", status)
 	}
-	if reason != domain.BlueprintAbortOrphanedAtMint {
-		t.Errorf("orphan abort_reason = %q, want %q", reason, domain.BlueprintAbortOrphanedAtMint)
+	// The literal the migration writes. No Go constant names it: nothing in
+	// the product produces this abort_reason any more, so the migration and
+	// this assertion are the only two places the value exists.
+	if reason != "orphaned_at_mint" {
+		t.Errorf("orphan abort_reason = %q, want %q", reason, "orphaned_at_mint")
 	}
 	if !completed {
 		t.Error("orphan completed_at is NULL on a terminal blueprint_run")

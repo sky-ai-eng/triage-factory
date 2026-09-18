@@ -1249,15 +1249,15 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	// --- Returned-row standard ---
 
 	t.Run("lifecycle_writes_return_the_stored_row", func(t *testing.T) {
-		// The returned-row standard on TaskStore's ten converted writes:
-		// Bump[System], Close[System], SetStatus[System], SetClaimedByAgent,
-		// SetClaimedByUser, SetOwnerTeam[System]. Each returns tasks' OWN
-		// columns, not the entity join Get reads alongside them — see the
-		// shape note on db.TaskStore. bareRead mirrors that: a Get with the
-		// join-populated display fields blanked, the same trick
-		// TeamsStore.Role's conformance test uses for a per-user column no
-		// write can see (settings_conformance.go).
-		s, orgID, _, agentID, userID, seed, seedTeam := mk(t)
+		// The returned-row standard on TaskStore's converted writes:
+		// Bump[System], Close[System], SetStatus[System], SetClaimedByAgent
+		// and SetClaimedByUser. Each returns tasks' OWN columns, not the
+		// entity join Get reads alongside them — see the shape note on
+		// db.TaskStore. bareRead mirrors that: a Get with the join-populated
+		// display fields blanked, the same trick TeamsStore.Role's
+		// conformance test uses for a per-user column no write can see
+		// (settings_conformance.go).
+		s, orgID, _, agentID, userID, seed, _ := mk(t)
 		bareRead := func(taskID string) func() (*domain.Task, error) {
 			return func() (*domain.Task, error) {
 				full, err := s.Get(ctx, orgID, taskID)
@@ -1358,47 +1358,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Errorf("SetClaimedByUser returned claimed_by_user_id=%q, want %q", gotUser.ClaimedByUserID, userID)
 		}
 
-		if seedTeam == nil {
-			t.Skip("backend factory did not provide a TeamSeeder; SetOwnerTeam subtests skipped")
-		}
-		otherTeam := seedTeam(t, "rr-owner")
-
-		// SetOwnerTeam / SetOwnerTeamSystem.
-		for _, sys := range []bool{false, true} {
-			_, _, taskID := seed(t, fmt.Sprintf("rr-owner-%v", sys))
-			what, got, err := "Tasks.SetOwnerTeam", domain.Task{}, error(nil)
-			if sys {
-				what = "Tasks.SetOwnerTeamSystem"
-				got, err = s.SetOwnerTeamSystem(ctx, orgID, taskID, otherTeam)
-			} else {
-				got, err = s.SetOwnerTeam(ctx, orgID, taskID, otherTeam)
-			}
-			if err != nil {
-				t.Fatalf("%s: %v", what, err)
-			}
-			AssertWriteReturnedStoredRow(t, what, got, bareRead(taskID))
-			if got.TeamID == nil || *got.TeamID != otherTeam {
-				t.Errorf("%s returned team_id=%v, want %q", what, got.TeamID, otherTeam)
-			}
-		}
-
-		// SetOwnerTeam("") is a no-op on the column but still requires the id
-		// to name a row — the write runs, just to a COALESCE that keeps the
-		// stored value.
-		_, _, taskNoop := seed(t, "rr-owner-noop")
-		before, err := s.Get(ctx, orgID, taskNoop)
-		if err != nil || before == nil {
-			t.Fatalf("Get before no-op SetOwnerTeam: (%v, %v)", before, err)
-		}
-		noop, err := s.SetOwnerTeam(ctx, orgID, taskNoop, "")
-		if err != nil {
-			t.Fatalf("SetOwnerTeam (empty teamID): %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "Tasks.SetOwnerTeam (empty teamID)", noop, bareRead(taskNoop))
-		if noop.TeamID == nil || before.TeamID == nil || *noop.TeamID != *before.TeamID {
-			t.Errorf("SetOwnerTeam(\"\") changed team_id: before=%v after=%v", before.TeamID, noop.TeamID)
-		}
-
 		// Miss semantics: an id-keyed write against a task that never
 		// existed reports it rather than succeeding silently.
 		missingID := "00000000-0000-0000-0000-0000000000ba"
@@ -1411,7 +1370,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			{"Tasks.SetStatus", func() error { _, e := s.SetStatus(ctx, orgID, missingID, "queued"); return e }},
 			{"Tasks.SetClaimedByAgent", func() error { _, e := s.SetClaimedByAgent(ctx, orgID, missingID, agentID); return e }},
 			{"Tasks.SetClaimedByUser", func() error { _, e := s.SetClaimedByUser(ctx, orgID, missingID, userID); return e }},
-			{"Tasks.SetOwnerTeam", func() error { _, e := s.SetOwnerTeam(ctx, orgID, missingID, otherTeam); return e }},
 		}
 		for _, m := range misses {
 			if err := m.call(); !errors.Is(err, db.ErrNoSuchTask) {
