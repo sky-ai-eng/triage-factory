@@ -33,6 +33,7 @@ func Run(t *testing.T, mk Factory) {
 	t.Run("HolderObservesCancelAtNextOperation", func(t *testing.T) { testHolderObservesCancel(t, mk) })
 	t.Run("CancelOfDeferredReadyItem", func(t *testing.T) { testCancelDeferred(t, mk) })
 	t.Run("UniqueWhileUnsettled", func(t *testing.T) { testUniqueWhileUnsettled(t, mk) })
+	t.Run("AdmitUnderRowLock", func(t *testing.T) { testAdmitUnderRowLock(t, mk) })
 	t.Run("UniqueForever", func(t *testing.T) { testUniqueForever(t, mk) })
 	t.Run("UniqueNone", func(t *testing.T) { testUniqueNone(t, mk) })
 	t.Run("Defer", func(t *testing.T) { testDefer(t, mk) })

@@ -696,3 +696,84 @@ func (e *env) nowSQL() string {
 	}
 	return `strftime('%Y-%m-%d %H:%M:%f','now')`
 }
+
+// A holder settling the row an admission is about is the ordinary interleaving,
+// not an exotic one: the admission has to wait for that settlement and then
+// decide against the committed answer. Deciding beside it instead — conflict
+// against the live row, read the id back afterwards — hands the caller the id
+// of a row that is already done, and the obligation it was admitting for is
+// then recorded nowhere.
+func testAdmitUnderRowLock(t *testing.T, mk Factory) {
+	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
+	if e.dialect != workitem.Postgres {
+		t.Skip("row-lock contention is a Postgres shape; SQLite serializes writers")
+	}
+	id := e.admit("contested", "original", 0)
+	r := e.claimOne("worker-a", 1)
+
+	// The holder's completion blocks inside its own closure, so the row stays
+	// locked and unsettled until this test lets it commit.
+	locked, release := make(chan struct{}), make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	defer releaseOnce()
+	completed := make(chan error, 1)
+	go func() {
+		completed <- workitem.Complete(e.ctx, e.conn, e.kind, r, func(tx *sql.Tx) error {
+			close(locked)
+			<-release
+			_, err := tx.ExecContext(e.ctx, e.q("UPDATE "+e.kind.Table+" SET payload = ? WHERE id = ?"), "done by worker-a", id)
+			return err
+		})
+	}()
+	select {
+	case <-locked:
+	case err := <-completed:
+		t.Fatalf("the holder never reached its closure: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for the holder's closure")
+	}
+
+	type admission struct {
+		id  int64
+		dup bool
+		err error
+	}
+	got := make(chan admission, 1)
+	go func() {
+		newID, dup, err := workitem.Admit(e.ctx, e.conn, e.kind, e.org, "contested", map[string]any{
+			"payload": "second obligation", "frozen_col": 0,
+		})
+		got <- admission{newID, dup, err}
+	}()
+
+	select {
+	case a := <-got:
+		t.Fatalf("Admit answered while the key's row was locked mid-settlement: id=%d dup=%v err=%v", a.id, a.dup, a.err)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	releaseOnce()
+	if err := <-completed; err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	select {
+	case a := <-got:
+		if a.err != nil {
+			t.Fatalf("Admit behind a settling holder: %v", a.err)
+		}
+		if a.dup {
+			t.Fatalf("Admit deduplicated against row %d, which settled before the insert decided", id)
+		}
+		if a.id == id {
+			t.Fatalf("Admit returned the settled row %d rather than a fresh one", id)
+		}
+		e.requireStatus(a.id, "ready")
+		if got := asString(e.row(a.id)["payload"]); got != "second obligation" {
+			t.Fatalf("fresh row payload = %q, want the admission's own", got)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Admit never returned after the holder committed")
+	}
+	e.requireStatus(id, "done")
+}
