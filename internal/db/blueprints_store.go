@@ -41,6 +41,16 @@ var (
 	// The event path always supplies both, so an empty value is a programming
 	// error surfaced loud.
 	ErrBlueprintRunFenceRequiresEventAndTrigger = errors.New("db: an event-triggered blueprint run requires non-empty TriggeringEventID and TriggerID")
+	// ErrManualRunNeedsCreator is returned by CreateRunWithFirstStepSystem's
+	// manual arm, in multi mode, when the firing names no creator.
+	//
+	// The arm runs on the admin pool, which has neither a tf.current_user_id()
+	// to read an identity from nor the blueprint_runs_insert WITH CHECK that
+	// held one to the caller. The creator therefore has to arrive on the call,
+	// and an absent one is a programming error in a new firing door rather
+	// than a value to default: attributing a person's run to the org owner
+	// would put it on the wrong person's reads with nothing to notice it by.
+	ErrManualRunNeedsCreator = errors.New("db: a manual blueprint run must name its creator")
 	// ErrTaskBusyActiveRun is returned by both mint doors, in both dialects,
 	// when the insert loses to the one-active-run-per-task partial unique
 	// index: something else already holds this task's single live engagement.

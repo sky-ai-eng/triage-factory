@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -13,7 +14,58 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// TestBlueprintStore_Postgres_ManualFiringNeedsACreator pins the one check the
+// manual arm lost when it moved from the app pool to the admin pool: the
+// blueprint_runs_insert WITH CHECK that held creator_user_id to
+// tf.current_user_id(). There is no session identity to read on the admin
+// pool, so the creator has to arrive on the call — and a firing that names
+// none is refused rather than attributed to the org owner, which would put
+// somebody's run on a stranger's reads with nothing to notice it by.
+func TestBlueprintStore_Postgres_ManualFiringNeedsACreator(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	taskID := seedPgTask(t, h, orgID, userID)
+	bpID := "bp-nocreator"
+	seedPgBlueprint(t, h, orgID, userID, bpID)
+	promptID := "nocreator-p0"
+	seedPgPrompt(t, h, orgID, userID, promptID)
+
+	step0 := 0
+	br := domain.BlueprintRun{
+		ID: uuid.New().String(), BlueprintID: bpID, TaskID: taskID,
+		TriggerType: domain.BlueprintTriggerManual,
+		Status:      domain.BlueprintRunStatusRunning,
+	}
+	for _, tc := range []struct{ name, creator string }{
+		{"absent", ""},
+		{"the local sentinel, which has no users row in multi", runmode.LocalDefaultUserID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step := domain.Conversation{
+				ID: uuid.New().String(), TaskID: taskID, PromptID: promptID, Model: "m",
+				TriggerType: "manual", CreatorUserID: tc.creator,
+				BlueprintRunID: br.ID, BlueprintStepIndex: &step0,
+			}
+			_, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, orgID, br, db.AgentClaimStamp{}, "", step)
+			if !errors.Is(err, db.ErrManualRunNeedsCreator) {
+				t.Fatalf("CreateRunWithFirstStepSystem = %v, want db.ErrManualRunNeedsCreator", err)
+			}
+			var runs int
+			if err := h.AdminDB.QueryRow(`SELECT count(*) FROM blueprint_runs WHERE task_id = $1`, taskID).Scan(&runs); err != nil {
+				t.Fatalf("count runs: %v", err)
+			}
+			if runs != 0 {
+				t.Errorf("blueprint_runs on the task = %d, want 0", runs)
+			}
+		})
+	}
+}
 
 // TestBlueprintStore_Postgres_Firing runs the shared firing conformance
 // against the Postgres impl. This is the arm where the owner consolidation has

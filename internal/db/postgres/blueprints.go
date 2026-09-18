@@ -981,26 +981,31 @@ func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.Blu
 		`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
 			nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
 	} else {
-		// The local sentinel user has no FK target in multi-mode; filter it so
-		// the COALESCE walks to the org owner. There is no tf.current_user_id()
-		// on the admin pool, so the creator must arrive on the row or fall back
-		// — the schema CHECK requires a non-NULL creator for a manual run. It
-		// comes off the first step, which the same person is creating.
-		creatorBind := creatorUserID
-		if creatorBind == runmode.LocalDefaultUserID {
-			creatorBind = ""
+		// A manual run is attributed to the person who asked for it, and the
+		// creator has to arrive on the row: this runs on the admin pool, where
+		// there is no tf.current_user_id() to read it from and no
+		// blueprint_runs_insert WITH CHECK to hold it to the caller's identity.
+		//
+		// So an absent one is refused rather than defaulted. The value reaching
+		// here is the request's authenticated subject, threaded through
+		// DelegateOpts.CreatorUserID and onto the first step; substituting the
+		// org owner for it would attribute someone's run to somebody else and
+		// show it on that person's reads, which is worse than a failed firing
+		// and impossible to notice afterwards. The local sentinel counts as
+		// absent — it has no users row to point at in multi.
+		if creatorUserID == "" || creatorUserID == runmode.LocalDefaultUserID {
+			return fmt.Errorf("insert blueprint_run (manual firing): %w", db.ErrManualRunNeedsCreator)
 		}
 		res, err = q.ExecContext(ctx, `
 			INSERT INTO blueprint_runs
 				(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
 				 actor_agent_id, status, worktree_path, started_at, step_plan)
 			VALUES (
-				$1, $2,
-				COALESCE(NULLIF($3, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $2)),
+				$1, $2, $3::uuid,
 				$4, $5, $6, $7, NULL,
 				$8, $9, $10, now(), $11
 			)
-		`, br.ID, orgID, creatorBind, br.BlueprintID, br.TaskID, br.TriggerType,
+		`, br.ID, orgID, creatorUserID, br.BlueprintID, br.TaskID, br.TriggerType,
 			nullIfEmpty(br.TriggerID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
 	}
 	if err != nil {
