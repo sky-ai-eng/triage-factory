@@ -61,9 +61,10 @@ Every adopting table includes these columns alongside its typed payload and fore
 | `lease_generation` | Ownership generation. Increases on every acquisition, including reacquisition by the same owner in the same boot. |
 | `lease_owner`, `lease_epoch` | Ownership provenance for display, debugging, and startup recovery. The generation is the write fence. |
 | `leased_at`, `lease_expires_at` | Lease start and expiry. The lease can be renewed (§1.6). |
-| `cancel_requested_at`, `cancel_requested_by` | Cancellation intent. Setting them does not change status (§1.7). |
+| `cancel_requested_at`, `cancel_requested_by`, `cancel_reason` | Cancellation intent: when it was asked for, by whom, and why. Setting them does not change status (§1.7), and whatever was set survives onto the terminal record. An operator control that cancels outright rather than requesting it — supersede (§1.4) — records the actor alone: there is no request to time, and `last_outcome` already says why. |
 | `last_error`, `last_outcome` | Most recent attempt's error and typed outcome. |
 | `unique_key` | Prevents duplicate admission (§1.4). |
+| `superseded_by` | The row that replaced this one, recorded when an operator supersedes parked work (§1.4). |
 | `first_enqueued_at` | Original enqueue time, preserved when an operator retries parked work. |
 | `org_id`, `created_at`, `done_at` | Organization and lifecycle timestamps. |
 
@@ -256,6 +257,11 @@ term between batches.
 - Org-admin-only, following `failedEventsHandler`: admin-pool access behind `RequireOrgAdminRole`,
   with no RLS backstop. Document and test that responsibility explicitly.
 - A named visibility join for team- or user-scoped rows.
+
+A kind reachable on the app pool must carry a policy set admitting `UPDATE`, not `INSERT` alone:
+every ownership-guarded write is an `UPDATE`, and so is the conflict arm of admission. An
+append-only set does not refuse the queue outright — the guarded writes match no rows, so it
+drains nothing and reads as permanently empty.
 
 Each kind must preserve its authorization rules through retention and parent deletion, and ship
 handler authorization tests alongside its Postgres tests.
