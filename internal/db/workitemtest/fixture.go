@@ -48,14 +48,23 @@ func FixtureDDL(dialect workitem.Dialect) []string {
 		{FixtureTable, workitem.UniqueWhileUnsettled},
 		{FixtureForeverTable, workitem.UniqueForever},
 	} {
-		out = append(out, "DROP TABLE IF EXISTS "+spec.table)
-		out = append(out, createFixtureTable(dialect, spec.table))
-		out = append(out, workitem.IndexDDL(workitem.Kind{
-			Table: spec.table, Dialect: dialect, Unique: spec.unique,
-			Strategy: workitem.SingleTx,
-		})...)
+		out = append(out, TableDDL(dialect, spec.table, spec.unique)...)
 	}
 	return out
+}
+
+// TableDDL drops and recreates one fixture-shaped table with the indexes its
+// uniqueness mode calls for. A dialect's own test file reaches for this when it
+// needs the same column block under different governance — a copy carrying RLS
+// policies, say — rather than restating the shape and letting the two drift.
+func TableDDL(dialect workitem.Dialect, table string, unique workitem.UniqueMode) []string {
+	return append([]string{
+		"DROP TABLE IF EXISTS " + table,
+		createFixtureTable(dialect, table),
+	}, workitem.IndexDDL(workitem.Kind{
+		Table: table, Dialect: dialect, Unique: unique,
+		Strategy: workitem.SingleTx,
+	})...)
 }
 
 // createFixtureTable is the shared column block in each dialect's spelling,

@@ -20,9 +20,12 @@ import (
 // Admission dedup is not execution safety — it stops a second row for the same
 // obligation, not a second run of the one that exists.
 //
-// On Postgres a deduplicated admission writes the row it conflicted with, so an
-// adopting table under RLS needs a policy admitting that update, not INSERT
-// alone.
+// On Postgres a deduplicated admission writes the row it conflicted with, so
+// under RLS the table's UPDATE policy governs it. That is the policy every
+// guarded write in this package already needs — a claim or a completion with
+// none behind it matches no rows and reports nothing — so admission adds no
+// requirement to an adopting table. It is only the operation that says out loud
+// when one is missing.
 func Admit(ctx context.Context, q DBTX, k Kind, orgID, uniqueKey string, cols map[string]any) (int64, bool, error) {
 	if err := k.Validate(); err != nil {
 		return 0, false, err

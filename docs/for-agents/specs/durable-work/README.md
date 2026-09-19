@@ -258,6 +258,11 @@ term between batches.
   with no RLS backstop. Document and test that responsibility explicitly.
 - A named visibility join for team- or user-scoped rows.
 
+A kind reachable on the app pool must carry a policy set admitting `UPDATE`, not `INSERT` alone:
+every ownership-guarded write is an `UPDATE`, and so is the conflict arm of admission. An
+append-only set does not refuse the queue outright — the guarded writes match no rows, so it
+drains nothing and reads as permanently empty.
+
 Each kind must preserve its authorization rules through retention and parent deletion, and ship
 handler authorization tests alongside its Postgres tests.
 
