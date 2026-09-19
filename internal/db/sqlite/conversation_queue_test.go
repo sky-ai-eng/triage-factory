@@ -204,18 +204,11 @@ func TestConversationQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrgID
 
 	bpID, taskID, promptID := seedSqliteFiringParents(t, conn, stores, "rq-dormant")
-	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "rqd-br", BlueprintID: bpID, TaskID: taskID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
-		WorktreePath: "/tmp/wt-rqd",
+	brID := insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
+		ID: "rqd-br", BlueprintID: bpID, TaskID: taskID, WorktreePath: "/tmp/wt-rqd",
 	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	brID := created.ID
 	// A parked (dormant) conversation — directly insert with status open, then stamp
 	// it as owned by THIS instance from an EARLIER boot (epoch 0 < the
 	// sweep's epoch). Without the stamp the ownership predicate alone would
@@ -277,35 +270,6 @@ func TestConversationQueueStore_SQLite_ResetProcessingConversations_ScopedToOwne
 		t.Fatalf("ResetProcessingConversations (restart): %v", err)
 	} else if n != 1 {
 		t.Errorf("ResetProcessingConversations on restart reset %d rows, want 1", n)
-	}
-}
-
-func TestConversationQueueStore_SQLite_SetCurrentStep(t *testing.T) {
-	conn := openSQLiteForTest(t)
-	stores := sqlitestore.New(conn)
-	ctx := context.Background()
-	org := runmode.LocalDefaultOrgID
-
-	task := seedEntityEventTask(t, conn, "rq-step")
-	insertBlueprintForTest(t, conn, "rqs-bp", "RQ Step Blueprint")
-	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "rqs-br", BlueprintID: "rqs-bp", TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
-		WorktreePath: "/tmp/wt-rqs",
-	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	brID := created.ID
-	if _, err := stores.Blueprints.SetRunCurrentStepSystem(ctx, org, brID, 3); err != nil {
-		t.Fatalf("SetRunCurrentStepSystem: %v", err)
-	}
-	br, err := stores.Blueprints.GetRunSystem(ctx, org, brID)
-	if err != nil || br == nil {
-		t.Fatalf("GetRunSystem: (%v, %v)", br, err)
-	}
-	if br.CurrentStepIndex != 3 {
-		t.Fatalf("CurrentStepIndex = %d, want 3", br.CurrentStepIndex)
 	}
 }
 
@@ -761,15 +725,9 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 			BlueprintRun: func(t *testing.T, age time.Duration) string {
 				t.Helper()
 				task := seedEntityEventTask(t, conn, fmt.Sprintf("rq-recon-%d", len(runTask)))
-				created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-					ID: uuid.New().String(), BlueprintID: "rqrc-bp", TaskID: task.ID,
-					TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
-					WorktreePath: "/tmp/wt-rqrc",
+				brID := insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
+					BlueprintID: "rqrc-bp", TaskID: task.ID, WorktreePath: "/tmp/wt-rqrc",
 				})
-				if err != nil {
-					t.Fatalf("CreateRun: %v", err)
-				}
-				brID := created.ID
 				runTask[brID] = task.ID
 				if age > 0 {
 					// SQLite's own clock, in the CURRENT_TIMESTAMP shape the

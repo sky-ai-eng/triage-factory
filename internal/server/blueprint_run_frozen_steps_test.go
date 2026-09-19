@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -42,23 +43,19 @@ func TestBlueprintRunGet_ProjectsFrozenStepsNotLive(t *testing.T) {
 		t.Fatalf("create task: %v", err)
 	}
 
-	// Mint the run with a length-1 plan frozen onto it, exactly as delegate.go
-	// does at mint — snapshot the single resolved step. Cancelled mirrors the
-	// repro (the run was cancelled before the blueprint was edited).
-	brID := fixtureUUID("br-frozen")
-	if _, err := sqlitestore.New(s.db).Blueprints.CreateRun(ctx, runmode.LocalDefaultOrgID, domain.BlueprintRun{
-		ID:           brID,
+	// A run carrying the length-1 plan a firing freezes onto it — the single
+	// resolved step, snapshotted. Cancelled mirrors the repro: the run was
+	// cancelled before the blueprint was edited.
+	brID := dbtest.SeedBlueprintRun(t, s.db, domain.BlueprintRun{
+		ID:           fixtureUUID("br-frozen"),
 		BlueprintID:  bpID,
 		TaskID:       task.ID,
-		TriggerType:  domain.BlueprintTriggerManual,
 		Status:       domain.BlueprintRunStatusCancelled,
 		WorktreePath: "/tmp/wt-frozen",
 		StepPlan: []domain.BlueprintPlanStep{
 			{StepIndex: 0, PromptID: p0, PromptName: "Frozen", PromptBody: "do Frozen", Source: "user"},
 		},
-	}); err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
+	})
 
 	// The mid-flight edit: append a second step to the LIVE blueprint, growing it
 	// to 2 steps. Re-including p0 (owned by this blueprint) keeps it as step 0.

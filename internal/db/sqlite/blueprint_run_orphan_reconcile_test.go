@@ -39,15 +39,9 @@ func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
 	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "oa-bp", []string{"oa-p0"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
-	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "oa-br", BlueprintID: "oa-bp", TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
-		WorktreePath: "/tmp/wt-oa",
+	brID := insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
+		ID: "oa-br", BlueprintID: "oa-bp", TaskID: task.ID, WorktreePath: "/tmp/wt-oa",
 	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	brID := created.ID
 	step0 := 0
 	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "oa-child", TaskID: task.ID, PromptID: "oa-p0", Status: "running",
@@ -108,15 +102,9 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "of-bp", []string{"of-p0"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
-	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "of-br", BlueprintID: "of-bp", TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
-		WorktreePath: "/tmp/wt-of",
+	brID := insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
+		ID: "of-br", BlueprintID: "of-bp", TaskID: task.ID, WorktreePath: "/tmp/wt-of",
 	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	brID := created.ID
 	step0 := 0
 	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "of-child", TaskID: task.ID, PromptID: "of-p0", Status: "completed",
@@ -158,14 +146,9 @@ func TestReconcileOrphanedConversations(t *testing.T) {
 	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "ra-bp", []string{"ra-p0"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps A: %v", err)
 	}
-	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "ra-br", BlueprintID: "ra-bp", TaskID: taskA.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-ra",
+	brA := insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
+		ID: "ra-br", BlueprintID: "ra-bp", TaskID: taskA.ID, WorktreePath: "/tmp/wt-ra",
 	})
-	if err != nil {
-		t.Fatalf("CreateRun A: %v", err)
-	}
-	brA := created.ID
 	step0 := 0
 	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "ra-child", TaskID: taskA.ID, PromptID: "ra-p0", Status: "running",
@@ -208,14 +191,9 @@ func TestReconcileOrphanedConversations(t *testing.T) {
 	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "rb-bp", []string{"rb-p0"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps B: %v", err)
 	}
-	created2, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "rb-br", BlueprintID: "rb-bp", TaskID: taskB.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-rb",
+	brB := insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
+		ID: "rb-br", BlueprintID: "rb-bp", TaskID: taskB.ID, WorktreePath: "/tmp/wt-rb",
 	})
-	if err != nil {
-		t.Fatalf("CreateRun B: %v", err)
-	}
-	brB := created2.ID
 	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "rb-child", TaskID: taskB.ID, PromptID: "rb-p0", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brB, BlueprintStepIndex: &step0,
@@ -288,14 +266,9 @@ func TestReconcileOrphanedConversations_HealsClaimDesyncs(t *testing.T) {
 	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "ds-bp", []string{"ds-p0"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
-	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "ds-br", BlueprintID: "ds-bp", TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-ds",
+	brID := insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
+		ID: "ds-br", BlueprintID: "ds-bp", TaskID: task.ID, WorktreePath: "/tmp/wt-ds",
 	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	brID := created.ID
 	step0 := 0
 	seedChild := func(id, status string) {
 		t.Helper()

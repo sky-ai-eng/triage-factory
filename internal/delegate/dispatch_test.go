@@ -64,15 +64,10 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 			PromptBody: "b", Source: "user",
 		}
 	}
-	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	brID := dbtest.SeedBlueprintRun(t, database, domain.BlueprintRun{
 		ID: "rbpr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-" + suffix, StepPlan: plan,
 	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	brID := created.ID
 
 	step0 := 0
 	step0ConversationID := "rrun0-" + suffix
@@ -451,16 +446,18 @@ func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
 		ctx := context.Background()
 
 		// The advance the reactor itself performed on step 0's first
-		// conclusion: pointer first, then the row it names. Step 1 is
-		// mid-flight (NULL status) and holds the shared worktree.
-		if _, err := s.blueprints.SetRunCurrentStepSystem(ctx, org, brID, 1); err != nil {
-			t.Fatalf("SetRunCurrentStepSystem: %v", err)
-		}
+		// conclusion, through the door it performs it with: the pointer, the
+		// boundary stamp on step 0 and the step-1 row commit together. Step 1
+		// lands mid-flight (NULL status) and holds the shared worktree.
 		step1 := 1
-		dbtest.SeedConversation(t, database, domain.Conversation{
+		advanced, _, _, err := s.blueprints.AdvanceRunToStepSystem(ctx, org, 0, step0ConversationID, domain.Conversation{
 			ID: "rrun1-" + suffix, TaskID: taskID, PromptID: suffix + "-p1",
-			Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step1,
+			Model: "claude-sonnet-4-6", TriggerType: "manual", CreatorUserID: runmode.LocalDefaultUserID,
+			BlueprintRunID: brID, BlueprintStepIndex: &step1,
 		})
+		if err != nil || !advanced {
+			t.Fatalf("AdvanceRunToStepSystem to step 1 = (advanced=%v, %v)", advanced, err)
+		}
 
 		stepConversation, err := s.conversations.GetSystem(ctx, org, step0ConversationID)
 		if err != nil || stepConversation == nil {

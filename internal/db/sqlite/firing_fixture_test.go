@@ -63,28 +63,58 @@ func fireSqliteStep(t *testing.T, conn *sql.DB, stores db.Stores, bpID, taskID s
 // nil, which is what the unindexed-mint refusal is staged with.
 func tryFireSqliteStep(t *testing.T, conn *sql.DB, stores db.Stores, bpID, taskID string, step domain.Conversation) (*domain.Conversation, error) {
 	t.Helper()
-	if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE task_id = ? AND status = 'running'`, taskID); err != nil {
+	return tryFireSqliteRun(t, conn, stores, domain.BlueprintRun{BlueprintID: bpID, TaskID: taskID}, step)
+}
+
+// fireSqliteRun fires a run the fixture composed itself — the variant for
+// tests that name the run's own columns (its id, its frozen plan, its actor)
+// rather than only the step riding on it. Anything br leaves empty is
+// defaulted; the step's run, task and index are filled in from br.
+func fireSqliteRun(t *testing.T, conn *sql.DB, stores db.Stores, br domain.BlueprintRun, step domain.Conversation) *domain.Conversation {
+	t.Helper()
+	if step.BlueprintStepIndex == nil {
+		step0 := 0
+		step.BlueprintStepIndex = &step0
+	}
+	conv, err := tryFireSqliteRun(t, conn, stores, br, step)
+	if err != nil {
+		t.Fatalf("CreateRunWithFirstStepSystem: %v", err)
+	}
+	if conv == nil {
+		t.Fatal("CreateRunWithFirstStepSystem returned no conversation for a fresh firing")
+	}
+	return conv
+}
+
+// tryFireSqliteRun is the one place this package's fixtures reach the firing
+// door. Everything above it composes a run and a step and lands here.
+func tryFireSqliteRun(t *testing.T, conn *sql.DB, stores db.Stores, br domain.BlueprintRun, step domain.Conversation) (*domain.Conversation, error) {
+	t.Helper()
+	if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE task_id = ? AND status = 'running'`, br.TaskID); err != nil {
 		t.Fatalf("settle the task's prior blueprint_run: %v", err)
 	}
-	brID := uuid.New().String()
+	if br.ID == "" {
+		br.ID = uuid.New().String()
+	}
+	if br.TriggerType == "" {
+		br.TriggerType = domain.BlueprintTriggerManual
+	}
+	if br.WorktreePath == "" {
+		br.WorktreePath = "/tmp/wt-" + br.ID
+	}
 	if step.ID == "" {
 		step.ID = uuid.New().String()
 	}
-	step.TaskID = taskID
-	step.BlueprintRunID = brID
+	step.TaskID = br.TaskID
+	step.BlueprintRunID = br.ID
 	if step.TriggerType == "" {
-		step.TriggerType = "manual"
+		step.TriggerType = string(br.TriggerType)
 	}
 	if step.Model == "" {
 		step.Model = "m"
 	}
-	_, _, conv, err := stores.Blueprints.CreateRunWithFirstStepSystem(context.Background(), runmode.LocalDefaultOrgID, domain.BlueprintRun{
-		ID:           brID,
-		BlueprintID:  bpID,
-		TaskID:       taskID,
-		TriggerType:  domain.BlueprintTriggerManual,
-		WorktreePath: "/tmp/wt-" + brID,
-	}, db.AgentClaimStamp{}, "", step)
+	_, _, conv, err := stores.Blueprints.CreateRunWithFirstStepSystem(
+		context.Background(), runmode.LocalDefaultOrgID, br, db.AgentClaimStamp{}, "", step)
 	return conv, err
 }
 

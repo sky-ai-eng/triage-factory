@@ -728,60 +728,6 @@ func (s *blueprintStore) DuplicatePrompts(ctx context.Context, orgID, teamID str
 
 // --- Runs ----------------------------------------------------------------
 
-func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (domain.BlueprintRun, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return domain.BlueprintRun{}, err
-	}
-	if br.ID == "" {
-		br.ID = uuid.New().String()
-	}
-	if br.Status == "" {
-		br.Status = domain.BlueprintRunStatusRunning
-	}
-	if br.TriggerType == "" {
-		return domain.BlueprintRun{}, errors.New("blueprint run trigger type required")
-	}
-	var triggerID any
-	if br.TriggerID != "" {
-		triggerID = br.TriggerID
-	}
-	var abortReason any
-	if br.AbortReason != "" {
-		abortReason = br.AbortReason
-	}
-	var completedAt any
-	if br.CompletedAt != nil {
-		completedAt = br.CompletedAt.UTC()
-	}
-	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
-	if err != nil {
-		return domain.BlueprintRun{}, fmt.Errorf("marshal step plan: %w", err)
-	}
-	// creator_user_id is paired with trigger_type by the
-	// blueprint_runs_creator_matches_trigger_type CHECK: NULL for event-fired
-	// runs (no human author), the sentinel local user for manual runs. Mirrors
-	// the conversations insert and the Postgres createRunManual/createRunEventTriggered
-	// split (which are one method here — SQLite is N=1, single connection).
-	var creatorUserID any
-	if br.TriggerType != domain.BlueprintTriggerEvent {
-		creatorUserID = runmode.LocalDefaultUserID
-	}
-	// RETURNING carries the started_at the statement stamped and the id this
-	// method minted when br had none.
-	stored, err := scanBlueprintRunSQLite(s.q.QueryRowContext(ctx, `
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, abort_reason, completed_at, creator_user_id, started_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		RETURNING `+blueprintRunColumns,
-		br.ID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath, abortReason, completedAt, creatorUserID).Scan)
-	if err != nil {
-		if isTaskBusyActiveRun(err) {
-			return domain.BlueprintRun{}, db.ErrTaskBusyActiveRun
-		}
-		return domain.BlueprintRun{}, fmt.Errorf("insert blueprint_run: %w", err)
-	}
-	return stored, nil
-}
-
 // isTaskBusyActiveRun reports whether err is
 // blueprint_runs_one_active_run_per_task refusing an insert: something already
 // holds this task's single live engagement. Both mint doors translate through
@@ -810,6 +756,9 @@ func isTaskBusyActiveRun(err error) bool {
 func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim db.AgentClaimStamp, ownerTeamID string, firstStep domain.Conversation) (bool, bool, *domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, false, nil, err
+	}
+	if br.TriggerType == "" {
+		return false, false, nil, db.ErrBlueprintRunTriggerTypeRequired
 	}
 	event := br.TriggerType == domain.BlueprintTriggerEvent
 	if event && (br.TriggeringEventID == "" || br.TriggerID == "") {
@@ -1302,15 +1251,6 @@ func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id strin
 		return false, err
 	}
 	return n > 0, nil
-}
-
-func (s *blueprintStore) SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) (domain.BlueprintRun, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return domain.BlueprintRun{}, err
-	}
-	return scanUpdatedBlueprintRunSQLite(s.q.QueryRowContext(ctx,
-		`UPDATE blueprint_runs SET current_step_index = ? WHERE id = ? RETURNING `+blueprintRunColumns,
-		stepIndex, id))
 }
 
 func (s *blueprintStore) RequestRunCancelSystem(ctx context.Context, orgID, id string) (bool, error) {

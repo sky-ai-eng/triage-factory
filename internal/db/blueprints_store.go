@@ -34,6 +34,13 @@ var (
 	// row. Same split as ErrNoSuchBlueprint: the writes refuse, GetRun answers
 	// (nil, nil).
 	ErrNoSuchBlueprintRun = errors.New("db: no blueprint run with that id")
+	// ErrBlueprintRunTriggerTypeRequired is returned by
+	// CreateRunWithFirstStepSystem when br names no trigger type. The door
+	// branches on that value — "event" takes the fenced arm, anything else
+	// the manual one — so an empty one does not fail, it silently fires a
+	// manual delegation and writes an empty trigger_type the CHECK
+	// constraints pair with a creator rule nobody meant to select.
+	ErrBlueprintRunTriggerTypeRequired = errors.New("db: a blueprint run must name its trigger type")
 	// ErrBlueprintRunFenceRequiresEventAndTrigger is returned by
 	// CreateRunWithFirstStepSystem's event arm when TriggeringEventID or
 	// TriggerID is empty. Both bind to SQL NULL, which the partial unique
@@ -280,11 +287,11 @@ type BlueprintRunListFilter struct {
 
 // # Every single-row write returns the row it persisted
 //
-// Create, Rename, ReplaceSteps, CreateRun, SetRunWorktreePathSystem and
-// SetRunCurrentStepSystem hand back the stored row, read off RETURNING on the
-// write statement itself rather than from a follow-up SELECT, projecting the
-// point read's column list and scanner. ReplaceSteps is in that list because
-// its set write also stamps the parent blueprint (user_modified, updated_at),
+// Create, Rename, ReplaceSteps and SetRunWorktreePathSystem hand back the
+// stored row, read off RETURNING on the write statement itself rather than
+// from a follow-up SELECT, projecting the point read's column list and
+// scanner. ReplaceSteps is in that list because its set write also stamps the
+// parent blueprint (user_modified, updated_at),
 // and that stamp is a single-row write whose result the caller needs — the
 // step rows themselves are the set, and the parent row is what a caller
 // renders after replacing them.
@@ -299,7 +306,13 @@ type BlueprintRunListFilter struct {
 //     the outcome; the two that mint a blueprint already answer with its id.
 //   - CreateRunWithFirstStepSystem — its run insert is fenced ON CONFLICT DO NOTHING,
 //     which returns zero rows exactly when the fence engages, so RETURNING
-//     cannot answer the question the method exists to ask.
+//     cannot answer the question the method exists to ask. It is also the only
+//     door a blueprint_runs row is written by, so no other write on that table
+//     mints one.
+//   - AdvanceRunToStepSystem — the run's pointer moves only inside it, guarded
+//     by a compare-and-swap whose `advanced` bool is the write's own answer.
+//     It returns the two conversations it wrote, which are the rows a caller
+//     acts on.
 //   - MarkRunStatus / MarkRunStatusSystem, ReopenRunForResume and
 //     RequestRunCancelSystem — compare-and-swap guards whose `changed` bool is
 //     already the write's own answer about whether it landed, which is what
@@ -532,17 +545,6 @@ type BlueprintStore interface {
 
 	// --- Runs -----------------------------------------------------------
 
-	// CreateRun inserts a new blueprint instance row and returns it.
-	// TriggerType is required. A firing does NOT come through here — it goes
-	// through CreateRunWithFirstStepSystem, which commits the run with the
-	// step it implies; this is the plain insert for a run minted outside that
-	// commitment.
-	//
-	// br is an input: it carries no started_at, and the id and status are
-	// defaulted here when it leaves them empty. The returned row is where a
-	// caller learns the id it did not supply.
-	CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (domain.BlueprintRun, error)
-
 	// CreateRunWithFirstStepSystem commits a firing as ONE transaction: the
 	// task's owner consolidation, the blueprint_runs insert, the task's agent
 	// claim, and the first step's conversations row. It is the only door a
@@ -559,8 +561,11 @@ type BlueprintStore interface {
 	//     step 2, so without a fixed order two firings racing on one task can
 	//     take tasks and blueprint_runs in opposite orders and deadlock. No
 	//     such task aborts the firing here, before anything is written.
-	//  2. The blueprint_runs insert. An event-triggered run (TriggerType
-	//     "event") is fenced ON CONFLICT against
+	//  2. The blueprint_runs insert, which requires a trigger type: the arm
+	//     is chosen by that value, so an empty one selects the manual arm by
+	//     omission rather than by intent and impls reject it with
+	//     ErrBlueprintRunTriggerTypeRequired. An event-triggered run
+	//     (TriggerType "event") is fenced ON CONFLICT against
 	//     blueprint_runs_event_trigger_fence, making (triggering_event_id,
 	//     trigger_id) at-most-once under the at-least-once router queue, and
 	//     requires both halves of that key — an empty one binds NULL, which
@@ -700,14 +705,6 @@ type BlueprintStore interface {
 	// so the run flip and the blueprint re-open commit atomically.
 	ReopenRunForResume(ctx context.Context, orgID string, id string) (reopened bool, err error)
 
-	// SetRunCurrentStepSystem stamps the blueprint_run's durable
-	// current_step_index — the queue-driven reactor's sequencing pointer,
-	// bumped as it enqueues each next step so a mid-flight blueprint resumes by
-	// re-enqueuing this step at boot. Admin pool (reactor has no JWT claims).
-	//
-	// Returns the stamped run, or ErrNoSuchBlueprintRun.
-	SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) (domain.BlueprintRun, error)
-
 	// RequestRunCancelSystem raises the DB sequence-cancel signal
 	// (cancel_requested = true) on a still-running blueprint_run, so the claim
 	// stops handing out its queued steps and the reactor finalizes it
@@ -748,9 +745,6 @@ type BlueprintStore interface {
 	// the queue-driven orchestrator — the dispatcher + reactor that claim,
 	// run, and advance a blueprint through its step list with no JWT-claims in
 	// scope (delegate/dispatch.go).
-	//
-	// CreateRun has no System counterpart — it routes internally on the
-	// supplied BlueprintRun.TriggerType.
 	ListStepsSystem(ctx context.Context, orgID string, blueprintID string) ([]domain.BlueprintStep, error)
 	GetRunSystem(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)
 	GetRunForConversationSystem(ctx context.Context, orgID string, stepConversationID string) (*domain.BlueprintRun, *int, error)

@@ -35,41 +35,20 @@ func TestBlueprintStore_SQLite_Conformance(t *testing.T) {
 // TestBlueprintStore_SQLite_RunWriteConformance runs the shared returned-row
 // suite for the blueprint_runs writes against the SQLite impl.
 func TestBlueprintStore_SQLite_RunWriteConformance(t *testing.T) {
-	dbtest.RunBlueprintRunWriteConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
-		t.Helper()
-		conn := openSQLiteForTest(t)
-		blueprintID := "bp-run-" + uuid.New().String()[:8]
-		insertBlueprintForTest(t, conn, blueprintID, "Run fixture")
-		task := seedEntityEventTask(t, conn, "run-write")
-		return sqlitestore.New(conn).Blueprints, runmode.LocalDefaultOrgID, blueprintID, task.ID
-	})
+	dbtest.RunBlueprintRunWriteConformance(t, sqliteSequenceScaffold)
 }
 
 // TestBlueprintStore_SQLite_OneActiveRunPerTask runs the shared
 // one-running-blueprint_run-per-task suite against the SQLite impl, where the
 // index arrived with the rule rather than the baseline.
 func TestBlueprintStore_SQLite_OneActiveRunPerTask(t *testing.T) {
-	dbtest.RunOneActiveRunPerTaskConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
-		t.Helper()
-		conn := openSQLiteForTest(t)
-		blueprintID := "bp-oneactive-" + uuid.New().String()[:8]
-		insertBlueprintForTest(t, conn, blueprintID, "One-active fixture")
-		task := seedEntityEventTask(t, conn, "one-active")
-		return sqlitestore.New(conn).Blueprints, runmode.LocalDefaultOrgID, blueprintID, task.ID
-	})
+	dbtest.RunOneActiveRunPerTaskConformance(t, sqliteSequenceScaffold)
 }
 
 // TestBlueprintStore_SQLite_IsNewestRunForTask runs the shared newest-run suite
 // against the SQLite impl.
 func TestBlueprintStore_SQLite_IsNewestRunForTask(t *testing.T) {
-	dbtest.RunIsNewestRunForTaskConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
-		t.Helper()
-		conn := openSQLiteForTest(t)
-		blueprintID := "bp-newest-" + uuid.New().String()[:8]
-		insertBlueprintForTest(t, conn, blueprintID, "Newest-run fixture")
-		task := seedEntityEventTask(t, conn, "newest-run")
-		return sqlitestore.New(conn).Blueprints, runmode.LocalDefaultOrgID, blueprintID, task.ID
-	})
+	dbtest.RunIsNewestRunForTaskConformance(t, sqliteSequenceScaffold)
 }
 
 // TestBlueprintStore_SQLite_DuplicationConformance runs the shared
@@ -214,21 +193,12 @@ func TestBlueprintStore_SQLite_ConversationsForBlueprint_RoundTrip(t *testing.T)
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 
-	blueprintRunIDRow, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
 		ID:           "blueprint-run-rt",
 		BlueprintID:  "blueprint-1",
 		TaskID:       task.ID,
-		TriggerType:  domain.BlueprintTriggerManual,
-		Status:       domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-blueprint-rt",
 	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	blueprintRunID := blueprintRunIDRow.ID
-	if blueprintRunID != "blueprint-run-rt" {
-		t.Fatalf("unexpected blueprint run id: %s", blueprintRunID)
-	}
 
 	step0 := 0
 	step1 := 1
@@ -264,7 +234,7 @@ func TestBlueprintStore_SQLite_ConversationsForBlueprint_RoundTrip(t *testing.T)
 }
 
 // TestBlueprintStore_SQLite_StepPlanRoundTrip pins the frozen step plan column:
-// the plan serialized at CreateRun deserializes field-faithfully on GetRun
+// the plan serialized onto the run deserializes field-faithfully on GetRun
 // (full prompt content, not just ids), and an empty plan round-trips as empty
 // rather than tripping the NOT NULL column.
 func TestBlueprintStore_SQLite_StepPlanRoundTrip(t *testing.T) {
@@ -280,13 +250,10 @@ func TestBlueprintStore_SQLite_StepPlanRoundTrip(t *testing.T) {
 		{StepIndex: 0, PromptID: "sp-p0", PromptName: "Map", PromptBody: "map the surface", Source: "user", AllowedTools: "Bash,Read", Model: "opus", Brief: "brief-0"},
 		{StepIndex: 1, PromptID: "sp-p1", PromptName: "Write", PromptBody: "write the review", Source: "imported", Brief: "brief-1"},
 	}
-	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
 		ID: "sp-bpr", BlueprintID: "sp-bp", TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-sp", StepPlan: plan,
-	}); err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
+	})
 
 	got, err := blueprints.GetRun(ctx, org, "sp-bpr")
 	if err != nil || got == nil {
@@ -305,13 +272,10 @@ func TestBlueprintStore_SQLite_StepPlanRoundTrip(t *testing.T) {
 	// own task: one running blueprint_run per task is a schema invariant, and
 	// nothing here is about two runs sharing a task.
 	emptyTask := seedEntityEventTask(t, conn, "stepplan-rt-empty")
-	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
 		ID: "sp-bpr-empty", BlueprintID: "sp-bp", TaskID: emptyTask.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-sp-empty",
-	}); err != nil {
-		t.Fatalf("CreateRun (empty plan): %v", err)
-	}
+	})
 	empty, err := blueprints.GetRun(ctx, org, "sp-bpr-empty")
 	if err != nil || empty == nil {
 		t.Fatalf("GetRun (empty) = (%v, %v)", empty, err)
@@ -322,9 +286,9 @@ func TestBlueprintStore_SQLite_StepPlanRoundTrip(t *testing.T) {
 }
 
 // TestBlueprintStore_SQLite_ActorAgentRoundTrip pins that the executing-bot
-// actor freezes on the blueprint_run at CreateRun and reads back on GetRun (the
-// reactor relies on this to inherit it onto each step conversation). The
-// fenced event insert carries it too, and an empty actor round-trips as empty.
+// actor freezes on the blueprint_run at the firing and reads back on GetRun
+// (the reactor relies on this to inherit it onto each step conversation). The
+// fenced event arm carries it too, and an empty actor round-trips as empty.
 func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -339,14 +303,11 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 	insertBlueprintForTest(t, conn, "actor-bp", "Actor BP")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: firstStepPromptID, Name: "Step 0", Body: "b", Source: "user"})
 
-	// Manual CreateRun freezes + reads back the actor.
-	if _, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	// The manual firing freezes + reads back the actor.
+	fireSqliteRun(t, conn, stores, domain.BlueprintRun{
 		ID: "actor-bpr", BlueprintID: "actor-bp", TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-actor", ActorAgentID: agentID,
-	}); err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
+	}, domain.Conversation{PromptID: firstStepPromptID})
 	got, err := stores.Blueprints.GetRun(ctx, org, "actor-bpr")
 	if err != nil || got == nil {
 		t.Fatalf("GetRun = (%v, %v)", got, err)
@@ -386,13 +347,10 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 
 	// No actor → empty, not an error. Its own task, like the fenced run above.
 	noneTask := seedEntityEventTask(t, conn, "actor-rt-none")
-	if _, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	fireSqliteRun(t, conn, stores, domain.BlueprintRun{
 		ID: "actor-bpr-none", BlueprintID: "actor-bp", TaskID: noneTask.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-actor-none",
-	}); err != nil {
-		t.Fatalf("CreateRun (no actor): %v", err)
-	}
+	}, domain.Conversation{PromptID: firstStepPromptID})
 	none, err := stores.Blueprints.GetRun(ctx, org, "actor-bpr-none")
 	if err != nil || none == nil {
 		t.Fatalf("GetRun (no actor) = (%v, %v)", none, err)
@@ -559,12 +517,9 @@ func TestBlueprintStore_SQLite_ConversationsForBlueprint_SurfacesOutcome(t *test
 	if _, err := blueprints.ReplaceSteps(ctx, org, "op-blueprint", []string{"op-step"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
-	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
 		ID: "op-blueprint-run", BlueprintID: "op-blueprint", TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
-	}); err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
+	})
 
 	step0 := 0
 	insertConversationForTest(t, conn, domain.Conversation{
@@ -606,21 +561,15 @@ func TestBlueprintStore_SQLite_StepPlanLengths(t *testing.T) {
 		{StepIndex: 1, PromptID: "p1", PromptName: "Two", PromptBody: "body two"},
 		{StepIndex: 2, PromptID: "p2", PromptName: "Three", PromptBody: "body three"},
 	}
-	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
 		ID: "len-bpr-three", BlueprintID: "len-blueprint", TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		StepPlan: plan,
-	}); err != nil {
-		t.Fatalf("CreateRun (three steps): %v", err)
-	}
+	})
 	oneStepTask := seedEntityEventTask(t, conn, "blueprint-plan-len-one")
-	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
 		ID: "len-bpr-one", BlueprintID: "len-blueprint", TaskID: oneStepTask.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		StepPlan: plan[:1],
-	}); err != nil {
-		t.Fatalf("CreateRun (one step): %v", err)
-	}
+	})
 
 	got, err := blueprints.StepPlanLengths(ctx, org, []string{"len-bpr-three", "len-bpr-one", "len-bpr-missing"})
 	if err != nil {
@@ -656,14 +605,9 @@ func TestBlueprintStore_SQLite_MarkRunStatus_Guarded(t *testing.T) {
 	task := seedEntityEventTask(t, conn, "blueprint-guard")
 	insertBlueprintForTest(t, conn, "guard-blueprint", "Guard Blueprint")
 
-	blueprintRunIDRow, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	blueprintRunID := insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
 		ID: "blueprint-run-guard", BlueprintID: "guard-blueprint", TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	blueprintRunID := blueprintRunIDRow.ID
 
 	changed, err := blueprints.MarkRunStatus(ctx, org, blueprintRunID, domain.BlueprintRunStatusCompleted, "", nil)
 	if err != nil {
@@ -702,14 +646,9 @@ func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
 
 	task := seedEntityEventTask(t, conn, "reopen")
 	insertBlueprintForTest(t, conn, "reopen-blueprint", "Reopen Blueprint")
-	brIDRow, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	brID := insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
 		ID: "reopen-run", BlueprintID: "reopen-blueprint", TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	brID := brIDRow.ID
 
 	// A running blueprint is not re-openable (the CAS guards on status='aborted').
 	if reopened, err := blueprints.ReopenRunForResume(ctx, org, brID); err != nil || reopened {
@@ -743,26 +682,6 @@ func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
 	// Idempotent: a second re-open on the now-running row is a guarded no-op.
 	if reopened, _ := blueprints.ReopenRunForResume(ctx, org, brID); reopened {
 		t.Error("second ReopenRunForResume on running succeeded; want no-op false")
-	}
-}
-
-// TestBlueprintStore_SQLite_CreateRun_RequiresTriggerType verifies the
-// upfront validation: empty TriggerType errors rather than silently
-// defaulting.
-func TestBlueprintStore_SQLite_CreateRun_RequiresTriggerType(t *testing.T) {
-	conn := openSQLiteForTest(t)
-	blueprints := sqlitestore.New(conn).Blueprints
-	ctx := context.Background()
-	org := runmode.LocalDefaultOrgID
-
-	task := seedEntityEventTask(t, conn, "ttype")
-	insertBlueprintForTest(t, conn, "ttype-blueprint", "T")
-
-	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "ttype-run", BlueprintID: "ttype-blueprint", TaskID: task.ID,
-		TriggerType: "", Status: domain.BlueprintRunStatusRunning,
-	}); err == nil {
-		t.Error("expected error for empty TriggerType, got nil")
 	}
 }
 

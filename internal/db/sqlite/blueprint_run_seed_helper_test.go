@@ -55,6 +55,65 @@ func seedBlueprintRunForConversation(t *testing.T, conn *sql.DB, taskID string) 
 	return blueprintRunID
 }
 
+// insertBlueprintRunForTest inserts a blueprint_runs row directly — the test
+// fixture stand-in for the mint inside a BlueprintStore door, staging a run in
+// arbitrary shape without staging a whole firing for each. Production writes
+// this table through CreateRunWithFirstStepSystem alone, which commits a first
+// step with it; a fixture whose subject is the run row itself, or one that
+// stages its step conversations by hand beside it, wants neither that step nor
+// the doorbell the door rings for it.
+//
+// The trigger_type↔creator CHECK is satisfied by pairing 'manual' with the
+// sentinel user and 'event' with NULL. Fields honored: ID (minted when empty),
+// BlueprintID, TaskID, TriggerType (default manual), TriggerID, ActorAgentID,
+// Status (default running), StepPlan, WorktreePath. Returns the run id.
+//
+// One running blueprint_run per task is a schema invariant, so the task's
+// prior run is settled first — which is what a task moving on to its next
+// engagement means.
+func insertBlueprintRunForTest(t *testing.T, conn *sql.DB, br domain.BlueprintRun) string {
+	t.Helper()
+	if br.ID == "" {
+		br.ID = uuid.New().String()
+	}
+	if br.TriggerType == "" {
+		br.TriggerType = domain.BlueprintTriggerManual
+	}
+	if br.Status == "" {
+		br.Status = domain.BlueprintRunStatusRunning
+	}
+	var creator any
+	if br.TriggerType != domain.BlueprintTriggerEvent {
+		creator = runmode.LocalDefaultUserID
+	}
+	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
+	if err != nil {
+		t.Fatalf("marshal step plan: %v", err)
+	}
+	if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE task_id = ? AND status = 'running'`, br.TaskID); err != nil {
+		t.Fatalf("settle the task's prior blueprint_run: %v", err)
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id,
+		                            actor_agent_id, status, step_plan, worktree_path,
+		                            creator_user_id, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerType, nullIfEmptyForTest(br.TriggerID),
+		nullIfEmptyForTest(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath, creator); err != nil {
+		t.Fatalf("insert blueprint_run %s: %v", br.ID, err)
+	}
+	return br.ID
+}
+
+// nullIfEmptyForTest binds "" as SQL NULL, which is what a nullable column
+// holding "no value" carries.
+func nullIfEmptyForTest(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 // insertConversationForTest inserts a conversations row directly — the test
 // fixture stand-in for the mint inside a BlueprintStore door, staging rows in
 // arbitrary status without staging a whole firing for each. The trigger_type↔creator CHECK is satisfied by pairing
