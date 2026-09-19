@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.15.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.14.2...v1.15.0) (2026-09-19)
+
+
+### Features
+
+* **db:** add the shared work-item contract and its conformance suite (TFAC-1015) ([#1114](https://github.com/sky-ai-eng/triage-factory/issues/1114)) ([0df273e](https://github.com/sky-ai-eng/triage-factory/commit/0df273eee2a0217a9752770f53b0ef7535acffe3))
+* **tracker:** emit body update events for GitHub and Jira (TFAC-1014) ([#1112](https://github.com/sky-ai-eng/triage-factory/issues/1112)) ([274b31a](https://github.com/sky-ai-eng/triage-factory/commit/274b31ac8611e497ff9472621a8053664f36c155))
+
+
+### Bug Fixes
+
+* **tracker:** mirror the PR body into entities.description so the scorer sees it (TFAC-1013) ([#1110](https://github.com/sky-ai-eng/triage-factory/issues/1110)) ([4b06ef5](https://github.com/sky-ai-eng/triage-factory/commit/4b06ef506fb643ceabe8c63821561d001d549ad5))
+
 ## [1.14.2](https://github.com/sky-ai-eng/triage-factory/compare/v1.14.1...v1.14.2) (2026-09-14)
 
 
