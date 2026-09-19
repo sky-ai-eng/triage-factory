@@ -1004,7 +1004,7 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 		// One task per run: blueprint_runs_one_active_run_per_task refuses a
 		// second 'running' row on a task, and the suite stages several at once.
 		runTask := map[string]string{}
-		nextStep := 0
+		nextStep := map[string]int{}
 		seed := dbtest.ReconcileOrphanSeeder{
 			BlueprintRun: func(t *testing.T, age time.Duration) string {
 				t.Helper()
@@ -1032,8 +1032,8 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 			},
 			EnqueueChild: func(t *testing.T, brID string) string {
 				t.Helper()
-				idx := nextStep
-				nextStep++
+				idx := nextStep[brID]
+				nextStep[brID]++
 				convID := uuid.New().String()
 				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 					ID: convID, TaskID: runTask[brID], PromptID: "rqrc-p0", Model: "m",
@@ -1048,6 +1048,12 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 				if _, err := conn.Exec(`UPDATE blueprint_runs SET status = ?, abort_reason = NULLIF(?, '') WHERE id = ?`,
 					status, abortReason, brID); err != nil {
 					t.Fatalf("force blueprint_run status %q: %v", status, err)
+				}
+			},
+			SetCurrentStep: func(t *testing.T, brID string, stepIndex int) {
+				t.Helper()
+				if _, err := conn.Exec(`UPDATE blueprint_runs SET current_step_index = ? WHERE id = ?`, stepIndex, brID); err != nil {
+					t.Fatalf("set current_step_index: %v", err)
 				}
 			},
 			BlueprintRunState: func(t *testing.T, brID string) (string, string, bool) {

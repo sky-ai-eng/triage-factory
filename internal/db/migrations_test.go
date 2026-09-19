@@ -705,15 +705,17 @@ func TestMigrate_CollapsesSetupTransientOntoClaimPhase(t *testing.T) {
 	}
 }
 
-// TestMigrate_RepairsOrphanedAtMintBlueprintRuns pins the one-time repair in
+// TestMigrate_RepairsBlueprintRunsWithNoCurrentStep pins the one-time repair in
 // 202609180001. A firing now commits its blueprint_run and its first step
-// conversation in one transaction, so the shape below can no longer be
-// produced — but an installed local database may still hold one from the
-// window where the two were separate writes, where it holds
-// blueprint_runs_one_active_run_per_task against its task forever. The
-// migration fails it, freeing the index; a run with a step is ordinary work at
-// any age and must survive.
-func TestMigrate_RepairsOrphanedAtMintBlueprintRuns(t *testing.T) {
+// conversation in one transaction, and an advance commits its
+// current_step_index bump and the conversation that pointer names in another,
+// so neither shape below can be produced any more — but an installed local
+// database may still hold one from the window where those were separate
+// writes, where it holds blueprint_runs_one_active_run_per_task against its
+// task forever and nothing can drive it. The migration fails both, freeing the
+// index; a run whose pointer names a conversation that exists is ordinary work
+// at any age and must survive.
+func TestMigrate_RepairsBlueprintRunsWithNoCurrentStep(t *testing.T) {
 	database, err := sql.Open("sqlite", TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -748,6 +750,8 @@ func TestMigrate_RepairsOrphanedAtMintBlueprintRuns(t *testing.T) {
 			VALUES ('t-healthy', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'healthy', 'ev1')`,
 		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id)
 			VALUES ('t-settled', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'settled', 'ev1')`,
+		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id)
+			VALUES ('t-advanced', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'advanced', 'ev1')`,
 		`INSERT INTO blueprints (id, name, creator_user_id) VALUES ('bp1', 'BP', '` + userID + `')`,
 		`INSERT INTO prompts (id, name, body, creator_user_id) VALUES ('p1', 'P', 'b', '` + userID + `')`,
 		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, step_plan, worktree_path)
@@ -758,8 +762,15 @@ func TestMigrate_RepairsOrphanedAtMintBlueprintRuns(t *testing.T) {
 		// only, so a finished run keeps the verdict it recorded.
 		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, abort_reason, step_plan, worktree_path)
 			VALUES ('br-settled', 'bp1', 't-settled', 'manual', '` + userID + `', 'cancelled', 'user_cancelled', '[]', '')`,
+		// Mid-advance orphan: the pointer moved to step 1 but the step-1
+		// conversation never landed. It has a child, so only the pointer
+		// tells it apart from ordinary work.
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, step_plan, worktree_path, current_step_index)
+			VALUES ('br-advanced', 'bp1', 't-advanced', 'manual', '` + userID + `', 'running', '[]', '', 1)`,
 		`INSERT INTO conversations (id, task_id, prompt_id, trigger_type, creator_user_id, blueprint_run_id, blueprint_step_index)
 			VALUES ('conv-healthy', 't-healthy', 'p1', 'manual', '` + userID + `', 'br-healthy', 0)`,
+		`INSERT INTO conversations (id, task_id, prompt_id, trigger_type, creator_user_id, blueprint_run_id, blueprint_step_index)
+			VALUES ('conv-advanced-0', 't-advanced', 'p1', 'manual', '` + userID + `', 'br-advanced', 0)`,
 	} {
 		if _, err := database.Exec(stmt); err != nil {
 			t.Fatalf("seed %q: %v", stmt, err)
@@ -789,11 +800,15 @@ func TestMigrate_RepairsOrphanedAtMintBlueprintRuns(t *testing.T) {
 	// The literal the migration writes. No Go constant names it: nothing in
 	// the product produces this abort_reason any more, so the migration and
 	// this assertion are the only two places the value exists.
-	if reason != "orphaned_at_mint" {
-		t.Errorf("orphan abort_reason = %q, want %q", reason, "orphaned_at_mint")
+	if reason != "orphaned_step" {
+		t.Errorf("orphan abort_reason = %q, want %q", reason, "orphaned_step")
 	}
 	if !completed {
 		t.Error("orphan completed_at is NULL on a terminal blueprint_run")
+	}
+
+	if status, reason, completed := readRun("br-advanced"); status != "failed" || reason != "orphaned_step" || !completed {
+		t.Errorf("mid-advance orphan = (%q, %q, completed=%v), want (failed, orphaned_step, true) — a run whose pointer names no conversation is undrivable", status, reason, completed)
 	}
 
 	if status, reason, completed := readRun("br-healthy"); status != "running" || reason != "" || completed {

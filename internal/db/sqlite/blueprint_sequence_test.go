@@ -15,13 +15,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestBlueprintStore_SQLite_Firing runs the shared firing conformance against
+// TestBlueprintStore_SQLite_Sequence runs the shared firing conformance against
 // the SQLite impl. Local mode is N=1 — one org, one team — so the owner
 // consolidation writes the team it already holds and conversations take the
 // team sentinel rather than deriving one; the indivisibility the suite is
 // actually about is the same on both dialects, which is why it is shared.
-func TestBlueprintStore_SQLite_Firing(t *testing.T) {
-	dbtest.RunBlueprintFiringConformance(t, func(t *testing.T) (db.BlueprintStore, dbtest.BlueprintFiringScaffold) {
+func TestBlueprintStore_SQLite_Sequence(t *testing.T) {
+	dbtest.RunBlueprintSequenceConformance(t, func(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSequenceScaffold) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
@@ -82,7 +82,7 @@ func TestBlueprintStore_SQLite_Firing(t *testing.T) {
 			return got
 		}
 
-		return stores.Blueprints, dbtest.BlueprintFiringScaffold{
+		return stores.Blueprints, dbtest.BlueprintSequenceScaffold{
 			OrgID:   org,
 			AgentID: agentID,
 			// One team in local mode, so this is the team the task already
@@ -98,12 +98,11 @@ func TestBlueprintStore_SQLite_Firing(t *testing.T) {
 			},
 			Firing:       func(t *testing.T, taskID string) domain.BlueprintRun { return newFiring(t, taskID, false) },
 			ManualFiring: func(t *testing.T, taskID string) domain.BlueprintRun { return newFiring(t, taskID, true) },
-			FirstStep: func(br domain.BlueprintRun) domain.Conversation {
-				step0 := 0
+			Step: func(br domain.BlueprintRun, stepIndex int) domain.Conversation {
 				return domain.Conversation{
 					ID: uuid.New().String(), TaskID: br.TaskID, PromptID: promptID, Model: "m",
 					TriggerType: string(br.TriggerType), TriggerID: br.TriggerID,
-					BlueprintRunID: br.ID, BlueprintStepIndex: &step0,
+					BlueprintRunID: br.ID, BlueprintStepIndex: &stepIndex,
 				}
 			},
 			ClaimTaskForUser: func(t *testing.T, taskID string) {
@@ -133,6 +132,22 @@ func TestBlueprintStore_SQLite_Firing(t *testing.T) {
 					t.Fatalf("read task claim: %v", err)
 				}
 				return agent.String
+			},
+			RunCurrentStep: func(t *testing.T, blueprintRunID string) int {
+				t.Helper()
+				var idx int
+				if err := conn.QueryRow(`SELECT current_step_index FROM blueprint_runs WHERE id = ?`, blueprintRunID).Scan(&idx); err != nil {
+					t.Fatalf("read current_step_index: %v", err)
+				}
+				return idx
+			},
+			ConversationEnded: func(t *testing.T, convID string) bool {
+				t.Helper()
+				var endedAt sql.NullString
+				if err := conn.QueryRow(`SELECT ended_at FROM conversations WHERE id = ?`, convID).Scan(&endedAt); err != nil {
+					t.Fatalf("read ended_at: %v", err)
+				}
+				return endedAt.Valid
 			},
 			// Local mode stamps every conversation with the team sentinel
 			// rather than deriving one from the task, so the assertion would

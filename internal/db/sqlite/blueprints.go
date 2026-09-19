@@ -877,6 +877,71 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 	return inserted, claimed, conv, nil
 }
 
+// AdvanceRunToStepSystem — contract and statement order on the interface.
+// Mirrors the Postgres twin, minus its wake doorbell: local mode's enqueue
+// door does not ring one either, so the dispatcher's own nudge stays the
+// caller's.
+func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID string, fromStepIndex int, concludedConversationID string, nextStep domain.Conversation) (bool, *domain.Conversation, *domain.Conversation, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, nil, nil, err
+	}
+	// The bump writes the step's own index, so an unindexed row is refused
+	// here rather than by the insert that would otherwise catch it: statement
+	// 1 reads the index, and a nil there is a panic, not a rejection.
+	if nextStep.BlueprintStepIndex == nil {
+		return false, nil, nil, fmt.Errorf("%w (conversation %s, blueprint_run %s)",
+			db.ErrBlueprintStepUnindexed, nextStep.ID, nextStep.BlueprintRunID)
+	}
+	advanced := false
+	var ended, conv *domain.Conversation
+	err := inTx(ctx, s.q, func(q queryer) error {
+		// 1. The pointer, guarded — the fence for everything below it.
+		ok, err := advanceRunCurrentStep(ctx, q, nextStep.BlueprintRunID, fromStepIndex, *nextStep.BlueprintStepIndex)
+		if err != nil || !ok {
+			// Nothing is written either way: a closed guard leaves the
+			// sequence to whoever moved it, an error rolls the rest back.
+			return err
+		}
+		advanced = true
+
+		// 2. The boundary stamp on the step that just concluded, before the
+		// mint below rather than after it — a conversation opening on a task
+		// whose prior one is still un-ended is the shape this ordering exists
+		// to make unobservable.
+		if ended, err = endConversation(ctx, q, orgID, concludedConversationID, domain.EndedStepAdvanced); err != nil {
+			return fmt.Errorf("stamp the step-advance boundary: %w", err)
+		}
+
+		// 3. The next step.
+		conv, err = insertConversation(ctx, q, orgID, nextStep)
+		return err
+	})
+	if err != nil {
+		return false, nil, nil, err
+	}
+	return advanced, ended, conv, nil
+}
+
+// advanceRunCurrentStep moves a running blueprint_run's sequencing pointer one
+// step on, and reports whether it moved. The predicate is the compare-and-swap
+// the advance transaction fences on: a run that terminated since its reactor
+// read it, or whose pointer another engagement already moved, matches no row
+// and writes nothing.
+func advanceRunCurrentStep(ctx context.Context, q queryer, id string, from, to int) (bool, error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE blueprint_runs SET current_step_index = ?
+		WHERE id = ? AND status = 'running' AND current_step_index = ?
+	`, to, id, from)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // lockFiringTask reports db.ErrNoSuchTask when a firing names a task that does
 // not exist — the firing's first statement, so it is refused before anything
 // is written. The Postgres twin takes a row lock in the same statement; SQLite

@@ -25,27 +25,36 @@ func AssertBlueprintStepIndexed(conv domain.Conversation) error {
 	return nil
 }
 
-// OrphanedAtMintCheck is what ReconcileOrphanedConversations' checker arm
-// found: 'running' blueprint_runs holding no step conversation at all. The
-// store counts and samples; the caller logs, because the store layer holds no
-// logger and the finding is the caller's to report.
+// OrphanedStepCheck is what ReconcileOrphanedConversations' checker arm found:
+// 'running' blueprint_runs holding no conversation at the step their
+// current_step_index names. The store counts and samples; the caller logs,
+// because the store layer holds no logger and the finding is the caller's to
+// report.
+//
+// The pointer, not merely the presence of any child, because the pointer is
+// what the claim gate drives: a run whose current step has no row is one
+// nothing can pick up, whether it never got a first step or lost an advance.
+// Both shapes hold blueprint_runs_one_active_run_per_task against their task
+// forever, and neither is reachable by any arm that joins through
+// conversations.
 //
 // A non-zero Count is a broken invariant, not a backlog: a firing commits its
-// blueprint_run and its first step in one transaction, so no other
-// transaction can observe one without the other. What it can still surface is
-// a row from before that was true — an installed local database carries its
-// history, and the forward migration that repairs those is what makes a
-// survivor here worth shouting about.
-type OrphanedAtMintCheck struct {
+// run and its first step in one transaction, and an advance commits its
+// pointer and the step it names in another, so no transaction can observe one
+// without the other. What it can still surface is a row from before that was
+// true — an installed local database carries its history, and the forward
+// migration that repairs those is what makes a survivor here worth shouting
+// about.
+type OrphanedStepCheck struct {
 	// Count is every matching row, not just the sampled ones.
 	Count int
-	// Sample is up to OrphanedAtMintSampleLimit blueprint_run ids, oldest
+	// Sample is up to OrphanedStepSampleLimit blueprint_run ids, oldest
 	// first — enough to go look, bounded so one log line stays a log line.
 	Sample []string
 }
 
-// OrphanedAtMintSampleLimit caps OrphanedAtMintCheck.Sample.
-const OrphanedAtMintSampleLimit = 20
+// OrphanedStepSampleLimit caps OrphanedStepCheck.Sample.
+const OrphanedStepSampleLimit = 20
 
 // ConversationQueueStore owns the claim loop — the ONE scan that finds conversations
 // needing to be driven, on every surface. It is the sibling of
@@ -111,9 +120,9 @@ type ConversationQueueStore interface {
 	// ErrBlueprintStepUnindexed.
 	// PreferredExecutorID (TFAC-587) is the rendezvous placement stamp, empty
 	// for no affinity (placement disabled, local N=1, or a non-repo key).
-	// Routes through the admin pool — the dispatcher/reactor mint work items
-	// with no JWT-claims context; the row's creator_user_id is still stamped
-	// for audit and later RLS-scoped reads. The schema CHECK pairing
+	// Routes through the admin pool — a work item is minted with no
+	// JWT-claims context to bind RLS against; the row's creator_user_id is
+	// still stamped for audit and later RLS-scoped reads. The schema CHECK pairing
 	// trigger_type with creator_user_id nullability is the caller's contract.
 	//
 	// Returns the minted row, sharing ConversationStore.Get/GetSystem's
@@ -304,16 +313,18 @@ type ConversationQueueStore interface {
 	// repeats it periodically; here it runs at boot in both modes.
 	//
 	// And it runs one CHECKER, which repairs nothing: a 'running'
-	// blueprint_run holding NO child conversation is counted and logged at
-	// error with a sample of ids. That shape is unreachable now that a firing
-	// commits its run and its first step in one transaction, so observing one
-	// means an invariant broke — and a repair would hide it. It is a check
-	// rather than nothing at all because the shape is invisible to every other
-	// arm: they all join through conversations, and this one has none.
+	// blueprint_run holding no conversation at the step its current_step_index
+	// names is counted and logged at error with a sample of ids. That shape is
+	// unreachable now that a firing commits its run and its first step in one
+	// transaction and an advance commits its pointer and the step it names in
+	// another, so observing one means an invariant broke — and a repair would
+	// hide it. It is a check rather than nothing at all because the shape is
+	// invisible to every other arm: they drive or heal the step the pointer
+	// names, and this one has no such step to reach.
 	//
 	// Cross-org system sweep; returns the total count of rows healed — the
 	// checker's count is not in it, because counting is not healing.
-	ReconcileOrphanedConversations(ctx context.Context) (healed int, check OrphanedAtMintCheck, err error)
+	ReconcileOrphanedConversations(ctx context.Context) (healed int, check OrphanedStepCheck, err error)
 
 	// CountQueuedSystem returns how many conversations currently match the
 	// needs-driving predicate across the whole deployment — the fleet-wide

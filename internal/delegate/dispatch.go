@@ -153,11 +153,13 @@ func (s *Spawner) reconcileConversationQueue(ctx context.Context) {
 		dispatchLog.Info("boot reconcile: healed orphaned child conversations and conversation↔claim desyncs", "count", c)
 	}
 	// The one finding that is a report rather than a repair. A firing commits
-	// its blueprint_run and its first step in one transaction, so a 'running'
-	// parent with no child is a broken invariant — loud, and left alone for
-	// someone to look at, because a sweep here would absorb it silently.
+	// its blueprint_run and its first step in one transaction, and an advance
+	// commits its pointer and the step it names in another, so a 'running'
+	// parent with no conversation at the step it points at is a broken
+	// invariant — loud, and left alone for someone to look at, because a sweep
+	// here would absorb it silently.
 	if check.Count > 0 {
-		dispatchLog.Error("boot check: blueprint runs are 'running' with no step conversation — a firing commits both or neither, so these should not exist",
+		dispatchLog.Error("boot check: blueprint runs are 'running' with no conversation at their current step — a firing and an advance each commit both or neither, so these should not exist",
 			"count", check.Count, "blueprint_runs", check.Sample)
 	}
 }
@@ -1250,13 +1252,6 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 				domain.BlueprintRunStatusFailed, "load task for advance", &stepIdx, false)
 			return
 		}
-		// Bump the durable sequencing pointer, then enqueue the next step. Order
-		// matters: the pointer is set first so a crash between here and the
-		// enqueue leaves current_step_index naming the step the boot reconcile
-		// would re-drive.
-		if _, err := s.blueprints.SetRunCurrentStepSystem(ctx, orgID, br.ID, next); err != nil {
-			dispatchLog.Warn("set current_step_index for blueprint_run failed", "blueprint_run", br.ID, "error", err)
-		}
 		// The next step's pin is held to the team's set as it stands NOW, not as
 		// it stood when this blueprint fired: a set narrowed mid-flight is the
 		// case a check at the firing point cannot see. The step this advance
@@ -1273,27 +1268,39 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("step %d: %v", next, err), &stepIdx, false)
 			return
 		}
-		// Step N stops being the task's live conversation the moment N+1 is
-		// minted, so the boundary is stamped BEFORE the enqueue: the invariant
-		// is that a new conversation never opens on a task whose prior one is
-		// still un-ended. The agent's own memory row is already filed — the
-		// completion gate wrote it in the terminal this reactor is reacting to.
-		// Best-effort: an unstamped step is a row the provisioner sweeps later,
-		// while refusing to advance would strand the blueprint.
-		ended, err := s.conversations.EndConversationSystem(ctx, orgID, stepConversation.ID, domain.EndedStepAdvanced)
+		// The sequencing pointer, the concluded step's boundary stamp and the
+		// next step's row go in one transaction. Each of the three implies the
+		// others: current_step_index naming a step no conversation exists for
+		// is a blueprint nothing can ever drive — the claim gate only drives
+		// the step the pointer names — and step N stops being the task's live
+		// conversation the moment N+1 is minted, so a mint that outran the
+		// stamp would open a conversation on a task whose prior one is still
+		// un-ended.
+		advanced, ended, _, err := s.blueprints.AdvanceRunToStepSystem(ctx, orgID, stepIdx, stepConversation.ID,
+			s.buildStepConversation(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), nextModel, triggerType, br.TriggerID, creatorUserID, br.ActorAgentID))
 		if err != nil {
-			dispatchLog.Warn("stamp the step-advance boundary on the concluded step failed", "conversation", stepConversation.ID, "blueprint_run", br.ID, "error", err)
-		} else if ended != nil {
-			// The doorbell, before the enqueue below rather than after it: the
-			// next step is held out of the claim gate until this one's memory
-			// lands, so the sooner the brain starts generating the shorter the
-			// blueprint's own pause between steps.
-			s.kickMemoryOwed(orgID, ended.ID)
-		}
-		if err := s.enqueueBlueprintStep(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), nextModel, triggerType, br.TriggerID, creatorUserID, br.ActorAgentID); err != nil {
 			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
-				domain.BlueprintRunStatusFailed, fmt.Sprintf("enqueue step %d: %v", next, err), &stepIdx, false)
+				domain.BlueprintRunStatusFailed, fmt.Sprintf("advance to step %d: %v", next, err), &stepIdx, false)
 			return
+		}
+		if !advanced {
+			// The advance guard closed between the refresh at the top and the
+			// write: the run terminated, or another engagement already moved
+			// the pointer. Same answer as the stale-step check above, for the
+			// same reason — the sequence is somebody else's to drive, and
+			// every transition here would be decided on their state.
+			dispatchLog.Error("reactor: the advance guard found the sequence already moved; writing no blueprint transition",
+				"blueprint_run", br.ID, "conversation", stepConversation.ID, "step", stepIdx)
+			return
+		}
+		if ended != nil {
+			// The memory doorbell. The agent's own memory row is already filed
+			// — the completion gate wrote it in the terminal this reactor is
+			// reacting to — and the next step is held out of the claim gate
+			// until it lands, so the sooner the brain starts generating the
+			// shorter the blueprint's own pause between steps. A nil ended is
+			// a boundary somebody else stamped, and rang for.
+			s.kickMemoryOwed(orgID, ended.ID)
 		}
 		// The shared worktree stays on disk — it is the task's, reclaimed once
 		// when the blueprint terminates — so the next claim warm-reuses it.
@@ -1396,37 +1403,30 @@ func stepModelOrInherit(stepModel, inherited string, enabled domain.ModelSet) (s
 	return stepModel, nil
 }
 
-// enqueueBlueprintStep mints a queued conversations row for step stepIndex
-// of a blueprint_run. Shared by Delegate (step 0) and the reactor (every
-// advance). actorAgentID is the executing bot, frozen on the blueprint_run
-// at mint and passed through here so every step inherits the same
-// conversations.actor_agent_id — resolved once at the delegation entry
-// point, never re-derived from the task claim (which is empty at step 0 on
-// the event path and cleared by a takeover). triggerID is likewise the
-// blueprint_run's frozen firing event_handler, denormalized onto every
-// step's conversations.trigger_id (empty for manual → NULL): the JOIN-free
-// llm_spend view reads autonomous spend attribution off the conversations
-// row alone (the usage by-rule breakdown, TFAC-478), so a step run without
-// it would show as autonomous cost attributable to no rule.
-// TriggeringEventID is deliberately NOT inherited — the replay fence
-// relocated to blueprint_runs, and stamping it per step would collide a
-// multi-step chain on the leftover conversations_event_trigger_fence index.
-func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunID string, task domain.Task, step domain.BlueprintStep, model, triggerType, triggerID, creatorUserID, actorAgentID string) error {
-	_, err := s.conversationQueue.EnqueueConversation(ctx, orgID,
-		s.buildStepConversation(ctx, orgID, blueprintRunID, task, step, model, triggerType, triggerID, creatorUserID, actorAgentID))
-	return err
-}
-
 // buildStepConversation composes the conversations row for one blueprint step
 // — every field of it, plus the two reads that can only be taken outside the
-// write (the placement stamp and the inherited tree). Shared by the enqueue
-// above and by Delegate, which hands the composed row to the store method that
-// commits it inside the firing's own transaction; one composer, so the two
-// doors cannot produce different-shaped step 0s.
+// write (the placement stamp and the inherited tree). Both doors that mint a
+// step compose it here and hand the row to a store method that commits it
+// inside the transaction the step belongs to: Delegate's firing for step 0,
+// the reactor's advance for every step after. One composer, so the two cannot
+// produce different-shaped rows.
 //
 // Both reads are advisory, which is what makes them safe to take before the
 // transaction rather than inside it: a stale placement costs a tier-2 claim
 // and a missing tree costs a rehydrate.
+//
+// actorAgentID is the executing bot, frozen on the blueprint_run at mint and
+// passed through so every step inherits the same conversations.actor_agent_id
+// — resolved once at the delegation entry point, never re-derived from the
+// task claim (which is empty at step 0 on the event path and cleared by a
+// takeover). triggerID is likewise the blueprint_run's frozen firing
+// event_handler, denormalized onto every step's conversations.trigger_id
+// (empty for manual → NULL): the JOIN-free llm_spend view reads autonomous
+// spend attribution off the conversations row alone, so a step run without it
+// would show as autonomous cost attributable to no rule. TriggeringEventID is
+// deliberately NOT inherited — the replay fence lives on blueprint_runs, and
+// stamping it per step would collide a multi-step chain on the leftover
+// conversations_event_trigger_fence index.
 func (s *Spawner) buildStepConversation(ctx context.Context, orgID, blueprintRunID string, task domain.Task, step domain.BlueprintStep, model, triggerType, triggerID, creatorUserID, actorAgentID string) domain.Conversation {
 	stepIdx := step.StepIndex
 	conversationID := uuid.New().String()

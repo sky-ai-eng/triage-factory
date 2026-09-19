@@ -67,13 +67,13 @@ func TestBlueprintStore_Postgres_ManualFiringNeedsACreator(t *testing.T) {
 	}
 }
 
-// TestBlueprintStore_Postgres_Firing runs the shared firing conformance
+// TestBlueprintStore_Postgres_Sequence runs the shared firing conformance
 // against the Postgres impl. This is the arm where the owner consolidation has
 // something to prove — the org has two teams, so a firing by the one that is
 // not the task's owner moves the card and its step conversation follows.
-func TestBlueprintStore_Postgres_Firing(t *testing.T) {
+func TestBlueprintStore_Postgres_Sequence(t *testing.T) {
 	h := pgtest.Shared(t)
-	dbtest.RunBlueprintFiringConformance(t, func(t *testing.T) (db.BlueprintStore, dbtest.BlueprintFiringScaffold) {
+	dbtest.RunBlueprintSequenceConformance(t, func(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSequenceScaffold) {
 		t.Helper()
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -137,7 +137,7 @@ func TestBlueprintStore_Postgres_Firing(t *testing.T) {
 			return got
 		}
 
-		return stores.Blueprints, dbtest.BlueprintFiringScaffold{
+		return stores.Blueprints, dbtest.BlueprintSequenceScaffold{
 			OrgID:             orgID,
 			AgentID:           agentID,
 			ConsolidateTeamID: actingTeamID,
@@ -151,12 +151,11 @@ func TestBlueprintStore_Postgres_Firing(t *testing.T) {
 			},
 			Firing:       func(t *testing.T, taskID string) domain.BlueprintRun { return newFiring(t, taskID, false) },
 			ManualFiring: func(t *testing.T, taskID string) domain.BlueprintRun { return newFiring(t, taskID, true) },
-			FirstStep: func(br domain.BlueprintRun) domain.Conversation {
-				step0 := 0
+			Step: func(br domain.BlueprintRun, stepIndex int) domain.Conversation {
 				return domain.Conversation{
 					ID: uuid.New().String(), TaskID: br.TaskID, PromptID: promptID, Model: "m",
 					TriggerType: string(br.TriggerType), TriggerID: br.TriggerID, CreatorUserID: userID,
-					BlueprintRunID: br.ID, BlueprintStepIndex: &step0,
+					BlueprintRunID: br.ID, BlueprintStepIndex: &stepIndex,
 				}
 			},
 			ClaimTaskForUser: func(t *testing.T, taskID string) {
@@ -186,6 +185,22 @@ func TestBlueprintStore_Postgres_Firing(t *testing.T) {
 					t.Fatalf("read task claim: %v", err)
 				}
 				return agent.String
+			},
+			RunCurrentStep: func(t *testing.T, blueprintRunID string) int {
+				t.Helper()
+				var idx int
+				if err := h.AdminDB.QueryRow(`SELECT current_step_index FROM blueprint_runs WHERE id = $1`, blueprintRunID).Scan(&idx); err != nil {
+					t.Fatalf("read current_step_index: %v", err)
+				}
+				return idx
+			},
+			ConversationEnded: func(t *testing.T, convID string) bool {
+				t.Helper()
+				var endedAt sql.NullTime
+				if err := h.AdminDB.QueryRow(`SELECT ended_at FROM conversations WHERE id = $1`, convID).Scan(&endedAt); err != nil {
+					t.Fatalf("read ended_at: %v", err)
+				}
+				return endedAt.Valid
 			},
 			ConversationTeam: func(t *testing.T, convID string) string {
 				t.Helper()

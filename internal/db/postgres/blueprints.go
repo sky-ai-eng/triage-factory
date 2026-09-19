@@ -24,11 +24,11 @@ import (
 //     ResumeBlueprintAfter* paths) runs here.
 //
 //   - admin: admin pool (supabase_admin, BYPASSRLS). The blueprint
-//     orchestrator goroutine — enqueueBlueprintStep / reactToStepTerminal /
-//     terminateBlueprint — detaches from the kicking-off handler's context
-//     the moment it spawns, so it has no JWT-claims in scope and routes
-//     through admin via the `...System` variants. org_id stays in the WHERE
-//     clause as defense in depth.
+//     orchestrator goroutine — reactToStepTerminal / terminateBlueprint —
+//     detaches from the kicking-off handler's context the moment it spawns,
+//     so it has no JWT-claims in scope and routes through admin via the
+//     `...System` variants. org_id stays in the WHERE clause as defense in
+//     depth.
 //
 // CreateRun routes internally on BlueprintRun.TriggerType, mirroring the
 // ConversationStore.Create pattern: event-triggered runs land on the admin pool
@@ -939,6 +939,74 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		s.notifyWake(ctx, orgID)
 	}
 	return inserted, claimed, conv, nil
+}
+
+// AdvanceRunToStepSystem — contract and statement order on the interface.
+func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID string, fromStepIndex int, concludedConversationID string, nextStep domain.Conversation) (bool, *domain.Conversation, *domain.Conversation, error) {
+	if !isValidUUID(nextStep.BlueprintRunID) {
+		return false, nil, nil, db.ErrNoSuchBlueprintRun
+	}
+	// The bump writes the step's own index, so an unindexed row is refused
+	// here rather than by the insert that would otherwise catch it: statement
+	// 1 reads the index, and a nil there is a panic, not a rejection.
+	if nextStep.BlueprintStepIndex == nil {
+		return false, nil, nil, fmt.Errorf("%w (conversation %s, blueprint_run %s)",
+			db.ErrBlueprintStepUnindexed, nextStep.ID, nextStep.BlueprintRunID)
+	}
+	advanced := false
+	var ended, conv *domain.Conversation
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		// 1. The pointer, guarded — the fence for everything below it.
+		ok, err := advanceRunCurrentStep(ctx, q, orgID, nextStep.BlueprintRunID, fromStepIndex, *nextStep.BlueprintStepIndex)
+		if err != nil || !ok {
+			// Nothing is written either way: a closed guard leaves the
+			// sequence to whoever moved it, an error rolls the rest back.
+			return err
+		}
+		advanced = true
+
+		// 2. The boundary stamp on the step that just concluded, before the
+		// mint below rather than after it — a conversation opening on a task
+		// whose prior one is still un-ended is the shape this ordering exists
+		// to make unobservable.
+		if ended, err = endConversation(ctx, q, orgID, concludedConversationID, domain.EndedStepAdvanced); err != nil {
+			return fmt.Errorf("stamp the step-advance boundary: %w", err)
+		}
+
+		// 3. The next step.
+		conv, err = insertConversation(ctx, q, orgID, nextStep)
+		return err
+	})
+	if err != nil {
+		return false, nil, nil, err
+	}
+	if advanced {
+		// Committed: ring the doorbell the enqueue door rings for its own
+		// mint, so an idle executor claims the step within milliseconds
+		// instead of waiting out its scan interval.
+		s.notifyWake(ctx, orgID)
+	}
+	return advanced, ended, conv, nil
+}
+
+// advanceRunCurrentStep moves a running blueprint_run's sequencing pointer one
+// step on, and reports whether it moved. The predicate is the compare-and-swap
+// the advance transaction fences on: a run that terminated since its reactor
+// read it, or whose pointer another engagement already moved, matches no row
+// and writes nothing.
+func advanceRunCurrentStep(ctx context.Context, q queryer, orgID, id string, from, to int) (bool, error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE blueprint_runs SET current_step_index = $1
+		WHERE org_id = $2 AND id = $3 AND status = 'running' AND current_step_index = $4
+	`, to, orgID, id, from)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // lockFiringTask takes the row lock on a firing's task, and reports

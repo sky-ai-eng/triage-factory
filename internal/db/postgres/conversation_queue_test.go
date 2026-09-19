@@ -1123,7 +1123,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConforman
 		// One task per run: blueprint_runs_one_active_run_per_task refuses a
 		// second 'running' row on a task, and the suite stages several at once.
 		runTask := map[string]string{}
-		nextStep := 0
+		nextStep := map[string]int{}
 		seed := dbtest.ReconcileOrphanSeeder{
 			BlueprintRun: func(t *testing.T, age time.Duration) string {
 				t.Helper()
@@ -1138,8 +1138,8 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConforman
 			},
 			EnqueueChild: func(t *testing.T, brID string) string {
 				t.Helper()
-				idx := nextStep
-				nextStep++
+				idx := nextStep[brID]
+				nextStep[brID]++
 				convID := uuid.New().String()
 				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 					ID: convID, TaskID: runTask[brID], PromptID: promptID, Model: "m",
@@ -1154,6 +1154,11 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConforman
 				pgtest.MustExec(t, h.AdminDB,
 					`UPDATE blueprint_runs SET status = $2, abort_reason = NULLIF($3, '') WHERE id = $1`,
 					brID, status, abortReason)
+			},
+			SetCurrentStep: func(t *testing.T, brID string, stepIndex int) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE blueprint_runs SET current_step_index = $2 WHERE id = $1`, brID, stepIndex)
 			},
 			BlueprintRunState: func(t *testing.T, brID string) (string, string, bool) {
 				t.Helper()

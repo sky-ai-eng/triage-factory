@@ -36,6 +36,11 @@ type ReconcileOrphanSeeder struct {
 	// side effect.
 	ForceBlueprintStatus func(t *testing.T, brID, status, abortReason string)
 
+	// SetCurrentStep writes a blueprint_run's current_step_index directly,
+	// which is the only way to stage a pointer that moved without the step it
+	// names: the advance commits the two together.
+	SetCurrentStep func(t *testing.T, brID string, stepIndex int)
+
 	// BlueprintRunState reads back what the sweep did (or didn't) write:
 	// status, abort_reason ("" for NULL), and whether completed_at is stamped.
 	BlueprintRunState func(t *testing.T, brID string) (status, abortReason string, completedAtSet bool)
@@ -50,12 +55,13 @@ type ReconcileOrphanSeeder struct {
 // reports.
 //
 // That checker is where the pressure is, because its predicate is an absence
-// and its whole job is to stay hands-off. A 'running' blueprint_run with NO
-// child conversation is unreachable by every recovery path that joins through
-// conversations — and unreachable by any live writer too, now that a firing
-// commits the run and its first step in one transaction. So the subtests here
-// pin both halves: the shape is counted when it exists, and it is never
-// written to, whatever its age.
+// and its whole job is to stay hands-off. A 'running' blueprint_run with no
+// conversation at the step its current_step_index names is unreachable by
+// every recovery path — they drive or heal the step the pointer names — and
+// unreachable by any live writer too, now that a firing commits the run with
+// its first step and an advance commits the pointer with the step it names. So
+// the subtests here pin both halves, for both ways the shape arises: it is
+// counted when it exists, and it is never written to, whatever its age.
 func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrphanFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -126,6 +132,39 @@ func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrph
 		}
 	})
 
+	t.Run("Running_with_no_child_at_its_current_step_is_counted", func(t *testing.T) {
+		// The mid-advance orphan, and the reason the predicate reads the
+		// pointer rather than merely the presence of a child: step 0 ran, the
+		// pointer moved to step 1, and the step-1 conversation never landed.
+		// The claim gate drives the step the pointer names, so nothing will
+		// ever pick this run up, and no arm that walks its children can tell
+		// it from ordinary work.
+		store, seed := mk(t)
+		brID := seed.BlueprintRun(t, time.Hour)
+		convID := seed.EnqueueChild(t, brID)
+		seed.SetCurrentStep(t, brID, 1)
+
+		n, check, err := store.ReconcileOrphanedConversations(ctx)
+		if err != nil {
+			t.Fatalf("ReconcileOrphanedConversations: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("healed count = %d, want 0 (the checker repairs nothing)", n)
+		}
+		if check.Count != 1 {
+			t.Fatalf("check.Count = %d, want 1 — a pointer naming no conversation is as undrivable as no child at all", check.Count)
+		}
+		if len(check.Sample) != 1 || check.Sample[0] != brID {
+			t.Errorf("check.Sample = %v, want [%s]", check.Sample, brID)
+		}
+		if status, reason, completed := seed.BlueprintRunState(t, brID); status != string(domain.BlueprintRunStatusRunning) || reason != "" || completed {
+			t.Errorf("blueprint_run = (%q, %q, completed=%v), want (running, \"\", false) — the checker must not write", status, reason, completed)
+		}
+		if got := seed.ConversationStatus(t, convID); got != "" {
+			t.Errorf("the run's step-0 child status = %q, want no stored status (untouched)", got)
+		}
+	})
+
 	t.Run("Terminal_childless_blueprint_run_is_not_counted", func(t *testing.T) {
 		// Every terminal is a settled account of what happened. Only a run
 		// still claiming to be 'running' is an unmet obligation.
@@ -178,7 +217,7 @@ func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrph
 		// One log line stays a log line, and the number stays honest: the
 		// sample is capped, the count is every row.
 		store, seed := mk(t)
-		for i := 0; i < db.OrphanedAtMintSampleLimit+3; i++ {
+		for i := 0; i < db.OrphanedStepSampleLimit+3; i++ {
 			seed.BlueprintRun(t, time.Duration(i)*time.Minute)
 		}
 
@@ -186,11 +225,11 @@ func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrph
 		if err != nil {
 			t.Fatalf("ReconcileOrphanedConversations: %v", err)
 		}
-		if check.Count != db.OrphanedAtMintSampleLimit+3 {
-			t.Errorf("check.Count = %d, want %d (every row, not just the sampled ones)", check.Count, db.OrphanedAtMintSampleLimit+3)
+		if check.Count != db.OrphanedStepSampleLimit+3 {
+			t.Errorf("check.Count = %d, want %d (every row, not just the sampled ones)", check.Count, db.OrphanedStepSampleLimit+3)
 		}
-		if len(check.Sample) != db.OrphanedAtMintSampleLimit {
-			t.Errorf("len(check.Sample) = %d, want %d", len(check.Sample), db.OrphanedAtMintSampleLimit)
+		if len(check.Sample) != db.OrphanedStepSampleLimit {
+			t.Errorf("len(check.Sample) = %d, want %d", len(check.Sample), db.OrphanedStepSampleLimit)
 		}
 	})
 }

@@ -15,16 +15,17 @@ import (
 // translate to the same sentinel.
 func isTaskBusy(err error) bool { return errors.Is(err, db.ErrTaskBusyActiveRun) }
 
-// BlueprintFiringFactory is what a per-backend test file hands to
-// RunBlueprintFiringConformance: the wired BlueprintStore plus a scaffold that
-// stages firings and reads back what they committed. Each call must hand back a
-// clean database — the suite counts rows per task and asserts exact totals.
-type BlueprintFiringFactory func(t *testing.T) (db.BlueprintStore, BlueprintFiringScaffold)
+// BlueprintSequenceFactory is what a per-backend test file hands to
+// RunBlueprintSequenceConformance: the wired BlueprintStore plus a scaffold
+// that stages firings and advances and reads back what they committed. Each
+// call must hand back a clean database — the suite counts rows per task and
+// asserts exact totals.
+type BlueprintSequenceFactory func(t *testing.T) (db.BlueprintStore, BlueprintSequenceScaffold)
 
-// BlueprintFiringScaffold stages one backend's firings and reads their
-// aftermath. Every write below is a real store call or the backend's own SQL;
-// nothing here reimplements the method under test.
-type BlueprintFiringScaffold struct {
+// BlueprintSequenceScaffold stages one backend's firings and advances and
+// reads their aftermath. Every write below is a real store call or the
+// backend's own SQL; nothing here reimplements the method under test.
+type BlueprintSequenceScaffold struct {
 	OrgID string
 	// AgentID names a real agents row, so the claim stamp has something to write.
 	AgentID string
@@ -48,8 +49,9 @@ type BlueprintFiringScaffold struct {
 	Firing func(t *testing.T, taskID string) domain.BlueprintRun
 	// ManualFiring composes the same thing for the unfenced manual arm.
 	ManualFiring func(t *testing.T, taskID string) domain.BlueprintRun
-	// FirstStep composes the step-0 conversation a firing commits with its run.
-	FirstStep func(br domain.BlueprintRun) domain.Conversation
+	// Step composes the conversation for one step of br. Index 0 is the row a
+	// firing commits with its run; a higher index is the row an advance mints.
+	Step func(br domain.BlueprintRun, stepIndex int) domain.Conversation
 	// ClaimTaskForUser hands the task to a human, so the firing's own stamp is
 	// refused.
 	ClaimTaskForUser func(t *testing.T, taskID string)
@@ -62,24 +64,31 @@ type BlueprintFiringScaffold struct {
 	TaskOwnerTeam func(t *testing.T, taskID string) string
 	// TaskAgentClaim reads tasks.claimed_by_agent_id ("" for NULL).
 	TaskAgentClaim func(t *testing.T, taskID string) string
+	// RunCurrentStep reads blueprint_runs.current_step_index — the pointer
+	// the claim gate drives, and the one an advance moves.
+	RunCurrentStep func(t *testing.T, blueprintRunID string) int
+	// ConversationEnded reports whether a conversation carries an ended_at
+	// stamp: the boundary an advance writes on the step it concludes.
+	ConversationEnded func(t *testing.T, convID string) bool
 	// ConversationTeam reads a conversation's team_id. Nil on a backend whose
 	// conversations do not derive their team from the task (local mode's
 	// single-team sentinel), where the assertion would test nothing.
 	ConversationTeam func(t *testing.T, convID string) string
 }
 
-// RunBlueprintFiringConformance is the shared suite for the one door a
-// delegation is fired through.
+// RunBlueprintSequenceConformance is the shared suite for the two doors that
+// move a blueprint's sequence: the firing that mints step 0 with its run, and
+// the advance that mints every step after with the pointer naming it.
 //
-// Its subject is indivisibility. Four writes — the task's owner, the
-// blueprint_run, the task's agent claim, the first step's conversation — are
-// each implied by the one before it, and the shapes a partial commit leaves
-// behind are all silent: a run with no step is a 'running' parent nothing
-// drives and no recovery arm can see, and a firing under a stale owner opens
-// its conversation on the wrong team's board. So the suite fires, and then
-// fires things that fail, and asserts the database only ever holds all of it
-// or none of it.
-func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
+// Its subject is indivisibility. The writes each door makes are implied by the
+// one before them, and the shapes a partial commit leaves behind are all
+// silent: a run with no step, or a pointer naming a step that was never
+// minted, is a 'running' blueprint nothing drives and no recovery arm can
+// reach, and a firing under a stale owner opens its conversation on the wrong
+// team's board. So the suite fires and advances, then fires and advances
+// things that fail, and asserts the database only ever holds all of it or none
+// of it.
+func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -89,7 +98,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		br := sc.Firing(t, taskID)
 
 		inserted, claimed, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
-			db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, sc.FirstStep(br))
+			db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, sc.Step(br, 0))
 		if err != nil {
 			t.Fatalf("CreateRunWithFirstStepSystem: %v", err)
 		}
@@ -122,7 +131,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		store, sc := mk(t)
 		taken := sc.NewTask(t)
 		takenBr := sc.Firing(t, taken)
-		_, _, occupied, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, takenBr, db.AgentClaimStamp{}, "", sc.FirstStep(takenBr))
+		_, _, occupied, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, takenBr, db.AgentClaimStamp{}, "", sc.Step(takenBr, 0))
 		if err != nil || occupied == nil {
 			t.Fatalf("seed a committed conversation: (%v, %v)", occupied, err)
 		}
@@ -130,7 +139,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		taskID := sc.NewTask(t)
 		ownerBefore := sc.TaskOwnerTeam(t, taskID)
 		br := sc.Firing(t, taskID)
-		step := sc.FirstStep(br)
+		step := sc.Step(br, 0)
 		step.ID = occupied.ID // primary-key collision
 
 		inserted, claimed, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
@@ -159,7 +168,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		store, sc := mk(t)
 		taken := sc.NewTask(t)
 		takenBr := sc.Firing(t, taken)
-		_, _, occupied, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, takenBr, db.AgentClaimStamp{}, "", sc.FirstStep(takenBr))
+		_, _, occupied, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, takenBr, db.AgentClaimStamp{}, "", sc.Step(takenBr, 0))
 		if err != nil || occupied == nil {
 			t.Fatalf("seed a committed conversation: (%v, %v)", occupied, err)
 		}
@@ -167,7 +176,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		taskID := sc.NewTask(t)
 		br := sc.Firing(t, taskID)
 		br.ID = uuid.New().String()
-		doomed := sc.FirstStep(br)
+		doomed := sc.Step(br, 0)
 		doomed.ID = occupied.ID
 		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{AgentID: sc.AgentID}, "", doomed); err == nil {
 			t.Fatal("the doomed firing was expected to fail")
@@ -176,7 +185,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		// Same (triggering_event_id, trigger_id), fresh run id: the replay.
 		retry := br
 		retry.ID = uuid.New().String()
-		inserted, _, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, retry, db.AgentClaimStamp{AgentID: sc.AgentID}, "", sc.FirstStep(retry))
+		inserted, _, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, retry, db.AgentClaimStamp{AgentID: sc.AgentID}, "", sc.Step(retry, 0))
 		if err != nil {
 			t.Fatalf("replay after a rolled-back firing: %v", err)
 		}
@@ -202,14 +211,14 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		taskID := sc.NewTask(t)
 		br := sc.Firing(t, taskID)
 		br.ID = uuid.New().String()
-		if inserted, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{AgentID: sc.AgentID}, "", sc.FirstStep(br)); err != nil || !inserted {
+		if inserted, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{AgentID: sc.AgentID}, "", sc.Step(br, 0)); err != nil || !inserted {
 			t.Fatalf("first fire: inserted=%v err=%v", inserted, err)
 		}
 		ownerAfterFirstFire := sc.TaskOwnerTeam(t, taskID)
 
 		replay := br
 		replay.ID = uuid.New().String()
-		inserted, claimed, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, replay, db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, sc.FirstStep(replay))
+		inserted, claimed, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, replay, db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, sc.Step(replay, 0))
 		if err != nil {
 			t.Fatalf("replay fire: %v", err)
 		}
@@ -236,7 +245,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		br := sc.Firing(t, taskID)
 
 		inserted, claimed, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
-			db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, sc.FirstStep(br))
+			db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, sc.Step(br, 0))
 		if err != nil {
 			t.Fatalf("CreateRunWithFirstStepSystem against a user-claimed task: %v", err)
 		}
@@ -268,7 +277,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		br := sc.ManualFiring(t, taskID)
 		br.ID = uuid.New().String()
 
-		inserted, _, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.FirstStep(br))
+		inserted, _, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0))
 		if err != nil {
 			t.Fatalf("manual firing: %v", err)
 		}
@@ -290,7 +299,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		// intent is a deferral the caller must handle, not a satisfied one.
 		second := sc.ManualFiring(t, taskID)
 		second.ID = uuid.New().String()
-		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, second, db.AgentClaimStamp{}, "", sc.FirstStep(second)); err == nil {
+		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, second, db.AgentClaimStamp{}, "", sc.Step(second, 0)); err == nil {
 			t.Error("a second manual firing on a busy task should refuse")
 		} else if !isTaskBusy(err) {
 			t.Errorf("second manual firing = %v, want db.ErrTaskBusyActiveRun", err)
@@ -305,7 +314,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		taken := sc.NewTask(t)
 		takenBr := sc.ManualFiring(t, taken)
 		takenBr.ID = uuid.New().String()
-		_, _, occupied, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, takenBr, db.AgentClaimStamp{}, "", sc.FirstStep(takenBr))
+		_, _, occupied, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, takenBr, db.AgentClaimStamp{}, "", sc.Step(takenBr, 0))
 		if err != nil || occupied == nil {
 			t.Fatalf("seed a committed conversation: (%v, %v)", occupied, err)
 		}
@@ -314,7 +323,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		ownerBefore := sc.TaskOwnerTeam(t, taskID)
 		br := sc.ManualFiring(t, taskID)
 		br.ID = uuid.New().String()
-		step := sc.FirstStep(br)
+		step := sc.Step(br, 0)
 		step.ID = occupied.ID
 		// Everything the event arm's rollback asserts, on the manual arm too:
 		// the two arms share one transaction body, and a regression that let a
@@ -347,7 +356,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		br := sc.Firing(t, real)
 		br.ID = uuid.New().String()
 		br.TaskID = "00000000-0000-0000-0000-0000000000ba"
-		step := sc.FirstStep(br)
+		step := sc.Step(br, 0)
 		step.TaskID = br.TaskID
 
 		_, _, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
@@ -372,7 +381,7 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		ownerBefore := sc.TaskOwnerTeam(t, taskID)
 		br := sc.Firing(t, taskID)
 
-		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{AgentID: sc.AgentID}, sc.BadTeamID, sc.FirstStep(br)); err == nil {
+		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{AgentID: sc.AgentID}, sc.BadTeamID, sc.Step(br, 0)); err == nil {
 			t.Fatal("a refused consolidation must fail the firing, not proceed under the old owner")
 		}
 		if n := sc.RunCount(t, taskID); n != 0 {
@@ -383,6 +392,125 @@ func RunBlueprintFiringConformance(t *testing.T, mk BlueprintFiringFactory) {
 		}
 		if got := sc.TaskOwnerTeam(t, taskID); got != ownerBefore {
 			t.Errorf("task owner team = %q, want %q (unchanged)", got, ownerBefore)
+		}
+	})
+
+	// seedFiring stages a committed run and hands back its step-0 row — the
+	// starting position for every advance below.
+	seedFiring := func(t *testing.T, store db.BlueprintStore, sc BlueprintSequenceScaffold, taskID string) (domain.BlueprintRun, *domain.Conversation) {
+		t.Helper()
+		br := sc.Firing(t, taskID)
+		_, _, step0, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0))
+		if err != nil || step0 == nil {
+			t.Fatalf("seed a committed firing: (%v, %v)", step0, err)
+		}
+		return br, step0
+	}
+
+	t.Run("Advance_commits_the_pointer_the_boundary_and_the_next_step", func(t *testing.T) {
+		store, sc := mk(t)
+		taskID := sc.NewTask(t)
+		br, step0 := seedFiring(t, store, sc, taskID)
+
+		advanced, ended, next, err := store.AdvanceRunToStepSystem(ctx, sc.OrgID, 0, step0.ID, sc.Step(br, 1))
+		if err != nil {
+			t.Fatalf("AdvanceRunToStepSystem: %v", err)
+		}
+		if !advanced || ended == nil || next == nil {
+			t.Fatalf("(advanced=%v, ended=%v, conv=%v), want (true, non-nil, non-nil)", advanced, ended != nil, next != nil)
+		}
+		if got := sc.RunCurrentStep(t, br.ID); got != 1 {
+			t.Errorf("current_step_index = %d, want 1", got)
+		}
+		if n := sc.ConversationCount(t, taskID); n != 2 {
+			t.Errorf("conversations on the task = %d, want 2 — a pointer with no conversation at it is a run nothing can drive", n)
+		}
+		if !sc.ConversationEnded(t, step0.ID) {
+			t.Error("the concluded step carries no ended_at — it stops being the task's live conversation the moment its successor is minted")
+		}
+	})
+
+	t.Run("A_failing_step_insert_rolls_the_advance_back", func(t *testing.T) {
+		// The same collision the firing arm uses, one door over: the last
+		// statement fails, so the pointer and the boundary go with it. A
+		// pointer that survived would name a step nothing ever minted, which
+		// is the shape the whole transaction exists to prevent.
+		store, sc := mk(t)
+		taken := sc.NewTask(t)
+		_, occupied := seedFiring(t, store, sc, taken)
+
+		taskID := sc.NewTask(t)
+		br, step0 := seedFiring(t, store, sc, taskID)
+		doomed := sc.Step(br, 1)
+		doomed.ID = occupied.ID // primary-key collision
+
+		advanced, _, _, err := store.AdvanceRunToStepSystem(ctx, sc.OrgID, 0, step0.ID, doomed)
+		if err == nil {
+			t.Fatalf("a duplicate conversation id must fail the advance, got advanced=%v", advanced)
+		}
+		if got := sc.RunCurrentStep(t, br.ID); got != 0 {
+			t.Errorf("current_step_index = %d, want 0 — the pointer moved to a step that was never minted", got)
+		}
+		if n := sc.ConversationCount(t, taskID); n != 1 {
+			t.Errorf("conversations on the task = %d, want 1", n)
+		}
+		if sc.ConversationEnded(t, step0.ID) {
+			t.Error("the concluded step was ended under an advance that did not commit")
+		}
+	})
+
+	t.Run("A_stale_pointer_advances_nothing", func(t *testing.T) {
+		// A terminal arriving from a step the blueprint has already moved
+		// past. The compare-and-swap on current_step_index is what refuses
+		// it, so the second advance from step 0 mints no second successor and
+		// writes no second boundary.
+		store, sc := mk(t)
+		taskID := sc.NewTask(t)
+		br, step0 := seedFiring(t, store, sc, taskID)
+		if _, _, _, err := store.AdvanceRunToStepSystem(ctx, sc.OrgID, 0, step0.ID, sc.Step(br, 1)); err != nil {
+			t.Fatalf("first advance: %v", err)
+		}
+
+		advanced, ended, next, err := store.AdvanceRunToStepSystem(ctx, sc.OrgID, 0, step0.ID, sc.Step(br, 1))
+		if err != nil {
+			t.Fatalf("a stale advance is a refusal, not an error: %v", err)
+		}
+		if advanced || ended != nil || next != nil {
+			t.Fatalf("(advanced=%v, ended=%v, conv=%v), want (false, nil, nil)", advanced, ended != nil, next != nil)
+		}
+		if got := sc.RunCurrentStep(t, br.ID); got != 1 {
+			t.Errorf("current_step_index = %d, want 1 — the stale advance moved the sequence backwards", got)
+		}
+		if n := sc.ConversationCount(t, taskID); n != 2 {
+			t.Errorf("conversations on the task = %d, want 2 — the stale advance minted a duplicate step", n)
+		}
+	})
+
+	t.Run("A_terminal_run_advances_nothing", func(t *testing.T) {
+		// The reactor refreshes the run before it decides, but a cancel can
+		// land between that read and this write. The guard carries the status
+		// as well as the pointer, so the advance is refused rather than
+		// enqueuing a step under a blueprint that has already finished.
+		store, sc := mk(t)
+		taskID := sc.NewTask(t)
+		br, step0 := seedFiring(t, store, sc, taskID)
+		changed, err := store.MarkRunStatus(ctx, sc.OrgID, br.ID, domain.BlueprintRunStatusCancelled, "cancelled", nil)
+		if err != nil || !changed {
+			t.Fatalf("terminate the run: (changed=%v, %v)", changed, err)
+		}
+
+		advanced, _, _, err := store.AdvanceRunToStepSystem(ctx, sc.OrgID, 0, step0.ID, sc.Step(br, 1))
+		if err != nil {
+			t.Fatalf("advancing a terminal run is a refusal, not an error: %v", err)
+		}
+		if advanced {
+			t.Error("advanced a run that is no longer running")
+		}
+		if got := sc.RunCurrentStep(t, br.ID); got != 0 {
+			t.Errorf("current_step_index = %d, want 0", got)
+		}
+		if n := sc.ConversationCount(t, taskID); n != 1 {
+			t.Errorf("conversations on the task = %d, want 1 — a step was minted under a finished blueprint", n)
 		}
 	})
 }

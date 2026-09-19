@@ -52,10 +52,12 @@ var _ db.ConversationQueueStore = (*conversationQueueStore)(nil)
 const conversationTerminalStatusesSQL = `'completed','failed'`
 
 // EnqueueConversation mints a queued delegation conversation on its own
-// transaction and rings the wake doorbell for it. The step-advance path takes
-// this door; a blueprint's FIRST step takes
-// BlueprintStore.CreateRunWithFirstStepSystem instead, so it commits with the
-// run that implies it.
+// transaction and rings the wake doorbell for it. No blueprint step takes this
+// door: step 0 commits with its run through
+// BlueprintStore.CreateRunWithFirstStepSystem and every step after it commits
+// with the pointer that names it through BlueprintStore.AdvanceRunToStepSystem,
+// each arriving with the write that implies it. What this door is, then, is
+// the standalone mint — the same row shape on a commit of its own.
 func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) (*domain.Conversation, error) {
 	r, err := insertConversation(ctx, s.conn, orgID, conv)
 	if err != nil {
@@ -66,10 +68,10 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 }
 
 // insertConversation is the mint statement itself, taking the queryer so the
-// firing path can run it on the transaction that also commits the
-// blueprint_run it belongs to rather than as a second, separately-failing
-// write. One copy of the row shape, so the two doors cannot drift on what a
-// queued delegation looks like. The wake doorbell is NOT rung here: it
+// blueprint doors can run it on the transaction that also commits the run or
+// the pointer the row belongs to, rather than as a second, separately-failing
+// write. One copy of the row shape, so no door drifts on what a queued
+// delegation looks like. The wake doorbell is NOT rung here: it
 // announces a committed row, so it belongs to whoever owns the commit.
 //
 // The row carries NO status — the absence of an outcome is what makes it
@@ -825,7 +827,7 @@ func (s *conversationQueueStore) FleetQueueShares(ctx context.Context) ([]db.Org
 	return scanOrgQueueShares(rows)
 }
 
-func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Context) (int, db.OrphanedAtMintCheck, error) {
+func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Context) (int, db.OrphanedStepCheck, error) {
 	// Boot self-heal — see ConversationQueueStore.ReconcileOrphanedConversations and the
 	// SQLite mirror. Admin pool (BYPASSRLS): a cross-org system sweep with no
 	// per-user identity, the same posture as ResetProcessingConversations.
@@ -839,7 +841,7 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 	// Any active claim on a parked row releases as 'cancelled' in the same
 	// statement — the engagement was ended from outside.
 	var total int
-	var check db.OrphanedAtMintCheck
+	var check db.OrphanedStepCheck
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		var parked int
 		if err := q.QueryRowContext(ctx, `
@@ -874,11 +876,11 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 			return err
 		}
 
-		// Mint-crash CHECKER — the shape the park above cannot see, one level
-		// up: a live parent with no child at all. It repairs nothing, and its
-		// count stays out of the healed total, because counting is not
-		// healing.
-		check, err = countBlueprintRunsOrphanedAtMint(ctx, q)
+		// Orphaned-step CHECKER — the shape the park above cannot see, one
+		// level up: a live parent with no child at the step it is pointing
+		// at. It repairs nothing, and its count stays out of the healed
+		// total, because counting is not healing.
+		check, err = countBlueprintRunsMissingCurrentStep(ctx, q)
 		if err != nil {
 			return err
 		}
@@ -886,7 +888,7 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 		return nil
 	})
 	if err != nil {
-		return 0, db.OrphanedAtMintCheck{}, err
+		return 0, db.OrphanedStepCheck{}, err
 	}
 	return total, check, nil
 }
@@ -926,31 +928,35 @@ func healClaimDesyncs(ctx context.Context, q queryer) (released int, err error) 
 	return int(n), nil
 }
 
-// countBlueprintRunsOrphanedAtMint counts 'running' blueprint_runs that hold
-// no child conversation, and samples the oldest few. It writes nothing.
+// countBlueprintRunsMissingCurrentStep counts 'running' blueprint_runs holding
+// no conversation at the step current_step_index names, and samples the oldest
+// few. It writes nothing.
 //
-// A firing commits its blueprint_run and its first step in one transaction, so
-// no reader can observe one without the other and there is no window for this
-// shape to appear in — which is why there is no grace here, and why a repair
-// would be the wrong answer: it would quietly absorb a broken invariant that
-// should be looked at instead. What can still turn up is a survivor from
-// before that was true, in an installed local database.
+// A firing commits its run and its first step in one transaction and an
+// advance commits its pointer and the step it names in another, so no reader
+// can observe one without the other and there is no window for this shape to
+// appear in — which is why there is no grace here, and why a repair would be
+// the wrong answer: it would quietly absorb a broken invariant that should be
+// looked at instead. What can still turn up is a survivor from before that was
+// true, in an installed local database.
 //
 // `count(*) OVER ()` is evaluated before LIMIT, so one statement gives both
 // the full count and the bounded sample without the two disagreeing about
 // which rows they describe.
-func countBlueprintRunsOrphanedAtMint(ctx context.Context, q queryer) (db.OrphanedAtMintCheck, error) {
-	var out db.OrphanedAtMintCheck
+func countBlueprintRunsMissingCurrentStep(ctx context.Context, q queryer) (db.OrphanedStepCheck, error) {
+	var out db.OrphanedStepCheck
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, count(*) OVER ()
 		FROM blueprint_runs
 		WHERE status = 'running'
 		  AND NOT EXISTS (
-		      SELECT 1 FROM conversations c WHERE c.blueprint_run_id = blueprint_runs.id
+		      SELECT 1 FROM conversations c
+		      WHERE c.blueprint_run_id = blueprint_runs.id
+		        AND c.blueprint_step_index = blueprint_runs.current_step_index
 		  )
 		ORDER BY started_at, id
 		LIMIT $1
-	`, db.OrphanedAtMintSampleLimit)
+	`, db.OrphanedStepSampleLimit)
 	if err != nil {
 		return out, err
 	}
@@ -958,7 +964,7 @@ func countBlueprintRunsOrphanedAtMint(ctx context.Context, q queryer) (db.Orphan
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id, &out.Count); err != nil {
-			return db.OrphanedAtMintCheck{}, err
+			return db.OrphanedStepCheck{}, err
 		}
 		out.Sample = append(out.Sample, id)
 	}

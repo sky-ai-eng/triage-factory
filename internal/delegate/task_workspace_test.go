@@ -42,23 +42,19 @@ func blueprintIDOfRun(t *testing.T, database *sql.DB, blueprintRunID string) str
 	return bpID
 }
 
-// enqueueStepZero mints run B's first step through the production mint, which
-// is what stamps the task's inherited worktree_path onto the new row.
+// enqueueStepZero mints run B's first step through the production composer,
+// which is what stamps the task's inherited worktree_path onto the new row.
 func (f stepFixture) enqueueStepZero(t *testing.T, br *domain.BlueprintRun) string {
 	t.Helper()
-	before := conversationIDsForTask(t, f.database, f.task.ID)
-	if err := f.s.enqueueBlueprintStep(context.Background(), runmode.LocalDefaultOrgID, br.ID, f.task,
-		domain.BlueprintStep{BlueprintID: br.BlueprintID, StepIndex: 0, StepPromptID: stepPromptID(t, f.database, f.conversationIDs[0])},
-		"claude-sonnet-4-6", "manual", "", runmode.LocalDefaultUserID, ""); err != nil {
-		t.Fatalf("enqueueBlueprintStep: %v", err)
+	ctx := context.Background()
+	conv, err := f.s.conversationQueue.EnqueueConversation(ctx, runmode.LocalDefaultOrgID,
+		f.s.buildStepConversation(ctx, runmode.LocalDefaultOrgID, br.ID, f.task,
+			domain.BlueprintStep{BlueprintID: br.BlueprintID, StepIndex: 0, StepPromptID: stepPromptID(t, f.database, f.conversationIDs[0])},
+			"claude-sonnet-4-6", "manual", "", runmode.LocalDefaultUserID, ""))
+	if err != nil {
+		t.Fatalf("mint run B's first step: %v", err)
 	}
-	for id := range conversationIDsForTask(t, f.database, f.task.ID) {
-		if !before[id] {
-			return id
-		}
-	}
-	t.Fatal("enqueueBlueprintStep wrote no conversation row")
-	return ""
+	return conv.ID
 }
 
 // stepPromptID reads the prompt a seeded step ran, so the mint under test
@@ -70,27 +66,6 @@ func stepPromptID(t *testing.T, database *sql.DB, conversationID string) string 
 		t.Fatalf("read prompt_id of %s: %v", conversationID, err)
 	}
 	return promptID.String
-}
-
-func conversationIDsForTask(t *testing.T, database *sql.DB, taskID string) map[string]bool {
-	t.Helper()
-	rows, err := database.Query(`SELECT id FROM conversations WHERE task_id = ?`, taskID)
-	if err != nil {
-		t.Fatalf("list the task's conversations: %v", err)
-	}
-	defer rows.Close()
-	ids := map[string]bool{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			t.Fatalf("scan conversation id: %v", err)
-		}
-		ids[id] = true
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("list the task's conversations: %v", err)
-	}
-	return ids
 }
 
 // TestEnqueueBlueprintStep_StampsTheTasksWorktreePath is the mint half of

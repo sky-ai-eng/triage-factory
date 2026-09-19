@@ -599,6 +599,41 @@ type BlueprintStore interface {
 	// because its insert has no such arm.
 	CreateRunWithFirstStepSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim AgentClaimStamp, ownerTeamID string, firstStep domain.Conversation) (inserted, claimed bool, conv *domain.Conversation, err error)
 
+	// AdvanceRunToStepSystem commits a step advance as ONE transaction: the
+	// blueprint_run's current_step_index bump, the boundary stamp on the step
+	// that just concluded, and the next step's conversations row. It is the
+	// sibling of CreateRunWithFirstStepSystem — step 0 and step N+1 are minted
+	// under one rule — and it exists for the same reason: a current_step_index
+	// naming a step no conversation exists for is a 'running' blueprint nothing
+	// can drive, because the claim gate only ever drives the step the pointer
+	// names. It holds the one-active-run index against its task, and nothing
+	// re-mints the missing step.
+	//
+	// Statement order inside the transaction is fixed:
+	//
+	//  1. The guarded bump: current_step_index moves to nextStep's own index,
+	//     and only on a row still 'running' at fromStepIndex. That is the
+	//     pointer write and the fence at once, which is why it leads — a second
+	//     reactor holding a terminal from the same step queues on this row and
+	//     then finds the guard closed, having written nothing.
+	//
+	//     Both the run being advanced and the index being advanced to are
+	//     read off nextStep rather than passed beside it: the pointer and the
+	//     row it names are one fact, and two parameters carrying it are two
+	//     that can disagree.
+	//  2. The boundary stamp on concludedConversationID. A conversation must
+	//     never open on a task whose prior one is still un-ended, so the stamp
+	//     and the mint below share a commit or that invariant has a window. A
+	//     row already ended is not a fault: ended comes back nil and the
+	//     advance proceeds.
+	//  3. The next step's conversations row.
+	//
+	// Returns advanced=false with nothing written when the guard missed — the
+	// run is terminal, or another engagement already moved the pointer. The
+	// sequence is somebody else's to drive by then, so a caller stands down
+	// rather than failing the blueprint.
+	AdvanceRunToStepSystem(ctx context.Context, orgID string, fromStepIndex int, concludedConversationID string, nextStep domain.Conversation) (advanced bool, ended, conv *domain.Conversation, err error)
+
 	// SetRunWorktreePathSystem fills in a blueprint_run's worktree_path after
 	// the shared worktree is built. The row is created up front (before setup,
 	// so the replay fence commits before expensive work) with an empty path;
