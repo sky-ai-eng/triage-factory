@@ -26,7 +26,7 @@ func execSQL(t *testing.T, database *sql.DB, query string, args ...any) {
 // the conversation id. status sets the conversation's lifecycle state.
 //
 // The conversation is step 0 of its blueprint, which is where the blueprint's
-// current_step_index sits — the shape EnqueueConversation produces, and the one the
+// current_step_index sits — the shape a firing produces, and the one the
 // drivability gate reads. A row that named no step would be undrivable, so a
 // fixture that left it NULL would silently make every steering test a test of
 // the refusal path.

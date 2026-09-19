@@ -73,9 +73,9 @@ type ConversationSeeder struct {
 	Team func(t *testing.T, slug string) string
 
 	// Conversation inserts a conversations row directly and returns its id (conv.ID
-	// when set, a fresh uuid otherwise). ConversationQueueStore.EnqueueConversation is the
-	// only production mint; the conformance suite stages rows in arbitrary
-	// status without driving the queue. Fields honored: ID, TaskID, TeamID
+	// when set, a fresh uuid otherwise). Production mints a row only inside a
+	// BlueprintStore door; the conformance suite stages rows in arbitrary
+	// status without staging a whole firing for each. Fields honored: ID, TaskID, TeamID
 	// (default: the org's first team), PromptID, Status, Model, TriggerType
 	// (default manual), TriggerID, BlueprintRunID. An empty Status inserts
 	// SQL NULL — the mid-flight state a fresh mint carries, which the

@@ -16,9 +16,10 @@ type FleetQueueSharesFactory func(t *testing.T) (store db.ConversationQueueStore
 // FleetQueueShares reads. The store's own guarded flips can't reach terminal/dormant/active
 // statuses on demand, so ForceStatus writes them directly.
 type FleetQueueSharesSeeder struct {
-	// EnqueueConversation stages one queued conversation (under a running
-	// blueprint_run) and returns its id.
-	EnqueueConversation func(t *testing.T) (conversationID string)
+	// StageStep stages one claimable step — a running blueprint_run whose
+	// current_step_index names a conversation with no outcome — and returns
+	// that conversation's id.
+	StageStep func(t *testing.T) (conversationID string)
 
 	// ForceStatus rewrites a conversation's status directly, bypassing the
 	// store's guards.
@@ -69,9 +70,9 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 		// active conversations are made active by actually claiming them —
 		// which is also the only way to reach the state, the conversation row
 		// itself carrying no "running" any more.
-		seed.EnqueueConversation(t)
-		seed.EnqueueConversation(t)
-		seed.EnqueueConversation(t)
+		seed.StageStep(t)
+		seed.StageStep(t)
+		seed.StageStep(t)
 		for i := 0; i < 2; i++ {
 			claimed, err := store.ClaimNextConversation(ctx, "fleet-share-executor", 1, db.ClaimPlacement{})
 			if err != nil {
@@ -84,7 +85,7 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 
 		s, found := shareFor(t, store, orgID)
 		if !found {
-			t.Fatalf("org %s missing from FleetQueueShares after enqueue", orgID)
+			t.Fatalf("org %s missing from FleetQueueShares after staging its queue", orgID)
 		}
 		if s.Active != 2 || s.Queued != 1 {
 			t.Fatalf("share = {active:%d queued:%d}, want {active:2 queued:1}", s.Active, s.Queued)
@@ -115,11 +116,11 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 	t.Run("terminal_and_dormant_conversations_excluded", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 
-		queued := seed.EnqueueConversation(t) // counts as queued
+		queued := seed.StageStep(t) // counts as queued
 		_ = queued
-		done := seed.EnqueueConversation(t)
+		done := seed.StageStep(t)
 		seed.ForceStatus(t, done, "completed") // terminal: excluded from both
-		parked := seed.EnqueueConversation(t)
+		parked := seed.StageStep(t)
 		seed.ForceStatus(t, parked, "open") // hibernated: excluded from active
 
 		s, found := shareFor(t, store, orgID)

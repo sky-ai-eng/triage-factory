@@ -77,15 +77,10 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 			Source: p.Source, AllowedTools: p.AllowedTools, Model: p.Model, Brief: st.Brief,
 		}
 	}
-	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	brID := dbtest.SeedBlueprintRun(t, database, domain.BlueprintRun{
 		ID: "freeze-bpr", BlueprintID: bpID, TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-freeze", StepPlan: plan,
 	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	brID := created.ID
 
 	// Step 0 finished with continue → ready to advance to step 1.
 	step0 := 0

@@ -591,10 +591,6 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, agentID := seedPgOrgUserAgent(t, h)
-	// A second team the user also admins, so SetOwnerTeam's WITH CHECK
-	// (tf.user_can_write_team on the RESULTING team_id) holds for the move,
-	// not just the read.
-	otherTeam := seedPgDefaultTeam(t, h, orgID, userID)
 
 	seed := func(suffix string) string {
 		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userID, suffix)
@@ -605,7 +601,6 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 	statusID := seed("ap-status")
 	claimAgentID := seed("ap-claim-agent")
 	claimUserID := seed("ap-claim-user")
-	ownerID := seed("ap-owner")
 
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 		store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
@@ -656,15 +651,6 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 			return fmt.Errorf("SetClaimedByUser: %w", err)
 		}
 		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.SetClaimedByUser", claimedUser, bareRead(claimUserID))
-
-		owned, err := store.SetOwnerTeam(ctx, orgID, ownerID, otherTeam)
-		if err != nil {
-			return fmt.Errorf("SetOwnerTeam: %w", err)
-		}
-		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.SetOwnerTeam", owned, bareRead(ownerID))
-		if owned.TeamID == nil || *owned.TeamID != otherTeam {
-			t.Errorf("SetOwnerTeam returned team_id=%v, want %q", owned.TeamID, otherTeam)
-		}
 		return nil
 	}); err != nil {
 		t.Fatalf("WithUser: %v", err)

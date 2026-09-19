@@ -19,9 +19,10 @@ type ClaimCredentialsFactory func(t *testing.T) (store db.ConversationQueueStore
 // to stage and observe states the store's own guarded flips can't produce
 // on demand.
 type ClaimCredentialsSeeder struct {
-	// EnqueueConversation stages one claimable queued conversation (under a
-	// running blueprint_run) and returns its id.
-	EnqueueConversation func(t *testing.T) (conversationID string)
+	// StageStep stages one claimable step — a running blueprint_run whose
+	// current_step_index names a conversation with no outcome — and returns
+	// that conversation's id.
+	StageStep func(t *testing.T) (conversationID string)
 
 	// ConversationStatus reads the conversation's STORED conversations.status directly (SQL
 	// NULL as ""), so the suite can assert what the column does and does not
@@ -76,7 +77,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		// re-claim is a NEW engagement and must carry its own id, or the
 		// second run's actuals would land on the first one's row.
 		store, orgID, seed := mk(t)
-		conversationID := seed.EnqueueConversation(t)
+		conversationID := seed.StageStep(t)
 
 		first := claim(t, store, conversationID)
 		if first.ClaimID == "" {
@@ -96,7 +97,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 
 	t.Run("Mark_parks_claim_records_pubkey_and_reads_return_it", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.EnqueueConversation(t)
+		conversationID := seed.StageStep(t)
 		claim(t, store, conversationID)
 
 		matched, err := store.MarkAwaitingCredentials(ctx, orgID, conversationID, pubKey)
@@ -143,7 +144,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 
 	t.Run("Empty_pubkey_round_trips_as_empty", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.EnqueueConversation(t)
+		conversationID := seed.StageStep(t)
 		claim(t, store, conversationID)
 
 		matched, err := store.MarkAwaitingCredentials(ctx, orgID, conversationID, "")
@@ -161,7 +162,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 
 	t.Run("Mark_guard_never_overwrites_a_recorded_key", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.EnqueueConversation(t)
+		conversationID := seed.StageStep(t)
 		claim(t, store, conversationID)
 
 		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, conversationID, pubKey); err != nil || !matched {
@@ -188,7 +189,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 
 	t.Run("RequeueAwaitingCredentials_requires_parked_claim", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.EnqueueConversation(t)
+		conversationID := seed.StageStep(t)
 		claim(t, store, conversationID)
 
 		// Not parked yet: the guard must refuse — a timeout racing a claim
@@ -230,7 +231,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 
 	t.Run("RequeueConversation_clears_key", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.EnqueueConversation(t)
+		conversationID := seed.StageStep(t)
 		claim(t, store, conversationID)
 		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, conversationID, pubKey); err != nil || !matched {
 			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
@@ -262,7 +263,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		// run must reset and become claimable — anything else strands it
 		// forever while the backstop sweep re-seals its bundle every tick.
 		store, orgID, seed := mk(t)
-		conversationID := seed.EnqueueConversation(t)
+		conversationID := seed.StageStep(t)
 		claim(t, store, conversationID)
 		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, conversationID, pubKey); err != nil || !matched {
 			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
@@ -289,7 +290,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 
 	t.Run("ResetProcessingConversations_clears_key", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.EnqueueConversation(t)
+		conversationID := seed.StageStep(t)
 		claim(t, store, conversationID)
 		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, conversationID, pubKey); err != nil || !matched {
 			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)

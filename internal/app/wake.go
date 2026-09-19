@@ -11,8 +11,8 @@ import (
 // startWakeListener starts this process's tf_wake LISTEN connection
 // (TFAC-586): a dedicated direct connection (pgnotify's usual shape —
 // session-scoped, bypasses any transaction-mode pooler) that nudges the
-// local dispatcher the instant ANY pod's EnqueueConversation/resume-enqueue commits,
-// instead of waiting out the 2s scan-interval backstop. Every notification
+// local dispatcher the instant ANY pod commits a step mint or a
+// resume-enqueue, instead of waiting out the 2s scan-interval backstop. Every notification
 // wakes the dispatcher unconditionally, regardless of kind/org — the
 // payload exists for future org-scoped filtering, not because this pod
 // needs it today (a claim attempt that finds nothing is a cheap no-op).

@@ -17,11 +17,11 @@ import (
 )
 
 // finishBlueprint settles a seeded blueprint_run on the step its conversation
-// ran — the shape a blueprint leaves behind when its plan completes. Only
-// SetRunCurrentStepSystem writes current_step_index and no terminal write touches it, so a
+// ran — the shape a blueprint leaves behind when its plan completes. Only the
+// advance writes current_step_index and no terminal write touches it, so a
 // blueprint that stopped at step N really does leave the column at N; the
-// fixture writes both directly because the guarded store method refuses a
-// non-running row.
+// fixture writes both directly because the advance is fenced on a running row
+// at the pointer's current value, which is not the position being staged.
 func finishBlueprint(t *testing.T, database *sql.DB, blueprintRunID, status string, currentStep int) {
 	t.Helper()
 	if _, err := database.Exec(

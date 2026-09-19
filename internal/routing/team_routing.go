@@ -665,7 +665,7 @@ func ownerLadderRouting(owner string, ownerSet []string, matchedRules, matchedTr
 		// ownerSet by the same signal the handler-team path uses — max matched-rule
 		// DefaultPriority desc, then lowest team id — so the first member to win
 		// the exclusive claim is deterministic and the fire consolidates the NULL
-		// owner onto it (delegation.go SetOwnerTeamSystem).
+		// owner onto it (the firing transaction's owner consolidation).
 		orderedTeams = orderTeamsByRulePriority(setOf(ownerSet), matchedRules)
 	default:
 		// No member owns it (ownerSet empty — a truly external author:

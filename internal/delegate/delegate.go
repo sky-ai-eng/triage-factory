@@ -175,14 +175,14 @@ type DelegateOpts struct {
 	// event-triggered delegations; empty for manual. Server-side
 	// provenance like TriggerID — the router threads it from the event
 	// being processed (immediate path) or the pending firing row (drain
-	// path). Paired with TriggerID it drives the conversations_event_trigger_fence:
+	// path). Paired with TriggerID it drives the blueprint-run replay fence:
 	// the event-path insert is conflict-aware, so a replayed event whose
 	// first run already committed returns ErrAlreadyFired instead of
 	// spawning a duplicate. Required on the event path —
-	// BlueprintStore.CreateRunIfNotFiredSystem rejects an empty value (it would
-	// bind NULL and silently skip the fence) with
-	// ErrBlueprintRunFenceRequiresEventAndTrigger. Manual delegation never sets
-	// this field; it uses the unfenced Create, which doesn't write the column.
+	// BlueprintStore.CreateRunWithFirstStepSystem rejects an empty value (it
+	// would bind NULL and silently skip the fence) with
+	// ErrBlueprintRunFenceRequiresEventAndTrigger. Manual delegation never
+	// sets this field; its arm of the same method doesn't write the column.
 	TriggeringEventID string
 
 	// CreatorUserID is the user who initiated this Delegate call.
@@ -205,12 +205,11 @@ type DelegateOpts struct {
 	// not be written yet at step 0.
 	ActorAgentID string
 
-	// TaskClaim rides the task's agent claim into the same transaction as the
-	// fenced run insert, which is this delegation's commitment point: the
-	// board can then never show a task free under a run that is already live,
-	// because the two facts are one durable write. Event path only — manual
-	// delegations claim the task in their handler before they get here, and
-	// the fenced insert is the only insert the claim can ride.
+	// TaskClaim rides the task's agent claim into the firing transaction,
+	// which is this delegation's commitment point: the board can then never
+	// show a task free under a run that is already live, because the two facts
+	// are one durable write. Event path only — manual delegations claim the
+	// task in their handler before they get here.
 	//
 	// Distinct from ActorAgentID even though the immediate auto-fire path
 	// sets both to the same agent: the actor is who executes this run, the
@@ -220,6 +219,22 @@ type DelegateOpts struct {
 	// in between must not have it silently re-imposed. Zero value (empty
 	// AgentID) means "commit the run alone".
 	TaskClaim db.AgentClaimStamp
+
+	// OwnerTeamID consolidates tasks.team_id to the firing team, inside the
+	// firing's own transaction and before anything reads it. Step 0's
+	// conversation derives its team from the task, so a firing by a team other
+	// than the creation-time owner (the owner has auto-delegation off and a
+	// lower-priority team is firing) would otherwise open under the stale
+	// owner — and the claim stamp that also consolidates cannot be relied on,
+	// because a refusal (a user claimed first, or the bot already owns it)
+	// leaves the run committed and the owner unmoved.
+	//
+	// Empty means "leave the owner alone", which is what the manual paths and
+	// the pending-firings drain pass: a manual delegation fires as the team
+	// that already owns the card, and the drain's consolidation happened at
+	// the enqueue that queued the firing. A failure to consolidate aborts the
+	// firing rather than proceeding under the old owner.
+	OwnerTeamID string
 }
 
 // Delegate kicks off an async agent run for any task type.
@@ -250,6 +265,14 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	teamID := ""
 	if task.TeamID != nil {
 		teamID = *task.TeamID
+	}
+	// The firing's own consolidation wins over what the task currently says.
+	// It commits inside the firing transaction, further down, so the row still
+	// reads the old owner here — and everything below (the per-team spend cap,
+	// the team's model default and enable-set) is about the team this run
+	// belongs to, which is the team that is firing it.
+	if opts.OwnerTeamID != "" {
+		teamID = opts.OwnerTeamID
 	}
 
 	// TFAC-482 per-team fuse: after the org-wide cap above, also refuse the spawn
@@ -448,79 +471,59 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		}
 	}
 
-	// Event-triggered firings go through the fenced insert: a replayed
-	// (triggering_event_id, trigger_id) under the at-least-once router queue
-	// returns ErrAlreadyFired, so the router skips cleanly instead of minting a
-	// duplicate blueprint_run — closing the latent gap that multi-step chains
-	// were never replay-fenced. Manual delegations write under the user's
-	// synthetic claims so blueprint_runs_insert RLS sees the creator; they
-	// carry no triggering_event_id, so they take no part in the REPLAY fence —
-	// but the one-active-run-per-task index holds them like any other mint,
+	// The firing is ONE transaction: the task's owner consolidation, the
+	// blueprint_run insert, the task's agent claim, and step 0's conversations
+	// row. Each of those is implied by the one before it — a run without its
+	// first step is a 'running' parent nothing drives, holding the
+	// one-active-run index against its task — so the store commits them
+	// together or not at all.
+	//
+	// Event-triggered firings are fenced on (triggering_event_id, trigger_id):
+	// a replay under the at-least-once router queue returns inserted=false, so
+	// the router skips cleanly instead of minting a duplicate. Manual
+	// delegations carry no triggering_event_id and take no part in that fence
+	// — but the one-active-run-per-task index holds them like any other mint,
 	// which is what makes two concurrent delegate gestures produce one run.
-	// Everything before this insert (blueprint/step resolution, usage bumps) is
-	// cheap and idempotent enough to re-run on a fenced replay.
-	if triggerType == "manual" {
-		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			_, e := ts.Blueprints.CreateRun(bgCtx, orgID, brRow)
-			return e
-		}); err != nil {
-			// The one-active-run-per-task index refused: this task already
-			// holds a live engagement. The delegate route tears the prior one
-			// down before it calls here, so reaching this means something
-			// landed in between — a second gesture, or an auto-fire.
-			//
-			// The boundary stamp above has already run, and that is fine rather
-			// than something to unwind: it touched terminal rows only, which
-			// the winning engagement is not, and ending a finished transcript
-			// is idempotent — whoever wins the race stamps the same set to the
-			// same values.
-			if errors.Is(err, db.ErrTaskBusyActiveRun) {
-				return "", ErrTaskBusy
-			}
-			return "", fmt.Errorf("create blueprint run: %w", err)
+	// Everything before this (blueprint/step resolution, usage bumps) is cheap
+	// and idempotent enough to re-run on a fenced replay.
+	//
+	// opts.TaskClaim rides the same transaction: the firing is the commitment
+	// point, so the task's claim commits with it or not at all. A claim
+	// *refusal* (a user won the race, the bot already owns it, the task went
+	// terminal) leaves the run and its step committed — the claim race has a
+	// winner either way and the run must still stand.
+	firstStep := s.buildStepConversation(bgCtx, orgID, blueprintRunID, task, steps[0], stepModel, triggerType, triggerID, creatorUserID, brRow.ActorAgentID)
+	inserted, _, _, err := s.blueprints.CreateRunWithFirstStepSystem(bgCtx, orgID, brRow, opts.TaskClaim, opts.OwnerTeamID, firstStep)
+	if err != nil {
+		// The one-active-run-per-task index refused: this task already holds a
+		// live engagement. The delegate route tears the prior one down before
+		// it calls here, so reaching this means something landed in between —
+		// a second gesture, or an auto-fire.
+		//
+		// The boundary stamp above has already run, and that is fine rather
+		// than something to unwind: it touched terminal rows only, which the
+		// winning engagement is not, and ending a finished transcript is
+		// idempotent — whoever wins the race stamps the same set to the same
+		// values.
+		if errors.Is(err, db.ErrTaskBusyActiveRun) {
+			return "", ErrTaskBusy
 		}
-	} else {
-		// opts.TaskClaim rides this insert's transaction: the fenced insert is
-		// the commitment point, so the task's claim commits with the run or
-		// not at all. A claim *refusal* (a user won the race, the bot already
-		// owns it, the task went terminal) leaves the run committed — the
-		// claim race has a winner either way and the run must still stand.
-		inserted, _, err := s.blueprints.CreateRunIfNotFiredSystem(bgCtx, orgID, brRow, opts.TaskClaim)
-		if err != nil {
-			// Harmless after the stamp — see the manual arm above for why a
-			// refusal here leaves nothing to unwind.
-			if errors.Is(err, db.ErrTaskBusyActiveRun) {
-				return "", ErrTaskBusy
-			}
-			return "", fmt.Errorf("create blueprint run: %w", err)
-		}
-		if !inserted {
-			// The (event, trigger) fence caught a replay: this firing's run
-			// committed already, and the stamp that ran with it ended the
-			// task's prior conversations then. The stamp above found nothing
-			// this time round, which is the correct answer, not a missed one.
-			return "", ErrAlreadyFired
-		}
+		return "", fmt.Errorf("fire blueprint run: %w", err)
+	}
+	if !inserted {
+		// The (event, trigger) fence caught a replay: this firing's run, its
+		// claim and its first step committed already, and the stamp that ran
+		// with it ended the task's prior conversations then. The stamp above
+		// found nothing this time round, which is the correct answer, not a
+		// missed one.
+		return "", ErrAlreadyFired
 	}
 
-	// Enqueue the first step. The blueprint advances entirely through the run
-	// queue from here: the dispatcher claims this step, builds the shared
-	// workspace, runs the agent, and the reactor enqueues each next step (or
-	// finalizes). No in-process for-loop holds the sequencing — blueprint_runs
-	// does (current_step_index), so a crash mid-flight is recoverable. The
-	// blueprint_run was just committed (the replay fence point); if the enqueue
-	// fails, mark it failed so it doesn't strand non-terminal. A hard death in
-	// the same window can't run that write, and the parent it leaves behind has
-	// no child for any conversation-joining recovery arm to find it by — so the
-	// childless-parent shape is owned outside this path, by the boot reconcile
-	// and the leader reaper (domain.BlueprintAbortOrphanedAtMint).
-	if err := s.enqueueBlueprintStep(bgCtx, orgID, blueprintRunID, task, steps[0], stepModel, triggerType, triggerID, creatorUserID, brRow.ActorAgentID); err != nil {
-		if _, mErr := s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, domain.BlueprintRunStatusFailed, "enqueue first step: "+err.Error(), nil); mErr != nil {
-			delegateLog.Warn("mark blueprint_run failed after enqueue error", "blueprint_run", blueprintRunID, "error", mErr)
-		}
-		return "", fmt.Errorf("enqueue first step: %w", err)
-	}
-
+	// The blueprint advances entirely through the run queue from here: the
+	// dispatcher claims step 0, builds the shared workspace, runs the agent,
+	// and the reactor enqueues each next step (or finalizes). No in-process
+	// for-loop holds the sequencing — blueprint_runs does
+	// (current_step_index), so a crash mid-flight is recoverable.
 	verb := "Blueprint started"
 	if triggerType == "event" {
 		verb = "Auto-fired blueprint"

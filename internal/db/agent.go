@@ -106,8 +106,9 @@ func (p Park) ClaimOutcome() string {
 // stored status — so a live engagement's setup sub-state surfaces through
 // the same field the wire has always carried; the
 // terminal lifecycle writes release the conversation's active claim in the
-// same operation as the status flip. Conversation rows are minted by
-// ConversationQueueStore.EnqueueConversation; there is no direct Create here.
+// same operation as the status flip. Conversation rows are minted by the
+// BlueprintStore doors that commit the run or the pointer implying them;
+// there is no Create here.
 //
 // Wired against the app pool in Postgres (RLS-active): every
 // consumer is request-equivalent or runs inside a delegate spawner
@@ -301,7 +302,7 @@ type ConversationStore interface {
 	// ordinary claimable work instead of spawning an in-process goroutine.
 	// Releases any still-active claim with outcome 'requeued' (ownership is
 	// re-established by ClaimNextConversation minting a fresh claim at the actual
-	// claim, exactly like a fresh EnqueueConversation'd row). Clears parked_at and
+	// claim, exactly like a freshly minted row). Clears parked_at and
 	// park_reason together — both describe a park this call is undoing, and a
 	// resumed conversation that went on to conclude must not still name the
 	// stop it was picked back up from.

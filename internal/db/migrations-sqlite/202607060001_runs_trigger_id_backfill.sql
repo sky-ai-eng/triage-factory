@@ -1,8 +1,8 @@
 -- +goose Up
 -- Backfill runs.trigger_id from the parent blueprint_run. Since the blueprint
 -- orchestrator unification, trigger provenance is frozen on
--- blueprint_runs.trigger_id at mint, but the per-step runs rows minted by
--- enqueueBlueprintStep never carried it — so every event-fired run landed in
+-- blueprint_runs.trigger_id at mint, but the per-step runs rows the reactor
+-- minted never carried it — so every event-fired run landed in
 -- llm_spend as category='autonomous' with trigger_id NULL: counted by the
 -- usage page's by-category split yet invisible to the by-rule breakdown
 -- ("no automated runs" under a non-zero Automated share).

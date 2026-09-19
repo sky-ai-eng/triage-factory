@@ -186,7 +186,7 @@ func TestPollGitHubOnce_RateLimitCursorResumesAcrossCycles(t *testing.T) {
 		database: database,
 		pub:      busPublisher{bus: bus},
 		tasks:    stores.Tasks,
-		entities: stores.Entities,
+		entities: stores.Entities, eventQueue: stores.EventQueue,
 		repos:    stores.Repos,
 		resolver: &freshClientPerCallResolver{url: srv.URL},
 	}
@@ -298,7 +298,7 @@ func TestRunGitHubCycleForOrg_CursorSurvivesRepoRemoval(t *testing.T) {
 		database: database,
 		pub:      busPublisher{bus: bus},
 		tasks:    stores.Tasks,
-		entities: stores.Entities,
+		entities: stores.Entities, eventQueue: stores.EventQueue,
 		repos:    stores.Repos,
 		resolver: &freshClientPerCallResolver{url: srv.URL},
 	}
@@ -407,9 +407,9 @@ func TestRunGitHubCycleForOrg_UnresolvedInstallationDoesNotFalselyResetCursor(t 
 		database: database,
 		pub:      busPublisher{bus: bus},
 		tasks:    stores.Tasks,
-		entities: stores.Entities,
-		repos:    stores.Repos,
-		orgs:     stores.Orgs,
+		entities: stores.Entities, eventQueue: stores.EventQueue,
+		repos: stores.Repos,
+		orgs:  stores.Orgs,
 		apps: &fakeInstallsStore{
 			app: &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: true},
 			installs: []domain.OrgGitHubAppInstallation{

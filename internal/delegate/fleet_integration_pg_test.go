@@ -15,8 +15,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 )
 
-// fleetFixture mints a full org/team/task/prompt/blueprint chain and one
-// EnqueueConversation'd conversations row against real Postgres — the two-Spawner harness
+// fleetFixture mints a full org/team/task/prompt/blueprint chain and fires one
+// delegation on it against real Postgres — the two-Spawner harness
 // TFAC-586 calls for ("the reaper needs it anyway"): boot-overlap,
 // reaper-requeue, fence, and drain scenarios all start from the same
 // realistic shape, then diverge in how they manipulate/observe it.
@@ -68,19 +68,19 @@ func seedFleetFixture(t *testing.T, h *pgtest.Harness) fleetFixture {
 		VALUES ($1, $2, $3, $4, $5, $6, '', $7, 'queued', now())
 	`, taskID, orgID, userID, teamID, entityID, domain.EventGitHubPRCICheckFailed, eventID)
 
+	// One firing, through the door production fires through: the
+	// blueprint_run and its step-0 conversation commit together.
 	blueprintRunID := uuid.New().String()
-	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
-		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', $6, now(), '[]')
-	`, blueprintRunID, orgID, userID, blueprintID, taskID, "/tmp/wt-"+blueprintRunID)
-
 	conversationID := uuid.New().String()
 	step0 := 0
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, orgID, domain.BlueprintRun{
+		ID: blueprintRunID, BlueprintID: blueprintID, TaskID: taskID,
+		TriggerType: domain.BlueprintTriggerManual, WorktreePath: "/tmp/wt-" + blueprintRunID,
+	}, db.AgentClaimStamp{}, "", domain.Conversation{
 		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: blueprintRunID, BlueprintStepIndex: &step0,
 	}); err != nil {
-		t.Fatalf("EnqueueConversation: %v", err)
+		t.Fatalf("CreateRunWithFirstStepSystem: %v", err)
 	}
 
 	return fleetFixture{

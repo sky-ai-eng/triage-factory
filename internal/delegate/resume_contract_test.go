@@ -89,18 +89,10 @@ func seedStepFixture(t *testing.T, source, suffix string, steps int, sharedWT st
 	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, promptIDs, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
-	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	brID := dbtest.SeedBlueprintRun(t, database, domain.BlueprintRun{
 		ID: "bpr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
-		StepPlan: plan,
+		WorktreePath: sharedWT, StepPlan: plan,
 	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	brID := created.ID
-	if _, err := database.Exec(`UPDATE blueprint_runs SET worktree_path = ? WHERE id = ?`, sharedWT, brID); err != nil {
-		t.Fatalf("stamp the blueprint's shared worktree: %v", err)
-	}
 
 	conversationIDs := make([]string, steps)
 	for i := range steps {

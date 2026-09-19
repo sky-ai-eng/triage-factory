@@ -12,6 +12,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/wakebus"
 )
 
 // blueprintStore is the Postgres impl of db.BlueprintStore. Holds two pools:
@@ -22,16 +24,15 @@ import (
 //     ResumeBlueprintAfter* paths) runs here.
 //
 //   - admin: admin pool (supabase_admin, BYPASSRLS). The blueprint
-//     orchestrator goroutine — enqueueBlueprintStep / reactToStepTerminal /
-//     terminateBlueprint — detaches from the kicking-off handler's context
-//     the moment it spawns, so it has no JWT-claims in scope and routes
-//     through admin via the `...System` variants. org_id stays in the WHERE
-//     clause as defense in depth.
+//     orchestrator goroutine — reactToStepTerminal / terminateBlueprint —
+//     detaches from the kicking-off handler's context the moment it spawns,
+//     so it has no JWT-claims in scope and routes through admin via the
+//     `...System` variants. org_id stays in the WHERE clause as defense in
+//     depth.
 //
-// CreateRun routes internally on BlueprintRun.TriggerType, mirroring the
-// ConversationStore.Create pattern: event-triggered runs land on the admin pool
-// with NULL creator_user_id, manual runs on the app pool with COALESCE
-// fallback. There is no separate CreateRunSystem.
+// Every blueprint_runs row is written on admin: the two doors that mint or
+// move a run carry no JWT claims on either arm, and a manual firing names its
+// creator on the call rather than resolving one from the session.
 type blueprintStore struct {
 	app   queryer
 	admin queryer
@@ -733,22 +734,6 @@ func (s *blueprintStore) DuplicatePrompts(ctx context.Context, orgID, teamID str
 
 // --- Runs ----------------------------------------------------------------
 
-func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (domain.BlueprintRun, error) {
-	if br.ID == "" {
-		br.ID = uuid.New().String()
-	}
-	if br.Status == "" {
-		br.Status = domain.BlueprintRunStatusRunning
-	}
-	if br.TriggerType == "" {
-		return domain.BlueprintRun{}, errors.New("blueprint run trigger type required")
-	}
-	if br.TriggerType == domain.BlueprintTriggerEvent {
-		return s.createRunEventTriggered(ctx, orgID, br)
-	}
-	return s.createRunManual(ctx, orgID, br)
-}
-
 // pgBlueprintRunColumns is the canonical projection of a blueprint_runs row,
 // in the order scanBlueprintRun reads them. Both reads SELECT it and both
 // single-row run writes RETURN it, so the write shape cannot drift from the
@@ -756,68 +741,6 @@ func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.
 const pgBlueprintRunColumns = `id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id::text, status,
 		       current_step_index, cancel_requested, step_plan,
 		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at`
-
-func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID string, br domain.BlueprintRun) (domain.BlueprintRun, error) {
-	triggerID, abortReason, completedAt := blueprintRunArgs(br)
-	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
-	if err != nil {
-		return domain.BlueprintRun{}, fmt.Errorf("marshal step plan: %w", err)
-	}
-	stored, err := scanBlueprintRun(s.admin.QueryRowContext(ctx, `
-		INSERT INTO blueprint_runs
-			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
-			 actor_agent_id, status, worktree_path, abort_reason, completed_at, started_at, step_plan)
-		VALUES (
-			$1, $2, NULL,
-			$3, $4, $5, $6, $7,
-			$8, $9, $10, $11, $12, now(), $13
-		)
-		RETURNING `+pgBlueprintRunColumns,
-		br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan).Scan)
-	if err != nil {
-		// Same one-active-per-task translation as the fenced insert:
-		// production event runs route through CreateRunIfNotFiredSystem
-		// today, but any caller reaching this path (tests seeding event
-		// runs, a future direct CreateRun user) deserves the documented
-		// sentinel, not a raw unique_violation.
-		if isTaskBusyActiveRun(err) {
-			return domain.BlueprintRun{}, db.ErrTaskBusyActiveRun
-		}
-		return domain.BlueprintRun{}, fmt.Errorf("insert blueprint_run (event): %w", err)
-	}
-	return stored, nil
-}
-
-func (s *blueprintStore) createRunManual(ctx context.Context, orgID string, br domain.BlueprintRun) (domain.BlueprintRun, error) {
-	triggerID, abortReason, completedAt := blueprintRunArgs(br)
-	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
-	if err != nil {
-		return domain.BlueprintRun{}, fmt.Errorf("marshal step plan: %w", err)
-	}
-	stored, err := scanBlueprintRun(s.app.QueryRowContext(ctx, `
-		INSERT INTO blueprint_runs
-			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
-			 actor_agent_id, status, worktree_path, abort_reason, completed_at, started_at, step_plan)
-		VALUES (
-			$1, $2,
-			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-			$3, $4, $5, $6, $7,
-			$8, $9, $10, $11, $12, now(), $13
-		)
-		RETURNING `+pgBlueprintRunColumns,
-		br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan).Scan)
-	if err != nil {
-		// The manual mint is fenced by the same index as the event one. Two
-		// delegate gestures on one task race here with nothing else between
-		// them — the route tears the prior engagement down and mints, which is
-		// check-then-act — and an event firing can get there first.
-		if isTaskBusyActiveRun(err) {
-			return domain.BlueprintRun{}, db.ErrTaskBusyActiveRun
-		}
-		return domain.BlueprintRun{}, fmt.Errorf("insert blueprint_run (manual): %w", err)
-	}
-	return stored, nil
-}
 
 // isTaskBusyActiveRun reports whether err is the one-active-run-per-task index
 // refusing an insert. Every mint door translates through here so the three
@@ -838,13 +761,19 @@ func isTaskBusyActiveRun(err error) bool {
 // means for it.
 const blueprintRunsOneActivePerTaskConstraint = "blueprint_runs_one_active_run_per_task"
 
-// CreateRunIfNotFiredSystem is the event-path fenced insert (admin pool).
-// Two independent unique constraints can turn this insert into a clean
-// no-op instead of a duplicate:
+// CreateRunWithFirstStepSystem commits a firing as one transaction — owner
+// consolidation, the blueprint_runs insert, the task's agent claim, and the
+// first step's conversations row. See the interface for the contract and the
+// statement order; this is that order on the admin pool (a firing carries no
+// JWT claims, on either arm).
+//
+// Two independent unique constraints can turn the run insert into something
+// other than a plain success:
 //
 //   - blueprint_runs_event_trigger_fence (ON CONFLICT, inference-targeted):
 //     a replayed (triggering_event_id, trigger_id) — the at-least-once event
 //     queue redelivering an event whose first auto-delegation already fired.
+//     Returns inserted=false with nothing committed.
 //   - blueprint_runs_one_active_run_per_task (caught below): a DIFFERENT
 //     (event, trigger) pair racing to fire on the SAME task, or a manual
 //     delegation, while a run is still active on it. A single INSERT's ON
@@ -853,14 +782,13 @@ const blueprintRunsOneActivePerTaskConstraint = "blueprint_runs_one_active_run_p
 //     translated to db.ErrTaskBusyActiveRun. NOT the inserted=false
 //     contract: a replay is permanently satisfied, task-busy is a
 //     deferral — the caller must queue the intent, not drop it.
-//
-// The blueprint run row and the task's agent claim commit together — see
-// db.AgentClaimStamp for why they are inseparable. A stamp refusal is not an
-// error and leaves the run committed; a stamp *failure* rolls the run back,
-// so the firing path retries the pair rather than committing half of it.
-func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim db.AgentClaimStamp) (bool, bool, error) {
-	if br.TriggeringEventID == "" || br.TriggerID == "" {
-		return false, false, db.ErrBlueprintRunFenceRequiresEventAndTrigger
+func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim db.AgentClaimStamp, ownerTeamID string, firstStep domain.Conversation) (bool, bool, *domain.Conversation, error) {
+	if br.TriggerType == "" {
+		return false, false, nil, db.ErrBlueprintRunTriggerTypeRequired
+	}
+	event := br.TriggerType == domain.BlueprintTriggerEvent
+	if event && (br.TriggeringEventID == "" || br.TriggerID == "") {
+		return false, false, nil, db.ErrBlueprintRunFenceRequiresEventAndTrigger
 	}
 	if br.ID == "" {
 		br.ID = uuid.New().String()
@@ -870,11 +798,168 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 	}
 	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
 	if err != nil {
-		return false, false, fmt.Errorf("marshal step plan: %w", err)
+		return false, false, nil, fmt.Errorf("marshal step plan: %w", err)
 	}
 	inserted, claimed := false, false
+	var conv *domain.Conversation
 	err = inTx(ctx, s.admin, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
+		// 1. Take the task's row lock, on every firing and before anything
+		// else. Steps 3 and 4 both write this row, AFTER the run insert — so
+		// a firing that reached it only there would hold blueprint_runs while
+		// waiting for tasks, while another firing on the same task held tasks
+		// and waited for blueprint_runs. That is a deadlock, and the detector
+		// resolves it by killing one firing. Taking the task first, always,
+		// means two firings on one task queue instead of colliding.
+		//
+		// A lock and not the consolidation write, which is what step 3 is for:
+		// the fence below may end this transaction having written nothing, and
+		// a row locked but never written is exactly that.
+		if err := lockFiringTask(ctx, q, orgID, br.TaskID); err != nil {
+			return err
+		}
+
+		// 2. The run.
+		if err := insertFiringRun(ctx, q, orgID, br, stepPlan, event, firstStep.CreatorUserID, &inserted); err != nil {
+			return err
+		}
+		if !inserted {
+			// The fence closed: this firing's run committed already, and so
+			// did its owner, its claim and its first step. Everything below is
+			// skipped and this transaction commits nothing — a replay must not
+			// re-stamp a claim the user may have deliberately cleared since,
+			// move an owner the original firing already settled, nor mint a
+			// second step for a run that has one.
+			return nil
+		}
+
+		// 3. Owner consolidation — after the fence, so a replay cannot move
+		// the card, and before the step insert, which derives its team from
+		// this row.
+		if ownerTeamID != "" {
+			if _, err := setOwnerTeam(ctx, q, orgID, br.TaskID, ownerTeamID); err != nil {
+				return fmt.Errorf("consolidate owner team: %w", err)
+			}
+		}
+
+		// 4. The claim.
+		if claim.AgentID != "" {
+			claimed, err = stampAgentClaimIfUnclaimed(ctx, q, orgID, br.TaskID, claim.AgentID, claim.ActingTeamID)
+			if err != nil {
+				return err
+			}
+		}
+
+		// 5. The first step. Its team_id is derived from the task in-SQL, so
+		// it reads step 3's consolidation.
+		conv, err = insertConversation(ctx, q, orgID, firstStep)
+		return err
+	})
+	if err != nil {
+		return false, false, nil, err
+	}
+	if inserted {
+		// Committed: ring the doorbell so an idle executor claims the step
+		// within milliseconds instead of waiting out its scan interval.
+		s.notifyWake(ctx, orgID)
+	}
+	return inserted, claimed, conv, nil
+}
+
+// AdvanceRunToStepSystem — contract and statement order on the interface.
+func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID string, fromStepIndex int, concludedConversationID string, nextStep domain.Conversation) (bool, *domain.Conversation, *domain.Conversation, error) {
+	if !isValidUUID(nextStep.BlueprintRunID) {
+		return false, nil, nil, db.ErrNoSuchBlueprintRun
+	}
+	// The bump writes the step's own index, so an unindexed row is refused
+	// here rather than by the insert that would otherwise catch it: statement
+	// 1 reads the index, and a nil there is a panic, not a rejection.
+	if nextStep.BlueprintStepIndex == nil {
+		return false, nil, nil, fmt.Errorf("%w (conversation %s, blueprint_run %s)",
+			db.ErrBlueprintStepUnindexed, nextStep.ID, nextStep.BlueprintRunID)
+	}
+	advanced := false
+	var ended, conv *domain.Conversation
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		// 1. The pointer, guarded — the fence for everything below it.
+		ok, err := advanceRunCurrentStep(ctx, q, orgID, nextStep.BlueprintRunID, fromStepIndex, *nextStep.BlueprintStepIndex)
+		if err != nil || !ok {
+			// Nothing is written either way: a closed guard leaves the
+			// sequence to whoever moved it, an error rolls the rest back.
+			return err
+		}
+		advanced = true
+
+		// 2. The boundary stamp on the step that just concluded, before the
+		// mint below rather than after it — a conversation opening on a task
+		// whose prior one is still un-ended is the shape this ordering exists
+		// to make unobservable.
+		if ended, err = endConversation(ctx, q, orgID, concludedConversationID, domain.EndedStepAdvanced); err != nil {
+			return fmt.Errorf("stamp the step-advance boundary: %w", err)
+		}
+
+		// 3. The next step.
+		conv, err = insertConversation(ctx, q, orgID, nextStep)
+		return err
+	})
+	if err != nil {
+		return false, nil, nil, err
+	}
+	if advanced {
+		// Committed: ring the doorbell, so an idle executor claims the step
+		// within milliseconds instead of waiting out its scan interval.
+		s.notifyWake(ctx, orgID)
+	}
+	return advanced, ended, conv, nil
+}
+
+// advanceRunCurrentStep moves a running blueprint_run's sequencing pointer one
+// step on, and reports whether it moved. The predicate is the compare-and-swap
+// the advance transaction fences on: a run that terminated since its reactor
+// read it, or whose pointer another engagement already moved, matches no row
+// and writes nothing.
+func advanceRunCurrentStep(ctx context.Context, q queryer, orgID, id string, from, to int) (bool, error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE blueprint_runs SET current_step_index = $1
+		WHERE org_id = $2 AND id = $3 AND status = 'running' AND current_step_index = $4
+	`, to, orgID, id, from)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// lockFiringTask takes the row lock on a firing's task, and reports
+// db.ErrNoSuchTask when there is no such row — the firing's first statement,
+// so a task that does not exist is refused before anything is written.
+//
+// SELECT … FOR UPDATE rather than a write: this is about lock ORDER (see the
+// call site), and a firing whose fence catches a replay has to leave the task
+// exactly as it found it. Readers are unaffected; only another writer of the
+// same task waits.
+func lockFiringTask(ctx context.Context, q queryer, orgID, taskID string) error {
+	var one int
+	err := q.QueryRowContext(ctx,
+		`SELECT 1 FROM tasks WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, taskID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.ErrNoSuchTask
+	}
+	return err
+}
+
+// insertFiringRun writes the blueprint_runs row for a firing on the given
+// transaction, fenced on the event arm and plain on the manual one, and
+// reports through inserted whether a row landed. Split out so the two arms'
+// only difference — the fence and the creator column the schema CHECK pairs
+// with trigger_type — reads as the two statements it is.
+func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.BlueprintRun, stepPlan string, event bool, creatorUserID string, inserted *bool) error {
+	var res sql.Result
+	var err error
+	if event {
+		res, err = q.ExecContext(ctx, `
 			INSERT INTO blueprint_runs
 				(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
 				 actor_agent_id, status, worktree_path, started_at, step_plan)
@@ -884,31 +969,48 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 				$7, $8, $9, now(), $10
 			)
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-		`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
-		if err != nil {
-			if isTaskBusyActiveRun(err) {
-				return db.ErrTaskBusyActiveRun
-			}
-			return fmt.Errorf("insert blueprint_run (fenced): %w", err)
+		`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
+			nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
+	} else {
+		// A manual run is attributed to the person who asked for it, and the
+		// creator has to arrive on the row — see db.ErrManualCreatorRequired.
+		// The value reaching here is the request's authenticated subject,
+		// threaded through DelegateOpts.CreatorUserID and onto the first step.
+		if creatorUserID == "" || creatorUserID == runmode.LocalDefaultUserID {
+			return fmt.Errorf("insert blueprint_run (manual firing): %w", db.ErrManualCreatorRequired)
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		inserted = n > 0
-		// The fence closed: the original firing already stamped whatever claim
-		// this event was going to make, so a replay must not re-stamp one the
-		// user may have deliberately cleared since.
-		if !inserted || claim.AgentID == "" {
-			return nil
-		}
-		claimed, err = stampAgentClaimIfUnclaimed(ctx, q, orgID, br.TaskID, claim.AgentID, claim.ActingTeamID)
-		return err
-	})
-	if err != nil {
-		return false, false, err
+		res, err = q.ExecContext(ctx, `
+			INSERT INTO blueprint_runs
+				(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
+				 actor_agent_id, status, worktree_path, started_at, step_plan)
+			VALUES (
+				$1, $2, $3::uuid,
+				$4, $5, $6, $7, NULL,
+				$8, $9, $10, now(), $11
+			)
+		`, br.ID, orgID, creatorUserID, br.BlueprintID, br.TaskID, br.TriggerType,
+			nullIfEmpty(br.TriggerID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
 	}
-	return inserted, claimed, nil
+	if err != nil {
+		if isTaskBusyActiveRun(err) {
+			return db.ErrTaskBusyActiveRun
+		}
+		return fmt.Errorf("insert blueprint_run (firing): %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	*inserted = n > 0
+	return nil
+}
+
+// notifyWake fires the tf_wake doorbell after a step lands claimable.
+// Best-effort by contract (wakebus's "never the only path" rule) — a notify
+// failure is swallowed, since the write it announces already committed and
+// the scan-interval backstop covers a dropped doorbell.
+func (s *blueprintStore) notifyWake(ctx context.Context, orgID string) {
+	_ = wakebus.Publish(ctx, s.admin, wakebus.KindRun, orgID)
 }
 
 func (s *blueprintStore) SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) (domain.BlueprintRun, error) {
@@ -944,18 +1046,6 @@ func isNewestRunForTask(ctx context.Context, q queryer, orgID, taskID, blueprint
 		return false, err
 	}
 	return isNewest, nil
-}
-func blueprintRunArgs(br domain.BlueprintRun) (triggerID, abortReason, completedAt any) {
-	if br.TriggerID != "" {
-		triggerID = br.TriggerID
-	}
-	if br.AbortReason != "" {
-		abortReason = br.AbortReason
-	}
-	if br.CompletedAt != nil {
-		completedAt = br.CompletedAt.UTC()
-	}
-	return
 }
 
 func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {
@@ -1298,16 +1388,6 @@ func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id strin
 		return false, err
 	}
 	return n > 0, nil
-}
-
-func (s *blueprintStore) SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) (domain.BlueprintRun, error) {
-	if !isValidUUID(id) {
-		return domain.BlueprintRun{}, db.ErrNoSuchBlueprintRun
-	}
-	return scanUpdatedBlueprintRunPG(s.admin.QueryRowContext(ctx,
-		`UPDATE blueprint_runs SET current_step_index = $1 WHERE org_id = $2 AND id = $3
-		 RETURNING `+pgBlueprintRunColumns,
-		stepIndex, orgID, id))
 }
 
 func (s *blueprintStore) RequestRunCancelSystem(ctx context.Context, orgID, id string) (bool, error) {

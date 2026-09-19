@@ -133,9 +133,9 @@ func TestRunGitHubCycleForOrg_StagedAppPollsViaPAT(t *testing.T) {
 		database: database,
 		pub:      busPublisher{bus: bus},
 		tasks:    stores.Tasks,
-		entities: stores.Entities,
-		repos:    stores.Repos,
-		orgs:     stores.Orgs,
+		entities: stores.Entities, eventQueue: stores.EventQueue,
+		repos: stores.Repos,
+		orgs:  stores.Orgs,
 		// A staged App: registered (a row exists) but active=false, plus an
 		// installation that would otherwise pull us into the App path.
 		apps: &fakeInstallsStore{
@@ -184,9 +184,9 @@ func TestRunGitHubCycleForOrg_ActiveAppNoFunctionalInstallationDegrades(t *testi
 		database: database,
 		pub:      busPublisher{bus: bus},
 		tasks:    stores.Tasks,
-		entities: stores.Entities,
-		repos:    stores.Repos,
-		orgs:     stores.Orgs,
+		entities: stores.Entities, eventQueue: stores.EventQueue,
+		repos: stores.Repos,
+		orgs:  stores.Orgs,
 		apps: &fakeInstallsStore{
 			app:      &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: true},
 			installs: []domain.OrgGitHubAppInstallation{{InstallationID: "1", AccountLogin: "octo"}},

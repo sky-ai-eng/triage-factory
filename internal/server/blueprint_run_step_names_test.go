@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -18,7 +19,6 @@ import (
 // still returns the steps and simply omits the field.
 func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 	s := newTestServer(t)
-	ctx := context.Background()
 
 	bpID, p0 := createWrappedBlueprint(t, s, "Reproduce")
 	p1 := createBarePrompt(t, s, "Patch")
@@ -31,21 +31,16 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 	taskID := seedBlueprintRunTask(t, s, "owner/repo#names")
 
 	// The plan a delegation freezes onto the run at mint — prompt names and all.
-	plannedID := fixtureUUID("br-named")
-	if _, err := sqlitestore.New(s.db).Blueprints.CreateRun(ctx, runmode.LocalDefaultOrgID, domain.BlueprintRun{
-		ID:           plannedID,
+	plannedID := dbtest.SeedBlueprintRun(t, s.db, domain.BlueprintRun{
+		ID:           fixtureUUID("br-named"),
 		BlueprintID:  bpID,
 		TaskID:       taskID,
-		TriggerType:  domain.BlueprintTriggerManual,
-		Status:       domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-named",
 		StepPlan: []domain.BlueprintPlanStep{
 			{StepIndex: 0, PromptID: p0, PromptName: "Reproduce", PromptBody: "do Reproduce", Source: "user"},
 			{StepIndex: 1, PromptID: p1, PromptName: "Patch", PromptBody: "b", Source: "user", Brief: "land the fix"},
 		},
-	}); err != nil {
-		t.Fatalf("CreateRun (planned): %v", err)
-	}
+	})
 
 	steps := getBlueprintRunSteps(t, s, plannedID)
 	if len(steps) != 2 {
@@ -72,18 +67,12 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 	// The defensive branch: a run with no frozen plan falls back to the live
 	// steps, which carry a prompt id and no name. Its own task, because one
 	// running blueprint_run per task is a schema invariant.
-	unplannedID := fixtureUUID("br-unnamed")
-	unplannedTaskID := seedBlueprintRunTask(t, s, "owner/repo#unnamed")
-	if _, err := sqlitestore.New(s.db).Blueprints.CreateRun(ctx, runmode.LocalDefaultOrgID, domain.BlueprintRun{
-		ID:           unplannedID,
+	unplannedID := dbtest.SeedBlueprintRun(t, s.db, domain.BlueprintRun{
+		ID:           fixtureUUID("br-unnamed"),
 		BlueprintID:  bpID,
-		TaskID:       unplannedTaskID,
-		TriggerType:  domain.BlueprintTriggerManual,
-		Status:       domain.BlueprintRunStatusRunning,
+		TaskID:       seedBlueprintRunTask(t, s, "owner/repo#unnamed"),
 		WorktreePath: "/tmp/wt-unnamed",
-	}); err != nil {
-		t.Fatalf("CreateRun (unplanned): %v", err)
-	}
+	})
 
 	fallback := getBlueprintRunSteps(t, s, unplannedID)
 	if len(fallback) != 2 {

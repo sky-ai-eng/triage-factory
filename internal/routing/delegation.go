@@ -238,31 +238,23 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 		return r.enqueueBusyFiring(ctx, orgID, entityID, task, trigger, triggeringEventID, actingTeamID, agentID)
 	}
 
-	// Consolidate the owner team to the acting team BEFORE firing. An
-	// auto-fired conversation inherits conversations.team_id from tasks.team_id
-	// at insert, and the claim (which also consolidates the owner) lands inside
-	// that same insert — so without this, a conversation fired by a team other
-	// than the creation-time owner (e.g. the owner had auto-delegation disabled
-	// and a lower-priority team is firing) would read the stale owner as it
-	// writes its own row. Owner-only update, no claim touch: if the fire fails
-	// the task is owned by the team that tried, unclaimed — not a phantom
-	// claim. Skipped when the acting team already is the owner (the common
-	// path, and same-team multi-prompt where an active conversation may exist).
-	if actingTeamID != "" && actingTeamID != teamIDValue(task) {
-		if updated, err := r.tasks.SetOwnerTeamSystem(ctx, orgID, task.ID, actingTeamID); err != nil {
-			routerLog.Error("failed to consolidate owner team before fire", "task_id", task.ID, "error", err)
-		} else {
-			task.TeamID = updated.TeamID
-		}
-	}
-	// The claim rides the fenced blueprint-run insert's transaction (see
-	// db.AgentClaimStamp): the blueprint-run row and "the bot owns this task"
-	// are one durable write, so there is no window where the conversation is
-	// live and the board still shows the task free. A stamp refusal — a user
-	// claiming mid-fire — does not roll the blueprint run back; the human wins
-	// the claim, the conversation still runs, and the drain path's
-	// claim_changed guard keeps later firings off it.
-	if _, err := r.fireDelegate(ctx, orgID, task, trigger, triggeringEventID, agentID, claimStamp(agentID, actingTeamID)); err != nil {
+	// The firing is one transaction (see BlueprintStore.CreateRunWithFirstStepSystem):
+	// the owner consolidation, the blueprint_run row, "the bot owns this task",
+	// and step 0's conversation are one durable write, so there is no window
+	// where the conversation is live and the board still shows the task free
+	// or owned by the wrong team.
+	//
+	// actingTeamID travels as the owner to consolidate to, because an
+	// auto-fired conversation inherits conversations.team_id from
+	// tasks.team_id at insert: a firing by a team other than the creation-time
+	// owner (the owner has auto-delegation disabled and a lower-priority team
+	// is firing) would otherwise open under the stale owner. The claim stamp
+	// consolidates too, but cannot be relied on for it — a stamp refusal (a
+	// user claiming mid-fire, or the bot already owning the task) leaves the
+	// run committed and the owner unmoved. A refusal is otherwise not a
+	// rollback: the human wins the claim, the conversation still runs, and the
+	// drain path's claim_changed guard keeps later firings off it.
+	if _, err := r.fireDelegate(ctx, orgID, task, trigger, triggeringEventID, agentID, claimStamp(agentID, actingTeamID), actingTeamID); err != nil {
 		// A replayed event (at-least-once queue) whose first blueprint run
 		// already committed hits the (event, trigger) fence and comes back
 		// as ErrAlreadyFired. Clean skip — the original blueprint run + its
@@ -471,27 +463,27 @@ func (r *Router) claimCommitted(orgID string, task *domain.Task, actingTeamID, a
 	})
 }
 
-// syncClaimAfterCommit reads back the claim that rode the fenced blueprint-run
-// insert. The fire path is the one commitment whose store call the router
-// doesn't make itself — it goes through the spawner — so the outcome comes
-// from the row rather than a return value. This is a read of the claim column,
-// not a derivation from conversation liveness: a user who won the race
-// mid-fire reads back as the owner and neither the in-memory task nor the
-// Board is told otherwise.
+// syncClaimAfterCommit reads back the claim and the owner that rode the
+// firing's transaction. The fire path is the one commitment whose store call
+// the router doesn't make itself — it goes through the spawner — so the
+// outcome comes from the row rather than a return value. This is a read of the
+// claim column, not a derivation from conversation liveness: a user who won
+// the race mid-fire reads back as the owner and neither the in-memory task nor
+// the Board is told otherwise.
 //
 // Best-effort. A failed read leaves the router's in-memory copy stale for the
 // rest of this event's trigger loop, which is what a failed stamp used to do
 // on every fire; the committed row is already correct either way.
 func (r *Router) syncClaimAfterCommit(ctx context.Context, orgID string, task *domain.Task, agentID string) {
-	if agentID == "" {
-		return
-	}
 	fresh, err := r.tasks.GetSystem(ctx, orgID, task.ID)
 	if err != nil || fresh == nil {
 		routerLog.Warn("could not read back the task claim committed with the blueprint run", "task_id", task.ID, "error", err)
 		return
 	}
-	moved := task.ClaimedByAgentID != agentID && fresh.ClaimedByAgentID == agentID
+	// An empty agentID is test wiring with no agents store: no claim was
+	// stamped, so nothing moved and there is nothing to announce — but the
+	// owner consolidation still committed, so the sync above is not skipped.
+	moved := agentID != "" && task.ClaimedByAgentID != agentID && fresh.ClaimedByAgentID == agentID
 	task.ClaimedByAgentID = fresh.ClaimedByAgentID
 	task.ClaimedByUserID = fresh.ClaimedByUserID
 	task.TeamID = fresh.TeamID
@@ -546,14 +538,22 @@ func (r *Router) stampAgentClaim(ctx context.Context, orgID string, task *domain
 // claim); the drain path passes the firing's already-stamped task claim. It's
 // frozen onto blueprint_runs.actor_agent_id at mint and inherited by every step.
 //
-// claim is the task claim to write inside the blueprint-run insert's own
-// transaction, and is deliberately NOT derived from actorAgentID. The immediate path passes
+// claim is the task claim to write inside the firing's own transaction, and is
+// deliberately NOT derived from actorAgentID. The immediate path passes
 // one: this fire is the commitment, so the claim must land with it. The drain
 // path passes the zero stamp: its firing's claim was committed by the enqueue
 // that queued it, and attemptDrainOne has just re-validated that the claim is
 // still the bot's — re-stamping here would silently re-impose a claim a user
 // cleared by requeueing in the interim.
-func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID, actorAgentID string, claim dbpkg.AgentClaimStamp) (string, error) {
+//
+// ownerTeamID is the team the task's card consolidates to inside that same
+// transaction, and it is separate from the claim for the reason the claim is
+// separate from the actor: a stamp refusal still commits the run, so the
+// consolidation cannot ride on the stamp landing. Empty leaves the owner
+// alone — the drain path's consolidation happened at the enqueue that queued
+// the firing, and re-imposing it here would fight a user's requeue the same
+// way a re-stamped claim would.
+func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID, actorAgentID string, claim dbpkg.AgentClaimStamp, ownerTeamID string) (string, error) {
 	// The handoff point, and the last thing this trace can see: what the
 	// spawner enqueues is claimed minutes later, by another process, and up
 	// to five times — so the engagement gets its own root and the
@@ -595,6 +595,7 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 		TriggeringEventID:   triggeringEventID,
 		ActorAgentID:        actorAgentID,
 		TaskClaim:           claim,
+		OwnerTeamID:         ownerTeamID,
 	})
 	if err != nil {
 		// Post-B+: nothing to revert status-wise (status stayed 'queued').
@@ -946,7 +947,7 @@ func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *doma
 	// claim stamp rides this insert: the claim is already the bot's (the guard
 	// above just read it), and re-writing it would be the one shape that turns a
 	// user's requeue-with-a-live-conversation back into a bot claim.
-	id, err := r.fireDelegate(ctx, orgID, task, *trigger, firing.TriggeringEventID, task.ClaimedByAgentID, dbpkg.AgentClaimStamp{})
+	id, err := r.fireDelegate(ctx, orgID, task, *trigger, firing.TriggeringEventID, task.ClaimedByAgentID, dbpkg.AgentClaimStamp{}, "")
 	if err != nil {
 		// The blueprint run for this (event, trigger) already exists — a
 		// prior drain attempt fired it (process died before MarkFired), or

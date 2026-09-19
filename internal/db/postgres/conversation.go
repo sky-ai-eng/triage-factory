@@ -406,7 +406,7 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 // Always claims-scoped — resume is always user-initiated, so
 // there is no admin-pool "...System" variant. The active claim releases as
 // 'requeued' (ownership is re-established when ClaimNextConversation mints a fresh
-// claim, exactly like a fresh EnqueueConversation'd row).
+// claim, exactly like a freshly minted row).
 //
 // preferred_executor_id is re-stamped, in this statement, to the executor of
 // the conversation's newest claim. A resume knows something better than a
@@ -466,8 +466,8 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 		}
 		// tf_wake doorbell: resume-by-enqueue re-queues an
 		// EXISTING row rather than inserting one, so it needs its own
-		// notify — ConversationQueueStore.EnqueueConversation's doesn't fire for this path.
-		// Best-effort, same "never the only path" contract as there.
+		// notify — the doorbell a step mint rings does not fire for this
+		// path. Best-effort, same "never the only path" contract as there.
 		_ = wakebus.Publish(ctx, s.q, wakebus.KindEvent, orgID)
 	}
 	return flipped, nil

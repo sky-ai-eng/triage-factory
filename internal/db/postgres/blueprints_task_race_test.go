@@ -31,6 +31,13 @@ type raceFixture struct {
 	agentID string
 	newTask func(t *testing.T) string
 	firing  func(t *testing.T, taskID string) domain.BlueprintRun
+	// firstStep is the step-0 conversations row a firing commits alongside
+	// its blueprint_run — the shape CreateRunWithFirstStepSystem takes.
+	firstStep func(br domain.BlueprintRun) domain.Conversation
+	// promptID backs that row: a blueprint-origin conversation must name a
+	// prompt (conversations_origin_requires_parents), and its (prompt_id,
+	// org_id) FK needs a real row.
+	promptID string
 }
 
 func newRaceFixture(t *testing.T, h *pgtest.Harness) raceFixture {
@@ -96,7 +103,31 @@ func newRaceFixture(t *testing.T, h *pgtest.Harness) raceFixture {
 	); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
-	return raceFixture{orgID: orgID, entityID: entityID, userID: userID, agentID: agentID, newTask: newTask, firing: firing}
+	promptID := "race-p0"
+	seedPgPrompt(t, h, orgID, userID, promptID)
+	firstStep := func(br domain.BlueprintRun) domain.Conversation {
+		step0 := 0
+		return domain.Conversation{
+			ID: uuid.New().String(), TaskID: br.TaskID, PromptID: promptID, Model: "m",
+			TriggerType: "event", TriggerID: br.TriggerID,
+			BlueprintRunID: br.ID, BlueprintStepIndex: &step0,
+		}
+	}
+	return raceFixture{
+		orgID: orgID, entityID: entityID, userID: userID, agentID: agentID,
+		newTask: newTask, firing: firing, firstStep: firstStep, promptID: promptID,
+	}
+}
+
+// fire runs one firing through the single door, minting br.ID when the caller
+// left it empty so the step conversation can point at it. The store mints an
+// id of its own for an empty one, which the step row could not then reference.
+func (fx raceFixture) fire(t *testing.T, stores db.Stores, br domain.BlueprintRun, claim db.AgentClaimStamp) (bool, bool, *domain.Conversation, error) {
+	t.Helper()
+	if br.ID == "" {
+		br.ID = uuid.New().String()
+	}
+	return stores.Blueprints.CreateRunWithFirstStepSystem(context.Background(), fx.orgID, br, claim, "", fx.firstStep(br))
 }
 
 // TestBlueprintStore_Postgres_OneActiveRunPerTask: the task gate
@@ -106,7 +137,7 @@ func newRaceFixture(t *testing.T, h *pgtest.Harness) raceFixture {
 // blueprint_runs_one_active_run_per_task is the DB-enforced backstop.
 //
 // Several distinct (trigger, triggering_event) pairs on one task fire
-// CreateRunIfNotFiredSystem CONCURRENTLY (real goroutines behind a start
+// CreateRunWithFirstStepSystem CONCURRENTLY (real goroutines behind a start
 // barrier, racing genuinely simultaneous transactions — not sequential
 // calls, which a unique index would trivially survive regardless of whether
 // the constraint is actually correct): exactly one may land; every loser
@@ -126,6 +157,7 @@ func TestBlueprintStore_Postgres_OneActiveRunPerTask(t *testing.T) {
 	firings := make([]domain.BlueprintRun, racers)
 	for i := range firings {
 		firings[i] = fx.firing(t, taskID)
+		firings[i].ID = uuid.New().String()
 	}
 
 	insertedFlags := make([]bool, racers)
@@ -140,7 +172,7 @@ func TestBlueprintStore_Postgres_OneActiveRunPerTask(t *testing.T) {
 			defer wg.Done()
 			ready.Done()
 			<-start
-			insertedFlags[i], _, errs[i] = stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, firings[i], db.AgentClaimStamp{})
+			insertedFlags[i], _, _, errs[i] = stores.Blueprints.CreateRunWithFirstStepSystem(ctx, fx.orgID, firings[i], db.AgentClaimStamp{}, "", fx.firstStep(firings[i]))
 		}(i)
 	}
 	ready.Wait()
@@ -183,9 +215,9 @@ func TestBlueprintStore_Postgres_OneActiveRunPerTask(t *testing.T) {
 	`, fx.orgID, taskID); err != nil {
 		t.Fatalf("complete winning run: %v", err)
 	}
-	insertedNext, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, fx.firing(t, taskID), db.AgentClaimStamp{})
+	insertedNext, _, _, err := fx.fire(t, stores, fx.firing(t, taskID), db.AgentClaimStamp{})
 	if err != nil {
-		t.Fatalf("CreateRunIfNotFiredSystem after termination: %v", err)
+		t.Fatalf("CreateRunWithFirstStepSystem after termination: %v", err)
 	}
 	if !insertedNext {
 		t.Fatal("firing after the task's active run terminated should insert")
@@ -201,7 +233,6 @@ func TestBlueprintStore_Postgres_SiblingTasksOnOneEntityBothFire(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	ctx := context.Background()
 
 	fx := newRaceFixture(t, h)
 	taskA, taskB := fx.newTask(t), fx.newTask(t)
@@ -210,9 +241,9 @@ func TestBlueprintStore_Postgres_SiblingTasksOnOneEntityBothFire(t *testing.T) {
 		name   string
 		taskID string
 	}{{"first task", taskA}, {"sibling task", taskB}} {
-		inserted, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, fx.firing(t, tc.taskID), db.AgentClaimStamp{})
+		inserted, _, _, err := fx.fire(t, stores, fx.firing(t, tc.taskID), db.AgentClaimStamp{})
 		if err != nil {
-			t.Fatalf("%s: CreateRunIfNotFiredSystem: %v", tc.name, err)
+			t.Fatalf("%s: CreateRunWithFirstStepSystem: %v", tc.name, err)
 		}
 		if !inserted {
 			t.Fatalf("%s: firing should insert — a busy sibling task must not block it", tc.name)
@@ -234,13 +265,13 @@ func TestBlueprintStore_Postgres_SiblingTasksOnOneEntityBothFire(t *testing.T) {
 	}
 }
 
-// TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim is the Postgres
-// twin of the SQLite test of the same shape: the fenced insert is a
-// delegation's commitment point, so the task's agent claim commits in the same
-// transaction as the blueprint run row. Without that, a failed stamp leaves the board
-// showing a free task under a live run and no replay can repair it — the
+// TestBlueprintStore_Postgres_FiringCarriesTaskClaim is the Postgres twin of
+// the SQLite test of the same shape: the firing is a delegation's commitment
+// point, so the task's agent claim commits in the same transaction as the
+// blueprint run row. Without that, a failed stamp leaves the board showing a
+// free task under a live run and no replay can repair it — the
 // (triggering_event_id, trigger_id) fence closes first.
-func TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim(t *testing.T) {
+func TestBlueprintStore_Postgres_FiringCarriesTaskClaim(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -260,9 +291,9 @@ func TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim(t *testing.T) {
 
 	t.Run("stamps_with_the_run", func(t *testing.T) {
 		taskID := fx.newTask(t)
-		inserted, claimed, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, fx.firing(t, taskID), db.AgentClaimStamp{AgentID: fx.agentID})
+		inserted, claimed, _, err := fx.fire(t, stores, fx.firing(t, taskID), db.AgentClaimStamp{AgentID: fx.agentID})
 		if err != nil {
-			t.Fatalf("CreateRunIfNotFiredSystem: %v", err)
+			t.Fatalf("CreateRunWithFirstStepSystem: %v", err)
 		}
 		if !inserted || !claimed {
 			t.Fatalf("(inserted=%v, claimed=%v), want (true, true)", inserted, claimed)
@@ -280,9 +311,9 @@ func TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim(t *testing.T) {
 			t.Fatalf("SetClaimedByUser: %v", err)
 		}
 		br := fx.firing(t, taskID)
-		inserted, claimed, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, br, db.AgentClaimStamp{AgentID: fx.agentID})
+		inserted, claimed, _, err := fx.fire(t, stores, br, db.AgentClaimStamp{AgentID: fx.agentID})
 		if err != nil {
-			t.Fatalf("CreateRunIfNotFiredSystem against a user-claimed task: %v", err)
+			t.Fatalf("CreateRunWithFirstStepSystem against a user-claimed task: %v", err)
 		}
 		if !inserted {
 			t.Error("a refused stamp rolled the run insert back")
@@ -305,7 +336,8 @@ func TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim(t *testing.T) {
 	t.Run("fenced_replay_re_stamps_nothing", func(t *testing.T) {
 		taskID := fx.newTask(t)
 		br := fx.firing(t, taskID)
-		if inserted, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, br, db.AgentClaimStamp{AgentID: fx.agentID}); err != nil || !inserted {
+		br.ID = uuid.New().String()
+		if inserted, _, _, err := fx.fire(t, stores, br, db.AgentClaimStamp{AgentID: fx.agentID}); err != nil || !inserted {
 			t.Fatalf("first fire: inserted=%v err=%v", inserted, err)
 		}
 		// The user requeues while the run stays live — the deliberate
@@ -316,12 +348,22 @@ func TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim(t *testing.T) {
 		}
 		replay := br
 		replay.ID = ""
-		inserted, claimed, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, replay, db.AgentClaimStamp{AgentID: fx.agentID})
+		inserted, claimed, conv, err := fx.fire(t, stores, replay, db.AgentClaimStamp{AgentID: fx.agentID})
 		if err != nil {
 			t.Fatalf("replay fire: %v", err)
 		}
 		if inserted || claimed {
 			t.Errorf("replay = (inserted=%v, claimed=%v), want (false, false)", inserted, claimed)
+		}
+		if conv != nil {
+			t.Error("a fenced replay minted a second step conversation")
+		}
+		var steps int
+		if err := h.AdminDB.QueryRow(`SELECT count(*) FROM conversations WHERE task_id = $1`, taskID).Scan(&steps); err != nil {
+			t.Fatalf("count step conversations: %v", err)
+		}
+		if steps != 1 {
+			t.Errorf("conversations on the task = %d, want 1 (the replay must mint none)", steps)
 		}
 		if agent, user := readClaim(t, taskID); agent != "" || user != "" {
 			t.Errorf("claim after replay = (agent=%q, user=%q), want the requeue's cleared claim to hold", agent, user)

@@ -663,14 +663,6 @@ func (s *taskStore) VisibilityTeamsSystem(ctx context.Context, orgID, taskID str
 	return visibilityTeams(ctx, s.admin, taskID)
 }
 
-func (s *taskStore) SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error) {
-	return setOwnerTeam(ctx, s.q, orgID, taskID, teamID)
-}
-
-func (s *taskStore) SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error) {
-	return setOwnerTeam(ctx, s.admin, orgID, taskID, teamID)
-}
-
 func setOwnerTeam(ctx context.Context, q queryer, orgID, taskID, teamID string) (domain.Task, error) {
 	// Resolve the LocalDefaultTeamID sentinel to the canonical team so the
 	// teams(id) FK holds, mirroring FindOrCreate/StampAgentClaim. Only
@@ -685,8 +677,7 @@ func setOwnerTeam(ctx context.Context, q queryer, orgID, taskID, teamID string) 
 		}
 	}
 	// The row still has to exist for the write to answer anything, so a
-	// bogus id reports ErrNoSuchTask on this path too instead of the prior
-	// silent no-op — see SetOwnerTeam's doc comment on the interface.
+	// bogus id reports ErrNoSuchTask on this path rather than a silent no-op.
 	var t domain.Task
 	return scanTaskBareRow(q.QueryRowContext(ctx, `
 		UPDATE tasks SET team_id = COALESCE(NULLIF($1, '')::uuid, team_id)
