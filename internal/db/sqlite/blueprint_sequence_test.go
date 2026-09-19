@@ -153,6 +153,10 @@ func TestBlueprintStore_SQLite_Sequence(t *testing.T) {
 			// rather than deriving one from the task, so the assertion would
 			// prove nothing here. The Postgres arm carries it.
 			ConversationTeam: nil,
+			GetConversation: func(t *testing.T, convID string) (*domain.Conversation, error) {
+				t.Helper()
+				return stores.Conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, convID)
+			},
 		}
 	})
 }

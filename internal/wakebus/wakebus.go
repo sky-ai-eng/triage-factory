@@ -22,8 +22,8 @@ const Channel = "tf_wake"
 
 // Kind values discriminate WHY a conversation became claimable — not which
 // table it lives in (both kinds nudge the same conversation-queue claim
-// loop): "run" is a fresh ConversationQueueStore.EnqueueConversation (a new
-// blueprint step); "event" is ConversationStore.MarkQueuedForResume
+// loop): "run" is a freshly minted blueprint step (BlueprintStore's firing
+// and advance doors); "event" is ConversationStore.MarkQueuedForResume
 // (resume-by-enqueue — a parked/terminal-resumable conversation woken by an
 // external message).
 const (

@@ -370,7 +370,7 @@ footer {
     </tbody>
   </table>
 
-  <p>Two facts the rows lean on. Memory is written only at the completion gate, from the agent-authored <code>_tfac/memory.md</code> (<code>internal/delegate/native_run.go:632-641</code>, <code>run.go:846</code>, reader at <code>memory.go:103</code>); a stopped run writes none, and the human discard note is an UPDATE on a row that must already exist (<code>postgres/task_memory.go:131</code>). And there is no conversation outside a blueprint step: the only INSERT is <code>EnqueueConversation</code> from <code>enqueueBlueprintStep</code>, <code>type</code> and <code>visibility</code> are literals there, and <code>interactive</code> is declared and never minted (<code>internal/domain/agent.go:104-116</code>).</p>
+  <p>Two facts the rows lean on. Memory is written only at the completion gate, from the agent-authored <code>_tfac/memory.md</code> (<code>internal/delegate/native_run.go:632-641</code>, <code>run.go:846</code>, reader at <code>memory.go:103</code>); a stopped run writes none, and the human discard note is an UPDATE on a row that must already exist (<code>postgres/task_memory.go:131</code>). And there is no conversation outside a blueprint step: the only INSERTs are the ones inside <code>BlueprintStore</code>'s firing and advance doors, <code>type</code> and <code>visibility</code> are literals there, and <code>interactive</code> is declared and never minted (<code>internal/domain/agent.go:104-116</code>).</p>
 </section>
 
 <!-- ===================================================== -->

@@ -56,8 +56,8 @@ func seedBlueprintRunForConversation(t *testing.T, conn *sql.DB, taskID string) 
 }
 
 // insertConversationForTest inserts a conversations row directly — the test
-// fixture stand-in for the queue's EnqueueConversation mint, staging rows in
-// arbitrary status. The trigger_type↔creator CHECK is satisfied by pairing
+// fixture stand-in for the mint inside a BlueprintStore door, staging rows in
+// arbitrary status without staging a whole firing for each. The trigger_type↔creator CHECK is satisfied by pairing
 // 'manual' with the sentinel user and 'event' with NULL. Fields honored:
 // ID, TaskID, PromptID, Status, Model, TriggerType, TriggerID,
 // BlueprintRunID, BlueprintStepIndex.
@@ -79,12 +79,19 @@ func insertConversationForTest(t *testing.T, conn *sql.DB, conv domain.Conversat
 	if conv.BlueprintStepIndex != nil {
 		stepIdx = *conv.BlueprintStepIndex
 	}
+	// An empty Status writes SQL NULL — the mid-flight state, which is what
+	// an unconcluded conversation carries — not an empty string, which is not
+	// a status at all.
+	var status any
+	if conv.Status != "" {
+		status = conv.Status
+	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, team_id, visibility,
-		                           creator_user_id, blueprint_run_id, blueprint_step_index)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?)
-	`, conv.ID, conv.TaskID, conv.PromptID, conv.Status, conv.Model,
+		                           creator_user_id, blueprint_run_id, blueprint_step_index, queued_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, CURRENT_TIMESTAMP)
+	`, conv.ID, conv.TaskID, conv.PromptID, status, conv.Model,
 		trigger, triggerID, runmode.LocalDefaultTeamID, creator, conv.BlueprintRunID, stepIdx); err != nil {
 		t.Fatalf("insert conversation %s: %v", conv.ID, err)
 	}

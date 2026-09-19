@@ -12,8 +12,8 @@ import (
 
 // SeedConversation inserts a conversations row directly via raw SQLite SQL so
 // test fixtures outside internal/db can seed a conversation in any state.
-// Production mints conversation rows through ConversationQueueStore.EnqueueConversation (there
-// is no store-level Create), but most tests only need a row to hang
+// Production mints a conversation only inside a BlueprintStore door, which
+// takes a whole firing to stage; most tests only need a row to hang
 // messages / artifacts / claims off — this helper is that fixture door.
 //
 // The column list mirrors the conversations DDL. Constraint-driven defaults:

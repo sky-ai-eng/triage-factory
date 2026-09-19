@@ -14,7 +14,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/wakebus"
 )
 
 // conversationQueueStore is the Postgres impl of db.ConversationQueueStore —
@@ -51,35 +50,19 @@ var _ db.ConversationQueueStore = (*conversationQueueStore)(nil)
 // a value at a time.
 const conversationTerminalStatusesSQL = `'completed','failed'`
 
-// EnqueueConversation mints a queued delegation conversation on its own
-// transaction and rings the wake doorbell for it. No blueprint step takes this
-// door: step 0 commits with its run through
-// BlueprintStore.CreateRunWithFirstStepSystem and every step after it commits
-// with the pointer that names it through BlueprintStore.AdvanceRunToStepSystem,
-// each arriving with the write that implies it. What this door is, then, is
-// the standalone mint — the same row shape on a commit of its own.
-func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) (*domain.Conversation, error) {
-	r, err := insertConversation(ctx, s.conn, orgID, conv)
-	if err != nil {
-		return nil, err
-	}
-	s.notifyWake(ctx, orgID)
-	return r, nil
-}
-
-// insertConversation is the mint statement itself, taking the queryer so the
-// blueprint doors can run it on the transaction that also commits the run or
-// the pointer the row belongs to, rather than as a second, separately-failing
-// write. One copy of the row shape, so no door drifts on what a queued
-// delegation looks like. The wake doorbell is NOT rung here: it
-// announces a committed row, so it belongs to whoever owns the commit.
+// insertConversation is the mint a delegation conversation is written by. It
+// takes the queryer because it always runs on the transaction that also
+// commits the blueprint_run or the current_step_index pointer the row belongs
+// to — a step arrives with the write that implies it, never on a commit of
+// its own. The wake doorbell is NOT rung here: it announces a committed row,
+// so it belongs to whoever owns the commit.
 //
 // The row carries NO status — the absence of an outcome is what makes it
 // claimable, so the mint writes nothing to the column and queued_at carries
-// the enqueue moment. runtime is stamped 'native' here and 'sdk' in the
-// SQLite sibling: the dialect IS the mode (Postgres is multi-only, SQLite is
-// local-only), so the split lands where the row is written rather than as a
-// caller-passed knob.
+// the moment it entered the queue. runtime is stamped 'native' here and 'sdk'
+// in the SQLite sibling: the dialect IS the mode (Postgres is multi-only,
+// SQLite is local-only), so the split lands where the row is written rather
+// than as a caller-passed knob.
 //
 // Both arms stamp it explicitly, which is what makes the SDK engine
 // unreachable for a multi delegation: the ratchet means no conversation ever
@@ -145,16 +128,6 @@ func insertConversation(ctx context.Context, q queryer, orgID string, conv domai
 	`, conv.ID, orgID, conv.TaskID, nullIfEmpty(conv.PromptID), conv.Model, conv.WorktreePath,
 		nullIfEmpty(conv.TriggerID), conv.CreatorUserID, nullIfEmpty(conv.ActorAgentID),
 		nullIfEmpty(conv.BlueprintRunID), stepIdx, conv.PreferredExecutorID)
-}
-
-// notifyWake fires the tf_wake doorbell after a row lands
-// claimable, so an idle executor claims within milliseconds instead of
-// waiting out its scan interval. Best-effort by contract (wakebus's "never
-// the only path" rule) — a notify failure is swallowed, never surfaced to
-// the caller, since the write it announces already committed successfully
-// and the scan-interval backstop covers a dropped doorbell.
-func (s *conversationQueueStore) notifyWake(ctx context.Context, orgID string) {
-	_ = wakebus.Publish(ctx, s.conn, wakebus.KindRun, orgID)
 }
 
 // --- The needs-driving predicate ---------------------------------------
@@ -230,16 +203,17 @@ const eligibleForDrivingSQL = needsDrivingSQL
 // in one git tree and whichever concludes last overwriting the other's
 // snapshot. Storage forces the rule; the predicate states it.
 //
-// Equality alone admits every legitimate dispatch because the pointer moves
-// BEFORE the row it names is enqueued (see reactToStepTerminal), and nothing
-// else moves it — no terminal write touches it, so a blueprint that stopped at
-// step N leaves it at N, the conversation a follow-up must land on.
+// Equality alone admits every legitimate dispatch because the pointer and the
+// row it names are committed together (see
+// BlueprintStore.AdvanceRunToStepSystem), and nothing else moves it — no
+// terminal write touches it, so a blueprint that stopped at step N leaves it
+// at N, the conversation a follow-up must land on.
 //
 // Sequencing lives on the blueprint_runs row the claim already joins, so this
 // stays a column comparison rather than a correlated scan over sibling
 // conversations. That matters: this is the hot claim scan. A NULL step index
 // compares NULL and is not drivable — a step that never recorded its position
-// cannot prove it holds the workspace, and EnqueueConversation refuses to mint one.
+// cannot prove it holds the workspace, and the mint refuses to write one.
 //
 // The second clause is the memory gate, and it is about the task rather than
 // the blueprint: a task holding a conversation that ended owing a memory

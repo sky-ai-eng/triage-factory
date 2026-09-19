@@ -883,15 +883,17 @@ func TestFleet_Eviction_RoundTripsTheUncommittedDelta(t *testing.T) {
 	}
 
 	// A sibling step of the same blueprint is claimed on Y: someone is in
-	// this directory.
+	// this directory. Written directly, because the pointer must stay on step
+	// 0 — the advance door would move it with the row it mints, and the
+	// resume at the end of this case is of the step 0 conversation, which the
+	// claim gate only ever drives while the pointer names it.
 	sibling := uuid.New().String()
-	step1 := 1
-	if _, err := f.stores.ConversationQueue.EnqueueConversation(context.Background(), f.orgID, domain.Conversation{
-		ID: sibling, TaskID: f.taskID, PromptID: f.promptID, Model: "m",
-		TriggerType: "manual", CreatorUserID: f.userID, BlueprintRunID: f.brID, BlueprintStepIndex: &step1,
-	}); err != nil {
-		t.Fatalf("enqueue sibling step: %v", err)
-	}
+	pgtest.MustExec(t, f.h.AdminDB, `
+		INSERT INTO conversations (id, org_id, type, runtime, task_id, prompt_id, model, trigger_type,
+		                           team_id, visibility, creator_user_id, blueprint_run_id, blueprint_step_index, queued_at)
+		VALUES ($1, $2, 'delegation', 'native', $3, $4, 'm', 'manual',
+		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2), 'team', $5::uuid, $6, 1, now())
+	`, sibling, f.orgID, f.taskID, f.promptID, f.userID, f.brID)
 	yID, yEpoch := f.y.executorIdentity()
 	siblingClaim := uuid.New().String()
 	pgtest.MustExec(t, f.h.AdminDB, `

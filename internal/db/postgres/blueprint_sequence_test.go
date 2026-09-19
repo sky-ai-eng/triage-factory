@@ -210,6 +210,10 @@ func TestBlueprintStore_Postgres_Sequence(t *testing.T) {
 				}
 				return team.String
 			},
+			GetConversation: func(t *testing.T, convID string) (*domain.Conversation, error) {
+				t.Helper()
+				return stores.Conversations.GetSystem(context.Background(), orgID, convID)
+			},
 		}
 	})
 }

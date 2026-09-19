@@ -18,22 +18,21 @@ type ClaimPredicateHarness struct {
 	OrgID  string
 	UserID string
 
-	// EnqueueDelegation mints one delegation conversation under a running
+	// StageDelegation mints one delegation conversation under a running
 	// blueprint_run and returns its id. Successive calls are successive STEPS
-	// of that one blueprint, and each advances the blueprint's
-	// current_step_index to the step it is about to mint — the order the
-	// reactor writes in, and the thing the claim gate's equality reads.
+	// of that one blueprint, and each leaves current_step_index naming the
+	// step it just minted — which is what the claim gate's equality reads.
 	// runtime is 'sdk' or 'native': the dialect stamps its own at mint
 	// (Postgres native, SQLite sdk), so the seeder rewrites the column to
 	// cover both engines against one backend.
-	EnqueueDelegation func(t *testing.T, runtime string) (convID string)
+	StageDelegation func(t *testing.T, runtime string) (convID string)
 
-	// EnqueueUnindexed attempts the same mint with NO blueprint step index
+	// StageUnindexed attempts the same mint with NO blueprint step index
 	// and hands back the store's error. It is the one shape the claim gate
 	// could never admit — a conversation that names no position in its
 	// sequence — so the mint has to refuse it rather than leave a row in the
 	// work list that nothing will ever pick up.
-	EnqueueUnindexed func(t *testing.T) error
+	StageUnindexed func(t *testing.T) error
 
 	// SetStoredStatus writes conversations.status directly — the fixture
 	// door for the parks and terminals the suite needs on demand. An empty
@@ -179,7 +178,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		t.Run("runtime="+runtime, func(t *testing.T) {
 			t.Run("FreshMint_IsClaimableThroughTheNullArm", func(t *testing.T) {
 				h := mk(t)
-				convID := h.EnqueueDelegation(t, runtime)
+				convID := h.StageDelegation(t, runtime)
 				if st := h.StoredStatus(t, convID); st != "" {
 					t.Fatalf("mint wrote status %q, want none", st)
 				}
@@ -200,7 +199,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				// was concluded — and releasing the claim is the whole
 				// recovery.
 				h := mk(t)
-				convID := h.EnqueueDelegation(t, runtime)
+				convID := h.StageDelegation(t, runtime)
 				mustClaim(t, h, convID)
 				h.InsertRow(t, convID, userRow("the opening turn", true))
 				mustNotClaim(t, h)
@@ -218,7 +217,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 
 			t.Run("Parked_NeedsInputToBecomeClaimableAgain", func(t *testing.T) {
 				h := mk(t)
-				convID := h.EnqueueDelegation(t, runtime)
+				convID := h.StageDelegation(t, runtime)
 				mustClaim(t, h, convID)
 				release(t, h, h.OrgID, convID, "parked")
 				h.SetStoredStatus(t, convID, "open")
@@ -244,7 +243,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 
 			t.Run("Terminal_IsNeverClaimableWhateverRowsItHolds", func(t *testing.T) {
 				h := mk(t)
-				convID := h.EnqueueDelegation(t, runtime)
+				convID := h.StageDelegation(t, runtime)
 				mustClaim(t, h, convID)
 				release(t, h, h.OrgID, convID, "completed")
 				h.SetStoredStatus(t, convID, "completed")
@@ -268,7 +267,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				// refuse rather than leave a row queued for a claim that would
 				// find no tree.
 				h := mk(t)
-				convID := h.EnqueueDelegation(t, runtime)
+				convID := h.StageDelegation(t, runtime)
 				mustClaim(t, h, convID)
 				release(t, h, h.OrgID, convID, "failed")
 				h.SetStoredStatus(t, convID, "failed")
@@ -297,7 +296,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				} {
 					t.Run(tc.name, func(t *testing.T) {
 						h := mk(t)
-						convID := h.EnqueueDelegation(t, runtime)
+						convID := h.StageDelegation(t, runtime)
 						mustClaim(t, h, convID)
 						if tc.status == "open" {
 							release(t, h, h.OrgID, convID, "parked")
@@ -335,7 +334,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			t.Run("RunningBlueprint_EveryStepIsClaimedExactlyOnce", func(t *testing.T) {
 				h := mk(t)
 				for step := 0; step < 3; step++ {
-					convID := h.EnqueueDelegation(t, runtime)
+					convID := h.StageDelegation(t, runtime)
 					mustClaim(t, h, convID)
 					mustNotClaim(t, h)
 					release(t, h, h.OrgID, convID, "completed")
@@ -350,14 +349,14 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			t.Run("RunningBlueprint_DrivesOnlyItsCurrentStep", func(t *testing.T) {
 				h := mk(t)
 
-				// Step 0 runs and concludes; step 1 is enqueued behind it and
+				// Step 0 runs and concludes; step 1 is minted behind it and
 				// claimed, which is the ordinary sequential dispatch.
-				first := h.EnqueueDelegation(t, runtime)
+				first := h.StageDelegation(t, runtime)
 				mustClaim(t, h, first)
 				release(t, h, h.OrgID, first, "completed")
 				h.SetStoredStatus(t, first, "completed")
 
-				second := h.EnqueueDelegation(t, runtime)
+				second := h.StageDelegation(t, runtime)
 				mustClaim(t, h, second)
 
 				// Now the follow-up on the COMPLETED earlier step, with step 1
@@ -403,7 +402,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 					t.Helper()
 					var ids [2]string
 					for i := range ids {
-						ids[i] = h.EnqueueDelegation(t, runtime)
+						ids[i] = h.StageDelegation(t, runtime)
 						mustClaim(t, h, ids[i])
 						release(t, h, h.OrgID, ids[i], "completed")
 						h.SetStoredStatus(t, ids[i], "completed")
@@ -488,7 +487,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				// deliberately, and pinned in RunConversationStoreConformance. See
 				// domain.Conversation.Attempts for which is which.
 				h := mk(t)
-				convID := h.EnqueueDelegation(t, runtime)
+				convID := h.StageDelegation(t, runtime)
 
 				// Four healthy engagements — the ordinary shape of a
 				// conversation a user has followed up on a few times. Each
@@ -557,7 +556,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				if h.CollapseClaimTimestamps == nil {
 					t.Skip("harness cannot stage a coarse clock")
 				}
-				convID := h.EnqueueDelegation(t, runtime)
+				convID := h.StageDelegation(t, runtime)
 
 				// A hand-back, then a healthy engagement that ends the
 				// episode, then one more hand-back.
@@ -583,7 +582,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 
 			t.Run("Compaction_RequestDoesNotWake_FractionalSeqStillMatches", func(t *testing.T) {
 				h := mk(t)
-				convID := h.EnqueueDelegation(t, runtime)
+				convID := h.StageDelegation(t, runtime)
 				mustClaim(t, h, convID)
 				release(t, h, h.OrgID, convID, "parked")
 				h.SetStoredStatus(t, convID, "open")
@@ -606,7 +605,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 
 			t.Run("DisplayStatus_RendersTheFrozenVocabulary", func(t *testing.T) {
 				h := mk(t)
-				convID := h.EnqueueDelegation(t, runtime)
+				convID := h.StageDelegation(t, runtime)
 
 				// Derived queued: mid-flight, nobody driving.
 				if st := h.DisplayStatus(t, convID); st != "queued" {
@@ -663,12 +662,12 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	// Runtime-independent: the mint refuses what the gate could never admit.
 	t.Run("BlueprintConversationWithoutAStepIndexIsRefusedAtTheMint", func(t *testing.T) {
 		h := mk(t)
-		if h.EnqueueUnindexed == nil {
+		if h.StageUnindexed == nil {
 			t.Skip("harness cannot stage an unindexed mint")
 		}
-		err := h.EnqueueUnindexed(t)
+		err := h.StageUnindexed(t)
 		if !errors.Is(err, db.ErrBlueprintStepUnindexed) {
-			t.Fatalf("EnqueueConversation with no step index = %v, want ErrBlueprintStepUnindexed", err)
+			t.Fatalf("minting a step with no step index = %v, want ErrBlueprintStepUnindexed", err)
 		}
 		// The refusal is the whole point: nothing landed, so nothing is
 		// sitting in the work list that no claim could ever reach.
@@ -690,7 +689,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	// by user" on a run nobody stopped.
 	t.Run("ClaimingAParkedConversationClearsItsParkReason", func(t *testing.T) {
 		h := mk(t)
-		convID := h.EnqueueDelegation(t, "sdk")
+		convID := h.StageDelegation(t, "sdk")
 		if _, err := h.Stores.Conversations.ParkOpen(ctx, h.OrgID, convID,
 			db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil {
 			t.Fatalf("park: %v", err)
@@ -722,8 +721,8 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	// drivable, whatever its own state says.
 	t.Run("OnlyTheTasksNewestUnEndedConversationIsClaimed", func(t *testing.T) {
 		h := mk(t)
-		earlier := h.EnqueueDelegation(t, "sdk")
-		later := h.EnqueueDelegation(t, "sdk")
+		earlier := h.StageDelegation(t, "sdk")
+		later := h.StageDelegation(t, "sdk")
 
 		// Point the blueprint back at the earlier step, so its own clause
 		// admits that row. What refuses it now is the task: `later` is newer
@@ -746,8 +745,8 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	// is idle rather than finished and the tree is still its.
 	t.Run("AQueuedStepBehindANewerOpenConversationIsNotClaimed", func(t *testing.T) {
 		h := mk(t)
-		earlier := h.EnqueueDelegation(t, "sdk")
-		later := h.EnqueueDelegation(t, "sdk")
+		earlier := h.StageDelegation(t, "sdk")
+		later := h.StageDelegation(t, "sdk")
 		mustClaim(t, h, later)
 		release(t, h, h.OrgID, later, "parked")
 		h.SetStoredStatus(t, later, "open")
@@ -768,8 +767,8 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	// the concluded conversation may still be resumed into.
 	t.Run("ACompletedUnEndedConversationIsTheTasksLiveOne_ButNotTheRouters", func(t *testing.T) {
 		h := mk(t)
-		earlier := h.EnqueueDelegation(t, "sdk")
-		later := h.EnqueueDelegation(t, "sdk")
+		earlier := h.StageDelegation(t, "sdk")
+		later := h.StageDelegation(t, "sdk")
 		taskID := mustClaim(t, h, later).TaskID
 		release(t, h, h.OrgID, later, "completed")
 		h.SetStoredStatus(t, later, "completed")
@@ -804,8 +803,8 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		if h.SetParentConversation == nil {
 			t.Skip("harness cannot stage a subagent row")
 		}
-		spawner := h.EnqueueDelegation(t, "sdk")
-		sub := h.EnqueueDelegation(t, "sdk")
+		spawner := h.StageDelegation(t, "sdk")
+		sub := h.StageDelegation(t, "sdk")
 		h.SetParentConversation(t, sub, spawner)
 
 		// The newest un-ended row on the task is the subagent, and the claim
@@ -822,7 +821,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		if id, err := h.Stores.Conversations.LiveConversationIDForTaskSystem(ctx, h.OrgID, taskID); err != nil || id != "" {
 			t.Errorf("a subagent alone: the router's read = %q err=%v, want empty", id, err)
 		}
-		next := h.EnqueueDelegation(t, "sdk")
+		next := h.StageDelegation(t, "sdk")
 		mustClaim(t, h, next)
 	})
 
@@ -834,14 +833,14 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	// what makes this testable as a gate rather than as a mint refusal.
 	t.Run("AQueuedStepOnATaskStillOwingAMemoryIsNotClaimed", func(t *testing.T) {
 		h := mk(t)
-		owing := h.EnqueueDelegation(t, "sdk")
+		owing := h.StageDelegation(t, "sdk")
 		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, owing, domain.EndedRequeued); err != nil {
 			t.Fatalf("end the owing conversation: %v", err)
 		}
 		// The next step, minted the way the reactor mints one: the pointer
 		// moves first, so this is the only conversation the blueprint gate
 		// admits. Everything below is the memory gate alone.
-		next := h.EnqueueDelegation(t, "sdk")
+		next := h.StageDelegation(t, "sdk")
 		mustNotClaim(t, h)
 
 		// The memory lands. A `none` row counts: what the gate waits on is
@@ -862,7 +861,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	// not the rule.
 	t.Run("AnEndedConversationWithItsMemoryBlocksNothing", func(t *testing.T) {
 		h := mk(t)
-		done := h.EnqueueDelegation(t, "sdk")
+		done := h.StageDelegation(t, "sdk")
 		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, done, domain.EndedStepAdvanced); err != nil {
 			t.Fatalf("end the conversation: %v", err)
 		}
@@ -871,7 +870,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		); err != nil {
 			t.Fatalf("file the memory: %v", err)
 		}
-		next := h.EnqueueDelegation(t, "sdk")
+		next := h.StageDelegation(t, "sdk")
 		mustClaim(t, h, next)
 	})
 
@@ -883,13 +882,13 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		if h.SetParentConversation == nil {
 			t.Skip("harness cannot stage a subagent row")
 		}
-		parent := h.EnqueueDelegation(t, "sdk")
-		sub := h.EnqueueDelegation(t, "sdk")
+		parent := h.StageDelegation(t, "sdk")
+		sub := h.StageDelegation(t, "sdk")
 		h.SetParentConversation(t, sub, parent)
 		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, sub, domain.EndedFailed); err != nil {
 			t.Fatalf("end the subagent conversation: %v", err)
 		}
-		next := h.EnqueueDelegation(t, "sdk")
+		next := h.StageDelegation(t, "sdk")
 		mustClaim(t, h, next)
 	})
 }

@@ -80,24 +80,24 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, priorOutcomes ...string)
 		VALUES ($1, $2, $3, $4, $5, $6, '', $7, 'queued', now())
 	`, taskID, orgID, userID, teamID, entityID, domain.EventGitHubPRCICheckFailed, eventID)
 
-	blueprintRunID := uuid.New().String()
-	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
-		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', $6, now(), '[]')
-	`, blueprintRunID, orgID, userID, blueprintID, taskID, "/tmp/wt-"+blueprintRunID)
-
 	executorID := "reaper-executor-" + uuid.New().String()[:8]
 	if _, err := stores.Instances.Register(ctx, executorID, domain.InstanceRoleExecutor, "v1", ""); err != nil {
 		t.Fatalf("register executor: %v", err)
 	}
 
+	// One firing, through the door production fires through: the
+	// blueprint_run and its step-0 conversation commit together.
+	blueprintRunID := uuid.New().String()
 	conversationID := uuid.New().String()
 	step0 := 0
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, orgID, domain.BlueprintRun{
+		ID: blueprintRunID, BlueprintID: blueprintID, TaskID: taskID,
+		TriggerType: domain.BlueprintTriggerManual, WorktreePath: "/tmp/wt-" + blueprintRunID,
+	}, db.AgentClaimStamp{}, "", domain.Conversation{
 		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: blueprintRunID, BlueprintStepIndex: &step0,
 	}); err != nil {
-		t.Fatalf("EnqueueConversation: %v", err)
+		t.Fatalf("CreateRunWithFirstStepSystem: %v", err)
 	}
 	for i := 0; i <= len(priorOutcomes); i++ {
 		// The claim is cross-org and takes the globally-oldest eligible

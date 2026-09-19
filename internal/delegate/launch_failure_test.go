@@ -16,9 +16,9 @@ import (
 )
 
 // launchFixture is a claimed blueprint step with a worktree on disk — the
-// shape every pre-agent failure acts on. The conversation is claimed for real
-// (EnqueueConversation + ClaimNextConversation) so the claim id, the claim fence and the
-// re-claim all behave as they do in production.
+// shape every pre-agent failure acts on. The delegation is fired and claimed
+// for real (CreateRunWithFirstStepSystem + ClaimNextConversation) so the claim
+// id, the claim fence and the re-claim all behave as they do in production.
 type launchFixture struct {
 	s        *Spawner
 	database *sql.DB
@@ -77,31 +77,26 @@ func newLaunchFixtureWithWorktree(t *testing.T, suffix, wt string) *launchFixtur
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 
-	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "lfbr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
-		WorktreePath: wt,
+	brID := "lfbr-" + suffix
+	step0 := 0
+	if _, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, domain.BlueprintRun{
+		ID: brID, BlueprintID: bpID, TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, WorktreePath: wt,
 		StepPlan: []domain.BlueprintPlanStep{{
 			StepIndex: 0, PromptID: promptID, PromptName: promptID, PromptBody: "b", Source: "user",
 		}},
-	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
+	}, db.AgentClaimStamp{}, "", domain.Conversation{
+		ID: "lfrun-" + suffix, TaskID: task.ID, PromptID: promptID, Model: "claude-sonnet-4-6",
+		TriggerType: "manual", CreatorUserID: runmode.LocalDefaultUserID,
+		BlueprintRunID: brID, BlueprintStepIndex: &step0, WorktreePath: wt,
+	}); err != nil {
+		t.Fatalf("CreateRunWithFirstStepSystem: %v", err)
 	}
-	brID := created.ID
 	br, err := stores.Blueprints.GetRunSystem(ctx, org, brID)
 	if err != nil || br == nil {
 		t.Fatalf("GetRunSystem: (%v, %v)", br, err)
 	}
 
-	step0 := 0
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
-		ID: "lfrun-" + suffix, TaskID: task.ID, PromptID: promptID, Model: "claude-sonnet-4-6",
-		TriggerType: "manual", CreatorUserID: runmode.LocalDefaultUserID,
-		BlueprintRunID: brID, BlueprintStepIndex: &step0, WorktreePath: wt,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation: %v", err)
-	}
 	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "lf-exec", 1, db.ClaimPlacement{})
 	if err != nil || claimed == nil {
 		t.Fatalf("ClaimNextConversation: (%v, %v)", claimed, err)

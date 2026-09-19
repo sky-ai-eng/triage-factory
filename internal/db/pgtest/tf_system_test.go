@@ -201,10 +201,15 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 	const executorID = "conformance-executor"
 
-	t.Run("conversation_queue_enqueue_and_claim", func(t *testing.T) {
+	t.Run("conversation_queue_advance_and_claim", func(t *testing.T) {
+		// The reactor's own step mint, which is where the executor role's
+		// conversations INSERT and blueprint_runs UPDATE grants are both
+		// spent: one transaction moves the pointer and writes the step it
+		// names. The seeded run has no step yet, so there is nothing to
+		// conclude and the boundary id is empty.
 		conversationID := newUUID(t, h)
-		step0 := 0
-		if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+		step1 := 1
+		advanced, _, _, err := stores.Blueprints.AdvanceRunToStepSystem(ctx, orgID, 0, "", domain.Conversation{
 			ID:                 conversationID,
 			TaskID:             taskID,
 			PromptID:           promptID,
@@ -212,9 +217,10 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			TriggerType:        "manual",
 			CreatorUserID:      userID,
 			BlueprintRunID:     blueprintRunID,
-			BlueprintStepIndex: &step0,
-		}); err != nil {
-			t.Fatalf("ConversationQueue.EnqueueConversation (dispatcher's own step enqueue): %v", err)
+			BlueprintStepIndex: &step1,
+		})
+		if err != nil || !advanced {
+			t.Fatalf("Blueprints.AdvanceRunToStepSystem (the reactor's own step mint) = (%v, %v)", advanced, err)
 		}
 
 		claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, executorID, 1, db.ClaimPlacement{})
@@ -222,7 +228,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			t.Fatalf("ConversationQueue.ClaimNextConversation: %v", err)
 		}
 		if claimed == nil || claimed.ID != conversationID {
-			t.Fatalf("ClaimNextConversation = %+v, want the just-enqueued conversation", claimed)
+			t.Fatalf("ClaimNextConversation = %+v, want the just-minted step", claimed)
 		}
 
 		if _, err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, executorID, 1); err != nil {
@@ -256,7 +262,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("conversation_worktrees", func(t *testing.T) {
-		conversationID := seedQueuedConversation(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID, userID)
+		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		// The registry row is seeded on the admin pool, not minted by the
 		// store: the executor's role holds SELECT and UPDATE on repositories
 		// and deliberately no INSERT, so a worktree reservation resolves the
@@ -277,7 +283,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("artifacts", func(t *testing.T) {
-		conversationID := seedQueuedConversation(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID, userID)
+		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		art, err := stores.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
 			ConversationID: conversationID, TeamID: teamID, Provider: "github", Kind: "pull_request",
 			Target: "octo/repo#1", State: "open", DedupKey: "conformance-" + conversationID,
@@ -292,7 +298,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("conversation_memory", func(t *testing.T) {
-		conversationID := seedQueuedConversation(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID, userID)
+		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, blueprintRunID, "agent narrative", domain.MemorySourceAgent); err != nil {
 			t.Errorf("TaskMemory.UpsertAgentMemorySystem: %v", err)
 		}
@@ -308,7 +314,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("external_actions", func(t *testing.T) {
-		conversationID := seedQueuedConversation(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID, userID)
+		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		if err := stores.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 			TeamID: teamID, Provider: "jira", Action: "status_transition", Target: "SKY-1",
 			ConversationID: conversationID, Credential: "org", ToState: "In Progress",
@@ -347,7 +353,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("staged_injections", func(t *testing.T) {
-		conversationID := seedQueuedConversation(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID, userID)
+		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		if _, err := stores.StagedInjections.AppendSystem(ctx, orgID, domain.StagedInjection{
 			ConversationID: conversationID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "new commits landed",
 		}); err != nil {
@@ -367,7 +373,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("conversation_signals", func(t *testing.T) {
-		conversationID := seedQueuedConversation(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID, userID)
+		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		var sigID int64
 		if err := h.AdminDB.QueryRowContext(ctx, `
 			INSERT INTO conversation_signals (org_id, conversation_id, kind, target) VALUES ($1, $2, 'interrupt', $3) RETURNING id
@@ -387,7 +393,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("conversation_pending_input", func(t *testing.T) {
-		conversationID := seedQueuedConversation(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID, userID)
+		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		// Pending input is an undelivered plain user message on the
 		// conversation's own transcript now.
 		MustExec(t, h.AdminDB, `
@@ -509,7 +515,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("claim_credentials", func(t *testing.T) {
-		conversationID := seedQueuedConversation(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID, userID)
+		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		// The brain seals + writes bundles on its own pool (supabase_admin,
 		// never tf_system); seed the active claim + its bundle directly via
 		// AdminDB so this subtest isolates the executor's read side —
@@ -591,25 +597,28 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 }
 
-// seedQueuedConversation mints a fresh conversations row via the tf_system-backed
-// ConversationQueue.EnqueueConversation (the same INSERT the dispatcher's reactor performs
-// for every subsequent blueprint step), so each subtest below gets its
-// own conversation without re-running the claim subtest's side effects.
-// creatorUserID is the person a manual delegation is attributed to. It is a
-// real user rather than the empty string the fixture used to pass: the insert
-// refuses without one, because a manual conversation with no creator would
-// otherwise land on the org owner's creator-scoped reads.
-func seedQueuedConversation(t *testing.T, h *Harness, stores db.Stores, ctx context.Context, orgID, taskID, promptID, blueprintRunID, creatorUserID string) string {
+// seedStepConversation writes one step conversation on the ADMIN pool, so
+// each subtest below gets its own row to hang worktrees, artifacts, memory
+// and signals off without re-running the claim subtest's side effects.
+//
+// Admin rather than the tf_system-backed store on purpose. The grant this
+// fixture would otherwise exercise — the executor role's conversations INSERT
+// — is spent for real one subtest up, by the reactor's own step mint; and the
+// door that mint goes through moves the blueprint_run's pointer with it,
+// which several subtests below then rewrite or terminate. A fixture cannot
+// ride a door whose side effects the suite is also the subject of.
+//
+// creatorUserID is the person a manual delegation is attributed to: the
+// trigger_type↔creator CHECK pairs 'manual' with a real user.
+func seedStepConversation(t *testing.T, h *Harness, ctx context.Context, orgID, taskID, promptID, blueprintRunID, creatorUserID string) string {
 	t.Helper()
 	conversationID := newUUID(t, h)
-	step0 := 0
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "test-model",
-		TriggerType: "manual", CreatorUserID: creatorUserID, BlueprintRunID: blueprintRunID,
-		BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("seedQueuedConversation EnqueueConversation: %v", err)
-	}
+	MustExec(t, h.AdminDB, `
+		INSERT INTO conversations (id, org_id, type, runtime, task_id, prompt_id, model, trigger_type,
+		                           team_id, visibility, creator_user_id, blueprint_run_id, blueprint_step_index, queued_at)
+		VALUES ($1, $2, 'delegation', 'native', $3, $4, 'test-model', 'manual',
+		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2), 'team', $5::uuid, $6, 0, now())
+	`, conversationID, orgID, taskID, promptID, creatorUserID, blueprintRunID)
 	return conversationID
 }
 

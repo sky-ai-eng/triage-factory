@@ -10,24 +10,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// ConversationQueueReturnedRowScaffold hands RunConversationQueueReturnedRowConformance
-// one fresh task/prompt/blueprint_run tuple to mint a step against: a
-// 'running' blueprint_run whose current_step_index is 0, so the step this
-// suite enqueues at index 0 is drivable and ClaimNextConversation can find
-// it. Minted fresh per call so the enqueue subtest and the requeue subtest
-// never share a blueprint_run's single current step.
-//
-// creatorUserID is the person the minted step is attributed to. A manual
-// delegation names one in production and the Postgres insert refuses without
-// it, so the suite supplies a real user rather than leaning on a default.
-type ConversationQueueReturnedRowScaffold func(t *testing.T) (taskID, promptID, blueprintRunID, creatorUserID string)
+// ConversationQueueReturnedRowScaffold stages one claimable step and hands
+// back its conversation id. RequeueConversation only acts on a mid-flight
+// conversation with a live claim, so the suite needs a row
+// ClaimNextConversation can actually find: a 'running' blueprint_run whose
+// current_step_index names this step. Minted fresh per call so the requeue
+// subtests never share a blueprint_run's single current step.
+type ConversationQueueReturnedRowScaffold func(t *testing.T) (conversationID string)
 
 // ConversationQueueReturnedRowFactory is what a per-backend test file hands to
 // RunConversationQueueReturnedRowConformance: the ConversationQueueStore
 // under test, its ConversationStore sibling (the point-read projection
-// EnqueueConversation/RequeueConversation share — ConversationStore's
-// Get/GetSystem),
-// the org to pass, and the scaffold above.
+// RequeueConversation shares — ConversationStore's Get/GetSystem), the org to
+// pass, and the scaffold above.
 type ConversationQueueReturnedRowFactory func(t *testing.T) (
 	queue db.ConversationQueueStore,
 	store db.ConversationStore,
@@ -36,57 +31,25 @@ type ConversationQueueReturnedRowFactory func(t *testing.T) (
 )
 
 // RunConversationQueueReturnedRowConformance covers the returned-row standard
-// for ConversationQueueStore's two conversations-row writes:
-//
-//   - EnqueueConversation returns the minted row, GetSystem's projection.
-//   - RequeueConversation returns the requeued row on a mid-flight
-//     conversation with a live claim, or nil — the guard declining — when
-//     there is nothing to hand back (the EntityStore.Close shape).
+// for ConversationQueueStore's one conversations-row write:
+// RequeueConversation returns the requeued row on a mid-flight conversation
+// with a live claim, or nil — the guard declining — when there is nothing to
+// hand back (the EntityStore.Close shape).
 //
 // There is no app-pool arm here. ConversationQueueStore is wired only
 // against the admin pool in production — it is a system-service store, the
-// dispatcher runs with no per-user identity — so neither write has an
-// RLS-gated door to lose visibility on. See ConversationAppPoolFactory's doc
+// dispatcher runs with no per-user identity — so the write has no RLS-gated
+// door to lose visibility on. See ConversationAppPoolFactory's doc
 // (conversation_returned_row_conformance.go) for the same reasoning applied
 // to ConversationStore's claims-scoped writes.
 func RunConversationQueueReturnedRowConformance(t *testing.T, mk ConversationQueueReturnedRowFactory) {
 	t.Helper()
 	ctx := context.Background()
 
-	t.Run("EnqueueConversation_returns_the_minted_row", func(t *testing.T) {
-		queue, store, orgID, scaffold := mk(t)
-		taskID, promptID, brID, creatorUserID := scaffold(t)
-		step0 := 0
-		conversationID := uuid.New().String()
-
-		conv, err := queue.EnqueueConversation(ctx, orgID, domain.Conversation{
-			ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "claude-sonnet-4-6",
-			TriggerType: "manual", CreatorUserID: creatorUserID,
-			BlueprintRunID: brID, BlueprintStepIndex: &step0,
-		})
-		if err != nil {
-			t.Fatalf("EnqueueConversation: %v", err)
-		}
-		if conv == nil || conv.ID != conversationID {
-			t.Fatalf("EnqueueConversation = %+v, want conversation %s", conv, conversationID)
-		}
-		AssertWriteReturnedStoredRow(t, "EnqueueConversation", *conv,
-			func() (*domain.Conversation, error) { return store.GetSystem(ctx, orgID, conversationID) })
-	})
-
 	t.Run("RequeueConversation_returns_the_requeued_row_then_declines", func(t *testing.T) {
 		queue, store, orgID, scaffold := mk(t)
-		taskID, promptID, brID, creatorUserID := scaffold(t)
-		step0 := 0
-		conversationID := uuid.New().String()
+		conversationID := scaffold(t)
 
-		if _, err := queue.EnqueueConversation(ctx, orgID, domain.Conversation{
-			ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "claude-sonnet-4-6",
-			TriggerType: "manual", CreatorUserID: creatorUserID,
-			BlueprintRunID: brID, BlueprintStepIndex: &step0,
-		}); err != nil {
-			t.Fatalf("EnqueueConversation: %v", err)
-		}
 		claimed, err := queue.ClaimNextConversation(ctx, "rr-executor", 1, db.ClaimPlacement{})
 		if err != nil || claimed == nil || claimed.ID != conversationID {
 			t.Fatalf("ClaimNextConversation = (%+v, %v), want conversation %s", claimed, err, conversationID)
@@ -116,7 +79,7 @@ func RunConversationQueueReturnedRowConformance(t *testing.T, mk ConversationQue
 
 	t.Run("RequeueConversation_declines_on_a_missing_conversation", func(t *testing.T) {
 		queue, _, orgID, _ := mk(t)
-		missingID := "00000000-0000-4000-8000-000000000000"
+		missingID := uuid.New().String()
 		conv, err := queue.RequeueConversation(ctx, orgID, missingID, "x")
 		if err != nil || conv != nil {
 			t.Errorf("RequeueConversation on a missing conversation id = (%+v, %v), want (nil, nil) — the guard declining", conv, err)

@@ -26,9 +26,9 @@ type ReconcileOrphanSeeder struct {
 	// Returns its id.
 	BlueprintRun func(t *testing.T, age time.Duration) string
 
-	// EnqueueChild stages one mid-flight (no stored status) child conversation
+	// StageChild stages one mid-flight (no stored status) child conversation
 	// under brID and returns its id.
-	EnqueueChild func(t *testing.T, brID string) string
+	StageChild func(t *testing.T, brID string) string
 
 	// ForceBlueprintStatus writes a blueprint_run's status and abort_reason
 	// directly, bypassing the guarded flip — the suite needs a terminal parent
@@ -115,7 +115,7 @@ func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrph
 		// that: a long-running blueprint is ordinary work.
 		store, seed := mk(t)
 		brID := seed.BlueprintRun(t, 30*24*time.Hour)
-		convID := seed.EnqueueChild(t, brID)
+		convID := seed.StageChild(t, brID)
 
 		n, check, err := store.ReconcileOrphanedConversations(ctx)
 		if err != nil {
@@ -141,7 +141,7 @@ func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrph
 		// it from ordinary work.
 		store, seed := mk(t)
 		brID := seed.BlueprintRun(t, time.Hour)
-		convID := seed.EnqueueChild(t, brID)
+		convID := seed.StageChild(t, brID)
 		seed.SetCurrentStep(t, brID, 1)
 
 		n, check, err := store.ReconcileOrphanedConversations(ctx)
@@ -192,7 +192,7 @@ func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrph
 		// change what the park writes.
 		store, seed := mk(t)
 		brID := seed.BlueprintRun(t, time.Hour)
-		convID := seed.EnqueueChild(t, brID)
+		convID := seed.StageChild(t, brID)
 		seed.ForceBlueprintStatus(t, brID, string(domain.BlueprintRunStatusFailed), "step_failed")
 
 		n, check, err := store.ReconcileOrphanedConversations(ctx)

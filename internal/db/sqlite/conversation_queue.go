@@ -127,7 +127,7 @@ const episodeAttemptsSQL = `
 	        AND c3.claimed_at >= COALESCE(c2.released_at, c2.claimed_at))`
 
 // conversationQueueClaimCols is the column list ClaimNextConversation returns, shared with the
-// scan helper. visibility is left at its row default on enqueue; team_id is
+// scan helper. visibility is left at its row default by the mint; team_id is
 // surfaced so the construction-path ConversationInfo built off a claimed
 // conversation carries the owning team for the capture writers. The claim
 // identity fields (ExecutorID/ClaimedAt/Attempts) are hydrated from the
@@ -138,29 +138,18 @@ const conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALES
 	COALESCE(r.creator_user_id, ''), COALESCE(r.team_id, ''),
 	COALESCE(r.blueprint_run_id, ''), r.blueprint_step_index`
 
-// EnqueueConversation mints a queued delegation conversation on its own
-// statement. No blueprint step takes this door: step 0 commits with its run
-// through BlueprintStore.CreateRunWithFirstStepSystem and every step after it
-// commits with the pointer that names it through
-// BlueprintStore.AdvanceRunToStepSystem, each arriving with the write that
-// implies it. What this door is, then, is the standalone mint — the same row
-// shape on a statement of its own.
-func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) (*domain.Conversation, error) {
-	return insertConversation(ctx, s.conn, orgID, conv)
-}
-
-// insertConversation is the mint statement itself, taking the queryer so the
-// blueprint doors can run it on the transaction that also commits the run or
-// the pointer the row belongs to, rather than as a second, separately-failing
-// write. One copy of the row shape, so no door drifts on what a queued
-// delegation looks like. Mirrors the Postgres helper of the same name.
+// insertConversation is the mint a delegation conversation is written by. It
+// takes the queryer because it always runs on the transaction that also
+// commits the blueprint_run or the current_step_index pointer the row belongs
+// to — a step arrives with the write that implies it, never on a statement of
+// its own. Mirrors the Postgres helper of the same name.
 //
 // The row carries NO status — the absence of an outcome is what makes it
 // claimable, so the mint writes nothing to the column and queued_at carries
-// the enqueue moment. runtime is stamped 'sdk': SQLite is local mode, which
-// keeps the Claude Code SDK runtime. The Postgres sibling stamps 'native' —
-// the dialect IS the mode, so the split lands where the row is written rather
-// than as a caller-passed knob.
+// the moment it entered the queue. runtime is stamped 'sdk': SQLite is local
+// mode, which keeps the Claude Code SDK runtime. The Postgres sibling stamps
+// 'native' — the dialect IS the mode, so the split lands where the row is
+// written rather than as a caller-passed knob.
 func insertConversation(ctx context.Context, q queryer, orgID string, conv domain.Conversation) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

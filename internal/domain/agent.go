@@ -473,8 +473,8 @@ type Conversation struct {
 
 	// TeamID is the conversation's owning team — conversations.team_id, NOT NULL (the
 	// LocalDefaultTeamID sentinel in local mode, the task-derived team in
-	// multi mode; EnqueueConversation / Create denormalize it from the parent task
-	// at insert, so it carries the team without a task hop at read time).
+	// multi mode; the mint denormalizes it from the parent task at insert, so
+	// it carries the team without a task hop at read time).
 	// Surfaced onto ConversationInfo (TFAC-458) so the capture writers can stamp
 	// artifacts.team_id (NOT NULL, per TFAC-455 F1) directly off the conversation.
 	// Populated by the Get and ClaimNextConversation scan paths; empty on rows

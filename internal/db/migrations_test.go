@@ -370,7 +370,7 @@ func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
 }
 
 // TestMigrate_RunsTriggerIDBackfill pins the 202607060001 backfill: step conversations
-// minted while enqueueBlueprintStep dropped the firing trigger (trigger_type =
+// minted while the reactor dropped the firing trigger (trigger_type =
 // 'event' with a NULL trigger_id — the shape every autonomous run carried
 // after the blueprint orchestrator unification) are healed from their parent
 // blueprint_run's frozen trigger_id, so historical autonomous spend regains

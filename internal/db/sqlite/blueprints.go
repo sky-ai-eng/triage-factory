@@ -878,9 +878,8 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 }
 
 // AdvanceRunToStepSystem — contract and statement order on the interface.
-// Mirrors the Postgres twin, minus its wake doorbell: local mode's enqueue
-// door does not ring one either, so the dispatcher's own nudge stays the
-// caller's.
+// Mirrors the Postgres twin, minus its wake doorbell: local mode rings none,
+// so the dispatcher's own nudge stays the caller's.
 func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID string, fromStepIndex int, concludedConversationID string, nextStep domain.Conversation) (bool, *domain.Conversation, *domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, nil, nil, err

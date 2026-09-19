@@ -57,8 +57,8 @@ const DefaultDispatchScanInterval = 2 * time.Second
 
 // WakeDispatcher is the exported form of wakeDispatcher, for callers outside
 // this package — the tf_wake NOTIFY listener (internal/app, TFAC-586) nudges
-// the dispatcher the moment a cross-process EnqueueConversation/resume-enqueue lands,
-// instead of waiting out the scan interval backstop.
+// the dispatcher the moment a cross-process step mint or resume-enqueue
+// lands, instead of waiting out the scan interval backstop.
 func (s *Spawner) WakeDispatcher() {
 	s.wakeDispatcher()
 }

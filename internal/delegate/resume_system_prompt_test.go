@@ -515,18 +515,21 @@ func (f *launchFixture) setBranchTemplate(t *testing.T, tmpl string) {
 	}
 }
 
-// nextStep stages the blueprint's second step: a new conversation on the same
-// task, sharing the run tree its predecessor built. Returns its id.
+// nextStep advances the blueprint onto its second step, the way the reactor
+// does: one transaction moves the pointer, ends the step it moves past and
+// mints a new conversation on the same task, sharing the run tree its
+// predecessor built. Returns its id.
 func (f *launchFixture) nextStep(t *testing.T) string {
 	t.Helper()
 	stepIndex := 1
-	next, err := f.stores.ConversationQueue.EnqueueConversation(context.Background(), runmode.LocalDefaultOrgID, domain.Conversation{
-		ID: f.conv.ID + "-s2", TaskID: f.conv.TaskID, PromptID: f.conv.PromptID, Model: f.conv.Model,
-		TriggerType: "manual", CreatorUserID: runmode.LocalDefaultUserID,
-		BlueprintRunID: f.br.ID, BlueprintStepIndex: &stepIndex, WorktreePath: f.worktree,
-	})
-	if err != nil {
-		t.Fatalf("EnqueueConversation for step 2: %v", err)
+	advanced, _, next, err := f.stores.Blueprints.AdvanceRunToStepSystem(
+		context.Background(), runmode.LocalDefaultOrgID, 0, f.conv.ID, domain.Conversation{
+			ID: f.conv.ID + "-s2", TaskID: f.conv.TaskID, PromptID: f.conv.PromptID, Model: f.conv.Model,
+			TriggerType: "manual", CreatorUserID: runmode.LocalDefaultUserID,
+			BlueprintRunID: f.br.ID, BlueprintStepIndex: &stepIndex, WorktreePath: f.worktree,
+		})
+	if err != nil || !advanced || next == nil {
+		t.Fatalf("AdvanceRunToStepSystem to step 2 = (%v, %v, %v)", advanced, next, err)
 	}
 	return next.ID
 }

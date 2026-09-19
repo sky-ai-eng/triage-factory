@@ -13,11 +13,11 @@ import (
 // position in its sequence. The claim gate drives the one step
 // current_step_index names, so the row could never be claimed by anyone: a
 // refusal at the mint beats a row that sits invisible in the work list.
-var ErrBlueprintStepUnindexed = errors.New("enqueue: blueprint conversation has no step index")
+var ErrBlueprintStepUnindexed = errors.New("db: blueprint conversation has no step index")
 
-// AssertBlueprintStepIndexed is the guard both dialects' EnqueueConversation opens with.
-// A conversation with no blueprint parent passes — the gate never compares an
-// index for one.
+// AssertBlueprintStepIndexed is the guard both dialects' conversation mint
+// opens with. A conversation with no blueprint parent passes — the gate never
+// compares an index for one.
 func AssertBlueprintStepIndexed(conv domain.Conversation) error {
 	if conv.BlueprintRunID != "" && conv.BlueprintStepIndex == nil {
 		return fmt.Errorf("%w (conversation %s, blueprint_run %s)", ErrBlueprintStepUnindexed, conv.ID, conv.BlueprintRunID)
@@ -56,32 +56,6 @@ type OrphanedStepCheck struct {
 // OrphanedStepSampleLimit caps OrphanedStepCheck.Sample.
 const OrphanedStepSampleLimit = 20
 
-// ConversationQueueStore owns the claim loop — the ONE scan that finds conversations
-// needing to be driven, on every surface. It is the sibling of
-// EventQueueStore: where the event queue feeds the router, this feeds the
-// dispatcher.
-//
-// There is no "queued" column. A conversation needs driving when nobody is
-// driving it and it is either mid-flight (no outcome written — a fresh mint,
-// or a claim that released without concluding) or parked and woken by new
-// input. A worker claims it (Postgres: FOR UPDATE SKIP LOCKED over that
-// predicate, with idx_claims_one_active as the actual mutual exclusion;
-// SQLite: a plain single-statement claim — N=1, no contention), drives it,
-// and releases the claim. A type-conditional gate rides alongside the shared
-// predicate: a delegation conversation's blueprint parent must still be
-// running.
-//
-// This is a system-service store: the dispatcher runs as a background worker
-// with no per-user identity, so the Postgres impl wires against the admin pool
-// (BYPASSRLS) and keeps org_id bound where it is known, defense in depth.
-// SQLite collapses onto its single connection and asserts the local sentinel
-// org on the org-scoped methods.
-//
-// The claim fence here (one worker claims one queued conversation) is distinct from the
-// replay fence (one blueprint_run per (triggering_event_id, trigger_id), at the
-// firing boundary in BlueprintStore.CreateRunWithFirstStepSystem). The queue does
-// not subsume the replay fence — by the time a step is enqueued the blueprint_run
-// already exists.
 // ClaimPlacement configures the placement-aware, two-tier claim (TFAC-587,
 // spec §6.2). The ZERO VALUE (Enabled=false) selects the original
 // global-oldest claim — the whole placement layer is advisory, so a disabled
@@ -110,26 +84,36 @@ type ClaimPlacement struct {
 	Liveness time.Duration
 }
 
+// ConversationQueueStore owns the claim loop — the ONE scan that finds
+// conversations needing to be driven, on every surface. It is the sibling of
+// EventQueueStore: where the event queue feeds the router, this feeds the
+// dispatcher. It writes no conversations row of its own: a delegation is
+// minted by the BlueprintStore door that commits the run or the pointer
+// implying it, and this store picks the row up from there.
+//
+// There is no "queued" column. A conversation needs driving when nobody is
+// driving it and it is either mid-flight (no outcome written — a fresh mint,
+// or a claim that released without concluding) or parked and woken by new
+// input. A worker claims it (Postgres: FOR UPDATE SKIP LOCKED over that
+// predicate, with idx_claims_one_active as the actual mutual exclusion;
+// SQLite: a plain single-statement claim — N=1, no contention), drives it,
+// and releases the claim. A type-conditional gate rides alongside the shared
+// predicate: a delegation conversation's blueprint parent must still be
+// running.
+//
+// This is a system-service store: the dispatcher runs as a background worker
+// with no per-user identity, so the Postgres impl wires against the admin pool
+// (BYPASSRLS) and keeps org_id bound where it is known, defense in depth.
+// SQLite collapses onto its single connection and asserts the local sentinel
+// org on the org-scoped methods.
+//
+// The claim fence here (one worker claims one queued conversation) is
+// distinct from the replay fence (one blueprint_run per
+// (triggering_event_id, trigger_id), at the firing boundary in
+// BlueprintStore.CreateRunWithFirstStepSystem). Neither subsumes the other:
+// the replay fence decides whether a step row exists at all, this one decides
+// who drives the one that does.
 type ConversationQueueStore interface {
-	// EnqueueConversation mints a delegation conversation for a blueprint step with
-	// NO stored status — the absence of an outcome is what makes it
-	// claimable. It is the work-list write the dispatcher later claims. conv
-	// carries the step's identity: ID, TaskID, PromptID, Model, TriggerType,
-	// CreatorUserID, TriggerID, BlueprintRunID (required), BlueprintStepIndex.
-	// A blueprint conversation with no step index is refused — see
-	// ErrBlueprintStepUnindexed.
-	// PreferredExecutorID (TFAC-587) is the rendezvous placement stamp, empty
-	// for no affinity (placement disabled, local N=1, or a non-repo key).
-	// Routes through the admin pool — a work item is minted with no
-	// JWT-claims context to bind RLS against; the row's creator_user_id is
-	// still stamped for audit and later RLS-scoped reads. The schema CHECK pairing
-	// trigger_type with creator_user_id nullability is the caller's contract.
-	//
-	// Returns the minted row, sharing ConversationStore.Get/GetSystem's
-	// projection and scanner — the queued_at stamp and any team_id the insert
-	// derived from the task need no separate lookup.
-	EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) (*domain.Conversation, error)
-
 	// ClaimNextConversation claims the next conversation that needs driving, of ANY
 	// surface, and mints the claim that records the engagement (executor id,
 	// boot epoch, claimed_at, and — where the surface's unit of work is one

@@ -74,6 +74,11 @@ type BlueprintSequenceScaffold struct {
 	// conversations do not derive their team from the task (local mode's
 	// single-team sentinel), where the assertion would test nothing.
 	ConversationTeam func(t *testing.T, convID string) string
+	// GetConversation point-reads a conversation through ConversationStore's
+	// own projection, so the suite can hold each door's returned conversation
+	// to the returned-row standard. These are the only two doors that mint
+	// one, so this is where that standard is checked for the row shape.
+	GetConversation func(t *testing.T, convID string) (*domain.Conversation, error)
 }
 
 // RunBlueprintSequenceConformance is the shared suite for the two doors that
@@ -122,6 +127,8 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 				t.Errorf("conversation team_id = %q, want the consolidated owner %q — the step insert must read the consolidation, not the owner it replaced", got, sc.ConsolidateTeamID)
 			}
 		}
+		AssertWriteReturnedStoredRow(t, "CreateRunWithFirstStepSystem", *conv,
+			func() (*domain.Conversation, error) { return sc.GetConversation(t, conv.ID) })
 	})
 
 	t.Run("A_failing_step_insert_rolls_the_whole_firing_back", func(t *testing.T) {
@@ -428,6 +435,8 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		if !sc.ConversationEnded(t, step0.ID) {
 			t.Error("the concluded step carries no ended_at — it stops being the task's live conversation the moment its successor is minted")
 		}
+		AssertWriteReturnedStoredRow(t, "AdvanceRunToStepSystem", *next,
+			func() (*domain.Conversation, error) { return sc.GetConversation(t, next.ID) })
 	})
 
 	t.Run("A_failing_step_insert_rolls_the_advance_back", func(t *testing.T) {

@@ -981,9 +981,8 @@ func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID strin
 		return false, nil, nil, err
 	}
 	if advanced {
-		// Committed: ring the doorbell the enqueue door rings for its own
-		// mint, so an idle executor claims the step within milliseconds
-		// instead of waiting out its scan interval.
+		// Committed: ring the doorbell, so an idle executor claims the step
+		// within milliseconds instead of waiting out its scan interval.
 		s.notifyWake(ctx, orgID)
 	}
 	return advanced, ended, conv, nil
@@ -1082,10 +1081,10 @@ func insertFiringRun(ctx context.Context, q queryer, orgID string, br domain.Blu
 	return nil
 }
 
-// notifyWake fires the tf_wake doorbell after a firing's first step lands
-// claimable. Best-effort by contract (wakebus's "never the only path" rule) —
-// a notify failure is swallowed, since the write it announces already
-// committed and the scan-interval backstop covers a dropped doorbell.
+// notifyWake fires the tf_wake doorbell after a step lands claimable.
+// Best-effort by contract (wakebus's "never the only path" rule) — a notify
+// failure is swallowed, since the write it announces already committed and
+// the scan-interval backstop covers a dropped doorbell.
 func (s *blueprintStore) notifyWake(ctx context.Context, orgID string) {
 	_ = wakebus.Publish(ctx, s.admin, wakebus.KindRun, orgID)
 }

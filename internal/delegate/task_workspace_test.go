@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -15,22 +16,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// redelegate settles the fixture's blueprint_run and mints a second one on the
+// redelegate settles the fixture's blueprint_run and composes a second one on the
 // same task — a re-delegation, the shape this file is about. It returns the new
 // run, which carries no worktree_path of its own: the tree belongs to the task,
 // and run B has not claimed anything yet.
 func (f stepFixture) redelegate(t *testing.T, suffix string) *domain.BlueprintRun {
 	t.Helper()
 	finishBlueprint(t, f.database, f.brID, "completed", len(f.conversationIDs)-1)
-	created, err := f.s.blueprints.CreateRun(context.Background(), runmode.LocalDefaultOrgID, domain.BlueprintRun{
+	return &domain.BlueprintRun{
 		ID: "bpr-" + suffix + "-b", BlueprintID: blueprintIDOfRun(t, f.database, f.brID), TaskID: f.task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		StepPlan: []domain.BlueprintPlanStep{{StepIndex: 0, PromptID: "p", PromptName: "p", PromptBody: "b", Source: "user"}},
-	})
-	if err != nil {
-		t.Fatalf("mint the second blueprint_run: %v", err)
 	}
-	return &created
 }
 
 func blueprintIDOfRun(t *testing.T, database *sql.DB, blueprintRunID string) string {
@@ -42,17 +39,18 @@ func blueprintIDOfRun(t *testing.T, database *sql.DB, blueprintRunID string) str
 	return bpID
 }
 
-// enqueueStepZero mints run B's first step through the production composer,
-// which is what stamps the task's inherited worktree_path onto the new row.
-func (f stepFixture) enqueueStepZero(t *testing.T, br *domain.BlueprintRun) string {
+// fireStepZero commits run B and its first step the way a delegation is
+// fired, composing the step through the production composer — which is what
+// stamps the task's inherited worktree_path onto the new row.
+func (f stepFixture) fireStepZero(t *testing.T, br *domain.BlueprintRun) string {
 	t.Helper()
 	ctx := context.Background()
-	conv, err := f.s.conversationQueue.EnqueueConversation(ctx, runmode.LocalDefaultOrgID,
+	_, _, conv, err := f.s.blueprints.CreateRunWithFirstStepSystem(ctx, runmode.LocalDefaultOrgID, *br, db.AgentClaimStamp{}, "",
 		f.s.buildStepConversation(ctx, runmode.LocalDefaultOrgID, br.ID, f.task,
 			domain.BlueprintStep{BlueprintID: br.BlueprintID, StepIndex: 0, StepPromptID: stepPromptID(t, f.database, f.conversationIDs[0])},
 			"claude-sonnet-4-6", "manual", "", runmode.LocalDefaultUserID, ""))
 	if err != nil {
-		t.Fatalf("mint run B's first step: %v", err)
+		t.Fatalf("fire run B: %v", err)
 	}
 	return conv.ID
 }
@@ -68,36 +66,36 @@ func stepPromptID(t *testing.T, database *sql.DB, conversationID string) string 
 	return promptID.String
 }
 
-// TestEnqueueBlueprintStep_StampsTheTasksWorktreePath is the mint half of
+// TestFiredStep_StampsTheTasksWorktreePath is the mint half of
 // keying the workspace by the task: a conversation opens in the tree the task's
 // previous one left, and the row says so before any executor claims it.
 //
 // Without the stamp the row arrives with an empty path, the claim's warm stat
 // has nothing to stat, and a tree sitting on disk is rehydrated from a blob
 // anyway — or, when no blob exists, cloned over.
-func TestEnqueueBlueprintStep_StampsTheTasksWorktreePath(t *testing.T) {
+func TestFiredStep_StampsTheTasksWorktreePath(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	wt := t.TempDir()
 	f := seedStepFixture(t, "github", "mint-stamp", 1, wt)
 
-	next := f.enqueueStepZero(t, f.redelegate(t, "mint-stamp"))
+	next := f.fireStepZero(t, f.redelegate(t, "mint-stamp"))
 
 	if got := storedWorktreePath(t, f.database, next); got != wt {
 		t.Errorf("the minted conversation's worktree_path = %q, want the task's %q", got, wt)
 	}
 }
 
-// TestEnqueueBlueprintStep_FirstConversationOnATaskInheritsNothing is the other
+// TestFiredStep_FirstConversationOnATaskInheritsNothing is the other
 // half: "" is an answer, not a failure. A task nothing has ever run on has no
 // tree to name, and the claim that picks this row up is the one that clones.
-func TestEnqueueBlueprintStep_FirstConversationOnATaskInheritsNothing(t *testing.T) {
+func TestFiredStep_FirstConversationOnATaskInheritsNothing(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	f := seedStepFixture(t, "github", "mint-first", 1, "")
 	if _, err := f.database.Exec(`UPDATE conversations SET worktree_path = NULL WHERE task_id = ?`, f.task.ID); err != nil {
 		t.Fatalf("clear the fixture's paths: %v", err)
 	}
 
-	next := f.enqueueStepZero(t, f.redelegate(t, "mint-first"))
+	next := f.fireStepZero(t, f.redelegate(t, "mint-first"))
 
 	if got := storedWorktreePath(t, f.database, next); got != "" {
 		t.Errorf("worktree_path on a task with no tree = %q, want empty", got)
@@ -118,7 +116,7 @@ func TestBuildStepConfig_RedelegationStartsInThePriorRunsTree(t *testing.T) {
 	f := seedStepFixture(t, "jira", "redelegate-warm", 1, wt)
 
 	runB := f.redelegate(t, "redelegate-warm")
-	next := f.enqueueStepZero(t, runB)
+	next := f.fireStepZero(t, runB)
 	if runB.WorktreePath != "" {
 		t.Fatalf("the second run carries worktree_path %q; the fixture is not staging a re-delegation", runB.WorktreePath)
 	}
@@ -176,7 +174,7 @@ func TestBuildStepConfig_RedelegationRehydratesRatherThanCloning(t *testing.T) {
 	}
 
 	runB := f.redelegate(t, "redelegate-cold")
-	next := f.enqueueStepZero(t, runB)
+	next := f.fireStepZero(t, runB)
 
 	cfg, err := f.s.buildStepConfig(ctx, org, runB, f.task,
 		domain.Conversation{ID: next, TaskID: f.task.ID, WorktreePath: rebuilt, BlueprintRunID: runB.ID}, nil, nil)
@@ -241,7 +239,7 @@ func TestBuildStepConfig_RedelegationAfterAFailedRunWithNoBlobBuildsFresh(t *tes
 	f.s.SetStorage(blobs)
 
 	runB := f.redelegate(t, "redelegate-swept")
-	next := f.enqueueStepZero(t, runB)
+	next := f.fireStepZero(t, runB)
 	if got := storedWorktreePath(t, f.database, next); got != swept {
 		t.Fatalf("the mint stamped %q; the fixture is not staging a swept tree (%q)", got, swept)
 	}
@@ -292,7 +290,7 @@ func TestBuildStepConfig_LadderLastRungReadsTheStepsRuntime(t *testing.T) {
 			seedSnapshotState(t, f.s, f.task.ID, "claim-vanished", domain.WorkspaceSnapshotPending)
 
 			runB := f.redelegate(t, "ladder-"+tc.runtime)
-			next := f.enqueueStepZero(t, runB)
+			next := f.fireStepZero(t, runB)
 			cfg, err := f.s.buildStepConfig(context.Background(), runmode.LocalDefaultOrgID, runB, f.task,
 				domain.Conversation{ID: next, TaskID: f.task.ID, Runtime: tc.runtime, BlueprintRunID: runB.ID}, nil, nil)
 
