@@ -63,7 +63,7 @@ func (s *Server) handleOrgGet(w http.ResponseWriter, r *http.Request) {
 		org  *domain.Org
 		role string
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		org, e = tx.Orgs.GetOrg(r.Context(), orgID)
 		if e != nil || org == nil {

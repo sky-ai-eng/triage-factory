@@ -163,7 +163,7 @@ const (
 // landed, and ok=false when it already wrote an error response.
 func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, hesitationMs int) (*jira.Client, claimLanding, bool) {
 	var task *domain.Task
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
 		return e
@@ -332,7 +332,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 // not a bug this method needs to close.
 func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id, targetUserID string, hesitationMs int) bool {
 	var task *domain.Task
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
 		return e
@@ -407,7 +407,7 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 			// isn't on a team that can see this task, which is a reference
 			// to an object in the wrong team rather than a state conflict.
 			var fresh *domain.Task
-			_ = s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+			_ = s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 				var e error
 				fresh, e = tx.Tasks.Get(r.Context(), orgID, id)
 				return e
@@ -526,7 +526,7 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 	// Pre-load to disambiguate HandoffRefused (404 missing / 409 terminal /
 	// 409 theft) and to gate the bot-enablement check on the task's own team.
 	var task *domain.Task
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
 		return e
@@ -548,7 +548,7 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 	// the latter can be a team the caller isn't in, whose team_agents row RLS
 	// hides — wrongly reporting the bot disabled and rejecting a legit delegate.
 	var claimTeamID string
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		claimTeamID, e = tx.Tasks.ResolveClaimTeam(r.Context(), orgID, id, userID)
 		return e
@@ -652,7 +652,7 @@ func (s *Server) stopTaskConversations(ctx context.Context, orgID, userID, taskI
 		return
 	}
 	var ids []string
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
 		ids, e = tx.Conversations.ActiveIDsForTask(ctx, orgID, taskID)
 		return e
@@ -735,7 +735,7 @@ func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUs
 	// goes through the app-pool ListForTeam under jira_rules_select RLS.
 	var task *domain.Task
 	var rule *domain.JiraProjectStatusRules
-	err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
 		if e != nil {
@@ -790,7 +790,7 @@ func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUs
 // an error response is written.
 func (s *Server) triggerDelegation(w http.ResponseWriter, r *http.Request, orgID, userID, id string, req taskDelegateRequest, response map[string]any) bool {
 	var task *domain.Task
-	err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
 		return e
@@ -844,7 +844,7 @@ func (s *Server) triggerDelegation(w http.ResponseWriter, r *http.Request, orgID
 // not turn on a lookup that only names the run.
 func (s *Server) firstStepConversationID(ctx context.Context, orgID, userID, blueprintRunID string) string {
 	var convs []domain.Conversation
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
 		convs, e = tx.Blueprints.ConversationsForBlueprint(ctx, orgID, blueprintRunID)
 		return e

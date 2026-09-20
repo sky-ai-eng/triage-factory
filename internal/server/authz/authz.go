@@ -92,7 +92,7 @@ func (az *Checker) ResolveTeamID(ctx context.Context, orgID, userID, raw string)
 		return raw, nil
 	}
 	var teamID string
-	err := az.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	err := az.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
 		teamID, e = tx.Teams.GetDefaultForOrg(ctx, orgID)
 		return e

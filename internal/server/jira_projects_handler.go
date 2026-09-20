@@ -96,7 +96,7 @@ func (s *Server) handleJiraProjectsList(w http.ResponseWriter, r *http.Request) 
 	// read runs under the caller's claims — the same door GET
 	// /api/jira/statuses uses for the same credential.
 	var creds auth.Credentials
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
 		if lerr != nil {

@@ -50,6 +50,20 @@ func (f failingSecretsTx) SyntheticClaimsWithTx(ctx context.Context, orgID, user
 	})
 }
 
+func (f failingSecretsTx) WithReadTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	return f.inner.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		tx.Secrets = getFailingSecrets{SecretStore: tx.Secrets}
+		return fn(tx)
+	})
+}
+
+func (f failingSecretsTx) SyntheticClaimsWithReadTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	return f.inner.SyntheticClaimsWithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		tx.Secrets = getFailingSecrets{SecretStore: tx.Secrets}
+		return fn(tx)
+	})
+}
+
 // assertNoAppRow fails the test if any org_github_apps row exists. The
 // staging decision reads the org's PAT to choose active=true/false; when
 // that read fails the request must leave no App row at all, in either

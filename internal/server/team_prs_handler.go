@@ -61,7 +61,7 @@ func (s *Server) handleTeamPRList(w http.ResponseWriter, r *http.Request) {
 		prs   []domain.PRSummaryRow
 		total int
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Member identities are host-scoped, so the org's configured GitHub
 		// host rides into the read — raw, exactly as the roster passes it; the
 		// store resolves it, since an unset setting has to look under the

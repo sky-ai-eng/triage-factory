@@ -302,7 +302,7 @@ func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, o
 		creds  auth.Credentials
 		orgSet domain.OrgSettings
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// A failed credential read is a backend fault, not "no credentials":
 		// swallowing it here answered "GitHub not configured" and told the user to
 		// re-enter a token they already have.
@@ -519,7 +519,7 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 		total   int
 		canEdit []bool
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		opts := db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly}
 		if isAdmin {
@@ -596,7 +596,7 @@ func (s *Server) readRepo(
 		row     *domain.Repository
 		canEdit bool
 	)
-	err = s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	err = s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		found, e := lookup(ctx, tx)
 		if e != nil || found == nil {
 			return e
@@ -771,7 +771,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		row    *domain.Repository
 		access repoWriteAccess
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		found, e := repoByID(r.Context(), tx.Repos.Get, orgID, id)
 		if e != nil || found == nil {
 			return e

@@ -120,7 +120,7 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 		members []domain.OrgMember
 		total   int
 	)
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Identity is host-scoped: resolve the org's GitHub/Jira hosts from
 		// org_settings, then look up each member's login on those hosts —
 		// the same keys the per-user readers and PAT writers use.

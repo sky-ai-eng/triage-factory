@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -23,7 +24,14 @@ import (
 // Commit on nil error, rollback on any error — the deferred Rollback
 // is a no-op after Commit.
 func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
-	return s.runTx(ctx, orgID, userID, fn)
+	return s.runTx(ctx, orgID, userID, false, fn)
+}
+
+// WithReadTx is WithTx on db.InReadTx's transaction: a DEFERRED BEGIN, so the
+// body never takes the handle's IMMEDIATE write lock, guarded by query_only
+// so it cannot need one.
+func (s *Store) WithReadTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	return s.runTx(ctx, orgID, userID, true, fn)
 }
 
 // SyntheticClaimsWithTx mirrors WithTx for callers that have an
@@ -33,15 +41,21 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 // needed because SQLite has no auth concept. Signature parity with
 // the Postgres impl is the only reason this exists on SQLite at all.
 func (s *Store) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
-	return s.runTx(ctx, orgID, userID, fn)
+	return s.runTx(ctx, orgID, userID, false, fn)
 }
 
-// runTx is the shared body between WithTx and SyntheticClaimsWithTx.
-// Both entry points have identical behavior in SQLite — the
-// distinction is purely semantic (request vs synthetic identity)
-// and only matters in the Postgres impl where the two paths set
-// JWT claims differently.
-func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+// SyntheticClaimsWithReadTx is SyntheticClaimsWithTx on db.InReadTx's
+// transaction, as WithReadTx is to WithTx.
+func (s *Store) SyntheticClaimsWithReadTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	return s.runTx(ctx, orgID, userID, true, fn)
+}
+
+// runTx is the shared body between the four entry points. Request and
+// synthetic identity behave identically in SQLite — the distinction only
+// matters in the Postgres impl, where the two paths set JWT claims
+// differently. readOnly picks the transaction: db.InReadTx's guarded
+// DEFERRED one, or the handle's IMMEDIATE default.
+func (s *Store) runTx(ctx context.Context, orgID, userID string, readOnly bool, fn func(db.TxStores) error) error {
 	_ = userID // accepted for signature parity; SQLite has no auth concept
 	// The Postgres twin's span, same name and attribute, so a local-mode
 	// trace has the same shape as a multi-mode one. org.id is the local
@@ -55,6 +69,15 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		span.SetStatus(codes.Error, "org mismatch")
 		return fmt.Errorf("sqlite WithTx: orgID must be %q in local mode, got %q", runmode.LocalDefaultOrgID, orgID)
 	}
+	if readOnly {
+		err := db.InReadTx(ctx, s.conn, db.DialectSQLite, func(tx *sql.Tx) error {
+			return fn(s.txStoresFromTx(tx))
+		})
+		if err != nil {
+			span.SetStatus(codes.Error, "read tx")
+		}
+		return err
+	}
 	tx, err := s.conn.BeginTx(ctx, nil)
 	if err != nil {
 		span.SetStatus(codes.Error, "begin")
@@ -62,8 +85,24 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := fn(s.txStoresFromTx(tx)); err != nil {
+		// See the Postgres twin: rolled back via the defer, and not
+		// recorded as an exception.
+		span.SetStatus(codes.Error, "tx body")
+		return db.TxCause(ctx, err)
+	}
+	if err := tx.Commit(); err != nil {
+		span.SetStatus(codes.Error, "commit")
+		return db.TxCause(ctx, err)
+	}
+	return nil
+}
+
+// txStoresFromTx returns the TxStores bundle wired against one *sql.Tx,
+// shared by the read and write arms of runTx so the two cannot drift.
+func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 	users := newUsersStore(tx, tx)
-	txStores := db.TxStores{
+	return db.TxStores{
 		Scores:                   newScoreStore(tx),
 		Prompts:                  newPromptStore(tx),
 		Swipes:                   newSwipeStore(tx),
@@ -106,17 +145,6 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Permissions:              newPermissionStore(tx),
 		OrgEventSources:          newOrgEventSourceStore(tx),
 		ModelAvailability:        newModelAvailabilityStore(tx),
-		Ext:                      db.BuildStoreExtensions("sqlite", tx, tx),
+		Ext:                      db.BuildStoreExtensions(db.DialectSQLite, tx, tx),
 	}
-	if err := fn(txStores); err != nil {
-		// See the Postgres twin: rolled back via the defer, and not
-		// recorded as an exception.
-		span.SetStatus(codes.Error, "tx body")
-		return db.TxCause(ctx, err)
-	}
-	if err := tx.Commit(); err != nil {
-		span.SetStatus(codes.Error, "commit")
-		return db.TxCause(ctx, err)
-	}
-	return nil
 }

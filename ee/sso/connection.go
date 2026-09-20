@@ -165,7 +165,7 @@ func (h *ssoConnectionHandler) spValuesOr500(w http.ResponseWriter) (entityID, a
 // org-admin in the current org).
 func (h *ssoConnectionHandler) currentConnection(ctx context.Context, orgID, userID string) (*ssostore.SSOConnection, error) {
 	var conns []ssostore.SSOConnection
-	if err := h.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
 		conns, e = ssostore.FromTx(tx).Connections.ListByOrg(ctx, orgID)
 		return e

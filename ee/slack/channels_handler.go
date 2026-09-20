@@ -300,7 +300,7 @@ func (h *channelsHandler) buildChannelsResponse(ctx context.Context, orgID, user
 		registry   []slackstore.Channel
 		workspaces []slackstore.Workspace
 	)
-	if err := h.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		bundle := slackstore.FromTx(tx)
 		var e error
 		if tracked, e = bundle.TeamChannels.ListForTeam(ctx, orgID, teamID); e != nil {
@@ -505,7 +505,7 @@ func (h *channelsHandler) liveSlackCandidates(ctx context.Context, orgID string,
 // channel is never silently reported as healthy.
 func (h *channelsHandler) ensureAndAutoJoin(ctx context.Context, orgID, userID string, added []string) []channelsWarning {
 	var workspaces []slackstore.Workspace
-	if err := h.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
 		workspaces, e = slackstore.FromTx(tx).Workspaces.ListForOrg(ctx, orgID)
 		return e

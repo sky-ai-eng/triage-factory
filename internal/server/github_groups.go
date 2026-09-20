@@ -110,7 +110,7 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 	}
 
 	var groups []domain.TeamGitHubGroup
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		groups, e = tx.TeamGitHubGroups.ListForTeam(r.Context(), teamID)
 		return e
@@ -207,7 +207,7 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 // reconnect prompt instead of a silent empty list.
 func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string) ([]gitHubGroupCandidateJSON, bool) {
 	var repos []domain.Repository
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
 		// Unwindowed: the candidate set is derived from the whole registry,
 		// not browsed, so a page would silently narrow what can be imported.

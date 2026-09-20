@@ -100,7 +100,7 @@ func (ph *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Reque
 		list  []domain.Prompt
 		total int
 	)
-	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		list, total, e = tx.Prompts.List(r.Context(), orgID, req.TeamID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
@@ -122,7 +122,7 @@ func (ph *promptsHandler) handlePromptGet(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var prompt *domain.Prompt
-	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		prompt, e = tx.Prompts.Get(r.Context(), orgID, id)
 		return e
@@ -185,7 +185,7 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 	// the prompts_insert RLS WITH CHECK surfacing as a 500. The main tx below
 	// re-resolves (and stamps last-acting) only for callers that pass.
 	var actingTeam string
-	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		actingTeam, e = teamscope.ResolveActingNoStamp(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		return e
@@ -253,7 +253,7 @@ func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request
 	}
 
 	var existing *domain.Prompt
-	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.Prompts.Get(r.Context(), orgID, id)
 		return e
@@ -306,7 +306,7 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 	// to the 404 the mutation tx below already renders (RequireTeamWrite isn't
 	// reached). The extra read is cheap and human-paced (canvas delete gesture).
 	var existing *domain.Prompt
-	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.Prompts.Get(r.Context(), orgID, id)
 		return e
@@ -456,7 +456,7 @@ func (ph *promptsHandler) handlePromptStats(w http.ResponseWriter, r *http.Reque
 		stats  *domain.PromptStats
 		prompt *domain.Prompt
 	)
-	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Read the prompt first: Stats aggregates over runs, so a prompt that
 		// doesn't exist (or isn't visible) produced an all-zero row that read
 		// as a real, quiet prompt — while the sibling GET 404s the same id.

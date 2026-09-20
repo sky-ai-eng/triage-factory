@@ -330,3 +330,73 @@ func seedSyntheticClaimsOrg(t *testing.T, h *pgtest.Harness, label string) (orgI
 	seedPgDefaultTeam(t, h, orgID, userID)
 	return orgID, userID
 }
+
+// TestWithReadTx_Postgres_RefusesWriteAndReads pins both read doors on
+// Postgres: the role elevation and claims still apply (the read succeeds
+// under RLS), and a write is refused by the server's READ ONLY transaction
+// rather than committed.
+func TestWithReadTx_Postgres_RefusesWriteAndReads(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedSyntheticClaimsOrg(t, h, "read-door")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	doors := map[string]func(context.Context, string, string, func(db.TxStores) error) error{
+		"WithReadTx":                stores.Tx.WithReadTx,
+		"SyntheticClaimsWithReadTx": stores.Tx.SyntheticClaimsWithReadTx,
+	}
+	for name, door := range doors {
+		t.Run(name, func(t *testing.T) {
+			err := door(ctx, orgID, userID, func(tx db.TxStores) error {
+				return tx.Repos.SetConfigured(ctx, orgID, []string{"read/door"})
+			})
+			if err == nil {
+				t.Fatalf("%s committed a write; want a read-only refusal", name)
+			}
+			if !strings.Contains(err.Error(), "read-only transaction") {
+				t.Fatalf("%s refused with %v; want the server's read-only refusal", name, err)
+			}
+			for _, got := range registryNames(t, stores, orgID) {
+				if got == "read/door" {
+					t.Fatalf("%s landed a row despite the refusal", name)
+				}
+			}
+
+			if err := door(ctx, orgID, userID, func(tx db.TxStores) error {
+				_, _, err := tx.Repos.List(ctx, orgID, db.ListOpts{})
+				return err
+			}); err != nil {
+				t.Fatalf("%s refused a read under claims: %v", name, err)
+			}
+		})
+	}
+}
+
+// TestWithReadTx_Postgres_RawClaimsDoor covers db.WithReadTx, the
+// claims-bound door the membership probes use without TxStores.
+func TestWithReadTx_Postgres_RawClaimsDoor(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedSyntheticClaimsOrg(t, h, "raw-read-door")
+	ctx := context.Background()
+	claims := db.Claims{Sub: userID, OrgID: orgID}
+
+	err := db.WithReadTx(ctx, h.AdminDB, claims, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE users SET display_name = 'written' WHERE id = $1::uuid`, userID)
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "read-only transaction") {
+		t.Fatalf("db.WithReadTx write refused with %v; want the server's read-only refusal", err)
+	}
+
+	var sub string
+	if err := db.WithReadTx(ctx, h.AdminDB, claims, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT current_setting('request.jwt.claims', true)::jsonb ->> 'sub'`).Scan(&sub)
+	}); err != nil {
+		t.Fatalf("db.WithReadTx read: %v", err)
+	}
+	if sub != userID {
+		t.Fatalf("claims inside db.WithReadTx: sub=%q, want %q", sub, userID)
+	}
+}

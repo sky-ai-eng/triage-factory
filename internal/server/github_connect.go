@@ -134,7 +134,7 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 
 	var app *domain.OrgGitHubApp
 	var orgSet domain.OrgSettings
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		app, lerr = tx.GitHubApps.GetForOrg(r.Context(), orgID)
 		if lerr != nil {
@@ -267,7 +267,7 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 	var app *domain.OrgGitHubApp
 	var clientSecret string
 	var orgSet domain.OrgSettings
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		app, lerr = tx.GitHubApps.GetForOrg(r.Context(), orgID)
 		if lerr != nil {
@@ -366,7 +366,7 @@ func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Reque
 		host             string
 		connectAvailable bool
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, lerr := tx.Orgs.GetSettings(r.Context(), orgID)
 		if lerr != nil {
 			return lerr
@@ -494,7 +494,7 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 	// Resolve the org's host the same way the status reader / Connect writer do,
 	// so the (user, host) key always agrees across surfaces.
 	var orgSet domain.OrgSettings
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
 		return lerr

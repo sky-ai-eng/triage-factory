@@ -411,7 +411,7 @@ func (s *Server) agentEnabledForTeam(ctx context.Context, orgID, userID, teamID 
 		// three-tuple directly.
 		teamMissing bool
 	)
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
 		a, e = tx.Agents.GetForOrg(ctx, orgID)
 		if e != nil {

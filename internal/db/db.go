@@ -53,6 +53,13 @@ func Open() (*sql.DB, error) {
 // ratchet in internal/db/timenow_ratchet_test.go.
 const SQLiteTimeFormatParam = "_time_format=sqlite"
 
+// SQLiteTxLockParam selects the lock mode every non-read-only transaction
+// begins with. It is named so the test DSNs carry the same transaction
+// semantics production runs under: for :memory: at one connection it changes
+// nothing observable, but a test handle whose transactions began differently
+// would be describing a database production does not open.
+const SQLiteTxLockParam = "_txlock=immediate"
+
 // TestDSNMemory is the DSN every in-repo test opens SQLite with. It exists so
 // a test cannot silently exercise a storage format production never writes:
 // the suite ran for months against the driver's default time layout, which is
@@ -61,7 +68,7 @@ const SQLiteTimeFormatParam = "_time_format=sqlite"
 //
 // Tests-only, alongside BootstrapSchemaForTest, and pinned against the
 // production DSN by TestDSN_TestMemoryMatchesProductionStorageParams.
-const TestDSNMemory = ":memory:?_pragma=foreign_keys(on)&" + SQLiteTimeFormatParam
+const TestDSNMemory = ":memory:?_pragma=foreign_keys(on)&" + SQLiteTxLockParam + "&" + SQLiteTimeFormatParam
 
 // TestDSNMemoryNoForeignKeys is TestDSNMemory with enforcement off, for the
 // migration tests that stage rows as an older schema held them — historical
@@ -72,7 +79,7 @@ const TestDSNMemory = ":memory:?_pragma=foreign_keys(on)&" + SQLiteTimeFormatPar
 // default is off today, but "off" here is a requirement of these tests, not an
 // observation about the driver: a future default flip, or a driver that
 // enables it for you, would break them somewhere far from this line.
-const TestDSNMemoryNoForeignKeys = ":memory:?_pragma=foreign_keys(off)&" + SQLiteTimeFormatParam
+const TestDSNMemoryNoForeignKeys = ":memory:?_pragma=foreign_keys(off)&" + SQLiteTxLockParam + "&" + SQLiteTimeFormatParam
 
 // OpenAt returns a connection to the SQLite database at the given path.
 // The directory must already exist.
@@ -82,10 +89,24 @@ func OpenAt(dbPath string) (*sql.DB, error) {
 	// unlike mattn/go-sqlite3 which had implicit driver-level retries.
 	// 5s gives any rare contention plenty of room to resolve before
 	// surfacing an error.
+	//
+	// _txlock=immediate is what makes that net reach transactions. A
+	// DEFERRED transaction that reads before it writes takes its locks in
+	// two steps, and SQLite will not run the busy handler on the second:
+	// waiting on a lock upgrade can deadlock, so the upgrade fails at once
+	// instead — SQLITE_BUSY while another process holds the write lock,
+	// SQLITE_BUSY_SNAPSHOT if one committed anything at all in the gap —
+	// and busy_timeout never applies. Taking the write lock at BEGIN
+	// removes the upgrade. In-process it costs nothing, since the single
+	// connection below already serializes every transaction; across
+	// processes it turns an immediate, unretryable failure into a wait of
+	// up to busy_timeout. Set on the handle rather than per BEGIN so no
+	// store has to remember it and no caller has to learn the two codes.
 	db, err := OpenTraced("sqlite", dbPath+
 		"?_pragma=journal_mode(WAL)"+
 		"&_pragma=foreign_keys(on)"+
 		"&_pragma=busy_timeout(5000)"+
+		"&"+SQLiteTxLockParam+
 		"&"+SQLiteTimeFormatParam, PoolLocal)
 	if err != nil {
 		return nil, err

@@ -61,7 +61,7 @@ func (h *ssoBreakGlassHandler) handleBreakGlassList(w http.ResponseWriter, r *ht
 // would not see the still-uncommitted Add.
 func (h *ssoBreakGlassHandler) listViews(ctx context.Context, orgID, userID string) ([]breakGlassView, error) {
 	var principals []ssostore.SSOBreakGlassPrincipal
-	if err := h.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
 		principals, e = ssostore.FromTx(tx).BreakGlass.List(ctx, orgID)
 		return e

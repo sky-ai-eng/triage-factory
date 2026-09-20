@@ -980,7 +980,7 @@ func (s *Server) completeNamedAccountBind(r *http.Request, orgID, userID, nonce,
 // login, which is the caller's own.
 func (s *Server) linkedIdentityRefusal(ctx context.Context, orgID, userID, ghWeb string, ghUser *auth.GitHubUser) (*bindRefusal, error) {
 	var linked *domain.UserGitHubIdentity
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		linked, lerr = tx.Users.GetGitHubIdentity(ctx, userID, ghWeb)
 		return lerr
@@ -1164,7 +1164,7 @@ func (s *Server) credentialSlotRefusal(ctx context.Context, orgID, userID string
 		existingApp *domain.OrgGitHubApp
 		pat         string
 	)
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		if existingApp, lerr = tx.GitHubApps.GetForOrg(ctx, orgID); lerr != nil {
 			return lerr

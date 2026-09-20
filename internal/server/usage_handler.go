@@ -179,7 +179,7 @@ func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 
 	self := userID
 	var rows []domain.SpendRow
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		rows, e = tx.Spend.ListSpend(r.Context(), orgID, domain.SpendFilter{
 			CreatorUserID: &self, Since: since, Until: until,
@@ -261,7 +261,7 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		userProfiles map[string]userProfile
 		ruleNames    map[string]string
 	)
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		rows, e = tx.Spend.ListSpendSystem(r.Context(), orgID, domain.SpendFilter{
 			TeamID: &teamID, Since: since, Until: until,
@@ -342,7 +342,7 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 		userProfiles map[string]userProfile
 		ruleNames    map[string]string // local mode only
 	)
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		rows, e = tx.Spend.ListSpendSystem(r.Context(), orgID, domain.SpendFilter{
 			Since: since, Until: until,
@@ -517,7 +517,7 @@ func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Reques
 		caps  []domain.TeamCap
 		total int
 	)
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		caps, total, e = tx.Teams.ListActiveCapsForOrgSystem(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e

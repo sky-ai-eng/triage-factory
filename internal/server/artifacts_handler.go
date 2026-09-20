@@ -146,7 +146,7 @@ func requireArtifactKind(w http.ResponseWriter, art *domain.Artifact, kind, arti
 // art.Kind (pull_request vs review). Returns ok=false (after writing the error
 // response) so callers can `if ...; !ok { return }`.
 func (ah *artifactsHandler) loadArtifact(w http.ResponseWriter, r *http.Request, orgID, userID, id string) (art *domain.Artifact, ok bool) {
-	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ah.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		art, e = tx.Artifacts.Get(r.Context(), orgID, id)
 		return e
@@ -605,7 +605,7 @@ func (ah *artifactsHandler) reconcileArtifactOutOfBand(r *http.Request, orgID, u
 	ctx := context.WithoutCancel(r.Context())
 	arts := []domain.Artifact{*art}
 	if art.ConversationID != "" {
-		if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		if err := ah.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 			all, e := tx.Artifacts.ListByConversation(ctx, orgID, art.ConversationID)
 			if e != nil {
 				return e
@@ -1127,7 +1127,7 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		closeEligible bool
 		unresolved    bool
 	)
-	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := ah.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		// Step 1: the blueprint run is what carries the terminal this closure
 		// keys on, so a conversation with none cannot drive it — whether or not
 		// it carries a task_id of its own. Leave taskID empty and no-op below.

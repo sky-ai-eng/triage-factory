@@ -104,7 +104,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		// A credential-store failure is a backend fault, not "no credentials":
 		// swallowing it here used to answer "Jira not configured", telling the
@@ -166,7 +166,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 
 	var entities []domain.Entity
 	var taskedEntityIDs map[string]struct{}
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		// Team-scoped discovery read: in multi-mode this returns only
 		// Jira entities whose project is attached to one of the viewer's
@@ -524,7 +524,7 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 		taskedEntityIDs map[string]struct{}
 		scopedJiraIDs   map[string]struct{}
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		taskedEntityIDs, e = tx.Tasks.EntityIDsWithActiveTasks(r.Context(), orgID, "jira")
 		if e != nil {
@@ -714,7 +714,7 @@ func (s *Server) resolveStockTicket(r *http.Request, b *stockBatch, issueKey str
 	}
 
 	var entity *domain.Entity
-	if err := s.tx.WithTx(r.Context(), b.orgID, b.userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), b.orgID, b.userID, func(tx db.TxStores) error {
 		var e error
 		entity, e = tx.Entities.GetBySource(r.Context(), b.orgID, "jira", issueKey)
 		return e

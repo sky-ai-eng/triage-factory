@@ -275,7 +275,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 		preflightErr error
 	)
 	if userID != "" {
-		preflightErr = s.tx.SyntheticClaimsWithTx(context.Background(), orgID, userID, func(ts db.TxStores) error {
+		preflightErr = s.tx.SyntheticClaimsWithReadTx(context.Background(), orgID, userID, func(ts db.TxStores) error {
 			r, e := ts.Conversations.Get(context.Background(), orgID, conversationID)
 			conv = r
 			return e

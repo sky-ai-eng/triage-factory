@@ -419,7 +419,7 @@ func (h *avatarsHandler) handleAvatar(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var avatarURL string
-	if err := h.tx.WithTx(r.Context(), orgID, claims.Subject, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, claims.Subject, func(tx db.TxStores) error {
 		_, avatar, e := tx.Users.GetProfile(r.Context(), targetID)
 		avatarURL = avatar
 		return e

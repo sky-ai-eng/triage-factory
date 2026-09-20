@@ -105,7 +105,7 @@ type pgMembership struct{ db *sql.DB }
 // probe runs a one-column boolean SQL function under the given claims.
 func (m pgMembership) probe(ctx context.Context, claims db.Claims, query string, arg any) (bool, error) {
 	var ok bool
-	err := db.WithTx(ctx, m.db, claims, func(tx *sql.Tx) error {
+	err := db.WithReadTx(ctx, m.db, claims, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, query, arg).Scan(&ok)
 	})
 	return ok, err
@@ -117,7 +117,7 @@ func (m pgMembership) teamInOrg(ctx context.Context, orgID, userID, teamID strin
 
 func (m pgMembership) teamArchived(ctx context.Context, orgID, userID, teamID string) (bool, error) {
 	var archived sql.NullBool
-	err := db.WithTx(ctx, m.db, db.Claims{Sub: userID, OrgID: orgID}, func(tx *sql.Tx) error {
+	err := db.WithReadTx(ctx, m.db, db.Claims{Sub: userID, OrgID: orgID}, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx,
 			`SELECT deleted_at IS NOT NULL FROM teams WHERE id = $1::uuid`, teamID,
 		).Scan(&archived)
@@ -157,7 +157,7 @@ func (m pgMembership) userOwnsOrg(ctx context.Context, userID, orgID string) (bo
 
 func (m pgMembership) orgMemberCount(ctx context.Context, orgID, userID string) (int, error) {
 	var n int
-	err := db.WithTx(ctx, m.db, db.Claims{Sub: userID, OrgID: orgID}, func(tx *sql.Tx) error {
+	err := db.WithReadTx(ctx, m.db, db.Claims{Sub: userID, OrgID: orgID}, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM org_memberships WHERE org_id = $1::uuid`, orgID,
 		).Scan(&n)
@@ -173,7 +173,7 @@ func (m pgMembership) teamMemberCountAndRole(ctx context.Context, orgID, userID,
 		n    int
 		role string
 	)
-	err := db.WithTx(ctx, m.db, db.Claims{Sub: userID, OrgID: orgID}, func(tx *sql.Tx) error {
+	err := db.WithReadTx(ctx, m.db, db.Claims{Sub: userID, OrgID: orgID}, func(tx *sql.Tx) error {
 		if e := tx.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM memberships WHERE team_id = $1::uuid`, teamID,
 		).Scan(&n); e != nil {
@@ -196,7 +196,7 @@ func (m pgMembership) teamMemberCountAndRole(ctx context.Context, orgID, userID,
 // spelled out here to be diffable against the policy it shadows.
 func (m pgMembership) taskWritable(ctx context.Context, orgID, userID, taskID string) (bool, bool, error) {
 	var visible, canWrite bool
-	err := db.WithTx(ctx, m.db, db.Claims{Sub: userID, OrgID: orgID}, func(tx *sql.Tx) error {
+	err := db.WithReadTx(ctx, m.db, db.Claims{Sub: userID, OrgID: orgID}, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 			SELECT
 			  EXISTS (SELECT 1 FROM tasks t WHERE t.id = $1::uuid AND t.org_id = $2::uuid) AS visible,

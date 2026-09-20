@@ -228,7 +228,7 @@ func (mh *marketplaceHandler) handleMarketplacePublish(w http.ResponseWriter, r 
 		sourceNotFound  bool
 		existingListing *domain.ListingSummary
 	)
-	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := mh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		snap, teamID, e = buildListingSnapshot(r.Context(), tx, orgID, req.Kind, req.SourceID)
 		if errors.Is(e, errMarketplaceSourceNotFound) {
@@ -336,7 +336,7 @@ func (mh *marketplaceHandler) handleMarketplaceListingVersionCreate(w http.Respo
 		listingNotFound   bool
 		sourceUnavailable bool
 	)
-	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := mh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		detail, e := tx.Marketplace.Get(r.Context(), orgID, id, userID)
 		if errors.Is(e, sql.ErrNoRows) {
 			listingNotFound = true
@@ -406,7 +406,7 @@ func (mh *marketplaceHandler) gateMarketplaceListingWrite(w http.ResponseWriter,
 		listing *domain.MarketplaceListing
 		missing bool
 	)
-	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := mh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		detail, e := tx.Marketplace.Get(r.Context(), orgID, id, userID)
 		if errors.Is(e, sql.ErrNoRows) {
 			missing = true
@@ -527,7 +527,7 @@ func (mh *marketplaceHandler) handleMarketplaceListingBySource(w http.ResponseWr
 	}
 
 	var listing *domain.ListingSummary
-	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := mh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		listing, e = tx.Marketplace.GetBySource(r.Context(), orgID, sourceID)
 		return e
@@ -619,7 +619,7 @@ func (mh *marketplaceHandler) handleMarketplaceList(w http.ResponseWriter, r *ht
 		listings []domain.ListingSummary
 		total    int
 	)
-	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := mh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		listings, total, e = tx.Marketplace.List(r.Context(), orgID, userID, f, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
@@ -650,7 +650,7 @@ func (mh *marketplaceHandler) handleMarketplaceGet(w http.ResponseWriter, r *htt
 		detail  domain.ListingDetail
 		missing bool
 	)
-	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := mh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		detail, e = tx.Marketplace.Get(r.Context(), orgID, id, userID)
 		if errors.Is(e, sql.ErrNoRows) {
@@ -691,7 +691,7 @@ func (mh *marketplaceHandler) handleMarketplaceVote(w http.ResponseWriter, r *ht
 	// already applies) and 404 before writing, rather than translating a
 	// caught FK-violation error after the fact.
 	var missing bool
-	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := mh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if _, e := tx.Marketplace.Get(r.Context(), orgID, id, userID); errors.Is(e, sql.ErrNoRows) {
 			missing = true
 			return nil

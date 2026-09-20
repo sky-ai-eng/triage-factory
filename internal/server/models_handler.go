@@ -177,7 +177,7 @@ func (h *modelsHandler) handleModelsList(w http.ResponseWriter, r *http.Request)
 	}
 
 	var orgSet domain.OrgSettings
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error
 		orgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
 		return err
@@ -273,7 +273,7 @@ func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Requ
 	// discloses to another org member is which models a sibling team may spend
 	// on.
 	var enabled domain.ModelSet
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
 		if err != nil {
 			return fmt.Errorf("read org settings: %w", err)

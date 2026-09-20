@@ -159,3 +159,44 @@ func TestWithTx_SQLite_CanceledCtxSurfacesAsCanceled(t *testing.T) {
 		t.Fatalf("errors.Is(err, context.Canceled) = false; got %v", err)
 	}
 }
+
+// TestWithReadTx_SQLite_RefusesWriteAndReads pins both read doors: a body
+// that writes is refused, and the refusal leaves the handle writable — the
+// query_only guard is connection state, so a stuck guard would refuse every
+// later write in a one-connection pool.
+func TestWithReadTx_SQLite_RefusesWriteAndReads(t *testing.T) {
+	conn := newSQLiteForTxTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	doors := map[string]func(context.Context, string, string, func(db.TxStores) error) error{
+		"WithReadTx":                stores.Tx.WithReadTx,
+		"SyntheticClaimsWithReadTx": stores.Tx.SyntheticClaimsWithReadTx,
+	}
+	for name, door := range doors {
+		t.Run(name, func(t *testing.T) {
+			err := door(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
+				return tx.Repos.SetConfigured(ctx, runmode.LocalDefaultOrgID, []string{"read/door"})
+			})
+			if err == nil {
+				t.Fatalf("%s committed a write; want a read-only refusal", name)
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), "readonly") {
+				t.Fatalf("%s refused with %v; want SQLITE_READONLY", name, err)
+			}
+
+			if err := door(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
+				_, _, err := tx.Repos.List(ctx, runmode.LocalDefaultOrgID, db.ListOpts{})
+				return err
+			}); err != nil {
+				t.Fatalf("%s refused a read: %v", name, err)
+			}
+
+			if err := stores.Tx.WithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
+				return tx.Repos.SetConfigured(ctx, runmode.LocalDefaultOrgID, []string{"write/door"})
+			}); err != nil {
+				t.Fatalf("WithTx refuses a write after %s: %v", name, err)
+			}
+		})
+	}
+}

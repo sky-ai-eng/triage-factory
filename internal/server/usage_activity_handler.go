@@ -161,7 +161,7 @@ func (h *usageHandler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.R
 		arts  []domain.Artifact
 		total int
 	)
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		arts, total, e = tx.Artifacts.ListByTeam(r.Context(), orgID, teamID, opts)
 		return e
@@ -208,7 +208,7 @@ func (h *usageHandler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Re
 		total     int
 		teamNames map[string]string
 	)
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		arts, total, e = tx.Artifacts.ListByOrgSystem(r.Context(), orgID, opts)
 		if e != nil {
@@ -464,7 +464,7 @@ func (h *usageHandler) handleUsageTeamActions(w http.ResponseWriter, r *http.Req
 		total      int
 		actorNames map[string]string
 	)
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		actions, total, e = tx.ExternalActions.ListByTeam(r.Context(), orgID, teamID, opts)
 		if e != nil {
@@ -517,7 +517,7 @@ func (h *usageHandler) handleUsageOrgActions(w http.ResponseWriter, r *http.Requ
 		teamNames  map[string]string
 		actorNames map[string]string
 	)
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		actions, total, e = tx.ExternalActions.ListByOrgSystem(r.Context(), orgID, opts)
 		if e != nil {

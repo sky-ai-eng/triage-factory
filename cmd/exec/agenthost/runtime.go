@@ -353,7 +353,7 @@ func (r *directRuntime) ListConversationArtifacts(ctx context.Context) ([]domain
 		return r.stores.Artifacts.ListByConversationSystem(ctx, r.info.OrgID, r.info.ConversationID)
 	}
 	var out []domain.Artifact
-	err := r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
+	err := r.stores.Tx.SyntheticClaimsWithReadTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
 		a, e := ts.Artifacts.ListByConversation(ctx, r.info.OrgID, r.info.ConversationID)
 		out = a
 		return e
