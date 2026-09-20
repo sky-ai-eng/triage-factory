@@ -186,9 +186,8 @@ type ConversationQueueStore interface {
 	// that claim released, which is all it takes for the dispatcher to
 	// re-claim and re-drive it. Parked (`open`) and terminal conversations
 	// are not mid-flight and stay put — they resume through their own paths.
-	// attempts is retained (mirrors EventQueue.ResetProcessing) so a conversation that
-	// keeps hard-crashing the process eventually fails out rather than
-	// crash-looping the boot.
+	// attempts is retained so a conversation that keeps hard-crashing the
+	// process eventually fails out rather than crash-looping the boot.
 	//
 	// Ownership-scoped (TFAC-578): only rows stamped executor_id = executorID
 	// AND boot_epoch < bootEpoch are reset — i.e. this instance's own orphans
