@@ -295,7 +295,8 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 
 // ListActiveTerminalCandidatesSystem selects active entities whose stored
 // snapshot already reads terminal, unpolled for at least unpolledFor, with
-// no terminating close unsettled in the queue. json_valid guards the
+// no terminating close ready, leased or parked in the queue — a parked one
+// still holds the entity's key, and is the alarm itself. json_valid guards the
 // extraction so a legacy ” / malformed snapshot is skipped rather than
 // failing the scan — an entity that never stored a snapshot has said nothing
 // about whether its subject finished. json_extract returns 1 for a JSON
@@ -315,7 +316,7 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 	settlingArm := `NOT EXISTS (
 		    SELECT 1 FROM event_queue q
 		    WHERE q.entity_id = entities.id
-		      AND q.status IN ('pending', 'processing')
+		      AND q.status IN ('ready', 'leased', 'parked')
 		      AND q.event_type IN (` + strings.Join(settling, ", ") + `)
 		  )`
 	// Each arm is omitted rather than emitted empty: `IN ()` is a syntax

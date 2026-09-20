@@ -4,28 +4,33 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// eventQueueStore is the Postgres impl of db.EventQueueStore —
-// the durable router queue. Wired against the admin pool in postgres.New:
-// the ingestor and drain worker are system services with no per-user
-// identity, so impersonating a user via the app pool would be wrong. The
-// event_queue_all RLS policy is defense-in-depth (admin bypasses it) and
-// org_id is bound in every statement.
+// eventQueueStore is the Postgres impl of db.EventQueueStore — the durable
+// router queue, on the shared work-item contract. Wired against the admin
+// pool in postgres.New: the ingestor and drain worker are system services
+// with no per-user identity, so impersonating a user via the app pool would
+// be wrong. The event_queue_all RLS policy is defense-in-depth (admin
+// bypasses it) and org_id is bound in every statement.
 //
-// Holds the admin *sql.DB directly (not the shared queryer) because
-// Enqueue runs the events-row insert and the queue-row insert in one
-// transaction — the outbox atomicity guarantee — which needs BeginTx.
+// Holds the admin *sql.DB directly (not the shared queryer) because Enqueue
+// runs the events-row insert and the queue-row admission in one transaction
+// — the outbox atomicity guarantee — which needs BeginTx, and because the
+// package's claim opens its own transaction per round.
 type eventQueueStore struct {
 	conn *sql.DB
+	kind workitem.Kind
 }
 
 func newEventQueueStore(conn *sql.DB) db.EventQueueStore {
-	return &eventQueueStore{conn: conn}
+	return &eventQueueStore{conn: conn, kind: workkinds.EventQueue(workitem.Postgres)}
 }
 
 var _ db.EventQueueStore = (*eventQueueStore)(nil)
@@ -41,45 +46,45 @@ func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.
 		if err != nil {
 			return err
 		}
-		return insertQueueRow(ctx, tx, orgID, id, evt, traceparent, nil)
+		_, err = s.admitQueueRow(ctx, tx, orgID, id, evt, traceparent, nil, "")
+		return err
 	}); err != nil {
 		return "", err
 	}
 	return id, nil
 }
 
-// insertQueueRow writes the pending queue row for an already-recorded
-// event. Shared by Enqueue and EnqueueBatchWithSnapshotCAS so both produce
-// byte-identical rows.
+// admitQueueRow admits the ready queue row for an already-recorded event
+// through the package, so the shared block is filled the one way the
+// contract fills it. Shared by Enqueue and EnqueueBatchWithSnapshotCAS so
+// both produce byte-identical rows.
 //
 // entityPollSeq is the version the event was judged at — the CAS path passes
 // the poll_seq it just advanced to, the ingest path passes nil and the column
-// stores NULL.
-func insertQueueRow(ctx context.Context, q queryer, orgID, eventID string, evt domain.Event, traceparent string, entityPollSeq *int64) error {
-	var entityID any
-	if evt.EntityID != nil && *evt.EntityID != "" {
-		entityID = *evt.EntityID
-	}
-	// NULLIF on traceparent: an untraced producer stores NULL rather than
-	// an empty string, so "no context to link" is one value in the column,
-	// not two.
-	_, err := q.ExecContext(ctx, `
-		INSERT INTO public.event_queue (org_id, event_id, entity_id, event_type, status, traceparent, entity_poll_seq)
-		VALUES ($1, $2, $3, $4, 'pending', NULLIF($5, ''), $6)
-	`, orgID, eventID, entityID, evt.EventType, traceparent, entityPollSeq)
-	return err
+// stores NULL. uniqueKey is set only for the close obligation. deduplicated
+// reports the package's answer, which only a keyed admission can return.
+func (s *eventQueueStore) admitQueueRow(ctx context.Context, tx *sql.Tx, orgID, eventID string, evt domain.Event, traceparent string, entityPollSeq *int64, uniqueKey string) (bool, error) {
+	_, deduplicated, err := workitem.Admit(ctx, tx, s.kind, orgID, uniqueKey, db.EventQueueRowCols(eventID, evt, traceparent, entityPollSeq))
+	return deduplicated, err
 }
 
-// unsettledCloseExists reports whether the entity already has a pending or
-// processing row whose settlement decides its fate — a terminating
-// transition or an earlier close obligation. Evaluated inside the enqueue
-// transaction, so the answer is the one the insert commits against.
+// unsettledCloseStatuses is the predicate for a close still deciding an
+// entity's fate. Parked is in it: a parked obligation holds the entity's key
+// under the kind's uniqueness index, so the tracker mints no replacement
+// and the checker does not count the entity — the parked row itself is the
+// alarm.
+const unsettledCloseStatuses = "'ready','leased','parked'"
+
+// unsettledCloseExists reports whether the entity already has an unsettled
+// row whose settlement decides its fate — a terminating transition or an
+// earlier close obligation. Evaluated inside the enqueue transaction, so the
+// answer is the one the insert commits against.
 func unsettledCloseExists(ctx context.Context, q queryer, orgID, entityID string) (bool, error) {
 	var one int
 	err := q.QueryRowContext(ctx, `
 		SELECT 1 FROM public.event_queue
 		WHERE org_id = $1 AND entity_id = $2
-		  AND status IN ('pending', 'processing')
+		  AND status IN (`+unsettledCloseStatuses+`)
 		  AND event_type = ANY($3)
 		LIMIT 1
 	`, orgID, entityID, domain.EntityCloseSettlingEventTypes()).Scan(&one)
@@ -111,6 +116,7 @@ func (s *eventQueueStore) EnqueueBatchWithSnapshotCAS(ctx context.Context, orgID
 		judgedAt := expectedPollSeq + 1
 		ids = make([]string, 0, len(events))
 		for i, evt := range events {
+			uniqueKey := ""
 			if evt.EventType == domain.EventSystemEntityCloseOwed {
 				// One obligation per entity while one is unsettled — checked
 				// here, on the transaction that would insert it, so two cycles
@@ -124,13 +130,22 @@ func (s *eventQueueStore) EnqueueBatchWithSnapshotCAS(ctx context.Context, orgID
 					ids = append(ids, "")
 					continue
 				}
+				uniqueKey = workkinds.EventQueueCloseOwedKey(entityID)
 			}
 			id, err := recordEvent(ctx, tx, orgID, evt)
 			if err != nil {
 				return err
 			}
-			if err := insertQueueRow(ctx, tx, orgID, id, evt, db.TraceparentAt(traceparents, i), &judgedAt); err != nil {
+			deduplicated, err := s.admitQueueRow(ctx, tx, orgID, id, evt, db.TraceparentAt(traceparents, i), &judgedAt, uniqueKey)
+			if err != nil {
 				return err
+			}
+			if deduplicated {
+				// The check above ran on this transaction, and the entity row
+				// lock the CAS took serializes every writer of this key, so
+				// a duplicate here is an invariant failing. Erroring rolls
+				// the events row back rather than orphaning it.
+				return errors.New("close obligation admission raced its own check")
 			}
 			ids = append(ids, id)
 		}
@@ -144,119 +159,74 @@ func (s *eventQueueStore) EnqueueBatchWithSnapshotCAS(ctx context.Context, orgID
 	return true, ids, nil
 }
 
-func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, bootEpoch int64) (*domain.QueuedEvent, error) {
-	// FOR UPDATE SKIP LOCKED on the inner select so multiple router
-	// workers can drain concurrently without ever claiming the same row
-	// — the horizontal-routing groundwork (running N workers is a
-	// non-goal for now). The single-statement UPDATE ... RETURNING is
-	// atomic; an empty queue matches no row and the scan reports
-	// ErrNoRows -> (nil, nil).
-	//
-	// executor_id + boot_epoch are stamped in this same statement,
-	// mirroring ConversationQueueStore.ClaimNextConversation — see ResetProcessing.
-	row := s.conn.QueryRowContext(ctx, `
-		UPDATE public.event_queue
-		SET status = 'processing', claimed_at = now(), attempts = attempts + 1,
-		    executor_id = NULLIF($1, ''),
-		    boot_epoch  = CASE WHEN $1 = '' THEN NULL ELSE $2::bigint END
-		WHERE id = (
-			SELECT id FROM public.event_queue
-			WHERE status = 'pending'
-			ORDER BY id
-			FOR UPDATE SKIP LOCKED
-			LIMIT 1
-		)
-		RETURNING id, org_id, event_id, entity_id, event_type,
-		          status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at,
-		          COALESCE(traceparent, ''), entity_poll_seq
-	`, executorID, bootEpoch)
-	return scanPgQueuedEvent(row)
-}
+// pgQueuedEventSelect is the projection every QueuedEvent read answers
+// with: the shared block and the kind's own columns.
+const pgQueuedEventSelect = `
+	SELECT id, org_id, event_id, COALESCE(entity_id::text, ''), event_type,
+	       status, attempt, max_attempts, next_attempt_at,
+	       lease_generation, COALESCE(lease_owner, ''), lease_epoch, leased_at, lease_expires_at,
+	       cancel_requested_at, COALESCE(cancel_requested_by, ''), COALESCE(cancel_reason, ''),
+	       COALESCE(last_error, ''), COALESCE(last_outcome, ''), COALESCE(unique_key, ''), superseded_by,
+	       first_enqueued_at, created_at, done_at,
+	       COALESCE(traceparent, ''), entity_poll_seq
+	FROM public.event_queue`
 
-func (s *eventQueueStore) MarkDone(ctx context.Context, orgID string, id int64) error {
-	_, err := s.conn.ExecContext(ctx, `
-		UPDATE public.event_queue SET status = 'done', processed_at = now()
-		WHERE org_id = $1 AND id = $2 AND status = 'processing'
-	`, orgID, id)
-	return err
-}
-
-func (s *eventQueueStore) MarkFailed(ctx context.Context, orgID string, id int64, lastErr string) error {
-	_, err := s.conn.ExecContext(ctx, `
-		UPDATE public.event_queue SET status = 'failed', processed_at = now(), last_error = $3
-		WHERE org_id = $1 AND id = $2 AND status = 'processing'
-	`, orgID, id, lastErr)
-	return err
-}
-
-func (s *eventQueueStore) Requeue(ctx context.Context, orgID string, id int64, lastErr string) error {
-	// attempts left as-is (the claim counted this try); claimed_at
-	// cleared so the row reads clean for the next claim. The ownership
-	// stamp is cleared too: a pending row has no owner.
-	_, err := s.conn.ExecContext(ctx, `
-		UPDATE public.event_queue SET status = 'pending', last_error = $3, claimed_at = NULL,
-			executor_id = NULL, boot_epoch = NULL
-		WHERE org_id = $1 AND id = $2 AND status = 'processing'
-	`, orgID, id, lastErr)
-	return err
-}
-
-func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
-	// Ownership-scoped, mirroring ConversationQueueStore.ResetProcessingConversations:
-	// only rows this instance itself claimed (executor_id = $1) during a
-	// strictly earlier boot (boot_epoch < $2) are reset. A live sibling's
-	// still-processing row carries a different executor_id and is never
-	// touched. `boot_epoch IS NULL` is a narrow defensive catch (this
-	// instance's persistent id, no epoch — a state only pre-epoch
-	// from-source builds could produce); it does NOT cover pre-registry
-	// rows (random per-boot uuid or NULL executor_id) — moot on Postgres
-	// (fresh-installs-only posture), normalized on SQLite by migration
-	// 202607080003_pre_registry_orphan_normalization. The reset clears
-	// the stamp: a pending row has no owner.
-	res, err := s.conn.ExecContext(ctx, `
-		UPDATE public.event_queue SET status = 'pending', claimed_at = NULL,
-			executor_id = NULL, boot_epoch = NULL
-		WHERE status = 'processing'
-		  AND executor_id = $1
-		  AND (boot_epoch IS NULL OR boot_epoch < $2)
-	`, executorID, bootEpoch)
-	if err != nil {
-		return 0, err
+func (s *eventQueueStore) Claim(ctx context.Context, owner workitem.Owner, n int) (db.EventQueueClaim, error) {
+	res, claimErr := workitem.Claim(ctx, s.conn, s.kind, owner, "", n)
+	out := db.EventQueueClaim{Cancelled: res.Cancelled, Parked: res.Parked, Reclaimed: res.Reclaimed}
+	if len(res.Claimed) == 0 {
+		return out, claimErr
 	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
-}
-
-func (s *eventQueueStore) RequeueStaleProcessing(ctx context.Context, olderThan time.Duration) (int, error) {
-	// The staleness backstop under ResetProcessing — see the interface doc
-	// for why it errs toward reclaiming. Unscoped by ownership on purpose:
-	// the row this exists for belongs to an instance id that is never coming
-	// back, so scoping it to any live identity would skip exactly the case
-	// it covers.
-	//
-	// The cutoff is computed from now() — the same server clock that stamped
-	// claimed_at — rather than from a caller-supplied timestamp, so pod clock
-	// skew can't turn a fresh claim into a stale one. A NULL claimed_at
-	// 'processing' row is reclaimed unconditionally (mirroring
-	// PendingFirings.RequeueStaleDraining): the claim stamps both columns in
-	// one statement so it should not exist, and if it somehow does it is
-	// stranded by every other predicate.
-	res, err := s.conn.ExecContext(ctx, `
-		UPDATE public.event_queue SET status = 'pending', last_error = $2, claimed_at = NULL,
-			executor_id = NULL, boot_epoch = NULL
-		WHERE status = 'processing'
-		  AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $1::double precision))
-	`, olderThan.Seconds(), db.StaleProcessingReclaimReason)
-	if err != nil {
-		return 0, err
+	// The kind's columns are immutable after admission, so reading them by
+	// id after the claim reads the values the row was admitted with.
+	ids := make([]int64, len(res.Claimed))
+	for i, r := range res.Claimed {
+		ids[i] = r.ItemID
 	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
+	rows, err := s.conn.QueryContext(ctx, pgQueuedEventSelect+`
+		WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return out, errors.Join(claimErr, err)
+	}
+	defer rows.Close()
+	byID := make(map[int64]domain.QueuedEvent, len(res.Claimed))
+	for rows.Next() {
+		qe, err := scanPgQueuedEvent(rows)
+		if err != nil {
+			return out, errors.Join(claimErr, err)
+		}
+		byID[qe.ID] = qe
+	}
+	if err := rows.Err(); err != nil {
+		return out, errors.Join(claimErr, err)
+	}
+	out.Events = make([]db.ClaimedEvent, 0, len(res.Claimed))
+	for _, r := range res.Claimed {
+		qe, ok := byID[r.ItemID]
+		if !ok {
+			return out, errors.Join(claimErr, fmt.Errorf("event_queue row %d leased but not readable", r.ItemID))
+		}
+		out.Events = append(out.Events, db.ClaimedEvent{Receipt: r, Event: qe})
+	}
+	return out, claimErr
 }
 
-func (s *eventQueueStore) PruneDone(ctx context.Context, before time.Time) (int, error) {
+func (s *eventQueueStore) RenewLease(ctx context.Context, r workitem.Receipt) (workitem.Receipt, error) {
+	return workitem.RenewLease(ctx, s.conn, s.kind, r)
+}
+
+func (s *eventQueueStore) MarkDone(ctx context.Context, r workitem.Receipt) error {
+	return workitem.MarkDone(ctx, s.conn, s.kind, r)
+}
+
+func (s *eventQueueStore) Requeue(ctx context.Context, r workitem.Receipt, outcome workitem.Outcome, cause error) (bool, error) {
+	return workitem.Requeue(ctx, s.conn, s.kind, r, outcome, cause)
+}
+
+func (s *eventQueueStore) PruneSettled(ctx context.Context, before time.Time) (int, error) {
 	res, err := s.conn.ExecContext(ctx, `
-		DELETE FROM public.event_queue WHERE status = 'done' AND processed_at < $1
+		DELETE FROM public.event_queue
+		WHERE status IN ('done', 'cancelled') AND done_at < $1
 	`, before)
 	if err != nil {
 		return 0, err
@@ -265,7 +235,7 @@ func (s *eventQueueStore) PruneDone(ctx context.Context, before time.Time) (int,
 	return int(n), nil
 }
 
-// pgFailedEventSelect is the projection both the list and the single read
+// pgParkedEventSelect is the projection both the list and the single read
 // answer with, so a row read one way is byte-identical to the same row read
 // the other.
 //
@@ -275,29 +245,30 @@ func (s *eventQueueStore) PruneDone(ctx context.Context, before time.Time) (int,
 // well as id — the composite FK means the pair is what identifies an entity,
 // and binding only id would let a future cross-org id collision join the wrong
 // title in.
-const pgFailedEventSelect = `
+const pgParkedEventSelect = `
 	SELECT q.id, q.event_type,
 	       COALESCE(q.entity_id::text, ''), COALESCE(e.source, ''), COALESCE(e.source_id, ''), COALESCE(e.title, ''),
-	       q.attempts, COALESCE(q.last_error, ''), q.enqueued_at
+	       q.attempt, q.max_attempts, COALESCE(q.last_outcome, ''), COALESCE(q.last_error, ''),
+	       q.first_enqueued_at, q.done_at
 	FROM public.event_queue q
 	LEFT JOIN public.entities e ON e.id = q.entity_id AND e.org_id = q.org_id
-	WHERE q.org_id = $1 AND q.status = 'failed'`
+	WHERE q.org_id = $1 AND q.status = 'parked'`
 
-func (s *eventQueueStore) ListFailedEvents(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.FailedEvent, int, error) {
+func (s *eventQueueStore) ListParked(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.ParkedEvent, int, error) {
 	var total int
 	if err := s.conn.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM public.event_queue WHERE org_id = $1 AND status = 'failed'
+		SELECT COUNT(*) FROM public.event_queue WHERE org_id = $1 AND status = 'parked'
 	`, orgID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if opts.CountOnly {
-		return []domain.FailedEvent{}, total, nil
+		return []domain.ParkedEvent{}, total, nil
 	}
 
-	// id DESC is enqueue order reversed: the most recently dropped work is
+	// id DESC is enqueue order reversed: the most recently parked work is
 	// what an operator is looking for, and id is monotonic per insert so the
 	// order is total and stable across pages.
-	query := pgFailedEventSelect + `
+	query := pgParkedEventSelect + `
 		ORDER BY q.id DESC`
 	args := []any{orgID}
 	if opts.Limit > 0 {
@@ -310,19 +281,19 @@ func (s *eventQueueStore) ListFailedEvents(ctx context.Context, orgID string, op
 		return nil, 0, err
 	}
 	defer rows.Close()
-	out := []domain.FailedEvent{}
+	out := []domain.ParkedEvent{}
 	for rows.Next() {
-		fe, err := scanFailedEvent(rows)
+		pe, err := scanParkedEvent(rows)
 		if err != nil {
 			return nil, 0, err
 		}
-		out = append(out, fe)
+		out = append(out, pe)
 	}
 	return out, total, rows.Err()
 }
 
-func (s *eventQueueStore) GetFailedEvent(ctx context.Context, orgID string, id int64) (*domain.FailedEvent, error) {
-	fe, err := scanFailedEvent(s.conn.QueryRowContext(ctx, pgFailedEventSelect+`
+func (s *eventQueueStore) GetParked(ctx context.Context, orgID string, id int64) (*domain.ParkedEvent, error) {
+	pe, err := scanParkedEvent(s.conn.QueryRowContext(ctx, pgParkedEventSelect+`
 		AND q.id = $2`, orgID, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -330,49 +301,41 @@ func (s *eventQueueStore) GetFailedEvent(ctx context.Context, orgID string, id i
 	if err != nil {
 		return nil, err
 	}
-	return &fe, nil
+	return &pe, nil
 }
 
-// scanFailedEvent reads one pgFailedEventSelect row. It takes the narrow Scan
-// interface so *sql.Row and *sql.Rows share it — the two reads must not drift
-// on column order.
-func scanFailedEvent(row interface{ Scan(...any) error }) (domain.FailedEvent, error) {
-	var fe domain.FailedEvent
-	err := row.Scan(
-		&fe.ID, &fe.EventType,
-		&fe.EntityID, &fe.EntitySource, &fe.EntitySourceID, &fe.EntityTitle,
-		&fe.Attempts, &fe.LastError, &fe.EnqueuedAt,
+// scanParkedEvent reads one pgParkedEventSelect row. It takes the narrow Scan
+// interface so *sql.Row and *sql.Rows share it — the two reads must not
+// drift on column order.
+func scanParkedEvent(row interface{ Scan(...any) error }) (domain.ParkedEvent, error) {
+	var (
+		pe       domain.ParkedEvent
+		parkedAt sql.NullTime
 	)
-	return fe, err
+	err := row.Scan(
+		&pe.ID, &pe.EventType,
+		&pe.EntityID, &pe.EntitySource, &pe.EntitySourceID, &pe.EntityTitle,
+		&pe.Attempt, &pe.MaxAttempts, &pe.LastOutcome, &pe.LastError,
+		&pe.FirstEnqueuedAt, &parkedAt,
+	)
+	if parkedAt.Valid {
+		pe.ParkedAt = parkedAt.Time
+	}
+	return pe, err
 }
 
-func (s *eventQueueStore) RequeueFailedEvents(ctx context.Context, orgID string, ids []int64) (int, error) {
-	if len(ids) == 0 {
-		return 0, nil
+func (s *eventQueueStore) Redrive(ctx context.Context, orgID string, ids []int64, by string) (int, error) {
+	moved := 0
+	for _, id := range ids {
+		switch err := workitem.Redrive(ctx, s.conn, s.kind, orgID, id, by); {
+		case err == nil:
+			moved++
+		case errors.Is(err, workitem.ErrNotParked):
+		default:
+			return moved, err
+		}
 	}
-	// status = 'failed' is both the selector and the guard: it makes the
-	// operation idempotent (a second requeue matches nothing) and keeps an
-	// operator from resetting the attempts of a row another worker is
-	// actively driving. last_error is untouched on purpose — see the
-	// interface doc.
-	res, err := s.conn.ExecContext(ctx, `
-		UPDATE public.event_queue
-		SET status = 'pending', attempts = 0, claimed_at = NULL, processed_at = NULL,
-			executor_id = NULL, boot_epoch = NULL
-		WHERE org_id = $1 AND status = 'failed' AND id = ANY($2)
-	`, orgID, ids)
-	if err != nil {
-		return 0, err
-	}
-	// Unlike the sweeps above, the count here is the operator's answer — "2 of
-	// the 3 you picked moved" — so a driver that cannot report it must say so
-	// rather than let a discarded error render as "nothing moved" over rows
-	// that did.
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
-	return int(n), nil
+	return moved, nil
 }
 
 func (s *eventQueueStore) UnsettledCloseExistsSystem(ctx context.Context, orgID, entityID string) (bool, error) {
@@ -380,11 +343,7 @@ func (s *eventQueueStore) UnsettledCloseExistsSystem(ctx context.Context, orgID,
 }
 
 func (s *eventQueueStore) ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.QueuedEvent, error) {
-	rows, err := s.conn.QueryContext(ctx, `
-		SELECT id, org_id, event_id, entity_id, event_type,
-		       status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at,
-		       COALESCE(traceparent, ''), entity_poll_seq
-		FROM public.event_queue
+	rows, err := s.conn.QueryContext(ctx, pgQueuedEventSelect+`
 		WHERE org_id = $1 AND entity_id = $2
 		ORDER BY id
 	`, orgID, entityID)
@@ -394,76 +353,58 @@ func (s *eventQueueStore) ListForEntity(ctx context.Context, orgID, entityID str
 	defer rows.Close()
 	out := []domain.QueuedEvent{}
 	for rows.Next() {
-		qe, err := scanPgQueuedEventRow(rows)
+		qe, err := scanPgQueuedEvent(rows)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, *qe)
+		out = append(out, qe)
 	}
 	return out, rows.Err()
 }
 
-// scanPgQueuedEvent scans a sql.Row into *domain.QueuedEvent. (nil, nil)
-// on sql.ErrNoRows so callers treat "empty queue" as a non-error empty
-// result.
-func scanPgQueuedEvent(row *sql.Row) (*domain.QueuedEvent, error) {
+// scanPgQueuedEvent reads one pgQueuedEventSelect row.
+func scanPgQueuedEvent(row interface{ Scan(...any) error }) (domain.QueuedEvent, error) {
 	var (
-		qe          domain.QueuedEvent
-		entityID    sql.NullString
-		claimedAt   sql.NullTime
-		processedAt sql.NullTime
-		pollSeq     sql.NullInt64
+		qe                                    domain.QueuedEvent
+		nextAt, leasedAt, expiresAt, cancelAt sql.NullTime
+		doneAt                                sql.NullTime
+		leaseEpoch, supersededBy, pollSeq     sql.NullInt64
 	)
 	err := row.Scan(
-		&qe.ID, &qe.OrgID, &qe.EventID, &entityID, &qe.EventType,
-		&qe.Status, &qe.Attempts, &qe.LastError, &qe.EnqueuedAt, &claimedAt, &processedAt,
-		&qe.Traceparent, &pollSeq,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	applyPgQueuedEventNulls(&qe, entityID, claimedAt, processedAt, pollSeq)
-	return &qe, nil
-}
-
-// scanPgQueuedEventRow is the sql.Rows variant.
-func scanPgQueuedEventRow(rows *sql.Rows) (*domain.QueuedEvent, error) {
-	var (
-		qe          domain.QueuedEvent
-		entityID    sql.NullString
-		claimedAt   sql.NullTime
-		processedAt sql.NullTime
-		pollSeq     sql.NullInt64
-	)
-	err := rows.Scan(
-		&qe.ID, &qe.OrgID, &qe.EventID, &entityID, &qe.EventType,
-		&qe.Status, &qe.Attempts, &qe.LastError, &qe.EnqueuedAt, &claimedAt, &processedAt,
+		&qe.ID, &qe.OrgID, &qe.EventID, &qe.EntityID, &qe.EventType,
+		&qe.Status, &qe.Attempt, &qe.MaxAttempts, &nextAt,
+		&qe.LeaseGeneration, &qe.LeaseOwner, &leaseEpoch, &leasedAt, &expiresAt,
+		&cancelAt, &qe.CancelRequestedBy, &qe.CancelReason,
+		&qe.LastError, &qe.LastOutcome, &qe.UniqueKey, &supersededBy,
+		&qe.FirstEnqueuedAt, &qe.CreatedAt, &doneAt,
 		&qe.Traceparent, &pollSeq,
 	)
 	if err != nil {
-		return nil, err
+		return domain.QueuedEvent{}, err
 	}
-	applyPgQueuedEventNulls(&qe, entityID, claimedAt, processedAt, pollSeq)
-	return &qe, nil
+	qe.NextAttemptAt = nullTimePtr(nextAt)
+	qe.LeasedAt = nullTimePtr(leasedAt)
+	qe.LeaseExpiresAt = nullTimePtr(expiresAt)
+	qe.CancelRequestedAt = nullTimePtr(cancelAt)
+	qe.DoneAt = nullTimePtr(doneAt)
+	qe.LeaseEpoch = queueNullInt64(leaseEpoch)
+	qe.SupersededBy = queueNullInt64(supersededBy)
+	qe.EntityPollSeq = queueNullInt64(pollSeq)
+	return qe, nil
 }
 
-func applyPgQueuedEventNulls(qe *domain.QueuedEvent, entityID sql.NullString, claimedAt, processedAt sql.NullTime, pollSeq sql.NullInt64) {
-	if entityID.Valid {
-		qe.EntityID = entityID.String
+func nullTimePtr(v sql.NullTime) *time.Time {
+	if !v.Valid {
+		return nil
 	}
-	if claimedAt.Valid {
-		t := claimedAt.Time
-		qe.ClaimedAt = &t
+	t := v.Time.UTC()
+	return &t
+}
+
+func queueNullInt64(v sql.NullInt64) *int64 {
+	if !v.Valid {
+		return nil
 	}
-	if processedAt.Valid {
-		t := processedAt.Time
-		qe.ProcessedAt = &t
-	}
-	if pollSeq.Valid {
-		v := pollSeq.Int64
-		qe.EntityPollSeq = &v
-	}
+	n := v.Int64
+	return &n
 }

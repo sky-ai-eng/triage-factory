@@ -2,9 +2,9 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -12,6 +12,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -32,10 +34,10 @@ func TestEventQueueStore_Postgres(t *testing.T) {
 }
 
 // TestEventQueueStore_Postgres_CrossOrg pins the org_id defense-in-depth
-// filter on the org-scoped mutators + reads. ClaimNext is cross-org by
-// design (one system worker drains every tenant in FIFO order), so it is
-// excluded — the claimed row carries its org_id, which scopes everything
-// downstream.
+// filter on the org-scoped reads and controls. Claim is cross-org by design
+// (one system worker drains every tenant), so it is excluded — the claimed
+// row carries its org_id, which scopes everything downstream, and the
+// receipt carries it into every holder write.
 func TestEventQueueStore_Postgres_CrossOrg(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -52,22 +54,26 @@ func TestEventQueueStore_Postgres_CrossOrg(t *testing.T) {
 		t.Fatalf("Enqueue orgA: %v", err)
 	}
 
-	// ClaimNext is global — it claims orgA's row and tags it with orgA.
-	claimed, err := stores.EventQueue.ClaimNext(ctx, "cross-org-executor", 1)
-	if err != nil || claimed == nil {
-		t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
+	// Claim is global — it claims orgA's row and the receipt names orgA.
+	batch, err := stores.EventQueue.Claim(ctx, workitem.Owner{ID: "cross-org-executor", Epoch: 1}, 1)
+	if err != nil || len(batch.Events) != 1 {
+		t.Fatalf("Claim: got=%+v err=%v", batch, err)
 	}
-	if claimed.OrgID != orgA {
-		t.Errorf("claimed row org_id = %q, want %q", claimed.OrgID, orgA)
+	claimed := batch.Events[0]
+	if claimed.Event.OrgID != orgA || claimed.Receipt.OrgID != orgA {
+		t.Errorf("claimed row org_id = %q/%q, want %q", claimed.Event.OrgID, claimed.Receipt.OrgID, orgA)
 	}
 
-	// MarkDone scoped to orgB must NOT flip orgA's (processing) row.
-	if err := stores.EventQueue.MarkDone(ctx, orgB, claimed.ID); err != nil {
-		t.Fatalf("MarkDone cross-org: %v", err)
+	// A receipt re-addressed to orgB matches nothing: the guard binds the
+	// org beside the generation.
+	forged := claimed.Receipt
+	forged.OrgID = orgB
+	if err := stores.EventQueue.MarkDone(ctx, forged); !errors.Is(err, workitem.ErrLeaseLost) {
+		t.Errorf("MarkDone with a cross-org receipt = %v, want ErrLeaseLost", err)
 	}
 	rowsA, _ := stores.EventQueue.ListForEntity(ctx, orgA, entityA)
-	if len(rowsA) != 1 || rowsA[0].Status != domain.QueuedEventStatusProcessing {
-		t.Errorf("orgA row mutated by cross-org MarkDone: %+v", rowsA)
+	if len(rowsA) != 1 || rowsA[0].Status != domain.QueuedEventStatusLeased {
+		t.Errorf("orgA row mutated by a cross-org receipt: %+v", rowsA)
 	}
 
 	// ListForEntity scoped to orgB must not see orgA's entity rows.
@@ -77,51 +83,57 @@ func TestEventQueueStore_Postgres_CrossOrg(t *testing.T) {
 
 	// The operator surface is org-scoped on the same admin pool, so its
 	// org_id bind is the only thing between one tenant's admin and another
-	// tenant's dropped work. Park orgA's row and prove orgB can neither see
+	// tenant's parked work. Park orgA's row and prove orgB can neither see
 	// nor move it.
-	if err := stores.EventQueue.MarkFailed(ctx, orgA, claimed.ID, "boom"); err != nil {
-		t.Fatalf("MarkFailed orgA: %v", err)
+	if parked, err := stores.EventQueue.Requeue(ctx, claimed.Receipt, workitem.OutcomePermanent, errors.New("boom")); err != nil || !parked {
+		t.Fatalf("Requeue orgA: parked=%v err=%v", parked, err)
 	}
-	if parkedB, _, err := stores.EventQueue.ListFailedEvents(ctx, orgB, db.ListOpts{Limit: 50}); err != nil {
-		t.Fatalf("ListFailedEvents orgB: %v", err)
+	if parkedB, _, err := stores.EventQueue.ListParked(ctx, orgB, db.ListOpts{Limit: 50}); err != nil {
+		t.Fatalf("ListParked orgB: %v", err)
 	} else if len(parkedB) != 0 {
-		t.Errorf("orgB ListFailedEvents returned %d of orgA's parked rows", len(parkedB))
+		t.Errorf("orgB ListParked returned %d of orgA's parked rows", len(parkedB))
 	}
-	if n, err := stores.EventQueue.RequeueFailedEvents(ctx, orgB, []int64{claimed.ID}); err != nil {
-		t.Fatalf("RequeueFailedEvents orgB: %v", err)
+	if row, err := stores.EventQueue.GetParked(ctx, orgB, claimed.Event.ID); err != nil || row != nil {
+		t.Errorf("orgB GetParked = %+v err=%v, want (nil, nil)", row, err)
+	}
+	if n, err := stores.EventQueue.Redrive(ctx, orgB, []int64{claimed.Event.ID}, "operator"); err != nil {
+		t.Fatalf("Redrive orgB: %v", err)
 	} else if n != 0 {
-		t.Errorf("orgB requeued %d of orgA's parked rows, want 0", n)
+		t.Errorf("orgB redrove %d of orgA's parked rows, want 0", n)
 	}
-	parkedA, _, _ := stores.EventQueue.ListFailedEvents(ctx, orgA, db.ListOpts{Limit: 50})
-	if len(parkedA) != 1 || parkedA[0].ID != claimed.ID {
+	parkedA, _, _ := stores.EventQueue.ListParked(ctx, orgA, db.ListOpts{Limit: 50})
+	if len(parkedA) != 1 || parkedA[0].ID != claimed.Event.ID {
 		t.Fatalf("orgA's parked row = %+v, want the row it parked, untouched", parkedA)
 	}
+	if unsettledB, err := stores.EventQueue.UnsettledCloseExistsSystem(ctx, orgB, entityA); err != nil || unsettledB {
+		t.Errorf("orgB UnsettledCloseExistsSystem = %v err=%v, want false", unsettledB, err)
+	}
 
-	// The correctly-scoped requeue puts it back, and the correctly-scoped
-	// MarkDone still drives it to a terminal.
-	if n, err := stores.EventQueue.RequeueFailedEvents(ctx, orgA, []int64{claimed.ID}); err != nil || n != 1 {
-		t.Fatalf("RequeueFailedEvents orgA: n=%d err=%v", n, err)
+	// The correctly-scoped redrive puts it back, and the correctly-scoped
+	// receipt still drives it to a terminal.
+	if n, err := stores.EventQueue.Redrive(ctx, orgA, []int64{claimed.Event.ID}, "operator"); err != nil || n != 1 {
+		t.Fatalf("Redrive orgA: n=%d err=%v", n, err)
 	}
-	reclaimed, err := stores.EventQueue.ClaimNext(ctx, "cross-org-executor", 1)
-	if err != nil || reclaimed == nil {
-		t.Fatalf("re-claim after requeue: got=%v err=%v", reclaimed, err)
+	again, err := stores.EventQueue.Claim(ctx, workitem.Owner{ID: "cross-org-executor", Epoch: 1}, 1)
+	if err != nil || len(again.Events) != 1 {
+		t.Fatalf("re-claim after redrive: got=%+v err=%v", again, err)
 	}
-	if err := stores.EventQueue.MarkDone(ctx, orgA, reclaimed.ID); err != nil {
+	if err := stores.EventQueue.MarkDone(ctx, again.Events[0].Receipt); err != nil {
 		t.Fatalf("MarkDone orgA: %v", err)
 	}
 	rowsA, _ = stores.EventQueue.ListForEntity(ctx, orgA, entityA)
 	if rowsA[0].Status != domain.QueuedEventStatusDone {
-		t.Errorf("orgA row status = %q, want done after correctly-scoped MarkDone", rowsA[0].Status)
+		t.Errorf("orgA row status = %q, want done after the correctly-scoped MarkDone", rowsA[0].Status)
 	}
 }
 
 // TestEventQueueStore_Postgres_LateWriterAfterReclaim pins the loser
-// contract of the staleness backstop. Once a stale row has been reclaimed,
-// the original owner may still be alive and may still finish the unit it
-// claimed — and when it does, its terminal write lands on a row that now
-// belongs to another pass. Every one of those writes must be a no-op, not a
-// false 'done' that consumes an event nobody has routed yet. The
-// status = 'processing' guard on the terminal mutators is what makes it so.
+// contract of lease expiry under a real takeover. Once a row has been
+// reclaimed, the original owner may still be alive and may still finish the
+// unit it claimed — and when it does, its terminal write presents a receipt
+// whose generation the row has moved past. Every one of those writes must
+// be a no-op, not a false 'done' that consumes an event nobody has routed
+// yet.
 func TestEventQueueStore_Postgres_LateWriterAfterReclaim(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -137,51 +149,46 @@ func TestEventQueueStore_Postgres_LateWriterAfterReclaim(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	claimed, err := stores.EventQueue.ClaimNext(ctx, "slow-executor", 1)
-	if err != nil || claimed == nil {
-		t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
+	slow, err := stores.EventQueue.Claim(ctx, workitem.Owner{ID: "slow-executor", Epoch: 1}, 1)
+	if err != nil || len(slow.Events) != 1 {
+		t.Fatalf("Claim: got=%+v err=%v", slow, err)
 	}
-	seeder.BackdateClaim(t, claimed.ID, 11*time.Minute)
+	stale := slow.Events[0]
+	seeder.ExpireLease(t, stale.Event.ID)
 
-	if n, err := stores.EventQueue.RequeueStaleProcessing(ctx, 10*time.Minute); err != nil {
-		t.Fatalf("RequeueStaleProcessing: %v", err)
-	} else if n != 1 {
-		t.Fatalf("RequeueStaleProcessing reclaimed %d rows, want 1", n)
+	successor, err := stores.EventQueue.Claim(ctx, workitem.Owner{ID: "successor-executor", Epoch: 1}, 1)
+	if err != nil || len(successor.Events) != 1 || successor.Reclaimed != 1 {
+		t.Fatalf("successor Claim: got=%+v err=%v, want one reclaim", successor, err)
+	}
+	if r := successor.Events[0].Receipt; !r.Reclaimed || r.PreviousOwner != "slow-executor" {
+		t.Errorf("successor receipt = %+v, want a reclaim from slow-executor", r)
 	}
 
 	// The original pass finishes late and writes its terminal. Each of
 	// these is the write it would have made had nothing intervened.
-	if err := stores.EventQueue.MarkDone(ctx, orgID, claimed.ID); err != nil {
-		t.Fatalf("late MarkDone: %v", err)
+	if err := stores.EventQueue.MarkDone(ctx, stale.Receipt); !errors.Is(err, workitem.ErrLeaseLost) {
+		t.Errorf("late MarkDone = %v, want ErrLeaseLost", err)
 	}
-	if err := stores.EventQueue.MarkFailed(ctx, orgID, claimed.ID, "late failure"); err != nil {
-		t.Fatalf("late MarkFailed: %v", err)
+	if _, err := stores.EventQueue.Requeue(ctx, stale.Receipt, workitem.OutcomeTransient, errors.New("late requeue")); !errors.Is(err, workitem.ErrLeaseLost) {
+		t.Errorf("late Requeue = %v, want ErrLeaseLost", err)
 	}
-	if err := stores.EventQueue.Requeue(ctx, orgID, claimed.ID, "late requeue"); err != nil {
-		t.Fatalf("late Requeue: %v", err)
+	if _, err := stores.EventQueue.RenewLease(ctx, stale.Receipt); !errors.Is(err, workitem.ErrLeaseLost) {
+		t.Errorf("late RenewLease = %v, want ErrLeaseLost", err)
 	}
 
 	rows, err := stores.EventQueue.ListForEntity(ctx, orgID, entityID)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("ListForEntity: rows=%d err=%v", len(rows), err)
 	}
-	if rows[0].Status != domain.QueuedEventStatusPending {
-		t.Errorf("status = %q, want pending — a late writer must not move a reclaimed row", rows[0].Status)
+	if rows[0].Status != domain.QueuedEventStatusLeased || rows[0].LeaseOwner != "successor-executor" {
+		t.Errorf("row = %+v, want still leased by the successor — a late writer must not move a reclaimed row", rows[0])
 	}
-	if rows[0].ProcessedAt != nil {
-		t.Errorf("processed_at = %v, want nil — the row has not been processed", rows[0].ProcessedAt)
-	}
-	if rows[0].LastError != db.StaleProcessingReclaimReason {
-		t.Errorf("last_error = %q, want %q — the late writer's reason must not overwrite the reclaim's",
-			rows[0].LastError, db.StaleProcessingReclaimReason)
+	if rows[0].LeaseGeneration != successor.Events[0].Receipt.LeaseGeneration {
+		t.Errorf("lease_generation = %d, want the successor's %d", rows[0].LeaseGeneration, successor.Events[0].Receipt.LeaseGeneration)
 	}
 
-	// The successor claims the row and drives it to a real terminal.
-	again, err := stores.EventQueue.ClaimNext(ctx, "successor-executor", 1)
-	if err != nil || again == nil {
-		t.Fatalf("successor ClaimNext: got=%v err=%v", again, err)
-	}
-	if err := stores.EventQueue.MarkDone(ctx, orgID, again.ID); err != nil {
+	// The successor drives it to a real terminal.
+	if err := stores.EventQueue.MarkDone(ctx, successor.Events[0].Receipt); err != nil {
 		t.Fatalf("successor MarkDone: %v", err)
 	}
 	rows, _ = stores.EventQueue.ListForEntity(ctx, orgID, entityID)
@@ -219,6 +226,18 @@ func seedPgEventQueueOrg(t *testing.T, h *pgtest.Harness) (orgID, userID string)
 	return orgID, userID
 }
 
+// pgExecOne runs a statement that must touch exactly one row.
+func pgExecOne(t *testing.T, h *pgtest.Harness, what, query string, args ...any) {
+	t.Helper()
+	res, err := h.AdminDB.Exec(query, args...)
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("%s touched %d rows, want 1", what, n)
+	}
+}
+
 // newPgEventQueueSeeder builds the seeder bag against AdminDB so raw
 // inserts bypass RLS. Enqueue writes the events audit row itself, so the
 // seeder only needs to stand up an entity for its FK.
@@ -236,58 +255,115 @@ func newPgEventQueueSeeder(h *pgtest.Harness, orgID string) dbtest.EventQueueSee
 		}
 		return entityID
 	}
-	backdateClaim := func(t *testing.T, queueID int64, age time.Duration) {
-		t.Helper()
-		// Rewound against now() — the same server clock claimed_at was
-		// stamped from and the sweep's predicate compares against.
-		res, err := conn.Exec(`
-			UPDATE event_queue SET claimed_at = now() - make_interval(secs => $1::double precision)
-			WHERE id = $2
-		`, age.Seconds(), queueID)
-		if err != nil {
-			t.Fatalf("backdate claimed_at: %v", err)
-		}
-		if n, _ := res.RowsAffected(); n != 1 {
-			t.Fatalf("backdate claimed_at touched %d rows, want 1", n)
-		}
-	}
-	clearEntityRef := func(t *testing.T, queueID int64) {
-		t.Helper()
-		res, err := conn.Exec(`UPDATE event_queue SET entity_id = NULL WHERE id = $1`, queueID)
-		if err != nil {
-			t.Fatalf("clear entity_id: %v", err)
-		}
-		if n, _ := res.RowsAffected(); n != 1 {
-			t.Fatalf("clear entity_id touched %d rows, want 1", n)
-		}
-	}
-	entitySnapshot := func(t *testing.T, entityID string) (string, int64) {
-		t.Helper()
-		var snap string
-		var seq int64
-		if err := conn.QueryRow(
-			`SELECT COALESCE(snapshot_json::text, ''), poll_seq FROM entities WHERE id = $1 AND org_id = $2`,
-			entityID, orgID,
-		).Scan(&snap, &seq); err != nil {
-			t.Fatalf("read entity snapshot: %v", err)
-		}
-		return snap, seq
-	}
-	countEventRows := func(t *testing.T, entityID string) int {
-		t.Helper()
-		var n int
-		if err := conn.QueryRow(
-			`SELECT COUNT(*) FROM events WHERE entity_id = $1 AND org_id = $2`, entityID, orgID,
-		).Scan(&n); err != nil {
-			t.Fatalf("count events: %v", err)
-		}
-		return n
-	}
 	return dbtest.EventQueueSeeder{
-		Entity:         entity,
-		BackdateClaim:  backdateClaim,
-		ClearEntityRef: clearEntityRef,
-		EntitySnapshot: entitySnapshot,
-		CountEventRows: countEventRows,
+		Entity: entity,
+		ExpireLease: func(t *testing.T, queueID int64) {
+			t.Helper()
+			// Rewound against the server clock — the one the claim stamped
+			// the lease from and the guard compares against.
+			pgExecOne(t, h, "expire lease",
+				`UPDATE event_queue SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = $1 AND status = 'leased'`, queueID)
+		},
+		Ripen: func(t *testing.T, queueID int64) {
+			t.Helper()
+			pgExecOne(t, h, "ripen", `UPDATE event_queue SET next_attempt_at = NULL WHERE id = $1 AND status = 'ready'`, queueID)
+		},
+		RequestCancel: func(t *testing.T, queueID int64) {
+			t.Helper()
+			pgExecOne(t, h, "request cancel",
+				`UPDATE event_queue SET cancel_requested_at = clock_timestamp(), cancel_requested_by = 'operator', cancel_reason = 'test' WHERE id = $1`, queueID)
+		},
+		ClearEntityRef: func(t *testing.T, queueID int64) {
+			t.Helper()
+			pgExecOne(t, h, "clear entity_id", `UPDATE event_queue SET entity_id = NULL WHERE id = $1`, queueID)
+		},
+		KeyedRow: func(t *testing.T, entityID string) {
+			t.Helper()
+			eventID := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+				VALUES ($1, $2, $3, $4, '', '{}'::jsonb, now())
+			`, eventID, orgID, entityID, domain.EventGitHubPRCICheckFailed); err != nil {
+				t.Fatalf("seed keyed event: %v", err)
+			}
+			if _, err := conn.Exec(`
+				INSERT INTO event_queue (org_id, event_id, entity_id, event_type, status, max_attempts, unique_key, first_enqueued_at)
+				VALUES ($1, $2, $3, $4, 'ready', 5, $5, now())
+			`, orgID, eventID, entityID, domain.EventGitHubPRCICheckFailed, workkinds.EventQueueCloseOwedKey(entityID)); err != nil {
+				t.Fatalf("seed keyed row: %v", err)
+			}
+		},
+		EntitySnapshot: func(t *testing.T, entityID string) (string, int64) {
+			t.Helper()
+			var snap string
+			var seq int64
+			if err := conn.QueryRow(
+				`SELECT COALESCE(snapshot_json::text, ''), poll_seq FROM entities WHERE id = $1 AND org_id = $2`,
+				entityID, orgID,
+			).Scan(&snap, &seq); err != nil {
+				t.Fatalf("read entity snapshot: %v", err)
+			}
+			return snap, seq
+		},
+		CountEventRows: func(t *testing.T, entityID string) int {
+			t.Helper()
+			var n int
+			if err := conn.QueryRow(
+				`SELECT COUNT(*) FROM events WHERE entity_id = $1 AND org_id = $2`, entityID, orgID,
+			).Scan(&n); err != nil {
+				t.Fatalf("count events: %v", err)
+			}
+			return n
+		},
+	}
+}
+
+// TestEventQueueStore_Postgres_ClaimInterleavesOrgs pins the kind's fairness
+// on the production table: with one org holding the queue's head and every
+// live lease, a batch claim prefers the org with fewer leased rows rather
+// than draining the busy org's backlog first.
+func TestEventQueueStore_Postgres_ClaimInterleavesOrgs(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	busy, _ := seedPgEventQueueOrg(t, h)
+	quiet, _ := seedPgEventQueueOrg(t, h)
+	busyEntity := newPgEventQueueSeeder(h, busy).Entity(t)
+	quietEntity := newPgEventQueueSeeder(h, quiet).Entity(t)
+	enqueue := func(orgID, entityID string) {
+		t.Helper()
+		if _, err := stores.EventQueue.Enqueue(ctx, orgID, domain.Event{
+			EntityID: &entityID, EventType: domain.EventGitHubPRCICheckFailed,
+		}, ""); err != nil {
+			t.Fatalf("Enqueue in %s: %v", orgID, err)
+		}
+	}
+
+	// The busy org holds three live leases; then it enqueues three more
+	// ahead of the quiet org's one, so id order and fairness order disagree.
+	for i := 0; i < 3; i++ {
+		enqueue(busy, busyEntity)
+	}
+	if batch, err := stores.EventQueue.Claim(ctx, workitem.Owner{ID: "pre", Epoch: 1}, 3); err != nil || len(batch.Events) != 3 {
+		t.Fatalf("seed leases: got=%+v err=%v", batch, err)
+	}
+	for i := 0; i < 3; i++ {
+		enqueue(busy, busyEntity)
+	}
+	enqueue(quiet, quietEntity)
+
+	batch, err := stores.EventQueue.Claim(ctx, workitem.Owner{ID: "worker", Epoch: 1}, 4)
+	if err != nil || len(batch.Events) != 4 {
+		t.Fatalf("Claim: got=%+v err=%v", batch, err)
+	}
+	if got := batch.Events[0].Event.OrgID; got != quiet {
+		t.Errorf("first claimed row belongs to %s, want the quiet org %s — fairness must interleave ahead of id order", got, quiet)
+	}
+	for _, ce := range batch.Events[1:] {
+		if ce.Event.OrgID != busy {
+			t.Errorf("claimed row %d belongs to %s, want the busy org's backlog after the quiet org's row", ce.Event.ID, ce.Event.OrgID)
+		}
 	}
 }

@@ -109,12 +109,13 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 				t.Fatalf("baseline queued %d events", got)
 			}
 			poll("Edit before a rule exists")
-			if got := countRows(t, database, `SELECT COUNT(*) FROM event_queue WHERE status='pending'`); got != 1 {
-				t.Fatalf("pending body events = %d, want 1", got)
+			if got := countRows(t, database, `SELECT COUNT(*) FROM event_queue WHERE status='ready'`); got != 1 {
+				t.Fatalf("ready body events = %d, want 1", got)
 			}
 			// A fresh router discovers the edit without an in-memory signal.
 			router := reviewRouter(database)
 			router.SetEventQueue(st.EventQueue)
+			router.SetExecutorID(testExecutorID, 1)
 			router.drainEventQueue(ctx)
 			check(1, 0)
 			if _, err := database.Exec(`INSERT INTO event_handlers

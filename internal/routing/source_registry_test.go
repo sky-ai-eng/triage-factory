@@ -176,6 +176,7 @@ func fakeSourceQueueRouter(database *sql.DB, spawner Delegator) *Router {
 		st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, spawner,
 		noopScorer{}, websocket.NewHub())
 	r.SetEventQueue(st.EventQueue)
+	r.SetExecutorID(testExecutorID, 1)
 	return r
 }
 
@@ -289,8 +290,8 @@ func TestSourceRegistry_ResolveOwnerFailure_RequeuesThenRoutesToTheHooksTeam(t *
 	}
 
 	status, attempts, lastErr := queueRow(t, database)
-	if status != domain.QueuedEventStatusPending {
-		t.Errorf("row after the failed hook = %q, want pending — an unresolvable owner must not consume the event", status)
+	if status != domain.QueuedEventStatusReady {
+		t.Errorf("row after the failed hook = %q, want ready — an unresolvable owner must not consume the event", status)
 	}
 	if attempts != 1 {
 		t.Errorf("attempts = %d, want 1", attempts)
@@ -303,6 +304,7 @@ func TestSourceRegistry_ResolveOwnerFailure_RequeuesThenRoutesToTheHooksTeam(t *
 	}
 
 	// The source's store recovers: the retry resolves the owner it always had.
+	ripenQueue(t, database)
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue after recovery: %v", err)
 	}
@@ -348,8 +350,8 @@ func TestSourceRegistry_ResolveOwnerFailure_WatcherDoesNotCaptureOwnership(t *te
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue: %v", err)
 	}
-	if status, _, lastErr := queueRow(t, database); status != domain.QueuedEventStatusPending || lastErr == "" {
-		t.Errorf("row after the failed hook = (%s, last_error %q), want (pending, non-empty)", status, lastErr)
+	if status, _, lastErr := queueRow(t, database); status != domain.QueuedEventStatusReady || lastErr == "" {
+		t.Errorf("row after the failed hook = (%s, last_error %q), want (ready, non-empty)", status, lastErr)
 	}
 	if n := len(activeTasksOfType(t, database, entityID, fakeEventType)); n != 0 {
 		t.Fatalf("tasks after the failed hook = %d, want 0 — an unreadable owner is not an absent one", n)
@@ -360,6 +362,7 @@ func TestSourceRegistry_ResolveOwnerFailure_WatcherDoesNotCaptureOwnership(t *te
 
 	// The store recovers: exactly one task, owned by the team the hook names,
 	// and the watcher — which never had a claim on it — has run nothing.
+	ripenQueue(t, database)
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue after recovery: %v", err)
 	}
@@ -441,7 +444,7 @@ func TestSourceRegistry_SwallowedFailure_IsRefusedNotBelieved(t *testing.T) {
 	}
 
 	status, _, lastErr := queueRow(t, database)
-	if status != domain.QueuedEventStatusPending {
+	if status != domain.QueuedEventStatusReady {
 		t.Errorf("row after the swallowed failure = %q, want pending — an unclaimed empty resolution is not an answer", status)
 	}
 	if !strings.Contains(lastErr, `source "fake"`) || !strings.Contains(lastErr, "Unowned") {
@@ -456,6 +459,7 @@ func TestSourceRegistry_SwallowedFailure_IsRefusedNotBelieved(t *testing.T) {
 
 	// The source's store recovers and the retry routes normally — the refusal
 	// costs a replay, not the event.
+	ripenQueue(t, database)
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue after recovery: %v", err)
 	}

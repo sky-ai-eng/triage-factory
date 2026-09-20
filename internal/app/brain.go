@@ -76,9 +76,13 @@ func (a *App) startBrain(term int64) {
 	// own goroutine, apart from the reaper below.
 	go a.router.RunTerminalInvariantChecker(brainCtx, routing.DefaultTerminalCheckInterval)
 	// Durable event-queue drain worker: claims github:/jira: events the
-	// ingestor enqueued, routes them, and marks them done. Single worker,
-	// global FIFO — exactly one process may run this at a time, which is
-	// what makes it a brain component rather than a replica-safe one.
+	// ingestor enqueued under the work-item contract's leases, routes them,
+	// and marks them done under the lease's fence. A failed attempt returns
+	// to the queue with a backoff; a dead holder's rows are reclaimed by
+	// the next claim once their lease expires. Single worker, batches
+	// interleaved across orgs — exactly one process may run this at a time,
+	// which is what makes it a brain component rather than a replica-safe
+	// one.
 	go a.router.RunEventQueue(brainCtx, a.eventWake, routing.DefaultEventScanInterval, routing.DefaultEventPruneInterval, routing.DefaultEventPruneAge)
 	// Poll schedule: RestartAll's initial synchronous cycle plus its
 	// ticking loop. A fresh acquisition always starts cold (every org

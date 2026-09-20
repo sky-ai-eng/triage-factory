@@ -34,6 +34,11 @@ var beginTxRatchet = []string{
 	"internal/db/sqlite/tx.go",
 	// db.InTx itself — the one place a transaction is opened without claims.
 	"internal/db/withtx.go",
+	// The work-item contract's own transaction boundary. internal/db names
+	// the package's types in its store interfaces, so the package cannot
+	// import db.InTx back; its inTx carries the same shape and the same
+	// context attribution.
+	"internal/db/workitem/tx.go",
 	// The websocket backplane's outbox publish. It logs per stage rather than
 	// returning an error — an operator reads the difference between a failed
 	// insert and a failed commit — so it keeps its own tx and wraps both

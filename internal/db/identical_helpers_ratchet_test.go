@@ -88,7 +88,6 @@ var identicalHelperRatchet = []string{
 	"scanEntityRow",
 	"scanExternalAction",
 	"scanExternalActionRows",
-	"scanFailedEvent",
 	"scanIntIDs",
 	"scanJiraStatusRules",
 	"scanMessageRow",

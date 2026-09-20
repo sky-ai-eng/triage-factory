@@ -254,6 +254,7 @@ func TestCloseCancelIntent_ReplayedCloseStampsNothing(t *testing.T) {
 	// entirely alone.
 	brID, _ := seedRunOnTask(t, database, closedFirst, "running", "")
 
+	ripenQueue(t, database)
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue on the replay: %v", err)
 	}

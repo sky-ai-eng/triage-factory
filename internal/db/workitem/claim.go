@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // claimRounds bounds how many times one Claim call re-picks. A round that
@@ -47,6 +45,7 @@ func Claim(ctx context.Context, conn *sql.DB, k Kind, owner Owner, orgID string,
 		out.Claimed = append(out.Claimed, committed.Claimed...)
 		out.Cancelled += committed.Cancelled
 		out.Parked += committed.Parked
+		out.Reclaimed += committed.Reclaimed
 		if picked == 0 {
 			break
 		}
@@ -55,15 +54,20 @@ func Claim(ctx context.Context, conn *sql.DB, k Kind, owner Owner, orgID string,
 }
 
 // picked is one row the claim statement selected, with everything the
-// disposition choice needs. The budget is read from the row rather than from
-// the policy: max_attempts was copied at admission, and that copy is the
-// budget this row was admitted under.
+// disposition choice needs and what a reclaim reports. The budget is read
+// from the row rather than from the policy: max_attempts was copied at
+// admission, and that copy is the budget this row was admitted under.
 type picked struct {
 	id        int64
 	orgID     string
 	attempt   int
 	maxTries  int
 	cancelled bool
+	// wasLeased marks a row the third arm selected: its previous holder's
+	// lease expired without a terminal write. prevOwner is that holder, read
+	// in the same pick so a reclaim can name whom it took the row from.
+	wasLeased bool
+	prevOwner string
 }
 
 // claimRound picks and disposes of up to limit rows in one transaction,
@@ -71,25 +75,13 @@ type picked struct {
 // with SKIP LOCKED so concurrent claimers pick disjoint sets.
 //
 // SQLite takes neither, and its mutual exclusion comes from outside this
-// package: db.OpenAt caps the pool at one connection, so every claimer in the
-// process queues behind the same handle and no two transactions interleave.
-//
-// That is a property of the handle, not of the file, and db.InTx begins
-// DEFERRED — so the pick and the per-row writes take their locks in two steps.
-// A second PROCESS on the same file that holds the write lock at that upgrade,
-// or that commits anything at all between the two, fails this transaction
-// immediately: busy_timeout does not cover a lock upgrade, because waiting
-// there can deadlock. Nothing is double-leased — the round rolls back whole,
-// receipts and all — so the cost is a lost cycle, not a lost fence.
-//
-// This is local mode's shape rather than this package's: db.InTx is shared, the
-// read-then-write stores beside it are exposed identically, and the fix belongs
-// at the handle where one begin mode covers all of them.
-//
-// TODO(TFAC-1027): local mode's DSN gains _txlock=immediate, which makes the
-// busy handler apply here. Until it lands, a SQLite consumer claiming while an
-// unsandboxed agent's exec verbs write must treat a "database is locked" from
-// Claim as retryable rather than as a fault.
+// package: the local handle caps its pool at one connection, so every claimer
+// in the process queues behind the same handle and no two transactions
+// interleave. Across processes the handle's IMMEDIATE begin does the work: the
+// write lock is taken at BEGIN, before the pick, so a second process on the
+// same file — an unsandboxed agent's exec verbs, say — waits out busy_timeout
+// for this round rather than failing it at a lock upgrade, and this round
+// waits the same way behind that process's write.
 //
 // The round's work accumulates locally and is merged into the caller's result
 // only after the commit. A round is one transaction, so a row that fails partway
@@ -101,7 +93,7 @@ func (k Kind) claimRound(ctx context.Context, conn *sql.DB, owner Owner, orgID s
 		n     int
 		round ClaimResult
 	)
-	err := db.InTx(ctx, conn, func(tx *sql.Tx) error {
+	err := inTx(ctx, conn, func(tx *sql.Tx) error {
 		// Reset per attempt: database/sql may retry the begin, and a partially
 		// filled result from an abandoned run must not survive into this one.
 		n, round = 0, ClaimResult{}
@@ -130,6 +122,9 @@ func (k Kind) claimRound(ctx context.Context, conn *sql.DB, owner Owner, orgID s
 					return err
 				}
 				round.Claimed = append(round.Claimed, r)
+				if r.Reclaimed {
+					round.Reclaimed++
+				}
 			}
 		}
 		return nil
@@ -148,9 +143,10 @@ func (k Kind) pick(ctx context.Context, tx *sql.Tx, orgID string, limit int) ([]
 	a := newArgs(k.Dialect)
 	now := k.nowExpr()
 
-	where := "((t.status = 'ready' AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= " + now + "))" +
-		" OR (t.status = 'ready' AND t.cancel_requested_at IS NOT NULL)" +
-		" OR (t.status = 'leased' AND t.lease_expires_at <= " + now + "))"
+	ready, leased := quoteLiteral(StatusReady), quoteLiteral(StatusLeased)
+	where := "((t.status = " + ready + " AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= " + now + "))" +
+		" OR (t.status = " + ready + " AND t.cancel_requested_at IS NOT NULL)" +
+		" OR (t.status = " + leased + " AND t.lease_expires_at <= " + now + "))"
 	if orgID != "" {
 		where += " AND t.org_id = " + a.bind(orgID)
 	}
@@ -161,14 +157,15 @@ func (k Kind) pick(ctx context.Context, tx *sql.Tx, orgID string, limit int) ([]
 		// the head of the queue against every other tenant. The count is a
 		// single pass over this table, taken once per pick.
 		prefix = "WITH org_leased AS (SELECT org_id, count(*) AS leased FROM " + k.Table +
-			" WHERE status = 'leased' GROUP BY org_id) "
+			" WHERE status = " + leased + " GROUP BY org_id) "
 		join = " LEFT JOIN org_leased ol ON ol.org_id = t.org_id"
 		order = " ORDER BY COALESCE(ol.leased, 0), t.id"
 	} else {
 		order = " ORDER BY t.id"
 	}
 
-	stmt := prefix + "SELECT t.id, t.org_id, t.attempt, t.max_attempts, (t.cancel_requested_at IS NOT NULL)" +
+	stmt := prefix + "SELECT t.id, t.org_id, t.attempt, t.max_attempts, (t.cancel_requested_at IS NOT NULL)," +
+		" (t.status = " + quoteLiteral(StatusLeased) + "), COALESCE(t.lease_owner, '')" +
 		" FROM " + k.Table + " t" + join +
 		" WHERE " + where + order +
 		" LIMIT " + a.bind(limit)
@@ -187,11 +184,12 @@ func (k Kind) pick(ctx context.Context, tx *sql.Tx, orgID string, limit int) ([]
 	var out []picked
 	for rows.Next() {
 		var p picked
-		var cancelled dbBool
-		if err := rows.Scan(&p.id, &p.orgID, &p.attempt, &p.maxTries, &cancelled); err != nil {
+		var cancelled, wasLeased dbBool
+		if err := rows.Scan(&p.id, &p.orgID, &p.attempt, &p.maxTries, &cancelled, &wasLeased, &p.prevOwner); err != nil {
 			return nil, fmt.Errorf("workitem: pick %s scan: %w", k.Table, err)
 		}
 		p.cancelled = cancelled.V
+		p.wasLeased = wasLeased.V
 		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -209,7 +207,7 @@ func (k Kind) claimDisposition(ctx context.Context, tx *sql.Tx, p picked, sets [
 	stmt := "UPDATE " + k.Table + " SET " + strings.Join(clauses, ", ") +
 		" WHERE id = " + a.bind(p.id) +
 		" AND org_id = " + a.bind(p.orgID) +
-		" AND status IN ('ready','leased')"
+		" AND status IN (" + claimableStatusList + ")"
 	res, err := tx.ExecContext(ctx, stmt, a.vals...)
 	if err != nil {
 		return fmt.Errorf("workitem: claim disposition on %s: %w", k.Table, err)
@@ -238,7 +236,7 @@ func (k Kind) settleAtClaim(ctx context.Context, tx *sql.Tx, p picked) error {
 // reads the parked row than the fact that it ran out.
 func (k Kind) parkAtClaim(ctx context.Context, tx *sql.Tx, p picked) error {
 	sets := append([]assign{
-		{"status", lit(quoteLiteral("parked"))},
+		{"status", lit(quoteLiteral(StatusParked))},
 		{"done_at", lit(k.nowExpr())},
 		{"last_outcome", lit("COALESCE(last_outcome, " + quoteLiteral(outcomeBudgetExhausted) + ")")},
 	}, clearLease...)
@@ -247,14 +245,16 @@ func (k Kind) parkAtClaim(ctx context.Context, tx *sql.Tx, p picked) error {
 
 // lease takes ownership and returns the receipt, reading the frozen columns in
 // the same statement so their values belong to this acquisition rather than to
-// whatever the row holds by the time the holder looks.
+// whatever the row holds by the time the holder looks. A row the third arm
+// selected is stamped Reclaimed: the receipt is the first place a worker can
+// learn that the unit it is about to run was interrupted somewhere.
 func (k Kind) lease(ctx context.Context, tx *sql.Tx, p picked, owner Owner) (Receipt, error) {
 	a := newArgs(k.Dialect)
 	p2 := k.Policy.resolved()
 	now := k.nowExpr()
 
 	sets := []assign{
-		{"status", lit(quoteLiteral("leased"))},
+		{"status", lit(quoteLiteral(StatusLeased))},
 		{"attempt", lit("attempt + 1")},
 		{"lease_generation", lit("lease_generation + 1")},
 		{"lease_owner", bound(func(a *args) string { return a.bind(owner.ID) })},
@@ -270,10 +270,10 @@ func (k Kind) lease(ctx context.Context, tx *sql.Tx, p picked, owner Owner) (Rec
 	stmt := "UPDATE " + k.Table + " SET " + strings.Join(clauses, ", ") +
 		" WHERE id = " + a.bind(p.id) +
 		" AND org_id = " + a.bind(p.orgID) +
-		" AND status IN ('ready','leased')" +
+		" AND status IN (" + claimableStatusList + ")" +
 		" RETURNING " + strings.Join(returning, ", ")
 
-	r := Receipt{ItemID: p.id, OrgID: p.orgID}
+	r := Receipt{ItemID: p.id, OrgID: p.orgID, Reclaimed: p.wasLeased, PreviousOwner: p.prevOwner}
 	var expires dbTime
 	dest := []any{&r.LeaseGeneration, &expires, &r.Attempt, &r.UniqueKey}
 	frozen := make([]any, len(k.Frozen))

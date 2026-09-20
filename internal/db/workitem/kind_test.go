@@ -85,17 +85,21 @@ func TestPolicyDefaults(t *testing.T) {
 // since an adopting table's migration copies this text verbatim.
 func TestIndexDDLByMode(t *testing.T) {
 	k := Kind{Table: "fixture", Dialect: Postgres, Strategy: SingleTx}
-	if got := len(IndexDDL(with(k, func(k *Kind) { k.Unique = UniqueNone }))); got != 3 {
-		t.Errorf("UniqueNone renders %d statements, want the three claim indexes", got)
+	none := IndexDDL(with(k, func(k *Kind) { k.Unique = UniqueNone }))
+	if len(none) != 4 {
+		t.Errorf("UniqueNone renders %d statements, want the three claim indexes and the parked list", len(none))
+	}
+	if !strings.Contains(none[3], "idx_fixture_parked ON fixture (org_id, id) WHERE status = 'parked'") {
+		t.Errorf("parked index = %q, want the per-org parked list", none[3])
 	}
 
 	forever := IndexDDL(with(k, func(k *Kind) { k.Unique = UniqueForever }))
-	if len(forever) != 4 || strings.Contains(forever[3], "status IN") {
-		t.Errorf("UniqueForever uniqueness index = %q, want no status predicate", forever[3])
+	if len(forever) != 5 || strings.Contains(forever[4], "status IN") {
+		t.Errorf("UniqueForever uniqueness index = %q, want no status predicate", forever[len(forever)-1])
 	}
 	unsettled := IndexDDL(with(k, func(k *Kind) { k.Unique = UniqueWhileUnsettled }))
-	if len(unsettled) != 4 || !strings.Contains(unsettled[3], "status IN ('ready','leased','parked')") {
-		t.Errorf("UniqueWhileUnsettled uniqueness index = %q, want the unsettled predicate", unsettled[3])
+	if len(unsettled) != 5 || !strings.Contains(unsettled[4], "status IN ('ready','leased','parked')") {
+		t.Errorf("UniqueWhileUnsettled uniqueness index = %q, want the unsettled predicate", unsettled[len(unsettled)-1])
 	}
 	for i, name := range IndexNames(with(k, func(k *Kind) { k.Unique = UniqueWhileUnsettled })) {
 		if !strings.Contains(unsettled[i], " "+name+" ") {
