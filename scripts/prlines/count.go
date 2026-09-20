@@ -19,12 +19,13 @@ func (p pair) empty() bool { return p.Added == 0 && p.Removed == 0 }
 
 func (p pair) String() string { return fmt.Sprintf("+%d/-%d", p.Added, p.Removed) }
 
-// buckets are the four rows of the PR template's table.
+// buckets are the five rows of the PR template's table.
 type buckets struct {
 	Code          pair `json:"code"`
 	Tests         pair `json:"tests"`
 	Documentation pair `json:"documentation"`
-	Comments      pair `json:"comments"`
+	CodeComments  pair `json:"codeComments"`
+	TestComments  pair `json:"testComments"`
 }
 
 type fileResult struct {
@@ -47,12 +48,14 @@ type result struct {
 
 // route decides which bucket one changed line lands in.
 //
-// The four buckets are mutually exclusive, so precedence has to be stated
+// The five buckets are mutually exclusive, so precedence has to be stated
 // somewhere and this is it: documentation > comments > tests > code. Comments
-// outrank tests deliberately — the row exists to answer "how much of this diff
+// outrank tests deliberately — the rows exist to answer "how much of this diff
 // is prose rather than behavior", and a comment is prose wherever it lives.
-// Blank lines belong to no bucket and are reported separately so the table's
-// arithmetic can be reconciled against the diff.
+// A comment is then split by the file it sits in, so a PR that documents its
+// tests reads differently from one that documents its code. Blank lines belong
+// to no bucket and are reported separately so the table's arithmetic can be
+// reconciled against the diff.
 func route(b *buckets, blank *pair, cls fileClass, kind lineKind, side int) {
 	if kind == lineBlank {
 		blank.add(side, 1)
@@ -61,8 +64,10 @@ func route(b *buckets, blank *pair, cls fileClass, kind lineKind, side int) {
 	switch {
 	case cls == classDocs:
 		b.Documentation.add(side, 1)
+	case kind == lineComment && cls == classTests:
+		b.TestComments.add(side, 1)
 	case kind == lineComment:
-		b.Comments.add(side, 1)
+		b.CodeComments.add(side, 1)
 	case cls == classTests:
 		b.Tests.add(side, 1)
 	default:
@@ -77,8 +82,10 @@ func (b *buckets) merge(o buckets) {
 	b.Tests.Removed += o.Tests.Removed
 	b.Documentation.Added += o.Documentation.Added
 	b.Documentation.Removed += o.Documentation.Removed
-	b.Comments.Added += o.Comments.Added
-	b.Comments.Removed += o.Comments.Removed
+	b.CodeComments.Added += o.CodeComments.Added
+	b.CodeComments.Removed += o.CodeComments.Removed
+	b.TestComments.Added += o.TestComments.Added
+	b.TestComments.Removed += o.TestComments.Removed
 }
 
 // count turns a parsed diff into the table. headRev is empty for a working-tree

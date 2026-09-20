@@ -1,6 +1,7 @@
 // Command prlines counts the lines a pull request changes, split into the
-// Code / Tests / Documentation / Comments buckets .github/pull_request_template.md
-// asks for, and prints them as a table that pastes straight into it.
+// Code / Tests / Documentation / Code comments / Test comments buckets
+// .github/pull_request_template.md asks for, and prints them as a table that
+// pastes straight into it.
 //
 // The counts come from the diff GitHub actually shows under "Files changed":
 // the three-dot comparison between the head commit and the MERGE BASE of head
@@ -193,14 +194,15 @@ func resolveRange(r *repo, baseRef, headRef string, warns []string) (string, str
 // Output
 // ---------------------------------------------------------------------------
 
-var rows = []string{"Code", "Tests", "Documentation", "Comments"}
+var rows = []string{"Code", "Tests", "Documentation", "Code comments", "Test comments"}
 
 func renderTable(w io.Writer, b buckets) {
 	vals := [][2]int{
 		{b.Code.Added, b.Code.Removed},
 		{b.Tests.Added, b.Tests.Removed},
 		{b.Documentation.Added, b.Documentation.Removed},
-		{b.Comments.Added, b.Comments.Removed},
+		{b.CodeComments.Added, b.CodeComments.Removed},
+		{b.TestComments.Added, b.TestComments.Removed},
 	}
 
 	// Widths match the template's own table when the numbers are small enough
@@ -243,7 +245,7 @@ func printHeader(w io.Writer, r *repo, base baseRef, mergeBaseRev, headCommit, h
 		summary += "; excluded: " + strings.Join(excl, ", ")
 	}
 	fmt.Fprintf(w, "diff        %s\n", summary)
-	fmt.Fprintf(w, "buckets     documentation > comments > tests > code (per line, first match wins)\n")
+	fmt.Fprintf(w, "buckets     documentation > comments (split by code vs test file) > tests > code (per line, first match wins)\n")
 
 	for _, warn := range res.Warnings {
 		fmt.Fprintf(w, "warning     %s\n", warn)
@@ -271,7 +273,8 @@ func printPerFile(w io.Writer, res result) {
 				{"code", f.Buckets.Code},
 				{"tests", f.Buckets.Tests},
 				{"documentation", f.Buckets.Documentation},
-				{"comments", f.Buckets.Comments},
+				{"code comments", f.Buckets.CodeComments},
+				{"test comments", f.Buckets.TestComments},
 			} {
 				if !b.p.empty() {
 					parts = append(parts, fmt.Sprintf("%s %s", b.name, b.p))

@@ -2,8 +2,9 @@
 # Triage Factory — PR line breakdown for the pull request template.
 #
 # Counts the lines this branch changes, split into the Code / Tests /
-# Documentation / Comments buckets .github/pull_request_template.md asks for,
-# and prints a markdown table ready to paste into it.
+# Documentation / Code comments / Test comments buckets
+# .github/pull_request_template.md asks for, and prints a markdown table ready
+# to paste into it.
 #
 #   ./scripts/pr-lines.sh                      # HEAD vs the resolved base
 #   ./scripts/pr-lines.sh | pbcopy             # table only — diagnostics go to stderr

@@ -148,8 +148,8 @@ func TestMergeBaseIgnoresLaterBaseCommits(t *testing.T) {
 	if want := (pair{Added: 2}); res.Buckets.Code != want {
 		t.Errorf("code = %+v, want %+v", res.Buckets.Code, want)
 	}
-	if want := (pair{Added: 1}); res.Buckets.Comments != want {
-		t.Errorf("comments = %+v, want %+v", res.Buckets.Comments, want)
+	if want := (pair{Added: 1}); res.Buckets.CodeComments != want {
+		t.Errorf("code comments = %+v, want %+v", res.Buckets.CodeComments, want)
 	}
 	if want := (pair{Added: 1}); res.Blank != want {
 		t.Errorf("blank = %+v, want %+v", res.Blank, want)
@@ -164,7 +164,7 @@ func TestCountBucketsEndToEnd(t *testing.T) {
 	tr.mustGit("checkout", "-q", "-b", "feature")
 
 	tr.write("app.go", "package p\n\n// why the guard is here\nfunc F() bool { return true }\n")
-	tr.write("app_test.go", "package p\n\nimport \"testing\"\n\nfunc TestF(t *testing.T) { _ = F() }\n")
+	tr.write("app_test.go", "package p\n\nimport \"testing\"\n\n// why F is exercised this way\nfunc TestF(t *testing.T) { _ = F() }\n")
 	tr.write("README.md", "# Title\n\nProse.\n")
 	tr.write("go.sum", "example.com/m v1.0.0 h1:abc=\n")
 	tr.commit("work")
@@ -193,8 +193,11 @@ func TestCountBucketsEndToEnd(t *testing.T) {
 	if want := (pair{Added: 2}); res.Buckets.Documentation != want {
 		t.Errorf("documentation = %+v, want %+v", res.Buckets.Documentation, want)
 	}
-	if want := (pair{Added: 1}); res.Buckets.Comments != want {
-		t.Errorf("comments = %+v, want %+v", res.Buckets.Comments, want)
+	if want := (pair{Added: 1}); res.Buckets.CodeComments != want {
+		t.Errorf("code comments = %+v, want %+v", res.Buckets.CodeComments, want)
+	}
+	if want := (pair{Added: 1}); res.Buckets.TestComments != want {
+		t.Errorf("test comments = %+v, want %+v (comment in a _test.go file)", res.Buckets.TestComments, want)
 	}
 	if want := (pair{Added: 1}); res.Generated != want {
 		t.Errorf("generated = %+v, want %+v (go.sum excluded from the table)", res.Generated, want)
