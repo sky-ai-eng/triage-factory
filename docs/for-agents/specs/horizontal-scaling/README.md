@@ -81,7 +81,7 @@ of what this design **reuses rather than builds**:
 | Piece | Where | State |
 | --- | --- | --- |
 | Durable conversation queue, `FOR UPDATE SKIP LOCKED` claim | `internal/db/postgres/conversation_queue.go` (`ClaimNextConversation`), `internal/delegate/dispatch.go` | Built (TFAC-13). Claim is already N-worker-safe; the dispatcher loop is per-process. |
-| `Delegate()` = pure DB enqueue | `internal/delegate/delegate.go` → `EnqueueConversation` | Built. Manual + auto delegation already work cross-machine unchanged — no spawner needed at the enqueue site. |
+| `Delegate()` = pure DB write | `internal/delegate/delegate.go` → `BlueprintStore.CreateRunWithFirstStepSystem` | Built. Manual + auto delegation already work cross-machine unchanged — no spawner needed at the firing site. |
 | Durable event queue for router-bound events | `internal/ingest/ingest.go`, `internal/db/postgres/event_queue.go` | Built. Single drain worker; `SKIP LOCKED` claim exists. |
 | Executor-ownership stamp (the active claim's `claims.executor_id`/`boot_epoch`) | pg baseline (`claims`), stamped by `stampExecutor` (`process_registry.go`) | Written, consumed by nothing — the intended lease hook. |
 | `RunController` indirection for cancel/steer/interrupt/permission | `internal/delegate/process_registry.go` | Built (TFAC-305). In-process impl resolves `s.procs`/`s.cancels`/`s.permPending`; the seam exists precisely so a DB-signaling impl can slot in. |
@@ -541,7 +541,7 @@ claim → execute); three additions to the claim:
    moves to the **leader reaper**: runs whose executor's heartbeat is
    stale past a threshold are requeued (`attempts`-capped, then failed
    with `failure_kind='executor_lost'`).
-2. **Cross-process wake**: `EnqueueConversation` also `NOTIFY tf_wake` so idle
+2. **Cross-process wake**: the doors that mint a step also `NOTIFY tf_wake` so idle
    executors claim within milliseconds instead of the poll interval
    (which remains as backstop).
 3. **Affinity preference** (§6) and later **per-org fairness** (§9 P3)

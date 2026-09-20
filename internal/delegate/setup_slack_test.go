@@ -189,15 +189,9 @@ func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, stri
 	plan := []domain.BlueprintPlanStep{{
 		StepIndex: 0, PromptID: promptID, PromptName: promptID, PromptBody: "b", Source: "user",
 	}}
-	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "sbpr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
-		StepPlan: plan,
+	brID := dbtest.SeedBlueprintRun(t, database, domain.BlueprintRun{
+		ID: "sbpr-" + suffix, BlueprintID: bpID, TaskID: task.ID, StepPlan: plan,
 	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	brID := created.ID
 
 	conv := domain.Conversation{ID: "srun-" + suffix, TaskID: task.ID, BlueprintRunID: brID}
 	return s, database, brID, task, conv

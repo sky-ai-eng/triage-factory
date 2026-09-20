@@ -646,13 +646,22 @@ func (s *conversationStore) endConversationsScoped(ctx context.Context, orgID st
 }
 
 func (s *conversationStore) EndConversation(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
+	return endConversation(ctx, s.q, orgID, conversationID, reason)
+}
+
+// endConversation is the single-row boundary stamp itself, taking the queryer
+// so the blueprint step advance can run it on the transaction that also mints
+// the step it hands off to. One copy of the statement, so the two doors cannot
+// drift on what ending a conversation means. Mirrors the Postgres helper of
+// the same name.
+func endConversation(ctx context.Context, q queryer, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	if !domain.IsEndedReason(string(reason)) {
 		return nil, fmt.Errorf("%w: %q", db.ErrInvalidEndedReason, reason)
 	}
-	row := s.q.QueryRowContext(ctx, `
+	row := q.QueryRowContext(ctx, `
 		UPDATE conversations SET ended_at = ?, ended_reason = ?
 		WHERE id = ? AND ended_at IS NULL
 		RETURNING `+sqliteConversationReturningColumns, time.Now().UTC(), string(reason), conversationID)

@@ -809,9 +809,8 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	// Seed a manual conversation row owned by userID — the queue's
-	// EnqueueConversation does this in production before any lifecycle
-	// write runs.
+	// Seed a manual conversation row owned by userID — in production the
+	// firing door writes one before any lifecycle write runs.
 	lcBlueprintRun := seedPgBlueprintRun(t, h, orgID, userID, taskID)
 	conversationID := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
 		TaskID: taskID, PromptID: "p_lc_test", Status: "running", Model: "m",
@@ -915,8 +914,8 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 }
 
 // seedPgConversation inserts a conversations row directly — the test
-// fixture stand-in for the queue's EnqueueConversation mint, staging rows in
-// arbitrary status. The trigger_type↔creator CHECK is satisfied by the
+// fixture stand-in for the mint inside a BlueprintStore door, staging rows in
+// arbitrary status without staging a whole firing for each. The trigger_type↔creator CHECK is satisfied by the
 // caller: manual rows carry CreatorUserID, event rows leave it empty.
 func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, conv domain.Conversation) string {
 	t.Helper()

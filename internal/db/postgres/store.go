@@ -137,12 +137,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// app — same pool-split pattern PromptStore + the predecessor
 		// stores used.
 		EventHandlers: eventHandlers,
-		// Blueprints wires both pools. CreateRun routes internally on
-		// trigger_type (event → admin with NULL creator, manual → app
-		// with COALESCE fallback), mirroring ConversationStore.Create. The
-		// `...System` variants on the read/write methods (ListSteps,
-		// MarkRunStatus, ConversationsForBlueprint) give the blueprint orchestrator
-		// goroutine an admin-pool route for its detached-context work.
+		// Blueprints wires both pools: the request-facing reads on app
+		// under RLS, every write and every `...System` read (ListSteps,
+		// MarkRunStatus, ConversationsForBlueprint) on admin, which is
+		// what gives the blueprint orchestrator goroutine a route for its
+		// detached-context work.
 		Blueprints: newBlueprintStore(app, admin),
 		// Agents.Create routes through admin (bootstrap has no JWT
 		// claims and the agents_insert policy gates on

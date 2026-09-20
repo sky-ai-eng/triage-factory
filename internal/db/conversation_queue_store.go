@@ -13,11 +13,11 @@ import (
 // position in its sequence. The claim gate drives the one step
 // current_step_index names, so the row could never be claimed by anyone: a
 // refusal at the mint beats a row that sits invisible in the work list.
-var ErrBlueprintStepUnindexed = errors.New("enqueue: blueprint conversation has no step index")
+var ErrBlueprintStepUnindexed = errors.New("db: blueprint conversation has no step index")
 
-// AssertBlueprintStepIndexed is the guard both dialects' EnqueueConversation opens with.
-// A conversation with no blueprint parent passes — the gate never compares an
-// index for one.
+// AssertBlueprintStepIndexed is the guard both dialects' conversation mint
+// opens with. A conversation with no blueprint parent passes — the gate never
+// compares an index for one.
 func AssertBlueprintStepIndexed(conv domain.Conversation) error {
 	if conv.BlueprintRunID != "" && conv.BlueprintStepIndex == nil {
 		return fmt.Errorf("%w (conversation %s, blueprint_run %s)", ErrBlueprintStepUnindexed, conv.ID, conv.BlueprintRunID)
@@ -25,32 +25,37 @@ func AssertBlueprintStepIndexed(conv domain.Conversation) error {
 	return nil
 }
 
-// ConversationQueueStore owns the claim loop — the ONE scan that finds conversations
-// needing to be driven, on every surface. It is the sibling of
-// EventQueueStore: where the event queue feeds the router, this feeds the
-// dispatcher.
+// OrphanedStepCheck is what ReconcileOrphanedConversations' checker arm found:
+// 'running' blueprint_runs holding no conversation at the step their
+// current_step_index names. The store counts and samples; the caller logs,
+// because the store layer holds no logger and the finding is the caller's to
+// report.
 //
-// There is no "queued" column. A conversation needs driving when nobody is
-// driving it and it is either mid-flight (no outcome written — a fresh mint,
-// or a claim that released without concluding) or parked and woken by new
-// input. A worker claims it (Postgres: FOR UPDATE SKIP LOCKED over that
-// predicate, with idx_claims_one_active as the actual mutual exclusion;
-// SQLite: a plain single-statement claim — N=1, no contention), drives it,
-// and releases the claim. A type-conditional gate rides alongside the shared
-// predicate: a delegation conversation's blueprint parent must still be
-// running.
+// The pointer, not merely the presence of any child, because the pointer is
+// what the claim gate drives: a run whose current step has no row is one
+// nothing can pick up, whether it never got a first step or lost an advance.
+// Both shapes hold blueprint_runs_one_active_run_per_task against their task
+// forever, and neither is reachable by any arm that joins through
+// conversations.
 //
-// This is a system-service store: the dispatcher runs as a background worker
-// with no per-user identity, so the Postgres impl wires against the admin pool
-// (BYPASSRLS) and keeps org_id bound where it is known, defense in depth.
-// SQLite collapses onto its single connection and asserts the local sentinel
-// org on the org-scoped methods.
-//
-// The claim fence here (one worker claims one queued conversation) is distinct from the
-// replay fence (one blueprint_run per (triggering_event_id, trigger_id), at the
-// firing boundary in BlueprintStore.CreateRunIfNotFiredSystem). The queue does
-// not subsume the replay fence — by the time a step is enqueued the blueprint_run
-// already exists.
+// A non-zero Count is a broken invariant, not a backlog: a firing commits its
+// run and its first step in one transaction, and an advance commits its
+// pointer and the step it names in another, so no transaction can observe one
+// without the other. What it can still surface is a row from before that was
+// true — an installed local database carries its history, and the forward
+// migration that repairs those is what makes a survivor here worth shouting
+// about.
+type OrphanedStepCheck struct {
+	// Count is every matching row, not just the sampled ones.
+	Count int
+	// Sample is up to OrphanedStepSampleLimit blueprint_run ids, oldest
+	// first — enough to go look, bounded so one log line stays a log line.
+	Sample []string
+}
+
+// OrphanedStepSampleLimit caps OrphanedStepCheck.Sample.
+const OrphanedStepSampleLimit = 20
+
 // ClaimPlacement configures the placement-aware, two-tier claim (TFAC-587,
 // spec §6.2). The ZERO VALUE (Enabled=false) selects the original
 // global-oldest claim — the whole placement layer is advisory, so a disabled
@@ -79,26 +84,36 @@ type ClaimPlacement struct {
 	Liveness time.Duration
 }
 
+// ConversationQueueStore owns the claim loop — the ONE scan that finds
+// conversations needing to be driven, on every surface. It is the sibling of
+// EventQueueStore: where the event queue feeds the router, this feeds the
+// dispatcher. It writes no conversations row of its own: a delegation is
+// minted by the BlueprintStore door that commits the run or the pointer
+// implying it, and this store picks the row up from there.
+//
+// There is no "queued" column. A conversation needs driving when nobody is
+// driving it and it is either mid-flight (no outcome written — a fresh mint,
+// or a claim that released without concluding) or parked and woken by new
+// input. A worker claims it (Postgres: FOR UPDATE SKIP LOCKED over that
+// predicate, with idx_claims_one_active as the actual mutual exclusion;
+// SQLite: a plain single-statement claim — N=1, no contention), drives it,
+// and releases the claim. A type-conditional gate rides alongside the shared
+// predicate: a delegation conversation's blueprint parent must still be
+// running.
+//
+// This is a system-service store: the dispatcher runs as a background worker
+// with no per-user identity, so the Postgres impl wires against the admin pool
+// (BYPASSRLS) and keeps org_id bound where it is known, defense in depth.
+// SQLite collapses onto its single connection and asserts the local sentinel
+// org on the org-scoped methods.
+//
+// The claim fence here (one worker claims one queued conversation) is
+// distinct from the replay fence (one blueprint_run per
+// (triggering_event_id, trigger_id), at the firing boundary in
+// BlueprintStore.CreateRunWithFirstStepSystem). Neither subsumes the other:
+// the replay fence decides whether a step row exists at all, this one decides
+// who drives the one that does.
 type ConversationQueueStore interface {
-	// EnqueueConversation mints a delegation conversation for a blueprint step with
-	// NO stored status — the absence of an outcome is what makes it
-	// claimable. It is the work-list write the dispatcher later claims. conv
-	// carries the step's identity: ID, TaskID, PromptID, Model, TriggerType,
-	// CreatorUserID, TriggerID, BlueprintRunID (required), BlueprintStepIndex.
-	// A blueprint conversation with no step index is refused — see
-	// ErrBlueprintStepUnindexed.
-	// PreferredExecutorID (TFAC-587) is the rendezvous placement stamp, empty
-	// for no affinity (placement disabled, local N=1, or a non-repo key).
-	// Routes through the admin pool — the dispatcher/reactor mint work items
-	// with no JWT-claims context; the row's creator_user_id is still stamped
-	// for audit and later RLS-scoped reads. The schema CHECK pairing
-	// trigger_type with creator_user_id nullability is the caller's contract.
-	//
-	// Returns the minted row, sharing ConversationStore.Get/GetSystem's
-	// projection and scanner — the queued_at stamp and any team_id the insert
-	// derived from the task need no separate lookup.
-	EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) (*domain.Conversation, error)
-
 	// ClaimNextConversation claims the next conversation that needs driving, of ANY
 	// surface, and mints the claim that records the engagement (executor id,
 	// boot epoch, claimed_at, and — where the surface's unit of work is one
@@ -281,22 +296,19 @@ type ConversationQueueStore interface {
 	// released with the outcome mapped from its status. The leader reaper
 	// repeats it periodically; here it runs at boot in both modes.
 	//
-	// And it runs the mint-crash arm, the exact mirror of the first: a
-	// 'running' blueprint_run holding NO child conversation, older than
-	// domain.BlueprintOrphanedAtMintGrace, is terminal-failed with
-	// abort_reason=domain.BlueprintAbortOrphanedAtMint. The firing path commits
-	// the blueprint_run first and enqueues its first step second, so a hard
-	// death between the two leaves a parent nothing drives — and nothing else
-	// recovers it, because every other arm (and the Postgres-only leader
-	// reaper) joins through conversations. Failing frees the
-	// one-active-run index the orphan was holding, so the task's
-	// already-queued firing intent drains into a fresh, fully-minted
-	// blueprint run instead of retrying against the index forever. Both
-	// dialects: local mode has the same crash window and no reaper.
+	// And it runs one CHECKER, which repairs nothing: a 'running'
+	// blueprint_run holding no conversation at the step its current_step_index
+	// names is counted and logged at error with a sample of ids. That shape is
+	// unreachable now that a firing commits its run and its first step in one
+	// transaction and an advance commits its pointer and the step it names in
+	// another, so observing one means an invariant broke — and a repair would
+	// hide it. It is a check rather than nothing at all because the shape is
+	// invisible to every other arm: they drive or heal the step the pointer
+	// names, and this one has no such step to reach.
 	//
-	// Cross-org system sweep; returns the total count of rows healed across
-	// all arms.
-	ReconcileOrphanedConversations(ctx context.Context) (int, error)
+	// Cross-org system sweep; returns the total count of rows healed — the
+	// checker's count is not in it, because counting is not healing.
+	ReconcileOrphanedConversations(ctx context.Context) (healed int, check OrphanedStepCheck, err error)
 
 	// CountQueuedSystem returns how many conversations currently match the
 	// needs-driving predicate across the whole deployment — the fleet-wide

@@ -26,15 +26,20 @@ type ReconcileOrphanSeeder struct {
 	// Returns its id.
 	BlueprintRun func(t *testing.T, age time.Duration) string
 
-	// EnqueueChild stages one mid-flight (no stored status) child conversation
+	// StageChild stages one mid-flight (no stored status) child conversation
 	// under brID and returns its id.
-	EnqueueChild func(t *testing.T, brID string) string
+	StageChild func(t *testing.T, brID string) string
 
 	// ForceBlueprintStatus writes a blueprint_run's status and abort_reason
 	// directly, bypassing the guarded flip — the suite needs a terminal parent
 	// without going through the store method that would park children as a
 	// side effect.
 	ForceBlueprintStatus func(t *testing.T, brID, status, abortReason string)
+
+	// SetCurrentStep writes a blueprint_run's current_step_index directly,
+	// which is the only way to stage a pointer that moved without the step it
+	// names: the advance commits the two together.
+	SetCurrentStep func(t *testing.T, brID string, stepIndex int)
 
 	// BlueprintRunState reads back what the sweep did (or didn't) write:
 	// status, abort_reason ("" for NULL), and whether completed_at is stamped.
@@ -46,85 +51,78 @@ type ReconcileOrphanSeeder struct {
 }
 
 // RunReconcileOrphanedConversationsConformance is the shared suite for the boot
-// self-heal, covering both directions of the parent↔child desync and the
-// negative space around each.
+// self-heal: the parent↔child desync it repairs, and the one shape it only
+// reports.
 //
-// The mint-crash arm is the one under the most pressure to be wrong, because
-// its predicate is an absence: a 'running' blueprint_run with NO child
-// conversation is unreachable by every recovery path that joins through
-// conversations, so nothing else would catch a regression here. Its three ways
-// to misfire — sweeping a healthy parent whose child simply hasn't been claimed
-// yet, sweeping one whose mint is still in flight, and re-stamping a run that
-// already reached a terminal — each get their own subtest.
+// That checker is where the pressure is, because its predicate is an absence
+// and its whole job is to stay hands-off. A 'running' blueprint_run with no
+// conversation at the step its current_step_index names is unreachable by
+// every recovery path — they drive or heal the step the pointer names — and
+// unreachable by any live writer too, now that a firing commits the run with
+// its first step and an advance commits the pointer with the step it names. So
+// the subtests here pin both halves, for both ways the shape arises: it is
+// counted when it exists, and it is never written to, whatever its age.
 func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrphanFactory) {
 	t.Helper()
 	ctx := context.Background()
 
-	// Comfortably past the grace, so a slow CI box can't drift a fixture back
-	// inside it mid-test.
-	pastGrace := domain.BlueprintOrphanedAtMintGrace + time.Minute
-
-	t.Run("Childless_running_past_grace_fails_orphaned_at_mint", func(t *testing.T) {
+	t.Run("Childless_running_is_counted_and_not_repaired", func(t *testing.T) {
 		store, seed := mk(t)
-		brID := seed.BlueprintRun(t, pastGrace)
+		brID := seed.BlueprintRun(t, time.Hour)
 
-		n, err := store.ReconcileOrphanedConversations(ctx)
-		if err != nil {
-			t.Fatalf("ReconcileOrphanedConversations: %v", err)
-		}
-		if n != 1 {
-			t.Fatalf("healed count = %d, want 1 (the childless orphan)", n)
-		}
-		status, reason, completed := seed.BlueprintRunState(t, brID)
-		if status != string(domain.BlueprintRunStatusFailed) {
-			t.Errorf("blueprint_run status = %q, want failed", status)
-		}
-		if reason != domain.BlueprintAbortOrphanedAtMint {
-			t.Errorf("abort_reason = %q, want %q", reason, domain.BlueprintAbortOrphanedAtMint)
-		}
-		if !completed {
-			t.Error("completed_at is NULL on a terminal blueprint_run")
-		}
-
-		// Idempotent: the row is terminal now, so a second sweep finds nothing.
-		if n2, err := store.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
-			t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
-		}
-	})
-
-	t.Run("Childless_running_within_grace_is_untouched", func(t *testing.T) {
-		// The grace is what makes racing a live Delegate impossible: the mint
-		// commits the parent and enqueues the first step milliseconds later, and
-		// in between the row looks exactly like an orphan.
-		store, seed := mk(t)
-		brID := seed.BlueprintRun(t, 0)
-
-		n, err := store.ReconcileOrphanedConversations(ctx)
+		n, check, err := store.ReconcileOrphanedConversations(ctx)
 		if err != nil {
 			t.Fatalf("ReconcileOrphanedConversations: %v", err)
 		}
 		if n != 0 {
-			t.Errorf("healed count = %d, want 0 (a mint still inside the grace)", n)
+			t.Errorf("healed count = %d, want 0 (the checker repairs nothing)", n)
+		}
+		if check.Count != 1 {
+			t.Fatalf("check.Count = %d, want 1", check.Count)
+		}
+		if len(check.Sample) != 1 || check.Sample[0] != brID {
+			t.Errorf("check.Sample = %v, want [%s]", check.Sample, brID)
 		}
 		if status, reason, completed := seed.BlueprintRunState(t, brID); status != string(domain.BlueprintRunStatusRunning) || reason != "" || completed {
-			t.Errorf("fresh blueprint_run = (%q, %q, completed=%v), want (running, \"\", false)", status, reason, completed)
+			t.Errorf("blueprint_run = (%q, %q, completed=%v), want (running, \"\", false) — the checker must not write", status, reason, completed)
+		}
+
+		// Reporting is not consuming: the row is still there, so a second call
+		// counts it again. That is the point — the invariant is still broken.
+		if _, again, err := store.ReconcileOrphanedConversations(ctx); err != nil || again.Count != 1 {
+			t.Errorf("second call = (%d, %v), want count 1", again.Count, err)
 		}
 	})
 
-	t.Run("Running_with_a_child_is_untouched_at_any_age", func(t *testing.T) {
-		// A child is the proof the mint completed. Age says nothing after that:
-		// a long-running blueprint is ordinary work, and failing it would kill
-		// a live agent mid-step.
+	t.Run("Childless_running_is_counted_at_any_age", func(t *testing.T) {
+		// No grace, because there is no window to protect: the firing commits
+		// the run and its first step together, so a fresh childless run is not
+		// a mint in flight — it is the same broken invariant an old one is.
 		store, seed := mk(t)
-		brID := seed.BlueprintRun(t, 30*24*time.Hour)
-		convID := seed.EnqueueChild(t, brID)
+		seed.BlueprintRun(t, 0)
 
-		n, err := store.ReconcileOrphanedConversations(ctx)
+		_, check, err := store.ReconcileOrphanedConversations(ctx)
 		if err != nil {
 			t.Fatalf("ReconcileOrphanedConversations: %v", err)
 		}
-		if n != 0 {
-			t.Errorf("healed count = %d, want 0 (a parent with a child is not an orphan)", n)
+		if check.Count != 1 {
+			t.Errorf("check.Count = %d, want 1 (age is not part of the predicate)", check.Count)
+		}
+	})
+
+	t.Run("Running_with_a_child_is_not_counted", func(t *testing.T) {
+		// A child is the proof the firing committed. Age says nothing after
+		// that: a long-running blueprint is ordinary work.
+		store, seed := mk(t)
+		brID := seed.BlueprintRun(t, 30*24*time.Hour)
+		convID := seed.StageChild(t, brID)
+
+		n, check, err := store.ReconcileOrphanedConversations(ctx)
+		if err != nil {
+			t.Fatalf("ReconcileOrphanedConversations: %v", err)
+		}
+		if n != 0 || check.Count != 0 {
+			t.Errorf("(healed, counted) = (%d, %d), want (0, 0) — a parent with a child is not an orphan", n, check.Count)
 		}
 		if status, _, _ := seed.BlueprintRunState(t, brID); status != string(domain.BlueprintRunStatusRunning) {
 			t.Errorf("blueprint_run status = %q, want running", status)
@@ -134,20 +132,52 @@ func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrph
 		}
 	})
 
-	t.Run("Terminal_childless_blueprint_run_keeps_its_own_verdict", func(t *testing.T) {
-		// Every terminal is a settled account of what happened, including the
-		// abort_reason a cancel or an abort already wrote. The arm may only
-		// claim a run that is still 'running'.
+	t.Run("Running_with_no_child_at_its_current_step_is_counted", func(t *testing.T) {
+		// The mid-advance orphan, and the reason the predicate reads the
+		// pointer rather than merely the presence of a child: step 0 ran, the
+		// pointer moved to step 1, and the step-1 conversation never landed.
+		// The claim gate drives the step the pointer names, so nothing will
+		// ever pick this run up, and no arm that walks its children can tell
+		// it from ordinary work.
 		store, seed := mk(t)
-		brID := seed.BlueprintRun(t, pastGrace)
-		seed.ForceBlueprintStatus(t, brID, string(domain.BlueprintRunStatusCancelled), "user_cancelled")
+		brID := seed.BlueprintRun(t, time.Hour)
+		convID := seed.StageChild(t, brID)
+		seed.SetCurrentStep(t, brID, 1)
 
-		n, err := store.ReconcileOrphanedConversations(ctx)
+		n, check, err := store.ReconcileOrphanedConversations(ctx)
 		if err != nil {
 			t.Fatalf("ReconcileOrphanedConversations: %v", err)
 		}
 		if n != 0 {
-			t.Errorf("healed count = %d, want 0 (terminal blueprint runs are settled)", n)
+			t.Errorf("healed count = %d, want 0 (the checker repairs nothing)", n)
+		}
+		if check.Count != 1 {
+			t.Fatalf("check.Count = %d, want 1 — a pointer naming no conversation is as undrivable as no child at all", check.Count)
+		}
+		if len(check.Sample) != 1 || check.Sample[0] != brID {
+			t.Errorf("check.Sample = %v, want [%s]", check.Sample, brID)
+		}
+		if status, reason, completed := seed.BlueprintRunState(t, brID); status != string(domain.BlueprintRunStatusRunning) || reason != "" || completed {
+			t.Errorf("blueprint_run = (%q, %q, completed=%v), want (running, \"\", false) — the checker must not write", status, reason, completed)
+		}
+		if got := seed.ConversationStatus(t, convID); got != "" {
+			t.Errorf("the run's step-0 child status = %q, want no stored status (untouched)", got)
+		}
+	})
+
+	t.Run("Terminal_childless_blueprint_run_is_not_counted", func(t *testing.T) {
+		// Every terminal is a settled account of what happened. Only a run
+		// still claiming to be 'running' is an unmet obligation.
+		store, seed := mk(t)
+		brID := seed.BlueprintRun(t, time.Hour)
+		seed.ForceBlueprintStatus(t, brID, string(domain.BlueprintRunStatusCancelled), "user_cancelled")
+
+		n, check, err := store.ReconcileOrphanedConversations(ctx)
+		if err != nil {
+			t.Fatalf("ReconcileOrphanedConversations: %v", err)
+		}
+		if n != 0 || check.Count != 0 {
+			t.Errorf("(healed, counted) = (%d, %d), want (0, 0) — terminal blueprint runs are settled", n, check.Count)
 		}
 		status, reason, _ := seed.BlueprintRunState(t, brID)
 		if status != string(domain.BlueprintRunStatusCancelled) || reason != "user_cancelled" {
@@ -156,27 +186,50 @@ func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrph
 	})
 
 	t.Run("Mid_flight_child_under_a_terminal_parent_is_parked", func(t *testing.T) {
-		// The original arm, and the mirror of the one above: a live child under
-		// a dead parent. Kept here so the two can't drift — the mint-crash arm
-		// must not swallow this shape (its parent has a child) and must not
-		// change what this one writes.
+		// The repair arm, and the mirror of the checker above: a live child
+		// under a dead parent. Kept beside it so the two can't drift — the
+		// checker must not count this parent (it has a child) and must not
+		// change what the park writes.
 		store, seed := mk(t)
-		brID := seed.BlueprintRun(t, pastGrace)
-		convID := seed.EnqueueChild(t, brID)
+		brID := seed.BlueprintRun(t, time.Hour)
+		convID := seed.StageChild(t, brID)
 		seed.ForceBlueprintStatus(t, brID, string(domain.BlueprintRunStatusFailed), "step_failed")
 
-		n, err := store.ReconcileOrphanedConversations(ctx)
+		n, check, err := store.ReconcileOrphanedConversations(ctx)
 		if err != nil {
 			t.Fatalf("ReconcileOrphanedConversations: %v", err)
 		}
 		if n != 1 {
 			t.Fatalf("healed count = %d, want 1 (the parked child)", n)
 		}
+		if check.Count != 0 {
+			t.Errorf("check.Count = %d, want 0 (a terminal parent is not the checker's shape)", check.Count)
+		}
 		if got := seed.ConversationStatus(t, convID); got != "open" {
 			t.Errorf("child status = %q, want open (parked under a terminal parent)", got)
 		}
 		if _, reason, _ := seed.BlueprintRunState(t, brID); reason != "step_failed" {
 			t.Errorf("parent abort_reason = %q, want step_failed (the park must not restamp it)", reason)
+		}
+	})
+
+	t.Run("Sample_is_bounded_and_the_count_is_not", func(t *testing.T) {
+		// One log line stays a log line, and the number stays honest: the
+		// sample is capped, the count is every row.
+		store, seed := mk(t)
+		for i := 0; i < db.OrphanedStepSampleLimit+3; i++ {
+			seed.BlueprintRun(t, time.Duration(i)*time.Minute)
+		}
+
+		_, check, err := store.ReconcileOrphanedConversations(ctx)
+		if err != nil {
+			t.Fatalf("ReconcileOrphanedConversations: %v", err)
+		}
+		if check.Count != db.OrphanedStepSampleLimit+3 {
+			t.Errorf("check.Count = %d, want %d (every row, not just the sampled ones)", check.Count, db.OrphanedStepSampleLimit+3)
+		}
+		if len(check.Sample) != db.OrphanedStepSampleLimit {
+			t.Errorf("len(check.Sample) = %d, want %d", len(check.Sample), db.OrphanedStepSampleLimit)
 		}
 	})
 }

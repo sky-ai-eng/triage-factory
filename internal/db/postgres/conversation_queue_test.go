@@ -24,30 +24,25 @@ const (
 	pgConversationQueueBootEpoch  = int64(1)
 )
 
-// TestConversationQueueStore_Postgres_EnqueueClaim exercises the basic enqueue → claim →
-// requeue → reset cycle against real Postgres (admin pool).
-func TestConversationQueueStore_Postgres_EnqueueClaim(t *testing.T) {
+// TestConversationQueueStore_Postgres_ClaimCycle exercises the basic
+// fire → claim → requeue → reset cycle against real Postgres (admin pool).
+func TestConversationQueueStore_Postgres_ClaimCycle(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+	bpID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 	// Empty queue.
 	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
 		t.Fatalf("ClaimNextConversation on empty queue = (%v, %v), want (nil, nil)", got, err)
 	}
 
-	conversationID := uuid.New().String()
-	step0 := 0
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
-		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation: %v", err)
-	}
+	conversationID := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+		PromptID: promptID, CreatorUserID: userID,
+	}).ID
 
 	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{})
 	if err != nil || got == nil {
@@ -61,8 +56,8 @@ func TestConversationQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 	if st, _ := pgConversationStatus(t, h, conversationID); st != "" {
 		t.Fatalf("stored status after claim = %q, want none", st)
 	}
-	// team_id rides back on the claim (TFAC-458) and matches the value
-	// EnqueueConversation derived from the parent task — this is the construction-path
+	// team_id rides back on the claim (TFAC-458) and matches the value the
+	// mint derived from the parent task — this is the construction-path
 	// ConversationInfo.TeamID source the capture writers attribute artifacts by.
 	var wantTeam string
 	if err := h.AdminDB.QueryRow(`SELECT team_id::text FROM tasks WHERE id = $1`, taskID).Scan(&wantTeam); err != nil {
@@ -102,15 +97,10 @@ func TestConversationQueueStore_Postgres_ResetProcessingConversations_ScopedToOw
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
-	step0 := 0
-	conversationID := uuid.New().String()
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
-		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation: %v", err)
-	}
+	bpID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+	conversationID := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+		PromptID: promptID, CreatorUserID: userID,
+	}).ID
 
 	// Process A claims and is still live (never crashed).
 	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "process-a", 1, db.ClaimPlacement{})
@@ -162,15 +152,10 @@ func TestConversationQueueStore_Postgres_ResetProcessingConversations_NeverReset
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
-	step0 := 0
-	conversationID := uuid.New().String()
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
-		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation: %v", err)
-	}
+	bpID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+	conversationID := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+		PromptID: promptID, CreatorUserID: userID,
+	}).ID
 
 	if _, err := stores.ConversationQueue.ClaimNextConversation(ctx, "process-self", 5, db.ClaimPlacement{}); err != nil {
 		t.Fatalf("claim: %v", err)
@@ -196,16 +181,12 @@ func TestConversationQueueStore_Postgres_CancelRequestedNotClaimed(t *testing.T)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+	bpID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
-	step0 := 0
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-		ID: uuid.New().String(), TaskID: taskID, PromptID: promptID, Model: "m",
-		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation: %v", err)
-	}
-	if changed, err := stores.Blueprints.RequestRunCancelSystem(ctx, orgID, brID); err != nil || !changed {
+	step := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+		PromptID: promptID, CreatorUserID: userID,
+	})
+	if changed, err := stores.Blueprints.RequestRunCancelSystem(ctx, orgID, step.BlueprintRunID); err != nil || !changed {
 		t.Fatalf("RequestRunCancelSystem = (%v, %v)", changed, err)
 	}
 	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
@@ -214,7 +195,7 @@ func TestConversationQueueStore_Postgres_CancelRequestedNotClaimed(t *testing.T)
 }
 
 // TestConversationQueueStore_Postgres_ConcurrentClaim proves the FOR UPDATE SKIP LOCKED
-// claim never hands the same queued conversation to two claimers: it enqueues N
+// claim never hands the same queued conversation to two claimers: it stages N
 // conversations and drains them from G goroutines, asserting every conversation
 // is claimed exactly once.
 func TestConversationQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
@@ -224,8 +205,7 @@ func TestConversationQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
-	bpID := pgBlueprintIDOfRun(t, h, brID)
+	bpID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 	// N runs queued at once = N tasks, each with one blueprint_run on its own
 	// step 0. Neither unit offers two conversations at once — a blueprint
@@ -234,18 +214,10 @@ func TestConversationQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 	const n = 40
 	want := make(map[string]bool, n)
 	for i := 0; i < n; i++ {
-		conversationID := uuid.New().String()
-		step0 := 0
-		taskID := seedPgTask(t, h, orgID, userID)
-		if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-			ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
-			TriggerType: "manual", CreatorUserID: userID,
-			BlueprintRunID:     seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID),
-			BlueprintStepIndex: &step0,
-		}); err != nil {
-			t.Fatalf("EnqueueConversation %d: %v", i, err)
-		}
-		want[conversationID] = true
+		conv := firePgStep(t, h, stores, orgID, bpID, seedPgTask(t, h, orgID, userID), domain.Conversation{
+			PromptID: promptID, CreatorUserID: userID,
+		})
+		want[conv.ID] = true
 	}
 
 	const workers = 8
@@ -300,45 +272,28 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
 
-	// Orphan: terminal (cancelled) parent, child still running.
-	brA, taskA, promptA := seedPgConversationQueueFixture(t, h, orgID, userID)
-	orphanID := uuid.New().String()
-	step0 := 0
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-		ID: orphanID, TaskID: taskA, PromptID: promptA, Model: "m",
-		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brA, BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation orphan: %v", err)
-	}
-	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, orphanID); err != nil {
-		t.Fatalf("set orphan running: %v", err)
-	}
-	// A second mid-flight orphan under the same terminal parent that no claim
-	// ever picked up must also be parked — a claimable step under a non-running
-	// parent is never actually claimed, so it would sit in the queue forever.
-	queuedOrphanID := uuid.New().String()
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-		ID: queuedOrphanID, TaskID: taskA, PromptID: promptA, Model: "m",
-		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brA, BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation queued orphan: %v", err)
-	}
-	if _, err := h.AdminDB.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = false WHERE id = $1`, brA); err != nil {
+	// Orphan: terminal (cancelled) parent, child still running. A second
+	// mid-flight orphan under the same parent — the step the blueprint moved
+	// on to — that no claim ever picked up must also be parked: a claimable
+	// step under a non-running parent is never actually claimed, so it would
+	// sit in the queue forever.
+	bpA, taskA, promptA := seedPgConversationQueueFixture(t, h, orgID, userID)
+	orphan := firePgStep(t, h, stores, orgID, bpA, taskA, domain.Conversation{
+		PromptID: promptA, CreatorUserID: userID,
+	})
+	orphanID := orphan.ID
+	queuedOrphanID := advancePgStep(t, stores, orgID, orphan, domain.Conversation{
+		PromptID: promptA, CreatorUserID: userID,
+	}).ID
+	if _, err := h.AdminDB.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = false WHERE id = $1`, orphan.BlueprintRunID); err != nil {
 		t.Fatalf("set parent cancelled: %v", err)
 	}
 
 	// Healthy: running parent, child running — must be left alone.
-	brB, taskB, promptB := seedPgConversationQueueFixture(t, h, orgID, userID)
-	healthyID := uuid.New().String()
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-		ID: healthyID, TaskID: taskB, PromptID: promptB, Model: "m",
-		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brB, BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation healthy: %v", err)
-	}
-	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, healthyID); err != nil {
-		t.Fatalf("set healthy running: %v", err)
-	}
+	bpB, taskB, promptB := seedPgConversationQueueFixture(t, h, orgID, userID)
+	healthyID := firePgStep(t, h, stores, orgID, bpB, taskB, domain.Conversation{
+		PromptID: promptB, CreatorUserID: userID,
+	}).ID
 	// A genuinely running child holds an active claim (ClaimNextConversation mints
 	// it); without one, the claim-desync requeue arm would rightly treat the
 	// row as stranded.
@@ -349,7 +304,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 		t.Fatalf("seed healthy claim: %v", err)
 	}
 
-	n, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
+	n, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil || n != 2 {
 		t.Fatalf("ReconcileOrphanedConversations = (%d, %v), want (2, nil)", n, err)
 	}
@@ -364,7 +319,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
+	if n2, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
 		t.Errorf("second ReconcileOrphanedConversations = (%d, %v), want (0, nil)", n2, err)
 	}
 }
@@ -383,18 +338,16 @@ func TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
-	step0 := 0
+	bpID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
+	// A task apiece, so every staged conversation is under its own running
+	// blueprint_run: the arms below are about claims, and a shared parent
+	// would let one subject's terminal decide another's.
 	seedChild := func(status string) string {
 		t.Helper()
-		id := uuid.New().String()
-		if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-			ID: id, TaskID: taskID, PromptID: promptID, Model: "m",
-			TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
-		}); err != nil {
-			t.Fatalf("EnqueueConversation: %v", err)
-		}
+		id := firePgStep(t, h, stores, orgID, bpID, seedPgTask(t, h, orgID, userID), domain.Conversation{
+			PromptID: promptID, CreatorUserID: userID,
+		}).ID
 		if status != "" {
 			pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = $2 WHERE id = $1`, id, status)
 		}
@@ -425,7 +378,7 @@ func TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T
 	healthyClaim := activeClaim(healthyID)
 	queuedID := seedChild("")
 
-	n, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
+	n, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil {
 		t.Fatalf("ReconcileOrphanedConversations: %v", err)
 	}
@@ -469,24 +422,24 @@ func TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
+	if n2, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
 		t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
 	}
 }
 
-// TestConversationQueueStore_Postgres_EnqueueStampsActorAgent is the Postgres parity of
-// the SQLite actor-stamp test: EnqueueConversation (both the manual and event branches)
+// TestConversationQueueStore_Postgres_MintStampsActorAgent is the Postgres parity of
+// the SQLite actor-stamp test: the mint (both the manual and event branches)
 // persists conversations.actor_agent_id, and ConversationStore.GetSystem
 // JOINs agents to surface the display name as ActorAgentName. A conversation with
 // no actor reads back with both fields empty.
-func TestConversationQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
+func TestConversationQueueStore_Postgres_MintStampsActorAgent(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+	bpID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 	// One org agent backs the composite FK (actor_agent_id, org_id) and carries
 	// the display name the read JOIN denormalizes.
@@ -499,16 +452,10 @@ func TestConversationQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	}
 
 	// Manual branch stamps the actor.
-	manualID := uuid.New().String()
-	step0 := 0
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-		ID: manualID, TaskID: taskID, PromptID: promptID, Model: "m",
-		TriggerType: "manual", CreatorUserID: userID, ActorAgentID: agentID,
-		BlueprintRunID: brID, BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation (manual): %v", err)
-	}
-	got, err := stores.Conversations.GetSystem(ctx, orgID, manualID)
+	manual := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+		PromptID: promptID, CreatorUserID: userID, ActorAgentID: agentID,
+	})
+	got, err := stores.Conversations.GetSystem(ctx, orgID, manual.ID)
 	if err != nil || got == nil {
 		t.Fatalf("GetSystem (manual): (%v, %v)", got, err)
 	}
@@ -520,16 +467,12 @@ func TestConversationQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	}
 
 	// Event branch (creator_user_id NULL per the schema CHECK) also stamps it.
-	eventID := uuid.New().String()
-	step1 := 1
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-		ID: eventID, TaskID: taskID, PromptID: promptID, Model: "m",
-		TriggerType: "event", ActorAgentID: agentID,
-		BlueprintRunID: brID, BlueprintStepIndex: &step1,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation (event): %v", err)
-	}
-	ev, err := stores.Conversations.GetSystem(ctx, orgID, eventID)
+	// A step after the first is minted by the advance, which is the only door
+	// that mints one — so this walks the sequence rather than re-firing.
+	event := advancePgStep(t, stores, orgID, manual, domain.Conversation{
+		PromptID: promptID, TriggerType: "event", ActorAgentID: agentID,
+	})
+	ev, err := stores.Conversations.GetSystem(ctx, orgID, event.ID)
 	if err != nil || ev == nil {
 		t.Fatalf("GetSystem (event): (%v, %v)", ev, err)
 	}
@@ -538,15 +481,9 @@ func TestConversationQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	}
 
 	// No actor → both fields empty (nullable column + LEFT JOIN).
-	bareID := uuid.New().String()
-	step2 := 2
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-		ID: bareID, TaskID: taskID, PromptID: promptID, Model: "m",
-		TriggerType: "manual", CreatorUserID: userID,
-		BlueprintRunID: brID, BlueprintStepIndex: &step2,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation (no actor): %v", err)
-	}
+	bareID := advancePgStep(t, stores, orgID, event, domain.Conversation{
+		PromptID: promptID, CreatorUserID: userID,
+	}).ID
 	bare, err := stores.Conversations.GetSystem(ctx, orgID, bareID)
 	if err != nil || bare == nil {
 		t.Fatalf("GetSystem (no actor): (%v, %v)", bare, err)
@@ -556,7 +493,7 @@ func TestConversationQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	}
 }
 
-// TestConversationQueueStore_Postgres_EnqueueStampsTheNativeEngine pins the single fact
+// TestConversationQueueStore_Postgres_MintStampsTheNativeEngine pins the single fact
 // that makes the SDK engine unreachable for a delegation in this mode: the
 // mint names the engine, so no row is ever written that a claimant would have
 // to be taught to refuse. There is no caller-passed knob and no reliance on
@@ -569,14 +506,13 @@ func TestConversationQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 // It reads the stored column rather than the projection on purpose. The
 // question is what the write put there, and a projection that COALESCEd an
 // absent value would answer it wrong.
-func TestConversationQueueStore_Postgres_EnqueueStampsTheNativeEngine(t *testing.T) {
+func TestConversationQueueStore_Postgres_MintStampsTheNativeEngine(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+	bpID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 	storedRuntime := func(t *testing.T, convID string) string {
 		t.Helper()
@@ -589,20 +525,16 @@ func TestConversationQueueStore_Postgres_EnqueueStampsTheNativeEngine(t *testing
 		return runtime
 	}
 
-	for i, trigger := range []string{"manual", "event"} {
-		step := i
-		convID := uuid.New().String()
-		conv := domain.Conversation{
-			ID: convID, TaskID: taskID, PromptID: promptID, Model: "m",
-			TriggerType: trigger, BlueprintRunID: brID, BlueprintStepIndex: &step,
-		}
-		if trigger == "manual" {
-			// The schema CHECK pairs a manual trigger with a creator.
-			conv.CreatorUserID = userID
-		}
-		if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, conv); err != nil {
-			t.Fatalf("EnqueueConversation (%s): %v", trigger, err)
-		}
+	// Step 0 is the manual arm (the schema CHECK pairs a manual trigger with
+	// a creator); the event arm is the step after it, which is the only way a
+	// second step is minted.
+	manual := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+		PromptID: promptID, CreatorUserID: userID,
+	})
+	event := advancePgStep(t, stores, orgID, manual, domain.Conversation{
+		PromptID: promptID, TriggerType: "event",
+	})
+	for trigger, convID := range map[string]string{"manual": manual.ID, "event": event.ID} {
 		if got := storedRuntime(t, convID); got != domain.ConversationRuntimeNative {
 			t.Errorf("%s mint runtime = %q, want %q", trigger, got, domain.ConversationRuntimeNative)
 		}
@@ -615,29 +547,20 @@ func TestConversationQueueStore_Postgres_EnqueueStampsTheNativeEngine(t *testing
 // share state.
 func TestConversationQueueStore_Postgres_Credentials(t *testing.T) {
 	h := pgtest.Shared(t)
-	ctx := context.Background()
 
 	dbtest.RunClaimCredentialsConformance(t, func(t *testing.T) (db.ConversationQueueStore, string, dbtest.ClaimCredentialsSeeder) {
 		t.Helper()
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
-		brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+		bpID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
-		nextStep := 0
 		seed := dbtest.ClaimCredentialsSeeder{
-			EnqueueConversation: func(t *testing.T) string {
+			StageStep: func(t *testing.T) string {
 				t.Helper()
-				idx := nextStep
-				nextStep++
-				conversationID := uuid.New().String()
-				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-					ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
-					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
-				}); err != nil {
-					t.Fatalf("EnqueueConversation: %v", err)
-				}
-				return conversationID
+				return firePgStep(t, h, stores, orgID, bpID, seedPgTask(t, h, orgID, userID), domain.Conversation{
+					PromptID: promptID, CreatorUserID: userID,
+				}).ID
 			},
 			ConversationStatus: func(t *testing.T, conversationID string) string {
 				t.Helper()
@@ -666,7 +589,6 @@ func TestConversationQueueStore_Postgres_Credentials(t *testing.T) {
 // call resets the harness so subtests don't share state.
 func TestConversationQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 	h := pgtest.Shared(t)
-	ctx := context.Background()
 
 	dbtest.RunFleetQueueSharesConformance(t, func(t *testing.T) (db.ConversationQueueStore, string, dbtest.FleetQueueSharesSeeder) {
 		t.Helper()
@@ -675,23 +597,17 @@ func TestConversationQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 		orgID, userID := seedPgOrgForBlueprints(t, h)
 
 		seed := dbtest.FleetQueueSharesSeeder{
-			// One blueprint_run per staged run — the real firing model (one
-			// delegation = one blueprint_run), and what makes several queued
+			// One firing per staged run — the real model (one delegation is
+			// one blueprint_run on one task), and what makes several queued
 			// rows concurrently claimable: a blueprint drives its current
 			// step and no other, so siblings under one blueprint could never
 			// all be queued at once.
-			EnqueueConversation: func(t *testing.T) string {
+			StageStep: func(t *testing.T) string {
 				t.Helper()
-				brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
-				conversationID := uuid.New().String()
-				step := 0
-				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-					ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
-					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step,
-				}); err != nil {
-					t.Fatalf("EnqueueConversation: %v", err)
-				}
-				return conversationID
+				bpID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+				return firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+					PromptID: promptID, CreatorUserID: userID,
+				}).ID
 			},
 			ForceStatus: func(t *testing.T, conversationID, status string) {
 				t.Helper()
@@ -740,33 +656,24 @@ func pgConversationParked(t *testing.T, h *pgtest.Harness, conversationID string
 	return stored.String, parkedAt != nil
 }
 
-// seedPgConversationQueueFixture mints a prompt + blueprint + a running blueprint_run on
-// a fresh task, returning (blueprintRunID, taskID, promptID) ready for enqueue.
-func seedPgConversationQueueFixture(t *testing.T, h *pgtest.Harness, orgID, userID string) (brID, taskID, promptID string) {
+// seedPgConversationQueueFixture mints the parents one delegation needs — a
+// prompt, a blueprint and a fresh task — returning (blueprintID, taskID,
+// promptID) ready to fire a step against.
+func seedPgConversationQueueFixture(t *testing.T, h *pgtest.Harness, orgID, userID string) (bpID, taskID, promptID string) {
 	t.Helper()
-	bpID := "rq-bp-" + uuid.New().String()[:8]
+	bpID = "rq-bp-" + uuid.New().String()[:8]
 	seedPgBlueprint(t, h, orgID, userID, bpID)
 	promptID = "rq-p-" + uuid.New().String()[:8]
 	seedPgPrompt(t, h, orgID, userID, promptID)
-	taskID = seedPgTask(t, h, orgID, userID)
-	return seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID), taskID, promptID
+	return bpID, seedPgTask(t, h, orgID, userID), promptID
 }
 
-// seedPgBlueprintRunOn mints one more running blueprint_run against an existing
-// blueprint + task. A fixture staging several CONCURRENTLY queued conversations
-// needs one of these per conversation: a blueprint drives the single step its
-// current_step_index names, so sibling steps of one blueprint are never
-// claimable at the same moment — which is the real firing model anyway (one
-// delegation = one blueprint_run).
-func seedPgBlueprintRunOn(t *testing.T, h *pgtest.Harness, orgID, userID, bpID, taskID string) string {
+// seedPgChildlessRun writes a running blueprint_run with no step under it —
+// the shape no door can produce, because a firing commits its first step in
+// the same transaction as the run. The boot reconcile's checker exists to
+// count exactly this, so its suite has to be able to write it.
+func seedPgChildlessRun(t *testing.T, h *pgtest.Harness, orgID, userID, bpID, taskID string) string {
 	t.Helper()
-	// One running blueprint_run per task is a schema invariant
-	// (blueprint_runs_one_active_run_per_task), so staging a task's next
-	// engagement settles the one before it — which is what the task moving on
-	// means.
-	if _, err := h.AdminDB.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE org_id = $1 AND task_id = $2 AND status = 'running'`, orgID, taskID); err != nil {
-		t.Fatalf("settle the task's prior blueprint_run: %v", err)
-	}
 	brID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
@@ -777,18 +684,26 @@ func seedPgBlueprintRunOn(t *testing.T, h *pgtest.Harness, orgID, userID, bpID, 
 	return brID
 }
 
-// pgBlueprintIDOfRun reads the blueprint a blueprint_run was minted from, so a
-// fixture holding only a conversation id can stage more conversations beside it.
-func pgBlueprintIDOfRun(t *testing.T, h *pgtest.Harness, brID string) string {
+// seedPgMidFlightStep writes one step conversation under an existing run, at
+// the index the caller names and with no stored status. Direct SQL for the
+// same reason as the helper above: the suites that reach for it stage
+// children at indices their run's pointer does not name, and under parents
+// the doors would refuse to mint against at all.
+func seedPgMidFlightStep(t *testing.T, h *pgtest.Harness, orgID, userID, taskID, promptID, brID string, stepIndex int) string {
 	t.Helper()
-	var bpID string
-	if err := h.AdminDB.QueryRow(`SELECT blueprint_id FROM blueprint_runs WHERE id = $1`, brID).Scan(&bpID); err != nil {
-		t.Fatalf("read blueprint_id of %s: %v", brID, err)
+	convID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO conversations (id, org_id, type, runtime, task_id, prompt_id, model, trigger_type,
+		                           team_id, visibility, creator_user_id, blueprint_run_id, blueprint_step_index, queued_at)
+		VALUES ($1, $2, 'delegation', 'native', $3, $4, 'm', 'manual',
+		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2), 'team', $5::uuid, $6, $7, now())
+	`, convID, orgID, taskID, promptID, userID, brID, stepIndex); err != nil {
+		t.Fatalf("seed step conversation: %v", err)
 	}
-	return bpID
+	return convID
 }
 
-// TestConversationQueueStore_Postgres_QueuedAtStamps mirrors the SQLite twin: enqueue
+// TestConversationQueueStore_Postgres_QueuedAtStamps mirrors the SQLite twin: the mint
 // stamps queued_at, a claim stamps claimed_at (both surfaced through
 // Conversations.GetSystem), and a requeue re-stamps queued_at and clears
 // claimed_at so the next dwell measures from the re-entry, not the mint.
@@ -799,23 +714,18 @@ func TestConversationQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+	bpID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
-	conversationID := uuid.New().String()
-	step0 := 0
-	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
-		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation: %v", err)
-	}
+	conversationID := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+		PromptID: promptID, CreatorUserID: userID,
+	}).ID
 
 	queued, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil || queued == nil {
-		t.Fatalf("GetSystem after enqueue: (%v, %v)", queued, err)
+		t.Fatalf("GetSystem after the mint: (%v, %v)", queued, err)
 	}
 	if queued.QueuedAt == nil {
-		t.Fatal("QueuedAt = nil after enqueue; the enqueue must stamp queue entry")
+		t.Fatal("QueuedAt = nil after the mint; the mint must stamp queue entry")
 	}
 	if queued.ClaimedAt != nil {
 		t.Fatalf("ClaimedAt = %v on a queued conversation, want nil", queued.ClaimedAt)
@@ -871,16 +781,11 @@ func TestConversationQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			h.Reset(t)
 			orgID, userID := seedPgOrgForBlueprints(t, h)
-			brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+			bpID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
-			conversationID := uuid.New().String()
-			step0 := 0
-			if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-				ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
-				TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
-			}); err != nil {
-				t.Fatalf("EnqueueConversation: %v", err)
-			}
+			conversationID := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+				PromptID: promptID, CreatorUserID: userID,
+			}).ID
 			if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
 				t.Fatalf("ClaimNextConversation: (%v, %v)", got, err)
 			}
@@ -914,30 +819,21 @@ func TestConversationQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 // design). Each factory call resets the harness so subtests don't share state.
 func TestConversationQueueStore_Postgres_ExecutorClaims(t *testing.T) {
 	h := pgtest.Shared(t)
-	ctx := context.Background()
 
 	dbtest.RunExecutorClaimsConformance(t, func(t *testing.T) (db.ConversationQueueStore, dbtest.ExecutorClaimsSeeder) {
 		t.Helper()
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
-		brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+		bpID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
-		nextStep := 0
 		seed := dbtest.ExecutorClaimsSeeder{
 			OrgID: orgID,
 			Conversation: func(t *testing.T, status, failureKind string) string {
 				t.Helper()
-				idx := nextStep
-				nextStep++
-				conversationID := uuid.New().String()
-				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-					ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
-					TriggerType: "manual", CreatorUserID: userID,
-					BlueprintRunID: brID, BlueprintStepIndex: &idx,
-				}); err != nil {
-					t.Fatalf("EnqueueConversation: %v", err)
-				}
+				conversationID := firePgStep(t, h, stores, orgID, bpID, seedPgTask(t, h, orgID, userID), domain.Conversation{
+					PromptID: promptID, CreatorUserID: userID,
+				}).ID
 				if _, err := h.AdminDB.Exec(`
 					UPDATE conversations SET status = $1, failure_kind = NULLIF($2, '') WHERE id = $3
 				`, status, failureKind, conversationID); err != nil {
@@ -1000,27 +896,37 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
-		brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+		bpID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
-		nextStep := 0
+		brID, nextStep := "", 0
 		return dbtest.ClaimPredicateHarness{
 			Stores: stores,
 			OrgID:  orgID,
 			UserID: userID,
-			EnqueueDelegation: func(t *testing.T, runtime string) string {
+			StageDelegation: func(t *testing.T, runtime string) string {
 				t.Helper()
 				idx := nextStep
 				nextStep++
-				// Pointer first, then the row it names — the order the
-				// reactor writes in, and the reason the claim gate can be a
-				// plain equality.
-				pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET current_step_index = $2 WHERE id = $1`, brID, idx)
-				convID := uuid.New().String()
-				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-					ID: convID, TaskID: taskID, PromptID: promptID, Model: "m",
-					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
-				}); err != nil {
-					t.Fatalf("EnqueueConversation: %v", err)
+				var convID string
+				if idx == 0 {
+					// Step 0 is a real firing, so the fresh-mint assertions —
+					// no stored status, the dialect's own runtime stamp — are
+					// about the statement production mints with.
+					step0 := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+						PromptID: promptID, CreatorUserID: userID,
+					})
+					brID, convID = step0.BlueprintRunID, step0.ID
+				} else {
+					// Every step after it is written directly, pointer first,
+					// then the row it names. The advance door commits those
+					// two together and only from the step the pointer already
+					// names — and this suite rewrites the pointer by hand
+					// between stagings, parking a run behind its newest step
+					// and resuming past it, so a door that refuses those
+					// states is a door it cannot stage through.
+					pgtest.MustExec(t, h.AdminDB,
+						`UPDATE blueprint_runs SET current_step_index = $2 WHERE id = $1`, brID, idx)
+					convID = seedPgMidFlightStep(t, h, orgID, userID, taskID, promptID, brID, idx)
 				}
 				// The dialect stamps its own runtime at mint; rewrite it so
 				// one backend covers both engines. started_at is stamped in
@@ -1033,11 +939,10 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 					convID, runtime, float64(idx))
 				return convID
 			},
-			EnqueueUnindexed: func(t *testing.T) error {
+			StageUnindexed: func(t *testing.T) error {
 				t.Helper()
-				_, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-					ID: uuid.New().String(), TaskID: taskID, PromptID: promptID, Model: "m",
-					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID,
+				_, err := tryFirePgStep(t, h, stores, orgID, bpID, seedPgTask(t, h, orgID, userID), domain.Conversation{
+					PromptID: promptID, CreatorUserID: userID,
 				})
 				return err
 			},
@@ -1059,9 +964,12 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 			},
 			SetBlueprintState: func(t *testing.T, status string, currentStepIndex int) {
 				t.Helper()
+				// The sequence task carries exactly one run — the firing that
+				// opened it — so the task is the address here and the harness
+				// keeps no run id of its own.
 				pgtest.MustExec(t, h.AdminDB,
-					`UPDATE blueprint_runs SET status = $2, current_step_index = $3 WHERE id = $1`,
-					brID, status, currentStepIndex)
+					`UPDATE blueprint_runs SET status = $2, current_step_index = $3 WHERE task_id = $1`,
+					taskID, status, currentStepIndex)
 			},
 			InsertRow: func(t *testing.T, convID string, msg domain.Message) int64 {
 				t.Helper()
@@ -1107,53 +1015,53 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 // healed counts are this subtest's alone.
 func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConformance(t *testing.T) {
 	h := pgtest.Shared(t)
-	ctx := context.Background()
 
 	dbtest.RunReconcileOrphanedConversationsConformance(t, func(t *testing.T) (db.ConversationQueueStore, dbtest.ReconcileOrphanSeeder) {
 		t.Helper()
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
-		brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
-		bpID := pgBlueprintIDOfRun(t, h, brID)
+		bpID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
-		nextStep := 0
-		// The fixture already minted one running blueprint_run; hand that one
-		// out first so the suite's exact counts aren't thrown off by a spare
-		// childless orphan sitting beside the one it staged.
-		spare := brID
+		// Both seeders below write their rows directly. This suite's whole
+		// subject is the shapes the invariants forbid — a childless run, a
+		// mid-flight child under a terminal parent, a pointer naming a step
+		// nothing minted — and the doors that mint a step are the ones that
+		// make those shapes unreachable, so they cannot stage them.
+		//
+		// One task per run either way: blueprint_runs_one_active_run_per_task
+		// refuses a second 'running' row on a task, and the suite stages
+		// several at once.
+		runTask := map[string]string{}
+		nextStep := map[string]int{}
 		seed := dbtest.ReconcileOrphanSeeder{
 			BlueprintRun: func(t *testing.T, age time.Duration) string {
 				t.Helper()
-				id := spare
-				if id == "" {
-					id = seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID)
-				}
-				spare = ""
+				taskID := seedPgTask(t, h, orgID, userID)
+				id := seedPgChildlessRun(t, h, orgID, userID, bpID, taskID)
+				runTask[id] = taskID
 				if age > 0 {
 					pgtest.MustExec(t, h.AdminDB,
 						`UPDATE blueprint_runs SET started_at = now() - $2::interval WHERE id = $1`, id, age.String())
 				}
 				return id
 			},
-			EnqueueChild: func(t *testing.T, brID string) string {
+			StageChild: func(t *testing.T, brID string) string {
 				t.Helper()
-				idx := nextStep
-				nextStep++
-				convID := uuid.New().String()
-				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
-					ID: convID, TaskID: taskID, PromptID: promptID, Model: "m",
-					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
-				}); err != nil {
-					t.Fatalf("EnqueueConversation: %v", err)
-				}
-				return convID
+				idx := nextStep[brID]
+				nextStep[brID]++
+				return seedPgMidFlightStep(t, h, orgID, userID, runTask[brID], promptID, brID, idx)
 			},
 			ForceBlueprintStatus: func(t *testing.T, brID, status, abortReason string) {
 				t.Helper()
 				pgtest.MustExec(t, h.AdminDB,
 					`UPDATE blueprint_runs SET status = $2, abort_reason = NULLIF($3, '') WHERE id = $1`,
 					brID, status, abortReason)
+			},
+			SetCurrentStep: func(t *testing.T, brID string, stepIndex int) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE blueprint_runs SET current_step_index = $2 WHERE id = $1`, brID, stepIndex)
 			},
 			BlueprintRunState: func(t *testing.T, brID string) (string, string, bool) {
 				t.Helper()
@@ -1193,14 +1101,15 @@ func TestConversationQueueStore_Postgres_ReturnedRow(t *testing.T) {
 		h.Reset(t)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
 
-		scaffold := func(t *testing.T) (taskID, promptID, blueprintRunID string) {
+		scaffold := func(t *testing.T) string {
 			t.Helper()
 			bpID := "cqrr-bp-" + uuid.New().String()[:8]
 			seedPgBlueprint(t, h, orgID, userID, bpID)
-			promptID = "cqrr-p-" + uuid.New().String()[:8]
+			promptID := "cqrr-p-" + uuid.New().String()[:8]
 			seedPgPrompt(t, h, orgID, userID, promptID)
-			taskID = seedPgTask(t, h, orgID, userID)
-			return taskID, promptID, seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID)
+			return firePgStep(t, h, stores, orgID, bpID, seedPgTask(t, h, orgID, userID), domain.Conversation{
+				PromptID: promptID, CreatorUserID: userID,
+			}).ID
 		}
 		return stores.ConversationQueue, stores.Conversations, orgID, scaffold
 	})

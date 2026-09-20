@@ -618,7 +618,7 @@ func TestOwnerLadderRouting_ExternalAuthor_WatchersFireRanked(t *testing.T) {
 // (applies_to_unowned rule) AND has a configured, enabled auto-delegation may
 // now fire on it — the deliberate, eyes-open behavior that supersedes the
 // TFAC-514 blanket "external never fires." The fire consolidates ownership onto
-// the watcher (delegation.go SetOwnerTeamSystem). The no-steal invariant — a
+// the watcher (the firing transaction's owner consolidation). The no-steal invariant — a
 // watcher never beats a MEMBER team — is unaffected and covered by
 // TestAuthorCentric_TwoTeams_WatcherDoesNotStealOwnership.
 func TestAuthorCentric_ExternalAuthor_WatchTriggerFires(t *testing.T) {

@@ -152,9 +152,9 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		Secrets:       s.buildSecrets(tx, s.admin),
 		EventHandlers: newTxEventHandlerStore(tx),
 		// Blueprints: composed half is tx; admin half stays the real
-		// admin pool so event-triggered CreateRun + the `...System`
-		// reads route around RLS. The admin writes commit
-		// autonomously from the outer tx — same pool-routing
+		// admin pool so the firing and advance doors and the
+		// `...System` reads route around RLS. Those admin writes
+		// commit autonomously from the outer tx — same pool-routing
 		// semantics as ConversationStore.Create.
 		Blueprints:   newBlueprintStore(tx, s.admin),
 		Agents:       newTxAgentStore(tx),

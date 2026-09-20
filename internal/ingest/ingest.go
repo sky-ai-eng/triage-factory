@@ -35,8 +35,8 @@ import (
 // not durable work.
 //
 // Implements tracker.Publisher via Publish and PublishPreEnqueued — the
-// latter for the tracker's snapshot-CAS emit, which owns its own
-// transaction and so arrives here already durable.
+// latter for the tracker's snapshot-CAS emits, which own their own
+// transaction and so arrive here already durable.
 type Ingestor struct {
 	bus   *eventbus.Bus
 	queue db.EventQueueStore
@@ -74,16 +74,14 @@ func (i *Ingestor) Publish(ctx context.Context, evt domain.Event) {
 			// recover. An emit re-derived from durable state every cycle (the
 			// tracker reconciling a stale review-request against the stored
 			// snapshot) does come back on the next poll. One that fires off
-			// a one-time observation does not: a first-discovery backfill
-			// runs behind an entity whose snapshot is already seeded, so
-			// the next cycle takes the already-exists path and never
-			// synthesizes it again, and an ee/ ingest runs behind a
-			// delivery id already recorded as consumed, so the upstream's
-			// own redelivery is dropped as a duplicate. Both are gone for
+			// a one-time observation does not: an ee/ ingest runs behind a
+			// delivery id already recorded as consumed, so the upstream's own
+			// redelivery is dropped as a duplicate, and that one is gone for
 			// good.
-			// The tracker's diffed transitions are not in this set at all —
-			// they commit inside the snapshot CAS's transaction and never
-			// reach this path.
+			// The tracker's snapshot-paired emits are not in this set at all
+			// — its diffed transitions and its discovery seed's review-request
+			// backfill both commit inside the snapshot CAS's transaction and
+			// reach this package only through PublishPreEnqueued.
 			//
 			// Deliberately do NOT fall through to the bus: with no events
 			// row, evt.ID is empty, and forwarding an id-less event would
@@ -104,10 +102,10 @@ func (i *Ingestor) Publish(ctx context.Context, evt domain.Event) {
 // PublishPreEnqueued is Publish for an event the caller ALREADY committed
 // to the outbox itself: it nudges the drain worker and fans the event out
 // to the bus, and deliberately does not enqueue. The tracker is the caller
-// — it enqueues its diffed transitions inside the same transaction as the
-// snapshot CAS they were diffed against (EnqueueBatchWithSnapshotCAS), so
-// routing them through Publish would write a second queue row for an event
-// already queued.
+// — it enqueues both its diffed transitions and its discovery seed's
+// review-request backfill inside the same transaction as the snapshot they
+// belong to (EnqueueBatchWithSnapshotCAS), so routing them through Publish
+// would write a second queue row for an event already queued.
 //
 // evt.ID must be the id that enqueue minted, so the WS feed and the queue
 // row agree the way they do on the ordinary path.

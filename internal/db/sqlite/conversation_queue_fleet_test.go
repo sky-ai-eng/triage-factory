@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -20,30 +21,13 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
-	task := seedEntityEventTask(t, conn, "fleet-reads")
-	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "fr-p0", Name: "Step 0", Body: "b", Source: "user"})
-	insertBlueprintForTest(t, conn, "fr-bp", "FR Blueprint")
-	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "fr-bp", []string{"fr-p0"}, nil); err != nil {
-		t.Fatalf("ReplaceSteps: %v", err)
-	}
-	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "fr-br", BlueprintID: "fr-bp", TaskID: task.ID,
-		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
-		WorktreePath: "/tmp/wt-fr",
-	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	brID := created.ID
-
-	step0 := 0
-	for _, id := range []string{"fr-run-0", "fr-run-1"} {
-		if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
-			ID: id, TaskID: task.ID, PromptID: "fr-p0", Model: "claude-sonnet-4-6",
-			TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
-		}); err != nil {
-			t.Fatalf("EnqueueConversation %s: %v", id, err)
-		}
+	// A firing apiece: two conversations queued at the same instant are two
+	// delegations, which is two blueprint_runs on two tasks.
+	for i, id := range []string{"fr-run-0", "fr-run-1"} {
+		bpID, taskID, promptID := seedSqliteFiringParents(t, conn, stores, fmt.Sprintf("fleet-reads-%d", i))
+		fireSqliteStep(t, conn, stores, bpID, taskID, domain.Conversation{
+			ID: id, PromptID: promptID, Model: "claude-sonnet-4-6",
+		})
 	}
 
 	// Two queued conversations.

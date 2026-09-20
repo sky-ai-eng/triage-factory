@@ -85,7 +85,7 @@ func TestRunGitHubCycleForOrg_TurningJiraOffDoesNotSkipGitHub(t *testing.T) {
 
 	m := &Manager{
 		database: database, pub: busPublisher{bus: newTestBus(t)},
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
 		orgs: stores.Orgs, users: stores.Users,
 		apps: &fakeInstallsStore{}, resolver: &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
 		EventSources: stores.OrgEventSources,
@@ -116,7 +116,7 @@ func TestRunJiraCycleForOrg_SkipsTurnedOffSource(t *testing.T) {
 
 	m := &Manager{
 		database: database, pub: busPublisher{bus: newTestBus(t)},
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
 		orgs: stores.Orgs, users: stores.Users, secrets: stores.Secrets,
 		jiraRules:    stores.JiraStatusRules,
 		EventSources: stores.OrgEventSources,
@@ -160,7 +160,7 @@ func TestRunJiraCycleForOrg_PolicyReadFails_SkipsRatherThanPolls(t *testing.T) {
 
 	m := &Manager{
 		database: database, pub: busPublisher{bus: newTestBus(t)},
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
 		orgs: stores.Orgs, users: stores.Users, secrets: stores.Secrets,
 		jiraRules:    stores.JiraStatusRules,
 		EventSources: erroringSourceStore{},

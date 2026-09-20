@@ -34,12 +34,39 @@ var (
 	// row. Same split as ErrNoSuchBlueprint: the writes refuse, GetRun answers
 	// (nil, nil).
 	ErrNoSuchBlueprintRun = errors.New("db: no blueprint run with that id")
+	// ErrBlueprintRunTriggerTypeRequired is returned by
+	// CreateRunWithFirstStepSystem when br names no trigger type. The door
+	// branches on that value — "event" takes the fenced arm, anything else
+	// the manual one — so an empty one does not fail, it silently fires a
+	// manual delegation and writes an empty trigger_type the CHECK
+	// constraints pair with a creator rule nobody meant to select.
+	ErrBlueprintRunTriggerTypeRequired = errors.New("db: a blueprint run must name its trigger type")
 	// ErrBlueprintRunFenceRequiresEventAndTrigger is returned by
-	// CreateRunIfNotFiredSystem when TriggeringEventID or TriggerID is empty.
-	// Both bind to SQL NULL, which the partial unique fence index treats as
-	// distinct — the fence would silently not engage. The event path always
-	// supplies both, so an empty value is a programming error surfaced loud.
-	ErrBlueprintRunFenceRequiresEventAndTrigger = errors.New("db: CreateRunIfNotFiredSystem requires non-empty TriggeringEventID and TriggerID")
+	// CreateRunWithFirstStepSystem's event arm when TriggeringEventID or
+	// TriggerID is empty. Both bind to SQL NULL, which the partial unique
+	// fence index treats as distinct — the fence would silently not engage.
+	// The event path always supplies both, so an empty value is a programming
+	// error surfaced loud.
+	ErrBlueprintRunFenceRequiresEventAndTrigger = errors.New("db: an event-triggered blueprint run requires non-empty TriggeringEventID and TriggerID")
+	// ErrManualCreatorRequired is returned by the Postgres manual-delegation
+	// inserts — the blueprint_runs row and the conversations row beside it —
+	// when the caller names no creator, or names the local sentinel, which has
+	// no users row in multi.
+	//
+	// Both run on the admin pool, which has neither a tf.current_user_id() to
+	// read an identity from nor an RLS WITH CHECK holding one to the caller.
+	// The creator therefore has to arrive on the call, and an absent one is a
+	// programming error in a new door rather than a value to default:
+	// attributing a person's delegation to the org owner would put it on the
+	// wrong person's reads, since both tables' SELECT policies are
+	// creator-scoped, with nothing to notice it by.
+	//
+	// Defense in depth rather than a live fix. Every manual delegation today
+	// passes through SyntheticClaimsWithTx first, which refuses both values
+	// outright — so this refuses what cannot currently reach it, and says so
+	// at the row it protects instead of resting on an upstream accident in
+	// another package.
+	ErrManualCreatorRequired = errors.New("db: a manual delegation must name its creator")
 	// ErrTaskBusyActiveRun is returned by both mint doors, in both dialects,
 	// when the insert loses to the one-active-run-per-task partial unique
 	// index: something else already holds this task's single live engagement.
@@ -47,7 +74,7 @@ var (
 	// race; on the manual path it is a second delegate gesture, or an event
 	// firing that got there first.
 	//
-	// Deliberately distinct from CreateRunIfNotFiredSystem's inserted=false
+	// Deliberately distinct from CreateRunWithFirstStepSystem's inserted=false
 	// replay-fence outcome — a replay is permanently satisfied (the run for
 	// THIS event exists), while task-busy is a deferral: the event caller's
 	// intent is still valid and must be queued (or released back to the
@@ -260,11 +287,11 @@ type BlueprintRunListFilter struct {
 
 // # Every single-row write returns the row it persisted
 //
-// Create, Rename, ReplaceSteps, CreateRun, SetRunWorktreePathSystem and
-// SetRunCurrentStepSystem hand back the stored row, read off RETURNING on the
-// write statement itself rather than from a follow-up SELECT, projecting the
-// point read's column list and scanner. ReplaceSteps is in that list because
-// its set write also stamps the parent blueprint (user_modified, updated_at),
+// Create, Rename, ReplaceSteps and SetRunWorktreePathSystem hand back the
+// stored row, read off RETURNING on the write statement itself rather than
+// from a follow-up SELECT, projecting the point read's column list and
+// scanner. ReplaceSteps is in that list because its set write also stamps the
+// parent blueprint (user_modified, updated_at),
 // and that stamp is a single-row write whose result the caller needs — the
 // step rows themselves are the set, and the parent row is what a caller
 // renders after replacing them.
@@ -277,9 +304,15 @@ type BlueprintRunListFilter struct {
 //   - MergeInto, SplitAt and DeleteStep — compositions that rewrite two
 //     blueprints and their step sets in one transaction, so no single row is
 //     the outcome; the two that mint a blueprint already answer with its id.
-//   - CreateRunIfNotFiredSystem — its insert is fenced ON CONFLICT DO NOTHING,
+//   - CreateRunWithFirstStepSystem — its run insert is fenced ON CONFLICT DO NOTHING,
 //     which returns zero rows exactly when the fence engages, so RETURNING
-//     cannot answer the question the method exists to ask.
+//     cannot answer the question the method exists to ask. It is also the only
+//     door a blueprint_runs row is written by, so no other write on that table
+//     mints one.
+//   - AdvanceRunToStepSystem — the run's pointer moves only inside it, guarded
+//     by a compare-and-swap whose `advanced` bool is the write's own answer.
+//     It returns the two conversations it wrote, which are the rows a caller
+//     acts on.
 //   - MarkRunStatus / MarkRunStatusSystem, ReopenRunForResume and
 //     RequestRunCancelSystem — compare-and-swap guards whose `changed` bool is
 //     already the write's own answer about whether it landed, which is what
@@ -512,47 +545,99 @@ type BlueprintStore interface {
 
 	// --- Runs -----------------------------------------------------------
 
-	// CreateRun inserts a new blueprint instance row and returns it.
-	// TriggerType is required. Manual delegations use this path (no
-	// triggering_event_id, so the replay fence never engages). Event-triggered
-	// delegations use CreateRunIfNotFiredSystem instead.
+	// CreateRunWithFirstStepSystem commits a firing as ONE transaction: the
+	// task's owner consolidation, the blueprint_runs insert, the task's agent
+	// claim, and the first step's conversations row. It is the only door a
+	// delegation is fired through, in either dialect, and it exists because
+	// each of those writes is implied by the one before it — a blueprint_run
+	// that commits without its first step is a 'running' parent nothing
+	// drives, holding the one-active-run index against its task, invisible to
+	// every recovery arm that joins through conversations.
 	//
-	// br is an input: it carries no started_at, and the id and status are
-	// defaulted here when it leaves them empty. The returned row is where a
-	// caller learns the id it did not supply.
-	CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (domain.BlueprintRun, error)
+	// Statement order inside the transaction is fixed:
+	//
+	//  1. The task's row lock, taken by every firing whether or not it
+	//     consolidates. Steps 3 and 4 both write that row and both come AFTER
+	//     step 2, so without a fixed order two firings racing on one task can
+	//     take tasks and blueprint_runs in opposite orders and deadlock. No
+	//     such task aborts the firing here, before anything is written.
+	//  2. The blueprint_runs insert, which requires a trigger type: the arm
+	//     is chosen by that value, so an empty one selects the manual arm by
+	//     omission rather than by intent and impls reject it with
+	//     ErrBlueprintRunTriggerTypeRequired. An event-triggered run
+	//     (TriggerType "event") is fenced ON CONFLICT against
+	//     blueprint_runs_event_trigger_fence, making (triggering_event_id,
+	//     trigger_id) at-most-once under the at-least-once router queue, and
+	//     requires both halves of that key — an empty one binds NULL, which
+	//     the partial index treats as distinct, so impls reject it with
+	//     ErrBlueprintRunFenceRequiresEventAndTrigger. A manual run carries no
+	//     event and takes a plain insert. Either arm loses to
+	//     blueprint_runs_one_active_run_per_task as ErrTaskBusyActiveRun.
+	//     Everything below is skipped when the fence caught a replay, which is
+	//     what makes inserted=false mean nothing was written.
+	//  3. ownerTeamID, when non-empty, becomes tasks.team_id — the acting team
+	//     taking ownership before anything reads it. The conversations insert
+	//     derives its own team_id from the task, so it sees this. Zero rows
+	//     (no such task) or an error aborts the whole firing: firing with an
+	//     owner the caller asked to change is the wrong card on the wrong
+	//     board, which no later write corrects.
+	//  4. The task's agent claim (see AgentClaimStamp) — a replay never
+	//     reaches it, so it cannot re-stamp a claim the original firing
+	//     already settled or steal one the user has since taken. Returns
+	//     claimed=true only when the stamp actually moved the claim; a refusal
+	//     is not an error and still commits the run and its step.
+	//  5. The first step's conversations row.
+	//
+	// Returns inserted=false with nothing else committed when the fence caught
+	// a replay: the run for THIS event already exists, so the caller skips.
+	// "Nothing else" is literal and includes the owner — a replay carrying a
+	// different ownerTeamID than the original firing must not move the card,
+	// which is why the consolidation sits after the fence rather than before
+	// it. That is deliberately distinct from ErrTaskBusyActiveRun, which is a
+	// deferral the caller must queue rather than drop.
+	//
+	// Exempt from the returned-row rule for the run, by decision rather than
+	// by shape: the event arm's insert is ON CONFLICT DO NOTHING, which
+	// returns zero rows in exactly the case this method exists to detect. A
+	// RETURNING row could not tell a fenced no-op from a failure, and
+	// `inserted` is the answer the caller needs. The conversation IS returned,
+	// because its insert has no such arm.
+	CreateRunWithFirstStepSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim AgentClaimStamp, ownerTeamID string, firstStep domain.Conversation) (inserted, claimed bool, conv *domain.Conversation, err error)
 
-	// CreateRunIfNotFiredSystem is the event-path fenced insert: it writes
-	// triggering_event_id and relies on the blueprint_runs_event_trigger_fence
-	// partial unique index to make (triggering_event_id, trigger_id) at-most-once.
-	// Returns inserted=false (no error) when a blueprint_run for this
-	// (event, trigger) already committed — the at-least-once router queue
-	// replayed an event whose first firing already minted the blueprint_run.
-	// The blueprint_run insert is the crash-consistent commit point of a
-	// delegation, so the firing path mints it before the orchestrator goroutine
-	// does any expensive worktree setup. Routes through the admin pool (event
-	// runs carry no JWT claims) and forces trigger_type='event'
-	// (creator_user_id NULL per the schema CHECK).
+	// AdvanceRunToStepSystem commits a step advance as ONE transaction: the
+	// blueprint_run's current_step_index bump, the boundary stamp on the step
+	// that just concluded, and the next step's conversations row. It is the
+	// sibling of CreateRunWithFirstStepSystem — step 0 and step N+1 are minted
+	// under one rule — and it exists for the same reason: a current_step_index
+	// naming a step no conversation exists for is a 'running' blueprint nothing
+	// can drive, because the claim gate only ever drives the step the pointer
+	// names. It holds the one-active-run index against its task, and nothing
+	// re-mints the missing step.
 	//
-	// Precondition: br.TriggeringEventID and br.TriggerID must be non-empty —
-	// both are part of the fence key, and an empty value binds NULL (which the
-	// partial index treats as distinct, silently skipping the fence). Impls
-	// reject that with ErrBlueprintRunFenceRequiresEventAndTrigger.
+	// Statement order inside the transaction is fixed:
 	//
-	// claim rides the same transaction as the blueprint run row: this insert IS the
-	// commitment point of a delegation, so the task's agent claim is written
-	// with it or not at all (see AgentClaimStamp). Skipped on the fenced
-	// no-op — a replay must not re-stamp a claim the original firing already
-	// settled, and may not steal one the user has since taken. Returns
-	// claimed=true only when the stamp actually moved the claim; a refusal
-	// still commits the run.
+	//  1. The guarded bump: current_step_index moves to nextStep's own index,
+	//     and only on a row still 'running' at fromStepIndex. That is the
+	//     pointer write and the fence at once, which is why it leads — a second
+	//     reactor holding a terminal from the same step queues on this row and
+	//     then finds the guard closed, having written nothing.
 	//
-	// Exempt from the returned-row rule, by decision rather than by shape: the
-	// insert is ON CONFLICT DO NOTHING, which returns zero rows in exactly the
-	// case this method exists to detect. A RETURNING row could not tell a
-	// fenced no-op from a failure, and `inserted` is the answer the caller
-	// needs.
-	CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim AgentClaimStamp) (inserted, claimed bool, err error)
+	//     Both the run being advanced and the index being advanced to are
+	//     read off nextStep rather than passed beside it: the pointer and the
+	//     row it names are one fact, and two parameters carrying it are two
+	//     that can disagree.
+	//  2. The boundary stamp on concludedConversationID. A conversation must
+	//     never open on a task whose prior one is still un-ended, so the stamp
+	//     and the mint below share a commit or that invariant has a window. A
+	//     row already ended is not a fault: ended comes back nil and the
+	//     advance proceeds.
+	//  3. The next step's conversations row.
+	//
+	// Returns advanced=false with nothing written when the guard missed — the
+	// run is terminal, or another engagement already moved the pointer. The
+	// sequence is somebody else's to drive by then, so a caller stands down
+	// rather than failing the blueprint.
+	AdvanceRunToStepSystem(ctx context.Context, orgID string, fromStepIndex int, concludedConversationID string, nextStep domain.Conversation) (advanced bool, ended, conv *domain.Conversation, err error)
 
 	// SetRunWorktreePathSystem fills in a blueprint_run's worktree_path after
 	// the shared worktree is built. The row is created up front (before setup,
@@ -620,14 +705,6 @@ type BlueprintStore interface {
 	// so the run flip and the blueprint re-open commit atomically.
 	ReopenRunForResume(ctx context.Context, orgID string, id string) (reopened bool, err error)
 
-	// SetRunCurrentStepSystem stamps the blueprint_run's durable
-	// current_step_index — the queue-driven reactor's sequencing pointer,
-	// bumped as it enqueues each next step so a mid-flight blueprint resumes by
-	// re-enqueuing this step at boot. Admin pool (reactor has no JWT claims).
-	//
-	// Returns the stamped run, or ErrNoSuchBlueprintRun.
-	SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) (domain.BlueprintRun, error)
-
 	// RequestRunCancelSystem raises the DB sequence-cancel signal
 	// (cancel_requested = true) on a still-running blueprint_run, so the claim
 	// stops handing out its queued steps and the reactor finalizes it
@@ -668,9 +745,6 @@ type BlueprintStore interface {
 	// the queue-driven orchestrator — the dispatcher + reactor that claim,
 	// run, and advance a blueprint through its step list with no JWT-claims in
 	// scope (delegate/dispatch.go).
-	//
-	// CreateRun has no System counterpart — it routes internally on the
-	// supplied BlueprintRun.TriggerType.
 	ListStepsSystem(ctx context.Context, orgID string, blueprintID string) ([]domain.BlueprintStep, error)
 	GetRunSystem(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)
 	GetRunForConversationSystem(ctx context.Context, orgID string, stepConversationID string) (*domain.BlueprintRun, *int, error)

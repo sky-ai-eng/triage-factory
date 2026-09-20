@@ -47,12 +47,12 @@ func assertNotEnded(t *testing.T, database *sql.DB, conversationID string) {
 
 // TestReactor_AdvanceEndsTheStepItMovesPast: step N stops being the task's
 // live conversation the moment N+1 is minted, so the advance stamps it
-// `step_advanced` — and stamps it BEFORE the enqueue, which is the invariant
-// that keeps a task from momentarily having two live conversations.
+// `step_advanced` in the same transaction that mints N+1 and moves the
+// pointer. A task therefore never holds two live conversations, and never a
+// pointer naming a step that does not exist.
 //
-// The ordering is asserted the only way it is observable from outside: with
-// the enqueue made to fail, the stamp is still there. A stamp written after
-// the enqueue would be missing here.
+// Both halves are observable from outside: the advance that lands writes all
+// three, and the advance whose step insert fails writes none of them.
 func TestReactor_AdvanceEndsTheStepItMovesPast(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
@@ -69,11 +69,10 @@ func TestReactor_AdvanceEndsTheStepItMovesPast(t *testing.T) {
 		assertEnded(t, database, step0, domain.EndedStepAdvanced)
 	})
 
-	t.Run("the enqueue fails", func(t *testing.T) {
+	t.Run("the step insert fails", func(t *testing.T) {
 		s, database, brID, _, step0 := reactorFixture(t, "adv-boundary-fail", 2, "completed", "continue")
 		// Point the frozen plan's step 1 at a prompt that does not exist, so
-		// enqueueBlueprintStep fails on the conversation's FK. Whatever the
-		// reactor does after that, step 0 is already behind it.
+		// the transaction's last statement fails on the conversation's FK.
 		if _, err := database.Exec(
 			`UPDATE blueprint_runs SET step_plan = replace(step_plan, ?, ?) WHERE id = ?`,
 			`"prompt_id":"adv-boundary-fail-p1"`, `"prompt_id":"no-such-prompt"`, brID,
@@ -86,9 +85,19 @@ func TestReactor_AdvanceEndsTheStepItMovesPast(t *testing.T) {
 		s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
 		if q := queuedStepConversations(t, database, brID); len(q) != 0 {
-			t.Fatalf("queued step runs = %v, want none — the enqueue was meant to fail", q)
+			t.Fatalf("queued step runs = %v, want none — the step insert was meant to fail", q)
 		}
-		assertEnded(t, database, step0, domain.EndedStepAdvanced)
+		// No boundary, because no advance happened: a `step_advanced` stamp on
+		// a step nothing advanced past says the blueprint moved on when it
+		// did not. The blueprint's own terminal is the disposition instead.
+		assertNotEnded(t, database, step0)
+		after := mustGetRun(t, s, org, brID)
+		if after.CurrentStepIndex != 0 {
+			t.Errorf("current_step_index = %d, want 0 — the pointer moved to a step that was never minted", after.CurrentStepIndex)
+		}
+		if after.Status != domain.BlueprintRunStatusFailed {
+			t.Errorf("blueprint_run status = %q, want failed — a blueprint that cannot advance is stopped, not left running", after.Status)
+		}
 	})
 }
 

@@ -30,123 +30,152 @@ type BlueprintStoreFactory func(t *testing.T) (store db.BlueprintStore, orgID, t
 // knowing each backend's prompt-insert shape.
 type PromptSeederForBlueprints func(t *testing.T, idHint string) string
 
-// BlueprintRunWriteFactory is what a per-backend test file hands to
-// RunBlueprintRunWriteConformance. A blueprint_runs row FKs both a blueprint
-// and a task, and a task hangs off an entity and an event, so the backend
-// seeds that graph its own way and returns the two ids the run needs. Kept
-// separate from BlueprintStoreFactory because the rest of the blueprint suite
-// never mints a run and would pay for that fixture on every subtest.
-type BlueprintRunWriteFactory func(t *testing.T) (store db.BlueprintStore, orgID, blueprintID, taskID string)
+// fireRun stages one run on taskID through the door that mints runs, and
+// returns its id. trigger picks the arm: the event one carries its own fence
+// key, the manual one its creator. Every blueprint_runs suite below opens with
+// this, because it is the only way a run is written.
+func fireRun(t *testing.T, store db.BlueprintStore, sc BlueprintSequenceScaffold, taskID string, trigger domain.BlueprintTriggerType) (string, error) {
+	t.Helper()
+	ctx := context.Background()
+	var br domain.BlueprintRun
+	if trigger == domain.BlueprintTriggerEvent {
+		br = sc.Firing(t, taskID)
+	} else {
+		br = sc.ManualFiring(t, taskID)
+	}
+	br.ID = uuid.New().String()
+	inserted, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0))
+	if err != nil {
+		return "", err
+	}
+	if !inserted {
+		t.Fatalf("firing on task %s was fenced as a replay; the scaffold must hand each firing a fresh key", taskID)
+	}
+	return br.ID, nil
+}
+
+// mustFireRun is fireRun where a refusal is a broken fixture rather than the
+// thing under test.
+func mustFireRun(t *testing.T, store db.BlueprintStore, sc BlueprintSequenceScaffold, taskID string, trigger domain.BlueprintTriggerType) string {
+	t.Helper()
+	id, err := fireRun(t, store, sc, taskID, trigger)
+	if err != nil {
+		t.Fatalf("fire a %s run on task %s: %v", trigger, taskID, err)
+	}
+	return id
+}
 
 // RunBlueprintRunWriteConformance covers the returned-row standard on the
-// blueprint_runs writes: CreateRun, SetRunWorktreePathSystem and
-// SetRunCurrentStepSystem each hand back the row they persisted, and the two
-// id-keyed stamps refuse an id no run answers to.
-func RunBlueprintRunWriteConformance(t *testing.T, mk BlueprintRunWriteFactory) {
+// blueprint_runs stamp: SetRunWorktreePathSystem hands back the row it
+// persisted and refuses an id no run answers to.
+//
+// It is the only single-row blueprint_runs write left to hold to the standard.
+// The mint does not return its run by decision (see the firing door's own
+// contract), and the pointer moves only inside the advance, whose answer is
+// the `advanced` bool.
+func RunBlueprintRunWriteConformance(t *testing.T, mk BlueprintSequenceFactory) {
 	t.Helper()
 
-	t.Run("every_single_row_run_write_returns_the_stored_row", func(t *testing.T) {
-		store, orgID, blueprintID, taskID := mk(t)
+	t.Run("the_run_stamp_returns_the_stored_row", func(t *testing.T) {
+		store, sc := mk(t)
 		ctx := context.Background()
-		readRun := func(id string) func() (*domain.BlueprintRun, error) {
-			return func() (*domain.BlueprintRun, error) { return store.GetRun(ctx, orgID, id) }
-		}
+		runID := mustFireRun(t, store, sc, sc.NewTask(t), domain.BlueprintTriggerEvent)
 
-		run, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
-			BlueprintID: blueprintID, TaskID: taskID,
-			TriggerType: domain.BlueprintTriggerManual,
-		})
-		if err != nil {
-			t.Fatalf("CreateRun: %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "CreateRun", run, readRun(run.ID))
-		// The id and started_at are the statement's, not the caller's — which
-		// is the whole reason a caller that supplied neither can still act on
-		// the run it just created.
-		if run.ID == "" || run.StartedAt.IsZero() || run.Status != domain.BlueprintRunStatusRunning {
-			t.Errorf("CreateRun returned a row missing what only the row knows: %+v", run)
-		}
-
-		pathed, err := store.SetRunWorktreePathSystem(ctx, orgID, run.ID, "/tmp/ret-wt")
+		pathed, err := store.SetRunWorktreePathSystem(ctx, sc.OrgID, runID, "/tmp/ret-wt")
 		if err != nil {
 			t.Fatalf("SetRunWorktreePathSystem: %v", err)
 		}
-		AssertWriteReturnedStoredRow(t, "SetRunWorktreePathSystem", pathed, readRun(run.ID))
+		AssertWriteReturnedStoredRow(t, "SetRunWorktreePathSystem", pathed,
+			func() (*domain.BlueprintRun, error) { return store.GetRun(ctx, sc.OrgID, runID) })
 		if pathed.WorktreePath != "/tmp/ret-wt" {
 			t.Errorf("SetRunWorktreePathSystem returned worktree_path %q, want the stamped one", pathed.WorktreePath)
 		}
-
-		stepped, err := store.SetRunCurrentStepSystem(ctx, orgID, run.ID, 2)
-		if err != nil {
-			t.Fatalf("SetRunCurrentStepSystem: %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "SetRunCurrentStepSystem", stepped, readRun(run.ID))
-		if stepped.CurrentStepIndex != 2 || stepped.WorktreePath != "/tmp/ret-wt" {
-			t.Errorf("SetRunCurrentStepSystem returned %+v, want step 2 with the earlier stamp intact", stepped)
+		// started_at is the statement's, not the caller's — which is what
+		// lets a caller that supplied none still order the task's runs.
+		if pathed.StartedAt.IsZero() || pathed.Status != domain.BlueprintRunStatusRunning {
+			t.Errorf("stamped row is missing what only the row knows: %+v", pathed)
 		}
 
 		missing := uuid.New().String()
-		if _, err := store.SetRunWorktreePathSystem(ctx, orgID, missing, "/tmp/x"); !errors.Is(err, db.ErrNoSuchBlueprintRun) {
+		if _, err := store.SetRunWorktreePathSystem(ctx, sc.OrgID, missing, "/tmp/x"); !errors.Is(err, db.ErrNoSuchBlueprintRun) {
 			t.Errorf("SetRunWorktreePathSystem on a missing id: got %v, want db.ErrNoSuchBlueprintRun", err)
 		}
-		if _, err := store.SetRunCurrentStepSystem(ctx, orgID, missing, 1); !errors.Is(err, db.ErrNoSuchBlueprintRun) {
-			t.Errorf("SetRunCurrentStepSystem on a missing id: got %v, want db.ErrNoSuchBlueprintRun", err)
+	})
+
+	t.Run("a_firing_that_names_no_trigger_type_is_refused", func(t *testing.T) {
+		store, sc := mk(t)
+		ctx := context.Background()
+		taskID := sc.NewTask(t)
+		br := sc.ManualFiring(t, taskID)
+		br.ID = uuid.New().String()
+		br.TriggerType = ""
+
+		// The door picks its arm off this value, so an empty one does not
+		// fail — it fires a manual delegation nobody asked for.
+		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0)); !errors.Is(err, db.ErrBlueprintRunTriggerTypeRequired) {
+			t.Fatalf("firing with no trigger type = %v, want db.ErrBlueprintRunTriggerTypeRequired", err)
+		}
+		if n := sc.RunCount(t, taskID); n != 0 {
+			t.Errorf("blueprint_runs on the task = %d, want 0", n)
+		}
+		if n := sc.ConversationCount(t, taskID); n != 0 {
+			t.Errorf("conversations on the task = %d, want 0", n)
 		}
 	})
 }
 
 // RunOneActiveRunPerTaskConformance pins the DB backstop for "a task has at
 // most one live conversation": blueprint_runs_one_active_run_per_task refuses a
-// second running run on the task whatever minted it, and both mint doors report
-// the refusal as db.ErrTaskBusyActiveRun rather than a raw driver error.
+// second running run on the task whatever fired it, and the refusal reads as
+// db.ErrTaskBusyActiveRun rather than a raw driver error.
 //
 // The trigger-type axis is the point: the index spans every trigger type, so a
 // human's delegation cannot mint a second live engagement beside an auto-fired
 // one and leave the task with two conversations and nothing able to say which
-// it is about.
-func RunOneActiveRunPerTaskConformance(t *testing.T, mk BlueprintRunWriteFactory) {
+// it is about. Both orderings run, because the two arms are different SQL in
+// Postgres — the event one fenced ON CONFLICT, the manual one plain — and only
+// a pair of cases proves neither is the unguarded one.
+func RunOneActiveRunPerTaskConformance(t *testing.T, mk BlueprintSequenceFactory) {
 	t.Helper()
 
-	// Both orderings, because the two arms are different SQL in Postgres
-	// (createRunManual on the app pool, createRunEventTriggered on the admin
-	// pool) and only a pair of cases proves neither is the unguarded one.
 	for _, tc := range []struct {
 		name         string
 		first, again domain.BlueprintTriggerType
 	}{
 		{"manual_then_event", domain.BlueprintTriggerManual, domain.BlueprintTriggerEvent},
 		{"event_then_manual", domain.BlueprintTriggerEvent, domain.BlueprintTriggerManual},
-		{"manual_then_manual", domain.BlueprintTriggerManual, domain.BlueprintTriggerManual},
+		{"event_then_event", domain.BlueprintTriggerEvent, domain.BlueprintTriggerEvent},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store, orgID, blueprintID, taskID := mk(t)
+			store, sc := mk(t)
 			ctx := context.Background()
+			taskID := sc.NewTask(t)
 
-			held, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
-				BlueprintID: blueprintID, TaskID: taskID, TriggerType: tc.first,
-			})
-			if err != nil {
-				t.Fatalf("CreateRun (%s, the run that holds the task): %v", tc.first, err)
+			held := mustFireRun(t, store, sc, taskID, tc.first)
+
+			// A different firing on a busy task, and a DIFFERENT fence key —
+			// so what refuses it is the one-active-run index, not the replay
+			// fence, and the caller is told to defer rather than to drop.
+			if _, err := fireRun(t, store, sc, taskID, tc.again); !isTaskBusy(err) {
+				t.Fatalf("a %s firing onto a busy task = %v, want db.ErrTaskBusyActiveRun", tc.again, err)
 			}
-
-			if _, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
-				BlueprintID: blueprintID, TaskID: taskID, TriggerType: tc.again,
-			}); !errors.Is(err, db.ErrTaskBusyActiveRun) {
-				t.Fatalf("CreateRun (%s) onto a busy task = %v, want db.ErrTaskBusyActiveRun", tc.again, err)
+			if n := sc.RunCount(t, taskID); n != 1 {
+				t.Errorf("blueprint_runs on the task = %d, want 1", n)
+			}
+			if n := sc.ConversationCount(t, taskID); n != 1 {
+				t.Errorf("conversations on the task = %d, want 1 (the refused firing minted a step)", n)
 			}
 
 			// Teardown then re-delegate: the delegate route cancels the
-			// blueprint behind the conversation it ends, and the next mint has
-			// to succeed. This is the deadlock the widened index would
+			// blueprint behind the conversation it ends, and the next firing
+			// has to succeed. This is the deadlock the widened index would
 			// otherwise create — a parked conversation's blueprint stays
 			// 'running' by design, so nothing but that cancel reopens the task.
-			if _, err := store.MarkRunStatusSystem(ctx, orgID, held.ID, domain.BlueprintRunStatusCancelled, "system_cancelled", nil); err != nil {
+			if _, err := store.MarkRunStatusSystem(ctx, sc.OrgID, held, domain.BlueprintRunStatusCancelled, "system_cancelled", nil); err != nil {
 				t.Fatalf("cancel the held run: %v", err)
 			}
-			if _, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
-				BlueprintID: blueprintID, TaskID: taskID, TriggerType: tc.again,
-			}); err != nil {
-				t.Fatalf("CreateRun (%s) after the prior run was cancelled: %v", tc.again, err)
+			if _, err := fireRun(t, store, sc, taskID, tc.again); err != nil {
+				t.Fatalf("a %s firing after the prior run was cancelled: %v", tc.again, err)
 			}
 		})
 	}
@@ -164,23 +193,24 @@ func RunOneActiveRunPerTaskConformance(t *testing.T, mk BlueprintRunWriteFactory
 // The RLS half — a superseding run the caller cannot see still answers false —
 // is Postgres-only and needs a claims-carrying connection, so it lives in that
 // backend's own test rather than here, where both pools are wired to admin.
-func RunIsNewestRunForTaskConformance(t *testing.T, mk BlueprintRunWriteFactory) {
+func RunIsNewestRunForTaskConformance(t *testing.T, mk BlueprintSequenceFactory) {
 	t.Helper()
 
 	t.Run("newest_by_started_at_whatever_the_status", func(t *testing.T) {
-		store, orgID, blueprintID, taskID := mk(t)
+		store, sc := mk(t)
 		ctx := context.Background()
+		taskID := sc.NewTask(t)
 
 		// Read both pools every time: the hooks split across them (the request
 		// handler on the app pool, the spawner's reconciler hook on the admin
 		// pool) and must not be able to disagree about which run is newest.
 		isNewest := func(t *testing.T, runID, when string) bool {
 			t.Helper()
-			app, err := store.IsNewestRunForTask(ctx, orgID, taskID, runID)
+			app, err := store.IsNewestRunForTask(ctx, sc.OrgID, taskID, runID)
 			if err != nil {
 				t.Fatalf("IsNewestRunForTask (%s): %v", when, err)
 			}
-			sys, err := store.IsNewestRunForTaskSystem(ctx, orgID, taskID, runID)
+			sys, err := store.IsNewestRunForTaskSystem(ctx, sc.OrgID, taskID, runID)
 			if err != nil {
 				t.Fatalf("IsNewestRunForTaskSystem (%s): %v", when, err)
 			}
@@ -190,20 +220,15 @@ func RunIsNewestRunForTaskConformance(t *testing.T, mk BlueprintRunWriteFactory)
 			return app
 		}
 
-		first, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
-			BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
-		})
-		if err != nil {
-			t.Fatalf("CreateRun (first): %v", err)
-		}
-		if !isNewest(t, first.ID, "the task's only run") {
+		first := mustFireRun(t, store, sc, taskID, domain.BlueprintTriggerEvent)
+		if !isNewest(t, first, "the task's only run") {
 			t.Errorf("the task's only run is not its newest")
 		}
 
 		// A task holds one live run at a time, so the next engagement settles
 		// the one before it — which is also what makes the first run a
 		// superseded one rather than a competing one.
-		if _, err := store.MarkRunStatusSystem(ctx, orgID, first.ID, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
+		if _, err := store.MarkRunStatusSystem(ctx, sc.OrgID, first, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
 			t.Fatalf("settle the first run: %v", err)
 		}
 		// SQLite stamps started_at to the second, so two runs minted back to
@@ -212,52 +237,47 @@ func RunIsNewestRunForTaskConformance(t *testing.T, mk BlueprintRunWriteFactory)
 		// Postgres keeps microseconds and waits for nothing. (It can land
 		// exactly on a second boundary and pay the wait, which costs a second
 		// and changes no answer.)
-		if first.StartedAt.Nanosecond() == 0 {
+		firstRow, err := store.GetRunSystem(ctx, sc.OrgID, first)
+		if err != nil || firstRow == nil {
+			t.Fatalf("GetRunSystem (first): (%v, %v)", firstRow, err)
+		}
+		if firstRow.StartedAt.Nanosecond() == 0 {
 			time.Sleep(1100 * time.Millisecond)
 		}
-		second, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
-			BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
-		})
-		if err != nil {
-			t.Fatalf("CreateRun (second): %v", err)
-		}
-		if isNewest(t, first.ID, "superseded") {
+		second := mustFireRun(t, store, sc, taskID, domain.BlueprintTriggerEvent)
+		if isNewest(t, first, "superseded") {
 			t.Errorf("a run a later delegation superseded still reports as the task's newest")
 		}
-		if !isNewest(t, second.ID, "the superseding run") {
+		if !isNewest(t, second, "the superseding run") {
 			t.Errorf("the later run is not the task's newest")
 		}
 
 		// Both terminal: a task whose every run has finished still has a
 		// newest, and it is still the later one.
-		if _, err := store.MarkRunStatusSystem(ctx, orgID, second.ID, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
+		if _, err := store.MarkRunStatusSystem(ctx, sc.OrgID, second, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
 			t.Fatalf("settle the second run: %v", err)
 		}
-		if isNewest(t, first.ID, "both terminal") || !isNewest(t, second.ID, "both terminal") {
+		if isNewest(t, first, "both terminal") || !isNewest(t, second, "both terminal") {
 			t.Errorf("with no live run left, the newest is no longer the later one")
 		}
 	})
 
 	t.Run("a_run_the_task_does_not_have_is_false_not_an_error", func(t *testing.T) {
-		store, orgID, blueprintID, taskID := mk(t)
+		store, sc := mk(t)
 		ctx := context.Background()
+		taskID := sc.NewTask(t)
 
 		// Nothing delegated yet: no run is this task's newest.
 		stranger := uuid.New().String()
-		got, err := store.IsNewestRunForTask(ctx, orgID, taskID, stranger)
+		got, err := store.IsNewestRunForTask(ctx, sc.OrgID, taskID, stranger)
 		if err != nil || got {
 			t.Errorf("IsNewestRunForTask on an unknown run = (%v, %v), want (false, nil)", got, err)
 		}
 
 		// A real run, asked about under some other task's id: still false, and
 		// still not an error — the run exists, it is just not that task's.
-		run, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
-			BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
-		})
-		if err != nil {
-			t.Fatalf("CreateRun: %v", err)
-		}
-		gotSys, err := store.IsNewestRunForTaskSystem(ctx, orgID, uuid.New().String(), run.ID)
+		runID := mustFireRun(t, store, sc, taskID, domain.BlueprintTriggerEvent)
+		gotSys, err := store.IsNewestRunForTaskSystem(ctx, sc.OrgID, uuid.New().String(), runID)
 		if err != nil || gotSys {
 			t.Errorf("IsNewestRunForTaskSystem for another task = (%v, %v), want (false, nil)", gotSys, err)
 		}

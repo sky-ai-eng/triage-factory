@@ -32,10 +32,6 @@ func (s *countingStore) HealClaimDesyncs(context.Context) (int, error) {
 	panic("HealClaimDesyncs not expected from RunRegistryGC")
 }
 
-func (s *countingStore) FailBlueprintRunsOrphanedAtMint(context.Context, time.Duration) (int, error) {
-	panic("FailBlueprintRunsOrphanedAtMint not expected from RunRegistryGC")
-}
-
 func (s *countingStore) calls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

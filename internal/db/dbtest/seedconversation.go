@@ -12,8 +12,8 @@ import (
 
 // SeedConversation inserts a conversations row directly via raw SQLite SQL so
 // test fixtures outside internal/db can seed a conversation in any state.
-// Production mints conversation rows through ConversationQueueStore.EnqueueConversation (there
-// is no store-level Create), but most tests only need a row to hang
+// Production mints a conversation only inside a BlueprintStore door, which
+// takes a whole firing to stage; most tests only need a row to hang
 // messages / artifacts / claims off — this helper is that fixture door.
 //
 // The column list mirrors the conversations DDL. Constraint-driven defaults:
@@ -128,6 +128,60 @@ func SeedConversation(tb testing.TB, database *sql.DB, conv domain.Conversation)
 			tb.Fatalf("SeedConversation %s telemetry claim: %v", conv.ID, err)
 		}
 	}
+}
+
+// SeedBlueprintRun inserts a blueprint_runs row directly via raw SQLite SQL,
+// the sibling of SeedConversation and for the same reason: production writes
+// this table through CreateRunWithFirstStepSystem alone, which commits a first
+// step with it, and a fixture that stages its step conversations by hand
+// beside the run wants neither that step nor the doorbell the door rings for
+// it.
+//
+// Constraint-driven defaults: the id is minted when empty and status falls
+// back to 'running'; the worktree path is written as given, so a fixture whose
+// subject is the stamp that fills it in can leave it empty. creator_user_id pairs with trigger_type the
+// way blueprint_runs_creator_matches_trigger_type requires — the local
+// sentinel for a manual run (the default trigger type), NULL for an event one.
+// The task's prior running run is settled first, since
+// blueprint_runs_one_active_run_per_task allows only one.
+//
+// Returns the run id.
+func SeedBlueprintRun(tb testing.TB, database *sql.DB, br domain.BlueprintRun) string {
+	tb.Helper()
+	if br.ID == "" {
+		br.ID = uuid.New().String()
+	}
+	if br.TriggerType == "" {
+		br.TriggerType = domain.BlueprintTriggerManual
+	}
+	if br.Status == "" {
+		br.Status = domain.BlueprintRunStatusRunning
+	}
+	var creator any
+	if br.TriggerType != domain.BlueprintTriggerEvent {
+		creator = runmode.LocalDefaultUserID
+	}
+	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
+	if err != nil {
+		tb.Fatalf("SeedBlueprintRun %s: marshal step plan: %v", br.ID, err)
+	}
+	if _, err := database.Exec(
+		`UPDATE blueprint_runs SET status = 'completed' WHERE task_id = ? AND status = 'running'`,
+		br.TaskID,
+	); err != nil {
+		tb.Fatalf("SeedBlueprintRun %s: settle the task's prior run: %v", br.ID, err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id,
+		                            triggering_event_id, actor_agent_id, status, step_plan,
+		                            worktree_path, creator_user_id, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerType, nullIfEmpty(br.TriggerID),
+		nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status,
+		stepPlan, br.WorktreePath, creator); err != nil {
+		tb.Fatalf("SeedBlueprintRun %s: %v", br.ID, err)
+	}
+	return br.ID
 }
 
 // SeedActiveClaim inserts a live claim (released_at NULL) for the given

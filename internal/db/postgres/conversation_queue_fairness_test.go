@@ -14,10 +14,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// fairnessFixture is one org's ready-to-enqueue conversation-queue fixture: a
-// blueprint + prompt every conversation enqueued under that org hangs off,
-// plus the org's creator user id. Each conversation gets its own task and its
-// own blueprint_run — see enqueue.
+// fairnessFixture is one org's conversation-queue fixture: a blueprint +
+// prompt every conversation staged under that org hangs off, plus the org's
+// creator user id. Each conversation gets its own task and its own
+// blueprint_run — see stage.
 type fairnessFixture struct {
 	orgID, userID  string
 	bpID, promptID string
@@ -27,15 +27,12 @@ type fairnessFixture struct {
 func newFairnessFixture(t *testing.T, h *pgtest.Harness) fairnessFixture {
 	t.Helper()
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
-	return fairnessFixture{
-		orgID: orgID, userID: userID,
-		bpID: pgBlueprintIDOfRun(t, h, brID), promptID: promptID, h: h,
-	}
+	bpID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+	return fairnessFixture{orgID: orgID, userID: userID, bpID: bpID, promptID: promptID, h: h}
 }
 
-// enqueue stages one queued conversation under the fixture, optionally
-// stamped with a preferred executor. Returns the conversation id.
+// stage fires one delegation under the fixture, optionally stamped with a
+// preferred executor. Returns the conversation id.
 //
 // One task and one blueprint_run per conversation, each on step 0: fairness is
 // about many conversations competing for slots at the same instant, and
@@ -44,21 +41,11 @@ func newFairnessFixture(t *testing.T, h *pgtest.Harness) fairnessFixture {
 // the workspace is one per task, so a second conversation on one is a second
 // agent in one git tree. Both are the real firing model anyway: one delegation
 // is one blueprint_run on one task.
-func (f *fairnessFixture) enqueue(t *testing.T, stores db.Stores, preferred string) string {
+func (f *fairnessFixture) stage(t *testing.T, stores db.Stores, preferred string) string {
 	t.Helper()
-	conversationID := uuid.New().String()
-	step0 := 0
-	taskID := seedPgTask(t, f.h, f.orgID, f.userID)
-	if _, err := stores.ConversationQueue.EnqueueConversation(context.Background(), f.orgID, domain.Conversation{
-		ID: conversationID, TaskID: taskID, PromptID: f.promptID, Model: "m",
-		TriggerType: "manual", CreatorUserID: f.userID,
-		BlueprintRunID:      seedPgBlueprintRunOn(t, f.h, f.orgID, f.userID, f.bpID, taskID),
-		BlueprintStepIndex:  &step0,
-		PreferredExecutorID: preferred,
-	}); err != nil {
-		t.Fatalf("EnqueueConversation: %v", err)
-	}
-	return conversationID
+	return firePgStep(t, f.h, stores, f.orgID, f.bpID, seedPgTask(t, f.h, f.orgID, f.userID), domain.Conversation{
+		PromptID: f.promptID, CreatorUserID: f.userID, PreferredExecutorID: preferred,
+	}).ID
 }
 
 func setPgOrgCap(t *testing.T, h *pgtest.Harness, orgID string, cap *int) {
@@ -96,9 +83,9 @@ func TestClaimFairness_BurstDoesNotStarveOtherOrg(t *testing.T) {
 	b := newFairnessFixture(t, h)
 
 	for i := 0; i < 100; i++ {
-		a.enqueue(t, stores, "")
+		a.stage(t, stores, "")
 	}
-	bConv := b.enqueue(t, stores, "")
+	bConv := b.stage(t, stores, "")
 	// Make every A conversation strictly older than B's so pure FIFO would
 	// drain all 100 A conversations before ever reaching B — isolating fairness
 	// as the reason B jumps the queue.
@@ -137,7 +124,7 @@ func TestClaimCap_BlocksAtCapAndReconfiguresLive(t *testing.T) {
 
 	a := newFairnessFixture(t, h)
 	for i := 0; i < 5; i++ {
-		a.enqueue(t, stores, "")
+		a.stage(t, stores, "")
 	}
 	setCap := func(n int) { c := n; setPgOrgCap(t, h, a.orgID, &c) }
 	claim := func() *domain.Conversation {
@@ -203,9 +190,9 @@ func TestClaimFairness_ComposesWithinPlacementTiers(t *testing.T) {
 		// Org A carries an active conversation; both A and B have a fresh tier-1
 		// conversation (preferred = exec-a). Within tier 1, fairness gives B (0
 		// active) the slot over A (1 active).
-		forcePgRunning(t, h, a.enqueue(t, stores, ""))
-		aTier1 := a.enqueue(t, stores, "exec-a")
-		bTier1 := b.enqueue(t, stores, "exec-a")
+		forcePgRunning(t, h, a.stage(t, stores, ""))
+		aTier1 := a.stage(t, stores, "exec-a")
+		bTier1 := b.stage(t, stores, "exec-a")
 
 		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, cfg)
 		if err != nil || got == nil {
@@ -226,9 +213,9 @@ func TestClaimFairness_ComposesWithinPlacementTiers(t *testing.T) {
 		// past the aging window) and zero active conversations. Despite B being
 		// the fairer org, the tier-1 conversation is claimed first — tier
 		// dominates fairness.
-		forcePgRunning(t, h, a.enqueue(t, stores, ""))
-		aTier1 := a.enqueue(t, stores, "exec-a")
-		bTier2 := b.enqueue(t, stores, "exec-other")
+		forcePgRunning(t, h, a.stage(t, stores, ""))
+		aTier1 := a.stage(t, stores, "exec-a")
+		bTier2 := b.stage(t, stores, "exec-other")
 		pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET started_at = now() - interval '2 minutes' WHERE id = $1`, bTier2)
 
 		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, cfg)
@@ -255,13 +242,13 @@ func TestClaimFairness_ExplainAnalyzeSanity(t *testing.T) {
 	a := newFairnessFixture(t, h)
 	b := newFairnessFixture(t, h)
 	for i := 0; i < 250; i++ {
-		a.enqueue(t, stores, "")
-		b.enqueue(t, stores, "")
+		a.stage(t, stores, "")
+		b.stage(t, stores, "")
 	}
 	// Some active conversations across both orgs so the org_active CTE has
 	// real groups.
-	forcePgRunning(t, h, a.enqueue(t, stores, ""))
-	forcePgRunning(t, h, b.enqueue(t, stores, ""))
+	forcePgRunning(t, h, a.stage(t, stores, ""))
+	forcePgRunning(t, h, b.stage(t, stores, ""))
 
 	// The candidate SELECT the claim runs (placement disabled) minus FOR UPDATE
 	// SKIP LOCKED, so EXPLAIN ANALYZE is side-effect-free (locks/claims nothing)

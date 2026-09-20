@@ -26,12 +26,12 @@ type stubDelegator struct {
 	db    *sql.DB
 	calls int64
 
-	// mu guards the two things drains write concurrently: lastTaskTeamID, the
-	// task's owner team_id observed at the most recent Delegate call (tests
-	// assert the owner was consolidated to the acting team before the run was
-	// created), and the teardown ids below.
-	mu             sync.Mutex
-	lastTaskTeamID string
+	// mu guards the two things drains write concurrently: lastRunTeamID, the
+	// team the most recent Delegate call resolved for its run (tests assert a
+	// firing runs as the acting team, not the task's creation-time owner), and
+	// the teardown ids below.
+	mu            sync.Mutex
+	lastRunTeamID string
 	// stopped is every blueprint-run id handed to StopBlueprintRun, so a test
 	// can assert the rollback tore down the run it actually spawned.
 	stopped []string
@@ -43,7 +43,13 @@ type stubDelegator struct {
 func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	atomic.AddInt64(&s.calls, 1)
 	s.mu.Lock()
-	s.lastTaskTeamID = teamIDValue(&task)
+	// Resolved the way production's Delegate resolves it: the firing's own
+	// consolidation wins over the task's stored owner, which the firing
+	// transaction has not rewritten yet at this point.
+	s.lastRunTeamID = teamIDValue(&task)
+	if opts.OwnerTeamID != "" {
+		s.lastRunTeamID = opts.OwnerTeamID
+	}
 	s.mu.Unlock()
 	return stubDelegateRun(s.db, task, opts)
 }
@@ -79,42 +85,28 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 		Status:       domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-" + brID,
 	}
-	if opts.TriggerType == "event" {
-		// Pass opts.TaskClaim through exactly as production does: the claim
-		// commits inside this insert's transaction, so a stub that dropped it
-		// would hide the very coupling the router now depends on.
-		inserted, _, err := store.Blueprints.CreateRunIfNotFiredSystem(context.Background(), runmode.LocalDefaultOrgID, br, opts.TaskClaim)
-		if err != nil {
-			// Map the store sentinel the way production's Delegate does, so a
-			// router test exercising the busy-task deferral sees the error the
-			// router branches on rather than a raw store error.
-			if errors.Is(err, dbpkg.ErrTaskBusyActiveRun) {
-				return "", delegate.ErrTaskBusy
-			}
-			return "", err
-		}
-		if !inserted {
-			return "", delegate.ErrAlreadyFired
-		}
-	} else if _, err := store.Blueprints.CreateRun(context.Background(), runmode.LocalDefaultOrgID, br); err != nil {
+	// The one firing door, exactly as production calls it: the claim, the
+	// owner consolidation and step 0's conversation commit inside the run
+	// insert's transaction, so a stub that split them would hide the very
+	// coupling the router now depends on.
+	stepIdx := 0
+	inserted, _, _, err := store.Blueprints.CreateRunWithFirstStepSystem(context.Background(), runmode.LocalDefaultOrgID, br, opts.TaskClaim, opts.OwnerTeamID,
+		domain.Conversation{
+			ID: uuid.New().String(), TaskID: task.ID, PromptID: promptID, Model: "stub",
+			TriggerType: opts.TriggerType, TriggerID: opts.TriggerID, CreatorUserID: opts.CreatorUserID,
+			ActorAgentID: opts.ActorAgentID, BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
+		})
+	if err != nil {
+		// Map the store sentinel the way production's Delegate does, so a
+		// router test exercising the busy-task deferral sees the error the
+		// router branches on rather than a raw store error.
 		if errors.Is(err, dbpkg.ErrTaskBusyActiveRun) {
 			return "", delegate.ErrTaskBusy
 		}
 		return "", err
 	}
-	// Raw insert rather than a store call: conversation rows are minted by
-	// EnqueueConversation in production, and this stub runs on drain goroutines where
-	// a testing.TB-based seeding helper can't fail safely.
-	if _, err := database.Exec(`
-		INSERT INTO conversations (id, task_id, prompt_id, status, model, trigger_type, trigger_id,
-			team_id, visibility, creator_user_id, origin, blueprint_run_id, blueprint_step_index)
-		VALUES (?, ?, ?, 'running', 'stub', ?, ?, ?, 'team', ?, 'blueprint', ?, 0)
-	`, uuid.New().String(), task.ID, promptID, opts.TriggerType,
-		sql.NullString{String: opts.TriggerID, Valid: opts.TriggerID != ""},
-		runmode.LocalDefaultTeamID,
-		sql.NullString{String: opts.CreatorUserID, Valid: opts.CreatorUserID != ""},
-		brID); err != nil {
-		return "", err
+	if !inserted {
+		return "", delegate.ErrAlreadyFired
 	}
 	return brID, nil
 }
