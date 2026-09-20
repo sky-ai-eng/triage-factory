@@ -176,7 +176,8 @@ func TestWithReadTx_SQLite_RefusesWriteAndReads(t *testing.T) {
 	for name, door := range doors {
 		t.Run(name, func(t *testing.T) {
 			err := door(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
-				return tx.Repos.SetConfigured(ctx, runmode.LocalDefaultOrgID, []string{"read/door"})
+				return tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+					[]domain.TeamGitHubRepo{{Owner: "read", Repo: "door"}})
 			})
 			if err == nil {
 				t.Fatalf("%s committed a write; want a read-only refusal", name)
@@ -193,7 +194,8 @@ func TestWithReadTx_SQLite_RefusesWriteAndReads(t *testing.T) {
 			}
 
 			if err := stores.Tx.WithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
-				return tx.Repos.SetConfigured(ctx, runmode.LocalDefaultOrgID, []string{"write/door"})
+				return tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+					[]domain.TeamGitHubRepo{{Owner: "write", Repo: "door"}})
 			}); err != nil {
 				t.Fatalf("WithTx refuses a write after %s: %v", name, err)
 			}

@@ -339,6 +339,7 @@ func TestWithReadTx_Postgres_RefusesWriteAndReads(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID := seedSyntheticClaimsOrg(t, h, "read-door")
+	teamID := firstTeamForOrg(t, h, orgID)
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
@@ -349,7 +350,8 @@ func TestWithReadTx_Postgres_RefusesWriteAndReads(t *testing.T) {
 	for name, door := range doors {
 		t.Run(name, func(t *testing.T) {
 			err := door(ctx, orgID, userID, func(tx db.TxStores) error {
-				return tx.Repos.SetConfigured(ctx, orgID, []string{"read/door"})
+				return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID,
+					[]domain.TeamGitHubRepo{{Owner: "read", Repo: "door"}})
 			})
 			if err == nil {
 				t.Fatalf("%s committed a write; want a read-only refusal", name)
