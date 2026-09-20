@@ -594,9 +594,17 @@ func (t TxStores) Extension(key string) any { return t.Ext[key] }
 // `...System` methods instead. Passing runmode.LocalDefaultUserID
 // in production multi-mode is rejected with a clear error because
 // that sentinel has no FK target in the multi-mode users table.
+//
+// WithReadTx and SyntheticClaimsWithReadTx are the same two doors for a body
+// that only reads. The claims are identical; the transaction is InReadTx's,
+// so a write inside the body is refused by the engine on both dialects. A
+// body that reads and writes stays on WithTx — the read doors are for bodies
+// that would never take a write lock if they could say so, and now can.
 type TxRunner interface {
 	WithTx(ctx context.Context, orgID, userID string, fn func(TxStores) error) error
 	SyntheticClaimsWithTx(ctx context.Context, orgID, userID string, fn func(TxStores) error) error
+	WithReadTx(ctx context.Context, orgID, userID string, fn func(TxStores) error) error
+	SyntheticClaimsWithReadTx(ctx context.Context, orgID, userID string, fn func(TxStores) error) error
 }
 
 // ErrNotApplicableInLocal is returned by SQLite impls of multi-only

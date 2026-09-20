@@ -230,7 +230,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	var pendingTasks []domain.PendingTaskRef
 	var openRunsByEntity map[string]struct{}
 	runAuthors := map[string]string{}
-	if err := fh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := fh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, _ := tx.Orgs.GetSettings(r.Context(), orgID)
 		ghUsername, _ = tx.Users.GetGitHubLogin(r.Context(), userID, orgSet.GitHubBaseURL)
 

@@ -223,7 +223,7 @@ func (s *Server) registrantDisplayName(ctx context.Context, orgID, userID string
 		return ""
 	}
 	var name string
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var derr error
 		name, derr = tx.Users.GetDisplayName(ctx, app.RegisteredByUserID)
 		return derr
@@ -254,7 +254,7 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 	var class domain.GitHubCredentialClass
 	var app *domain.OrgGitHubApp
 	var insts []domain.OrgGitHubAppInstallation
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		set, lerr := tx.Orgs.GetSettings(ctx, orgID)
 		if lerr != nil {
 			return lerr
@@ -404,7 +404,7 @@ func (s *Server) handleGitHubAppInstallURL(w http.ResponseWriter, r *http.Reques
 	}
 
 	var app *domain.OrgGitHubApp
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		app, lerr = tx.GitHubApps.GetForOrg(r.Context(), orgID)
 		return lerr

@@ -58,7 +58,7 @@ func (s *Spawner) resolveBlueprint(orgID, explicitBlueprintID, triggerType, crea
 		err error
 	)
 	if triggerType == "manual" {
-		err = s.tx.SyntheticClaimsWithTx(context.Background(), orgID, creatorUserID, func(ts db.TxStores) error {
+		err = s.tx.SyntheticClaimsWithReadTx(context.Background(), orgID, creatorUserID, func(ts db.TxStores) error {
 			got, gErr := ts.Blueprints.Get(context.Background(), orgID, explicitBlueprintID)
 			if gErr != nil {
 				return gErr
@@ -86,7 +86,7 @@ func (s *Spawner) resolveBlueprintSteps(orgID, blueprintID, triggerType, creator
 		err   error
 	)
 	if triggerType == "manual" {
-		err = s.tx.SyntheticClaimsWithTx(context.Background(), orgID, creatorUserID, func(ts db.TxStores) error {
+		err = s.tx.SyntheticClaimsWithReadTx(context.Background(), orgID, creatorUserID, func(ts db.TxStores) error {
 			got, gErr := ts.Blueprints.ListSteps(context.Background(), orgID, blueprintID)
 			steps = got
 			return gErr
@@ -129,7 +129,7 @@ func (s *Spawner) resolvePrompt(orgID string, task domain.Task, explicitPromptID
 		err error
 	)
 	if triggerType == "manual" {
-		err = s.tx.SyntheticClaimsWithTx(context.Background(), orgID, creatorUserID, func(ts db.TxStores) error {
+		err = s.tx.SyntheticClaimsWithReadTx(context.Background(), orgID, creatorUserID, func(ts db.TxStores) error {
 			got, gErr := ts.Prompts.Get(context.Background(), orgID, explicitPromptID)
 			if gErr != nil {
 				return gErr

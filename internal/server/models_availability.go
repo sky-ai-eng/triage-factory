@@ -140,7 +140,7 @@ func (a availabilityIndex) familyFor(m modelcatalog.Model) string {
 func (h *modelsHandler) availability(w http.ResponseWriter, r *http.Request, orgID, userID string) (availabilityIndex, bool) {
 	multi := runmode.Current() == runmode.ModeMulti
 	var index availabilityIndex
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		set, err := tx.Orgs.GetSettings(r.Context(), orgID)
 		if err != nil {
 			return fmt.Errorf("load org settings: %w", err)

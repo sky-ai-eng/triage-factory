@@ -21,7 +21,7 @@ import (
 // shape lives in one place.
 func gateActingTeamWrite(w http.ResponseWriter, r *http.Request, tx db.TxRunner, az *authz.Checker, orgID, userID, picked, scope string) bool {
 	var actingTeam string
-	if err := tx.WithTx(r.Context(), orgID, userID, func(s db.TxStores) error {
+	if err := tx.WithReadTx(r.Context(), orgID, userID, func(s db.TxStores) error {
 		var e error
 		actingTeam, e = teamscope.ResolveActingNoStamp(r.Context(), s.Teams, s.Users, orgID, userID, picked)
 		return e

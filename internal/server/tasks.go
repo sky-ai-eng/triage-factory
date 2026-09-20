@@ -401,7 +401,7 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 	// to 403) and gate on it. A bad team pick 400s via the selection-error
 	// mapping, same as the write path below.
 	var actingTeam string
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		actingTeam, e = teamscope.ResolveActingNoStamp(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		return e
@@ -417,7 +417,7 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var entity *domain.Entity
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		entity, e = tx.Entities.Get(r.Context(), orgID, req.EntityID)
 		return e
@@ -443,7 +443,7 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 	// every time a sibling discriminator (label_added "help wanted") fired more
 	// recently than the requested one (label_added "bug").
 	var primaryEvent *domain.Event
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		primaryEvent, e = tx.Events.LatestForEntityTypeAndDedupKey(r.Context(), orgID, req.EntityID, req.EventType, req.DedupKey)
 		return e
@@ -673,7 +673,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 
 	var tasks []domain.Task
 	var total int
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		tasks, total, e = tx.Tasks.List(r.Context(), orgID, filter, opts)
 		return e
@@ -803,7 +803,7 @@ func (s *Server) handleTaskFacets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var facets []db.Facet
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		facets, e = tx.Tasks.FacetEventTypes(r.Context(), orgID, filter)
 		return e
@@ -844,7 +844,7 @@ func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var task *domain.Task
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
 		return e
@@ -1002,7 +1002,7 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var task *domain.Task
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
 		return e
@@ -1055,7 +1055,7 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 // between the write and this read.
 func (s *Server) writeTaskResource(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
 	var updated *domain.Task
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		updated, e = tx.Tasks.Get(r.Context(), orgID, id)
 		return e
@@ -1083,7 +1083,7 @@ func (s *Server) writeTaskResource(w http.ResponseWriter, r *http.Request, orgID
 // task under their own RLS within this same request.
 func (s *Server) writeTaskResourceSystem(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
 	var updated *domain.Task
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		updated, e = tx.Tasks.GetSystem(r.Context(), orgID, id)
 		return e
@@ -1563,7 +1563,7 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 	// future profile shows real cost, cache the per-team rules on
 	// Server and refresh from onJiraChanged.
 	var rule *domain.JiraProjectStatusRules
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		rule = lookupJiraRuleForTask(ctx, tx, task)
 		return nil
 	}); err != nil {

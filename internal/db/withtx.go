@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 )
@@ -41,18 +42,39 @@ type Claims struct {
 //     the original fn error takes precedence (it's the meaningful one
 //     for the caller).
 func WithTx(ctx context.Context, dbConn *sql.DB, claims Claims, fn func(*sql.Tx) error) error {
+	bound, err := withClaims(ctx, claims, fn)
+	if err != nil {
+		return err
+	}
+	return InTx(ctx, dbConn, bound)
+}
+
+// WithReadTx is WithTx for a body that only reads: the same claims, set the
+// same way, on InReadTx's transaction — so a write inside fn is refused by
+// the engine. Claims are a Postgres concept, which fixes the dialect.
+func WithReadTx(ctx context.Context, dbConn *sql.DB, claims Claims, fn func(*sql.Tx) error) error {
+	bound, err := withClaims(ctx, claims, fn)
+	if err != nil {
+		return err
+	}
+	return InReadTx(ctx, dbConn, DialectPostgres, bound)
+}
+
+// withClaims wraps fn so the transaction it runs in carries claims. Shared
+// by WithTx and WithReadTx so the two doors cannot set them differently.
+func withClaims(ctx context.Context, claims Claims, fn func(*sql.Tx) error) (func(*sql.Tx) error, error) {
 	payload, err := json.Marshal(claims)
 	if err != nil {
-		return fmt.Errorf("marshal claims: %w", err)
+		return nil, fmt.Errorf("marshal claims: %w", err)
 	}
-	return InTx(ctx, dbConn, func(tx *sql.Tx) error {
+	return func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
 			`SELECT set_config('request.jwt.claims', $1, true)`, string(payload),
 		); err != nil {
 			return fmt.Errorf("set request.jwt.claims: %w", err)
 		}
 		return fn(tx)
-	})
+	}, nil
 }
 
 // InTx runs fn inside a transaction on conn, committing when fn returns nil
@@ -75,6 +97,103 @@ func InTx(ctx context.Context, conn *sql.DB, fn func(*sql.Tx) error) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := fn(tx); err != nil {
+		return TxCause(ctx, err)
+	}
+	return TxCause(ctx, tx.Commit())
+}
+
+// Dialect names as the store constructors, Migrate and BuildStoreExtensions
+// spell them — the value InReadTx keys its guard on.
+const (
+	DialectSQLite   = "sqlite"
+	DialectPostgres = "postgres"
+)
+
+// readTxOpts selects the read-only BEGIN on both drivers: BEGIN READ ONLY on
+// Postgres, and on modernc.org/sqlite a plain (DEFERRED) BEGIN in place of
+// the handle's IMMEDIATE default.
+var readTxOpts = &sql.TxOptions{ReadOnly: true}
+
+// InReadTx is InTx for a body that only reads, and the difference is
+// enforced rather than declared: a write inside fn fails with the engine's
+// read-only error instead of committing.
+//
+// The door exists because the SQLite handle begins every ordinary
+// transaction IMMEDIATE (see OpenAt): the write lock is taken at BEGIN so a
+// read-then-write body never hits the unretryable lock upgrade. A body that
+// never writes pays for that lock without needing it — it waits out another
+// process's write, and holds that process off for its own duration — where
+// a DEFERRED transaction in WAL mode is free in both directions. ReadOnly
+// on the TxOptions is what selects DEFERRED again.
+//
+// It is enforced because ReadOnly alone only changes the BEGIN. SQLite would
+// accept an UPDATE inside it, and that UPDATE is a DEFERRED lock upgrade —
+// exactly the failure the handle's lock mode removes, reintroduced at one
+// site by a body that was read-only when it was written. So on SQLite the
+// transaction runs on a dedicated connection with PRAGMA query_only set for
+// its lifetime, cleared (or the connection discarded) before the connection
+// returns to the pool; Postgres enforces READ ONLY natively. A body that
+// writes therefore fails on both dialects the first time a test runs it,
+// rather than degrading a run on one of them.
+//
+// dialect is DialectSQLite or DialectPostgres. Anything else is refused
+// rather than guessed: the guard differs per engine, and the handle cannot
+// say which it is once the tracing driver has wrapped it.
+func InReadTx(ctx context.Context, conn *sql.DB, dialect string, fn func(*sql.Tx) error) error {
+	switch dialect {
+	case DialectPostgres:
+		return inReadTx(ctx, conn, fn)
+	case DialectSQLite:
+		return inSQLiteReadTx(ctx, conn, fn)
+	default:
+		return fmt.Errorf("read tx: unknown dialect %q", dialect)
+	}
+}
+
+func inReadTx(ctx context.Context, conn *sql.DB, fn func(*sql.Tx) error) error {
+	tx, err := conn.BeginTx(ctx, readTxOpts)
+	if err != nil {
+		return fmt.Errorf("begin read tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := fn(tx); err != nil {
+		return TxCause(ctx, err)
+	}
+	return TxCause(ctx, tx.Commit())
+}
+
+// inSQLiteReadTx pins one connection so the query_only pragma, which is
+// connection state rather than transaction state, provably covers the
+// transaction and nothing after it.
+func inSQLiteReadTx(ctx context.Context, conn *sql.DB, fn func(*sql.Tx) error) error {
+	c, err := conn.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("read tx: acquire connection: %w", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	if _, err := c.ExecContext(ctx, `PRAGMA query_only = 1`); err != nil {
+		return fmt.Errorf("read tx: set query_only: %w", err)
+	}
+	// The reset has to outlive the caller's ctx: database/sql rolls the
+	// transaction back on cancellation, and a connection handed back to the
+	// pool with the pragma still set would refuse every later write on it —
+	// with one connection in the pool, every later write in the process. If
+	// the reset fails anyway, the connection is discarded, never returned.
+	defer func() {
+		if _, err := c.ExecContext(context.WithoutCancel(ctx), `PRAGMA query_only = 0`); err != nil {
+			_ = c.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}()
+
+	tx, err := c.BeginTx(ctx, readTxOpts)
+	if err != nil {
+		return fmt.Errorf("begin read tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 

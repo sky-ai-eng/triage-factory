@@ -628,7 +628,7 @@ func (s *Spawner) toolsReferenceFor(ctx context.Context, orgID, creatorUserID, c
 		return agentprompt.ToolsReferenceForSources(base)
 	}
 	var kinds []string
-	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(tx db.TxStores) error {
+	if err := stores.Tx.SyntheticClaimsWithReadTx(ctx, orgID, creatorUserID, func(tx db.TxStores) error {
 		var e error
 		kinds, e = eventsource.AvailableKinds(ctx, tx, orgID)
 		return e

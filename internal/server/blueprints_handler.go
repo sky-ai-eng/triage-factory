@@ -42,7 +42,7 @@ const maxBlueprintSteps = 50
 // host/path blueprint's team is sufficient for those.
 func (bh *blueprintsHandler) gateBlueprintWrite(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
 	var bp *domain.Blueprint
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		bp, e = tx.Blueprints.Get(r.Context(), orgID, id)
 		return e
@@ -101,7 +101,7 @@ func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http
 		blueprints []domain.Blueprint
 		total      int
 	)
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		blueprints, total, e = tx.Blueprints.List(r.Context(), orgID, filter, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
@@ -145,7 +145,7 @@ func (bh *blueprintsHandler) handleBlueprintGet(w http.ResponseWriter, r *http.R
 	}
 
 	var blueprint *domain.Blueprint
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, id)
 		return e
@@ -495,7 +495,7 @@ func (bh *blueprintsHandler) handleBlueprintStepsAll(w http.ResponseWriter, r *h
 		steps []domain.BlueprintStep
 		total int
 	)
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		steps, total, e = tx.Blueprints.ListAllSteps(r.Context(), orgID,
 			db.BlueprintStepListFilter{TeamID: req.TeamID, BlueprintIDs: blueprintIDs},
@@ -559,7 +559,7 @@ func (bh *blueprintsHandler) handleBlueprintRunsList(w http.ResponseWriter, r *h
 		runs  []domain.BlueprintRun
 		total int
 	)
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		runs, total, e = tx.Blueprints.ListRuns(r.Context(), orgID,
 			db.BlueprintRunListFilter{BlueprintID: req.BlueprintID, Statuses: statuses},
@@ -600,7 +600,7 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 	}
 
 	var blueprint *domain.Blueprint
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, id)
 		return e
@@ -1334,7 +1334,7 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 	var br *domain.BlueprintRun
 	var fallbackSteps []domain.BlueprintStep
 	var stepConversations []domain.Conversation
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		br, e = tx.Blueprints.GetRun(r.Context(), orgID, id)
 		if e != nil {
@@ -1409,7 +1409,7 @@ func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *
 	}
 
 	var br *domain.BlueprintRun
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		br, e = tx.Blueprints.GetRun(r.Context(), orgID, id)
 		return e

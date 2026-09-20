@@ -118,7 +118,7 @@ func (h *workspacesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	userID := httpx.ClaimsFrom(r.Context()).Subject
 
 	var list []slackstore.Workspace
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		list, e = slackstore.FromTx(tx).Workspaces.ListForOrg(r.Context(), orgID)
 		return e
@@ -141,7 +141,7 @@ func (h *workspacesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 // org's stored refs).
 func (h *workspacesHandler) getExisting(ctx context.Context, orgID, userID, workspaceID, apiAppID string) (*slackstore.Workspace, error) {
 	var ws *slackstore.Workspace
-	if err := h.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
 		ws, e = slackstore.FromTx(tx).Workspaces.Get(ctx, orgID, workspaceID, apiAppID)
 		return e
@@ -430,7 +430,7 @@ func (h *workspacesHandler) handleManifest(w http.ResponseWriter, r *http.Reques
 	}
 
 	var orgName string
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		org, e := tx.Orgs.GetOrg(r.Context(), orgID)
 		if e != nil {
 			return e

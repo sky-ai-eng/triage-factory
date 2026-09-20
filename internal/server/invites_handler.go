@@ -334,7 +334,7 @@ func (ih *invitesHandler) handleInviteList(w http.ResponseWriter, r *http.Reques
 		invites []domain.OrgInvite
 		total   int
 	)
-	if err := ih.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ih.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		invites, total, e = tx.Invites.ListActive(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
@@ -367,7 +367,7 @@ func (ih *invitesHandler) handleInviteGet(w http.ResponseWriter, r *http.Request
 	}
 
 	var invite *domain.OrgInvite
-	if err := ih.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ih.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		invite, e = tx.Invites.GetActive(r.Context(), orgID, inviteID)
 		return e

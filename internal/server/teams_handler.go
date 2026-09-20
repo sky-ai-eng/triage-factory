@@ -138,7 +138,7 @@ func (th *teamsHandler) handleTeamsList(w http.ResponseWriter, r *http.Request) 
 		total      int
 		lastActing string
 	)
-	if err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := th.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		teams, total, e = tx.Teams.ListForUser(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		if e != nil {
@@ -185,7 +185,7 @@ func (th *teamsHandler) handleTeamGet(w http.ResponseWriter, r *http.Request) {
 		team       *domain.Team
 		lastActing string
 	)
-	if err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := th.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		team, e = tx.Teams.Get(r.Context(), orgID, teamID)
 		if e != nil || team == nil {

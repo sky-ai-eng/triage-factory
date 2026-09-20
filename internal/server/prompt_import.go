@@ -129,7 +129,7 @@ func (sk *promptImportHandler) handlePromptUpload(w http.ResponseWriter, r *http
 	// Same viewer gate as handlePromptCreate: resolve read-only first
 	// so a viewer gets a clean 403 instead of an RLS 500.
 	var actingTeam string
-	if err := sk.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := sk.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		actingTeam, e = teamscope.ResolveActingNoStamp(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		return e

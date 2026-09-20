@@ -73,7 +73,7 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 		username string
 		stats    *domain.DashboardStats
 	)
-	if err := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := dh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// The GitHub host comes from org_settings, not an integration
 		// credential. App-mode orgs (and multi-mode org-PAT orgs) have no
 		// per-user PAT, so the pre-TFAC-396 `creds.GitHubPAT == ""` gate hid
@@ -159,7 +159,7 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 		prs      []domain.PRSummaryRow
 		total    int
 	)
-	if err := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := dh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Host from org_settings, not a PAT credential — see handleDashboardStats
 		// for the TFAC-396 rationale. App-mode / org-PAT orgs have no PAT but do
 		// have populated snapshots and a bound identity.

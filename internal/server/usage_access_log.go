@@ -107,7 +107,7 @@ func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Reque
 		names map[string]string // user id -> display name (actors + targets)
 		teams map[string]string // team id -> team name
 	)
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		rows, total, e = tx.AccessChangeLog.ListByOrg(r.Context(), orgID, domain.AccessChangeListOpts{
 			Limit: page.Limit, Offset: page.Offset, Category: category,

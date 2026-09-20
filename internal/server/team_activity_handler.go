@@ -92,7 +92,7 @@ func (s *Server) handleTeamActivity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var activity domain.TeamActivity
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		activity, e = tx.TeamActivity.TeamActivity(r.Context(), orgID, teamID, since, until)
 		return e

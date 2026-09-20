@@ -65,7 +65,7 @@ func (s *Server) readUserSettings(w http.ResponseWriter, r *http.Request, orgID,
 		resp.UserSettings = *known
 		return resp, true
 	}
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		settings, err := tx.Users.GetSettings(r.Context(), userID)
 		if err != nil {
 			return fmt.Errorf("user settings: %w", err)
@@ -321,7 +321,7 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 // write produced. The GET route passes nil.
 func (s *Server) readTeamSettings(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string, known *domain.TeamSettings) (teamSettingsResponse, bool) {
 	var resp teamSettingsResponse
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var settings domain.TeamSettings
 		if known != nil {
 			settings = *known
@@ -913,7 +913,7 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 	jiraCredEnv := local &&
 		(auth.EnvProvidesKey(integrations.KeyJiraPAT) || auth.EnvProvidesKey(integrations.KeyJiraURL))
 
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error
 		if known != nil {
 			orgSet = *known
@@ -1541,7 +1541,7 @@ func (s *Server) orgSettingsSSHPreflight(w http.ResponseWriter, r *http.Request,
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var cur domain.OrgSettings
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error
 		cur, err = tx.Orgs.GetSettings(r.Context(), orgID)
 		return err
@@ -1613,7 +1613,7 @@ func (s *Server) disabledModelsWarning(ctx context.Context, orgID, userID string
 	}
 
 	var affected []string
-	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		teams, e := tx.Teams.ListActiveForOrgSystem(ctx, orgID)
 		if e != nil {
 			return e
