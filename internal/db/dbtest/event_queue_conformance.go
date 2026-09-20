@@ -142,7 +142,9 @@ func parkOn(t *testing.T, ctx context.Context, s db.EventQueueStore, orgID, enti
 //   - EnqueueBatchWithSnapshotCAS is all-or-nothing across BOTH tables: a
 //     won CAS advances the snapshot and queues every event in the batch; a
 //     lost CAS writes nothing; a failed insert mid-batch rolls the snapshot
-//     back with it. An empty batch is a pure CAS.
+//     back with it. An empty batch is a pure CAS. Every row it writes is
+//     stamped with the poll_seq the CAS advanced to; Enqueue's rows carry
+//     none. A close obligation is enqueued once while one is unsettled.
 func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -336,6 +338,153 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		}
 		if n := seed.CountEventRows(t, entityID); n != 0 {
 			t.Errorf("failed batch left %d events rows, want 0", n)
+		}
+	})
+
+	t.Run("EnqueueBatchWithSnapshotCAS_stamps_the_version_the_batch_was_judged_at", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		_, pollSeq := seed.EntitySnapshot(t, entityID)
+
+		if ok, _, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"judged":true}`, pollSeq,
+			[]domain.Event{batchEvent(entityID, "build")}, nil); err != nil || !ok {
+			t.Fatalf("EnqueueBatchWithSnapshotCAS: ok=%v err=%v", ok, err)
+		}
+		// The ingest path carries no version.
+		enqueueOn(t, ctx, s, orgID, entityID)
+
+		rows, err := s.ListForEntity(ctx, orgID, entityID)
+		if err != nil || len(rows) != 2 {
+			t.Fatalf("ListForEntity: rows=%d err=%v", len(rows), err)
+		}
+		if rows[0].EntityPollSeq == nil || *rows[0].EntityPollSeq != pollSeq+1 {
+			t.Errorf("CAS-path row entity_poll_seq = %v, want %d — the poll_seq the CAS advanced to", rows[0].EntityPollSeq, pollSeq+1)
+		}
+		if rows[1].EntityPollSeq != nil {
+			t.Errorf("ingest-path row entity_poll_seq = %d, want NULL", *rows[1].EntityPollSeq)
+		}
+		// The claim reads the same column back: the consumer is where the
+		// version is used.
+		claimed, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		if err != nil || claimed == nil {
+			t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
+		}
+		if claimed.EntityPollSeq == nil || *claimed.EntityPollSeq != pollSeq+1 {
+			t.Errorf("claimed entity_poll_seq = %v, want %d", claimed.EntityPollSeq, pollSeq+1)
+		}
+	})
+
+	t.Run("EnqueueBatchWithSnapshotCAS_enqueues_one_close_obligation_while_one_is_unsettled", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		_, pollSeq := seed.EntitySnapshot(t, entityID)
+		owed := func() domain.Event {
+			return domain.Event{EntityID: &entityID, EventType: domain.EventSystemEntityCloseOwed, MetadataJSON: `{"reason":"terminal_snapshot_active_entity"}`}
+		}
+		rowsOf := func(eventType string) int {
+			t.Helper()
+			rows, err := s.ListForEntity(ctx, orgID, entityID)
+			if err != nil {
+				t.Fatalf("ListForEntity: %v", err)
+			}
+			n := 0
+			for _, r := range rows {
+				if r.EventType == eventType {
+					n++
+				}
+			}
+			return n
+		}
+
+		unsettled := func() bool {
+			t.Helper()
+			got, err := s.UnsettledCloseExistsSystem(ctx, orgID, entityID)
+			if err != nil {
+				t.Fatalf("UnsettledCloseExistsSystem: %v", err)
+			}
+			return got
+		}
+		if unsettled() {
+			t.Fatal("unsettled = true on an entity with no queue rows")
+		}
+
+		// First cycle after a lost close: the obligation lands.
+		ok, ids, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"terminal":1}`, pollSeq, []domain.Event{owed()}, nil)
+		if err != nil || !ok {
+			t.Fatalf("first obligation: ok=%v err=%v", ok, err)
+		}
+		if len(ids) != 1 || ids[0] == "" {
+			t.Fatalf("first obligation ids = %v, want one minted id", ids)
+		}
+		if !unsettled() {
+			t.Error("unsettled = false with the obligation pending")
+		}
+		// Next cycle, the obligation still pending: the CAS still wins (the
+		// snapshot advances) but the obligation is declined — no second
+		// events row, no second queue row, and an empty id in its slot.
+		ok, ids, err = s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"terminal":2}`, pollSeq+1, []domain.Event{owed()}, nil)
+		if err != nil || !ok {
+			t.Fatalf("second obligation: ok=%v err=%v", ok, err)
+		}
+		if len(ids) != 1 || ids[0] != "" {
+			t.Errorf("second obligation ids = %v, want one empty slot", ids)
+		}
+		if n := rowsOf(domain.EventSystemEntityCloseOwed); n != 1 {
+			t.Errorf("obligation rows = %d, want 1 while the first is unsettled", n)
+		}
+		if n := seed.CountEventRows(t, entityID); n != 1 {
+			t.Errorf("events rows = %d, want 1 — a declined obligation records nothing", n)
+		}
+		if _, seq := seed.EntitySnapshot(t, entityID); seq != pollSeq+2 {
+			t.Errorf("poll_seq = %d, want %d — the snapshot still advances when the obligation is declined", seq, pollSeq+2)
+		}
+
+		// Claimed (processing) still counts as unsettled.
+		claimed, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		if err != nil || claimed == nil {
+			t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
+		}
+		if _, ids, err = s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"terminal":3}`, pollSeq+2, []domain.Event{owed()}, nil); err != nil || ids[0] != "" {
+			t.Fatalf("obligation while processing: ids=%v err=%v, want declined", ids, err)
+		}
+
+		if !unsettled() {
+			t.Error("unsettled = false with the obligation processing")
+		}
+
+		// Parked does not: nothing will drive a failed row, so the next
+		// cycle owes a fresh one.
+		if err := s.MarkFailed(ctx, orgID, claimed.ID, "budget spent"); err != nil {
+			t.Fatalf("MarkFailed: %v", err)
+		}
+		if unsettled() {
+			t.Error("unsettled = true with only a parked row; nothing will drive it")
+		}
+		if _, ids, err = s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"terminal":4}`, pollSeq+3, []domain.Event{owed()}, nil); err != nil || ids[0] == "" {
+			t.Fatalf("obligation after a park: ids=%v err=%v, want a fresh one", ids, err)
+		}
+		if n := rowsOf(domain.EventSystemEntityCloseOwed); n != 2 {
+			t.Errorf("obligation rows = %d, want 2 (the parked one and the fresh one)", n)
+		}
+
+		// A real terminating transition in flight declines the obligation
+		// too: the router will close from the transition.
+		other := seed.Entity(t)
+		_, otherSeq := seed.EntitySnapshot(t, other)
+		merged := domain.Event{EntityID: &other, EventType: domain.EventGitHubPRMerged}
+		if ok, _, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, other, `{"m":1}`, otherSeq, []domain.Event{merged}, nil); err != nil || !ok {
+			t.Fatalf("merged transition: ok=%v err=%v", ok, err)
+		}
+		owedOther := domain.Event{EntityID: &other, EventType: domain.EventSystemEntityCloseOwed, MetadataJSON: `{"reason":"terminal_snapshot_active_entity"}`}
+		if _, ids, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, other, `{"m":2}`, otherSeq+1, []domain.Event{owedOther}, nil); err != nil || ids[0] != "" {
+			t.Fatalf("obligation behind a pending transition: ids=%v err=%v, want declined", ids, err)
+		}
+
+		// Only the obligation is deduplicated: an ordinary event in the
+		// same batch still lands beside a declined one.
+		if _, ids, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, other, `{"m":3}`, otherSeq+2,
+			[]domain.Event{batchEvent(other, "build"), owedOther}, nil); err != nil || ids[0] == "" || ids[1] != "" {
+			t.Fatalf("mixed batch ids = %v err=%v, want the transition minted and the obligation declined", ids, err)
 		}
 	})
 

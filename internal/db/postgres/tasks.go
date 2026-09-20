@@ -504,6 +504,26 @@ func (s *taskStore) FindActiveByEntity(ctx context.Context, orgID, entityID stri
 	return findActiveTasksByEntity(ctx, s.q, orgID, entityID)
 }
 
+// ListOpenOnClosedEntitiesSystem is the checker's Count B read: open tasks
+// whose entity is closed. Admin pool, org-bound by argument; see the
+// interface doc for why steady state is empty.
+func (s *taskStore) ListOpenOnClosedEntitiesSystem(ctx context.Context, orgID string) ([]string, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT t.id
+		FROM tasks t
+		JOIN entities e ON e.id = t.entity_id AND e.org_id = t.org_id
+		WHERE t.org_id = $1
+		  AND t.status IN ('queued', 'in_progress', 'snoozed')
+		  AND e.state = 'closed'
+		  AND NOT (t.event_type = ANY($2))
+		ORDER BY t.created_at ASC, t.id ASC
+	`, orgID, domain.EntityTerminatingEventTypes())
+	if err != nil {
+		return nil, err
+	}
+	return scanIDs(rows, "tasks.id")
+}
+
 func (s *taskStore) FindActiveByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Task, error) {
 	return findActiveTasksByEntity(ctx, s.admin, orgID, entityID)
 }
@@ -731,6 +751,33 @@ func resolveTeamBind(ctx context.Context, q queryer, orgID, teamID string) (stri
 // an entity contends on the identical lock key.
 const entityTaskCreationLockSalt = 5
 
+// lockActiveEntity is the mint's half of the mint/close serialization: it
+// takes the entity's row lock inside the mint's transaction and refuses with
+// db.ErrEntityClosed when the row is closed or missing — except for the
+// lifecycle task a terminating transition mints on the entity it just
+// closed, which takes the lock and proceeds. The terminating close
+// (entityStore.CloseTerminalSystem) locks the same row first, so the two
+// commit in some order and each sees the other's result: a close that won
+// closes nothing this mint could add, and a mint that won is a task the
+// close walks. Held until the mint commits, so the close cannot slip between
+// this read and the insert.
+func lockActiveEntity(ctx context.Context, q queryer, orgID, entityID, eventType string) error {
+	var state string
+	err := q.QueryRowContext(ctx, `
+		SELECT state FROM entities WHERE org_id = $1 AND id = $2 FOR UPDATE
+	`, orgID, entityID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.ErrEntityClosed
+	}
+	if err != nil {
+		return fmt.Errorf("lock entity for task mint: %w", err)
+	}
+	if state != "active" && !domain.TaskMayRideClosedEntity(eventType) {
+		return db.ErrEntityClosed
+	}
+	return nil
+}
+
 func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
 	var task *domain.Task
 	var created bool
@@ -749,6 +796,9 @@ func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID,
 }
 
 func findOrCreateTaskAtLocked(ctx context.Context, q queryer, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+	if err := lockActiveEntity(ctx, q, orgID, entityID, eventType); err != nil {
+		return nil, false, err
+	}
 	// team_id is the owning/attributed team stamped on a newly created
 	// row — caller-supplied. User-source handlers carry a real team
 	// UUID. Org-visible handlers (visibility='org', team_id NULL)
@@ -905,64 +955,76 @@ func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context,
 		conversationIDs []string
 	)
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		t, err := closeTaskRow(ctx, q, orgID, taskID, closeReason, closeEventType)
-		if err != nil {
-			return fmt.Errorf("close task: %w", err)
-		}
-		closed = t != nil
-
-		if closingEventID != "" {
-			if err := recordTaskEvent(ctx, q, orgID, taskID, closingEventID, "closed"); err != nil {
-				return fmt.Errorf("record close audit: %w", err)
-			}
-		}
-		if !closed {
-			return nil
-		}
-
-		rows, err := q.QueryContext(ctx, `
-			SELECT id FROM conversations
-			WHERE org_id = $1 AND task_id = $2
-			  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
-		`, orgID, taskID)
-		if err != nil {
-			return fmt.Errorf("list active conversations: %w", err)
-		}
-		// Drained and closed (scanIDs closes) before the UPDATE below rather
-		// than on a defer: both ride the one connection this tx holds, and an
-		// open cursor is the kind of thing a driver is entitled to refuse to
-		// write around.
-		if conversationIDs, err = scanIDs(rows, "conversations.id"); err != nil {
-			return fmt.Errorf("list active conversations: %w", err)
-		}
-
-		// The same predicate one join further out, rather than a stamp keyed on
-		// the ids just scanned: the set is decided by the tx's own snapshot
-		// either way, and expressing it as SQL keeps the two from drifting.
-		// `status = 'running' AND cancel_requested = false` is
-		// RequestRunCancelSystem's guard verbatim — a blueprint that already
-		// finished is not a blueprint this close is entitled to call off.
-		if _, err := q.ExecContext(ctx, `
-			UPDATE blueprint_runs br SET cancel_requested = true
-			WHERE br.org_id = $1
-			  AND br.status = 'running'
-			  AND br.cancel_requested = false
-			  AND EXISTS (
-			      SELECT 1 FROM conversations c
-			      WHERE c.org_id = br.org_id
-			        AND c.task_id = $2
-			        AND c.blueprint_run_id = br.id
-			        AND (c.status IS NULL OR c.status NOT IN (`+conversationTerminalStatusesSQL+`))
-			  )
-		`, orgID, taskID); err != nil {
-			return fmt.Errorf("stamp run cancel intent: %w", err)
-		}
-		return nil
+		var err error
+		closed, conversationIDs, err = closeTaskWithCancelIntent(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID)
+		return err
 	})
 	if err != nil {
 		return false, nil, err
 	}
 	return closed, conversationIDs, nil
+}
+
+// closeTaskWithCancelIntent is the body of CloseWithConversationCancelIntentSystem
+// on a transaction the caller owns: the task's terminal flip, the audit row
+// when closingEventID names one, and the cancel intent on the blueprints
+// behind its then-active conversations. The entity store's terminating close
+// runs it per task inside its own transaction, so a task closed there and one
+// closed by a typed sibling close produce identical rows.
+func closeTaskWithCancelIntent(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, conversationIDs []string, err error) {
+	t, err := closeTaskRow(ctx, q, orgID, taskID, closeReason, closeEventType)
+	if err != nil {
+		return false, nil, fmt.Errorf("close task: %w", err)
+	}
+	closed = t != nil
+
+	if closingEventID != "" {
+		if err := recordTaskEvent(ctx, q, orgID, taskID, closingEventID, "closed"); err != nil {
+			return false, nil, fmt.Errorf("record close audit: %w", err)
+		}
+	}
+	if !closed {
+		return false, nil, nil
+	}
+
+	rows, err := q.QueryContext(ctx, `
+		SELECT id FROM conversations
+		WHERE org_id = $1 AND task_id = $2
+		  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+	`, orgID, taskID)
+	if err != nil {
+		return false, nil, fmt.Errorf("list active conversations: %w", err)
+	}
+	// Drained and closed (scanIDs closes) before the UPDATE below rather
+	// than on a defer: both ride the one connection this tx holds, and an
+	// open cursor is the kind of thing a driver is entitled to refuse to
+	// write around.
+	if conversationIDs, err = scanIDs(rows, "conversations.id"); err != nil {
+		return false, nil, fmt.Errorf("list active conversations: %w", err)
+	}
+
+	// The same predicate one join further out, rather than a stamp keyed on
+	// the ids just scanned: the set is decided by the tx's own snapshot
+	// either way, and expressing it as SQL keeps the two from drifting.
+	// `status = 'running' AND cancel_requested = false` is
+	// RequestRunCancelSystem's guard verbatim — a blueprint that already
+	// finished is not a blueprint this close is entitled to call off.
+	if _, err := q.ExecContext(ctx, `
+		UPDATE blueprint_runs br SET cancel_requested = true
+		WHERE br.org_id = $1
+		  AND br.status = 'running'
+		  AND br.cancel_requested = false
+		  AND EXISTS (
+		      SELECT 1 FROM conversations c
+		      WHERE c.org_id = br.org_id
+		        AND c.task_id = $2
+		        AND c.blueprint_run_id = br.id
+		        AND (c.status IS NULL OR c.status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  )
+	`, orgID, taskID); err != nil {
+		return false, nil, fmt.Errorf("stamp run cancel intent: %w", err)
+	}
+	return true, conversationIDs, nil
 }
 
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {

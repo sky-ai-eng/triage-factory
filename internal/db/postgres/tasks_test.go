@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -248,13 +249,15 @@ func TestTaskStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	})
 
 	t.Run("cross_org_write_denied", func(t *testing.T) {
-		// Seed a fresh entity+event in orgA so the FK chain is satisfied
-		// — the rejection we want is from tasks_insert WITH CHECK
-		// (bob's claims point at orgB; the row would land with
-		// org_id=orgA), not from a missing FK target. Fetch orgA's team
-		// via admin to fill the required teamID arg; in production a
-		// user wouldn't know the cross-org team, but we're proving the
-		// policy holds even if they did.
+		// Seed a fresh entity+event in orgA so the FK chain is satisfied.
+		// The mint's first statement is the entity lock read, which runs
+		// under the same RLS policies as everything else on the app pool:
+		// bob's claims point at orgB, so orgA's entity is filtered to no
+		// row and the mint refuses as it would for a missing entity — the
+		// INSERT (and tasks_insert's WITH CHECK behind it) is never
+		// reached. Fetch orgA's team via admin to fill the required teamID
+		// arg; in production a user wouldn't know the cross-org team, but
+		// we're proving the write is refused even if they did.
 		entityID, eventID := seedPgEntityEvent(t, h.AdminDB, orgA, "rls-write")
 		orgATeam := firstTeamForOrg(t, h, orgA)
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
@@ -264,7 +267,16 @@ func TestTaskStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 			)
 			return e
 		})
-		pgtest.AssertRLSViolation(t, err)
+		if !errors.Is(err, db.ErrEntityClosed) {
+			t.Fatalf("cross-org FindOrCreate: err = %v, want ErrEntityClosed — the entity is invisible under orgB's claims", err)
+		}
+		var n int
+		if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM tasks WHERE entity_id = $1`, entityID).Scan(&n); err != nil {
+			t.Fatalf("count tasks: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("tasks on orgA's entity after the refused cross-org mint = %d, want 0", n)
+		}
 	})
 }
 

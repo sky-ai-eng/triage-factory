@@ -241,6 +241,19 @@ const (
 	// "not configured" reply) never mistakes "we couldn't tell" for "there
 	// really is nothing configured here."
 	DispositionError = "error"
+	// DispositionStaleTerminal means a terminating event — a real merged /
+	// closed / completed transition or the poll's close obligation — was
+	// judged against a version of the entity that no longer exists: the
+	// entity reopened (or was otherwise re-polled) between the event's
+	// enqueue and its routing, and the guarded close declined. The event is
+	// consumed and routing stops; the newer snapshot's own cycle decides the
+	// entity's fate.
+	DispositionStaleTerminal = "stale_terminal"
+	// DispositionEntityCloseOwed means the poll's close obligation routed:
+	// the entity and its in-flight tasks closed under the same guarded
+	// transaction a real terminating transition uses. No handler is matched
+	// and no task is minted for it — the obligation is a repair, not news.
+	DispositionEntityCloseOwed = "entity_close_owed"
 )
 
 // No predicate fields — fires once per instance, users can only enable / disable.
@@ -251,13 +264,42 @@ func (p SystemRoutingDispositionPredicate) Matches(m SystemRoutingDispositionMet
 }
 
 // -----------------------------------------------------------------------------
+// system:entity:close_owed — the poll observed an active entity whose stored
+// snapshot was already terminal on the previous cycle, with no terminating
+// close unsettled in the queue. Enqueued by the tracker through the
+// snapshot-CAS path (never through ingest) and routed by the router as a
+// guarded terminating close. See domain.EventSystemEntityCloseOwed.
+// -----------------------------------------------------------------------------
+
+// SystemEntityCloseOwedReasonTerminalSnapshot is the one reason the poll
+// records today: the snapshot read terminal on two consecutive cycles while
+// the entity stayed active.
+const SystemEntityCloseOwedReasonTerminalSnapshot = "terminal_snapshot_active_entity"
+
+type SystemEntityCloseOwedMetadata struct {
+	Reason string `json:"reason"`
+}
+
+// No predicate fields — never user-addressable; the schema exists so the
+// envelope validates and introspects like every other event type.
+type SystemEntityCloseOwedPredicate struct{}
+
+func (p SystemEntityCloseOwedPredicate) Matches(m SystemEntityCloseOwedMetadata) bool {
+	return true
+}
+
+// -----------------------------------------------------------------------------
 // Registration.
 // -----------------------------------------------------------------------------
 
 // System events are all OwnershipUnrouted — none of them route via the
-// owning-team ladder, the requested-party path, or handler-team pooling;
-// they're bus-only sentinels, never router-bound (see RouterBound) and
-// never entity-scoped, so they never reach resolveTeamRouting at all.
+// owning-team ladder, the requested-party path, or handler-team pooling.
+// All but one are bus-only sentinels, never router-bound (see RouterBound)
+// and never entity-scoped, so they never reach resolveTeamRouting at all.
+// The exception is system:entity:close_owed, which IS entity-scoped and
+// reaches the router through the tracker's snapshot-CAS enqueue rather than
+// ingest; the router answers it with the terminating close alone and returns
+// before handler matching, so it never reaches resolveTeamRouting either.
 func init() {
 	Register(NewSchema[SystemPollCompletedMetadata, SystemPollCompletedPredicate](domain.EventSystemPollCompleted, OwnershipUnrouted))
 	Register(NewSchema[SystemScoringCompletedMetadata, SystemScoringCompletedPredicate](domain.EventSystemScoringCompleted, OwnershipUnrouted))
@@ -269,4 +311,5 @@ func init() {
 	Register(NewSchema[SystemConversationActivityMetadata, SystemConversationActivityPredicate](domain.EventSystemConversationActivity, OwnershipUnrouted))
 	Register(NewSchema[SystemConversationResumedMetadata, SystemConversationResumedPredicate](domain.EventSystemConversationResumed, OwnershipUnrouted))
 	Register(NewSchema[SystemRoutingDispositionMetadata, SystemRoutingDispositionPredicate](domain.EventSystemRoutingDisposition, OwnershipUnrouted))
+	Register(NewSchema[SystemEntityCloseOwedMetadata, SystemEntityCloseOwedPredicate](domain.EventSystemEntityCloseOwed, OwnershipUnrouted))
 }

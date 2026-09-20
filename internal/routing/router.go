@@ -157,6 +157,12 @@ type Router struct {
 	// close.
 	drainLockMu sync.Mutex
 	drainLocks  map[string]*sync.Mutex
+
+	// terminalGauges is the checker's gauge set, created from the global
+	// meter provider on the first pass (or from a test's provider through
+	// setTerminalGauges). See terminal_checker.go.
+	terminalGaugesOnce sync.Once
+	terminalGauges     *terminalInvariantGauges
 }
 
 // NewRouter creates a Router. teamAgents is nil-safe — callers wired
@@ -304,8 +310,8 @@ func (r *Router) autoDelegateEnabledForTeam(ctx context.Context, teamID string) 
 // broadcastTasksUpdated pushes the frontend's "re-read the board" nudge for an
 // org. The payload is empty by design — the hub carries the fact that
 // something changed, and the client re-fetches — so every producer of a task
-// change (the close phase, the task upsert, the terminal reconciler) sends the
-// identical event rather than each spelling out the same literal.
+// change (the typed close phase, the terminating close, the task upsert) sends
+// the identical event rather than each spelling out the same literal.
 func (r *Router) broadcastTasksUpdated(orgID string) {
 	r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
 }

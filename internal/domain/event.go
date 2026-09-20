@@ -164,7 +164,61 @@ const (
 	// internal/domain/events/system.go for the metadata shape and
 	// disposition values.
 	EventSystemRoutingDisposition = "system:routing:disposition"
+
+	// EventSystemEntityCloseOwed is the poll's close obligation: a refresh
+	// found an entity still active whose stored snapshot was ALREADY terminal
+	// on the previous cycle, and no terminating close for it is unsettled in
+	// the queue. The cycle that makes a snapshot terminal emits the real
+	// transition (merged / closed / completed) and the router closes from
+	// that; this exists only for the cycle after that close was lost — a
+	// transition diffed but never published, a row parked past its attempt
+	// budget, a row orphaned by a replaced pod. It is enqueued through the
+	// snapshot-CAS path, never through ingest, and the router answers it
+	// with the same guarded terminating close a real transition gets.
+	// Never user-selectable: an event handler cannot be authored against it.
+	EventSystemEntityCloseOwed = "system:entity:close_owed"
 )
+
+// EntityTerminatingEventTypes is the set of source transitions that
+// terminate an entity: a merged or closed pull request, a completed or
+// unreachable Jira issue. The routing package derives the same set from its
+// close relations; a routing test asserts the two agree, so the store layer
+// can read it without importing the router.
+func EntityTerminatingEventTypes() []string {
+	return []string{
+		EventGitHubPRMerged,
+		EventGitHubPRClosed,
+		EventJiraIssueCompleted,
+		EventJiraIssueUnreachable,
+	}
+}
+
+// EntityCloseSettlingEventTypes is the set of queue rows whose settlement
+// decides an entity's fate: the terminating transitions and the poll's close
+// obligation. While one of these is unsettled for an entity — pending or
+// processing — the entity's terminal snapshot is owed a close and no second
+// obligation is minted; the checker likewise excludes such an entity from
+// its violation count. A parked row does not count as unsettled: nothing
+// will drive it, so the next cycle owes a fresh obligation.
+func EntityCloseSettlingEventTypes() []string {
+	return append(EntityTerminatingEventTypes(), EventSystemEntityCloseOwed)
+}
+
+// TaskMayRideClosedEntity reports whether a task of eventType legitimately
+// lives on a CLOSED entity. Exactly the terminating transitions do: the
+// event that closes an entity mints its own lifecycle task afterwards — the
+// card a merge-triggered blueprint rides — on the entity it just closed, and
+// that is the one task the model puts there on purpose. Every other type is
+// refused a mint on a closed entity, and counted by the terminal-state
+// checker when found there.
+func TaskMayRideClosedEntity(eventType string) bool {
+	for _, et := range EntityTerminatingEventTypes() {
+		if et == eventType {
+			return true
+		}
+	}
+	return false
+}
 
 // AllEventTypes returns the canonical seed catalog for the per-action
 // event model (see docs/data-model-target.md).
@@ -225,6 +279,7 @@ func AllEventTypes() []EventType {
 		{ID: EventSystemConversationActivity, Source: "system", Category: "delegation", Label: "Conversation Activity", Description: "A delegated conversation invoked a tool"},
 		{ID: EventSystemConversationResumed, Source: "system", Category: "delegation", Label: "Conversation Resumed", Description: "A user sent a follow-up to a parked or concluded conversation"},
 		{ID: EventSystemRoutingDisposition, Source: "system", Category: "routing", Label: "Routing Disposition", Description: "The router finished handling an event (frozen, taskless, task created/bumped, or error)"},
+		{ID: EventSystemEntityCloseOwed, Source: "system", Category: "entity", Label: "Entity close owed", Description: "The poll observed a terminal snapshot on an active entity with no close in flight"},
 	}
 }
 

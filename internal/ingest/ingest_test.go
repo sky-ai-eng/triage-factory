@@ -223,6 +223,9 @@ func (failingEnqueueQueue) RequeueStaleProcessing(context.Context, time.Duration
 	return 0, nil
 }
 func (failingEnqueueQueue) PruneDone(context.Context, time.Time) (int, error) { return 0, nil }
+func (failingEnqueueQueue) UnsettledCloseExistsSystem(context.Context, string, string) (bool, error) {
+	return false, nil
+}
 func (failingEnqueueQueue) ListForEntity(context.Context, string, string) ([]domain.QueuedEvent, error) {
 	return nil, nil
 }

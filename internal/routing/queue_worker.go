@@ -299,7 +299,9 @@ func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent)
 		return false
 	}
 
-	if err := r.HandleEvent(eventCtx, *ev); err != nil {
+	// The queue row is the envelope: the version the event was judged at
+	// rides here, not on the events row, and reaches the terminating close.
+	if err := r.routeEvent(eventCtx, *ev, qe.EntityPollSeq); err != nil {
 		// A routing obligation went unmet — a dependency the pass needs
 		// failed, not a legitimate "nothing to do" outcome (those return
 		// nil and publish their own taskless disposition). Requeue rather

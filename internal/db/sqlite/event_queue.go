@@ -44,7 +44,7 @@ func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.
 		if err != nil {
 			return err
 		}
-		return insertQueueRow(ctx, tx, id, evt, traceparent)
+		return insertQueueRow(ctx, tx, id, evt, traceparent, nil)
 	}); err != nil {
 		return "", err
 	}
@@ -54,7 +54,11 @@ func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.
 // insertQueueRow writes the pending queue row for an already-recorded
 // event. Shared by Enqueue and EnqueueBatchWithSnapshotCAS so both produce
 // identical rows.
-func insertQueueRow(ctx context.Context, q queryer, eventID string, evt domain.Event, traceparent string) error {
+//
+// entityPollSeq is the version the event was judged at — the CAS path passes
+// the poll_seq it just advanced to, the ingest path passes nil and the column
+// stores NULL.
+func insertQueueRow(ctx context.Context, q queryer, eventID string, evt domain.Event, traceparent string, entityPollSeq *int64) error {
 	var entityID any
 	if evt.EntityID != nil && *evt.EntityID != "" {
 		entityID = *evt.EntityID
@@ -63,10 +67,36 @@ func insertQueueRow(ctx context.Context, q queryer, eventID string, evt domain.E
 	// an empty string, so "no context to link" is one value in the column,
 	// not two.
 	_, err := q.ExecContext(ctx, `
-		INSERT INTO event_queue (event_id, entity_id, event_type, status, traceparent)
-		VALUES (?, ?, ?, 'pending', NULLIF(?, ''))
-	`, eventID, entityID, evt.EventType, traceparent)
+		INSERT INTO event_queue (event_id, entity_id, event_type, status, traceparent, entity_poll_seq)
+		VALUES (?, ?, ?, 'pending', NULLIF(?, ''), ?)
+	`, eventID, entityID, evt.EventType, traceparent, entityPollSeq)
 	return err
+}
+
+// unsettledCloseExists reports whether the entity already has a pending or
+// processing row whose settlement decides its fate — a terminating
+// transition or an earlier close obligation. Evaluated inside the enqueue
+// transaction, so the answer is the one the insert commits against.
+func unsettledCloseExists(ctx context.Context, q queryer, entityID string) (bool, error) {
+	settling := domain.EntityCloseSettlingEventTypes()
+	placeholders := make([]string, len(settling))
+	args := []any{entityID}
+	for i, et := range settling {
+		placeholders[i] = "?"
+		args = append(args, et)
+	}
+	var one int
+	err := q.QueryRowContext(ctx, `
+		SELECT 1 FROM event_queue
+		WHERE entity_id = ?
+		  AND status IN ('pending', 'processing')
+		  AND event_type IN (`+strings.Join(placeholders, ", ")+`)
+		LIMIT 1
+	`, args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // EnqueueBatchWithSnapshotCAS runs the snapshot CAS and the batch's
@@ -92,13 +122,30 @@ func (s *eventQueueStore) EnqueueBatchWithSnapshotCAS(ctx context.Context, orgID
 		if !won {
 			return nil
 		}
+		// The version every row in this batch was judged at: the poll_seq
+		// the CAS above just advanced to.
+		judgedAt := expectedPollSeq + 1
 		ids = make([]string, 0, len(events))
 		for i, evt := range events {
+			if evt.EventType == domain.EventSystemEntityCloseOwed {
+				// One obligation per entity while one is unsettled — checked
+				// here, on the transaction that would insert it, so two cycles
+				// cannot both find the queue empty. A skipped obligation leaves
+				// an empty id in its slot.
+				owed, err := unsettledCloseExists(ctx, tx, entityID)
+				if err != nil {
+					return err
+				}
+				if owed {
+					ids = append(ids, "")
+					continue
+				}
+			}
 			id, err := recordEvent(ctx, tx, evt)
 			if err != nil {
 				return err
 			}
-			if err := insertQueueRow(ctx, tx, id, evt, db.TraceparentAt(traceparents, i)); err != nil {
+			if err := insertQueueRow(ctx, tx, id, evt, db.TraceparentAt(traceparents, i), &judgedAt); err != nil {
 				return err
 			}
 			ids = append(ids, id)
@@ -130,7 +177,7 @@ func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, boot
 		WHERE id = (SELECT id FROM event_queue WHERE status = 'pending' ORDER BY id LIMIT 1)
 		RETURNING id, org_id, event_id, COALESCE(entity_id, ''), event_type,
 		          status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at,
-		          COALESCE(traceparent, '')
+		          COALESCE(traceparent, ''), entity_poll_seq
 	`, time.Now().UTC(), executorID, executorID, bootEpoch)
 	return scanSqliteQueuedEvent(row)
 }
@@ -361,6 +408,13 @@ func (s *eventQueueStore) RequeueFailedEvents(ctx context.Context, orgID string,
 	return total, nil
 }
 
+func (s *eventQueueStore) UnsettledCloseExistsSystem(ctx context.Context, orgID, entityID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	return unsettledCloseExists(ctx, s.conn, entityID)
+}
+
 func (s *eventQueueStore) ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.QueuedEvent, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -368,7 +422,7 @@ func (s *eventQueueStore) ListForEntity(ctx context.Context, orgID, entityID str
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT id, org_id, event_id, COALESCE(entity_id, ''), event_type,
 		       status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at,
-		       COALESCE(traceparent, '')
+		       COALESCE(traceparent, ''), entity_poll_seq
 		FROM event_queue
 		WHERE entity_id = ?
 		ORDER BY id
@@ -396,11 +450,12 @@ func scanSqliteQueuedEvent(row *sql.Row) (*domain.QueuedEvent, error) {
 		qe          domain.QueuedEvent
 		claimedAt   sql.NullTime
 		processedAt sql.NullTime
+		pollSeq     sql.NullInt64
 	)
 	err := row.Scan(
 		&qe.ID, &qe.OrgID, &qe.EventID, &qe.EntityID, &qe.EventType,
 		&qe.Status, &qe.Attempts, &qe.LastError, &qe.EnqueuedAt, &claimedAt, &processedAt,
-		&qe.Traceparent,
+		&qe.Traceparent, &pollSeq,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -408,7 +463,7 @@ func scanSqliteQueuedEvent(row *sql.Row) (*domain.QueuedEvent, error) {
 	if err != nil {
 		return nil, err
 	}
-	applyQueuedEventNullTimes(&qe, claimedAt, processedAt)
+	applyQueuedEventNulls(&qe, claimedAt, processedAt, pollSeq)
 	return &qe, nil
 }
 
@@ -418,20 +473,21 @@ func scanSqliteQueuedEventRow(rows *sql.Rows) (*domain.QueuedEvent, error) {
 		qe          domain.QueuedEvent
 		claimedAt   sql.NullTime
 		processedAt sql.NullTime
+		pollSeq     sql.NullInt64
 	)
 	err := rows.Scan(
 		&qe.ID, &qe.OrgID, &qe.EventID, &qe.EntityID, &qe.EventType,
 		&qe.Status, &qe.Attempts, &qe.LastError, &qe.EnqueuedAt, &claimedAt, &processedAt,
-		&qe.Traceparent,
+		&qe.Traceparent, &pollSeq,
 	)
 	if err != nil {
 		return nil, err
 	}
-	applyQueuedEventNullTimes(&qe, claimedAt, processedAt)
+	applyQueuedEventNulls(&qe, claimedAt, processedAt, pollSeq)
 	return &qe, nil
 }
 
-func applyQueuedEventNullTimes(qe *domain.QueuedEvent, claimedAt, processedAt sql.NullTime) {
+func applyQueuedEventNulls(qe *domain.QueuedEvent, claimedAt, processedAt sql.NullTime, pollSeq sql.NullInt64) {
 	if claimedAt.Valid {
 		t := claimedAt.Time
 		qe.ClaimedAt = &t
@@ -439,5 +495,9 @@ func applyQueuedEventNullTimes(qe *domain.QueuedEvent, claimedAt, processedAt sq
 	if processedAt.Valid {
 		t := processedAt.Time
 		qe.ProcessedAt = &t
+	}
+	if pollSeq.Valid {
+		v := pollSeq.Int64
+		qe.EntityPollSeq = &v
 	}
 }

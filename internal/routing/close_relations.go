@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -25,10 +26,20 @@ import (
 // closes, an optional gate, an optional per-task filter, and whether it also
 // terminates the entity.
 //
-// Closing is orthogonal to routing. runCloses runs before handler matching, so
-// the SAME event can close prior tasks AND go on to create/fire its own (the
-// close can't catch a task that does not exist yet — e.g. the riding task a
-// terminating event mints for its lifecycle blueprint).
+// Closing is orthogonal to routing. The close phase runs before handler
+// matching, so the SAME event can close prior tasks AND go on to create/fire
+// its own (the close can't catch a task that does not exist yet — e.g. the
+// riding task a terminating event mints for its lifecycle blueprint).
+//
+// Two mechanisms carry the relations. A typed sibling close (CI green closes
+// the CI failure, a submitted review closes its request) runs through
+// runCloses: one task close per target, each its own transaction, with the
+// relation's prepare/keep hooks deciding per task. A TERMINATING relation
+// runs through the entity store's CloseTerminalSystem instead: the entity
+// flip and every task it resolves in one transaction, guarded on the
+// entity's version the event was judged at — see HandleEvent's terminating
+// arm. The relation data is the same shape either way; terminatesEntity is
+// what picks the mechanism.
 
 // closeContext is the per-firing value a relation's prepare step computes once
 // and its keep predicate consumes per task (a reviewer dedup key, the new
@@ -53,13 +64,26 @@ type closeRelation struct {
 	// keep decides per task whether it actually closes (dedup-key narrowing,
 	// member-aware skip). nil keep = close every active task of a target type.
 	keep func(evt domain.Event, ctx closeContext, t domain.Task) bool
-	// terminatesEntity also flips the entity to closed after the tasks close
-	// (stop polling / straggler tasks). This is what makes an event
-	// "entity-terminating" — there is no separate hardcoded set.
+	// terminatesEntity also flips the entity to closed, in the same
+	// transaction as the tasks close (stop polling / straggler tasks). This
+	// is what makes an event "entity-terminating" — there is no separate
+	// hardcoded set — and it selects the guarded single-transaction close
+	// over the per-task typed close; a terminating relation carries no
+	// prepare/keep hooks, since the whole set closes or nothing does.
 	terminatesEntity bool
 	// closeReason audits why the task closed. Defaults to "auto_closed_by_event".
 	closeReason string
 }
+
+// closeReasonReconciled is the close reason the poll's close obligation
+// stamps on the tasks it closes. Deliberately distinct from the event-driven
+// reasons ("auto_closed_by_event", "entity_closed"): those name a transition
+// that resolved the task, and this one had no transition to name — it closed
+// the task because the entity's stored snapshot said the work was already
+// over and the close that should have followed was lost. Keeping them apart
+// is what makes the audit trail honest about which mechanism fired, and
+// readable as a signal that closes are being lost somewhere upstream.
+const closeReasonReconciled = "reconciled"
 
 // closeRelations is the system-declared close model. Behavior here is a
 // faithful migration of the prior close_checks.go logic; the shape is now
@@ -141,6 +165,31 @@ var closeRelations = []closeRelation{
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
 	},
+	// The poll observed a terminal snapshot on an entity still active with
+	// no close in flight → the close that was lost, performed now. An
+	// entity has one source, so the union of the three terminal sets is
+	// safe: the types of another source have no open task to match. The
+	// terminating events' own types stay excluded, as in the sets above, so
+	// a lifecycle task riding an auto-run survives here too.
+	{
+		onEvents:         []string{domain.EventSystemEntityCloseOwed},
+		closes:           closeOwedCloseTypes(),
+		terminatesEntity: true,
+		closeReason:      closeReasonReconciled,
+	},
+}
+
+// terminatingRelationFor returns the terminating relation an event type
+// fires, or nil when the event terminates nothing. At most one relation
+// terminates for a given type; the test on EntityTerminatingEvents pins that.
+func terminatingRelationFor(eventType string) *closeRelation {
+	for ri := range closeRelations {
+		rel := &closeRelations[ri]
+		if rel.terminatesEntity && slices.Contains(rel.onEvents, eventType) {
+			return rel
+		}
+	}
+	return nil
 }
 
 // EntityTerminatingEvents is the set of event types that flip the entity to
@@ -191,6 +240,32 @@ func jiraIssueUnreachableCloseTypes() []string {
 	return jiraCloseTypesExcept(domain.EventJiraIssueUnreachable)
 }
 
+// closeOwedCloseTypes is what the poll's close obligation cleans up: the
+// union of the GitHub terminal set, the Jira completed set and the Jira
+// unreachable set, deduplicated, minus every terminating event's own type.
+// An entity has one source, so the types of the other source are no-ops.
+// The subtraction is explicit rather than inherited, because the two Jira
+// sets each spare only their own terminator: the obligation does not know
+// which transition was lost, so it spares them all — a task of one of those
+// types may be a lifecycle task riding the run its transition started.
+func closeOwedCloseTypes() []string {
+	spared := map[string]bool{}
+	for _, et := range domain.EntityTerminatingEventTypes() {
+		spared[et] = true
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, set := range [][]string{githubPRTerminalCloseTypes(), jiraIssueTerminalCloseTypes(), jiraIssueUnreachableCloseTypes()} {
+		for _, et := range set {
+			if !seen[et] && !spared[et] {
+				seen[et] = true
+				out = append(out, et)
+			}
+		}
+	}
+	return out
+}
+
 // jiraCloseTypesExcept builds an entity-wide Jira close set: every
 // assignee-centric type plus the unassigned pool task, minus the terminating
 // event's own type. That exclusion is the load-bearing part — a terminating
@@ -206,15 +281,12 @@ func jiraCloseTypesExcept(terminator string) []string {
 	return append(out, domain.EventJiraIssueAvailable)
 }
 
-// runCloses applies every close relation matching evt: it closes the active
-// tasks the event resolves (typed siblings and/or the entity-wide set) and
-// reports whether the entity should flip to closed. This is the single close
-// phase — both "ci_check_passed closes ci_check_failed" and "pr_merged closes
-// everything" run through here, distinguished only by relation data.
-//
-// closedAny drives the tasks_updated broadcast; terminate drives the entity
-// state flip. A terminating relation sets terminate even when no tasks exist to
-// close (a merged PR with no live tasks still closes its entity).
+// runCloses applies every typed (non-terminating) close relation matching
+// evt: it closes the active tasks the event resolves and reports whether any
+// closed, which drives the tasks_updated broadcast. Terminating relations
+// never reach here — HandleEvent routes them through the entity store's
+// single guarded transaction instead, so a terminating event's tasks and
+// its entity flip commit together rather than one transaction per task.
 //
 // The returned error is the close phase's routing obligation: a task this event
 // resolves that is still open is work nothing else re-derives, because the
@@ -224,7 +296,7 @@ func jiraCloseTypesExcept(terminator string) []string {
 // list or one bad close must not stop the siblings from closing, and the replay
 // only re-attempts what is still active (the list read returns active tasks
 // only, and a task close is a no-op on a terminal row).
-func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, entityID string) (closedAny, terminate bool, err error) {
+func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, entityID string) (closedAny bool, err error) {
 	ctx, span := tracer.Start(ctx, "route.close", trace.WithAttributes(telemetry.EntityID(entityID)))
 	defer span.End()
 
@@ -234,11 +306,8 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 	var errs []error
 	for ri := range closeRelations {
 		rel := &closeRelations[ri]
-		if !slices.Contains(rel.onEvents, evt.EventType) {
+		if rel.terminatesEntity || !slices.Contains(rel.onEvents, evt.EventType) {
 			continue
-		}
-		if rel.terminatesEntity {
-			terminate = true
 		}
 
 		var targets []domain.Task
@@ -288,7 +357,70 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 			closed++
 		}
 	}
-	return closedAny, terminate, errors.Join(errs...)
+	return closedAny, errors.Join(errs...)
+}
+
+// runTerminatingClose is the close phase for an entity-terminating event:
+// the entity flip and every task the relation resolves in ONE transaction,
+// guarded on the entity being active and — when judgedAt is non-nil — on its
+// poll_seq still being the version the event was judged at. See
+// EntityStore.CloseTerminalSystem for the transaction; this is the routing
+// half: the post-commit stop of the conversations the transaction stamped,
+// the artifact teardown behind it, and the tasks-updated nudge, sequenced
+// exactly as closeTaskWithAudit sequences them for a typed close.
+//
+// closed=false means the guard declined and nothing was written: the entity
+// reopened (or was re-polled) between the event's enqueue and now, so the
+// snapshot this event was judged against is gone and the newer snapshot's
+// own cycle owns the entity's fate. The caller consumes the event with the
+// stale_terminal disposition rather than replaying it — a replay would only
+// find the same newer version.
+//
+// Every failure is the close phase's routing obligation: the transaction
+// rolled back whole, so the replay finds the entity still active and every
+// task still open, and re-attempts all of it. There is no partial state a
+// retry could be blind to, which is what the single transaction buys over
+// the per-task closes a typed relation runs.
+func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt domain.Event, entityID string, rel *closeRelation, judgedAt *int64) (closed bool, err error) {
+	ctx, span := tracer.Start(ctx, "route.close", trace.WithAttributes(telemetry.EntityID(entityID)))
+	defer span.End()
+
+	reason := rel.closeReason
+	if reason == "" {
+		reason = "auto_closed_by_event"
+	}
+	res, err := r.entities.CloseTerminalSystem(ctx, orgID, entityID, judgedAt, rel.closes, reason, evt.EventType, evt.ID)
+	if err != nil {
+		span.SetStatus(codes.Error, "terminating close")
+		routerLog.ErrorContext(ctx, "terminating close failed", "entity_id", entityID, "on_event", evt.EventType, "error", err)
+		return false, err
+	}
+	span.SetAttributes(telemetry.Count(len(res.ClosedTaskIDs)))
+	if !res.Closed {
+		span.SetAttributes(telemetry.Outcome("stale_terminal"))
+		routerLog.WarnContext(ctx, "terminating close declined: entity is no longer at the version the event was judged at",
+			"entity_id", entityID, "on_event", evt.EventType)
+		return false, nil
+	}
+	for _, taskID := range res.ClosedTaskIDs {
+		routerLog.InfoContext(ctx, "closed task", "task_id", taskID, "on_event", evt.EventType, "reason", reason)
+		r.stopConversationsOnClosedTask(orgID, taskID, res.ActiveConversationIDs[taskID])
+		// Behind the stop, never beside it — see closeTaskWithAudit.
+		if r.spawner != nil {
+			r.spawner.TeardownTaskArtifactsSystem(ctx, orgID, taskID)
+		}
+	}
+	if evt.EventType == domain.EventSystemEntityCloseOwed {
+		// Worth a line every time: the obligation firing means a close was
+		// lost upstream, which is the signal it exists to make visible rather
+		// than absorb.
+		routerLog.WarnContext(ctx, "closed entity whose snapshot was already terminal; the close that should have preceded this was lost",
+			"entity_id", entityID, "tasks_closed", len(res.ClosedTaskIDs))
+	}
+	if len(res.ClosedTaskIDs) > 0 {
+		r.broadcastTasksUpdated(orgID)
+	}
+	return true, nil
 }
 
 // --- relation hooks ---------------------------------------------------------
@@ -481,9 +613,10 @@ func (r *Router) stopConversationsOnClosedTask(orgID, taskID string, conversatio
 }
 
 // closeTaskWithAudit closes a task, records the closing event in task_events,
-// and stops the conversations working on it. Every close goes through here
-// (including the entity-wide terminating close), so cancellation + audit are
-// uniform.
+// and stops the conversations working on it. Every typed close goes through
+// here; the terminating close runs the same task-close body inside the entity
+// store's transaction and then the same post-commit sequence
+// (runTerminatingClose), so cancellation + audit are uniform.
 //
 // The first three writes — the task's terminal flip, the audit row, and
 // `cancel_requested` on the blueprints behind the task's then-active

@@ -194,32 +194,34 @@ func TestCloseCascade_TearsDownTheTasksArtifacts(t *testing.T) {
 	}
 }
 
-// TestCloseCascade_ReconcilerCloseTearsDownToo pins the other door into the
-// same cascade. The reconciler closes a task nobody dispositioned and no event
-// reached — a close lost upstream — through closeTaskWithAudit, so it inherits
-// the teardown rather than needing its own.
-func TestCloseCascade_ReconcilerCloseTearsDownToo(t *testing.T) {
+// TestCloseCascade_ObligationCloseTearsDownToo pins the other door into the
+// same cascade. The poll's close obligation closes a task nobody dispositioned
+// and no transition reached — a close lost upstream — through the same
+// terminating close a real transition takes, so it inherits the teardown
+// rather than needing its own.
+func TestCloseCascade_ObligationCloseTearsDownToo(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
 	sp, closes := teardownSpawner(t, database)
 	r.spawner = sp
 
-	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#reconciled")
+	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "octo/repo#9")
 	_, convID := seedRunOnTask(t, database, taskID, "completed", "completed")
-	prID, reviewID := seedUnresolvedArtifacts(t, database, convID, "owner/repo", 7)
+	prID, reviewID := seedUnresolvedArtifacts(t, database, convID, "octo/repo", 9)
 
-	// The divergence the sweep exists to repair: the entity's snapshot says
-	// merged, but no close ever ran against it.
-	if _, err := database.Exec(
-		`UPDATE entities SET snapshot_json = ? WHERE id = ?`,
-		`{"state":"closed","merged":true}`, entityID,
-	); err != nil {
+	// The divergence the obligation repairs: the entity's snapshot says
+	// merged, but no close ever ran against it. The next poll observes the
+	// merged state again and records the obligation.
+	if _, err := sqlitestore.New(database).Entities.UpdateSnapshot(context.Background(), runmode.LocalDefaultOrgID, entityID, prSnapshotJSON(t, "MERGED")); err != nil {
 		t.Fatalf("stamp a terminal snapshot: %v", err)
 	}
-	r.reconcileOrgTerminalEntities(context.Background(), runmode.LocalDefaultOrgID)
+	pollGitHub(t, database, newFakeGitHub(t, "MERGED"))
+	if err := r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drainEventQueue: %v", err)
+	}
 
 	if n := activeTaskCount(t, database, entityID); n != 0 {
-		t.Fatalf("active tasks = %d, want 0 — the reconciler closes the task", n)
+		t.Fatalf("active tasks = %d, want 0 — the obligation closes the task", n)
 	}
 	if got := artifactState(t, database, prID); got != domain.ArtifactStatePRClosed {
 		t.Errorf("draft PR artifact state = %q, want %q", got, domain.ArtifactStatePRClosed)

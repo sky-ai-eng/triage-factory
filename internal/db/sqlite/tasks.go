@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -38,8 +39,14 @@ func (s *taskStore) Get(ctx context.Context, orgID, taskID string) (*domain.Task
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	return getTaskRow(ctx, s.q, taskID)
+}
+
+// getTaskRow is Get's body on a caller-supplied queryer, so a transaction
+// that just inserted a task can read it back on the same connection.
+func getTaskRow(ctx context.Context, q queryer, taskID string) (*domain.Task, error) {
 	var t domain.Task
-	err := scanTaskFromRow(s.q.QueryRowContext(ctx, `
+	err := scanTaskFromRow(q.QueryRowContext(ctx, `
 		SELECT `+sqliteTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id
@@ -700,6 +707,43 @@ func (s *taskStore) OwnerTeamForLatestTaskInTypesSystem(ctx context.Context, org
 	return teamID, nil
 }
 
+// ListOpenOnClosedEntitiesSystem is the checker's Count B read: open tasks
+// whose entity is closed. See the interface doc for why steady state is empty.
+func (s *taskStore) ListOpenOnClosedEntitiesSystem(ctx context.Context, orgID string) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	riding := domain.EntityTerminatingEventTypes()
+	placeholders := make([]string, len(riding))
+	args := make([]any, 0, len(riding))
+	for i, et := range riding {
+		placeholders[i] = "?"
+		args = append(args, et)
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT t.id
+		FROM tasks t
+		JOIN entities e ON e.id = t.entity_id
+		WHERE t.status IN ('queued', 'in_progress', 'snoozed')
+		  AND e.state = 'closed'
+		  AND t.event_type NOT IN (`+strings.Join(placeholders, ", ")+`)
+		ORDER BY t.created_at ASC, t.id ASC
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *taskStore) FindActiveByEntity(ctx context.Context, orgID, entityID string) ([]domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -804,6 +848,50 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, false, err
 	}
+	var task *domain.Task
+	var created bool
+	// One transaction, entity first: the entity-active check and the
+	// select-or-insert commit together, so a terminating close cannot land
+	// between them and leave a task on an entity nothing will close again.
+	// SQLite has one writer, so the transaction itself is the lock the
+	// Postgres impl takes with FOR UPDATE.
+	err := inTx(ctx, s.q, func(tx queryer) error {
+		if err := assertEntityActive(ctx, tx, entityID, eventType); err != nil {
+			return err
+		}
+		var err error
+		task, created, err = findOrCreateTaskAtLocked(ctx, tx, entityID, teamID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+		return err
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return task, created, nil
+}
+
+// assertEntityActive is the mint's half of the mint/close serialization: a
+// closed or missing entity refuses the mint with db.ErrEntityClosed, except
+// for the lifecycle task a terminating transition mints on the entity it
+// just closed. Run inside the mint's own transaction so the answer it reads
+// is the answer the insert commits against.
+func assertEntityActive(ctx context.Context, q queryer, entityID, eventType string) error {
+	var state string
+	err := q.QueryRowContext(ctx, `SELECT state FROM entities WHERE id = ?`, entityID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.ErrEntityClosed
+	}
+	if err != nil {
+		return err
+	}
+	if state != "active" && !domain.TaskMayRideClosedEntity(eventType) {
+		return db.ErrEntityClosed
+	}
+	return nil
+}
+
+// findOrCreateTaskAtLocked is FindOrCreateAt's select-or-insert, run on a
+// transaction that has already verified the entity is active.
+func findOrCreateTaskAtLocked(ctx context.Context, q queryer, entityID, teamID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
 	// teamID is the owning/attributed team stamped on a new row. Empty is
 	// allowed and means "unresolved owner" — author-centric routing couldn't
 	// pick a single team — and is inserted as NULL. A NULL-team task is still
@@ -818,7 +906,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 	// situation already tasked by another team's rule returns that
 	// task here rather than spawning a duplicate.
 	var existing domain.Task
-	err := scanTaskFromRow(s.q.QueryRowContext(ctx, `
+	err := scanTaskFromRow(q.QueryRowContext(ctx, `
 		SELECT `+sqliteTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id
@@ -842,7 +930,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 	// team_id is the owning/attributed team; 'team' is the canonical
 	// visibility. The broader visibility set is written separately via
 	// SetVisibilityTeams.
-	_, err = s.q.ExecContext(ctx, `
+	_, err = q.ExecContext(ctx, `
 		INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id,
 		                   status, priority_score, scoring_status, created_at,
 		                   team_id, visibility)
@@ -850,7 +938,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt.UTC(), teamBind)
 	if err != nil {
 		var raced domain.Task
-		err2 := scanTaskFromRow(s.q.QueryRowContext(ctx, `
+		err2 := scanTaskFromRow(q.QueryRowContext(ctx, `
 			SELECT `+sqliteTaskColumnsWithEntity+`
 			FROM tasks t
 			JOIN entities e ON t.entity_id = e.id
@@ -864,7 +952,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 		return nil, false, err
 	}
 
-	task, err := s.Get(ctx, orgID, id)
+	task, err := getTaskRow(ctx, q, id)
 	if err != nil {
 		return nil, false, err
 	}
@@ -958,55 +1046,67 @@ func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context,
 		conversationIDs []string
 	)
 	err := inTx(ctx, s.q, func(q queryer) error {
-		t, err := closeTaskRow(ctx, q, taskID, closeReason, closeEventType)
-		if err != nil {
-			return fmt.Errorf("close task: %w", err)
-		}
-		closed = t != nil
-
-		if closingEventID != "" {
-			if _, err := q.ExecContext(ctx, `
-				INSERT OR IGNORE INTO task_events (task_id, event_id, kind, created_at)
-				VALUES (?, ?, 'closed', ?)
-			`, taskID, closingEventID, time.Now().UTC()); err != nil {
-				return fmt.Errorf("record close audit: %w", err)
-			}
-		}
-		if !closed {
-			return nil
-		}
-
-		// Drained and closed before the UPDATE below rather than on a defer:
-		// both ride the one connection this tx holds, and an open cursor is
-		// the kind of thing a driver is entitled to refuse to write around.
-		if conversationIDs, err = scanActiveConversationIDs(ctx, q, taskID); err != nil {
-			return fmt.Errorf("list active conversations: %w", err)
-		}
-
-		// `status = 'running' AND cancel_requested = 0` is
-		// RequestRunCancelSystem's guard verbatim — a blueprint that already
-		// finished is not a blueprint this close is entitled to call off. The
-		// Postgres twin carries the model; this is the same predicate in the
-		// other dialect.
-		if _, err := q.ExecContext(ctx, `
-			UPDATE blueprint_runs SET cancel_requested = 1
-			WHERE status = 'running'
-			  AND cancel_requested = 0
-			  AND id IN (
-			      SELECT c.blueprint_run_id FROM conversations c
-			      WHERE c.task_id = ?
-			        AND c.blueprint_run_id IS NOT NULL
-			        AND (c.status IS NULL OR c.status NOT IN (`+conversationTerminalStatusesSQL+`))
-			  )
-		`, taskID); err != nil {
-			return fmt.Errorf("stamp run cancel intent: %w", err)
-		}
-		return nil
+		var err error
+		closed, conversationIDs, err = closeTaskWithCancelIntent(ctx, q, taskID, closeReason, closeEventType, closingEventID)
+		return err
 	})
 	if err != nil {
 		return false, nil, err
 	}
 	return closed, conversationIDs, nil
+}
+
+// closeTaskWithCancelIntent is the body of CloseWithConversationCancelIntentSystem
+// on a transaction the caller owns: the task's terminal flip, the audit row
+// when closingEventID names one, and the cancel intent on the blueprints
+// behind its then-active conversations. The entity store's terminating close
+// runs it per task inside its own transaction, so a task closed there and one
+// closed by a typed sibling close produce identical rows.
+func closeTaskWithCancelIntent(ctx context.Context, q queryer, taskID, closeReason, closeEventType, closingEventID string) (closed bool, conversationIDs []string, err error) {
+	t, err := closeTaskRow(ctx, q, taskID, closeReason, closeEventType)
+	if err != nil {
+		return false, nil, fmt.Errorf("close task: %w", err)
+	}
+	closed = t != nil
+
+	if closingEventID != "" {
+		if _, err := q.ExecContext(ctx, `
+			INSERT OR IGNORE INTO task_events (task_id, event_id, kind, created_at)
+			VALUES (?, ?, 'closed', ?)
+		`, taskID, closingEventID, time.Now().UTC()); err != nil {
+			return false, nil, fmt.Errorf("record close audit: %w", err)
+		}
+	}
+	if !closed {
+		return false, nil, nil
+	}
+
+	// Drained and closed before the UPDATE below rather than on a defer:
+	// both ride the one connection this tx holds, and an open cursor is
+	// the kind of thing a driver is entitled to refuse to write around.
+	if conversationIDs, err = scanActiveConversationIDs(ctx, q, taskID); err != nil {
+		return false, nil, fmt.Errorf("list active conversations: %w", err)
+	}
+
+	// `status = 'running' AND cancel_requested = 0` is
+	// RequestRunCancelSystem's guard verbatim — a blueprint that already
+	// finished is not a blueprint this close is entitled to call off. The
+	// Postgres twin carries the model; this is the same predicate in the
+	// other dialect.
+	if _, err := q.ExecContext(ctx, `
+		UPDATE blueprint_runs SET cancel_requested = 1
+		WHERE status = 'running'
+		  AND cancel_requested = 0
+		  AND id IN (
+		      SELECT c.blueprint_run_id FROM conversations c
+		      WHERE c.task_id = ?
+		        AND c.blueprint_run_id IS NOT NULL
+		        AND (c.status IS NULL OR c.status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  )
+	`, taskID); err != nil {
+		return false, nil, fmt.Errorf("stamp run cancel intent: %w", err)
+	}
+	return true, conversationIDs, nil
 }
 
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {

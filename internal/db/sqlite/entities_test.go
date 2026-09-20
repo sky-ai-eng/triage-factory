@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"database/sql"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -128,6 +129,32 @@ func newSQLiteEntitySeeder(conn *sql.DB) dbtest.EntitySeeder {
 				t.Fatalf("seed user %s: %v", name, err)
 			}
 			return id
+		},
+		BackdatePoll: func(t *testing.T, entityID string, age time.Duration) {
+			t.Helper()
+			// Local is one process: the clock that stamped the column and
+			// the one the read's cutoff comes from are the same, so rewind
+			// it in Go.
+			if _, err := conn.Exec(`UPDATE entities SET last_polled_at = ? WHERE id = ?`,
+				time.Now().UTC().Add(-age), entityID); err != nil {
+				t.Fatalf("backdate last_polled_at for %s: %v", entityID, err)
+			}
+		},
+		QueueRow: func(t *testing.T, entityID, eventType, status string) {
+			t.Helper()
+			eventID := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at)
+				VALUES (?, ?, ?, '', '{}', ?)
+			`, eventID, entityID, eventType, time.Now().UTC()); err != nil {
+				t.Fatalf("seed event %s on %s: %v", eventType, entityID, err)
+			}
+			if _, err := conn.Exec(`
+				INSERT INTO event_queue (event_id, entity_id, event_type, status)
+				VALUES (?, ?, ?, ?)
+			`, eventID, entityID, eventType, status); err != nil {
+				t.Fatalf("seed queue row %s (%s) on %s: %v", eventType, status, entityID, err)
+			}
 		},
 		CommissionedBy: func(t *testing.T, entityID string) string {
 			t.Helper()

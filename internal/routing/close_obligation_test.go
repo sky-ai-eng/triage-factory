@@ -57,24 +57,12 @@ func enqueueMerged(t *testing.T, database *sql.DB, entityID string) {
 	}
 }
 
-// entityCloseOutageStore fails entities.CloseSystem — the entity half of the
-// close phase, the write whose loss leaves a shipped PR polled forever.
-type entityCloseOutageStore struct {
-	dbpkg.EntityStore
-	o *outage
-}
-
-func (s entityCloseOutageStore) CloseSystem(ctx context.Context, orgID, id string) (*domain.Entity, error) {
-	if s.o.down() {
-		return nil, errOutage
-	}
-	return s.EntityStore.CloseSystem(ctx, orgID, id)
-}
-
-// taskCloseOutageStore fails ONE named task's close, so a test can watch its
-// siblings close on the same pass instead of being cancelled by it. The close
-// the router performs is the combined one — task flip, audit row, and stop
-// intent in a single transaction — so that is what this intercepts.
+// taskCloseOutageStore fails ONE named task's typed close, so a test can watch
+// its siblings close on the same pass instead of being cancelled by it. The
+// typed close the router performs is the combined one — task flip, audit row,
+// and stop intent in a single transaction — so that is what this intercepts.
+// A terminating close does not pass through here: it is one transaction on
+// the entity store (closeTerminalOutageStore fails that one).
 type taskCloseOutageStore struct {
 	dbpkg.TaskStore
 	failTaskID string
@@ -97,16 +85,17 @@ func closeAuditCount(t *testing.T, database *sql.DB, taskID string) int {
 	return n
 }
 
-// TestCloseObligation_EntityCloseFails_RequeuesThenClosesOnRetry is the
-// headline: the entity flip is load-bearing and unrecoverable if dropped — a
-// merged PR whose row stays 'active' is polled forever, its stragglers keep
-// routing, and the transition that would have closed it will never be emitted
-// again. So the failure must leave the event un-consumed.
-func TestCloseObligation_EntityCloseFails_RequeuesThenClosesOnRetry(t *testing.T) {
+// TestCloseObligation_TerminatingCloseFails_RequeuesThenClosesOnRetry is the
+// headline: the terminating close is load-bearing and, if dropped, is repaired
+// only by the poll's obligation one cycle later — a merged PR whose row stays
+// 'active' is polled again, its stragglers keep routing meanwhile, and the
+// transition that would have closed it will never be emitted again. So the
+// failure must leave the event un-consumed.
+func TestCloseObligation_TerminatingCloseFails_RequeuesThenClosesOnRetry(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
 	o := &outage{remaining: 1}
-	r.entities = entityCloseOutageStore{EntityStore: sqlitestore.New(database).Entities, o: o}
+	r.entities = closeTerminalOutageStore{EntityStore: sqlitestore.New(database).Entities, o: o}
 
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
 		"github", "owner/repo#close-obligation", "pr", "PR", "https://example.com")
@@ -152,15 +141,17 @@ func TestCloseObligation_EntityCloseFails_RequeuesThenClosesOnRetry(t *testing.T
 	}
 }
 
-// TestCloseObligation_OneSiblingCloseFails_OthersStillClose pins the
-// collect-don't-bail half. One task's close failing must not save the others
-// from a merge that already happened; and because the entity stays active, the
-// replay walks back into the close phase and finishes the one that was left.
+// TestCloseObligation_TerminatingCloseIsAllOrNothing pins the transaction
+// shape. A merge that closes several tasks either closes all of them and the
+// entity, or none of anything: a failure mid-way leaves every task open and
+// the entity active, and the replay does the whole job once, with exactly one
+// close-audit row per task.
 //
 // The entity NOT flipping on the failed pass is the load-bearing part: the
 // closed-entity gate drops a replayed event before the close phase, so an
-// entity closed here would hide the surviving task from its own retry.
-func TestCloseObligation_OneSiblingCloseFails_OthersStillClose(t *testing.T) {
+// entity closed with a task still open would hide that task from its own
+// retry — which is why the flip and the task closes are one transaction.
+func TestCloseObligation_TerminatingCloseIsAllOrNothing(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
 
@@ -178,31 +169,28 @@ func TestCloseObligation_OneSiblingCloseFails_OthersStillClose(t *testing.T) {
 	if err != nil || len(live) != 2 {
 		t.Fatalf("setup: active tasks = %d (err %v), want 2", len(live), err)
 	}
-	doomed := live[0].ID
 
-	r.tasks = &taskCloseOutageStore{TaskStore: testTaskStore(database), failTaskID: doomed, o: &outage{remaining: 1}}
+	r.entities = closeTerminalOutageStore{EntityStore: sqlitestore.New(database).Entities, o: &outage{remaining: 1}}
 	enqueueMerged(t, database, entity.ID)
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue: %v", err)
 	}
 
-	remaining, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
-	if err != nil {
-		t.Fatalf("list active tasks: %v", err)
-	}
-	if len(remaining) != 1 || remaining[0].ID != doomed {
-		t.Fatalf("active tasks after the failed close = %d, want exactly the one whose close failed — a broken sibling must not block the rest", len(remaining))
+	if n := activeTaskCount(t, database, entity.ID); n != 2 {
+		t.Fatalf("active tasks after the failed close = %d, want both — a terminating close lands whole or not at all", n)
 	}
 	if status, attempts, _ := mergedQueueRow(t, database); status != domain.QueuedEventStatusPending || attempts != 1 {
 		t.Errorf("row = (%s, attempts %d), want (pending, 1)", status, attempts)
 	}
 	if got := entityState(t, database, entity.ID); got != "active" {
-		t.Errorf("entity state = %q, want active — closing it would drop the replay at the closed-entity gate and strand the surviving task", got)
+		t.Errorf("entity state = %q, want active — closing it would drop the replay at the closed-entity gate", got)
+	}
+	for _, task := range live {
+		if n := closeAuditCount(t, database, task.ID); n != 0 {
+			t.Errorf("close-audit rows on %s after the failed close = %d, want 0", task.ID, n)
+		}
 	}
 
-	// The replay closes only what is still open, and records no second
-	// close-audit row for the task that already closed.
-	closedFirst := live[1].ID
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue after recovery: %v", err)
 	}
@@ -212,11 +200,10 @@ func TestCloseObligation_OneSiblingCloseFails_OthersStillClose(t *testing.T) {
 	if got := entityState(t, database, entity.ID); got != "closed" {
 		t.Errorf("entity state = %q, want closed", got)
 	}
-	if n := closeAuditCount(t, database, closedFirst); n != 1 {
-		t.Errorf("close-audit rows on the already-closed task = %d, want 1 — a replay must not double-audit", n)
-	}
-	if n := closeAuditCount(t, database, doomed); n != 1 {
-		t.Errorf("close-audit rows on the retried task = %d, want 1", n)
+	for _, task := range live {
+		if n := closeAuditCount(t, database, task.ID); n != 1 {
+			t.Errorf("close-audit rows on %s = %d, want exactly 1", task.ID, n)
+		}
 	}
 }
 

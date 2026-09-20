@@ -47,6 +47,13 @@ type QueuedEvent struct {
 	// to it rather than descending from it, because one cycle emits many
 	// events that route later and possibly elsewhere.
 	Traceparent string `json:"traceparent,omitempty"`
+	// EntityPollSeq is the entity's poll_seq at the moment this row's event
+	// was judged — the value the tracker's snapshot CAS advanced TO when it
+	// committed the batch — so a terminating close can refuse to land
+	// against any other version of the entity. Nil for a row that arrived
+	// through the ingest path rather than the CAS path: those carry no
+	// version, and the close they imply is guarded on state alone.
+	EntityPollSeq *int64 `json:"entity_poll_seq,omitempty"`
 }
 
 // Status values for QueuedEvent.Status.

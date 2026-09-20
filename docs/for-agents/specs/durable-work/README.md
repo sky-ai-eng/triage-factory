@@ -719,9 +719,12 @@ delivery ID and retains tombstones. This is a design check, not an implementatio
 
 ## 8. Open decisions
 
-- **O3 — Entity reconciliation:** move enforcement into tracker Phase 3 and keep a counting
-  checker? This is the recommendation and can ship independently. D1 defines what each poll must
-  enforce and the coverage required before removing the repair sweep.
+- **O3 — Entity reconciliation (decided):** enforcement moved into tracker Phase 3 and the
+  repair sweep became a counting checker. The shape chosen: the poll records a close obligation
+  (`system:entity:close_owed`) when it observes a terminal snapshot on an active entity with no
+  close in flight, and the router closes from it under the same version-guarded transaction a
+  real terminating transition takes; the tracker never closes inline. D1 defines what each poll
+  must enforce; the coverage gate it named is what the checker's read-only posture rests on.
 - **O4 — Stalled-run health:** which operation bounds or progress signals should detect and
   handle a stalled agent whose executor still renews its lease? Healthy runs have no total-duration
   cap. D3 sets initial lease timings and distinguishes ownership from progress; P4 must resolve

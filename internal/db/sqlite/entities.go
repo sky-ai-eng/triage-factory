@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -275,20 +276,6 @@ func (s *entityStore) Close(ctx context.Context, orgID, id string) (*domain.Enti
 		time.Now().UTC(), id))
 }
 
-func (s *entityStore) Reactivate(ctx context.Context, orgID, id string) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE entities SET state = 'active', closed_at = NULL WHERE id = ? AND state = 'closed'
-	`, id)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
-}
-
 // --- Admin-pool (`...System`) variants ---
 //
 // The `...System` methods on these stores let multi-mode
@@ -310,16 +297,30 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 }
 
 // ListActiveTerminalCandidatesSystem selects active entities whose stored
-// snapshot already reads terminal. json_valid guards the extraction so a
-// legacy ” / malformed snapshot is skipped rather than failing the scan —
-// an entity that never stored a snapshot has said nothing about whether its
-// subject finished. json_extract returns 1 for a JSON true, hence the
-// integer comparison on $.merged.
-func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, limit int) ([]domain.Entity, error) {
+// snapshot already reads terminal, unpolled for at least unpolledFor, with
+// no terminating close unsettled in the queue. json_valid guards the
+// extraction so a legacy ” / malformed snapshot is skipped rather than
+// failing the scan — an entity that never stored a snapshot has said nothing
+// about whether its subject finished. json_extract returns 1 for a JSON
+// true, hence the integer comparison on $.merged. The unpolled cutoff is
+// computed in Go: local is one process, so the clock that stamped
+// last_polled_at is this one.
+func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, unpolledFor time.Duration, limit int) ([]domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	args := []any{}
+	args := []any{time.Now().UTC().Add(-unpolledFor)}
+	settling := make([]string, 0, len(domain.EntityCloseSettlingEventTypes()))
+	for _, et := range domain.EntityCloseSettlingEventTypes() {
+		args = append(args, et)
+		settling = append(settling, "?")
+	}
+	settlingArm := `NOT EXISTS (
+		    SELECT 1 FROM event_queue q
+		    WHERE q.entity_id = entities.id
+		      AND q.status IN ('pending', 'processing')
+		      AND q.event_type IN (` + strings.Join(settling, ", ") + `)
+		  )`
 	// Each arm is omitted rather than emitted empty: `IN ()` is a syntax
 	// error, and a ref set with no ids (or no names) genuinely has nothing to
 	// match on that side. With neither, no Jira entity can be terminal.
@@ -351,6 +352,8 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		SELECT `+entitySelectCols+`
 		FROM entities
 		WHERE state = 'active'
+		  AND (last_polled_at IS NULL OR last_polled_at < ?)
+		  AND `+settlingArm+`
 		  AND json_valid(NULLIF(snapshot_json, ''))
 		  AND (
 		    (source = 'github' AND (
@@ -358,7 +361,7 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		       OR upper(COALESCE(json_extract(snapshot_json, '$.state'), '')) IN ('CLOSED', 'MERGED')
 		    ))`+jiraArm+`
 		  )
-		ORDER BY created_at ASC`+limitClause, args...)
+		ORDER BY created_at ASC, id ASC`+limitClause, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -520,8 +523,156 @@ func (s *entityStore) CloseSystem(ctx context.Context, orgID, id string) (*domai
 	return s.Close(ctx, orgID, id)
 }
 
-func (s *entityStore) ReactivateSystem(ctx context.Context, orgID, id string) (bool, error) {
-	return s.Reactivate(ctx, orgID, id)
+// ReactivateWithSnapshotCASSystem is the discovery reopen: state, closed_at
+// and the fresh snapshot in one statement under the poll_seq CAS. See the
+// interface doc for why the two halves must not be separate writes.
+func (s *entityStore) ReactivateWithSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE entities
+		SET state = 'active', closed_at = NULL, snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1
+		WHERE id = ? AND state = 'closed' AND poll_seq = ?
+	`, snapshotJSON, time.Now().UTC(), id, expectedPollSeq)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// CloseWithSnapshotCASSystem is the poll's own close — a terminal snapshot
+// and the closed state in one statement under the poll_seq CAS. No state
+// guard: a seed may land on a row another writer already closed, and the
+// CAS decides whose snapshot is current.
+func (s *entityStore) CloseWithSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	now := time.Now().UTC()
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE entities
+		SET state = 'closed', closed_at = COALESCE(closed_at, ?), snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1
+		WHERE id = ? AND poll_seq = ?
+	`, now, snapshotJSON, now, id, expectedPollSeq)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// CloseTerminalSystem is the terminating close — see the interface doc. On
+// SQLite the transaction is the lock: one writer at a time, so a mint and a
+// close on the same entity commit in some order and each sees the other's
+// result, which is all the Postgres FOR UPDATE buys.
+func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string) (db.TerminalCloseResult, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.TerminalCloseResult{}, err
+	}
+	res := db.TerminalCloseResult{ActiveConversationIDs: map[string][]string{}}
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var state string
+		var pollSeq int64
+		err := q.QueryRowContext(ctx, `SELECT state, poll_seq FROM entities WHERE id = ?`, entityID).Scan(&state, &pollSeq)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("lock entity: %w", err)
+		}
+		if state != "active" || (expected != nil && pollSeq != *expected) {
+			return nil
+		}
+
+		taskIDs, err := openTaskIDsByEntityAndTypes(ctx, q, entityID, closeTypes)
+		if err != nil {
+			return fmt.Errorf("list open tasks: %w", err)
+		}
+		for _, taskID := range taskIDs {
+			closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, taskID, closeReason, closeEventType, closingEventID)
+			if err != nil {
+				return fmt.Errorf("task %s: %w", taskID, err)
+			}
+			if !closed {
+				continue
+			}
+			res.ClosedTaskIDs = append(res.ClosedTaskIDs, taskID)
+			res.ActiveConversationIDs[taskID] = conversationIDs
+		}
+
+		// Guarded on state a second time even though this transaction read
+		// it active moments ago: the statement is the same one Close runs,
+		// so the two spellings of "flip an active entity" cannot drift.
+		flip, err := q.ExecContext(ctx, `
+			UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ? AND state = 'active'
+		`, time.Now().UTC(), entityID)
+		if err != nil {
+			return fmt.Errorf("close entity: %w", err)
+		}
+		n, err := flip.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errors.New("close entity: row changed under the transaction")
+		}
+		res.Closed = true
+		return nil
+	})
+	if err != nil {
+		return db.TerminalCloseResult{}, err
+	}
+	if !res.Closed {
+		return db.TerminalCloseResult{}, nil
+	}
+	return res, nil
+}
+
+// openTaskIDsByEntityAndTypes lists the entity's non-terminal tasks of the
+// given types, oldest first, for the terminating close to walk. An empty
+// type set matches nothing. Chunked on the IN list like every other
+// caller-supplied slice in this package.
+func openTaskIDsByEntityAndTypes(ctx context.Context, q queryer, entityID string, eventTypes []string) ([]string, error) {
+	var out []string
+	for _, chunk := range chunkIDs(eventTypes) {
+		placeholders := make([]string, len(chunk))
+		args := []any{entityID}
+		for i, et := range chunk {
+			placeholders[i] = "?"
+			args = append(args, et)
+		}
+		rows, err := q.QueryContext(ctx, `
+			SELECT id FROM tasks
+			WHERE entity_id = ? AND event_type IN (`+strings.Join(placeholders, ", ")+`)
+			  AND status NOT IN ('done', 'dismissed')
+			ORDER BY created_at ASC, id ASC
+		`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out = append(out, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 func (s *entityStore) DescriptionsSystem(ctx context.Context, orgID string, ids []string) (map[string]string, error) {

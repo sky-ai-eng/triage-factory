@@ -190,6 +190,29 @@ func TestHandleEventHandlerCreate_TriggerRequiresBlueprintID(t *testing.T) {
 	}
 }
 
+// TestHandleEventHandlerCreate_RejectsSystemEventType pins that a system
+// sentinel — including the poll's close obligation — is never a handler's
+// subject: the router matches no handler on one, so the create refuses it as
+// a field fault rather than storing a handler that would never fire.
+func TestHandleEventHandlerCreate_RejectsSystemEventType(t *testing.T) {
+	s := newTestServer(t)
+	configureEventSources(t, s)
+	for _, eventType := range []string{domain.EventSystemEntityCloseOwed, domain.EventSystemPollCompleted, domain.EventSystemRoutingDisposition} {
+		rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+			"event_type":       eventType,
+			"name":             "x",
+			"default_priority": 0.5,
+			"sort_order":       0,
+		})
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: expected 400, got %d: %s", eventType, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "event_type") {
+			t.Errorf("%s: the refusal should name the field: %s", eventType, rec.Body.String())
+		}
+	}
+}
+
 func TestHandleEventHandlerCreate_RejectsUnknownEventType(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
