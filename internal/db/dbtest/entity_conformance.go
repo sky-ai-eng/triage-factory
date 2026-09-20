@@ -44,6 +44,18 @@ type EntitySeeder struct {
 	// reads it as a SQL predicate, and a getter existing only to be asserted
 	// on would be dead code carrying an interface entry.
 	CommissionedBy func(t *testing.T, entityID string) string
+
+	// BackdatePoll rewinds an entity's last_polled_at by age, standing in
+	// for a poll that far in the past. Raw SQL because every store write
+	// stamps the column with now, and the terminal-candidate read's grace
+	// can only be exercised against a row old enough to be past it.
+	BackdatePoll func(t *testing.T, entityID string, age time.Duration)
+
+	// QueueRow inserts an events row of eventType on the entity and a queue
+	// row for it in the given status, standing in for a terminating close
+	// at that point in its life. Raw SQL because the queue store's own
+	// writers cannot place a row directly in 'processing' or 'failed'.
+	QueueRow func(t *testing.T, entityID, eventType, status string)
 }
 
 // RunEntityStoreConformance covers the entity-store contract every
@@ -57,11 +69,13 @@ type EntitySeeder struct {
 //     UpdateSnapshotCASSystem also stamping last_polled_at and
 //     PatchSnapshot deliberately leaving it alone.
 //   - MarkClosed is unconditional; Close only fires when state='active';
-//     Reactivate only fires when state='closed'.
+//     ReactivateWithSnapshotCASSystem and CloseWithSnapshotCASSystem write
+//     state and snapshot in one guarded statement.
 //   - ListActive filters on the documented predicates.
 //   - ListActiveTerminalCandidatesSystem surfaces active entities whose
 //     stored snapshot reads terminal (github exactly, jira against the
-//     caller's done-status union) and nothing else.
+//     caller's done-status union), unpolled past the grace, with no
+//     terminating close in flight — and nothing else.
 //   - Descriptions dedupes the input id list and only returns ids
 //     whose description is non-empty.
 //   - MarkPolledSystem advances last_polled_at without touching the
@@ -597,37 +611,130 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
-	t.Run("Reactivate_only_fires_on_closed", func(t *testing.T) {
+	t.Run("ReactivateWithSnapshotCASSystem_flips_state_and_snapshot_in_one_guarded_write", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
 		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#reac", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
+		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, ent.ID, `{"state":"MERGED","merged":true}`, ent.PollSeq); err != nil || !ok {
+			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
+		}
+		before := mustEntity(t, s, ctx, orgID, "github", "owner/repo#reac")
 
-		// Active entity: Reactivate is a no-op.
-		ok, err := s.Reactivate(ctx, orgID, ent.ID)
+		// Active entity: the state guard declines and nothing is written —
+		// the snapshot handed in must not land on a row the guard refused.
+		ok, err := s.ReactivateWithSnapshotCASSystem(ctx, orgID, ent.ID, `{"state":"OPEN","merged":false}`, before.PollSeq)
 		if err != nil {
-			t.Fatalf("Reactivate (active): %v", err)
+			t.Fatalf("ReactivateWithSnapshotCASSystem (active): %v", err)
 		}
 		if ok {
-			t.Errorf("Reactivate on active entity should return ok=false")
+			t.Error("ok = true on an active entity, want the guard to decline")
+		}
+		if got := mustEntity(t, s, ctx, orgID, "github", "owner/repo#reac"); got.SnapshotJSON != before.SnapshotJSON || got.PollSeq != before.PollSeq {
+			t.Errorf("a declined reactivate wrote something: %+v", got)
 		}
 
-		// Close, then reactivate.
 		if _, err := s.Close(ctx, orgID, ent.ID); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		ok, err = s.Reactivate(ctx, orgID, ent.ID)
+
+		// Closed, but a stale poll_seq: the CAS declines and nothing is
+		// written either.
+		ok, err = s.ReactivateWithSnapshotCASSystem(ctx, orgID, ent.ID, `{"state":"OPEN","merged":false}`, before.PollSeq+7)
 		if err != nil {
-			t.Fatalf("Reactivate (closed): %v", err)
+			t.Fatalf("ReactivateWithSnapshotCASSystem (stale seq): %v", err)
+		}
+		if ok {
+			t.Error("ok = true for a stale poll_seq, want the CAS to lose")
+		}
+		if got := mustEntity(t, s, ctx, orgID, "github", "owner/repo#reac"); got.State != "closed" {
+			t.Errorf("a lost CAS reactivated the entity: %+v", got)
+		}
+
+		// Closed at the right version: state, closed_at and the snapshot
+		// all move in the one statement, and poll_seq advances.
+		ok, err = s.ReactivateWithSnapshotCASSystem(ctx, orgID, ent.ID, `{"state":"OPEN","merged":false}`, before.PollSeq)
+		if err != nil {
+			t.Fatalf("ReactivateWithSnapshotCASSystem (closed): %v", err)
 		}
 		if !ok {
-			t.Errorf("Reactivate on closed entity should return ok=true")
+			t.Fatal("ok = false on a closed entity at its current poll_seq, want the reopen to land")
 		}
-		got, _ := s.Get(ctx, orgID, ent.ID)
+		got := mustEntity(t, s, ctx, orgID, "github", "owner/repo#reac")
 		if got.State != "active" || got.ClosedAt != nil {
-			t.Errorf("Reactivate didn't restore state — %+v", got)
+			t.Errorf("state after reopen = (%q, closed_at %v), want (active, nil)", got.State, got.ClosedAt)
+		}
+		if !strings.Contains(got.SnapshotJSON, `"OPEN"`) {
+			t.Errorf("snapshot after reopen = %q, want the open snapshot — state and snapshot are one write", got.SnapshotJSON)
+		}
+		if got.PollSeq != before.PollSeq+1 {
+			t.Errorf("poll_seq = %d, want %d (bumped exactly once)", got.PollSeq, before.PollSeq+1)
+		}
+		if got.LastPolledAt == nil || !got.LastPolledAt.After(*before.LastPolledAt) {
+			t.Errorf("last_polled_at = %v, want stamped past %v", got.LastPolledAt, before.LastPolledAt)
+		}
+	})
+
+	t.Run("CloseWithSnapshotCASSystem_writes_terminal_snapshot_and_closes_in_one_guarded_write", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#cws", "pr", "T", "")
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		// A stale poll_seq loses and writes nothing: the row stays active
+		// with no snapshot, exactly as it was.
+		ok, err := s.CloseWithSnapshotCASSystem(ctx, orgID, ent.ID, `{"state":"MERGED","merged":true}`, ent.PollSeq+1)
+		if err != nil {
+			t.Fatalf("CloseWithSnapshotCASSystem (stale seq): %v", err)
+		}
+		if ok {
+			t.Error("ok = true for a stale poll_seq, want the CAS to lose")
+		}
+		if got := mustEntity(t, s, ctx, orgID, "github", "owner/repo#cws"); got.State != "active" || got.SnapshotJSON != "" {
+			t.Errorf("a lost CAS wrote something: %+v", got)
+		}
+
+		ok, err = s.CloseWithSnapshotCASSystem(ctx, orgID, ent.ID, `{"state":"MERGED","merged":true}`, ent.PollSeq)
+		if err != nil {
+			t.Fatalf("CloseWithSnapshotCASSystem: %v", err)
+		}
+		if !ok {
+			t.Fatal("ok = false at the entity's current poll_seq, want the close to land")
+		}
+		got := mustEntity(t, s, ctx, orgID, "github", "owner/repo#cws")
+		if got.State != "closed" || got.ClosedAt == nil {
+			t.Errorf("state = (%q, closed_at %v), want (closed, stamped)", got.State, got.ClosedAt)
+		}
+		if !strings.Contains(got.SnapshotJSON, `"MERGED"`) {
+			t.Errorf("snapshot = %q, want the terminal snapshot written in the same statement", got.SnapshotJSON)
+		}
+		if got.PollSeq != ent.PollSeq+1 {
+			t.Errorf("poll_seq = %d, want %d", got.PollSeq, ent.PollSeq+1)
+		}
+		if got.LastPolledAt == nil {
+			t.Error("last_polled_at not stamped; the seed is a poll")
+		}
+		closedAt := *got.ClosedAt
+
+		// No state guard: a seed landing on an already-closed row at its
+		// current version still advances the snapshot, and keeps the
+		// closed_at the earlier close stamped rather than moving it.
+		ok, err = s.CloseWithSnapshotCASSystem(ctx, orgID, ent.ID, `{"state":"MERGED","merged":true,"reseed":1}`, got.PollSeq)
+		if err != nil {
+			t.Fatalf("CloseWithSnapshotCASSystem (already closed): %v", err)
+		}
+		if !ok {
+			t.Error("ok = false on a closed row at its current poll_seq; the CAS, not the state, decides")
+		}
+		again := mustEntity(t, s, ctx, orgID, "github", "owner/repo#cws")
+		if !strings.Contains(again.SnapshotJSON, `"reseed"`) {
+			t.Errorf("snapshot = %q, want the reseed", again.SnapshotJSON)
+		}
+		if again.ClosedAt == nil || !again.ClosedAt.Equal(closedAt) {
+			t.Errorf("closed_at moved from %v to %v on a reseed; the audit trail should say when the work actually ended", closedAt, again.ClosedAt)
 		}
 	})
 
@@ -891,7 +998,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	})
 
 	t.Run("ListActiveTerminalCandidatesSystem_selects_terminal_snapshots_only", func(t *testing.T) {
-		s, orgID, _ := mk(t)
+		s, orgID, seed := mk(t)
 
 		// The whole matrix the reconciliation sweep depends on: each
 		// shape of terminal snapshot, each shape of non-terminal one,
@@ -926,9 +1033,31 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		if _, err := s.MarkClosed(ctx, orgID, alreadyClosed); err != nil {
 			t.Fatalf("close: %v", err)
 		}
+		// The two exceptions the invariant states. A close in flight — a
+		// terminating transition or an obligation pending or processing —
+		// means the entity is about to be closed by the queue, not
+		// stranded; a parked row means nothing will drive it, so the entity
+		// counts. And a row polled within the grace is one cycle behind at
+		// most, which is the lag the obligation itself carries.
+		closePending := seedSnap("owner/repo#tc-pending", "github", `{"state":"MERGED","merged":true}`)
+		seed.QueueRow(t, closePending, domain.EventGitHubPRMerged, domain.QueuedEventStatusPending)
+		owedProcessing := seedSnap("owner/repo#tc-processing", "github", `{"state":"MERGED","merged":true}`)
+		seed.QueueRow(t, owedProcessing, domain.EventSystemEntityCloseOwed, domain.QueuedEventStatusProcessing)
+		closeParked := seedSnap("owner/repo#tc-parked", "github", `{"state":"MERGED","merged":true}`)
+		seed.QueueRow(t, closeParked, domain.EventSystemEntityCloseOwed, domain.QueuedEventStatusFailed)
+		closeDone := seedSnap("owner/repo#tc-done-row", "github", `{"state":"MERGED","merged":true}`)
+		seed.QueueRow(t, closeDone, domain.EventGitHubPRMerged, domain.QueuedEventStatusDone)
+		freshlyPolled := seedSnap("owner/repo#tc-fresh", "github", `{"state":"MERGED","merged":true}`)
+
+		// Every row but the freshly polled one was last polled an hour ago,
+		// well past a fifteen-minute grace.
+		for _, id := range []string{merged, closedState, open, noSnapshot, jiraDone, jiraRenamed, jiraLive, alreadyClosed, closePending, owedProcessing, closeParked, closeDone} {
+			seed.BackdatePoll(t, id, time.Hour)
+		}
+		const grace = 15 * time.Minute
 
 		doneRefs := []domain.JiraStatusRef{{ID: "10001", Name: "Done"}, {Name: "Won't Do"}}
-		got, err := s.ListActiveTerminalCandidatesSystem(ctx, orgID, doneRefs, 0)
+		got, err := s.ListActiveTerminalCandidatesSystem(ctx, orgID, doneRefs, grace, 0)
 		if err != nil {
 			t.Fatalf("ListActiveTerminalCandidatesSystem: %v", err)
 		}
@@ -943,9 +1072,11 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{closedState, "a CLOSED PR"},
 			{jiraDone, "a Jira issue in a done status, matched by name because its snapshot predates status ids"},
 			{jiraRenamed, "a Jira issue whose done status was renamed, matched by id"},
+			{closeParked, "an entity whose only close row is parked — nothing will drive it"},
+			{closeDone, "an entity whose close row is done — the close it carried did not land"},
 		} {
 			if !ids[want.id] {
-				t.Errorf("%s is missing; its entity row is stranded active and nothing else repairs it", want.why)
+				t.Errorf("%s is missing; its entity row is stranded active and the checker would not count it", want.why)
 			}
 		}
 		for _, skip := range []struct {
@@ -955,15 +1086,35 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{noSnapshot, "an entity with no stored snapshot"},
 			{jiraLive, "a Jira issue in a live status"},
 			{alreadyClosed, "an entity already closed"},
+			{closePending, "an entity with a terminating transition pending"},
+			{owedProcessing, "an entity with a close obligation processing"},
+			{freshlyPolled, "an entity polled within the grace"},
 		} {
 			if ids[skip.id] {
-				t.Errorf("%s surfaced as a terminal candidate; the sweep would close live work", skip.why)
+				t.Errorf("%s surfaced as a terminal candidate; the checker would count work that is not stranded", skip.why)
 			}
+		}
+
+		// Once the grace elapses, the freshly polled row counts too: the
+		// grace is a lag allowance, not an exemption.
+		seed.BackdatePoll(t, freshlyPolled, time.Hour)
+		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, doneRefs, grace, 0)
+		if err != nil {
+			t.Fatalf("ListActiveTerminalCandidatesSystem (after grace): %v", err)
+		}
+		found := false
+		for _, e := range got {
+			if e.ID == freshlyPolled {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("an entity polled past the grace did not surface")
 		}
 
 		// No configured done statuses means no Jira row can be terminal —
 		// and must not become a syntax error on the way to saying so.
-		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, nil, 0)
+		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, nil, grace, 0)
 		if err != nil {
 			t.Fatalf("ListActiveTerminalCandidatesSystem(no jira statuses): %v", err)
 		}
@@ -984,7 +1135,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{"ids only", []domain.JiraStatusRef{{ID: "10001"}}, jiraRenamed},
 			{"names only", []domain.JiraStatusRef{{Name: "Done"}}, jiraDone},
 		} {
-			got, err := s.ListActiveTerminalCandidatesSystem(ctx, orgID, half.refs, 0)
+			got, err := s.ListActiveTerminalCandidatesSystem(ctx, orgID, half.refs, grace, 0)
 			if err != nil {
 				t.Fatalf("ListActiveTerminalCandidatesSystem(%s): %v", half.name, err)
 			}
@@ -999,8 +1150,8 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			}
 		}
 
-		// The limit bounds the batch; the rest is reached on later passes.
-		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, []domain.JiraStatusRef{{Name: "Done"}}, 1)
+		// The limit bounds the batch.
+		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, []domain.JiraStatusRef{{Name: "Done"}}, grace, 1)
 		if err != nil {
 			t.Fatalf("ListActiveTerminalCandidatesSystem(limit): %v", err)
 		}

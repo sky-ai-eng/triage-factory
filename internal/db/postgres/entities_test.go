@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -525,6 +526,33 @@ func newPgEntitySeeder(conn *sql.DB, orgID, userID string) dbtest.EntitySeeder {
 				t.Fatalf("seed user %s: %v", name, err)
 			}
 			return id
+		},
+		BackdatePoll: func(t *testing.T, entityID string, age time.Duration) {
+			t.Helper()
+			// Rewound against now() — the server clock the read's cutoff is
+			// subtracted from.
+			if _, err := conn.Exec(`
+				UPDATE entities SET last_polled_at = now() - make_interval(secs => $1::double precision)
+				WHERE id = $2 AND org_id = $3
+			`, age.Seconds(), entityID, orgID); err != nil {
+				t.Fatalf("backdate last_polled_at for %s: %v", entityID, err)
+			}
+		},
+		QueueRow: func(t *testing.T, entityID, eventType, status string) {
+			t.Helper()
+			eventID := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+				VALUES ($1, $2, $3, $4, '', '{}'::jsonb, now())
+			`, eventID, orgID, entityID, eventType); err != nil {
+				t.Fatalf("seed event %s on %s: %v", eventType, entityID, err)
+			}
+			if _, err := conn.Exec(`
+				INSERT INTO event_queue (org_id, event_id, entity_id, event_type, status)
+				VALUES ($1, $2, $3, $4, $5)
+			`, orgID, eventID, entityID, eventType, status); err != nil {
+				t.Fatalf("seed queue row %s (%s) on %s: %v", eventType, status, entityID, err)
+			}
 		},
 		CommissionedBy: func(t *testing.T, entityID string) string {
 			t.Helper()

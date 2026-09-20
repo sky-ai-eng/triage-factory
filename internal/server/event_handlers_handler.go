@@ -311,16 +311,28 @@ type createTriggerRequest struct {
 	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`
 }
 
-// eventTypeField validates the event_type both create bodies carry: present
-// and registered. It reports whether the type resolved, because the predicate
-// can only be validated against a known schema.
+// eventTypeField validates the event_type both create bodies carry: present,
+// registered, and one the router can carry a handler for. It reports whether
+// the type resolved, because the predicate can only be validated against a
+// known schema.
+//
+// A system sentinel (OwnershipUnrouted — poll completions, routing
+// dispositions, the poll's close obligation) is refused: the router never
+// matches handlers on one, so a handler authored against it would sit
+// enabled and never fire, with nothing to say why. The refusal is a field
+// fault the caller can fix, not a permission fault.
 func eventTypeField(v *httpx.Validation, eventType string) bool {
 	if eventType == "" {
 		v.Missing("event_type")
 		return false
 	}
-	if _, found := events.Get(eventType); !found {
+	schema, found := events.Get(eventType)
+	if !found {
 		v.Invalid("event_type", "unknown event_type: "+eventType)
+		return false
+	}
+	if schema.Ownership == events.OwnershipUnrouted {
+		v.Invalid("event_type", eventType+" is a system event and cannot have a handler")
 		return false
 	}
 	return true

@@ -3782,7 +3782,13 @@ CREATE TABLE public.event_queue (
     -- that emitted the event; only the queue row carries one. NULL is normal
     -- (tracing off, untraced path, no exporter) and routes identically. The
     -- consumer links to this context rather than descending from it.
-    traceparent  text
+    traceparent  text,
+    -- The entity's poll_seq at the moment this row's event was judged: the
+    -- value the tracker's snapshot CAS advanced TO when it committed the batch
+    -- the event rode in. A terminating close refuses to land against any other
+    -- version of the entity. NULL for a row that arrived through ingest rather
+    -- than the CAS path; such a close is guarded on the entity's state alone.
+    entity_poll_seq bigint
 );
 
 ALTER TABLE ONLY public.event_queue

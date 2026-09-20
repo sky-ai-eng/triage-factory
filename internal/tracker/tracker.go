@@ -124,8 +124,17 @@ func (t *Tracker) publish(ctx context.Context, evt domain.Event) {
 // first-discovery seed carrying the review requests that were already on the
 // PR when TF started watching.
 //
-// evts may be empty: a refreshed entity with no transitions is a pure
-// snapshot advance, and takes this same path rather than a second one.
+// evts may be empty: a refreshed entity whose snapshot changed without a
+// transition is a pure snapshot advance, and takes this same path rather
+// than a second one. A refresh that observed NO change does not come here
+// at all — it stamps last_polled_at alone (MarkPolledSystem), because
+// advancing poll_seq for nothing would turn every terminating close still
+// waiting in the queue stale.
+//
+// enqueued is how many of evts actually landed on the queue. It is less
+// than len(evts) in exactly one case: a close obligation the queue already
+// carried for this entity (the enqueue's own unsettled-row check), which is
+// then neither recorded nor forwarded to the bus.
 //
 // Unlike the tracker's other persistence calls this takes the CYCLE's ctx,
 // not context.Background(). Those keep Background because a cancellation
@@ -134,10 +143,10 @@ func (t *Tracker) publish(ctx context.Context, evt domain.Event) {
 // next cycle re-diffs from the surviving snapshot. And the enqueue needs a
 // real ctx to carry: the producer trace context every queue row it writes
 // is stamped with comes from here.
-func (t *Tracker) emitWithSnapshotCAS(ctx context.Context, orgID, entityID, snapshotJSON string, expectedPollSeq int64, evts []domain.Event) (bool, error) {
+func (t *Tracker) emitWithSnapshotCAS(ctx context.Context, orgID, entityID, snapshotJSON string, expectedPollSeq int64, evts []domain.Event) (ok bool, enqueued int, err error) {
 	if len(evts) == 0 {
 		ok, _, err := t.queue.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, snapshotJSON, expectedPollSeq, nil, nil)
-		return ok, err
+		return ok, 0, err
 	}
 
 	// One producer span per emitted batch — the trace context every row in
@@ -172,21 +181,93 @@ func (t *Tracker) emitWithSnapshotCAS(ctx context.Context, orgID, entityID, snap
 	ok, ids, err := t.queue.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, snapshotJSON, expectedPollSeq, evts, traceparents)
 	if err != nil {
 		span.SetStatus(codes.Error, "enqueue batch")
-		return false, err
+		return false, 0, err
 	}
 	if !ok {
-		return false, nil
+		return false, 0, nil
 	}
 
 	// Committed. The bus fan-out below is the cosmetic half — the live WS
 	// push and the scorer's idempotent nudge — and dying between the commit
 	// and it costs only that: the router consumes the queue, not the bus,
-	// so these events still route on the drain worker's schedule.
+	// so these events still route on the drain worker's schedule. An empty
+	// id is an event the enqueue declined (an obligation already owed), and
+	// nothing is forwarded for what was never recorded.
 	for i, evt := range evts {
+		if ids[i] == "" {
+			continue
+		}
+		enqueued++
 		evt.ID = ids[i] // the id the enqueue minted, so bus and queue agree
 		t.pub.PublishPreEnqueued(ctx, evt)
 	}
-	return true, nil
+	return true, enqueued, nil
+}
+
+// prSnapshotTerminal is the GitHub arm's notion of a finished pull request:
+// merged, or in a closed/merged state. Every write that decides an entity's
+// state reads it through here so the tracker cannot disagree with itself.
+func prSnapshotTerminal(snap domain.PRSnapshot) bool {
+	return snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED"
+}
+
+// closeOwed decides whether a refresh owes the entity a close obligation —
+// see domain.EventSystemEntityCloseOwed — and builds it. Owed when the
+// snapshot was terminal on the previous cycle AND still is, on an entity
+// Phase 2 listed as active, with no terminating close unsettled for it in
+// the queue. The unsettled read is advisory (the enqueue re-checks on its
+// own transaction); it is asked here so a cycle that would only re-owe an
+// already-owed close appends nothing, and with nothing else to record
+// leaves the entity's version where the close in flight was judged at. A
+// read failure skips the obligation for this cycle — the next one asks
+// again — rather than guessing.
+//
+// The event is appended to the batch the refresh commits, so it rides the
+// same snapshot CAS as a real transition and carries the same version
+// stamp.
+func (t *Tracker) closeOwed(ctx context.Context, orgID, entityID string, prevTerminal, currTerminal bool) (domain.Event, bool) {
+	if !prevTerminal || !currTerminal {
+		return domain.Event{}, false
+	}
+	unsettled, err := t.queue.UnsettledCloseExistsSystem(ctx, orgID, entityID)
+	if err != nil {
+		trackerLog.ErrorContext(ctx, "close obligation: unsettled-close read failed; deferring the obligation to the next cycle", "entity_id", entityID, "error", err)
+		return domain.Event{}, false
+	}
+	if unsettled {
+		return domain.Event{}, false
+	}
+	return domain.Event{
+		EventType: domain.EventSystemEntityCloseOwed,
+		EntityID:  &entityID,
+		MetadataJSON: mustJSON(events.SystemEntityCloseOwedMetadata{
+			Reason: events.SystemEntityCloseOwedReasonTerminalSnapshot,
+		}),
+		CreatedAt: time.Now(),
+	}, true
+}
+
+// commitRefresh is the tail every diffed refresh ends in: the snapshot
+// advance and the transitions diffed against it, in one transaction — or,
+// when the refresh observed no change and diffed nothing, a bare
+// last_polled_at stamp with no version bump. The two are told apart on the
+// snapshot's canonical bytes, marshalled by this process on both sides so
+// jsonb's key order on the stored copy cannot make an unchanged snapshot
+// look changed. Returns how many events landed on the queue; ok=false means
+// the cycle's view did not commit and the caller suppresses its transitions.
+//
+// The quiet branch is what keeps a terminating close routable: a queue that
+// falls behind the poll by more than one cycle would otherwise find every
+// merged / closed / completed row judged at a version a no-op refresh has
+// since moved past, and decline them all.
+func (t *Tracker) commitRefresh(ctx context.Context, orgID, entityID string, prevJSON, snapJSON string, expectedPollSeq int64, evts []domain.Event) (ok bool, enqueued int, err error) {
+	if len(evts) == 0 && snapJSON == prevJSON {
+		if err := t.entities.MarkPolledSystem(context.Background(), orgID, entityID); err != nil {
+			return false, 0, err
+		}
+		return true, 0, nil
+	}
+	return t.emitWithSnapshotCAS(ctx, orgID, entityID, snapJSON, expectedPollSeq, evts)
 }
 
 // --- GitHub ---
@@ -279,7 +360,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		}
 
 		if created {
-			terminal := snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED"
+			terminal := prSnapshotTerminal(snap)
 			// Backfill: a per-reviewer review_requested event for every
 			// TF-known requested reviewer on a just-discovered open PR.
 			// DiffPRSnapshots' "no events on initial load" rule means
@@ -322,8 +403,21 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			// on this same entity, so the loser is a straggler whose read is
 			// stale by the time it lands rather than the only cycle that saw
 			// these review requests.
+			//
+			// A PR that is already terminal seeds through the close-with-
+			// snapshot write instead: the snapshot and the closed state land
+			// in one statement, so it never sits in the active refresh set
+			// with a terminal snapshot — not forever, and not for a phase.
+			// Nothing is emitted for it (Phase 3 would find prev==curr), and
+			// it carried no backfill either.
 			snapJSON, _ := json.Marshal(snap)
-			if ok, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, backfilled); err != nil {
+			if terminal {
+				if ok, err := t.entities.CloseWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
+					trackerLog.Error("seed terminal snapshot failed", "source_id", sid, "error", err)
+				} else if !ok {
+					trackerLog.Warn("seed terminal snapshot CAS lost race, skipping", "source_id", sid)
+				}
+			} else if ok, _, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, backfilled); err != nil {
 				trackerLog.Error("seed snapshot+backfill failed", "source_id", sid, "error", err)
 			} else if !ok {
 				trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", sid)
@@ -336,14 +430,6 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 					trackerLog.Error("seed description failed", "source_id", sid, "error", err)
 				}
 			}
-			// If the PR is already terminal, mark the entity closed immediately
-			// so it doesn't sit in the active refresh set forever (Phase 3
-			// won't emit a merged/closed event because prev==curr).
-			if terminal {
-				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
-					trackerLog.Error("mark entity closed on discovery failed", "source_id", sid, "error", err)
-				}
-			}
 		} else {
 			// Update title and description if changed.
 			if entity.Title != snap.Title {
@@ -352,12 +438,20 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			if desc := prDescription(snap); snap.BodyHash != "" && entity.Description != desc {
 				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, desc)
 			}
-			// Reactivate if a previously-closed entity reappears as open
-			// (e.g., reopened PR).
-			if !snap.Merged && snap.State != "CLOSED" && snap.State != "MERGED" && entity.State == "closed" {
-				if reactivated, err := t.entities.ReactivateSystem(context.Background(), orgID, entity.ID); err != nil {
+			// A previously-closed entity reappearing open (a reopened PR)
+			// reactivates with the discovery snapshot in the same statement,
+			// under the poll_seq guard. The state flip and the snapshot are
+			// one fact: an entity active with its old merged snapshot stored
+			// is exactly what a terminating close reads as "close me", and
+			// this cycle's Phase 3 already re-diffs from the snapshot written
+			// here, so no transition is lost by writing it early.
+			if !prSnapshotTerminal(snap) && entity.State == "closed" {
+				snapJSON, _ := json.Marshal(snap)
+				if reactivated, err := t.entities.ReactivateWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 					trackerLog.Error("reactivate entity failed", "source_id", sid, "error", err)
-				} else if reactivated {
+				} else if !reactivated {
+					trackerLog.Warn("reactivate entity CAS lost race, skipping", "source_id", sid)
+				} else {
 					trackerLog.Info("reactivated entity (reopened)", "source_id", sid)
 				}
 			}
@@ -438,7 +532,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		}
 
 		item := entityWithSnap{entity: e, snap: snap, nodeID: snap.NodeID}
-		if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
+		if prSnapshotTerminal(snap) {
 			terminalItems = append(terminalItems, item)
 			continue
 		}
@@ -583,8 +677,18 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			// we tracked it — or, after an event-source pause, for one that merged
 			// while the org had the source turned off. The next cycle diffs
 			// against this seed normally.
+			// A terminal seed closes the row in the same statement that
+			// writes its snapshot, so the entity is never active with a
+			// terminal snapshot stored, even between two phases.
 			snapJSON, _ := json.Marshal(newSnap)
-			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq); err != nil {
+			var ok bool
+			var err error
+			if prSnapshotTerminal(newSnap) {
+				ok, err = t.entities.CloseWithSnapshotCASSystem(context.Background(), orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq)
+			} else {
+				ok, err = t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq)
+			}
+			if err != nil {
 				trackerLog.ErrorContext(ctx, "seed stub snapshot failed", "source_id", item.entity.SourceID, "error", err)
 			} else if !ok {
 				trackerLog.WarnContext(ctx, "seed stub snapshot CAS lost race, skipping", "source_id", item.entity.SourceID)
@@ -595,16 +699,21 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			if desc := prDescription(newSnap); bodyFetched && item.entity.Description != desc {
 				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, item.entity.ID, desc)
 			}
-			if newSnap.Merged || newSnap.State == "CLOSED" || newSnap.State == "MERGED" {
-				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, item.entity.ID); err != nil {
-					trackerLog.ErrorContext(ctx, "mark stub closed failed", "source_id", item.entity.SourceID, "error", err)
-				}
-			}
 			continue
 		}
 
 		// Diff against previous snapshot.
 		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver)
+
+		// The close obligation: this entity is active (Phase 2 lists only
+		// active rows) and its snapshot was ALREADY terminal last cycle, so
+		// the transition that should have closed it was emitted then and
+		// lost somewhere after. The cycle that makes a snapshot terminal
+		// emits the real transition above and the router closes from that;
+		// only the cycle after a lost close reaches here.
+		if owed, ok := t.closeOwed(ctx, orgID, item.entity.ID, prSnapshotTerminal(item.snap), prSnapshotTerminal(newSnap)); ok {
+			events = append(events, owed)
+		}
 
 		// Commit the snapshot advance and the transitions diffed against it
 		// together, CAS'd on item.entity.PollSeq (the value this cycle's
@@ -616,9 +725,11 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// miss is a straggler ex-leader losing to the current one; an error
 		// means this cycle's view didn't commit. Either way nothing was
 		// written and the winning writer's next cycle re-diffs and emits
-		// the transition, so suppression loses nothing.
+		// the transition, so suppression loses nothing. A refresh that
+		// observed no change commits nothing but its poll stamp.
+		prevJSON, _ := json.Marshal(item.snap)
 		snapJSON, _ := json.Marshal(newSnap)
-		ok, err := t.emitWithSnapshotCAS(ctx, orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq, events)
+		ok, enqueued, err := t.commitRefresh(ctx, orgID, item.entity.ID, string(prevJSON), string(snapJSON), item.entity.PollSeq, events)
 		if err != nil {
 			trackerLog.ErrorContext(ctx, "snapshot+events commit failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", item.entity.SourceID, "error", err)
 			continue
@@ -627,7 +738,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			trackerLog.WarnContext(ctx, "snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", item.entity.SourceID)
 			continue
 		}
-		eventsEmitted += len(events)
+		eventsEmitted += enqueued
 
 		// Best-effort, outside the transaction: the title and description
 		// are mirrors read outside the diff (display, the scorer), so a
@@ -1156,33 +1267,43 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		}
 		if created {
 			snapJSON, _ := json.Marshal(snap)
-			if state.DiscoveredAssignedToCurrentUser {
+			switch {
+			case terminal(snap):
+				// Already done when first seen: the snapshot and the closed
+				// state land in one statement, so the row is never active
+				// with a terminal snapshot stored. Nothing is emitted — the
+				// issue finished before TF tracked it. Discovery excludes
+				// terminal statuses, so this is the rare issue whose done
+				// set the query's exclusion did not cover.
+				if ok, err := t.entities.CloseWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
+					trackerLog.Error("seed terminal jira snapshot failed", "source_id", snap.Key, "error", err)
+				} else if !ok {
+					trackerLog.Warn("seed terminal jira snapshot CAS lost race, skipping", "source_id", snap.Key)
+				}
+			case state.DiscoveredAssignedToCurrentUser:
 				// An issue assigned to someone else is outside both
 				// discovery queries, so appearing in the assigned-to-current-user
 				// result can itself be the assignment transition. Commit that initial
 				// event with the first snapshot; seeding first would make Phase 3
 				// diff current-against-current and retire the transition unseen.
 				events := DiffJiraSnapshots(domain.JiraSnapshot{}, snap, entity.ID, projects.doneMembersForKey(snap.Key))
-				if ok, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, events); err != nil {
+				if ok, enqueued, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, events); err != nil {
 					trackerLog.Error("seed assigned jira snapshot+event failed", "source_id", snap.Key, "error", err)
 				} else if !ok {
 					trackerLog.Warn("seed assigned jira snapshot CAS lost race, skipping", "source_id", snap.Key)
 				} else {
-					discoveryEventsEmitted += len(events)
+					discoveryEventsEmitted += enqueued
 				}
-			} else if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
-				trackerLog.Error("seed snapshot failed", "source_id", snap.Key, "error", err)
-			} else if !ok {
-				trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", snap.Key)
+			default:
+				if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
+					trackerLog.Error("seed snapshot failed", "source_id", snap.Key, "error", err)
+				} else if !ok {
+					trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", snap.Key)
+				}
 			}
 			if state.Description != "" {
 				if _, err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description); err != nil {
 					trackerLog.Error("seed description failed", "source_id", snap.Key, "error", err)
-				}
-			}
-			if terminal(snap) {
-				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
-					trackerLog.Error("mark entity closed on discovery failed", "source_id", snap.Key, "error", err)
 				}
 			}
 		} else {
@@ -1192,11 +1313,17 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 			if snap.BodyHash != "" && entity.Description != state.Description {
 				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description)
 			}
-			// Reactivate if a previously-closed issue reappears as open.
+			// A previously-closed issue reappearing open reactivates with the
+			// discovery snapshot in the same statement, under the poll_seq
+			// guard — the GitHub arm's reasoning: state and snapshot are one
+			// fact, and this cycle's Phase 3 re-diffs from what is written here.
 			if !terminal(snap) && entity.State == "closed" {
-				if reactivated, err := t.entities.ReactivateSystem(context.Background(), orgID, entity.ID); err != nil {
+				snapJSON, _ := json.Marshal(snap)
+				if reactivated, err := t.entities.ReactivateWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 					trackerLog.Error("reactivate entity failed", "source_id", snap.Key, "error", err)
-				} else if reactivated {
+				} else if !reactivated {
+					trackerLog.Warn("reactivate entity CAS lost race, skipping", "source_id", snap.Key)
+				} else {
 					trackerLog.Info("reactivated entity (reopened)", "source_id", snap.Key)
 				}
 			}
@@ -1248,8 +1375,18 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 			// create-branch (snapshot + title + description, close if terminal) WITHOUT
 			// diffing instead. Normal discovery seeds in Phase 1, so this only
 			// ever fires for rows that arrived without one.
+			// A terminal seed closes the row in the same statement that
+			// writes its snapshot, so the entity is never active with a
+			// terminal snapshot stored, even between two phases.
 			snapJSON, _ := json.Marshal(newSnap)
-			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq); err != nil {
+			var ok bool
+			var err error
+			if terminal(newSnap) {
+				ok, err = t.entities.CloseWithSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq)
+			} else {
+				ok, err = t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq)
+			}
+			if err != nil {
 				trackerLog.Error("seed jira stub snapshot failed", "source_id", e.SourceID, "error", err)
 			} else if !ok {
 				trackerLog.Warn("seed jira stub snapshot CAS lost race, skipping", "source_id", e.SourceID)
@@ -1259,11 +1396,6 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 			}
 			if newState.Snap.BodyHash != "" && e.Description != newState.Description {
 				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, e.ID, newState.Description)
-			}
-			if terminal(newSnap) {
-				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, e.ID); err != nil {
-					trackerLog.Error("mark jira stub closed failed", "source_id", e.SourceID, "error", err)
-				}
 			}
 			continue
 		}
@@ -1306,6 +1438,14 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		// detection still works for previously-known done statuses).
 		events := DiffJiraSnapshots(prevSnap, newSnap, e.ID, projects.doneMembersForKey(newSnap.Key))
 
+		// The close obligation — the GitHub arm's rule, read against this
+		// cycle's per-project done set: the entity is active (Phase 2 lists
+		// only active rows) and its snapshot was already terminal last
+		// cycle, so the completion that should have closed it was lost.
+		if owed, ok := t.closeOwed(ctx, orgID, e.ID, terminal(prevSnap), terminal(newSnap)); ok {
+			events = append(events, owed)
+		}
+
 		// Snapshot advance + the transitions diffed against it, one
 		// transaction, CAS'd on e.PollSeq (the value this cycle's diff was
 		// read against) — the GitHub arm's contract, same reasoning: the
@@ -1313,9 +1453,11 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		// landing is either a duplicate task (events off a snapshot that
 		// didn't win) or a lost one (a snapshot that retired transitions
 		// nobody recorded). On a miss or an error nothing was written and
-		// the winner's next cycle re-diffs, so suppression loses nothing.
+		// the winner's next cycle re-diffs, so suppression loses nothing. A
+		// refresh that observed no change commits nothing but its poll stamp.
+		prevJSON, _ := json.Marshal(prevSnap)
 		snapJSON, _ := json.Marshal(newSnap)
-		ok, err := t.emitWithSnapshotCAS(ctx, orgID, e.ID, string(snapJSON), e.PollSeq, events)
+		ok, enqueued, err := t.commitRefresh(ctx, orgID, e.ID, string(prevJSON), string(snapJSON), e.PollSeq, events)
 		if err != nil {
 			trackerLog.Error("jira snapshot+events commit failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", e.SourceID, "error", err)
 			continue
@@ -1324,7 +1466,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 			trackerLog.Warn("jira snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", e.SourceID)
 			continue
 		}
-		diffEventsEmitted += len(events)
+		diffEventsEmitted += enqueued
 
 		// Best-effort display/scorer mirrors. The event's body hash is the
 		// revision authority; these capped strings can lag a committed event.

@@ -197,9 +197,9 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 	})
 
 	t.Run("Non_event_close_writes_no_audit_row", func(t *testing.T) {
-		// The terminal reconciler's close: nothing triggered it, so it names
-		// neither an event to record nor a close_event_type to record it
-		// under. The only shape in which either is empty.
+		// A close no event drove — a run finishing, a user dispositioning —
+		// names neither an event to record nor a close_event_type to record
+		// it under. The only shape in which either is empty.
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 

@@ -112,8 +112,9 @@ func (t *Tracker) BackfillDashboardHistory(ctx context.Context, client *ghclient
 }
 
 // seedBackfillEntity creates an entity for a backfilled PR and seeds its
-// snapshot, marking it closed when terminal so it doesn't sit in the active
-// refresh set. Mirrors the terminal branch of RefreshGitHub's discovery loop.
+// snapshot, closing it in the same write when terminal so it never sits in
+// the active refresh set. Mirrors the terminal branch of RefreshGitHub's
+// discovery loop.
 // Returns true when a NEW entity was created; an already-known entity is left
 // untouched (the poll cycle owns refresh) and returns false. Emits no events.
 func (t *Tracker) seedBackfillEntity(ctx context.Context, d ghclient.DiscoveredPR) (bool, error) {
@@ -134,14 +135,15 @@ func (t *Tracker) seedBackfillEntity(ctx context.Context, d ghclient.DiscoveredP
 	}
 	// CAS against entity.PollSeq (0 for a just-created row). A miss means a
 	// concurrent seed of the same brand-new entity already landed a
-	// snapshot — harmless, nothing to retry.
-	if _, err := t.entities.UpdateSnapshotCASSystem(ctx, t.orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
-		return false, err
+	// snapshot — harmless, nothing to retry. A terminal PR — the usual case
+	// for history — closes in the same statement that writes its snapshot.
+	if prSnapshotTerminal(snap) {
+		_, err = t.entities.CloseWithSnapshotCASSystem(ctx, t.orgID, entity.ID, string(snapJSON), entity.PollSeq)
+	} else {
+		_, err = t.entities.UpdateSnapshotCASSystem(ctx, t.orgID, entity.ID, string(snapJSON), entity.PollSeq)
 	}
-	if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
-		if _, err := t.entities.MarkClosedSystem(ctx, t.orgID, entity.ID); err != nil {
-			return false, err
-		}
+	if err != nil {
+		return false, err
 	}
 	return true, nil
 }

@@ -27,37 +27,46 @@ func TestTaskStore_CloseWithConversationCancelIntent_Postgres(t *testing.T) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, _ := seedPgOrgUserAgent(t, h)
-		conn := h.AdminDB
+		seeder, _ := newPgCloseIntentSeeder(h.AdminDB, orgID, userID)
+		return stores.Tasks, orgID, seeder
+	})
+}
 
-		// entityForTask lets Event() find the entity a seeded task hangs off,
-		// so the closing event lands on the same entity production would put
-		// it on. Keyed per factory call, which is per subtest.
-		entityForTask := map[string]string{}
+// newPgCloseIntentSeeder builds the (task, event, blueprint, conversation)
+// seeder against the harness's admin connection for one org, and returns the
+// task→entity map it keeps so a suite that also needs the entity side can
+// read it. Shared with the terminating-close suite, which stages the same
+// graph.
+func newPgCloseIntentSeeder(conn *sql.DB, orgID, userID string) (dbtest.TaskCloseCancelIntentSeeder, map[string]string) {
+	// entityForTask lets Event() find the entity a seeded task hangs off,
+	// so the closing event lands on the same entity production would put
+	// it on. Keyed per factory call, which is per subtest.
+	entityForTask := map[string]string{}
 
-		seeder := dbtest.TaskCloseCancelIntentSeeder{
-			Task: func(t *testing.T) string {
-				t.Helper()
-				entityID, _, taskID := seedPgTaskChain(t, conn, orgID, userID, "close-intent-"+uuid.New().String()[:8])
-				entityForTask[taskID] = entityID
-				return taskID
-			},
-			Event: func(t *testing.T, taskID string) string {
-				t.Helper()
-				eventID := uuid.New().String()
-				if _, err := conn.Exec(`
+	seeder := dbtest.TaskCloseCancelIntentSeeder{
+		Task: func(t *testing.T) string {
+			t.Helper()
+			entityID, _, taskID := seedPgTaskChain(t, conn, orgID, userID, "close-intent-"+uuid.New().String()[:8])
+			entityForTask[taskID] = entityID
+			return taskID
+		},
+		Event: func(t *testing.T, taskID string) string {
+			t.Helper()
+			eventID := uuid.New().String()
+			if _, err := conn.Exec(`
 					INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
 					VALUES ($1, $2, $3, $4, '', '{}'::jsonb, $5)
 				`, eventID, orgID, entityForTask[taskID], domain.EventGitHubPRMerged, time.Now().UTC()); err != nil {
-					t.Fatalf("seed closing event: %v", err)
-				}
-				return eventID
-			},
-			BlueprintAndConversation: func(t *testing.T, taskID, blueprintStatus, convStatus string) (string, string) {
-				t.Helper()
-				brID := seedPgBlueprintRunForClose(t, conn, orgID, userID, taskID, blueprintStatus)
-				promptID := seedPgStepPromptForClose(t, conn, orgID, userID)
-				convID := uuid.New().String()
-				if _, err := conn.Exec(`
+				t.Fatalf("seed closing event: %v", err)
+			}
+			return eventID
+		},
+		BlueprintAndConversation: func(t *testing.T, taskID, blueprintStatus, convStatus string) (string, string) {
+			t.Helper()
+			brID := seedPgBlueprintRunForClose(t, conn, orgID, userID, taskID, blueprintStatus)
+			promptID := seedPgStepPromptForClose(t, conn, orgID, userID)
+			convID := uuid.New().String()
+			if _, err := conn.Exec(`
 					INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id,
 					                           prompt_id, trigger_type, origin, status,
 					                           blueprint_run_id, blueprint_step_index)
@@ -65,54 +74,53 @@ func TestTaskStore_CloseWithConversationCancelIntent_Postgres(t *testing.T) {
 					        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 					        'team', $3, $4, 'event', 'blueprint', NULLIF($5, ''), $6, 0)
 				`, convID, orgID, taskID, promptID, convStatus, brID); err != nil {
-					t.Fatalf("seed conversation: %v", err)
-				}
-				return brID, convID
-			},
-			BareConversation: func(t *testing.T, taskID, convStatus string) string {
-				t.Helper()
-				convID := uuid.New().String()
-				// origin='interactive': the origin CHECK demands the blueprint
-				// parents only for 'blueprint', so this is how a conversation
-				// with no sequence behind it is spelled.
-				if _, err := conn.Exec(`
+				t.Fatalf("seed conversation: %v", err)
+			}
+			return brID, convID
+		},
+		BareConversation: func(t *testing.T, taskID, convStatus string) string {
+			t.Helper()
+			convID := uuid.New().String()
+			// origin='interactive': the origin CHECK demands the blueprint
+			// parents only for 'blueprint', so this is how a conversation
+			// with no sequence behind it is spelled.
+			if _, err := conn.Exec(`
 					INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id,
 					                           trigger_type, origin, status)
 					VALUES ($1, $2, $3,
 					        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 					        'team', $4, 'manual', 'interactive', NULLIF($5, ''))
 				`, convID, orgID, userID, taskID, convStatus); err != nil {
-					t.Fatalf("seed blueprintless conversation: %v", err)
-				}
-				return convID
-			},
-			CancelRequested: func(t *testing.T, blueprintRunID string) bool {
-				t.Helper()
-				var flag bool
-				if err := conn.QueryRow(`SELECT cancel_requested FROM blueprint_runs WHERE id = $1`, blueprintRunID).Scan(&flag); err != nil {
-					t.Fatalf("read cancel_requested: %v", err)
-				}
-				return flag
-			},
-			TaskStatus: func(t *testing.T, taskID string) string {
-				t.Helper()
-				var status string
-				if err := conn.QueryRow(`SELECT status FROM tasks WHERE id = $1`, taskID).Scan(&status); err != nil {
-					t.Fatalf("read task status: %v", err)
-				}
-				return status
-			},
-			CloseAuditCount: func(t *testing.T, taskID string) int {
-				t.Helper()
-				var n int
-				if err := conn.QueryRow(`SELECT COUNT(*) FROM task_events WHERE task_id = $1 AND kind = 'closed'`, taskID).Scan(&n); err != nil {
-					t.Fatalf("count close audit rows: %v", err)
-				}
-				return n
-			},
-		}
-		return stores.Tasks, orgID, seeder
-	})
+				t.Fatalf("seed blueprintless conversation: %v", err)
+			}
+			return convID
+		},
+		CancelRequested: func(t *testing.T, blueprintRunID string) bool {
+			t.Helper()
+			var flag bool
+			if err := conn.QueryRow(`SELECT cancel_requested FROM blueprint_runs WHERE id = $1`, blueprintRunID).Scan(&flag); err != nil {
+				t.Fatalf("read cancel_requested: %v", err)
+			}
+			return flag
+		},
+		TaskStatus: func(t *testing.T, taskID string) string {
+			t.Helper()
+			var status string
+			if err := conn.QueryRow(`SELECT status FROM tasks WHERE id = $1`, taskID).Scan(&status); err != nil {
+				t.Fatalf("read task status: %v", err)
+			}
+			return status
+		},
+		CloseAuditCount: func(t *testing.T, taskID string) int {
+			t.Helper()
+			var n int
+			if err := conn.QueryRow(`SELECT COUNT(*) FROM task_events WHERE task_id = $1 AND kind = 'closed'`, taskID).Scan(&n); err != nil {
+				t.Fatalf("count close audit rows: %v", err)
+			}
+			return n
+		},
+	}
+	return seeder, entityForTask
 }
 
 // seedPgBlueprintRunForClose mints a blueprint + blueprint_run on the task in

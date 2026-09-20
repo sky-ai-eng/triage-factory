@@ -90,8 +90,8 @@ from the user-facing server so it stays network-internal: **don't publish or
 route `9464` externally**; scrape it from inside the compose network / cluster.
 
 Beyond the standard Go runtime and process collectors (`go_*`, `process_*`),
-the TF-specific set today covers dropped audit records and Slack message-event
-volume.
+the TF-specific set today covers dropped audit records, the entity
+terminal-state invariant, and Slack message-event volume.
 
 ### Dropped audit records
 
@@ -140,6 +140,39 @@ volume.
   ```
   sum(increase(tf_audit_records_dropped_total[1h])) > 0
   ```
+
+### Entity terminal state
+
+Two gauges, recorded every five minutes by the read-only terminal-state
+checker on whichever control pod holds the background-brain lease, labelled
+`org_id`. Both count violations of one invariant — an entity whose stored
+snapshot says the pull request merged or the issue reached a done status is
+closed, and its open tasks are closed with it — which the poll enforces on
+every cycle. **Zero is the steady state**; the checker repairs nothing, so a
+nonzero value that does not clear on the next pass is an alarm, not
+housekeeping.
+
+- `tf_entity_terminal_active{org_id}` — active entities carrying a terminal
+  snapshot, unpolled for over fifteen minutes, with no terminating close
+  pending in the event queue. The fifteen minutes is a lag allowance: a lost
+  close is re-owed by the poll one cycle later, so a fresh divergence is not
+  yet a violation. What outlives it is an entity nothing polls any more — a
+  repo the org stopped tracking, a Jira project removed from settings — with
+  tasks still open on it. Untracking never destroys tasks; the answer is to
+  dismiss them, and this is the count of how many are waiting for that.
+- `tf_tasks_open_on_closed_entity{org_id}` — queued, in-progress or snoozed
+  tasks whose entity is closed, other than the lifecycle task a merge or
+  completion mints on the entity it just closed. A terminating close takes
+  every open task with it in one transaction, and a task mint refuses a
+  closed entity in its own, so any sample here means one of those guards was
+  bypassed.
+
+Each pass also logs a `WARN` line per nonzero count naming up to twenty ids.
+
+```
+max_over_time(tf_entity_terminal_active[30m]) > 0
+tf_tasks_open_on_closed_entity > 0
+```
 
 ### Slack ingest
 

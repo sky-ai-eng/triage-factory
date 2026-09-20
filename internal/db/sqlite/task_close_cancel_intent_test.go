@@ -32,85 +32,93 @@ func TestTaskStore_CloseWithConversationCancelIntent_SQLite(t *testing.T) {
 		if err := db.BootstrapSchemaForTest(conn); err != nil {
 			t.Fatalf("bootstrap schema: %v", err)
 		}
+		seeder, _ := newSQLiteCloseIntentSeeder(conn)
+		return sqlitestore.New(conn).Tasks, runmode.LocalDefaultOrgID, seeder
+	})
+}
 
-		// entityForTask lets Event() find the entity a seeded task hangs off,
-		// so the closing event lands on the same entity production would put
-		// it on. Keyed per factory call, which is per subtest.
-		entityForTask := map[string]string{}
+// newSQLiteCloseIntentSeeder builds the (task, event, blueprint, conversation)
+// seeder against one in-memory database, and returns the task→entity map it
+// keeps so a suite that also needs the entity side can read it. Shared with
+// the terminating-close suite, which stages the same graph.
+func newSQLiteCloseIntentSeeder(conn *sql.DB) (dbtest.TaskCloseCancelIntentSeeder, map[string]string) {
+	// entityForTask lets Event() find the entity a seeded task hangs off,
+	// so the closing event lands on the same entity production would put
+	// it on. Keyed per factory call, which is per subtest.
+	entityForTask := map[string]string{}
 
-		seeder := dbtest.TaskCloseCancelIntentSeeder{
-			Task: func(t *testing.T) string {
-				t.Helper()
-				entityID, _, taskID := seedSQLiteTaskChain(t, conn, "close-intent-"+uuid.New().String()[:8])
-				entityForTask[taskID] = entityID
-				return taskID
-			},
-			Event: func(t *testing.T, taskID string) string {
-				t.Helper()
-				eventID := uuid.New().String()
-				if _, err := conn.Exec(`
+	seeder := dbtest.TaskCloseCancelIntentSeeder{
+		Task: func(t *testing.T) string {
+			t.Helper()
+			entityID, _, taskID := seedSQLiteTaskChain(t, conn, "close-intent-"+uuid.New().String()[:8])
+			entityForTask[taskID] = entityID
+			return taskID
+		},
+		Event: func(t *testing.T, taskID string) string {
+			t.Helper()
+			eventID := uuid.New().String()
+			if _, err := conn.Exec(`
 					INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at)
 					VALUES (?, ?, ?, '', '{}', ?)
 				`, eventID, entityForTask[taskID], domain.EventGitHubPRMerged, time.Now().UTC()); err != nil {
-					t.Fatalf("seed closing event: %v", err)
-				}
-				return eventID
-			},
-			BlueprintAndConversation: func(t *testing.T, taskID, blueprintStatus, convStatus string) (string, string) {
-				t.Helper()
-				brID := seedSQLiteBlueprintRun(t, conn, taskID, blueprintStatus)
-				convID := uuid.New().String()
-				stepIdx := 0
-				insertConversationForTest(t, conn, domain.Conversation{
-					ID: convID, TaskID: taskID, PromptID: seedSQLiteStepPrompt(t, conn),
-					Status: convStatus, TriggerType: "event",
-					BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
-				})
-				return brID, convID
-			},
-			BareConversation: func(t *testing.T, taskID, convStatus string) string {
-				t.Helper()
-				convID := uuid.New().String()
-				// origin='interactive': the origin CHECK demands the blueprint
-				// parents only for 'blueprint', so this is how a conversation
-				// with no sequence behind it is spelled.
-				if _, err := conn.Exec(`
+				t.Fatalf("seed closing event: %v", err)
+			}
+			return eventID
+		},
+		BlueprintAndConversation: func(t *testing.T, taskID, blueprintStatus, convStatus string) (string, string) {
+			t.Helper()
+			brID := seedSQLiteBlueprintRun(t, conn, taskID, blueprintStatus)
+			convID := uuid.New().String()
+			stepIdx := 0
+			insertConversationForTest(t, conn, domain.Conversation{
+				ID: convID, TaskID: taskID, PromptID: seedSQLiteStepPrompt(t, conn),
+				Status: convStatus, TriggerType: "event",
+				BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
+			})
+			return brID, convID
+		},
+		BareConversation: func(t *testing.T, taskID, convStatus string) string {
+			t.Helper()
+			convID := uuid.New().String()
+			// origin='interactive': the origin CHECK demands the blueprint
+			// parents only for 'blueprint', so this is how a conversation
+			// with no sequence behind it is spelled.
+			if _, err := conn.Exec(`
 					INSERT INTO conversations (id, task_id, status, trigger_type, origin,
 					                           team_id, visibility, creator_user_id)
 					VALUES (?, ?, ?, 'manual', 'interactive', ?, 'team', ?)
 				`, convID, taskID, nullIfEmptyString(convStatus), runmode.LocalDefaultTeamID,
-					runmode.LocalDefaultUserID); err != nil {
-					t.Fatalf("seed blueprintless conversation: %v", err)
-				}
-				return convID
-			},
-			CancelRequested: func(t *testing.T, blueprintRunID string) bool {
-				t.Helper()
-				var flag int
-				if err := conn.QueryRow(`SELECT cancel_requested FROM blueprint_runs WHERE id = ?`, blueprintRunID).Scan(&flag); err != nil {
-					t.Fatalf("read cancel_requested: %v", err)
-				}
-				return flag != 0
-			},
-			TaskStatus: func(t *testing.T, taskID string) string {
-				t.Helper()
-				var status string
-				if err := conn.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&status); err != nil {
-					t.Fatalf("read task status: %v", err)
-				}
-				return status
-			},
-			CloseAuditCount: func(t *testing.T, taskID string) int {
-				t.Helper()
-				var n int
-				if err := conn.QueryRow(`SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'closed'`, taskID).Scan(&n); err != nil {
-					t.Fatalf("count close audit rows: %v", err)
-				}
-				return n
-			},
-		}
-		return sqlitestore.New(conn).Tasks, runmode.LocalDefaultOrgID, seeder
-	})
+				runmode.LocalDefaultUserID); err != nil {
+				t.Fatalf("seed blueprintless conversation: %v", err)
+			}
+			return convID
+		},
+		CancelRequested: func(t *testing.T, blueprintRunID string) bool {
+			t.Helper()
+			var flag int
+			if err := conn.QueryRow(`SELECT cancel_requested FROM blueprint_runs WHERE id = ?`, blueprintRunID).Scan(&flag); err != nil {
+				t.Fatalf("read cancel_requested: %v", err)
+			}
+			return flag != 0
+		},
+		TaskStatus: func(t *testing.T, taskID string) string {
+			t.Helper()
+			var status string
+			if err := conn.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&status); err != nil {
+				t.Fatalf("read task status: %v", err)
+			}
+			return status
+		},
+		CloseAuditCount: func(t *testing.T, taskID string) int {
+			t.Helper()
+			var n int
+			if err := conn.QueryRow(`SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'closed'`, taskID).Scan(&n); err != nil {
+				t.Fatalf("count close audit rows: %v", err)
+			}
+			return n
+		},
+	}
+	return seeder, entityForTask
 }
 
 // seedSQLiteBlueprintRun mints a blueprint + blueprint_run on the task in the

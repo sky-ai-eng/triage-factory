@@ -95,6 +95,18 @@ type EventQueueStore interface {
 	// the tracker keeps one call path whether or not its diff produced
 	// events.
 	//
+	// Every queue row in the batch is stamped with the entity's poll_seq
+	// AFTER the CAS (expectedPollSeq + 1): the version the batch was judged
+	// at, which a terminating close reads back to refuse any other. Rows
+	// enqueued through Enqueue carry NULL there.
+	//
+	// A domain.EventSystemEntityCloseOwed event in the batch is enqueued
+	// only if the entity has no unsettled row in
+	// domain.EntityCloseSettlingEventTypes — checked on this same
+	// transaction, so two cycles cannot both find the queue empty. A skipped
+	// obligation writes neither an events row nor a queue row and leaves ""
+	// in its eventIDs slot; the caller forwards nothing for it.
+	//
 	// System-scoped like the CAS it subsumes: the tracker is a background
 	// job with no JWT claims, and org_id is bound by argument.
 	EnqueueBatchWithSnapshotCAS(ctx context.Context, orgID, entityID, snapshotJSON string, expectedPollSeq int64, events []domain.Event, traceparents []string) (ok bool, eventIDs []string, err error)
@@ -260,4 +272,14 @@ type EventQueueStore interface {
 	// router, tracker, ingest and delegate tests assert through, and that a
 	// debug view of a pull request's queue would ask.
 	ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.QueuedEvent, error)
+
+	// UnsettledCloseExistsSystem reports whether the entity has a pending or
+	// processing row in domain.EntityCloseSettlingEventTypes — a terminating
+	// transition or a close obligation the router has not yet consumed. The
+	// tracker asks before it appends an obligation to a refresh's batch, so
+	// a cycle that would only re-owe an already-owed close records nothing
+	// and, with nothing else to record, leaves the entity's version where
+	// the close in flight was judged. EnqueueBatchWithSnapshotCAS re-checks
+	// on its own transaction; this read is advisory and never the dedup.
+	UnsettledCloseExistsSystem(ctx context.Context, orgID, entityID string) (bool, error)
 }

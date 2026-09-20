@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -16,9 +17,14 @@ import (
 // Audiences:
 //
 //   - Poller / tracker (internal/tracker) — FindOrCreate on every
-//     poll cycle, then UpdateSnapshotCASSystem / UpdateTitle /
-//     UpdateDescription when the snapshot diff shows a drift, and
-//     MarkClosed / Close / Reactivate on lifecycle transitions.
+//     poll cycle, then the snapshot CAS (alone, or fused with the
+//     transitions it implies through EventQueueStore) when the snapshot
+//     diff shows a drift, and the two state+snapshot writes —
+//     CloseWithSnapshotCASSystem / ReactivateWithSnapshotCASSystem — on
+//     the lifecycle transitions the poll itself observes.
+//   - Router (internal/routing) — CloseTerminalSystem, the one guarded
+//     transaction a terminating event closes an entity and its open
+//     tasks through.
 //   - Delegation memory + resume + materialize (internal/delegate) —
 //     Get to fetch entity context attached to a task.
 //   - AI scorer (internal/ai) — Descriptions to bulk-load the
@@ -42,8 +48,20 @@ import (
 // Return convention: Get / GetBySource return (nil, nil) when no
 // row matches — a missing entity is a normal read outcome, not an
 // error. List* methods return an empty slice on no rows, never nil.
-// Reactivate exposes a distinct success signal (boolean) because its callers
-// need to know whether the row changed.
+//
+// # State and snapshot are one write
+//
+// Every write that changes state or writes a terminal snapshot is one
+// statement, guarded on poll_seq, so no commit boundary can leave an entity
+// active with a terminal snapshot or closed with an open one: the
+// discovery reopen (ReactivateWithSnapshotCASSystem), the terminal seed
+// and the terminal quiet-seed (CloseWithSnapshotCASSystem), and the
+// router's terminating close (CloseTerminalSystem, guarded on the version
+// the event was judged at). The one exception is MarkClosed, a user's own
+// "done" on the Jira stock deck, whose observed snapshot predates the
+// transition the user just made upstream; closing removes the entity from
+// polling, which is the outcome asked for, and the checker counts only
+// the active-with-terminal-snapshot direction.
 //
 // # Every single-row write returns the row it persisted
 //
@@ -62,11 +80,27 @@ import (
 // answer (nil, nil) the way GetBySource does.
 //
 // Exempt, each said so at the method: MarkPolledSystem (fire-and-forget
-// bookkeeping), UpdateSnapshotCASSystem and Reactivate / ReactivateSystem and
-// StampOwningTeamIfUnsetSystem (compare-and-swap guards whose bool already
-// answers whether the write landed), and RekeyOrMergeSystem (a composition
-// across tables that answers with the surviving id). FindOrCreate /
-// FindOrCreateSystem already return the row.
+// bookkeeping), UpdateSnapshotCASSystem, ReactivateWithSnapshotCASSystem,
+// CloseWithSnapshotCASSystem and StampOwningTeamIfUnsetSystem (compare-and-
+// swap guards whose bool already answers whether the write landed),
+// CloseTerminalSystem (a composition across entities and tasks that answers
+// with what it closed), and RekeyOrMergeSystem (a composition across tables
+// that answers with the surviving id). FindOrCreate / FindOrCreateSystem
+// already return the row.
+// TerminalCloseResult is what EntityStore.CloseTerminalSystem committed.
+type TerminalCloseResult struct {
+	// Closed reports whether the entity flipped in this call. False means the
+	// guard missed and nothing at all was written.
+	Closed bool
+	// ClosedTaskIDs are the tasks this call closed, in the order they were
+	// closed. Empty with Closed=true is normal.
+	ClosedTaskIDs []string
+	// ActiveConversationIDs maps each closed task to the conversations that
+	// were active on it when the transaction stamped their cancel intent —
+	// the set the caller's post-commit stop acts on.
+	ActiveConversationIDs map[string][]string
+}
+
 type EntityStore interface {
 	// --- Lookup ---
 
@@ -167,9 +201,10 @@ type EntityStore interface {
 	UpdateDescription(ctx context.Context, orgID, id, description string) (domain.Entity, error)
 
 	// MarkClosed unconditionally sets state='closed' and stamps
-	// closed_at = now. Used at discovery time when the initial
-	// snapshot is already terminal (merged PR / done issue) — the
-	// entity was never active, so there are no tasks to cascade.
+	// closed_at = now. Its one caller is the Jira stock deck's "done", where
+	// the user just transitioned the ticket upstream and the stored snapshot
+	// still predates that; see the state-and-snapshot note above for why
+	// that is the one write allowed to close without a terminal snapshot.
 	//
 	// Returns the closed row — carrying the closed_at it stamped — or
 	// sql.ErrNoRows.
@@ -185,16 +220,6 @@ type EntityStore interface {
 	// that wants to know whether this call was the one that closed it can now
 	// tell, which a bare error never let it.
 	Close(ctx context.Context, orgID, id string) (*domain.Entity, error)
-
-	// Reactivate flips a closed entity back to active and clears
-	// closed_at. Called when a previously-terminal entity reappears
-	// as open (reopened PR, reopened Jira issue). Returns true
-	// when the row actually changed.
-	//
-	// Exempt from the returned-row rule: a compare-and-swap guard whose bool
-	// is already the write's own answer about whether it landed, which is
-	// what every caller branches on. No caller renders the row.
-	Reactivate(ctx context.Context, orgID, id string) (bool, error)
 
 	// --- Admin-pool variants (`...System`) ---
 	//
@@ -223,12 +248,23 @@ type EntityStore interface {
 	ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error)
 
 	// ListActiveTerminalCandidatesSystem returns active entities whose
-	// STORED snapshot already reads terminal — the divergence the routing
-	// package's terminal-state reconciliation sweep repairs (a merged PR
-	// whose entity row never flipped, so it is polled forever and its
-	// tasks never clear). Normal operation returns nothing: the snapshot
-	// and the state flip land together, so a row here means the close
-	// write was lost.
+	// STORED snapshot already reads terminal, that no poll has refreshed for
+	// at least unpolledFor, and for which no terminating close is unsettled
+	// in the event queue — the invariant violation the routing package's
+	// terminal-state checker counts (a merged PR whose entity row never
+	// flipped, so it is polled forever and its tasks never clear). Normal
+	// operation returns nothing: the snapshot and the state flip land
+	// together, and a lost close is re-owed by the next refresh, so a row
+	// here means an entity nothing polls any more — an untracked repo, a
+	// removed Jira project — or an enforcement path that failed.
+	//
+	// The two extra predicates are what separate a violation from work in
+	// flight. A close is owed on the refresh AFTER the one that lost it, so
+	// an entity polled within the grace is legitimately one cycle behind;
+	// and an entity with a pending or processing row in
+	// domain.EntityCloseSettlingEventTypes has its close on the queue, which
+	// is the exception the invariant states. A NULL last_polled_at counts as
+	// unpolled. A parked row counts as settled: nothing will drive it.
 	//
 	// The two sources answer "is this snapshot terminal?" differently, so
 	// the filter is exact for one and a superset for the other:
@@ -252,13 +288,14 @@ type EntityStore interface {
 	//     status ids were recorded carries none until its next poll refresh.
 	//
 	// Rows with no stored snapshot never match — an unseeded stub has said
-	// nothing about whether its subject is finished. limit caps the batch
-	// (<= 0 means no cap); ordering is created_at ASC, so a capped sweep
-	// works through the oldest divergences first and reaches the rest on
-	// later passes. System-only (admin pool): the sweep is a background
-	// job with no JWT claims, and the invariant it enforces is org-wide.
-	// org_id stays in the WHERE clause as defense in depth.
-	ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, limit int) ([]domain.Entity, error)
+	// nothing about whether its subject is finished, and a snapshot an
+	// event-source pause cleared says nothing either. limit caps the batch
+	// (<= 0 means no cap); ordering is created_at ASC then id, so a capped
+	// read reports the oldest divergences first. Read-only and system-only
+	// (admin pool): the checker is a background job with no JWT claims, and
+	// the invariant it counts is org-wide. org_id stays in the WHERE clause
+	// as defense in depth.
+	ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, unpolledFor time.Duration, limit int) ([]domain.Entity, error)
 
 	FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
 
@@ -282,6 +319,82 @@ type EntityStore interface {
 	// the method — the caller suppresses its diffed transitions on a miss and
 	// re-reads the row on the next cycle either way.
 	UpdateSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (ok bool, err error)
+
+	// ReactivateWithSnapshotCASSystem flips a closed entity to active and
+	// writes its fresh snapshot in ONE statement, guarded on poll_seq the way
+	// UpdateSnapshotCASSystem is, bumping poll_seq by 1 and stamping
+	// last_polled_at on success. It is the discovery reopen: a pull request
+	// or issue previously observed terminal that reappears open.
+	//
+	// One statement because the two halves are one fact. Flipping the state
+	// first and writing the snapshot on a later phase leaves a window in
+	// which the entity is active with its OLD terminal snapshot stored —
+	// which is precisely the shape a terminating close reads as "close me",
+	// so anything judging the entity in that window cancels work on a pull
+	// request someone just reopened. ok=false means the guard missed (the
+	// row is not closed, or poll_seq moved) and NOTHING was written; the
+	// caller logs and the next cycle re-diffs from the surviving row, the
+	// same loser contract as every snapshot CAS.
+	//
+	// Exempt from the returned-row rule: a compare-and-swap guard whose
+	// bool is the write's own answer.
+	ReactivateWithSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (ok bool, err error)
+
+	// CloseWithSnapshotCASSystem writes a terminal snapshot and closes the
+	// entity in one statement — state='closed', closed_at stamped, poll_seq
+	// bumped, last_polled_at stamped — guarded on poll_seq like its
+	// reactivate twin. It is the poll's own close: the terminal-at-discovery
+	// seed and the quiet-seed of a terminal stub, both of which observe a
+	// subject that finished before TF tracked it and so emit nothing. The
+	// guard does not require the row to be active: a seed may land on a row
+	// another writer already closed, and the CAS on poll_seq is what decides
+	// whose snapshot is current.
+	//
+	// A terminating TRANSITION — a snapshot going from open to terminal —
+	// does not take this path: it commits through the snapshot-CAS enqueue
+	// and the router closes from the event, so the tasks that transition
+	// resolves close with it. This is only for a snapshot that was never
+	// open in TF's eyes.
+	//
+	// ok=false means the guard missed and nothing was written; same loser
+	// contract as above. Exempt from the returned-row rule for the same
+	// reason.
+	CloseWithSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (ok bool, err error)
+
+	// CloseTerminalSystem is the terminating close: the one transaction in
+	// which an entity flips to closed and every open task the terminating
+	// event resolves closes with it, each task closed with exactly the rows
+	// TaskStore.CloseWithConversationCancelIntentSystem writes (the terminal
+	// flip, the task_events audit row when closingEventID is set, and the
+	// cancel intent on the blueprints behind its then-active conversations).
+	// The router runs it for every event in domain.EntityCloseSettlingEventTypes.
+	//
+	// The transaction locks the entity row first (SELECT … FOR UPDATE on
+	// Postgres; the single writer on SQLite), verifies it is active and —
+	// when expected is non-nil — that poll_seq still equals *expected, the
+	// version the event was judged at, and only then touches tasks. That
+	// lock order is the same one every task mint takes, which is what
+	// serializes the two: a mint that commits first is seen and closed
+	// here; a close that commits first makes the mint refuse with
+	// ErrEntityClosed. A nil expected is the ingest-path event, which
+	// carries no version and is guarded on state alone.
+	//
+	// Closed=false means the guard missed — the entity is not active, or the
+	// snapshot has moved on since the event was judged (a reopen) — and
+	// NOTHING was written: no task flipped, no audit row, no cancel intent.
+	// The caller consumes the event; the newer snapshot's own cycle owns the
+	// entity's fate. Any failure inside rolls the whole close back, so a
+	// replay finds every task still open and the entity still active: there
+	// is no half-closed state for a retry to be blind to.
+	//
+	// ClosedTaskIDs may be empty with Closed=true — a merged pull request
+	// with no live tasks still closes its entity. ActiveConversationIDs is
+	// keyed per closed task and is the set the transaction stamped, so the
+	// post-commit stop acts on exactly what closed rather than on a later
+	// read. closeTypes narrows which task types close: the terminating
+	// event's own type is excluded by its relation so the lifecycle task it
+	// mints afterwards survives; a type with no open task is a no-op.
+	CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string) (TerminalCloseResult, error)
 
 	// ClearSnapshotsForSourceSystem blanks snapshot_json for every ACTIVE
 	// entity of one source in one org, bumping poll_seq on each row, and
@@ -358,9 +471,7 @@ type EntityStore interface {
 	// moments earlier, so a miss means the row went away underneath it, which
 	// is worth its best-effort log line rather than a silent success.
 	UpdateURLSystem(ctx context.Context, orgID, id, url string) (domain.Entity, error)
-	MarkClosedSystem(ctx context.Context, orgID, id string) (domain.Entity, error)
 	CloseSystem(ctx context.Context, orgID, id string) (*domain.Entity, error)
-	ReactivateSystem(ctx context.Context, orgID, id string) (bool, error)
 
 	// DescriptionsSystem mirrors Descriptions for the AI scorer —
 	// a background/system service that bulk-loads entity body text

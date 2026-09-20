@@ -503,6 +503,18 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
+		if errors.Is(err, db.ErrEntityClosed) {
+			// The station named an entity whose work is over, or none at
+			// all — a semantic fault in what was referenced, the same class
+			// as the missing event above, and one the caller can see for
+			// themselves.
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: "entity is closed or does not exist; no task can be created on it",
+				Field:   "entity_id",
+			})
+			return
+		}
 		internalError(w, "tasks", err)
 		return
 	}

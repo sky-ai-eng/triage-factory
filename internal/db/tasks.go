@@ -20,6 +20,16 @@ import (
 // didn't match" — so a caller that needs the distinction re-reads.
 var ErrNoSuchTask = errors.New("no task with that id")
 
+// ErrEntityClosed means a task mint found its entity closed — or found no
+// entity at all — inside the same transaction that would have inserted the
+// row, and declined. It is an answer, not a failure: the router maps it to
+// the closed-entity disposition and consumes the event, exactly as it would
+// have had the entity-lifecycle gate seen the close a moment earlier. The
+// check rides the mint's own transaction, locking the entity row on
+// Postgres, so a close committing between the router's gate read and the
+// insert can no longer strand a task on an entity nothing will close again.
+var ErrEntityClosed = errors.New("entity is closed or does not exist; no task may be minted on it")
+
 // AgentClaimStamp is the guarded task-claim write that rides *inside*
 // another store method's transaction — the bot taking responsibility for a
 // task, written in the same durable step as the engagement that commits it
@@ -406,6 +416,20 @@ type TaskStore interface {
 	// membership.
 	EntityIDsWithActiveTasks(ctx context.Context, orgID, source string) (map[string]struct{}, error)
 
+	// ListOpenOnClosedEntitiesSystem returns the ids of every task whose
+	// status is queued, in_progress or snoozed but whose entity is closed —
+	// the invariant violation the routing package's terminal-state checker
+	// counts. Steady state is empty: a terminating close takes every open
+	// task on the entity in the same transaction it closes the entity, and a
+	// mint refuses a closed entity in its own, so a row here means one of
+	// those guards was bypassed. The lifecycle task a terminating transition
+	// mints on the entity it closed (domain.TaskMayRideClosedEntity) is
+	// excluded: it is on a closed entity by design. Ordered by created_at
+	// then id so the oldest violation is reported first. Read-only, org-bound
+	// by argument on the admin pool: the checker is a background job with no
+	// JWT claims.
+	ListOpenOnClosedEntitiesSystem(ctx context.Context, orgID string) ([]string, error)
+
 	// --- Lifecycle ---
 
 	// FindOrCreate implements the dedup logic via the partial unique
@@ -424,6 +448,21 @@ type TaskStore interface {
 	// with created=true. Concurrent callers race on the index — the
 	// loser re-reads the winner's row. The full set of matched teams
 	// is recorded separately via SetVisibilityTeams.
+	//
+	// The entity must be active, and the check is part of the mint's own
+	// transaction: the row is read (and on Postgres locked, FOR UPDATE)
+	// before the select-or-insert, so a terminating close serialized against
+	// this call either sees the task it minted or made it refuse.
+	// ErrEntityClosed is that refusal — a closed or missing entity mints
+	// nothing and returns no task, whatever the event type: this door and
+	// FindOrCreateAt are the request path's, and a request can name any
+	// event type it likes. The one task the model deliberately places on a
+	// closed entity — the lifecycle task a terminating transition mints on
+	// the entity it just closed (domain.TaskMayRideClosedEntity) — is
+	// admitted only through the System doors below, which the router alone
+	// reaches. Every mint variant holds the same guard; the lock order
+	// (entity row first, then tasks) is the one EntityStore.CloseTerminalSystem
+	// takes.
 	FindOrCreate(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error)
 
 	// FindOrCreateAt is FindOrCreate with a caller-supplied
@@ -623,6 +662,13 @@ type TaskStore interface {
 	// variants collapse.
 	GetSystem(ctx context.Context, orgID, taskID string) (*domain.Task, error)
 	FindActiveByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Task, error)
+	//
+	// The System doors carry the one exemption to the entity-active guard:
+	// an event type in domain.TaskMayRideClosedEntity is admitted onto a
+	// closed entity here (the row still read and locked), because the
+	// router mints the terminating transition's own lifecycle task through
+	// this door immediately after closing the entity in the transaction
+	// before it. FindOrCreate / FindOrCreateAt never admit it.
 	FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error)
 
 	// FindOrCreateAtUnlessEntityActiveSystem is FindOrCreateAtSystem's
@@ -684,10 +730,14 @@ type TaskStore interface {
 	// way, matching CloseSystem+RecordEventSystem's INSERT-or-nothing shape.
 	//
 	// closeEventType and closingEventID travel as a pair: an event-driven
-	// close passes both, a non-event close (the terminal reconciler's) passes
-	// neither, and an empty closingEventID writes no audit row. Passing one
-	// without the other stamps a close_event_type no task_events row accounts
-	// for — not rejected here, but no caller does it.
+	// close passes both, a non-event close passes neither, and an empty
+	// closingEventID writes no audit row. Passing one without the other
+	// stamps a close_event_type no task_events row accounts for — not
+	// rejected here, but no caller does it.
+	//
+	// EntityStore.CloseTerminalSystem runs this same body per task inside its
+	// own transaction, so a task closed by a terminating event and one closed
+	// by a typed sibling close produce identical rows.
 	CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeConversationIDs []string, err error)
 
 	// RecordEventSystem mirrors RecordEvent's exemption — see its doc

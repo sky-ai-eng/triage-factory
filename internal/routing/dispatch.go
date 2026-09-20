@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
@@ -32,12 +33,10 @@ import (
 // the ones this event resolved are gone, and whether the right run started —
 // and none of them is recoverable by any other path in time. The tracker's
 // snapshot-diff is forward-only, so a dropped event is simply never re-derived;
-// a lost close is worse still, since a terminating transition emits exactly once
-// and nothing else reconciles an entity whose close write failed (only the
-// periodic terminal reconciler does, and at sweep latency). The drain worker
-// answers an error by requeueing the row for another attempt (see
-// parkOrRequeue), so an unmet obligation is retried rather than silently
-// consumed.
+// a lost close is repaired only by the poll's close obligation, one cycle
+// later. The drain worker answers an error by requeueing the row for another
+// attempt (see parkOrRequeue), so an unmet obligation is retried rather than
+// silently consumed.
 //
 // The tails that hang off those stages stay log-and-continue and never reach
 // the return: task visibility writes, Bump, the run-stop cascade's KILL half
@@ -59,11 +58,13 @@ import (
 // Replay is safe by construction, so an error asks for one freely: the task
 // upsert is a FindOrCreate under the tasks dedup partial index, and trigger
 // firing is fenced on (triggering_event_id, trigger_id) plus the one-active-
-// auto-run index, with ErrTaskBusy deferring onto pending_firings. The close
-// phase re-attempts only what is still open — its task list read returns active
-// rows only, and both the task close and the entity close are guarded
-// transitions that no-op on an already-closed row. The one accepted cost is a
-// duplicate 'bumped' task_events row per replay.
+// auto-run index, with ErrTaskBusy deferring onto pending_firings. The typed
+// close phase re-attempts only what is still open — its task list read
+// returns active rows only, and a task close is a guarded transition that
+// no-ops on an already-closed row — and the terminating close is one
+// transaction, so a failure leaves nothing half-closed for the replay to
+// miss. The one accepted cost is a duplicate 'bumped' task_events row per
+// replay.
 //
 // ctx reaches every store call the routing of this one event makes. The drain
 // worker hands it a ctx that carries values but cannot be cancelled
@@ -75,7 +76,21 @@ import (
 // The body is a pipeline of named stages; each short-circuits the rest by
 // returning ok=false (or an empty result), setting disp.Disposition on its
 // way out so the deferred publish below still reports the outcome.
+//
+// HandleEvent routes with no version in hand: a terminating close it performs
+// is guarded on the entity's state alone. The drain worker routes through
+// routeEvent with the queue row's entity_poll_seq, which is where a
+// terminating event learns the version it was judged at.
 func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
+	return r.routeEvent(ctx, evt, nil)
+}
+
+// routeEvent is HandleEvent's body. judgedAt is the entity's poll_seq at the
+// moment evt was judged — the queue row's entity_poll_seq — or nil when the
+// event carries none (an ingest-path event, or a direct call). It reaches
+// exactly one stage: the terminating close, which refuses to land against
+// any other version of the entity.
+func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int64) error {
 	// Defensive: every upstream emitter (poller, per-org loop) tags
 	// events with evt.OrgID. A missing OrgID indicates an emitter bug — failing
 	// loud here prevents tenant-mixed writes that would silently land on the
@@ -190,31 +205,45 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
 	disp.EntityID = entityID
 
 	// Close phase — runs unconditionally, before routing, and independent of
-	// whether any handler matches. It closes the tasks this event resolves
-	// (typed siblings like ci_check_passed→ci_check_failed, and/or the
-	// entity-wide set for a terminating event) and reports whether the entity
-	// should flip closed. Closing and routing are orthogonal: the same event
-	// goes on to create/fire its own task below (the close runs first, so a
-	// terminating event clears prior work before minting its riding task).
-	closedAny, terminate, closeErr := r.runCloses(ctx, orgID, evt, entityID)
-	if closedAny {
-		r.broadcastTasksUpdated(orgID)
-	}
-	if closeErr != nil {
-		// Bail BEFORE flipping the entity, not just because the pass failed.
-		// routableEntity gates the replay on state='active', so an entity
-		// closed here would make the replayed event drop at that gate — the
-		// close phase would never run again and whatever tasks are still open
-		// would stay open with nothing left to close them. Leaving the entity
-		// active is what keeps the retry able to finish the job.
-		disp.Disposition = events.DispositionError
-		return fmt.Errorf("close phase: %w", closeErr)
-	}
-	if terminate {
-		if _, err := r.entities.CloseSystem(ctx, orgID, entityID); err != nil {
-			lifecycleLog.Error("entity close failed", "entity_id", entityID, "error", err)
+	// whether any handler matches. Closing and routing are orthogonal: the
+	// same event goes on to create/fire its own task below (the close runs
+	// first, so a terminating event clears prior work before minting its
+	// riding task).
+	//
+	// A terminating event closes the entity and every task it resolves in
+	// one guarded transaction. Declined means the entity is no longer at
+	// the version this event was judged at — it reopened in between — and
+	// the event is consumed as stale: routing does not continue, because
+	// the situation it describes no longer exists, and a replay would find
+	// the same newer version. The poll's close obligation returns here
+	// either way: it is a repair, not news, so it matches no handler and
+	// mints nothing.
+	if rel := terminatingRelationFor(evt.EventType); rel != nil {
+		closed, err := r.runTerminatingClose(ctx, orgID, evt, entityID, rel, judgedAt)
+		if err != nil {
 			disp.Disposition = events.DispositionError
-			return fmt.Errorf("close entity: %w", err)
+			return fmt.Errorf("close phase: %w", err)
+		}
+		if !closed {
+			disp.Disposition = events.DispositionStaleTerminal
+			return nil
+		}
+		if evt.EventType == domain.EventSystemEntityCloseOwed {
+			disp.Disposition = events.DispositionEntityCloseOwed
+			return nil
+		}
+	} else {
+		// A typed close resolves the tasks this event answers (a passed check
+		// closes the failed one, a submitted review closes its request), one
+		// task at a time; a failure leaves the rest and asks for a replay,
+		// which re-attempts only what is still open.
+		closedAny, closeErr := r.runCloses(ctx, orgID, evt, entityID)
+		if closedAny {
+			r.broadcastTasksUpdated(orgID)
+		}
+		if closeErr != nil {
+			disp.Disposition = events.DispositionError
+			return fmt.Errorf("close phase: %w", closeErr)
 		}
 	}
 
@@ -255,6 +284,15 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
 	// Find or create the single task for this (entity, event_type,
 	// dedup_key); record visibility + lifecycle and enqueue scoring.
 	task, created, err := r.upsertTaskForEvent(ctx, orgID, evt, entityID, routing)
+	if errors.Is(err, dbpkg.ErrEntityClosed) {
+		// The entity closed between the lifecycle gate above and the mint's
+		// own transaction, and the mint refused rather than strand a task on
+		// it. The same answer the gate gives a straggler on a closed entity,
+		// reached a moment later; the event is consumed, not replayed.
+		routerLog.InfoContext(ctx, "entity closed under the mint; no task", "entity_id", entityID, "event_type", evt.EventType)
+		disp.Disposition = events.DispositionTasklessUnroutable
+		return nil
+	}
 	if err != nil {
 		disp.Disposition = events.DispositionError
 		return fmt.Errorf("upsert task: %w", err)
@@ -649,8 +687,12 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 		var suppressed bool
 		task, created, suppressed, err = r.tasks.FindOrCreateAtUnlessEntityActiveSystem(ctx, orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
 		if err != nil {
-			span.SetStatus(codes.Error, "find or create task")
-			routerLog.ErrorContext(ctx, "became_atomic: failed to check/create task on entity", "entity_id", entityID, "error", err)
+			// A closed entity is an answer the caller classifies and logs
+			// at its own level, not a failure of this stage.
+			if !errors.Is(err, dbpkg.ErrEntityClosed) {
+				span.SetStatus(codes.Error, "find or create task")
+				routerLog.ErrorContext(ctx, "became_atomic: failed to check/create task on entity", "entity_id", entityID, "error", err)
+			}
 			return nil, false, err
 		}
 		if suppressed {
@@ -662,8 +704,10 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 	} else {
 		task, created, err = r.tasks.FindOrCreateAtSystem(ctx, orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
 		if err != nil {
-			span.SetStatus(codes.Error, "find or create task")
-			routerLog.ErrorContext(ctx, "failed to find/create task", "event_type", evt.EventType, "entity_id", entityID, "error", err)
+			if !errors.Is(err, dbpkg.ErrEntityClosed) {
+				span.SetStatus(codes.Error, "find or create task")
+				routerLog.ErrorContext(ctx, "failed to find/create task", "event_type", evt.EventType, "entity_id", entityID, "error", err)
+			}
 			return nil, false, err
 		}
 	}
