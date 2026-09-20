@@ -69,7 +69,8 @@ type MarketplaceListing struct {
 	CreatorUserID string `json:"creator_user_id,omitempty"`
 	// SourceID is the team-side blueprint/prompt id this listing was
 	// published from — plain text, NO FK, so the listing survives source
-	// deletion. Used by GetActiveBySource to resolve the republish target.
+	// deletion. It is how a publish or relist finds the listing a source
+	// already has instead of minting a duplicate.
 	SourceID       string     `json:"source_id,omitempty"`
 	CurrentVersion int        `json:"current_version"`
 	CreatedAt      time.Time  `json:"created_at"`

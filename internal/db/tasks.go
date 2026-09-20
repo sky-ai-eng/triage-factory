@@ -498,20 +498,6 @@ type TaskStore interface {
 
 	// --- Claim mutations ---
 
-	// SetClaimedByAgent stamps the agent claim with no race-safety
-	// guards, landing a queued or snoozed row in progress the way every
-	// other claim door does — the tasks_queue_unclaimed CHECK refuses the
-	// held-queued row it would otherwise write. An empty agentID clears the
-	// claim and leaves the status alone. Production paths use
-	// StampAgentClaimIfUnclaimed (auto-trigger) or HandoffAgentClaim
-	// (user-initiated) instead; this primitive survives for test fixtures
-	// and migration backfills only.
-	SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) (domain.Task, error)
-
-	// SetClaimedByUser is the symmetric unconditional user-claim
-	// stamp. Same scope-warning as SetClaimedByAgent.
-	SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) (domain.Task, error)
-
 	// StampAgentClaimIfUnclaimed is the race-safe agent-claim stamp
 	// for the auto-trigger path. Guards on (a) no user claim,
 	// (b) not already same-agent, (c) row not terminal. Atomically
@@ -703,8 +689,6 @@ type TaskStore interface {
 	// without the other stamps a close_event_type no task_events row accounts
 	// for — not rejected here, but no caller does it.
 	CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeConversationIDs []string, err error)
-
-	SetStatusSystem(ctx context.Context, orgID, taskID, status string) (domain.Task, error)
 
 	// RecordEventSystem mirrors RecordEvent's exemption — see its doc
 	// comment.

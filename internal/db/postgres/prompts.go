@@ -113,26 +113,6 @@ func (s *promptStore) GetSystem(ctx context.Context, orgID string, id string) (*
 	return getPrompt(ctx, s.admin, orgID, id, true)
 }
 
-// GetBySystemSlug resolves a team's copy of a shipped prompt by slug. Runs
-// on the app pool (RLS-gated); org + team are in the WHERE for defense in
-// depth.
-func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Prompt, error) {
-	if teamID == "" {
-		return nil, errors.New("postgres prompts: GetBySystemSlug requires team_id")
-	}
-	p, err := scanPromptRowPG(s.app.QueryRowContext(ctx, `
-		SELECT `+pgPromptColumns+`
-		FROM prompts WHERE org_id = $1 AND team_id = $2 AND system_slug = $3 AND deleted_at IS NULL
-	`, orgID, teamID, systemSlug).Scan)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &p, nil
-}
-
 func getPrompt(ctx context.Context, q queryer, orgID, id string, includeDeleted bool) (*domain.Prompt, error) {
 	query := `
 		SELECT ` + pgPromptColumns + `
@@ -263,22 +243,6 @@ func (s *promptStore) Delete(ctx context.Context, orgID string, id string) error
 func (s *promptStore) Hide(ctx context.Context, orgID string, id string) (domain.Prompt, error) {
 	return scanUpdatedPrompt(s.app.QueryRowContext(ctx,
 		`UPDATE prompts SET hidden = TRUE WHERE org_id = $1 AND id = $2 RETURNING `+pgPromptColumns, orgID, id))
-}
-
-func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) (domain.Prompt, error) {
-	return scanUpdatedPrompt(s.app.QueryRowContext(ctx,
-		`UPDATE prompts SET hidden = FALSE WHERE org_id = $1 AND id = $2 RETURNING `+pgPromptColumns, orgID, id))
-}
-
-func (s *promptStore) CountConversationReferences(ctx context.Context, orgID, id string) (int, error) {
-	var n int
-	err := s.app.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM conversations WHERE org_id = $1 AND prompt_id = $2`, orgID, id,
-	).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("count conversation references: %w", err)
-	}
-	return n, nil
 }
 
 func (s *promptStore) IncrementUsage(ctx context.Context, orgID string, id string) error {

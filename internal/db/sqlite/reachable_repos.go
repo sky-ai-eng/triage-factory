@@ -114,57 +114,6 @@ func (s *reachableReposStore) ReplaceForPATSystem(ctx context.Context, orgID, ho
 	})
 }
 
-// ClearForInstallationSystem fails closed on a malformed argument rather than
-// reporting success for a delete that matched nothing. It is a write path called
-// only when the reach is known to be gone, so "no rows matched" and "the caller
-// named the wrong installation" must not be the same answer — the second would
-// leave the mirror answering for a grant that no longer exists.
-func (s *reachableReposStore) ClearForInstallationSystem(ctx context.Context, orgID, installationID string) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
-	}
-	if installationID == "" {
-		return fmt.Errorf("clear reachable repositories: empty installation id")
-	}
-	classes, classArgs := appTierClassArgs()
-	return inTx(ctx, s.q, func(tx queryer) error {
-		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM reachable_repositories
-			 WHERE org_id = ? AND installation_id = ?
-		`, orgID, installationID); err != nil {
-			return fmt.Errorf("clear reachable repositories: %w", err)
-		}
-		// The scope row goes with the entries: leaving it would keep vouching that
-		// this installation's reach had been established, for an installation that
-		// no longer reaches anything. Narrowed to the App classes because scope
-		// holds a host for the PAT tier, and this argument is an installation id.
-		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM reachable_scopes
-			 WHERE org_id = ? AND scope = ? AND credential_class IN (`+classes+`)
-		`, append([]any{orgID, installationID}, classArgs...)...); err != nil {
-			return fmt.Errorf("clear reachable scope: %w", err)
-		}
-		return nil
-	})
-}
-
-func (s *reachableReposStore) ListForOrgSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass) ([]domain.ReachableRepository, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	if err := db.RequireGrantClass("list grant entries", class); err != nil {
-		return nil, err
-	}
-	return scanReachableRepos(s.q.QueryContext(ctx, `
-		SELECT `+reachableColumns+`
-		  FROM reachable_repositories r
-		  JOIN org_github_app_installations i
-		    ON i.org_id = r.org_id AND i.installation_id = r.installation_id
-		 WHERE r.org_id = ? AND r.credential_class = ? AND i.removed_at IS NULL
-		 ORDER BY r.installation_id, LOWER(r.owner), LOWER(r.repo)
-	`, orgID, string(class)))
-}
-
 // ListReachWithoutPurposeSystem: granted, tracked by nobody. The NOT EXISTS is
 // case-folded on both sides because GitHub identifiers are case-insensitive and
 // a case-sensitive comparison here would report a tracked repository as

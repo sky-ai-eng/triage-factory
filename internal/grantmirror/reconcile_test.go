@@ -61,7 +61,6 @@ type fakeMirror struct {
 	// mirrors into a place nothing looks.
 	classes  map[string]domain.GitHubCredentialClass
 	replaces int
-	cleared  []string
 	err      error
 }
 
@@ -81,16 +80,6 @@ func (f *fakeMirror) ReplaceForInstallationSystem(_ context.Context, _ string, c
 	f.rows[installationID] = slugs
 	f.classes[installationID] = class
 	return nil
-}
-
-func (f *fakeMirror) ClearForInstallationSystem(_ context.Context, _, installationID string) error {
-	f.cleared = append(f.cleared, installationID)
-	delete(f.rows, installationID)
-	return nil
-}
-
-func (f *fakeMirror) ListForOrgSystem(context.Context, string, domain.GitHubCredentialClass) ([]domain.ReachableRepository, error) {
-	return nil, nil
 }
 
 func (f *fakeMirror) ListReachWithoutPurposeSystem(context.Context, string, domain.GitHubCredentialClass, db.ListOpts) ([]domain.ReachableRepository, int, error) {
@@ -334,9 +323,9 @@ func TestRunOrg_ExistenceFailureStopsThePass(t *testing.T) {
 	if apps.listedAfterBackfill {
 		t.Error("installations were listed after the existence reconcile failed; the pass must stop")
 	}
-	if mirror.replaces != 0 || len(mirror.cleared) != 0 {
-		t.Errorf("mirror was touched (%d replaces, %d clears) after the existence reconcile failed; want none",
-			mirror.replaces, len(mirror.cleared))
+	if mirror.replaces != 0 {
+		t.Errorf("mirror was touched (%d replaces) after the existence reconcile failed; want none",
+			mirror.replaces)
 	}
 }
 
@@ -349,7 +338,7 @@ func TestRunOrg_NoInstallationsIsANoOp(t *testing.T) {
 	if err := newReconciler(apps, mirror, fakeGrants{}).RunOrg(context.Background(), testOrg); err != nil {
 		t.Fatalf("RunOrg: %v", err)
 	}
-	if mirror.replaces != 0 || len(mirror.cleared) != 0 {
+	if mirror.replaces != 0 {
 		t.Errorf("mirror was touched for an org with no installations; want untouched")
 	}
 }
@@ -493,7 +482,7 @@ func TestRunOrg_PATOrgReconcilesNothingAndFailsNothing(t *testing.T) {
 	if err := newReconciler(apps, mirror, fakeGrants{}).RunOrg(context.Background(), testOrg); err != nil {
 		t.Fatalf("RunOrg: %v", err)
 	}
-	if mirror.replaces != 0 || len(mirror.cleared) != 0 {
+	if mirror.replaces != 0 {
 		t.Error("mirror was touched for an org with no App registration; want untouched")
 	}
 }
@@ -562,7 +551,7 @@ func TestRunOrg_ManagedWorkspaceWithNothingBoundWritesNothing(t *testing.T) {
 	if err := reconciler.RunOrg(context.Background(), testOrg); err != nil {
 		t.Fatalf("RunOrg: %v", err)
 	}
-	if mirror.replaces != 0 || len(mirror.cleared) != 0 {
+	if mirror.replaces != 0 {
 		t.Error("mirror was touched for a managed workspace with no bound installation; want untouched")
 	}
 }

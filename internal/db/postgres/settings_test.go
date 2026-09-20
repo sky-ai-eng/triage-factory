@@ -277,9 +277,9 @@ func TestTeamGitHubGroupsStore_Postgres_SetForTeam_TeamAdminGated(t *testing.T) 
 	}
 
 	// Original mapping survives.
-	got, err := stores.TeamGitHubGroups.ListForTeamSystem(context.Background(), teamID)
+	got, err := stores.TeamGitHubGroups.ListForTeam(context.Background(), teamID)
 	if err != nil {
-		t.Fatalf("ListForTeamSystem: %v", err)
+		t.Fatalf("ListForTeam: %v", err)
 	}
 	if len(got) != 1 || got[0].TeamSlug != "backend" {
 		t.Errorf("after refused write, groups=%+v; want one backend row", got)
@@ -429,14 +429,14 @@ func TestTeamGitHubGroupsStore_Postgres_PruneMissingSystem_DeletionLifecycle(t *
 		t.Errorf("PruneMissingSystem removed %d rows; want 2 (legacy from both teams)", n)
 	}
 
-	a, err := stores.TeamGitHubGroups.ListForTeamSystem(ctx, teamA)
+	a, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamA)
 	if err != nil {
 		t.Fatalf("ListForTeamSystem(teamA): %v", err)
 	}
 	if len(a) != 1 || a[0].TeamSlug != "backend" {
 		t.Errorf("teamA after prune = %+v; want only backend", a)
 	}
-	b, err := stores.TeamGitHubGroups.ListForTeamSystem(ctx, teamB)
+	b, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamB)
 	if err != nil {
 		t.Fatalf("ListForTeamSystem(teamB): %v", err)
 	}

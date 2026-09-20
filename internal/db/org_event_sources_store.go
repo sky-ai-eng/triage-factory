@@ -38,8 +38,14 @@ type OrgEventSourceStore interface {
 
 	// Get returns one source's row, or (nil, nil) when the org has recorded
 	// nothing for it — absence is an answer ("no per-source overrides"), not a
-	// miss. It is the point read the returned-row rule pairs SetDisabled
-	// against, and the only way to read who paused a source and when.
+	// miss.
+	//
+	// No production caller today: the consumers read the whole org's set
+	// through ListDisabled. Kept as the point read the returned-row rule
+	// pairs SetDisabled against — the write's RETURNING projects this read's
+	// column list and scan function, and the store conformance's
+	// AssertWriteReturnedStoredRow compares SetDisabled's result to it — and
+	// as the only read that answers who paused a source and when.
 	Get(ctx context.Context, orgID, kind string) (*domain.OrgEventSource, error)
 
 	// SetDisabled records the org's policy for one source and returns the

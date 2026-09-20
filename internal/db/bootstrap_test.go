@@ -8,6 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
@@ -150,7 +151,7 @@ func TestBootstrapLocalOrg_ReEntrantAfterPartial(t *testing.T) {
 }
 
 // TestBootstrapLocalOrg_PreservesUserDisable pins that re-provisioning
-// never flips a bot the user disabled back to enabled.
+// never flips a disabled bot back to enabled.
 func TestBootstrapLocalOrg_PreservesUserDisable(t *testing.T) {
 	conn := openTenantlessSQLite(t)
 	stores := sqlitestore.New(conn)
@@ -163,10 +164,9 @@ func TestBootstrapLocalOrg_PreservesUserDisable(t *testing.T) {
 	if agent == nil {
 		t.Fatal("no agent after provision")
 	}
-	// User disables the bot.
-	if _, err := stores.TeamAgents.SetEnabled(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agent.ID, false); err != nil {
-		t.Fatalf("SetEnabled false: %v", err)
-	}
+	// The bot is off for the team — a row shape no door produces today, so
+	// the fixture writes it directly.
+	dbtest.SetTeamAgentEnabledDirect(t, conn, runmode.LocalDefaultTeamID, agent.ID, false)
 	// Re-provision.
 	if err := db.BootstrapLocalOrg(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("second provision: %v", err)
@@ -299,13 +299,9 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 		t.Errorf("default team has no enabled team_agents row: %+v", ta)
 	}
 
-	// Prompts seeded. The id is a random UUID per team copy now,
+	// Prompts seeded. The id is a random UUID per team copy,
 	// so resolve by system_slug rather than by id.
-	got, err := stores.Prompts.GetBySystemSlug(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, "system-pr-review-security")
-	if err != nil {
-		t.Fatalf("Get prompt: %v", err)
-	}
-	if got == nil {
+	if got := shippedPromptBySlug(t, stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, "system-pr-review-security"); got == nil {
 		t.Error("shipped prompt system-pr-review-security missing after BootstrapNewOrg")
 	}
 
@@ -352,13 +348,13 @@ func TestSeedShippedIntoTeam_DistinctUUIDsAcrossTeams(t *testing.T) {
 
 	// Both teams have their own copy of the same shipped prompt, at
 	// distinct row ids.
-	p1, err := stores.Prompts.GetBySystemSlug(ctx, org, team1, "system-pr-review-aggregate")
-	if err != nil || p1 == nil {
-		t.Fatalf("team1 GetBySystemSlug: p=%v err=%v", p1, err)
+	p1 := shippedPromptBySlug(t, stores, org, team1, "system-pr-review-aggregate")
+	if p1 == nil {
+		t.Fatal("team1 has no copy of system-pr-review-aggregate")
 	}
-	p2, err := stores.Prompts.GetBySystemSlug(ctx, org, newTeamID, "system-pr-review-aggregate")
-	if err != nil || p2 == nil {
-		t.Fatalf("team2 GetBySystemSlug: p=%v err=%v", p2, err)
+	p2 := shippedPromptBySlug(t, stores, org, newTeamID, "system-pr-review-aggregate")
+	if p2 == nil {
+		t.Fatal("team2 has no copy of system-pr-review-aggregate")
 	}
 	if p1.ID == p2.ID {
 		t.Errorf("both teams' system-pr-review-aggregate prompt share id %q; want distinct per-team UUIDs", p1.ID)
@@ -372,18 +368,18 @@ func TestSeedShippedIntoTeam_DistinctUUIDsAcrossTeams(t *testing.T) {
 		t.Errorf("team2 system-pr-review-aggregate model=%q, want %q", p2.Model, wantModel)
 	}
 	// A sibling step prompt inherits too (empty model).
-	if sec, err := stores.Prompts.GetBySystemSlug(ctx, org, team1, "system-pr-review-security"); err != nil || sec == nil || sec.Model != "" {
-		t.Errorf("team1 system-pr-review-security model=%v err=%v, want empty (inherit)", sec, err)
+	if sec := shippedPromptBySlug(t, stores, org, team1, "system-pr-review-security"); sec == nil || sec.Model != "" {
+		t.Errorf("team1 system-pr-review-security = %v, want a copy with an empty model (inherit)", sec)
 	}
 
 	// Both teams have their own distinct blueprint copies too.
-	b1, err := stores.Blueprints.GetBySystemSlug(ctx, org, team1, "system-ci-fix")
-	if err != nil || b1 == nil {
-		t.Fatalf("team1 blueprint GetBySystemSlug: b=%v err=%v", b1, err)
+	b1 := shippedBlueprintBySlug(t, stores, org, team1, "system-ci-fix")
+	if b1 == nil {
+		t.Fatal("team1 has no copy of blueprint system-ci-fix")
 	}
-	b2, err := stores.Blueprints.GetBySystemSlug(ctx, org, newTeamID, "system-ci-fix")
-	if err != nil || b2 == nil {
-		t.Fatalf("team2 blueprint GetBySystemSlug: b=%v err=%v", b2, err)
+	b2 := shippedBlueprintBySlug(t, stores, org, newTeamID, "system-ci-fix")
+	if b2 == nil {
+		t.Fatal("team2 has no copy of blueprint system-ci-fix")
 	}
 	if b1.ID == b2.ID {
 		t.Errorf("both teams' system-ci-fix blueprint share id %q; want distinct per-team UUIDs", b1.ID)
@@ -436,9 +432,9 @@ func TestSeedShippedIntoTeam_AllowedToolsRoundTrips(t *testing.T) {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 
-	got, err := stores.Prompts.GetBySystemSlug(ctx, org, team, "test-tools-prompt")
-	if err != nil || got == nil {
-		t.Fatalf("GetBySystemSlug: got=%v err=%v", got, err)
+	got := shippedPromptBySlug(t, stores, org, team, "test-tools-prompt")
+	if got == nil {
+		t.Fatal("shipped prompt test-tools-prompt missing after BootstrapNewOrg")
 	}
 	if got.Model != "opus" {
 		t.Errorf("Model=%q, want opus", got.Model)
@@ -465,29 +461,29 @@ func TestSeedShippedIntoTeam_ReRunIsExactNoOp(t *testing.T) {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 
-	before, err := stores.Prompts.GetBySystemSlug(ctx, org, team, "system-ci-fix")
-	if err != nil || before == nil {
-		t.Fatalf("GetBySystemSlug before re-run: p=%v err=%v", before, err)
+	before := shippedPromptBySlug(t, stores, org, team, "system-ci-fix")
+	if before == nil {
+		t.Fatal("shipped prompt system-ci-fix missing before re-run")
 	}
-	beforeBP, err := stores.Blueprints.GetBySystemSlug(ctx, org, team, "system-ci-fix")
-	if err != nil || beforeBP == nil {
-		t.Fatalf("Blueprints.GetBySystemSlug before re-run: b=%v err=%v", beforeBP, err)
+	beforeBP := shippedBlueprintBySlug(t, stores, org, team, "system-ci-fix")
+	if beforeBP == nil {
+		t.Fatal("shipped blueprint system-ci-fix missing before re-run")
 	}
 
 	if err := stores.ShippedDefaults.SeedShippedIntoTeam(ctx, org, team, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("re-run SeedShippedIntoTeam: %v", err)
 	}
 
-	after, err := stores.Prompts.GetBySystemSlug(ctx, org, team, "system-ci-fix")
-	if err != nil || after == nil {
-		t.Fatalf("GetBySystemSlug after re-run: p=%v err=%v", after, err)
+	after := shippedPromptBySlug(t, stores, org, team, "system-ci-fix")
+	if after == nil {
+		t.Fatal("shipped prompt system-ci-fix missing after re-run")
 	}
 	if after.ID != before.ID {
 		t.Errorf("re-run changed prompt id: %s -> %s; want unchanged", before.ID, after.ID)
 	}
-	afterBP, err := stores.Blueprints.GetBySystemSlug(ctx, org, team, "system-ci-fix")
-	if err != nil || afterBP == nil {
-		t.Fatalf("Blueprints.GetBySystemSlug after re-run: b=%v err=%v", afterBP, err)
+	afterBP := shippedBlueprintBySlug(t, stores, org, team, "system-ci-fix")
+	if afterBP == nil {
+		t.Fatal("shipped blueprint system-ci-fix missing after re-run")
 	}
 	if afterBP.ID != beforeBP.ID {
 		t.Errorf("re-run changed blueprint id: %s -> %s; want unchanged", beforeBP.ID, afterBP.ID)
@@ -655,4 +651,25 @@ func shippedModel(t *testing.T, slug string) string {
 	}
 	t.Fatalf("no shipped prompt with slug %q", slug)
 	return ""
+}
+
+// shippedPromptBySlug observes a team's copy of a shipped prompt through the
+// store's live List read, or nil when the team has none.
+func shippedPromptBySlug(t *testing.T, stores db.Stores, org, team, slug string) *domain.Prompt {
+	t.Helper()
+	rows, _, err := stores.Prompts.List(t.Context(), org, team, db.Unwindowed)
+	if err != nil {
+		t.Fatalf("Prompts.List for %q: %v", slug, err)
+	}
+	return dbtest.ShippedCopyBySlug(t, rows, team, slug, func(p domain.Prompt) (string, string) { return p.TeamID, p.SystemSlug })
+}
+
+// shippedBlueprintBySlug is shippedPromptBySlug for a shipped blueprint.
+func shippedBlueprintBySlug(t *testing.T, stores db.Stores, org, team, slug string) *domain.Blueprint {
+	t.Helper()
+	rows, _, err := stores.Blueprints.List(t.Context(), org, db.BlueprintListFilter{TeamID: team}, db.Unwindowed)
+	if err != nil {
+		t.Fatalf("Blueprints.List for %q: %v", slug, err)
+	}
+	return dbtest.ShippedCopyBySlug(t, rows, team, slug, func(b domain.Blueprint) (string, string) { return b.TeamID, b.SystemSlug })
 }

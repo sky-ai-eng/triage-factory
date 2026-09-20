@@ -44,10 +44,6 @@ func (s *marketplaceStore) Get(context.Context, string, string, string) (domain.
 	return domain.ListingDetail{}, db.ErrNotApplicableInLocal
 }
 
-func (s *marketplaceStore) GetActiveBySource(context.Context, string, string) (*domain.MarketplaceListing, error) {
-	return nil, db.ErrNotApplicableInLocal
-}
-
 func (s *marketplaceStore) GetBySource(context.Context, string, string) (*domain.ListingSummary, error) {
 	return nil, db.ErrNotApplicableInLocal
 }

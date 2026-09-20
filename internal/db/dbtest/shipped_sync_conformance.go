@@ -18,7 +18,39 @@ import (
 //     SyncShippedIntoTeam reads teams.shipped_defaults_backfilled_at)
 //   - resetBackfill, which clears that marker (raw UPDATE) so the grandfather
 //     backfill can be exercised without inventing a pre-stamping-era install
-type ShippedSyncFactory func(t *testing.T) (stores db.Stores, orgID, teamID string, resetBackfill func(t *testing.T))
+//   - handlerID, the raw slug resolver described at ShippedHandlerIDBySlug,
+//     which the handler half of the suite observes shipped handlers through
+type ShippedSyncFactory func(t *testing.T) (stores db.Stores, orgID, teamID string, resetBackfill func(t *testing.T), handlerID ShippedHandlerIDBySlug)
+
+// ShippedCopyBySlug returns the one row in rows whose system_slug is slug
+// and, when teamID is non-empty, whose team_id is teamID — or nil when the
+// team has no such copy. It is how a test observes a team's copy of a
+// shipped row after a seed or a sync: the rows come from the store's live
+// List read, so a hidden or soft-deleted copy reads as absent exactly as it
+// does to a request. The team match is applied here rather than through the
+// List filter because the SQLite Lists ignore theirs (local mode is
+// single-team) while the multi-team bootstrap tests seed two teams into one
+// SQLite file. Two matches is a fixture bug, and fails loudly.
+func ShippedCopyBySlug[T any](t *testing.T, rows []T, teamID, slug string, key func(T) (teamID, systemSlug string)) *T {
+	t.Helper()
+	var found *T
+	for i := range rows {
+		team, s := key(rows[i])
+		if s != slug || (teamID != "" && team != teamID) {
+			continue
+		}
+		if found != nil {
+			t.Fatalf("shipped slug %q has more than one copy on team %q", slug, teamID)
+		}
+		found = &rows[i]
+	}
+	return found
+}
+
+// promptKey and blueprintKey are the ShippedCopyBySlug projections for the
+// two shipped-row types the sync suites observe.
+func promptKey(p domain.Prompt) (string, string)       { return p.TeamID, p.SystemSlug }
+func blueprintKey(b domain.Blueprint) (string, string) { return b.TeamID, b.SystemSlug }
 
 // syncBlueprint builds a shipped blueprint definition from a slug, name, and its
 // ordered step prompt slugs.
@@ -42,19 +74,19 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 
 	promptBySlug := func(t *testing.T, stores db.Stores, orgID, teamID, slug string) *domain.Prompt {
 		t.Helper()
-		p, err := stores.Prompts.GetBySystemSlug(ctx, orgID, teamID, slug)
+		rows, _, err := stores.Prompts.List(ctx, orgID, teamID, db.Unwindowed)
 		if err != nil {
-			t.Fatalf("GetBySystemSlug(prompt %q): %v", slug, err)
+			t.Fatalf("Prompts.List for prompt %q: %v", slug, err)
 		}
-		return p
+		return ShippedCopyBySlug(t, rows, teamID, slug, promptKey)
 	}
 	blueprintBySlug := func(t *testing.T, stores db.Stores, orgID, teamID, slug string) *domain.Blueprint {
 		t.Helper()
-		b, err := stores.Blueprints.GetBySystemSlug(ctx, orgID, teamID, slug)
+		rows, _, err := stores.Blueprints.List(ctx, orgID, db.BlueprintListFilter{TeamID: teamID}, db.Unwindowed)
 		if err != nil {
-			t.Fatalf("GetBySystemSlug(blueprint %q): %v", slug, err)
+			t.Fatalf("Blueprints.List for blueprint %q: %v", slug, err)
 		}
-		return b
+		return ShippedCopyBySlug(t, rows, teamID, slug, blueprintKey)
 	}
 	stepSlugsOf := func(t *testing.T, stores db.Stores, orgID, teamID, blueprintSlug string) []string {
 		t.Helper()
@@ -78,7 +110,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 	}
 
 	t.Run("StaleUnmodifiedUnit_Updated", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, _ := factory(t)
 		promptsA := []domain.Prompt{syncPrompt("ci", "CI Fix", "old body", "", "")}
 		bpsA := []domain.SeedBlueprint{syncBlueprint("ci", "CI Fix", "ci")}
 		if err := stores.ShippedDefaults.SyncShippedIntoTeam(ctx, orgID, teamID, promptsA, bpsA); err != nil {
@@ -102,7 +134,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 	})
 
 	t.Run("UserModifiedStepPrompt_SkipsWholeUnit", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, _ := factory(t)
 		promptsA := []domain.Prompt{
 			syncPrompt("a", "A", "a1", "", ""),
 			syncPrompt("b", "B", "b1", "", ""),
@@ -139,7 +171,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 	})
 
 	t.Run("UserModifiedBlueprintHeader_SkipsUnit", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, _ := factory(t)
 		promptsA := []domain.Prompt{syncPrompt("x", "X", "x1", "", "")}
 		bpsA := []domain.SeedBlueprint{syncBlueprint("hdr", "Header", "x")}
 		if err := stores.ShippedDefaults.SyncShippedIntoTeam(ctx, orgID, teamID, promptsA, bpsA); err != nil {
@@ -164,7 +196,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 	})
 
 	t.Run("EqualContent_ZeroWrites", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, _ := factory(t)
 		prompts := []domain.Prompt{syncPrompt("eq", "Eq", "same", domain.ModelOpus, "Read")}
 		bps := []domain.SeedBlueprint{syncBlueprint("eq", "Eq", "eq")}
 		if err := stores.ShippedDefaults.SyncShippedIntoTeam(ctx, orgID, teamID, prompts, bps); err != nil {
@@ -185,7 +217,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 	})
 
 	t.Run("SoftDeletedBlueprint_Skipped", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, _ := factory(t)
 		promptsA := []domain.Prompt{syncPrompt("dx", "DX", "dx1", "", "")}
 		bpsA := []domain.SeedBlueprint{syncBlueprint("del", "Del", "dx")}
 		if err := stores.ShippedDefaults.SyncShippedIntoTeam(ctx, orgID, teamID, promptsA, bpsA); err != nil {
@@ -211,7 +243,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 	})
 
 	t.Run("NewShippedSlug_Inserted", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, _ := factory(t)
 		promptsA := []domain.Prompt{syncPrompt("pa", "PA", "pa1", "", "")}
 		bpsA := []domain.SeedBlueprint{syncBlueprint("ua", "UA", "pa")}
 		if err := stores.ShippedDefaults.SyncShippedIntoTeam(ctx, orgID, teamID, promptsA, bpsA); err != nil {
@@ -241,7 +273,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 	})
 
 	t.Run("Restructure_AddsAndDropsStep", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, _ := factory(t)
 		promptsA := []domain.Prompt{
 			syncPrompt("pa", "PA", "pa1", "", ""),
 			syncPrompt("pb", "PB", "pb1", "", ""),
@@ -277,7 +309,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 	})
 
 	t.Run("InconsistentShippedList_Errors", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, _ := factory(t)
 		// A shipped blueprint references a step slug with no matching shipped
 		// prompt (a release-authoring mistake). The sync must fail loudly rather
 		// than resolve it to empty content and clobber/insert an empty row.
@@ -289,7 +321,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 	})
 
 	t.Run("Backfill_StampsDivergedUnflagged_Once", func(t *testing.T) {
-		stores, orgID, teamID, resetBackfill := factory(t)
+		stores, orgID, teamID, resetBackfill, _ := factory(t)
 		promptsA := []domain.Prompt{
 			syncPrompt("a", "A", "a1", "", ""),
 			syncPrompt("b", "B", "b1", "", ""),

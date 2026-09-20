@@ -30,9 +30,14 @@ func seedPRCheckRuns(t *testing.T, database *sql.DB, entityID string, runs ...do
 	if err != nil {
 		t.Fatalf("marshal snapshot: %v", err)
 	}
-	if _, err := sqlitestore.New(database).Entities.UpdateSnapshot(
-		t.Context(), runmode.LocalDefaultOrgID, entityID, string(snap)); err != nil {
-		t.Fatalf("seed snapshot: %v", err)
+	entities := sqlitestore.New(database).Entities
+	ent, err := entities.Get(t.Context(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil || ent == nil {
+		t.Fatalf("read entity %s: ent=%v err=%v", entityID, ent, err)
+	}
+	if ok, err := entities.UpdateSnapshotCASSystem(
+		t.Context(), runmode.LocalDefaultOrgID, entityID, string(snap), ent.PollSeq); err != nil || !ok {
+		t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 	}
 }
 

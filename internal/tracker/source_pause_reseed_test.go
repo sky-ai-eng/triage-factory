@@ -84,8 +84,8 @@ func TestRefreshGitHub_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if _, err := stores.Entities.UpdateSnapshot(ctx, org, ent.ID, pausedPRSnapshot()); err != nil {
-		t.Fatalf("seed snapshot: %v", err)
+	if ok, err := stores.Entities.UpdateSnapshotCASSystem(ctx, org, ent.ID, pausedPRSnapshot(), ent.PollSeq); err != nil || !ok {
+		t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 	}
 
 	// The disable, exactly as the PATCH route performs it.
@@ -137,8 +137,8 @@ func TestRefreshGitHub_PauseWithoutClearWouldEmit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if _, err := stores.Entities.UpdateSnapshot(ctx, org, ent.ID, pausedPRSnapshot()); err != nil {
-		t.Fatalf("seed snapshot: %v", err)
+	if ok, err := stores.Entities.UpdateSnapshotCASSystem(ctx, org, ent.ID, pausedPRSnapshot(), ent.PollSeq); err != nil || !ok {
+		t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 	}
 
 	pub := &recordingPublisher{}
@@ -182,8 +182,8 @@ func TestRefreshJira_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 		Assignee: "Alice", AssigneeAccountID: "acc-1",
 		UpdatedAt: "2026-06-01T00:00:00.000+0000",
 	})
-	if _, err := stores.Entities.UpdateSnapshot(ctx, org, ent.ID, string(prev)); err != nil {
-		t.Fatalf("seed snapshot: %v", err)
+	if ok, err := stores.Entities.UpdateSnapshotCASSystem(ctx, org, ent.ID, string(prev), ent.PollSeq); err != nil || !ok {
+		t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 	}
 	if _, err := stores.Entities.ClearSnapshotsForSourceSystem(ctx, org, "jira"); err != nil {
 		t.Fatalf("clear snapshots: %v", err)
@@ -294,9 +294,7 @@ func TestRefreshGitHub_ReEnable_KnownEntitySilentNewEntityDiscovered(t *testing.
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, []string{"octo/repo"})
 
 	// The entity TF knew before the pause, with the snapshot a normal cycle
 	// left behind.
@@ -304,8 +302,8 @@ func TestRefreshGitHub_ReEnable_KnownEntitySilentNewEntityDiscovered(t *testing.
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if _, err := stores.Entities.UpdateSnapshot(ctx, org, known.ID, pausedPRSnapshot()); err != nil {
-		t.Fatalf("seed snapshot: %v", err)
+	if ok, err := stores.Entities.UpdateSnapshotCASSystem(ctx, org, known.ID, pausedPRSnapshot(), known.PollSeq); err != nil || !ok {
+		t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 	}
 	if _, err := stores.Entities.ClearSnapshotsForSourceSystem(ctx, org, "github"); err != nil {
 		t.Fatalf("clear snapshots: %v", err)

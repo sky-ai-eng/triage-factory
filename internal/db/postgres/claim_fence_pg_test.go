@@ -114,9 +114,9 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("insert after reap = %v, want ErrClaimReleased", err)
 		}
-		msgs, err := fx.store.Messages(ctx, fx.orgID, fx.conversationID)
+		msgs, err := fx.store.MessagesForConversations(ctx, fx.orgID, []string{fx.conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		if len(msgs) != 1 || msgs[0].Content != "live" {
 			t.Fatalf("transcript = %+v, want only the row written while the claim was live", msgs)
@@ -189,9 +189,9 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("settle after reap = %v, want ErrClaimReleased", err)
 		}
-		msgs, err := fx.store.Messages(ctx, fx.orgID, fx.conversationID)
+		msgs, err := fx.store.MessagesForConversations(ctx, fx.orgID, []string{fx.conversationID})
 		if err != nil || len(msgs) != 1 {
-			t.Fatalf("Messages = %+v (err %v)", msgs, err)
+			t.Fatalf("MessagesForConversations = %+v (err %v)", msgs, err)
 		}
 		if msgs[0].CostUSD != nil || msgs[0].Metadata["compaction_failure"] != nil {
 			t.Errorf("refused settle landed anyway: cost=%v metadata=%v", msgs[0].CostUSD, msgs[0].Metadata)
@@ -393,9 +393,9 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		if got.SessionID != "" || got.WorktreePath != "" {
 			t.Errorf("other conversation coordinates = (%q, %q), want both empty (untouched)", got.SessionID, got.WorktreePath)
 		}
-		msgs, err := fx.store.Messages(ctx, fx.orgID, other)
+		msgs, err := fx.store.MessagesForConversations(ctx, fx.orgID, []string{other})
 		if err != nil {
-			t.Fatalf("Messages other: %v", err)
+			t.Fatalf("MessagesForConversations other: %v", err)
 		}
 		if len(msgs) != 0 {
 			t.Fatalf("other conversation transcript = %+v, want nothing written by a claim that does not own it", msgs)
@@ -485,9 +485,9 @@ func TestClaimFence_SerializesAgainstAConcurrentRelease(t *testing.T) {
 		t.Fatal("fenced write never returned after the release committed")
 	}
 
-	msgs, err := fx.store.Messages(ctx, fx.orgID, fx.conversationID)
+	msgs, err := fx.store.MessagesForConversations(ctx, fx.orgID, []string{fx.conversationID})
 	if err != nil {
-		t.Fatalf("Messages: %v", err)
+		t.Fatalf("MessagesForConversations: %v", err)
 	}
 	if len(msgs) != 0 {
 		t.Fatalf("transcript = %+v, want nothing written by the losing engagement", msgs)
@@ -545,9 +545,9 @@ func TestClaimFence_SuccessorWritesWhileTheZombieIsRefused(t *testing.T) {
 	if got.ExecutorID != "exec-successor" {
 		t.Errorf("executor = %q, want exec-successor", got.ExecutorID)
 	}
-	msgs, err := fx.store.Messages(ctx, fx.orgID, fx.conversationID)
+	msgs, err := fx.store.MessagesForConversations(ctx, fx.orgID, []string{fx.conversationID})
 	if err != nil {
-		t.Fatalf("Messages: %v", err)
+		t.Fatalf("MessagesForConversations: %v", err)
 	}
 	if len(msgs) != 1 || msgs[0].Content != "successor" {
 		t.Fatalf("transcript = %+v, want only the successor's row (no interleaving)", msgs)

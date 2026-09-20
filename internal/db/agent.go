@@ -665,45 +665,22 @@ type ConversationStore interface {
 	// what it always wrote (delivered=true, window_state='active').
 	InsertMessage(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 
-	// Messages returns the conversation's messages for display, ordered by the same
-	// effective assembly key ListForAssembly uses (COALESCE(seq, id)) rather
-	// than by insertion id. A transcript that ordered on id alone would show
-	// a row placed by seq — a compaction summary written between two existing
-	// rows — somewhere other than where the model read it, which is the one
-	// thing a transcript must never do. Every seq is NULL today, so the two
-	// keys coincide; that they agree is the point, not a coincidence to rely
-	// on.
+	// MessagesWindow is the conversation's display read, bounded by a
+	// window. Rows are ordered by the same effective assembly key
+	// ListForAssembly uses (COALESCE(seq, id)) rather than by insertion id.
+	// A transcript that ordered on id alone would show a row placed by seq —
+	// a compaction summary written between two existing rows — somewhere
+	// other than where the model read it, which is the one thing a
+	// transcript must never do. Every seq is NULL today, so the two keys
+	// coincide; that they agree is the point, not a coincidence to rely on.
 	//
 	// Withdrawn-pending rows (delivered=false AND window_state='inactive' —
 	// a staged injection withdrawn before any flush) are excluded: withdrawn
 	// means "never happened", so it must not render as transcript history.
-	// Delivered inactive rows (compacted history) stay visible.
-	Messages(ctx context.Context, orgID, conversationID string) ([]domain.Message, error)
-
-	// MessagesSince is Messages restricted to rows above a watermark: the
-	// same display read with `id > sinceID`. It exists so a client holding a
-	// partial transcript can repair it — a websocket frame is a hint, never
-	// the only path to a row, and the RunStation's transcript is otherwise
-	// append-only from page load.
-	//
-	// Visibility is identical to Messages by construction (Messages is this
-	// method at sinceID 0, which every real id clears), so the two reads can
-	// never disagree about which rows a client is entitled to see.
-	//
-	// sinceID 0 means "from the beginning". Callers normalize anything that
-	// isn't a real id to 0 rather than relying on a negative one selecting
-	// everything — that it does is an artifact of ids starting at 1.
-	//
-	// The watermark is an id and the ordering is COALESCE(seq, id): those are
-	// deliberately different keys. "Which rows has this client not seen yet"
-	// is a question about insertion; "where does each row belong" is a
-	// question about placement. Once anything writes seq, a returned row may
-	// sort before a row the client already holds — merging it is the caller's
-	// problem, not this read's.
-	MessagesSince(ctx context.Context, orgID, conversationID string, sinceID int) ([]domain.Message, error)
-
-	// MessagesWindow is Messages with a window: the same display read, the
-	// same visibility filter, bounded.
+	// Delivered inactive rows (compacted history) stay visible. Every display
+	// read — this one and MessagesForConversations — applies that filter and
+	// that order, so no two of them can disagree about which rows a client
+	// is entitled to see or where each one belongs.
 	//
 	// The transcript is a sync/tail read, not a browse — a client follows it
 	// forward from a watermark — so it keeps its own window type instead of
@@ -712,6 +689,16 @@ type ConversationStore interface {
 	//
 	//   - w.SinceID > 0: rows strictly after that id, oldest-first. The
 	//     tail-follow direction; a full page means more have already landed.
+	//     The watermark is how a client holding a partial transcript repairs
+	//     it — a websocket frame is a hint, never the only path to a row.
+	//     Callers normalize anything that isn't a real id to 0 rather than
+	//     relying on a negative one selecting everything. The watermark is an
+	//     id while the ordering is COALESCE(seq, id), and those are
+	//     deliberately different keys: "which rows has this client not seen
+	//     yet" is a question about insertion, "where does each row belong" is
+	//     a question about placement. Once anything writes seq, a returned
+	//     row may sort before a row the client already holds — merging it is
+	//     the caller's problem, not this read's.
 	//   - w.BeforeID > 0: the NEWEST rows strictly before that id, still
 	//     returned oldest-first. This is how history pages backward: a client
 	//     that opened on the tail walks toward the beginning.
@@ -736,9 +723,10 @@ type ConversationStore interface {
 	// pairing before it shipped.
 	MessagesWindow(ctx context.Context, orgID, conversationID string, w MessageWindow) ([]domain.Message, error)
 
-	// MessagesForConversations is the batched form of Messages: every message
-	// for any of the given conversation IDs as one flat slice, with the same
-	// withdrawn-pending exclusion and the same COALESCE(seq, id) ordering.
+	// MessagesForConversations is the batched display read: every message for
+	// any of the given conversation IDs as one flat slice, with the same
+	// withdrawn-pending exclusion and the same COALESCE(seq, id) ordering as
+	// MessagesWindow.
 	// Each conversation's messages are contiguous, so the caller groups by
 	// ConversationID with per-conversation order preserved; order across distinct
 	// conversations is unspecified (the SQLite read chunks its IN-list). Backs
@@ -754,7 +742,7 @@ type ConversationStore interface {
 	// "Newest" is the same effective assembly key the display read orders on
 	// (COALESCE(seq, id)), descending, so the row this answers with is the row
 	// a reader sees last in the transcript. Withdrawn-pending rows are excluded
-	// on the same terms as Messages — a derivation that named a row the
+	// on the same terms as the display reads — a derivation that named a row the
 	// transcript hides would describe something nobody can go look at.
 	//
 	// Only tool_calls is selected. A message row carries content, reasoning and
@@ -903,13 +891,12 @@ type ConversationStore interface {
 
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, conversationID, failureKind string) (bool, error)
 
-	// EndConversationsForTaskSystem / EndConversationSystem are the boundary
-	// doors' admin-pool twins — see the app-pool pair for the predicate, the
-	// return shape and the miss semantics. The claimless stampers need them:
-	// the blueprint reactor's step advance, the failure path and the team
-	// archive all run with no JWT claims in scope, and the archive's caller
-	// may not even be a member of the team whose conversations it is ending.
-	EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error)
+	// EndConversationSystem is EndConversation on the admin pool — see the
+	// app-pool door for the predicate, the return shape and the miss
+	// semantics. The delegate failure paths are its callers: a conversation
+	// whose engagement died in dispatch or whose agent failed is stamped from
+	// a background context with no JWT claims in scope, so the app-pool door
+	// would see no row to end.
 	EndConversationSystem(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error)
 
 	// EndConversationsForTeamSystem is the task door's team-scoped sibling:
@@ -930,10 +917,11 @@ type ConversationStore interface {
 	// ending, so the team-visibility RLS would hide the rows.
 	EndConversationsForTeamSystem(ctx context.Context, orgID, teamID string, reason domain.EndedReason) ([]domain.Conversation, error)
 
-	// EndTerminalConversationsForTaskSystem is EndConversationsForTaskSystem
-	// narrowed to the rows whose transcript has already finished — status is
-	// one of domain.AllTerminalConversationStatuses. Everything else about it
-	// is the same door: top-level rows only, already-ended rows untouched, the
+	// EndTerminalConversationsForTaskSystem is the task boundary door
+	// (EndConversationsForTask) on the admin pool, narrowed to the rows whose
+	// transcript has already finished — status is one of
+	// domain.AllTerminalConversationStatuses. Everything else about it is the
+	// same door: top-level rows only, already-ended rows untouched, the
 	// stamped rows returned as Get projects them.
 	//
 	// The narrowing is what makes it safe for a caller that has NOT stopped

@@ -17,11 +17,13 @@ import "github.com/google/uuid"
 //
 // Convention adopted: read methods (Get) return (nil, nil) on an
 // invalid UUID — same shape as Postgres-valid-but-absent rows.
-// Mutating methods (Update / SetEnabled / Delete) treat an invalid
-// UUID as "no row matched" and return nil. Production handlers do a
-// Get-then-mutate pattern that 404s on missing rows; the Get already
-// has the right shape so the mutating methods just need to not blow
-// up.
+// Mutating methods treat an invalid UUID as "no row matched" and
+// answer with whatever that store's miss is: a returned-row write
+// (eventHandlerStore.Update, agentStore.SetGitHubOrgIdentity) hands
+// back its ErrNoSuchX, a delete (eventHandlerStore.Delete) returns nil.
+// Production handlers do a Get-then-mutate pattern that 404s on missing
+// rows; the Get already has the right shape so the mutating methods
+// just need to not blow up.
 //
 // This is intentionally permissive — Create is NOT covered because
 // caller-supplied invalid IDs at INSERT time are a programmer bug

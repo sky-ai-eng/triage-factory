@@ -60,6 +60,13 @@ type MemoryAttemptStore interface {
 	// recent attempt by started_at, or (nil, nil) when it has never been
 	// attempted — an answer, not an error, and the common case for every
 	// conversation that concluded through the gate with its own memory.
+	//
+	// No production caller today: the provisioner writes attempts through
+	// BeginAttemptSystem / CompleteAttemptSystem and nothing in production
+	// reads them back. Kept as the observation read the provisioner's tests
+	// and the store conformance see an attempt through, and as what an
+	// attempts view — "why is this conversation's memory missing" — would
+	// read.
 	NewestAttemptForConversationSystem(ctx context.Context, orgID, conversationID string) (*domain.MemoryAttempt, error)
 }
 

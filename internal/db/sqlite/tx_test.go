@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -77,15 +78,17 @@ func TestSyntheticClaimsWithTx_SQLite_RollsBackOnError(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed a repo via the non-tx path so we have a baseline row count.
-	if err := stores.Repos.SetConfigured(ctx, runmode.LocalDefaultOrgID, []string{"baseline/repo"}); err != nil {
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		[]domain.TeamGitHubRepo{{Owner: "baseline", Repo: "repo"}}); err != nil {
 		t.Fatalf("seed baseline: %v", err)
 	}
 
 	sentinel := errors.New("forced rollback")
 	err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
 		func(tx db.TxStores) error {
-			// Insert a row that should roll back.
-			if err := tx.Repos.SetConfigured(ctx, runmode.LocalDefaultOrgID, []string{"baseline/repo", "rolled/back"}); err != nil {
+			// Track a repository whose registry row should roll back.
+			if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+				[]domain.TeamGitHubRepo{{Owner: "baseline", Repo: "repo"}, {Owner: "rolled", Repo: "back"}}); err != nil {
 				return err
 			}
 			return sentinel
@@ -94,12 +97,12 @@ func TestSyntheticClaimsWithTx_SQLite_RollsBackOnError(t *testing.T) {
 		t.Fatalf("expected sentinel error, got %v", err)
 	}
 
-	got, err := stores.Repos.ListConfiguredNames(ctx, runmode.LocalDefaultOrgID)
+	got, err := stores.Repos.ListSystem(ctx, runmode.LocalDefaultOrgID)
 	if err != nil {
-		t.Fatalf("ListConfiguredNames: %v", err)
+		t.Fatalf("ListSystem: %v", err)
 	}
-	for _, name := range got {
-		if name == "rolled/back" {
+	for _, r := range got {
+		if r.Slug() == "rolled/back" {
 			t.Errorf("rolled/back row visible after rollback; row count=%d", len(got))
 		}
 	}
@@ -136,7 +139,8 @@ func TestWithTx_SQLite_CanceledCtxSurfacesAsCanceled(t *testing.T) {
 	defer cancel()
 	err := stores.Tx.WithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
 		func(tx db.TxStores) error {
-			if err := tx.Repos.SetConfigured(ctx, runmode.LocalDefaultOrgID, []string{"gone/client"}); err != nil {
+			if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+				[]domain.TeamGitHubRepo{{Owner: "gone", Repo: "client"}}); err != nil {
 				return err
 			}
 			cancel()

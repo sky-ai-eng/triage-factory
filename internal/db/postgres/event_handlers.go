@@ -212,28 +212,6 @@ func getEventHandler(ctx context.Context, q queryer, orgID, id string) (*domain.
 	return &h, nil
 }
 
-// GetBySystemSlug resolves a team's copy of a shipped handler by its stable
-// system_slug. Returns (nil, nil) when the team has no copy or its copy is
-// soft-deleted.
-func (s *eventHandlerStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.EventHandler, error) {
-	if teamID == "" {
-		return nil, errors.New("postgres event_handlers GetBySystemSlug: teamID required")
-	}
-	row := s.app.QueryRowContext(ctx, `
-		SELECT `+pgEventHandlerColumns+`
-		FROM event_handlers
-		WHERE org_id = $1 AND team_id = $2::uuid AND system_slug = $3 AND deleted_at IS NULL
-	`, orgID, teamID, systemSlug)
-	h, err := scanEventHandlerRowPG(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &h, nil
-}
-
 func (s *eventHandlerStore) GetEnabledForEvent(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
 	return getEnabledEventHandlers(ctx, s.app, orgID, eventType)
 }

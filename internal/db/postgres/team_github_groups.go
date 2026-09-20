@@ -13,11 +13,11 @@ import (
 // db.TeamGitHubGroupsStore. Holds both pools — see the
 // TeamGitHubGroupsStore interface comment for the pool-split rationale.
 //
-//   - admin: ListForTeamSystem, TeamsForGroupSystem, PruneMissingSystem.
-//     Routing + reconcile from background callers without JWT claims.
-//   - app: ListForTeam, SetForTeam, TeamsForGroup. Request-handler
-//     reads/writes gated by team_github_groups_select / _insert /
-//     _delete (team membership / team admin).
+//   - admin: TeamsForGroupSystem, PruneMissingSystem. Routing + reconcile
+//     from background callers without JWT claims.
+//   - app: ListForTeam, SetForTeam. Request-handler reads/writes gated by
+//     team_github_groups_select / _insert / _delete (team membership /
+//     team admin).
 type teamGitHubGroupsStore struct {
 	app   queryer
 	admin queryer
@@ -30,15 +30,7 @@ func newTeamGitHubGroupsStore(app, admin queryer) db.TeamGitHubGroupsStore {
 var _ db.TeamGitHubGroupsStore = (*teamGitHubGroupsStore)(nil)
 
 func (s *teamGitHubGroupsStore) ListForTeam(ctx context.Context, teamID string) ([]domain.TeamGitHubGroup, error) {
-	return listTeamGitHubGroups(ctx, s.app, teamID)
-}
-
-func (s *teamGitHubGroupsStore) ListForTeamSystem(ctx context.Context, teamID string) ([]domain.TeamGitHubGroup, error) {
-	return listTeamGitHubGroups(ctx, s.admin, teamID)
-}
-
-func listTeamGitHubGroups(ctx context.Context, q queryer, teamID string) ([]domain.TeamGitHubGroup, error) {
-	rows, err := q.QueryContext(ctx, `
+	rows, err := s.app.QueryContext(ctx, `
 		SELECT github_org_login, github_team_slug
 		FROM team_github_groups
 		WHERE team_id = $1
@@ -87,20 +79,12 @@ func (s *teamGitHubGroupsStore) SetForTeam(ctx context.Context, teamID string, g
 	})
 }
 
-func (s *teamGitHubGroupsStore) TeamsForGroup(ctx context.Context, orgID, orgLogin, teamSlug string) ([]string, error) {
-	return teamsForGroup(ctx, s.app, orgID, orgLogin, teamSlug)
-}
-
 func (s *teamGitHubGroupsStore) TeamsForGroupSystem(ctx context.Context, orgID, orgLogin, teamSlug string) ([]string, error) {
-	return teamsForGroup(ctx, s.admin, orgID, orgLogin, teamSlug)
-}
-
-func teamsForGroup(ctx context.Context, q queryer, orgID, orgLogin, teamSlug string) ([]string, error) {
 	// Join teams to scope by org — team_github_groups carries no org_id
 	// (it FKs to teams), so org scoping rides the parent. Match the
 	// GitHub identifiers case-insensitively against the lowercase-
 	// normalized stored values.
-	rows, err := q.QueryContext(ctx, `
+	rows, err := s.admin.QueryContext(ctx, `
 		SELECT g.team_id
 		FROM team_github_groups g
 		JOIN teams t ON t.id = g.team_id

@@ -113,23 +113,6 @@ func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string)
 	return getBlueprint(ctx, s.admin, orgID, id, true)
 }
 
-func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Blueprint, error) {
-	if teamID == "" {
-		return nil, errors.New("postgres blueprints: GetBySystemSlug requires team_id")
-	}
-	b, err := scanBlueprintRowPG(s.app.QueryRowContext(ctx, `
-		SELECT `+pgBlueprintColumns+`
-		FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = $3 AND deleted_at IS NULL
-	`, orgID, teamID, systemSlug).Scan)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &b, nil
-}
-
 // pgBlueprintColumns is the canonical projection of a blueprints row, in the
 // order scanBlueprintRowPG reads them. Every point read SELECTs it and every
 // single-row write RETURNs it, so the write shape cannot drift from the read
@@ -354,17 +337,6 @@ func (s *blueprintStore) ListAllSteps(ctx context.Context, orgID string, f db.Bl
 		out = append(out, st)
 	}
 	return out, total, rows.Err()
-}
-
-func (s *blueprintStore) CountStepReferences(ctx context.Context, orgID, stepPromptID string) (int, error) {
-	var n int
-	err := s.app.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT bs.blueprint_id)
-		FROM blueprint_steps bs
-		JOIN blueprints b ON b.id = bs.blueprint_id AND b.org_id = bs.org_id
-		WHERE bs.org_id = $1 AND bs.step_prompt_id = $2 AND b.deleted_at IS NULL
-	`, orgID, stepPromptID).Scan(&n)
-	return n, err
 }
 
 func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID string, stepPromptIDs, briefs []string) (domain.Blueprint, error) {

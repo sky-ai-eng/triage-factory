@@ -58,9 +58,9 @@ func TestReconcileGitHubGroups_PrunesDeletedTeams(t *testing.T) {
 
 	m.reconcileGitHubGroups(ctx, org, []string{"octo/repo"})
 
-	got, err := stores.TeamGitHubGroups.ListForTeamSystem(ctx, team)
+	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team)
 	if err != nil {
-		t.Fatalf("ListForTeamSystem: %v", err)
+		t.Fatalf("ListForTeam: %v", err)
 	}
 	if len(got) != 1 || got[0].TeamSlug != "backend" {
 		t.Errorf("after reconcile, mappings = %+v; want only octo/backend (legacy pruned)", got)
@@ -103,9 +103,9 @@ func TestReconcileGitHubGroups_EmptyFetchDoesNotPrune(t *testing.T) {
 
 	m.reconcileGitHubGroups(ctx, org, []string{"octo/repo"})
 
-	got, err := stores.TeamGitHubGroups.ListForTeamSystem(ctx, team)
+	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team)
 	if err != nil {
-		t.Fatalf("ListForTeamSystem: %v", err)
+		t.Fatalf("ListForTeam: %v", err)
 	}
 	if len(got) != 1 {
 		t.Errorf("after empty-fetch reconcile, mappings = %+v; want octo/backend preserved (empty fetch must not prune)", got)

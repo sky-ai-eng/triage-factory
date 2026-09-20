@@ -22,10 +22,10 @@ var (
 	//     cannot serve two live repositories under one name, so the occupant is
 	//     a repository TF still has a row for and GitHub no longer does.
 	//   - A durable record keyed on that name: an entity ("owner/repo#18") or
-	//     an artifact dedup key. Untracking a repository deletes its
-	//     repositories row and deliberately keeps its entities, tasks and
-	//     artifacts (tracking is forward-only), so a freed name can still be
-	//     spoken for long after the repository row is gone.
+	//     an artifact dedup key. Entities, tasks and artifacts carry the slug
+	//     themselves rather than a reference to the repositories row, and
+	//     nothing that retires a repository row touches them (tracking is
+	//     forward-only), so a name can be spoken for by records alone.
 	//
 	// Neither is resolved by deleting the occupant. The first would drop a
 	// repository row; the second would destroy durable work — an entity carries
@@ -64,9 +64,10 @@ var (
 // conditional-request cursor.
 //
 // The registry is not the tracked set. A row is created when a repository is
-// first tracked and survives the last team untracking it, because
-// team_github_repos and conversation_worktrees both
-// reference this row by id and a reference must not outlive what it names.
+// first tracked — TeamGitHubReposStore.ReplaceForTeam is the door, and this
+// store exposes no create of its own — and survives the last team untracking
+// it, because team_github_repos and conversation_worktrees both reference
+// this row by id and a reference must not outlive what it names.
 // ListTrackedNamesSystem is the read that means "what does TF poll".
 //
 // All methods take orgID; local mode passes runmode.LocalDefaultOrgID.
@@ -122,11 +123,9 @@ var (
 // A caller may ignore the returned row. A caller must never re-read to learn
 // what the write already returned.
 //
-// Exempt, each said so at the method: SetConfigured (set reconciliation, no
-// single row to return), FillMissingExternalIDsSystem (bulk), and
+// Exempt, each said so at the method: FillMissingExternalIDsSystem (bulk) and
 // SetPullsPollStateByRefSystem (per-repo-per-cycle bookkeeping nobody reads
-// back). GetOrCreateSystem returns a row already, but by a re-read, because
-// its INSERT is ON CONFLICT DO NOTHING and returns nothing when it loses.
+// back).
 type RepositoryStore interface {
 	// Upsert inserts or updates a repository row. On conflict it
 	// refreshes profiling metadata (description, has_readme,
@@ -176,21 +175,6 @@ type RepositoryStore interface {
 	// ListActiveJiraTeamScoped / FactoryReadStore.Entities.
 	ListTeamScoped(ctx context.Context, orgID string, opts ListOpts) ([]domain.Repository, int, error)
 
-	// SetConfigured syncs the repositories table with the given
-	// "owner/repo" list. New entries get skeleton rows (no profile
-	// text); entries no longer in the list are deleted. Single
-	// transaction so the table can't observe a partial mid-sync
-	// state.
-	//
-	// Exempt from the returned-row rule: it reconciles a set, so there is no
-	// single row a return value could name. What it wrote is read back through
-	// ListConfiguredNames.
-	SetConfigured(ctx context.Context, orgID string, repoNames []string) error
-
-	// ListConfiguredNames returns just the "owner/repo" IDs of
-	// every configured repo. Ordered.
-	ListConfiguredNames(ctx context.Context, orgID string) ([]string, error)
-
 	// CountConfigured returns the number of configured repos. Used
 	// by the settings endpoint to short-circuit a "no repos
 	// configured yet" UI state without paying the full SELECT cost.
@@ -224,43 +208,6 @@ type RepositoryStore interface {
 	// GitHub, via domain.NormalizeRepoSource); ref.ExternalID is ignored, as
 	// this asks what a name resolves to now, not what an identity was called.
 	GetByRef(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
-
-	// GetOrCreateSystem returns the row for one repository, minting a bare
-	// one if it does not exist yet. It is the single primitive that brings
-	// a repository into the table: the tracked-set reconcile
-	// (TeamGitHubReposStore.ReplaceForTeam) and SetConfigured create their
-	// rows through the same INSERT, so a repository row can never exist
-	// without the identity columns the create sets.
-	//
-	// Get-or-create, not upsert. An existing row is returned as it stands —
-	// same id, same profile text, same base branch, same clone and poll
-	// state — with exactly one exception: external_id takes ref's value
-	// when ref carries one. That is the same rule Upsert applies, and it is
-	// one rule rather than two: a non-empty id the caller just read off a
-	// provider payload is what that provider currently says the slug
-	// resolves to, and an empty one means the caller learned nothing, so it
-	// never clears a stored id.
-	//
-	// The lookup is case-INSENSITIVE on owner/repo (GitHub identifiers are),
-	// matching the reconcile: a caller spelling a tracked repo differently
-	// gets the existing row rather than minting a second one for the same
-	// repository. Stored casing is therefore sticky. ref.Source normalizes
-	// through domain.NormalizeRepoSource — empty means GitHub, an unknown
-	// value is an error rather than a row.
-	//
-	// System (claims-free) variant only: the callers that learn about a
-	// repository are background jobs. Control-plane ones — the executor's
-	// Postgres role holds SELECT and UPDATE on repositories, not INSERT, so
-	// a repository is brought into the table by the side that polls and
-	// tracks, never by a running agent's pod.
-	//
-	// Concurrent creators of the same repository resolve to one row, whatever
-	// casing each of them spelled it with. That is enforced by the create
-	// itself and not by anything the caller has to hold — the unique index is
-	// case-sensitive and so cannot see the case-differing race, which is
-	// precisely why the impls serialize on the case-folded identity instead of
-	// leaning on it.
-	GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
 
 	// UpdateCloneStatusByRef records the outcome of an EnsureBareClone
 	// attempt for the named repo. status is "ok" | "failed" |
@@ -316,8 +263,6 @@ type RepositoryStore interface {
 	// name, and the ids would be dead weight in the poll loop's hot path.
 	ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error)
 	UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error)
-	CountConfiguredSystem(ctx context.Context, orgID string) (int, error)
-	GetSystem(ctx context.Context, orgID, id string) (*domain.Repository, error)
 	GetByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
 	UpsertSystem(ctx context.Context, orgID string, p domain.Repository) (domain.Repository, error)
 

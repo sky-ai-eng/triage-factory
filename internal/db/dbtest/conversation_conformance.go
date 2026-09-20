@@ -373,9 +373,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// The stamps land exactly where reported: one lump per invocation's
 		// last row, no proration.
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		costByID := map[int]*float64{}
 		for i := range msgs {
@@ -425,9 +425,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("Complete: %v", err)
 		}
 
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		for i := range msgs {
 			if msgs[i].ID != int(msgID) {
@@ -498,9 +498,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got.TotalCostUSD == nil || *got.TotalCostUSD != 2.0 {
 			t.Errorf("total_cost_usd = %v, want 2.0 (one lump per engagement)", got.TotalCostUSD)
 		}
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		costByID := map[int]*float64{}
 		for i := range msgs {
@@ -610,9 +610,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got.TotalCostUSD == nil || *got.TotalCostUSD != 0.625 {
 			t.Errorf("total_cost_usd = %v, want 0.625 (park lump 0.5 + terminal lump 0.125)", deref(got.TotalCostUSD))
 		}
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		costByID := map[int]*float64{}
 		for i := range msgs {
@@ -662,9 +662,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got.TotalCostUSD == nil || *got.TotalCostUSD != 2.0 {
 			t.Errorf("total_cost_usd = %v, want 2.0 (1.25 fallback-added + 0.75 fallback-added)", got.TotalCostUSD)
 		}
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		costByID := map[int]*float64{}
 		for i := range msgs {
@@ -715,9 +715,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.Complete(ctx, orgID, conversationID, "failed", 1.5, 1000, 2, "", "", "", "infra"); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		costByID := map[int]*float64{}
 		for i := range msgs {
@@ -757,9 +757,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if gotOnly.TotalCostUSD == nil || *gotOnly.TotalCostUSD != 0.25 {
 			t.Errorf("all-synthetic total_cost_usd = %v, want 0.25 (dollars stay on the ledger)", gotOnly.TotalCostUSD)
 		}
-		onlyMsgs, err := store.Messages(ctx, orgID, onlySynthID)
+		onlyMsgs, err := store.MessagesForConversations(ctx, orgID, []string{onlySynthID})
 		if err != nil {
-			t.Fatalf("Messages only-synth: %v", err)
+			t.Fatalf("MessagesForConversations only-synth: %v", err)
 		}
 		if len(onlyMsgs) != 1 || onlyMsgs[0].ID != int(onlySynth) {
 			t.Fatalf("only-synth messages = %+v, want the one synthetic row", onlyMsgs)
@@ -795,9 +795,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 1.25, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		costByID := map[int]*float64{}
 		for i := range msgs {
@@ -829,9 +829,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.Complete(ctx, orgID, noRealID, "failed", 0.5, 0, 0, "", "", "", "infra"); err != nil {
 			t.Fatalf("Complete no-real: %v", err)
 		}
-		noRealMsgs, err := store.Messages(ctx, orgID, noRealID)
+		noRealMsgs, err := store.MessagesForConversations(ctx, orgID, []string{noRealID})
 		if err != nil {
-			t.Fatalf("Messages no-real: %v", err)
+			t.Fatalf("MessagesForConversations no-real: %v", err)
 		}
 		noRealCost := map[int]*float64{}
 		for i := range noRealMsgs {
@@ -869,9 +869,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got.TotalCostUSD != nil {
 			t.Errorf("total_cost_usd = %v, want nil (no ledger row to settle on)", *got.TotalCostUSD)
 		}
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		if len(msgs) != 0 {
 			t.Errorf("messages = %d rows, want 0 (fallback must not mint rows)", len(msgs))
@@ -2132,9 +2132,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessageForClaimSystem: %v", err)
 		}
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil || len(msgs) != 1 {
-			t.Fatalf("Messages = %v (err %v), want the one streamed row", msgs, err)
+			t.Fatalf("MessagesForConversations = %v (err %v), want the one streamed row", msgs, err)
 		}
 		if msgs[0].ClaimID != claimID {
 			t.Errorf("row claim_id = %q, want %q (the engagement that wrote it)", msgs[0].ClaimID, claimID)
@@ -2143,9 +2143,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err := store.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, claimID, []int{int(msgID)}, ""); err != nil {
 			t.Fatalf("MarkDeliveredForClaimSystem: %v", err)
 		}
-		msgs, err = store.Messages(ctx, orgID, conversationID)
+		msgs, err = store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil || len(msgs) != 1 {
-			t.Fatalf("Messages after deliver = %v (err %v)", msgs, err)
+			t.Fatalf("MessagesForConversations after deliver = %v (err %v)", msgs, err)
 		}
 		if msgs[0].Delivered == nil || !*msgs[0].Delivered {
 			t.Errorf("row delivered = %v, want true", msgs[0].Delivered)
@@ -2241,9 +2241,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Nothing landed: the transcript is the one owned row, undelivered and
 		// unsettled, and the conversation is the stop's `open` with its claim
 		// exactly as the stop released it.
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil || len(msgs) != 1 {
-			t.Fatalf("Messages = %v (err %v), want only the row written while the claim was live", msgs, err)
+			t.Fatalf("MessagesForConversations = %v (err %v), want only the row written while the claim was live", msgs, err)
 		}
 		if msgs[0].Delivered == nil || *msgs[0].Delivered {
 			t.Errorf("owned row delivered = %v, want still pending (the refused flush wrote nothing)", msgs[0].Delivered)
@@ -2393,9 +2393,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Display: compacted history stays visible (delivered + inactive), and
 		// the reconstructed reply row renders like any other row.
-		display, err := store.Messages(ctx, orgID, conversationID)
+		display, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		var sawReply, sawAssistant bool
 		for _, m := range display {
@@ -2446,9 +2446,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("SettleCompactionRequestForClaimSystem: %v", err)
 		}
 
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil || len(msgs) != 1 {
-			t.Fatalf("Messages = %v (err %v), want the one request row", msgs, err)
+			t.Fatalf("MessagesForConversations = %v (err %v), want the one request row", msgs, err)
 		}
 		got := msgs[0]
 		if got.InputTokens == nil || *got.InputTokens != 150000 ||
@@ -3743,10 +3743,12 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	// The admin-pool twins the claimless stampers use — the blueprint
-	// reactor's step advance, the failure path, the team archive. Same write,
-	// same guard; only the pool differs, and SQLite's two arms collapse.
-	t.Run("EndDoorsSystem_MirrorTheirAppPoolTwins", func(t *testing.T) {
+	// The admin-pool twin the delegate failure paths stamp through: same
+	// write, same guard as EndConversation; only the pool differs, and
+	// SQLite's two arms collapse. That the task door then skips the row it
+	// stamped is what proves it is the same boundary — a stamp the app-pool
+	// door did not recognize would be ended twice.
+	t.Run("EndConversationSystem_MirrorsItsAppPoolTwin", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "end-system")
@@ -3755,23 +3757,27 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		one := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
 		two := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
 
-		stamped, err := store.EndConversationSystem(ctx, orgID, one, domain.EndedStepAdvanced)
+		stamped, err := store.EndConversationSystem(ctx, orgID, one, domain.EndedFailed)
 		if err != nil || stamped == nil {
 			t.Fatalf("EndConversationSystem: err=%v got=%v", err, stamped)
 		}
-		if stamped.EndedReason != domain.EndedStepAdvanced {
-			t.Errorf("ended_reason = %q, want step_advanced", stamped.EndedReason)
+		if stamped.EndedReason != domain.EndedFailed {
+			t.Errorf("ended_reason = %q, want failed", stamped.EndedReason)
 		}
 
-		rest, err := store.EndConversationsForTaskSystem(ctx, orgID, taskID, domain.EndedTeamArchived)
+		rest, err := store.EndConversationsForTask(ctx, orgID, taskID, domain.EndedDelegated)
 		if err != nil {
-			t.Fatalf("EndConversationsForTaskSystem: %v", err)
+			t.Fatalf("EndConversationsForTask: %v", err)
 		}
 		if len(rest) != 1 || rest[0].ID != two {
-			t.Fatalf("EndConversationsForTaskSystem stamped %d rows, want only the still-live %s", len(rest), two)
+			t.Fatalf("EndConversationsForTask stamped %d rows, want only the still-live %s", len(rest), two)
 		}
-		if rest[0].EndedReason != domain.EndedTeamArchived {
-			t.Errorf("ended_reason = %q, want team_archived", rest[0].EndedReason)
+		if rest[0].EndedReason != domain.EndedDelegated {
+			t.Errorf("ended_reason = %q, want delegated", rest[0].EndedReason)
+		}
+		again, err := store.EndConversationSystem(ctx, orgID, one, domain.EndedDelegated)
+		if err != nil || again != nil {
+			t.Fatalf("EndConversationSystem on an already-ended row = (%v, %v), want (nil, nil)", again, err)
 		}
 	})
 
@@ -4272,7 +4278,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("Messages_RoundTripsToolCallsAndMetadata", func(t *testing.T) {
+	t.Run("MessagesForConversations_RoundTripsToolCallsAndMetadata", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
@@ -4289,9 +4295,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
 			t.Fatalf("InsertMessage: %v", err)
 		}
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		if len(msgs) != 1 {
 			t.Fatalf("len = %d, want 1", len(msgs))
@@ -4339,9 +4345,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("InsertMessage system: %v", err)
 		}
 
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		if len(msgs) != 2 {
 			t.Fatalf("len = %d, want 2", len(msgs))
@@ -4399,9 +4405,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("InsertMessage explicit: %v", err)
 		}
 
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		if len(msgs) != 4 {
 			t.Fatalf("len = %d, want 4", len(msgs))
@@ -4431,9 +4437,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
 			t.Fatalf("InsertMessage: %v", err)
 		}
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		if len(msgs) != 1 {
 			t.Fatalf("len = %d, want 1", len(msgs))
@@ -4450,7 +4456,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("Messages_RoundTripsReasoningContentBlocksAndExplicitOverrides", func(t *testing.T) {
+	t.Run("MessagesForConversations_RoundTripsReasoningContentBlocksAndExplicitOverrides", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
@@ -4473,9 +4479,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
 			t.Fatalf("InsertMessage: %v", err)
 		}
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		if len(msgs) != 1 {
 			t.Fatalf("len = %d, want 1", len(msgs))
@@ -4499,7 +4505,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("Messages_RoundTripsDurationMs", func(t *testing.T) {
+	t.Run("MessagesForConversations_RoundTripsDurationMs", func(t *testing.T) {
 		// duration_ms has three distinct states the transcript renders
 		// differently, and the store must keep them apart: a measured value, a
 		// measured zero (fast enough to round to nothing — still a
@@ -4520,9 +4526,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 		}
 
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		if len(msgs) != 3 {
 			t.Fatalf("len = %d, want 3", len(msgs))
@@ -4541,7 +4547,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("Messages_RoundTripsStopReason", func(t *testing.T) {
+	t.Run("MessagesForConversations_RoundTripsStopReason", func(t *testing.T) {
 		// The MODEL's stop reason, per turn. Both runtimes write it — the SDK
 		// parser off each assistant event, the native loop off the
 		// completion's finish reason — so a `max_tokens` truncation is visible
@@ -4567,9 +4573,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 		}
 
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		if len(msgs) != 3 {
 			t.Fatalf("len = %d, want 3", len(msgs))
@@ -4584,7 +4590,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("Messages_SurfacesReasoningDecodeError", func(t *testing.T) {
+	t.Run("MessagesForConversations_SurfacesReasoningDecodeError", func(t *testing.T) {
 		// reasoning/content_blocks are canonical replay context (read via
 		// ListForAssembly by a future native loop) — a decode failure must
 		// return an error, not silently produce an empty slice that reads
@@ -4593,21 +4599,21 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 		seed.SeedRawMessage(t, conversationID, "reasoning", `{"wrong":"shape"}`)
-		if _, err := store.Messages(ctx, orgID, conversationID); err == nil {
-			t.Fatal("Messages: want a decode error for wrong-shaped reasoning JSON, got nil")
+		if _, err := store.MessagesForConversations(ctx, orgID, []string{conversationID}); err == nil {
+			t.Fatal("MessagesForConversations: want a decode error for wrong-shaped reasoning JSON, got nil")
 		}
 		if _, err := store.ListForAssemblySystem(ctx, orgID, conversationID); err == nil {
 			t.Fatal("ListForAssembly: want a decode error for wrong-shaped reasoning JSON, got nil")
 		}
 	})
 
-	t.Run("Messages_SurfacesContentBlocksDecodeError", func(t *testing.T) {
+	t.Run("MessagesForConversations_SurfacesContentBlocksDecodeError", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 		seed.SeedRawMessage(t, conversationID, "content_blocks", `{"wrong":"shape"}`)
-		if _, err := store.Messages(ctx, orgID, conversationID); err == nil {
-			t.Fatal("Messages: want a decode error for wrong-shaped content_blocks JSON, got nil")
+		if _, err := store.MessagesForConversations(ctx, orgID, []string{conversationID}); err == nil {
+			t.Fatal("MessagesForConversations: want a decode error for wrong-shaped content_blocks JSON, got nil")
 		}
 		if _, err := store.ListForAssemblySystem(ctx, orgID, conversationID); err == nil {
 			t.Fatal("ListForAssembly: want a decode error for wrong-shaped content_blocks JSON, got nil")
@@ -4678,7 +4684,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("Messages_HideWithdrawnPendingRows", func(t *testing.T) {
+	t.Run("DisplayReads_HideWithdrawnPendingRows", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
@@ -4721,26 +4727,20 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 		}
 
-		msgs, err := store.Messages(ctx, orgID, conversationID)
-		if err != nil {
-			t.Fatalf("Messages: %v", err)
-		}
-		assertContents("Messages", msgs)
-
 		batched, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
 			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		assertContents("MessagesForConversations", batched)
 
-		// The incremental read is the same display read from a watermark, so
-		// an unbounded one has to answer exactly what Messages does — a client
-		// repairing a transcript must not be shown a row the full read hides.
-		sinceZero, err := store.MessagesSince(ctx, orgID, conversationID, 0)
+		// The windowed read is the same display read, so an unbounded one has
+		// to answer exactly what the batched read does — a client repairing a
+		// transcript must not be shown a row the full read hides.
+		unbounded, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{})
 		if err != nil {
-			t.Fatalf("MessagesSince: %v", err)
+			t.Fatalf("MessagesWindow: %v", err)
 		}
-		assertContents("MessagesSince(0)", sinceZero)
+		assertContents("MessagesWindow(unbounded)", unbounded)
 
 		// Assembly excludes every inactive row — withdrawn AND compacted.
 		asm, err := store.ListForAssemblySystem(ctx, orgID, conversationID)
@@ -4757,7 +4757,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("Messages_OrderBySeqMatchesAssembly", func(t *testing.T) {
+	t.Run("DisplayReads_OrderBySeqMatchesAssembly", func(t *testing.T) {
 		// seq is the placement override: a row carrying one belongs where seq
 		// puts it, not where it was inserted. The display reads and the
 		// assembly read must agree about that, or the transcript renders a
@@ -4804,17 +4804,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 		}
 
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		unbounded, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesWindow: %v", err)
 		}
-		eqContents("Messages", msgs)
-
-		sinceZero, err := store.MessagesSince(ctx, orgID, conversationID, 0)
-		if err != nil {
-			t.Fatalf("MessagesSince: %v", err)
-		}
-		eqContents("MessagesSince(0)", sinceZero)
+		eqContents("MessagesWindow(unbounded)", unbounded)
 
 		batched, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
@@ -4832,7 +4826,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		eqContents("ListForAssembly", asm)
 	})
 
-	t.Run("MessagesSince_ReturnsOnlyRowsAboveTheWatermark", func(t *testing.T) {
+	t.Run("MessagesWindow_SinceIDReturnsOnlyRowsAboveTheWatermark", func(t *testing.T) {
 		// Backs RunStation's transcript repair: the client holds every
 		// row up to the watermark and asks for what it missed while its
 		// websocket was down.
@@ -4858,9 +4852,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		contents := func(desc string, sinceID int) []string {
 			t.Helper()
-			msgs, err := store.MessagesSince(ctx, orgID, conversationID, sinceID)
+			msgs, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{SinceID: sinceID})
 			if err != nil {
-				t.Fatalf("MessagesSince(%s): %v", desc, err)
+				t.Fatalf("MessagesWindow(since %s): %v", desc, err)
 			}
 			var out []string
 			for _, m := range msgs {
@@ -4871,11 +4865,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		eq := func(desc string, got, want []string) {
 			t.Helper()
 			if len(got) != len(want) {
-				t.Fatalf("MessagesSince(%s) = %v, want %v", desc, got, want)
+				t.Fatalf("MessagesWindow(since %s) = %v, want %v", desc, got, want)
 			}
 			for i := range want {
 				if got[i] != want[i] {
-					t.Errorf("MessagesSince(%s)[%d] = %q, want %q", desc, i, got[i], want[i])
+					t.Errorf("MessagesWindow(since %s)[%d] = %q, want %q", desc, i, got[i], want[i])
 				}
 			}
 		}
@@ -4936,9 +4930,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("MarkDelivered: %v", err)
 		}
 
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages(conversationID): %v", err)
+			t.Fatalf("MessagesForConversations(conversationID): %v", err)
 		}
 		byID := map[int]*domain.Message{}
 		for i := range msgs {
@@ -4951,9 +4945,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("id2 Delivered = %v, want false (not in the flip list)", d)
 		}
 
-		otherMsgs, err := store.Messages(ctx, orgID, otherConversationID)
+		otherMsgs, err := store.MessagesForConversations(ctx, orgID, []string{otherConversationID})
 		if err != nil {
-			t.Fatalf("Messages(otherConversationID): %v", err)
+			t.Fatalf("MessagesForConversations(otherConversationID): %v", err)
 		}
 		if len(otherMsgs) != 1 || otherMsgs[0].Delivered == nil || *otherMsgs[0].Delivered {
 			t.Errorf("otherConversationID message Delivered = %+v, want still false (conversation-scoped, must not leak across conversations)", otherMsgs)
@@ -4988,9 +4982,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("MarkDelivered(bare): %v", err)
 		}
 
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		byID := map[int]*domain.Message{}
 		for i := range msgs {
@@ -5032,9 +5026,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("flipped count = %d, want 2", n)
 		}
 
-		msgs, err := store.Messages(ctx, orgID, conversationID)
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
-			t.Fatalf("Messages: %v", err)
+			t.Fatalf("MessagesForConversations: %v", err)
 		}
 		byID := map[int64]domain.MessageWindowState{}
 		for _, m := range msgs {

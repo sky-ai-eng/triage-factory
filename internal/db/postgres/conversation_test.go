@@ -1275,8 +1275,17 @@ func TestConversationStore_Postgres_PRCoherenceTargets(t *testing.T) {
 			},
 			Worktree: func(t *testing.T, conversationID, slug, ref string) {
 				t.Helper()
-				if _, err := stores.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRefFromSlug(slug)); err != nil {
-					t.Fatalf("seed repository %s: %v", slug, err)
+				// Tracking is the one door into the registry, and the worktree
+				// references the row it mints. Appended rather than replaced so
+				// every staged repository stays tracked.
+				tracked, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, teamID)
+				if err != nil {
+					t.Fatalf("list tracked repos: %v", err)
+				}
+				r := domain.RepoRefFromSlug(slug)
+				tracked = append(tracked, domain.TeamGitHubRepo{Owner: r.Owner, Repo: r.Repo})
+				if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, tracked); err != nil {
+					t.Fatalf("track repository %s: %v", slug, err)
 				}
 				if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
 					ConversationID: conversationID, RepoID: slug, Ref: ref,

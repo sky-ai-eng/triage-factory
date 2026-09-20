@@ -240,15 +240,17 @@ func pgStrsEqual(a, b []string) bool {
 
 // Tracking is what brings a repository into the repositories table — not
 // profiling — so the row tracking mints has to be a complete identity row from
-// the moment it exists. Tracking and every other writer reach it through the
-// same get-or-create precisely so a row cannot differ by which of them created
-// it.
+// the moment it exists, and a second team tracking the same repository has to
+// resolve to that row rather than mint another.
 func TestTeamGitHubRepos_TrackedRowCarriesIdentity(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
+	bob := pgtest.SeedUser(t, h, "bob")
+	pgtest.AddOrgMember(t, h, bob, orgA, teamB, "member", "admin")
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
@@ -272,16 +274,19 @@ func TestTeamGitHubRepos_TrackedRowCarriesIdentity(t *testing.T) {
 		t.Error("the freshly tracked row is already profiled; it should be bare until the profiler runs")
 	}
 
-	// Get-or-create over the row tracking just made is a read: same row, and
-	// the surrogate uuid PK is untouched.
+	// A second team tracking the row the first just made — under different
+	// casing — is a read: same row, and the surrogate uuid PK is untouched.
 	var uuidBefore string
 	if err := h.AdminDB.QueryRow(
 		`SELECT id::text FROM repositories WHERE org_id = $1 AND owner = 'acme' AND repo = 'api'`, orgA,
 	).Scan(&uuidBefore); err != nil {
 		t.Fatalf("read surrogate id: %v", err)
 	}
-	if _, err := stores.Repos.GetOrCreateSystem(ctx, orgA, domain.RepoRef{Owner: "Acme", Repo: "API"}); err != nil {
-		t.Fatalf("GetOrCreateSystem: %v", err)
+	if err := stores.Tx.WithTx(ctx, orgA, bob, func(tx db.TxStores) error {
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamB,
+			[]domain.TeamGitHubRepo{{Owner: "Acme", Repo: "API"}})
+	}); err != nil {
+		t.Fatalf("teamB ReplaceForTeam: %v", err)
 	}
 	var uuidAfter string
 	var rows int
@@ -299,6 +304,6 @@ func TestTeamGitHubRepos_TrackedRowCarriesIdentity(t *testing.T) {
 		t.Fatalf("re-read surrogate id: %v", err)
 	}
 	if uuidAfter != uuidBefore {
-		t.Errorf("surrogate id moved from %s to %s — get-or-create must not re-key an existing row", uuidBefore, uuidAfter)
+		t.Errorf("surrogate id moved from %s to %s — a second team's save must not re-key an existing row", uuidBefore, uuidAfter)
 	}
 }

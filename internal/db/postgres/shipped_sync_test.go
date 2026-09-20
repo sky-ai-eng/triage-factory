@@ -16,7 +16,7 @@ import (
 // exercisable.
 func TestShippedSync_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	factory := func(t *testing.T) (db.Stores, string, string, func(*testing.T)) {
+	factory := func(t *testing.T) (db.Stores, string, string, func(*testing.T), dbtest.ShippedHandlerIDBySlug) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
@@ -31,7 +31,7 @@ func TestShippedSync_Postgres(t *testing.T) {
 				t.Fatalf("reset backfill marker: %v", err)
 			}
 		}
-		return stores, orgID, teamID, reset
+		return stores, orgID, teamID, reset, shippedHandlerIDBySlug(h, orgID)
 	}
 	dbtest.RunShippedSyncConformance(t, factory)
 	dbtest.RunShippedHandlerSyncConformance(t, factory)

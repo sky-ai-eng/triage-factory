@@ -66,8 +66,8 @@ type Stores struct {
 
 	// TeamAgents owns team_agents — per-team membership for the
 	// agent + per-team config overrides. Bootstrap-only AddForTeam
-	// (admin pool in Postgres); SetEnabled/SetOverrides/Remove run
-	// on the app pool and gate on team membership via RLS.
+	// (admin pool in Postgres); GetForTeam runs on the app pool and
+	// gates on team membership via RLS.
 	TeamAgents TeamAgentStore
 
 	// Users owns the users table — non-secret identity facts like

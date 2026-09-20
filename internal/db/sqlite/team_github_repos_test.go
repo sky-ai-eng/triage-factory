@@ -36,9 +36,13 @@ func TestTeamGitHubRepos_SQLite_TrackedSetIsTheUnion(t *testing.T) {
 	}
 	registry := func() []string {
 		t.Helper()
-		names, err := stores.Repos.ListConfiguredNames(ctx, runmode.LocalDefaultOrgID)
+		rows, err := stores.Repos.ListSystem(ctx, runmode.LocalDefaultOrgID)
 		if err != nil {
-			t.Fatalf("ListConfiguredNames: %v", err)
+			t.Fatalf("ListSystem: %v", err)
+		}
+		names := make([]string, 0, len(rows))
+		for _, r := range rows {
+			names = append(names, r.Slug())
 		}
 		sort.Strings(names)
 		return names
@@ -86,15 +90,6 @@ func TestTeamGitHubRepos_SQLite_TrackedSetIsTheUnion(t *testing.T) {
 	}
 	if got, want := tracked(), []string{"acme/web"}; !equalSlugs(got, want) {
 		t.Fatalf("after teamB clear: tracked = %v, want %v", got, want)
-	}
-
-	// ListForOrgSystem reports the same union.
-	union, err := stores.TeamGitHubRepos.ListForOrgSystem(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("ListForOrgSystem: %v", err)
-	}
-	if len(union) != 1 || union[0].Slug() != "acme/web" {
-		t.Fatalf("ListForOrgSystem = %v, want [acme/web]", union)
 	}
 }
 
@@ -302,8 +297,8 @@ func equalSlugs(a, b []string) bool {
 
 // Tracking is what brings a repository into the repositories table — not
 // profiling — so the row tracking mints has to be a complete identity row from
-// the moment it exists. The store's own get-or-create and this path share one
-// INSERT precisely so a row cannot differ by which of them created it.
+// the moment it exists, and a second team tracking the same repository has to
+// resolve to that row rather than mint another.
 func TestTeamGitHubRepos_SQLite_TrackedRowCarriesIdentity(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -328,15 +323,20 @@ func TestTeamGitHubRepos_SQLite_TrackedRowCarriesIdentity(t *testing.T) {
 		t.Error("the freshly tracked row is already profiled; it should be bare until the profiler runs")
 	}
 
-	// Get-or-create over the row tracking just made is a read: same row, no
-	// second one.
-	again, err := stores.Repos.GetOrCreateSystem(ctx, runmode.LocalDefaultOrgID,
-		domain.RepoRef{Owner: "acme", Repo: "api"})
+	// A second team tracking the row the first just made — under different
+	// casing — is a read: same row, no second one.
+	teamB := "team-b-0000-0000-0000-000000000004"
+	seedExtraTeam(t, conn, teamB, "team-b")
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB,
+		[]domain.TeamGitHubRepo{{Owner: "Acme", Repo: "API"}}); err != nil {
+		t.Fatalf("teamB ReplaceForTeam: %v", err)
+	}
+	again, err := stores.Repos.GetByRef(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug("Acme/API"))
 	if err != nil || again == nil {
-		t.Fatalf("GetOrCreateSystem: got=%v err=%v", again, err)
+		t.Fatalf("GetByRef after the second team's save: got=%v err=%v", again, err)
 	}
 	if again.ID != got.ID {
-		t.Errorf("get-or-create returned id %q, want the tracked row's %q", again.ID, got.ID)
+		t.Errorf("second team's save resolved to id %q, want the tracked row's %q", again.ID, got.ID)
 	}
 	if n, _ := stores.Repos.CountConfigured(ctx, runmode.LocalDefaultOrgID); n != 1 {
 		t.Errorf("repositories rows = %d, want 1", n)

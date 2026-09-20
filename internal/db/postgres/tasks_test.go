@@ -590,7 +590,7 @@ func TestTaskStore_Postgres_MalformedIDErrors(t *testing.T) {
 func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, userID, agentID := seedPgOrgUserAgent(t, h)
+	orgID, userID, _ := seedPgOrgUserAgent(t, h)
 
 	seed := func(suffix string) string {
 		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userID, suffix)
@@ -599,8 +599,6 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 	bumpID := seed("ap-bump")
 	closeID := seed("ap-close")
 	statusID := seed("ap-status")
-	claimAgentID := seed("ap-claim-agent")
-	claimUserID := seed("ap-claim-user")
 
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 		store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
@@ -639,18 +637,6 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 			return fmt.Errorf("SetStatus: %w", err)
 		}
 		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.SetStatus", status, bareRead(statusID))
-
-		claimedAgent, err := store.SetClaimedByAgent(ctx, orgID, claimAgentID, agentID)
-		if err != nil {
-			return fmt.Errorf("SetClaimedByAgent: %w", err)
-		}
-		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.SetClaimedByAgent", claimedAgent, bareRead(claimAgentID))
-
-		claimedUser, err := store.SetClaimedByUser(ctx, orgID, claimUserID, userID)
-		if err != nil {
-			return fmt.Errorf("SetClaimedByUser: %w", err)
-		}
-		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.SetClaimedByUser", claimedUser, bareRead(claimUserID))
 		return nil
 	}); err != nil {
 		t.Fatalf("WithUser: %v", err)

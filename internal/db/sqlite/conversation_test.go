@@ -619,9 +619,7 @@ func TestConversationStore_SQLite_PRCoherenceTargets(t *testing.T) {
 			},
 			Worktree: func(t *testing.T, conversationID, slug, ref string) {
 				t.Helper()
-				if _, err := stores.Repos.GetOrCreateSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(slug)); err != nil {
-					t.Fatalf("seed repository %s: %v", slug, err)
-				}
+				trackRepoForTest(t, stores, slug)
 				if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
 					ConversationID: conversationID, RepoID: slug, Ref: ref,
 					Path: "/tmp/coherence/" + conversationID + "/" + ref,
@@ -697,7 +695,7 @@ func TestConversationStore_SQLite_FenceRefusesAClaimFromAnotherOrg(t *testing.T)
 	}); !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("transcript write on a claim carrying another org = %v, want ErrClaimReleased", err)
 	}
-	if msgs, err := store.Messages(ctx, org, otherConv); err != nil || len(msgs) != 0 {
-		t.Errorf("Messages = %v (err %v), want nothing written behind the refusal", msgs, err)
+	if msgs, err := store.MessagesForConversations(ctx, org, []string{otherConv}); err != nil || len(msgs) != 0 {
+		t.Errorf("MessagesForConversations = %v (err %v), want nothing written behind the refusal", msgs, err)
 	}
 }

@@ -55,9 +55,7 @@ func TestRefreshGitHub_MirrorsPRBodyIntoDescription(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, []string{"octo/repo"})
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)
 	tr := New(database, busPublisher{bus: bus}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)

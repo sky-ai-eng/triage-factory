@@ -59,9 +59,7 @@ func TestDiscoverGitHub_BoundedConcurrency_MaxInFlight(t *testing.T) {
 	for i := range repos {
 		repos[i] = fmt.Sprintf("octo/repo%d", i)
 	}
-	if err := stores.Repos.SetConfigured(ctx, org, repos); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, repos)
 
 	tr := &Tracker{repos: stores.Repos, orgID: org}
 	client := ghclient.NewClient(srv.URL, "tok")
@@ -123,9 +121,7 @@ func TestDiscoverGitHub_ConcurrencyOne_IsFullySerial(t *testing.T) {
 	for i := range repos {
 		repos[i] = fmt.Sprintf("octo/repo%d", i)
 	}
-	if err := stores.Repos.SetConfigured(ctx, org, repos); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, repos)
 
 	tr := &Tracker{repos: stores.Repos, orgID: org}
 	client := ghclient.NewClient(srv.URL, "tok")
@@ -167,9 +163,7 @@ func TestDiscoverGitHub_HangingRepoDoesNotBlockOthers(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 
-	if err := stores.Repos.SetConfigured(context.Background(), org, repos); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, repos)
 
 	tr := &Tracker{repos: stores.Repos, orgID: org}
 	client := ghclient.NewClient(srv.URL, "tok")
@@ -241,9 +235,7 @@ func TestDiscoverGitHub_DeterministicOrderAcrossConcurrency(t *testing.T) {
 		database := newMigratedSQLite(t)
 		stores := sqlitestore.New(database)
 		org := runmode.LocalDefaultOrgID
-		if err := stores.Repos.SetConfigured(ctx, org, repos); err != nil {
-			t.Fatalf("SetConfigured: %v", err)
-		}
+		trackRepos(t, stores, org, repos)
 
 		tr := &Tracker{repos: stores.Repos, orgID: org}
 		client := ghclient.NewClient(srv.URL, "tok")
@@ -314,9 +306,7 @@ func TestRefreshGitHub_RateLimitStopsFanOutAndPropagatesDistinctly(t *testing.T)
 	for i := range repos {
 		repos[i] = fmt.Sprintf("octo/repo%d", i)
 	}
-	if err := stores.Repos.SetConfigured(ctx, org, repos); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, repos)
 
 	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
@@ -381,9 +371,7 @@ func TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping(t *tes
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, repos); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, repos)
 
 	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")

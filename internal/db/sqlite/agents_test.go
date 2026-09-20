@@ -11,16 +11,13 @@ import (
 
 // TestAgentStore_SQLite runs the shared AgentStore conformance suite
 // against the SQLite impl. Each subtest opens a fresh in-memory DB so
-// row state doesn't leak across cases. patUserID is the local sentinel
-// user ID — the agents.github_pat_user_id column has an
-// FK to users(id), so the value must reference a real row (the
-// migration's sentinel user is the only one available in test).
+// row state doesn't leak across cases.
 func TestAgentStore_SQLite(t *testing.T) {
-	dbtest.RunAgentStoreConformance(t, func(t *testing.T) (db.AgentStore, string, string) {
+	dbtest.RunAgentStoreConformance(t, func(t *testing.T) (db.AgentStore, string) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
-		return stores.Agents, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+		return stores.Agents, runmode.LocalDefaultOrgID
 	})
 }
 

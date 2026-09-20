@@ -230,9 +230,9 @@ func TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 
-	// Flip the bot OFF on the local team. The production path is
-	// team_agents.SetEnabled via a team-admin gesture; the direct UPDATE
-	// mirrors the same end state without the (unrelated) admin handler.
+	// Flip the bot OFF on the local team. No door writes this column
+	// today, so the direct UPDATE is the only way to stage the shape the
+	// delegate gate reads.
 	if _, err := s.db.Exec(
 		`UPDATE team_agents SET enabled = 0 WHERE team_id = ? AND agent_id = ?`,
 		runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID,

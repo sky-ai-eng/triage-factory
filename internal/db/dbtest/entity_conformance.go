@@ -53,9 +53,9 @@ type EntitySeeder struct {
 //     kind on an already-known row.
 //   - Get / GetBySource return (nil, nil) on miss; GetBySourceSystem
 //     mirrors GetBySource.
-//   - Update* mutations land on the right column, with UpdateSnapshot
-//     also stamping last_polled_at and PatchSnapshot deliberately
-//     leaving it alone.
+//   - Update* mutations land on the right column, with
+//     UpdateSnapshotCASSystem also stamping last_polled_at and
+//     PatchSnapshot deliberately leaving it alone.
 //   - MarkClosed is unconditional; Close only fires when state='active';
 //     Reactivate only fires when state='closed'.
 //   - ListActive filters on the documented predicates.
@@ -69,8 +69,9 @@ type EntitySeeder struct {
 
 // mustEntity re-reads an entity by its natural key, failing the test if it is
 // missing. Assertions about timestamp columns have to compare DB-precision
-// values on both sides (see the UpdateSnapshot subtest), which means re-reading
-// rather than reusing the struct a mutation returned.
+// values on both sides (see the UpdateSnapshotCASSystem_stamps_last_polled_at
+// subtest), which means re-reading rather than reusing the struct a mutation
+// returned.
 func mustEntity(t *testing.T, s db.EntityStore, ctx context.Context, orgID, source, sourceID string) *domain.Entity {
 	t.Helper()
 	ent, err := s.GetBySource(ctx, orgID, source, sourceID)
@@ -99,17 +100,6 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Fatalf("FindOrCreate: %v", err)
 		}
 		read := func() (*domain.Entity, error) { return s.Get(ctx, orgID, created.ID) }
-
-		snapped, err := s.UpdateSnapshot(ctx, orgID, created.ID, `{"state":"open"}`)
-		if err != nil {
-			t.Fatalf("UpdateSnapshot: %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "UpdateSnapshot", snapped, read)
-		// last_polled_at is the statement's, not the caller's — the input is
-		// one JSON string and the row carries a stamp alongside it.
-		if snapped.LastPolledAt == nil {
-			t.Error("UpdateSnapshot returned a row with no last_polled_at, the column it stamps")
-		}
 
 		patched, err := s.PatchSnapshot(ctx, orgID, created.ID, `{"state":"draft"}`)
 		if err != nil {
@@ -163,7 +153,6 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			name string
 			run  func() error
 		}{
-			{"UpdateSnapshot", func() error { _, e := s.UpdateSnapshot(ctx, orgID, missing, "{}"); return e }},
 			{"PatchSnapshot", func() error { _, e := s.PatchSnapshot(ctx, orgID, missing, "{}"); return e }},
 			{"UpdateTitle", func() error { _, e := s.UpdateTitle(ctx, orgID, missing, "x"); return e }},
 			{"UpdateDescription", func() error { _, e := s.UpdateDescription(ctx, orgID, missing, "x"); return e }},
@@ -339,7 +328,11 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
-	t.Run("UpdateSnapshot_stamps_last_polled_at", func(t *testing.T) {
+	t.Run("UpdateSnapshotCASSystem_stamps_last_polled_at", func(t *testing.T) {
+		// The tracker's snapshot write is also its "read from the source"
+		// stamp: a landed CAS advances last_polled_at alongside the snapshot,
+		// which is what the Jira gone-confirmation's staleness selection and
+		// the poll gate read.
 		s, orgID, _ := mk(t)
 
 		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#2", "pr", "T", ""); err != nil {
@@ -361,8 +354,8 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// microsecond bin and .After() returns false.
 		time.Sleep(2 * time.Millisecond)
 
-		if _, err := s.UpdateSnapshot(ctx, orgID, baseline.ID, `{"k":"v"}`); err != nil {
-			t.Fatalf("UpdateSnapshot: %v", err)
+		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, baseline.ID, `{"k":"v"}`, baseline.PollSeq); err != nil || !ok {
+			t.Fatalf("UpdateSnapshotCASSystem: ok=%v err=%v", ok, err)
 		}
 
 		got, err := s.Get(ctx, orgID, baseline.ID)
@@ -373,8 +366,15 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Errorf("snapshot_json missing payload: %q", got.SnapshotJSON)
 		}
 		if got.LastPolledAt == nil || !got.LastPolledAt.After(*initialPolled) {
-			t.Errorf("UpdateSnapshot should have advanced last_polled_at — initial=%v after=%v",
+			t.Errorf("UpdateSnapshotCASSystem should have advanced last_polled_at — initial=%v after=%v",
 				initialPolled, got.LastPolledAt)
+		}
+
+		// A missing id is a CAS miss, not an error: the caller drops its
+		// diffed transitions and lets the next cycle reconcile, the same
+		// answer a stale poll_seq gets.
+		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, uuid.New().String(), `{}`, 0); err != nil || ok {
+			t.Errorf("CAS on a missing id: ok=%v err=%v, want false/nil", ok, err)
 		}
 	})
 
@@ -427,8 +427,9 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#3", "pr", "T", ""); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		// Re-read for a DB-precision baseline — see UpdateSnapshot
-		// subtest above for the timestamptz-truncation rationale.
+		// Re-read for a DB-precision baseline — see the
+		// UpdateSnapshotCASSystem_stamps_last_polled_at subtest above for
+		// the timestamptz-truncation rationale.
 		baseline, err := s.GetBySource(ctx, orgID, "github", "owner/repo#3")
 		if err != nil || baseline == nil || baseline.LastPolledAt == nil {
 			t.Fatalf("baseline re-read: %v", err)
@@ -464,8 +465,9 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED").ID, `{"status":"To Do"}`, 0); err != nil || !ok {
 			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 		}
-		// Re-read for a DB-precision baseline — see the UpdateSnapshot
-		// subtest above for the timestamptz-truncation rationale.
+		// Re-read for a DB-precision baseline — see the
+		// UpdateSnapshotCASSystem_stamps_last_polled_at subtest above for
+		// the timestamptz-truncation rationale.
 		baseline := mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED")
 		if baseline.LastPolledAt == nil {
 			t.Fatal("baseline has no last_polled_at")
@@ -855,9 +857,9 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		gh, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#clr-gh", "pr", "GH", "")
 		ji, _, _ := s.FindOrCreate(ctx, orgID, "jira", "SKY-clr-1", "issue", "JI", "")
 		closed, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#clr-closed", "pr", "GC", "")
-		for _, e := range []string{gh.ID, ji.ID, closed.ID} {
-			if _, err := s.UpdateSnapshot(ctx, orgID, e, `{"number":7}`); err != nil {
-				t.Fatalf("seed snapshot: %v", err)
+		for _, e := range []*domain.Entity{gh, ji, closed} {
+			if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, e.ID, `{"number":7}`, e.PollSeq); err != nil || !ok {
+				t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 			}
 		}
 		if _, err := s.MarkClosed(ctx, orgID, closed.ID); err != nil {
@@ -902,8 +904,8 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 				t.Fatalf("create %s: %v", sourceID, err)
 			}
 			if snapshot != "" {
-				if _, err := s.UpdateSnapshot(ctx, orgID, e.ID, snapshot); err != nil {
-					t.Fatalf("snapshot %s: %v", sourceID, err)
+				if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, e.ID, snapshot, e.PollSeq); err != nil || !ok {
+					t.Fatalf("snapshot %s: ok=%v err=%v", sourceID, ok, err)
 				}
 			}
 			return e.ID

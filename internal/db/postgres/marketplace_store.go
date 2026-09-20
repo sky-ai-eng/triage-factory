@@ -499,33 +499,13 @@ func listListingVersionsPG(ctx context.Context, q queryer, orgID, listingID stri
 	return out, rows.Err()
 }
 
-// GetActiveBySource resolves the org's currently-published listing for a
-// team-side source object, or (nil, nil) if none. sourceID == "" always
-// misses (source_id NULL never equals an empty string, and the column is
-// uuid so binding "" would fail the cast) — short-circuit before the query.
-func (s *marketplaceStore) GetActiveBySource(ctx context.Context, orgID, sourceID string) (*domain.MarketplaceListing, error) {
-	if sourceID == "" {
-		return nil, nil
-	}
-	l, err := scanListingRowPG(s.q.QueryRowContext(ctx, `
-		SELECT `+listingColumnsPG+`
-		FROM marketplace_listings WHERE org_id = $1 AND source_id = $2::uuid AND status = $3
-	`, orgID, sourceID, domain.ListingStatusPublished).Scan)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &l, nil
-}
-
-// GetBySource mirrors GetActiveBySource but drops the status filter — it
-// resolves a listing for source_id regardless of published/delisted state —
-// and returns the full ListingSummary (event types + counts), reusing the
-// same listingSummaryQueryPG join List/Get use. No viewer context (this is
-// not a per-user browse read), so ViewerVoted is always false here.
-// sourceID == "" short-circuits for the same reason GetActiveBySource does.
+// GetBySource resolves a listing for source_id regardless of
+// published/delisted state and returns the full ListingSummary (event types
+// + counts), reusing the same listingSummaryQueryPG join List/Get use. No
+// viewer context (this is not a per-user browse read), so ViewerVoted is
+// always false here. sourceID == "" always misses (source_id NULL never
+// equals an empty string, and the column is uuid so binding "" would fail
+// the cast) — short-circuit before the query.
 func (s *marketplaceStore) GetBySource(ctx context.Context, orgID, sourceID string) (*domain.ListingSummary, error) {
 	if sourceID == "" {
 		return nil, nil

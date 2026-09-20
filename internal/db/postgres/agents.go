@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -14,7 +13,7 @@ import (
 //
 // # Pool split
 //
-//   - app   — tf_app, RLS-active. GetForOrg, Update, SetGitHubPATUser.
+//   - app   — tf_app, RLS-active. GetForOrg, SetGitHubOrgIdentity.
 //     The agents_select policy gates SELECTs by org access;
 //     agents_update/insert/delete gate by org admin.
 //   - admin — supabase_admin, BYPASSRLS. Create only. Justified
@@ -147,50 +146,13 @@ func scanUpdatedAgent(row *sql.Row) (domain.Agent, error) {
 	return a, err
 }
 
-func (s *agentStore) Update(ctx context.Context, orgID string, a domain.Agent) (domain.Agent, error) {
-	if !isValidUUID(a.ID) {
-		return domain.Agent{}, db.ErrNoSuchAgent
-	}
-	return scanUpdatedAgent(s.app.QueryRowContext(ctx, `
-		UPDATE agents
-		SET display_name = $1,
-		    default_model = $2,
-		    default_autonomy_suitability = $3,
-		    jira_service_account_id = $4
-		WHERE org_id = $5 AND id = $6
-		RETURNING `+pgAgentColumns,
-		a.DisplayName, nullString(a.DefaultModel), a.DefaultAutonomySuitability,
-		nullString(a.JiraServiceAccountID), orgID, a.ID))
-}
-
-func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) (domain.Agent, error) {
-	if !isValidUUID(agentID) {
-		return domain.Agent{}, db.ErrNoSuchAgent
-	}
-	// "" = caller-intentional clear, valid UUID = caller-intentional set.
-	// Any other shape (e.g. "alice@example.com" passed by mistake) is a
-	// programmer bug we refuse loudly rather than silently treating as
-	// clear — the underlying github_pat_user_id column is a UUID FK and
-	// the cast would 22P02-error anyway, but refusing up front gives a
-	// caller-friendly error shape.
-	if userID != "" && !isValidUUID(userID) {
-		return domain.Agent{}, fmt.Errorf("postgres agents: SetGitHubPATUser: userID %q is not empty and not a valid UUID", userID)
-	}
-	return scanUpdatedAgent(s.app.QueryRowContext(ctx, `
-		UPDATE agents
-		SET github_pat_user_id = $1
-		WHERE org_id = $2 AND id = $3
-		RETURNING `+pgAgentColumns,
-		nullUUID(userID), orgID, agentID))
-}
-
 func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) (domain.Agent, error) {
 	if !isValidUUID(agentID) {
 		return domain.Agent{}, db.ErrNoSuchAgent
 	}
 	// login is a free-form GitHub login (e.g. "octocat" or "acme-bot[bot]"),
 	// stored in the text column github_org_login — no UUID shape check, unlike
-	// SetGitHubPATUser's user FK. The pair is all-or-nothing: either empty input
+	// the github_pat_user_id FK. The pair is all-or-nothing: either empty input
 	// clears both columns so no caller can persist a partial commit identity.
 	if login == "" || email == "" {
 		login, email = "", ""

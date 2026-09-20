@@ -78,9 +78,7 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, []string{"octo/repo"})
 
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)
@@ -133,6 +131,25 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 	}
 	if len(ents) != 1 {
 		t.Errorf("after cycle 2: %d active entities; want 1 (304 must not duplicate)", len(ents))
+	}
+}
+
+// trackRepos records names as the local default team's tracked set — the seed
+// every poll fixture needs, because tracking is the one door that brings a
+// repository into the registry and "which repos does TF poll" is a question
+// about tracking rather than a listing of the registry.
+func trackRepos(t *testing.T, stores db.Stores, orgID string, names []string) {
+	t.Helper()
+	repos := make([]domain.TeamGitHubRepo, 0, len(names))
+	for _, name := range names {
+		owner, repo, ok := strings.Cut(name, "/")
+		if !ok {
+			t.Fatalf("trackRepos: %q is not an owner/repo slug", name)
+		}
+		repos = append(repos, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
+	}
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, runmode.LocalDefaultTeamID, repos); err != nil {
+		t.Fatalf("track repos %v: %v", names, err)
 	}
 }
 

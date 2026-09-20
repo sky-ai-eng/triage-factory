@@ -118,14 +118,14 @@ func TestTeamGitHubGroups_SQLite_PruneDeletionLifecycle(t *testing.T) {
 		t.Errorf("PruneMissingSystem removed %d rows; want 2 (legacy from both teams)", n)
 	}
 
-	a, err := stores.TeamGitHubGroups.ListForTeamSystem(ctx, teamA)
+	a, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamA)
 	if err != nil {
 		t.Fatalf("ListForTeamSystem(teamA): %v", err)
 	}
 	if len(a) != 1 || a[0].TeamSlug != "backend" {
 		t.Errorf("teamA after prune = %+v; want only backend", a)
 	}
-	b, err := stores.TeamGitHubGroups.ListForTeamSystem(ctx, teamB)
+	b, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamB)
 	if err != nil {
 		t.Fatalf("ListForTeamSystem(teamB): %v", err)
 	}

@@ -111,12 +111,6 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 		AssertWriteReturnedStoredRow(t, "Hide", hidden, read("ret-1"))
 
-		unhidden, err := store.Unhide(ctx, orgID, "ret-1")
-		if err != nil {
-			t.Fatalf("Unhide: %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "Unhide", unhidden, read("ret-1"))
-
 		// A miss is an error rather than a silent no-op, on every id-keyed
 		// write — that is what retires the rows-affected probes.
 		missing := "ret-nope"
@@ -128,9 +122,6 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 		if _, err := store.Hide(ctx, orgID, missing); !errors.Is(err, db.ErrNoSuchPrompt) {
 			t.Errorf("Hide on a missing id: got %v, want db.ErrNoSuchPrompt", err)
-		}
-		if _, err := store.Unhide(ctx, orgID, missing); !errors.Is(err, db.ErrNoSuchPrompt) {
-			t.Errorf("Unhide on a missing id: got %v, want db.ErrNoSuchPrompt", err)
 		}
 	})
 
@@ -201,7 +192,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 	})
 
-	t.Run("Hide_Unhide_FiltersList", func(t *testing.T) {
+	t.Run("Hide_FiltersList", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "u-visible", Name: "V", Body: "x", Source: "user"}); err != nil {
@@ -258,14 +249,6 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		got, _ := store.Get(ctx, orgID, "u-hidden")
 		if got == nil {
 			t.Fatalf("Get should still return hidden rows by ID")
-		}
-		// Unhide brings it back
-		if _, err := store.Unhide(ctx, orgID, "u-hidden"); err != nil {
-			t.Fatalf("unhide: %v", err)
-		}
-		list2, _, _ := store.List(ctx, orgID, "", db.ListOpts{Limit: 50})
-		if !containsPromptID(list2, "u-hidden") {
-			t.Fatalf("after Unhide, row still missing from List: %v", promptIDs(list2))
 		}
 	})
 
