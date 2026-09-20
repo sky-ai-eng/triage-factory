@@ -65,7 +65,7 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var repos []domain.TeamGitHubRepo
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		repos, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID)
 		return e
@@ -127,7 +127,7 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 	// could never save a corrected set. Only *newly added* unreachable
 	// repos are a user error worth blocking.
 	var existing []domain.TeamGitHubRepo
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID)
 		return e
@@ -438,7 +438,7 @@ func (s *Server) reachabilityClients(ctx context.Context, orgID, userID string) 
 		creds  auth.Credentials
 		orgSet domain.OrgSettings
 	)
-	_ = s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	_ = s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		creds, _ = integrations.Load(ctx, tx.Secrets, orgID)
 		var e error
 		orgSet, e = tx.Orgs.GetSettings(ctx, orgID)

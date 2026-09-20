@@ -585,7 +585,7 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 	// through the app pool inside WithTx so the org_secrets read and
 	// team_settings_select run under the user's claims.
 	var creds auth.Credentials
-	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := se.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// A failed credential read is a 500, not "Jira not configured" —
 		// telling a configured org to re-enter its credentials is the
 		// swallowed-error failure mode this sweep closes.
@@ -708,7 +708,7 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
 	var creds auth.Credentials
-	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := se.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
 		return lerr

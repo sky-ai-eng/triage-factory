@@ -214,7 +214,7 @@ type jiraProjectWish struct {
 // client that just read the resource would resend.
 func (s *Server) storedJiraProjects(ctx context.Context, orgID, userID, teamID string) ([]domain.JiraProjectStatusRules, error) {
 	var out []domain.JiraProjectStatusRules
-	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		teamSet, err := tx.Teams.GetSettings(ctx, teamID)
 		if err != nil {
 			return fmt.Errorf("load team settings: %w", err)

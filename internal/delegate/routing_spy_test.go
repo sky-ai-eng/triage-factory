@@ -28,16 +28,17 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// synthCall records one SyntheticClaimsWithTx invocation. The userID
-// is what proves the spawner forwarded the real creator (vs falling
-// back to a sentinel or skipping the wrap entirely).
+// synthCall records one synthetic-claims invocation, through either the
+// write or the read door. The userID is what proves the spawner forwarded
+// the real creator (vs falling back to a sentinel or skipping the wrap
+// entirely).
 type synthCall struct {
 	orgID, userID string
 }
 
-// recordingTxRunner wraps a real TxRunner and counts every
-// SyntheticClaimsWithTx call. WithTx is left as a pass-through
-// (embedded) because none of the fixes route through it.
+// recordingTxRunner wraps a real TxRunner and counts every synthetic-claims
+// call. The request doors are left as pass-throughs (embedded) because none
+// of the fixes route through them.
 type recordingTxRunner struct {
 	db.TxRunner
 	synthCalls []synthCall
@@ -46,6 +47,11 @@ type recordingTxRunner struct {
 func (r *recordingTxRunner) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
 	r.synthCalls = append(r.synthCalls, synthCall{orgID: orgID, userID: userID})
 	return r.TxRunner.SyntheticClaimsWithTx(ctx, orgID, userID, fn)
+}
+
+func (r *recordingTxRunner) SyntheticClaimsWithReadTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	r.synthCalls = append(r.synthCalls, synthCall{orgID: orgID, userID: userID})
+	return r.TxRunner.SyntheticClaimsWithReadTx(ctx, orgID, userID, fn)
 }
 
 // recordingPromptStore embeds the real store and overrides Get +
@@ -102,12 +108,12 @@ func TestResolvePrompt_ManualBranchesThroughSyntheticClaims(t *testing.T) {
 	}
 
 	if len(tx.synthCalls) != 1 {
-		t.Fatalf("SyntheticClaimsWithTx called %d times; want exactly 1 (manual must route through synth claims)", len(tx.synthCalls))
+		t.Fatalf("synthetic-claims doors called %d times; want exactly 1 (manual must route through synth claims)", len(tx.synthCalls))
 	}
 	if tx.synthCalls[0].userID != "00000000-0000-0000-0000-000000000aaa" {
 		t.Errorf("synth call userID = %q; want the caller's creatorUserID", tx.synthCalls[0].userID)
 	}
-	// The actual Get inside SyntheticClaimsWithTx happens on the
+	// The actual Get inside the synthetic-claims door happens on the
 	// TxStores' tx-local PromptStore (constructed inside runTx, not
 	// the one we injected), so we can't assert getCalls here. The
 	// observable fact that GetSystem was NOT called on the spied

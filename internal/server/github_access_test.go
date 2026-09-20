@@ -252,6 +252,20 @@ func (w setActiveReturnsNilTx) SyntheticClaimsWithTx(ctx context.Context, orgID,
 	})
 }
 
+func (w setActiveReturnsNilTx) WithReadTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	return w.inner.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		tx.GitHubApps = setActiveNilStore{GitHubAppsStore: tx.GitHubApps}
+		return fn(tx)
+	})
+}
+
+func (w setActiveReturnsNilTx) SyntheticClaimsWithReadTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	return w.inner.SyntheticClaimsWithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		tx.GitHubApps = setActiveNilStore{GitHubAppsStore: tx.GitHubApps}
+		return fn(tx)
+	})
+}
+
 // hookGitHubApps installs the race hook on the server and returns the store it
 // wrapped, so a hook body can mutate the row without recursing back through
 // itself.

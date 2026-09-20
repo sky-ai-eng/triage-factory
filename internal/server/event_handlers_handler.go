@@ -35,7 +35,7 @@ type eventHandlersHandler struct {
 // The same shape as gateBlueprintWrite.
 func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
 	var existing *domain.EventHandler
-	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
 		return e
@@ -124,7 +124,7 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 		total    int
 		sources  eventsource.Availability
 	)
-	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		handlers, total, e = tx.EventHandlers.List(r.Context(), orgID, filter, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		if e != nil || page.CountOnly {
@@ -203,7 +203,7 @@ func (eh *eventHandlersHandler) handleEventHandlerGet(w http.ResponseWriter, r *
 		handler *domain.EventHandler
 		sources eventsource.Availability
 	)
-	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		handler, e = tx.EventHandlers.Get(r.Context(), orgID, id)
 		if e != nil || handler == nil {
@@ -380,7 +380,7 @@ func (eh *eventHandlersHandler) gateEventTypeSourceAvailability(w http.ResponseW
 		state eventsource.State
 		known bool
 	)
-	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		state, known, e = eventsource.StateFor(r.Context(), tx, orgID, kind)
 		return e
@@ -722,7 +722,7 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 	// The row is loaded before the body is decoded, because the row's kind is
 	// the schema the body is decoded against.
 	var existing *domain.EventHandler
-	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
 		return e
@@ -937,7 +937,7 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 	var existing *domain.EventHandler
 	var blueprint *domain.Blueprint
 	var blueprintHasTrigger bool
-	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
 		if e != nil {
@@ -1203,7 +1203,7 @@ func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter,
 	// the list read applies — so "visible" means the same thing to both routes.
 	// Unwindowed because the answer is a set comparison, not a page.
 	var visible []domain.EventHandler
-	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		visible, _, e = tx.EventHandlers.List(r.Context(), orgID,
 			db.EventHandlerListFilter{GatedEventTypes: gatedEventTypes(orgID)}, db.Unwindowed)

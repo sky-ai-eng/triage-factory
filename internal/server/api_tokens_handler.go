@@ -339,7 +339,7 @@ func (s *Server) handleAPITokenPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var maxAge *int
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		set, err := tx.Orgs.GetSettings(r.Context(), orgID)
 		if err != nil {
 			return err

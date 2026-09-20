@@ -116,7 +116,7 @@ func (s *Server) jiraRegistrantDisplayName(ctx context.Context, orgID, userID st
 		return ""
 	}
 	var name string
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var derr error
 		name, derr = tx.Users.GetDisplayName(ctx, app.RegisteredByUserID)
 		return derr
@@ -163,7 +163,7 @@ func (s *Server) handleJiraAppStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var app *domain.OrgJiraApp
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		app, lerr = tx.JiraApps.GetForOrg(r.Context(), orgID)
 		return lerr
@@ -260,7 +260,7 @@ func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 	// Re-read so the response reflects the freshly-persisted row, in the same
 	// shape the status GET serves. connect_available is now necessarily true.
 	var app *domain.OrgJiraApp
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		app, lerr = tx.JiraApps.GetForOrg(r.Context(), orgID)
 		return lerr

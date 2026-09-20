@@ -68,7 +68,7 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http.Request, orgID, userID, conversationID string) {
 	var conv *domain.Conversation
 	var resp map[string]any
-	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
@@ -194,7 +194,7 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 	// org-wide Tier-1 query selects so the two tiers reconcile identically.
 	var conv *domain.Conversation
 	var arts []domain.Artifact
-	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil || conv == nil {
@@ -311,7 +311,7 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 
 	var conv *domain.Conversation
 	var arts []domain.Artifact
-	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
@@ -393,7 +393,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		actions []domain.ExternalAction
 		total   int
 	)
-	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
@@ -631,7 +631,7 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var messages []domain.Message
-	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		messages, e = tx.Conversations.MessagesWindow(r.Context(), orgID, conversationID, db.MessageWindow{
 			SinceID: sinceID, BeforeID: beforeID, Limit: transcriptPageSize,
@@ -738,7 +738,7 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 // another: a non-existent or not-visible conversation reads as false → the caller 404s.
 func (ag *agentHandler) conversationVisible(ctx context.Context, orgID, userID, conversationID string) (bool, error) {
 	var exists bool
-	err := ag.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	err := ag.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		conv, e := tx.Conversations.Get(ctx, orgID, conversationID)
 		if e != nil {
 			return e
@@ -972,7 +972,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	// no row anywhere; failing to record a prompt must never become a
 	// reason to fail to answer it, so that stays a 200 with nothing to show.
 	if resolved == nil {
-		if txErr := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if txErr := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			var getErr error
 			resolved, getErr = tx.Permissions.Get(r.Context(), orgID, conversationID, toolCallID)
 			return getErr
@@ -1024,7 +1024,7 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 
 	var pending []domain.ConversationPermission
 	var exists bool
-	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		conv, e := tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
@@ -1299,7 +1299,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 	if req.IncludeMessages {
 		resp.Messages = map[string][]domain.MessageDTO{}
 	}
-	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		convs, total, e := tx.Conversations.List(r.Context(), orgID,
 			db.ConversationListFilter{TaskIDs: taskIDs, TeamIDs: teamIDs, Statuses: statuses, Attention: req.Attention},
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})

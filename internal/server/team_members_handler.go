@@ -129,7 +129,7 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 		agent   *domain.Agent
 		ta      *domain.TeamAgent
 	)
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Identity is host-scoped: resolve the org's GitHub/Jira hosts from
 		// org_settings, then list the team's members with their readiness.
 		orgSet, e := tx.Orgs.GetSettings(r.Context(), orgID)

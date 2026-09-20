@@ -107,7 +107,7 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 		host       string
 		deployment string
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, lerr := tx.Orgs.GetSettings(r.Context(), orgID)
 		if lerr != nil {
 			return lerr
@@ -267,7 +267,7 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 		orgSet     domain.OrgSettings
 		authMethod string
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
 		if lerr != nil {
@@ -464,7 +464,7 @@ func (s *Server) handleJiraConnectStart(w http.ResponseWriter, r *http.Request) 
 		orgSet     domain.OrgSettings
 		authMethod string
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
 		if lerr != nil {
@@ -598,7 +598,7 @@ func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Reques
 
 	// Read the org's host + resolve its OAuth app (client_id + client_secret).
 	var orgSet domain.OrgSettings
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
 		return lerr

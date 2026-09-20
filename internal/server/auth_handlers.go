@@ -943,7 +943,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// to the active org's GitHub host. A stale/empty active org
 	// is harmless: org_event_sources RLS filters it out and the lookup falls
 	// back to the most-recently-verified identity row.
-	err := tfdb.WithTx(r.Context(), s.db,
+	err := tfdb.WithReadTx(r.Context(), s.db,
 		tfdb.Claims{Sub: claims.Subject, OrgID: resp.ActiveOrgID},
 		func(tx *sql.Tx) error {
 			// Identity is host-scoped for both providers (GitHub,
@@ -1196,7 +1196,7 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 	// aligned with resp.Methods ("" for a github row or an unstamped one), so
 	// the IdP lookup below can be one call and write back by index.
 	var providerIDs []string
-	err := tfdb.WithTx(r.Context(), s.db,
+	err := tfdb.WithReadTx(r.Context(), s.db,
 		tfdb.Claims{Sub: claims.Subject, OrgID: activeOrg},
 		func(tx *sql.Tx) error {
 			// Oldest-first: the bootstrap GitHub (break-glass) identity leads,

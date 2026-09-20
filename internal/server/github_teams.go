@@ -61,7 +61,7 @@ func (s *Server) userTeamsLocal(ctx context.Context, orgID, userID string) ([]gh
 		creds  auth.Credentials
 		orgSet domain.OrgSettings
 	)
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		creds, _ = integrations.Load(ctx, tx.Secrets, orgID)
 		var lerr error
 		orgSet, lerr = tx.Orgs.GetSettings(ctx, orgID)
@@ -92,7 +92,7 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 		login string
 		repos []domain.Repository
 	)
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		orgSet, lerr := tx.Orgs.GetSettings(ctx, orgID)
 		if lerr != nil {
 			return lerr

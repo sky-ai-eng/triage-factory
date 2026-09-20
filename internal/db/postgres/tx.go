@@ -32,7 +32,13 @@ import (
 // admin-wired stores (db.Stores.Scores in wave 0; more in later
 // waves). WithTx is purely for the request-handler atomicity boundary.
 func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
-	return s.runClaimsBoundTx(ctx, orgID, userID, fn)
+	return s.runClaimsBoundTx(ctx, orgID, userID, false, fn)
+}
+
+// WithReadTx is WithTx on db.InReadTx's transaction — BEGIN READ ONLY, so a
+// write inside the body is refused by the server.
+func (s *Store) WithReadTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	return s.runClaimsBoundTx(ctx, orgID, userID, true, fn)
 }
 
 // SyntheticClaimsWithTx mirrors WithTx for callers that have an
@@ -55,22 +61,38 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 // route through the admin pool via per-store `...System` methods
 // instead.
 func (s *Store) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	if err := syntheticUserID(userID); err != nil {
+		return err
+	}
+	return s.runClaimsBoundTx(ctx, orgID, userID, false, fn)
+}
+
+// SyntheticClaimsWithReadTx is SyntheticClaimsWithTx on db.InReadTx's
+// transaction, under the same userID guardrails.
+func (s *Store) SyntheticClaimsWithReadTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	if err := syntheticUserID(userID); err != nil {
+		return err
+	}
+	return s.runClaimsBoundTx(ctx, orgID, userID, true, fn)
+}
+
+// syntheticUserID is the guardrail both synthetic doors share.
+func syntheticUserID(userID string) error {
 	if userID == runmode.LocalDefaultUserID {
 		return errors.New("postgres: SyntheticClaimsWithTx rejected runmode.LocalDefaultUserID — sentinel has no FK target in multi-mode users; route to admin pool via per-store ...System methods")
 	}
 	if userID == "" {
 		return errors.New("postgres: SyntheticClaimsWithTx requires a non-empty userID; route through admin pool for callers that have no user identity")
 	}
-	return s.runClaimsBoundTx(ctx, orgID, userID, fn)
+	return nil
 }
 
-// runClaimsBoundTx is the shared body between WithTx and
-// SyntheticClaimsWithTx. The only structural difference between the
-// two public entry points is the source of the (orgID, userID) pair
-// (request context vs caller-supplied) plus the SyntheticClaimsWithTx
-// guardrails enforced at the public layer — once we're past those,
-// the SQL is identical.
-func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+// runClaimsBoundTx is the shared body between the four public entry
+// points. The request and synthetic doors differ only in the source of the
+// (orgID, userID) pair plus the synthetic guardrails enforced at the public
+// layer — once past those, the SQL is identical. readOnly picks the
+// transaction: db.InReadTx's BEGIN READ ONLY, or an ordinary one.
+func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, readOnly bool, fn func(db.TxStores) error) error {
 	// One span per claims-bound transaction — the handler-side atomicity
 	// boundary every RLS-scoped write passes through. otelsql covers each
 	// statement, but the gap between them (holding the connection, the
@@ -81,6 +103,45 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 		trace.WithAttributes(telemetry.OrgID(orgID)))
 	defer span.End()
 
+	// bind is the body both arms run: role, claims, then fn. Elevate the
+	// role before doing anything else. The app pool connects as
+	// `authenticator` (LOGIN, NOINHERIT) which has no privileges by design —
+	// RLS policies expect `tf_app` to be the active role, and the pgtest
+	// harness's WithUser helper does the same elevation. Without this, every
+	// WithTx-bound store call would fail at the role layer (not even RLS —
+	// just "permission denied" because authenticator has no grants). SET
+	// LOCAL scopes the role change to the tx, so the pool connection returns
+	// to authenticator when the tx ends.
+	bind := func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE tf_app`); err != nil {
+			span.SetStatus(codes.Error, "set role")
+			return err
+		}
+		claims, err := json.Marshal(map[string]any{
+			"sub":    userID,
+			"org_id": orgID,
+		})
+		if err != nil {
+			span.SetStatus(codes.Error, "marshal claims")
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `SELECT set_config('request.jwt.claims', $1, true)`, string(claims)); err != nil {
+			span.SetStatus(codes.Error, "set claims")
+			return err
+		}
+		if err := fn(s.txStoresFromTx(tx)); err != nil {
+			// Rolled back by the caller. Not recorded as an exception: a
+			// handler refusing a write with a validation error is normal,
+			// and the error text can carry tenant data.
+			span.SetStatus(codes.Error, "tx body")
+			return err
+		}
+		return nil
+	}
+
+	if readOnly {
+		return db.InReadTx(ctx, s.app, db.DialectPostgres, bind)
+	}
 	tx, err := s.app.BeginTx(ctx, nil)
 	if err != nil {
 		span.SetStatus(codes.Error, "begin")
@@ -88,38 +149,7 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Elevate the role before doing anything else. The app pool
-	// connects as `authenticator` (LOGIN, NOINHERIT) which has no
-	// privileges by design — RLS policies expect `tf_app` to be
-	// the active role, and the pgtest harness's WithUser helper
-	// does the same elevation. Without this, every WithTx-bound
-	// store call would fail at the role layer (not even RLS — just
-	// "permission denied" because authenticator has no grants).
-	// SET LOCAL scopes the role change to the tx, so the pool
-	// connection returns to authenticator when the tx ends.
-	if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE tf_app`); err != nil {
-		span.SetStatus(codes.Error, "set role")
-		return db.TxCause(ctx, err)
-	}
-
-	claims, err := json.Marshal(map[string]any{
-		"sub":    userID,
-		"org_id": orgID,
-	})
-	if err != nil {
-		span.SetStatus(codes.Error, "marshal claims")
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `SELECT set_config('request.jwt.claims', $1, true)`, string(claims)); err != nil {
-		span.SetStatus(codes.Error, "set claims")
-		return db.TxCause(ctx, err)
-	}
-
-	if err := fn(s.txStoresFromTx(tx)); err != nil {
-		// Rolled back via the defer. Not recorded as an exception: a
-		// handler refusing a write with a validation error is normal, and
-		// the error text can carry tenant data.
-		span.SetStatus(codes.Error, "tx body")
+	if err := bind(tx); err != nil {
 		return db.TxCause(ctx, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -315,6 +345,6 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// pool split is identical to core's own stores — the login-time reads
 		// (GetByProviderID / GetVerifiedByDomain) run on s.admin (claims-less),
 		// the CRUD on the claims tx.
-		Ext: db.BuildStoreExtensions("postgres", tx, s.admin),
+		Ext: db.BuildStoreExtensions(db.DialectPostgres, tx, s.admin),
 	}
 }

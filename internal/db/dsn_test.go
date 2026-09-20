@@ -135,9 +135,10 @@ func TestRewriteDSNCreds_PostgresqlScheme(t *testing.T) {
 // describing a database that did not exist. Two timestamp-comparison defects
 // lived under that gap.
 //
-// Only the storage-affecting parameter is compared. The production DSN also
-// carries WAL and busy_timeout, which are about a file on disk and mean
-// nothing to :memory:.
+// Only the parameters that shape what a test observes are compared: the
+// storage layout, and the lock mode transactions begin with. The production
+// DSN also carries WAL and busy_timeout, which are about a file on disk and
+// mean nothing to :memory:.
 func TestDSN_TestMemoryMatchesProductionStorageParams(t *testing.T) {
 	if !strings.Contains(TestDSNMemory, SQLiteTimeFormatParam) {
 		t.Fatalf("TestDSNMemory (%q) does not carry %q — tests would store a timestamp layout "+
@@ -149,8 +150,9 @@ func TestDSN_TestMemoryMatchesProductionStorageParams(t *testing.T) {
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=foreign_keys(on)" +
 		"&_pragma=busy_timeout(5000)" +
+		"&" + SQLiteTxLockParam +
 		"&" + SQLiteTimeFormatParam
-	for _, param := range []string{"_pragma=foreign_keys(on)", SQLiteTimeFormatParam} {
+	for _, param := range []string{"_pragma=foreign_keys(on)", SQLiteTxLockParam, SQLiteTimeFormatParam} {
 		if !strings.Contains(prod, param) {
 			t.Errorf("production DSN no longer carries %q; TestDSNMemory still does", param)
 		}

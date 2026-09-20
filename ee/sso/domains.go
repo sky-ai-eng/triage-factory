@@ -168,7 +168,7 @@ func (h *ssoDomainsHandler) handleDomainClaim(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		if httpx.IsUniqueViolation(err) {
 			var raced ssoDomainJSON
-			reErr := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+			reErr := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 				existing, e := findOrgDomain(r.Context(), ssostore.FromTx(tx), orgID, domainName)
 				if e != nil {
 					return e
@@ -210,7 +210,7 @@ func (h *ssoDomainsHandler) handleDomainList(w http.ResponseWriter, r *http.Requ
 	}
 
 	var domains []ssostore.SSODomain
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		domains, e = ssostore.FromTx(tx).Domains.ListByOrg(r.Context(), orgID)
 		return e
@@ -239,7 +239,7 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 	}
 
 	var claim *ssostore.SSODomain
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		claim, e = ssostore.FromTx(tx).Domains.GetByID(r.Context(), orgID, id)
 		return e
