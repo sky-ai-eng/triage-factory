@@ -91,8 +91,8 @@ func TestOrgSource_PatchClearsSnapshotsOnDisableOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if _, err := st.Entities.UpdateSnapshot(ctx, org, ent.ID, `{"key":"SKY-pause-1"}`); err != nil {
-		t.Fatalf("seed snapshot: %v", err)
+	if ok, err := st.Entities.UpdateSnapshotCASSystem(ctx, org, ent.ID, `{"key":"SKY-pause-1"}`, ent.PollSeq); err != nil || !ok {
+		t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 	}
 
 	if rec := doJSON(t, s, http.MethodPatch, orgSourcePath("jira"), map[string]any{"disabled": true}); rec.Code != http.StatusOK {
@@ -106,8 +106,10 @@ func TestOrgSource_PatchClearsSnapshotsOnDisableOnly(t *testing.T) {
 		t.Errorf("snapshot = %q after disable, want cleared", got.SnapshotJSON)
 	}
 
-	if _, err := st.Entities.UpdateSnapshot(ctx, org, ent.ID, `{"key":"SKY-pause-1"}`); err != nil {
-		t.Fatalf("re-seed snapshot: %v", err)
+	// The disable bumped poll_seq, so the re-seed CASes at the value the
+	// cleared row carries now.
+	if ok, err := st.Entities.UpdateSnapshotCASSystem(ctx, org, ent.ID, `{"key":"SKY-pause-1"}`, got.PollSeq); err != nil || !ok {
+		t.Fatalf("re-seed snapshot: ok=%v err=%v", ok, err)
 	}
 	if rec := doJSON(t, s, http.MethodPatch, orgSourcePath("jira"), map[string]any{"disabled": false}); rec.Code != http.StatusOK {
 		t.Fatalf("PATCH enable: %d: %s", rec.Code, rec.Body.String())

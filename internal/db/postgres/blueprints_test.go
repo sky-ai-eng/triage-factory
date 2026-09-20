@@ -250,9 +250,8 @@ func TestBlueprintStore_Postgres_DuplicatePrompts_CrossTeamRejected(t *testing.T
 }
 
 // TestBlueprintStore_Postgres_ReplaceAndListSteps pins the dialect-aware
-// SQL: ReplaceSteps must INSERT the org_id column (Postgres-only),
-// ListSteps must filter on org_id, and CountStepReferences must count
-// distinct blueprints within the org. The regression this guards
+// SQL: ReplaceSteps must INSERT the org_id column (Postgres-only) and
+// ListSteps must filter on org_id. The regression this guards
 // against is the original chains.go free-function shape that wrote
 // ? placeholders against the Postgres tables with no org_id — every
 // INSERT would 23502 (NULL constraint) and every WHERE would either
@@ -290,15 +289,6 @@ func TestBlueprintStore_Postgres_ReplaceAndListSteps(t *testing.T) {
 	}
 	if steps[1].StepIndex != 1 || steps[1].StepPromptID != stepBID || steps[1].Brief != "brief B" {
 		t.Errorf("step 1 = %+v, want index=1 prompt=%s brief='brief B'", steps[1], stepBID)
-	}
-
-	// CountStepReferences should see one blueprint referencing stepAID.
-	n, err := blueprints.CountStepReferences(ctx, orgID, stepAID)
-	if err != nil {
-		t.Fatalf("CountStepReferences: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("CountStepReferences = %d, want 1", n)
 	}
 
 	// Re-ReplaceSteps with a smaller list — the DELETE+INSERT path

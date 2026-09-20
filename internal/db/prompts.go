@@ -10,10 +10,10 @@ import (
 //go:generate go run github.com/vektra/mockery/v2 --name=PromptStore --output=./mocks --case=underscore --with-expecter
 
 // ErrNoSuchPrompt means an id-keyed write was handed a prompt id no row
-// answers to. Only the writes return it: Get and GetBySystemSlug keep
-// answering a miss with (nil, nil), because a read is a question and "no
-// prompt" is an answer to it, while a write that matched nothing is a caller
-// that resolved an id and then acted on something that is not there.
+// answers to. Only the writes return it: Get keeps answering a miss with
+// (nil, nil), because a read is a question and "no prompt" is an answer to
+// it, while a write that matched nothing is a caller that resolved an id and
+// then acted on something that is not there.
 var ErrNoSuchPrompt = errors.New("no prompt with that id")
 
 // PromptStore owns the prompts table. Three audiences:
@@ -39,7 +39,7 @@ var ErrNoSuchPrompt = errors.New("no prompt with that id")
 //
 // # Every single-row write returns the row it persisted
 //
-// Create, Update, UpdateImported, Hide and Unhide hand back the stored row,
+// Create, Update, UpdateImported and Hide hand back the stored row,
 // read off RETURNING on the write statement itself rather than from a
 // follow-up SELECT, projecting the point read's column list and scanner so the
 // write shape cannot drift from the read shape. The row differs from what the
@@ -71,16 +71,6 @@ type PromptStore interface {
 	// deleted_at IS NULL — a soft-deleted prompt reads as absent here
 	// (use GetSystem to resolve it for in-flight runs / past timelines).
 	Get(ctx context.Context, orgID string, id string) (*domain.Prompt, error)
-
-	// GetBySystemSlug resolves a team's copy of a shipped prompt by its
-	// stable system_slug (e.g. "system-ci-fix"). Returns (nil, nil) when the
-	// team has no copy. The id moved to a random UUID per team copy, so a
-	// caller that needs a shipped prompt by name resolves through this
-	// instead of Get(slug).
-	// The Postgres impl filters org+team and runs on the app
-	// pool (RLS-gated); the SQLite impl filters by slug only (single team)
-	// but honors a non-empty teamID when supplied.
-	GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Prompt, error)
 
 	// Create inserts a new prompt (user or imported source) owned by
 	// teamID — the acting team the handler resolved for the request.
@@ -119,9 +109,9 @@ type PromptStore interface {
 	// a hard DELETE on a prompt with conversation history would error, and
 	// auto-wrapping every new prompt as a 1-step blueprint (the step FK
 	// is also RESTRICT) makes hard-delete impossible. Request-facing
-	// reads (List/Get/GetBySystemSlug)
-	// filter deleted_at IS NULL; the ...System reads keep resolving it so
-	// in-flight runs + past-run timelines still render the name/body.
+	// reads (List/Get) filter deleted_at IS NULL; the ...System reads keep
+	// resolving it so in-flight runs + past-run timelines still render the
+	// name/body.
 	//
 	// Exempt from the returned-row rule: it is a delete. The stamp is how the
 	// row survives its RESTRICT FKs, not a state anyone renders — every
@@ -137,14 +127,6 @@ type PromptStore interface {
 	// readable through Get, so hiding one is a state change a caller can be
 	// handed rather than a removal.
 	Hide(ctx context.Context, orgID string, id string) (domain.Prompt, error)
-
-	// Unhide reverses Hide, and returns the row it un-hid or ErrNoSuchPrompt.
-	Unhide(ctx context.Context, orgID string, id string) (domain.Prompt, error)
-
-	// CountConversationReferences returns the number of conversations rows that reference
-	// the given prompt. Used to surface execution history before a
-	// destructive edit / delete.
-	CountConversationReferences(ctx context.Context, orgID string, id string) (int, error)
 
 	// IncrementUsage bumps usage_count by 1. Called from the
 	// delegate spawner when a conversation picks the prompt; the count

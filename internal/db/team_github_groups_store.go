@@ -16,26 +16,21 @@ import (
 //
 // # Pool split (Postgres)
 //
-//   - ListForTeam, SetForTeam, TeamsForGroup run on the app pool. The
+//   - ListForTeam, SetForTeam run on the app pool. The
 //     team_github_groups_select / _insert / _delete RLS policies gate
 //     reads by team membership and writes by team admin; the request-
 //     handler caller has set the JWT claims via the TxRunner.
-//   - ListForTeamSystem, TeamsForGroupSystem, PruneMissingSystem run on
-//     the admin pool. The router/poller resolve routing + reconcile
-//     deleted GitHub teams without a JWT-claims context.
+//   - TeamsForGroupSystem, PruneMissingSystem run on the admin pool. The
+//     router/poller resolve routing + reconcile deleted GitHub teams
+//     without a JWT-claims context.
 //
-// SQLite collapses the pool split to one connection; the `...System`
-// variant delegates to its non-System counterpart.
+// SQLite collapses the pool split to one connection.
 type TeamGitHubGroupsStore interface {
 	// ListForTeam returns the team's GitHub-team mappings ordered by
 	// (github_org_login, github_team_slug). Empty slice with nil error
 	// when the team has no mappings. Postgres routes through the app
 	// pool (team_github_groups_select gates by team membership).
 	ListForTeam(ctx context.Context, teamID string) ([]domain.TeamGitHubGroup, error)
-
-	// ListForTeamSystem mirrors ListForTeam but routes through the admin
-	// pool in Postgres for callers without a JWT-claims context.
-	ListForTeamSystem(ctx context.Context, teamID string) ([]domain.TeamGitHubGroup, error)
 
 	// SetForTeam replaces the team's entire mapping set with groups.
 	// Because every column is part of the primary key the rows are pure
@@ -51,19 +46,13 @@ type TeamGitHubGroupsStore interface {
 	// single row a return value could name.
 	SetForTeam(ctx context.Context, teamID string, groups []domain.TeamGitHubGroup) error
 
-	// TeamsForGroup returns the TF team IDs mapped to the given GitHub
-	// team within the org, ordered by team_id. This is the routing
+	// TeamsForGroupSystem returns the TF team IDs mapped to the given
+	// GitHub team within the org, ordered by team_id. This is the routing
 	// lookup: a github-team review request resolves to every TF team
 	// that funneled it in (M:N). orgLogin + teamSlug are matched
-	// case-insensitively. Postgres routes through the app pool, so the
-	// caller only sees teams it is a member of — routing consumers
-	// should use TeamsForGroupSystem.
-	TeamsForGroup(ctx context.Context, orgID, orgLogin, teamSlug string) ([]string, error)
-
-	// TeamsForGroupSystem mirrors TeamsForGroup but routes through the
-	// admin pool in Postgres so the router/poller can resolve routing
-	// without a JWT-claims context (and without RLS filtering the
-	// result to the caller's own teams).
+	// case-insensitively. Admin pool in Postgres: the router/poller
+	// resolve routing without a JWT-claims context, and the answer must
+	// span every team rather than the teams a caller belongs to.
 	TeamsForGroupSystem(ctx context.Context, orgID, orgLogin, teamSlug string) ([]string, error)
 
 	// PruneMissingSystem removes, across every team in the org, the

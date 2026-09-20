@@ -13,8 +13,8 @@ import (
 // accessChangeLogStore is the SQLite impl of db.AccessChangeLogStore. SQLite is
 // single-tenant (local mode, N=1) with no RLS — the org_id column exists for
 // parity with the Postgres baseline but every row defaults to LocalDefaultOrgID.
-// The Postgres impl gates writes/reads with an org-scoped RLS policy; here both
-// pools collapse to the one connection. See TFAC-471.
+// The Postgres impl gates writes/reads with an org-scoped RLS policy; here there
+// is the one connection.
 type accessChangeLogStore struct{ q queryer }
 
 func newAccessChangeLogStore(q queryer) db.AccessChangeLogStore {
@@ -42,14 +42,6 @@ func (s *accessChangeLogStore) Record(ctx context.Context, orgID string, e domai
 		nullIfEmpty(e.TargetUserID), nullIfEmpty(e.TeamID), nullIfEmpty(e.DetailJSON),
 	)
 	return err
-}
-
-// RecordSystem is identical to Record in SQLite: local mode is single-tenant
-// (N=1) with no RLS, so there is no admin/app pool split. The method exists for
-// parity with the Postgres store, where the SSO JIT auto-provisioning seam (no
-// JWT-claims context) needs the admin pool. See TFAC-486.
-func (s *accessChangeLogStore) RecordSystem(ctx context.Context, orgID string, e domain.AccessChange) error {
-	return s.Record(ctx, orgID, e)
 }
 
 func (s *accessChangeLogStore) ListByOrg(ctx context.Context, orgID string, opts domain.AccessChangeListOpts) ([]domain.AccessChange, int, error) {

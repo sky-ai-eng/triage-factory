@@ -26,11 +26,19 @@ func TestRepositoryStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
-	dbtest.RunRepositoryStoreConformance(t, func(t *testing.T) (db.RepositoryStore, string) {
+	dbtest.RunRepositoryStoreConformance(t, func(t *testing.T) (db.RepositoryStore, string, dbtest.RepositorySeeder) {
 		t.Helper()
 		h.Reset(t)
 		orgID, _, _ := seedPgRepoOrg(t, h)
-		return stores.Repos, orgID
+		seed := dbtest.RepositorySeeder{
+			Tracking: stores.TeamGitHubRepos,
+			TeamID:   firstTeamForOrg(t, h, orgID),
+			Team: func(t *testing.T, slug string) string {
+				t.Helper()
+				return pgtest.SeedTeam(t, h, orgID, slug)
+			},
+		}
+		return stores.Repos, orgID, seed
 	})
 }
 
@@ -99,14 +107,6 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget")); got.CloneStatus == "failed" {
 		t.Errorf("orgA's CloneStatus was mutated by orgB UpdateCloneStatus: got %q", got.CloneStatus)
-	}
-
-	// SetConfigured cross-org must not delete orgA's row.
-	if err := stores.Repos.SetConfigured(ctx, orgB, []string{"another/repo"}); err != nil {
-		t.Fatalf("SetConfigured cross-org: %v", err)
-	}
-	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget")); got == nil {
-		t.Errorf("orgA's repo was deleted by orgB SetConfigured")
 	}
 }
 

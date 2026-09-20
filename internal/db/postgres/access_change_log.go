@@ -9,52 +9,36 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// accessChangeLogStore is the Postgres impl of db.AccessChangeLogStore. Holds
-// both pools, the same split ExternalActions uses:
+// accessChangeLogStore is the Postgres impl of db.AccessChangeLogStore. App
+// pool only (RLS-active): Record composes inside the claims-bearing WithTx that
+// runs the governance action it audits, so the access_change_log_all policy's
+// WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
+// is exercised on write, and the audit view's ListByOrg reads under the same
+// org-scoped USING clause.
 //
-//   - app: app pool (RLS-active). Record composes inside the claims-bearing
-//     WithTx that runs the governance action it audits, so the
-//     access_change_log_all policy's WITH CHECK (org_id = tf.current_org_id() AND
-//     tf.user_has_org_access(org_id)) is exercised on write, and the audit view's
-//     ListByOrg reads under the same org-scoped USING clause.
-//   - admin: admin pool (BYPASSRLS). RecordSystem routes here for the SSO JIT
-//     auto-provisioning seam, whose user has no membership/claims at grant time.
+// org_id stays in every statement as defense in depth.
 //
-// org_id stays in every statement as defense in depth. See TFAC-471 / TFAC-486.
-//
-// (The invite-accept + JIT org_member_granted writes are the exception — they run
+// The invite-accept + JIT org_member_granted writes are the exception — they run
 // on the admin pool's raw transaction, atomically with the grant, because the
 // user has no RLS standing to insert their own membership; that seam writes the
-// audit row via a raw INSERT in the server package, not through this store.)
+// audit row via a raw INSERT in the server package, not through this store.
 type accessChangeLogStore struct {
-	app   queryer
-	admin queryer
+	app queryer
 }
 
-func newAccessChangeLogStore(app, admin queryer) db.AccessChangeLogStore {
-	return &accessChangeLogStore{app: app, admin: admin}
+func newAccessChangeLogStore(app queryer) db.AccessChangeLogStore {
+	return &accessChangeLogStore{app: app}
 }
 
 var _ db.AccessChangeLogStore = (*accessChangeLogStore)(nil)
 
 func (s *accessChangeLogStore) Record(ctx context.Context, orgID string, e domain.AccessChange) error {
-	return s.record(ctx, s.app, orgID, e)
-}
-
-// RecordSystem runs the same insert on the admin pool (BYPASSRLS) for the SSO JIT
-// auto-provisioning seam, which holds an org identity but no JWT-claims context.
-// See the type doc.
-func (s *accessChangeLogStore) RecordSystem(ctx context.Context, orgID string, e domain.AccessChange) error {
-	return s.record(ctx, s.admin, orgID, e)
-}
-
-func (s *accessChangeLogStore) record(ctx context.Context, q queryer, orgID string, e domain.AccessChange) error {
 	// A caller-supplied e.ID is honored (parity with the SQLite impl); an empty
 	// e.ID falls back to gen_random_uuid() server-side. created_at is left to
 	// the column DEFAULT now(). Empty nullable columns ('') → NULL via NULLIF;
 	// the uuid columns cast after the NULLIF so an empty string never reaches
 	// ::uuid.
-	_, err := q.ExecContext(ctx, `
+	_, err := s.app.ExecContext(ctx, `
 		INSERT INTO access_change_log
 			(id, org_id, actor_user_id, action, target_user_id, team_id, detail_json)
 		VALUES (

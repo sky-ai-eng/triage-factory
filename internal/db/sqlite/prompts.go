@@ -135,33 +135,6 @@ func (s *promptStore) GetSystem(ctx context.Context, orgID string, id string) (*
 	return &p, nil
 }
 
-// GetBySystemSlug resolves a shipped prompt by slug. SQLite is single-team
-// in production, so the slug alone is unique; a non-empty teamID further
-// scopes it (used by the per-team-divergence conformance path). org_id is
-// in the WHERE for consistency with the store's other reads (assertLocalOrg
-// already gates it).
-func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Prompt, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	q := `
-		SELECT ` + sqlitePromptColumns + `
-		FROM prompts WHERE org_id = ? AND system_slug = ? AND deleted_at IS NULL`
-	args := []any{orgID, systemSlug}
-	if teamID != "" {
-		q += ` AND team_id = ?`
-		args = append(args, teamID)
-	}
-	p, err := scanPromptRowSQLite(s.q.QueryRowContext(ctx, q, args...).Scan)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &p, nil
-}
-
 // Create inserts a prompt row scoped to the local sentinel team. The
 // creator_user_id is derived from p.Source rather than taken from the
 // caller, which is a deliberate divergence from the Postgres impl:
@@ -265,26 +238,6 @@ func (s *promptStore) Hide(ctx context.Context, orgID string, id string) (domain
 	}
 	return scanUpdatedPrompt(s.q.QueryRowContext(ctx,
 		`UPDATE prompts SET hidden = 1 WHERE id = ? RETURNING `+sqlitePromptColumns, id))
-}
-
-func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) (domain.Prompt, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return domain.Prompt{}, err
-	}
-	return scanUpdatedPrompt(s.q.QueryRowContext(ctx,
-		`UPDATE prompts SET hidden = 0 WHERE id = ? RETURNING `+sqlitePromptColumns, id))
-}
-
-func (s *promptStore) CountConversationReferences(ctx context.Context, orgID, id string) (int, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return 0, err
-	}
-	var n int
-	err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversations WHERE prompt_id = ?`, id).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("count conversation references: %w", err)
-	}
-	return n, nil
 }
 
 func (s *promptStore) IncrementUsage(ctx context.Context, orgID string, id string) error {

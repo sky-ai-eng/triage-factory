@@ -61,9 +61,7 @@ func TestRefreshGitHub_PollCompleteSentinel_OnlyOnFullWrap(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, repos); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, repos)
 
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)

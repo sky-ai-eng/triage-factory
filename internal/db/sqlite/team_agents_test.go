@@ -15,7 +15,7 @@ import (
 // row so team_agents.agent_id FK is satisfied (SQLite enforces FK with
 // the pragma set in openSQLiteForTest).
 func TestTeamAgentStore_SQLite(t *testing.T) {
-	dbtest.RunTeamAgentStoreConformance(t, func(t *testing.T) (db.TeamAgentStore, string, string, string) {
+	dbtest.RunTeamAgentStoreConformance(t, func(t *testing.T) (db.TeamAgentStore, string, string, string, dbtest.TeamAgentDisabler) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
@@ -24,7 +24,10 @@ func TestTeamAgentStore_SQLite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed agent: %v", err)
 		}
-		return stores.TeamAgents, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agentID
+		disable := func(t *testing.T) {
+			dbtest.SetTeamAgentEnabledDirect(t, conn, runmode.LocalDefaultTeamID, agentID, false)
+		}
+		return stores.TeamAgents, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agentID, disable
 	})
 }
 

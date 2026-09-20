@@ -393,42 +393,6 @@ func (s *conversationQueueStore) ClaimExecutorSystem(ctx context.Context, orgID,
 	return executorID, true, nil
 }
 
-// RequeueAwaitingCredentials mirrors the Postgres impl: releases the
-// conversation's claim parked in phase='awaiting_credentials', which leaves the
-// (still mid-flight) conversation claimable again. Never reached in
-// practice — local mode is always role=all, which never parks a claim
-// awaiting credentials — but implemented for store-interface +
-// conformance-test symmetry.
-func (s *conversationQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, conversationID string) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	var matched bool
-	err := inTx(ctx, s.conn, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
-			UPDATE conversations SET preferred_executor_id = NULL
-			WHERE id = ? AND EXISTS (
-			    SELECT 1 FROM claims cl
-			    WHERE cl.conversation_id = conversations.id
-			      AND cl.released_at IS NULL AND cl.phase = 'awaiting_credentials'
-			)
-		`, conversationID)
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		matched = n > 0
-		if !matched {
-			return nil
-		}
-		return releaseActiveClaim(ctx, q, conversationID, "requeued")
-	})
-	return matched, err
-}
-
 func (s *conversationQueueStore) ListAwaitingCredentials(ctx context.Context) ([]db.AwaitingCredentialsConversation, error) {
 	// The parked set is keyed off the active claim's phase (served by the
 	// idx_claims_active_phase partial index); an inner join is right here —

@@ -413,19 +413,6 @@ func scanWrittenEntity(row *sql.Row) (domain.Entity, error) {
 	return *e, nil
 }
 
-func (s *entityStore) UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error) {
-	// The blind-write system variant was removed with TFAC-579: every
-	// tracker snapshot write goes through UpdateSnapshotCASSystem. This
-	// app-pool variant survives for non-tracker writers with no poll_seq
-	// read-then-write cycle to protect.
-	return scanWrittenEntity(s.q.QueryRowContext(ctx, `
-		UPDATE entities
-		SET snapshot_json = $1::jsonb, last_polled_at = $2
-		WHERE org_id = $3 AND id = $4
-		RETURNING `+pgEntitySelectCols,
-		snapshotJSON, time.Now().UTC(), orgID, id))
-}
-
 // UpdateSnapshotCASSystem is the tracker's snapshot write with a poll_seq
 // CAS (TFAC-579): the WHERE clause pins expectedPollSeq alongside
 // org_id/id, so a straggler ex-leader's late write (its expectedPollSeq is

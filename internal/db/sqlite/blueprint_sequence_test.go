@@ -115,8 +115,8 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 		},
 		ClaimTaskForUser: func(t *testing.T, taskID string) {
 			t.Helper()
-			if _, err := stores.Tasks.SetClaimedByUser(ctx, org, taskID, runmode.LocalDefaultUserID); err != nil {
-				t.Fatalf("SetClaimedByUser: %v", err)
+			if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, org, taskID, runmode.LocalDefaultUserID); err != nil || !ok {
+				t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 			}
 		},
 		RunCount: func(t *testing.T, taskID string) int {

@@ -13,7 +13,7 @@ import (
 //go:generate go run github.com/vektra/mockery/v2 --name=AgentStore --output=./mocks --case=underscore --with-expecter
 
 // ErrNoSuchAgent means an id-keyed write named no agent row in the given org.
-// Only the writes return it; GetForOrg keeps answering a miss with (nil, nil),
+// Only the write returns it; GetForOrg keeps answering a miss with (nil, nil),
 // because "this org has no bot yet" is a state its callers already render.
 var ErrNoSuchAgent = errors.New("no agent with that id in this org")
 
@@ -29,8 +29,8 @@ var ErrNoSuchAgent = errors.New("no agent with that id in this org")
 //     Create with admin-pool routing in Postgres because at org-create
 //     time no org_memberships row exists yet for the founder and the
 //     agents_insert RLS policy would refuse.
-//   - Future admin UI (D14) — Update + SetGitHubPATUser via
-//     the app pool, admin-gated by RLS.
+//   - The org-PAT setup/rebind writers — SetGitHubOrgIdentity via the
+//     app pool, admin-gated by RLS.
 //   - D-Claims + delegate spawner — GetForOrg on every run
 //     dispatch to pick the credential source.
 //
@@ -42,7 +42,7 @@ var ErrNoSuchAgent = errors.New("no agent with that id in this org")
 //
 // # Pool split (Postgres)
 //
-//   - app pool — tf_app, RLS-active. GetForOrg, Update, SetGitHubPATUser.
+//   - app pool — tf_app, RLS-active. GetForOrg, SetGitHubOrgIdentity.
 //     agents_select gates reads by org access;
 //     agents_insert/agents_update/agents_delete each gate writes by
 //     tf.user_is_org_admin(org_id).
@@ -56,13 +56,11 @@ var ErrNoSuchAgent = errors.New("no agent with that id in this org")
 //
 // # Every single-row write returns the row it persisted
 //
-// Update, SetGitHubPATUser and SetGitHubOrgIdentity hand back the stored row,
-// read off RETURNING on the write statement itself rather than from a
-// follow-up SELECT, projecting the point read's column list and scanner. Each
-// of them normalizes its input on the way in — an empty model or service
-// account becomes NULL, and SetGitHubOrgIdentity clears both identity columns
-// when either is empty — so the row and the argument disagree by design. A
-// miss is ErrNoSuchAgent.
+// SetGitHubOrgIdentity hands back the stored row, read off RETURNING on the
+// write statement itself rather than from a follow-up SELECT, projecting the
+// point read's column list and scanner. It normalizes its input on the way
+// in — both identity columns clear when either half is empty — so the row and
+// the argument disagree by design. A miss is ErrNoSuchAgent.
 //
 // Create is the exception, and its reason is stated at the method: its insert
 // is ON CONFLICT DO NOTHING, which returns nothing at all on the idempotent
@@ -96,37 +94,20 @@ type AgentStore interface {
 	// renders the row.
 	Create(ctx context.Context, orgID string, a domain.Agent) (id string, err error)
 
-	// Update changes the agent's mutable metadata: display name,
-	// default model, default autonomy threshold, Jira service account.
-	// The credential FK uses SetGitHubPATUser at a smaller surface
-	// rather than letting Update touch it. Admin-only in Postgres via
-	// RLS.
-	//
-	// Returns the updated row, or ErrNoSuchAgent — which is what an id no row
-	// answers to now gets, including the invalid-UUID input Postgres used to
-	// turn into a silent no-op.
-	Update(ctx context.Context, orgID string, a domain.Agent) (domain.Agent, error)
-
-	// SetGitHubPATUser sets the PAT-borrow user FK. Used by local
-	// install (where userID is the sentinel local user) and by
-	// multi-mode small-org fallback. Admin-only in Postgres.
-	//
-	// Returns the updated row, or ErrNoSuchAgent.
-	SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) (domain.Agent, error)
-
 	// SetGitHubOrgIdentity records the org credential's OWN GitHub login and
 	// verified primary email — the account the bot/org PAT authenticates as,
-	// distinct from SetGitHubPATUser (the user who pasted the PAT). Written by the
-	// org-PAT setup/rebind writers (internal/server/credentials.go and
-	// the other integrations.Save sites) so the credential resolver's
-	// OrgIdentityFor PAT tier can stamp the org commit-author identity. If
-	// either value is empty, both fields are cleared so a partial
-	// identity can never be persisted. Admin-only in Postgres, same
-	// pool + RLS as SetGitHubPATUser. App-tier orgs never write here —
-	// the App bot login (<slug>[bot]) resolves live from the App
-	// registration, so this is the PAT path only.
+	// distinct from github_pat_user_id (the user who pasted the PAT, which
+	// only Create stamps). Written by the org-PAT setup/rebind writers
+	// (internal/server/credentials.go and the other integrations.Save sites)
+	// so the credential resolver's OrgIdentityFor PAT tier can stamp the org
+	// commit-author identity. If either value is empty, both fields are
+	// cleared so a partial identity can never be persisted. Admin-only in
+	// Postgres via the app pool's RLS. App-tier orgs never write here — the
+	// App bot login (<slug>[bot]) resolves live from the App registration, so
+	// this is the PAT path only.
 	//
-	// Returns the updated row, or ErrNoSuchAgent. The row is where the
+	// Returns the updated row, or ErrNoSuchAgent — which is what an id no row
+	// answers to gets, invalid-UUID input included. The row is where the
 	// all-or-nothing rule is visible: pass one half and both columns come back
 	// empty.
 	SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) (domain.Agent, error)

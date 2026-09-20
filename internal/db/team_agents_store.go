@@ -2,67 +2,56 @@ package db
 
 import (
 	"context"
-	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// ErrNoSuchTeamAgent means a key-addressed write named no team_agents row.
-// Only the writes return it; GetForTeam keeps answering a miss with
-// (nil, nil), because "this team has no membership row yet" is the state
-// AddForTeam exists to fix.
-var ErrNoSuchTeamAgent = errors.New("no team_agents row for that (team, agent)")
-
 //go:generate go run github.com/vektra/mockery/v2 --name=TeamAgentStore --output=./mocks --case=underscore --with-expecter
 
 // TeamAgentStore owns team_agents — the per-team membership row for
 // the org's agent, plus per-team config overrides. One row per
-// (team_id, agent_id). Default-enabled at team creation by the
-// bootstrap path; team members toggle + override post-creation.
+// (team_id, agent_id), default-enabled at team creation by the
+// bootstrap path. Nothing in the product flips enabled or writes an
+// override yet: the row's toggle and override columns are read on every
+// trigger fire and delegate gesture, but the only writer is bootstrap.
 //
 // Audiences:
 //
 //   - Bootstrap (internal/db/bootstrap.go) — AddForTeam on org-create
 //     (for each team that already exists) and on every subsequent
 //     team-create handler call.
-//   - D-Claims router — GetForTeam to decide whether a
+//   - D-Claims router — GetForTeamSystem to decide whether a
 //     trigger fire creates a claimed task (enabled team) or falls
 //     back to unclaimed (disabled team, prompt pre-filled).
-//   - Future admin UI — SetEnabled + SetOverrides
-//     for per-team toggling. ListForOrg for the "per-team bot config"
-//     table.
+//   - The delegate + team-member handlers — GetForTeam inside the
+//     request's claims tx, to refuse a gesture on a team whose bot is
+//     off.
 //
 // # Pool split (Postgres)
 //
-//   - app pool — tf_app, RLS-active. Everything except AddForTeam.
-//     team_agents_select plus the write policies
-//     team_agents_insert/team_agents_update/team_agents_delete all
-//     gate on tf.user_in_team(team_id), so team members can read and
-//     write their own team's row but not other teams'. Per the locked
-//     architecture decision: team-bot toggling is a team-member power,
-//     not an admin-only power.
-//   - admin pool — supabase_admin, BYPASSRLS. AddForTeam only. Same
-//     reasoning as AgentStore.Create: bootstrap runs without claims.
+//   - app pool — tf_app, RLS-active. GetForTeam. team_agents_select
+//     gates on tf.user_in_team(team_id), so team members read their
+//     own team's row but not other teams'. The write policies
+//     (team_agents_insert/team_agents_update/team_agents_delete) gate
+//     the same way: per the locked architecture decision, team-bot
+//     toggling is a team-member power, not an admin-only power, and the
+//     policies already admit it for the day a door writes it.
+//   - admin pool — supabase_admin, BYPASSRLS. AddForTeam and
+//     GetForTeamSystem. Same reasoning as AgentStore.Create: bootstrap
+//     and the router run without claims.
 //
 // SQLite collapses both pools to one connection; assertLocalOrg pins
 // orgID to LocalDefaultOrgID.
 //
-// # Every single-row write returns the row it persisted
+// # The returned-row rule
 //
-// SetEnabled and SetOverrides hand back the stored row, read off RETURNING on
-// the write statement itself rather than from a follow-up SELECT, projecting
-// the point read's column list and scanner. SetOverrides normalizes an empty
-// model to NULL on the way in, so the row and the argument disagree by design.
-// A miss is ErrNoSuchTeamAgent.
-//
-// Exempt, each said so at the method: AddForTeam (ON CONFLICT DO NOTHING — it
-// returns nothing on the idempotent re-run it exists for) and Remove (a
-// delete).
+// The store's one write is AddForTeam, exempt as said at the method.
 type TeamAgentStore interface {
 	// GetForTeam returns the row for (team_id, agent_id), or (nil, nil)
-	// if absent. The router calls this on every trigger fire to gate
-	// the claim-vs-unclaimed branch.
+	// if absent — "this team has no membership row yet" is the state
+	// AddForTeam exists to fix. The request handlers call this inside the
+	// claims tx to gate a delegate gesture.
 	GetForTeam(ctx context.Context, orgID, teamID, agentID string) (*domain.TeamAgent, error)
 
 	// AddForTeam inserts a default-enabled membership row. Idempotent
@@ -71,37 +60,10 @@ type TeamAgentStore interface {
 	// routes through the admin pool.
 	//
 	// Exempt from the returned-row rule, by decision rather than by shape: the
-	// insert is ON CONFLICT DO NOTHING so a re-run leaves the user's toggle
+	// insert is ON CONFLICT DO NOTHING so a re-run leaves the row's toggle
 	// and overrides alone, and that returns zero rows precisely on the re-run.
 	// Bootstrap does not read the row back.
 	AddForTeam(ctx context.Context, orgID, teamID, agentID string) error
-
-	// SetEnabled flips the bot on or off for a single team. Team-
-	// member-writable per the locked architectural decision. App pool
-	// in Postgres; RLS enforces team membership.
-	//
-	// Returns the updated row, or ErrNoSuchTeamAgent.
-	SetEnabled(ctx context.Context, orgID, teamID, agentID string, enabled bool) (domain.TeamAgent, error)
-
-	// SetOverrides writes per-team model + autonomy overrides. Nil
-	// pointer / empty string clears the override and falls back to
-	// the agent defaults. App pool in Postgres.
-	//
-	// Returns the updated row, or ErrNoSuchTeamAgent. The row is where the
-	// clear-on-empty rule is visible.
-	SetOverrides(ctx context.Context, orgID, teamID, agentID string, model *string, autonomy *float64) (domain.TeamAgent, error)
-
-	// Remove deletes the membership entirely. Rare path — usually the
-	// caller wants SetEnabled(false) so the team_agents row persists
-	// with its overrides intact. App pool in Postgres.
-	//
-	// Exempt from the returned-row rule: it is a delete.
-	Remove(ctx context.Context, orgID, teamID, agentID string) error
-
-	// ListForOrg returns every team_agents row for the org's agent.
-	// Used by the admin UI's per-team config table and by future
-	// router optimization that wants the full set in memory.
-	ListForOrg(ctx context.Context, orgID, agentID string) ([]domain.TeamAgent, error)
 
 	// GetForTeamSystem mirrors GetForTeam but routes through the admin
 	// pool in Postgres. The router reads this on every auto-trigger

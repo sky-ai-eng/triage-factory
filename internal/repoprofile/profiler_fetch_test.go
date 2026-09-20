@@ -64,7 +64,7 @@ func TestProfiler_FetchErrorLeavesRowUntouched(t *testing.T) {
 		nil, // ws nil: the profiler guards every Broadcast on non-nil
 	)
 
-	if err := p.Run(context.Background(), true /* force: bypass the TTL/GetSystem read */); err != nil {
+	if err := p.Run(context.Background(), true /* force: bypass the TTL/GetByRefSystem read */); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 

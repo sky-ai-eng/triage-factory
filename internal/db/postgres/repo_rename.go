@@ -414,10 +414,10 @@ func rewriteArtifactSlugs(ctx context.Context, q queryer, orgID, from, to string
 //
 // It exists for the two composite keys a rename can collide on: entities'
 // (org_id, source, source_id) and artifacts' (org_id, dedup_key). Both are
-// reachable without any corruption, because untracking a repository keeps its
-// entities and artifacts while dropping the repositories row that
-// slugHeldByAnotherRepository looks at — so a freed name can be spoken for by
-// records alone. Mapping the violation is what makes that a documented
+// reachable without any corruption: a record carries the provider's own
+// identity, not the registry row slugHeldByAnotherRepository looks at, so a
+// name no repositories row answers to can still be spoken for by records
+// alone. Mapping the violation is what makes that a documented
 // terminal state rather than a raw driver string the caller retries forever.
 //
 // Mapped at the write rather than pre-checked on purpose: a pre-check inside

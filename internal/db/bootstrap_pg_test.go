@@ -132,8 +132,8 @@ func TestSeedShippedIntoTeam_Postgres_TwoTeamsAndIdempotent(t *testing.T) {
 		t.Fatalf("BootstrapNewTeam: %v", err)
 	}
 
-	// stores.Prompts.GetBySystemSlug is app-pool (RLS-gated); read back
-	// through the admin pool directly.
+	// The store's request-facing prompt reads run on the app pool
+	// (RLS-gated); read back through the admin pool directly.
 	readPrompt := func(team, slug string) (id, model string) {
 		t.Helper()
 		if err := h.AdminDB.QueryRowContext(ctx,

@@ -562,7 +562,7 @@ func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	if withdrawn != 1 {
 		t.Errorf("withdrawn staged-injection rows = %d, want 1 (retired in place, not deleted)", withdrawn)
 	}
-	msgs, err := stores.Conversations.Messages(context.Background(), runmode.LocalDefaultOrgID, "r-inj3")
+	msgs, err := stores.Conversations.MessagesForConversations(context.Background(), runmode.LocalDefaultOrgID, []string{"r-inj3"})
 	if err != nil {
 		t.Fatalf("Messages: %v", err)
 	}

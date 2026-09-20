@@ -154,7 +154,7 @@ func TestDelegate_AfterTheRouteAlreadyStamped_FindsNothing(t *testing.T) {
 	// What the route does before it calls Delegate again.
 	ctx := context.Background()
 	stores := sqlitestore.New(database)
-	if _, err := stores.Conversations.EndConversationsForTaskSystem(
+	if _, err := stores.Conversations.EndConversationsForTask(
 		ctx, runmode.LocalDefaultOrgID, task.ID, domain.EndedDelegated,
 	); err != nil {
 		t.Fatalf("the route's own stamp: %v", err)

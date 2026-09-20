@@ -167,5 +167,13 @@ type SecretStore interface {
 
 	// DeleteUser removes a per-user secret. Returns ok=false when no
 	// row matched, mirroring Delete. Claims-checked like GetUser.
+	//
+	// No production caller today: it is the secrets half of the per-user
+	// disconnect that UsersStore.ClearJiraIdentity is the identity half of,
+	// and no live HTTP handler surfaces that disconnect yet — the
+	// /jira/identity routes are status + PAT-bind only, so a user-facing
+	// disconnect is still future capture-flow UI work. Such a handler would
+	// clear the identity row AND delete the PAT it captured; this exists now
+	// so that handler is a pure addition, not a store change.
 	DeleteUser(ctx context.Context, orgID, userID, key string) (ok bool, err error)
 }

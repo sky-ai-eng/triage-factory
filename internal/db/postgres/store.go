@@ -149,8 +149,8 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// pool-split pattern as PromptStore + EventHandlerStore.
 		Agents: newAgentStore(app, admin),
 		// TeamAgents.AddForTeam routes through admin for the same
-		// bootstrap reason; SetEnabled/Overrides/Remove/Get run on
-		// app where RLS gates by team membership.
+		// bootstrap reason; GetForTeam runs on app where RLS gates by
+		// team membership.
 		TeamAgents: newTeamAgentStore(app, admin),
 		// Users wires both pools: app for request-equivalent
 		// reads/writes (RLS gated by tf.user_can_read_user() /
@@ -288,17 +288,16 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// JWT claims).
 		JiraStatusRules: newJiraStatusRulesStore(app, admin),
 		// TeamGitHubGroups holds both pools: app for ListForTeam +
-		// SetForTeam + TeamsForGroup (request-handler reads/writes gated
-		// by team_github_groups_* RLS policies) and admin for
-		// ListForTeamSystem + TeamsForGroupSystem + PruneMissingSystem
-		// (router/poller routing + GitHub-team-deletion reconcile
-		// without JWT claims).
+		// SetForTeam (request-handler reads/writes gated by
+		// team_github_groups_* RLS policies) and admin for
+		// TeamsForGroupSystem + PruneMissingSystem (router/poller routing
+		// + GitHub-team-deletion reconcile without JWT claims).
 		TeamGitHubGroups: newTeamGitHubGroupsStore(app, admin),
 		// TeamGitHubRepos holds both pools: app for ListForTeam + the
 		// team-row write inside ReplaceForTeam (RLS gates by team admin)
-		// and admin for ListForTeamSystem + ListForOrgSystem +
-		// TracksRepoSystem (router gate, no JWT claims) + the
-		// repositories reconcile (org-wide union, commits autonomously).
+		// and admin for ListForTeamSystem + TracksRepoSystem (router gate,
+		// no JWT claims) + the repositories reconcile (org-wide union,
+		// commits autonomously).
 		TeamGitHubRepos: newTeamGitHubReposStore(app, admin),
 		// GitHubApps: app pool for request-handler reads/writes
 		// (RLS-gated); admin pool for installation-mirror writes (tf_app
@@ -345,7 +344,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// by org) + ListByOrg, admin for RecordSystem (the SSO JIT auto-provision
 		// seam, whose user has no claims/membership at grant time). See TFAC-471 /
 		// TFAC-486.
-		AccessChangeLog: newAccessChangeLogStore(app, admin),
+		AccessChangeLog: newAccessChangeLogStore(app),
 		// ExternalActions holds both pools (like Artifacts): app for Record
 		// (manual bot runs + server approval/board handlers, under claims) +
 		// ListByTeam, admin for RecordSystem (event-triggered runs + the Jira
@@ -515,7 +514,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		ShippedDefaults:          newTxShippedDefaultsStore(tx, newTxEventHandlerStore(tx)),
 		Invites:                  newInvitesStore(tx, tx),
 		SystemLLMRuns:            newSystemLLMRunStore(tx),
-		AccessChangeLog:          newAccessChangeLogStore(tx, tx),
+		AccessChangeLog:          newAccessChangeLogStore(tx),
 		ExternalActions:          newExternalActionStore(tx, tx),
 		Spend:                    newSpendStore(tx, tx),
 		AuthEvents:               newAuthEventStore(tx),

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -87,74 +86,35 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 	return scanRepositoryFull(row)
 }
 
-func (s *repoStore) GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	return getOrCreateRepository(ctx, s.q, ref)
-}
-
-// getOrCreateRepository is the store method's body, taking a queryer so it
-// composes inside a caller's transaction. Its create half is
-// insertRepositoryRow, which the tracked-set reconcile in
-// team_github_repos.go calls directly — that reconcile has already computed
-// which repos are new, so it skips the lookup rather than the insert.
-//
-// The lookup before the insert is not what prevents a duplicate (the identity
-// index is); it is what returns the existing row without writing to it.
-func getOrCreateRepository(ctx context.Context, q queryer, ref domain.RepoRef) (*domain.Repository, error) {
-	source, err := domain.NormalizeRepoSource(ref.Source)
-	if err != nil {
-		return nil, err
-	}
-	existing, err := findRepositoryByRef(ctx, q, source, ref)
-	if err != nil {
-		return nil, err
-	}
-	if existing == nil {
-		if err := insertRepositoryRow(ctx, q, ref); err != nil {
-			return nil, err
-		}
-		// Re-read rather than synthesizing the row: the INSERT is a
-		// DO NOTHING, so this is also what returns the winner's row when a
-		// concurrent creator got there first.
-		created, err := findRepositoryByRef(ctx, q, source, ref)
-		if err != nil {
-			return nil, err
-		}
-		if created == nil {
-			return nil, fmt.Errorf("repositories row for %s vanished immediately after insert", ref.Slug())
-		}
-		return created, nil
-	}
-	// The row stands as it is, except for an id the caller just learned.
-	if ref.ExternalID != "" && existing.ExternalID != ref.ExternalID {
-		if _, err := q.ExecContext(ctx, `
-			UPDATE repositories
-			   SET external_id = ?, updated_at = datetime('now')
-			 WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-		`, ref.ExternalID, source, existing.Owner, existing.Repo); err != nil {
-			return nil, fmt.Errorf("record external id for %s: %w", ref.Slug(), err)
-		}
-		existing.ExternalID = ref.ExternalID
-	}
-	return existing, nil
-}
-
 // getOrCreateRepositoryID returns the surrogate id of one repository's registry
-// row, minting the row if it does not exist yet. It is the resolver every
-// reference site uses: a caller holding a slug — a tracked-set save, a
-// worktree reservation, a pinned project — needs the id the FK points at, and
-// the store contract keeps the surrogate out of domain.Repository.
+// row, minting the row if it does not exist yet. It is the resolver the
+// tracked-set reconcile in team_github_repos.go uses: a save holding a slug
+// needs the id the tracking row's FK points at, and the store contract keeps
+// the surrogate out of domain.Repository. It takes a queryer so it composes
+// inside the reconcile's transaction.
+//
+// An existing row is left exactly as it stands — same id, same profile text,
+// same base branch, same clone and poll state. The lookup before the insert is
+// not what prevents a duplicate (the identity index is); it is what returns
+// the existing row without writing to it. The re-read after the insert is what
+// returns the winner's row when a concurrent creator got there first, since
+// the INSERT is a DO NOTHING and reports nothing when it loses.
 func getOrCreateRepositoryID(ctx context.Context, q queryer, ref domain.RepoRef) (string, error) {
-	if _, err := getOrCreateRepository(ctx, q, ref); err != nil {
-		return "", err
-	}
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {
 		return "", err
 	}
 	id, err := findRepositoryID(ctx, q, source, ref.Owner, ref.Repo)
+	if err != nil {
+		return "", err
+	}
+	if id != "" {
+		return id, nil
+	}
+	if err := insertRepositoryRow(ctx, q, ref); err != nil {
+		return "", err
+	}
+	id, err = findRepositoryID(ctx, q, source, ref.Owner, ref.Repo)
 	if err != nil {
 		return "", err
 	}
@@ -201,9 +161,11 @@ func findRepositoryByRef(ctx context.Context, q queryer, source string, ref doma
 }
 
 // insertRepositoryRow is the single INSERT that brings a repository into
-// repositories — get-or-create, SetConfigured, and the tracked-set reconcile
-// all create through it, so no create path can write a row without the
-// identity columns, and all three agree on what "already exists" means.
+// repositories. Tracking is the only path that creates one, and it creates
+// through here, so a row cannot exist without the identity columns the create
+// sets. Tracking learns no provider id, so none is written: the poller and
+// the profiler record external_id once they have read it off a provider
+// payload.
 //
 // "Already exists" means the repositories_identity index: (org_id, source)
 // plus the case-FOLDED slug, because GitHub identifiers are case-insensitive
@@ -223,10 +185,10 @@ func insertRepositoryRow(ctx context.Context, q queryer, ref domain.RepoRef) err
 		return err
 	}
 	if _, err := q.ExecContext(ctx, `
-		INSERT INTO repositories (id, owner, repo, source, external_id, updated_at)
-		VALUES (?, ?, ?, ?, ?, datetime('now'))
+		INSERT INTO repositories (id, owner, repo, source, updated_at)
+		VALUES (?, ?, ?, ?, datetime('now'))
 		ON CONFLICT DO NOTHING
-	`, uuid.New().String(), ref.Owner, ref.Repo, source, nullIfEmpty(ref.ExternalID)); err != nil {
+	`, uuid.New().String(), ref.Owner, ref.Repo, source); err != nil {
 		return fmt.Errorf("insert repositories[%s]: %w", ref.Slug(), err)
 	}
 	return nil
@@ -275,78 +237,6 @@ func (s *repoStore) List(ctx context.Context, orgID string, opts db.ListOpts) ([
 // FactoryReadStore.Entities local-mode asymmetry, TFAC-559).
 func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Repository, int, error) {
 	return s.List(ctx, orgID, opts)
-}
-
-func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames []string) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
-	}
-	return inTx(ctx, s.q, func(tx queryer) error {
-		// Build the desired set case-folded, and compare folded — the same
-		// rule the tracked-set reconcile uses, and for the same reason.
-		// A case-SENSITIVE compare turns a resubmission under different
-		// casing ("Owner/Repo" then "owner/repo") into a delete of a
-		// repository that is still selected, followed by a create of a bare
-		// row: the profile text, doc flags, clone URL and status, base branch
-		// and poll ETag all go, silently, because a person capitalized it
-		// differently. GitHub identifiers are case-insensitive, so the two
-		// spellings were never two repositories.
-		desired := make(map[string]bool, len(repoNames))
-		for _, name := range repoNames {
-			desired[strings.ToLower(name)] = true
-		}
-
-		// Delete repos no longer selected.
-		existing, err := listRepoRowsInTx(ctx, tx)
-		if err != nil {
-			return err
-		}
-		for _, row := range existing {
-			if !desired[strings.ToLower(row.slug)] {
-				if _, err := tx.ExecContext(ctx, `DELETE FROM repositories WHERE id = ?`, row.id); err != nil {
-					return err
-				}
-			}
-		}
-
-		// Create skeleton rows for new repos through the shared insert, so
-		// they carry the same identity columns the tracked-set reconcile
-		// writes. A repo already present is left exactly as it stands — the
-		// insert conflicts on the folded identity index and does nothing, so
-		// a resubmission under different casing keeps the stored casing and
-		// every cached column with it.
-		for _, name := range repoNames {
-			owner, repo := splitRepoSlug(name)
-			if owner == "" || repo == "" {
-				continue
-			}
-			if err := insertRepositoryRow(ctx, tx, domain.RepoRef{Owner: owner, Repo: repo}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-func (s *repoStore) ListConfiguredNames(ctx context.Context, orgID string) ([]string, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	rows, err := s.q.QueryContext(ctx, `SELECT owner || '/' || repo FROM repositories ORDER BY owner, repo`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := []string{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		out = append(out, name)
-	}
-	return out, rows.Err()
 }
 
 func (s *repoStore) CountConfigured(ctx context.Context, orgID string) (int, error) {
@@ -488,14 +378,6 @@ func (s *repoStore) UpdateCloneStatusByRefSystem(ctx context.Context, orgID stri
 	return s.UpdateCloneStatusByRef(ctx, orgID, ref, status, errMsg, errKind)
 }
 
-func (s *repoStore) CountConfiguredSystem(ctx context.Context, orgID string) (int, error) {
-	return s.CountConfigured(ctx, orgID)
-}
-
-func (s *repoStore) GetSystem(ctx context.Context, orgID, id string) (*domain.Repository, error) {
-	return s.Get(ctx, orgID, id)
-}
-
 func (s *repoStore) GetByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error) {
 	return s.GetByRef(ctx, orgID, ref)
 }
@@ -625,36 +507,12 @@ func scanRepositoryFull(row rowScanner) (domain.Repository, error) {
 	return p, nil
 }
 
-// repoRow pairs a registry row's surrogate id with its slug: the slug is what
-// a caller's desired set is expressed in, the id is what a DELETE keys on.
-type repoRow struct{ id, slug string }
-
-// listRepoRowsInTx is the SetConfigured helper that lists every registry row
-// inside the tx so we know which to delete.
-func listRepoRowsInTx(ctx context.Context, tx queryer) ([]repoRow, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id, owner || '/' || repo FROM repositories`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []repoRow
-	for rows.Next() {
-		var r repoRow
-		if err := rows.Scan(&r.id, &r.slug); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-// splitRepoSlug splits "owner/repo" at the first slash. Returns
-// empty owner+repo if the input has no slash (malformed entry from
-// the configured-repos PUT body — silently skipped at use site).
-// Local to this file rather than shared because the Postgres impl
-// needs its own copy in a different package; the helper is too
-// small to be worth exporting.
+// splitRepoSlug splits "owner/repo" at the first slash. Returns an empty
+// repo half if the input has no slash; the callers — the worktree ledger's
+// slug resolution and the rename rewrite — treat that as a name nothing
+// answers to. Local to this file rather than shared because the Postgres
+// impl needs its own copy in a different package; the helper is too small
+// to be worth exporting.
 func splitRepoSlug(s string) (owner, repo string) {
 	for i := 0; i < len(s); i++ {
 		if s[i] == '/' {

@@ -272,7 +272,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// stays pinned to s.admin so RecordSystem inside WithTx routes outside the
 		// tx — same autonomous-commit shape ExternalActions uses. See TFAC-471 /
 		// TFAC-486.
-		AccessChangeLog: newAccessChangeLogStore(tx, s.admin),
+		AccessChangeLog: newAccessChangeLogStore(tx),
 		// ExternalActions: app-side Record routes through the tx so the audit row
 		// commits or rolls back atomically with the action it records (the server
 		// approval flips, manual bot runs); admin half stays pinned to s.admin so

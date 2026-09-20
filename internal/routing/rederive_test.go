@@ -206,8 +206,8 @@ func TestReDeriveAfterScoring_BotClaimed_Skips(t *testing.T) {
 		t.Fatalf("seed agent: %v", err)
 	}
 	// Stamp the bot claim, which is also what puts the task in progress.
-	if _, err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
-		t.Fatalf("stamp agent claim: %v", err)
+	if ok, err := testTaskStore(database).StampAgentClaimIfUnclaimed(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultTeamID); err != nil || !ok {
+		t.Fatalf("stamp agent claim: ok=%v err=%v", ok, err)
 	}
 
 	ws := websocket.NewHub()

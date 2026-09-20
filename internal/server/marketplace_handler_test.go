@@ -589,8 +589,9 @@ func TestMarketplaceDelistRelist_RoundTrip(t *testing.T) {
 
 // TestMarketplacePublish_DuplicateDelistedSourceIs409: publishing a source
 // whose prior listing was delisted must not mint a second listing for the
-// same source_id (GetActiveBySource's published-only filter would miss
-// this — see GetBySource) — it 409s and steers the caller to relist.
+// same source_id (a published-only lookup would miss it, which is why the
+// handler reads the source status-blind via GetBySource) — it 409s and
+// steers the caller to relist.
 func TestMarketplacePublish_DuplicateDelistedSourceIs409(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "dup-delisted", "mission", "", "")

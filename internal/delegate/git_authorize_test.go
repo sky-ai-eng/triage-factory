@@ -47,11 +47,23 @@ func TestGitAuthorizeDecision(t *testing.T) {
 
 	// Track two repos for the team; materialize two — one overlapping (tracked
 	// AND materialized), one only-materialized (not tracked).
+	//
+	// acme/materialized-only is tracked first and then dropped: the
+	// durable-registry state a repository lands in once its last team
+	// untracks it. The worktree ledger references the registry row, so the
+	// row has to exist; the point of the case is that tracking does not.
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+		{Owner: "acme", Repo: "api"},
+		{Owner: "acme", Repo: "tracked-only"},
+		{Owner: "acme", Repo: "materialized-only"},
+	}); err != nil {
+		t.Fatalf("track repos: %v", err)
+	}
 	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "api"},
 		{Owner: "acme", Repo: "tracked-only"},
 	}); err != nil {
-		t.Fatalf("track repos: %v", err)
+		t.Fatalf("untrack acme/materialized-only: %v", err)
 	}
 	// A profile for acme/api so the protected-branch filter has a default to
 	// compare against (it must not reject the agent's own feature branch).
@@ -59,14 +71,6 @@ func TestGitAuthorizeDecision(t *testing.T) {
 		Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
-	}
-	// acme/materialized-only has a registry row but no team tracks it — the
-	// durable-registry state a repository lands in once its last team untracks
-	// it. The worktree ledger references the registry row, so the row has to
-	// exist; the point of the case is that tracking does not.
-	if _, err := stores.Repos.GetOrCreateSystem(ctx, runmode.LocalDefaultOrgID,
-		domain.RepoRef{Owner: "acme", Repo: "materialized-only"}); err != nil {
-		t.Fatalf("seed untracked repository: %v", err)
 	}
 	// Ref on the rows is informational only — the gate reads the live branch,
 	// stubbed below by worktree path.

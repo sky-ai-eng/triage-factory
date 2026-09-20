@@ -240,14 +240,6 @@ type ConversationQueueStore interface {
 	// own conversation's history, not an operator surface.
 	ClaimExecutorSystem(ctx context.Context, orgID, claimID string) (executorID string, ok bool, err error)
 
-	// RequeueAwaitingCredentials releases a conversation whose active claim is parked
-	// in phase='awaiting_credentials', clearing ownership — the executor-side
-	// timeout path. The release is the requeue. Guarded on that parked claim
-	// so a stale/duplicate timeout can't act on a row that already moved on.
-	// Returns matched=false when the guard didn't hold (bundle arrived just
-	// after the deadline check, or the conversation was reaped in the meantime).
-	RequeueAwaitingCredentials(ctx context.Context, orgID, conversationID string) (matched bool, err error)
-
 	// ListAwaitingCredentials returns every conversation — of EVERY surface
 	// — whose active claim is currently parked in
 	// phase='awaiting_credentials'. One scan serves the whole provisioner:

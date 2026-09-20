@@ -62,38 +62,6 @@ func listTeamGitHubRepos(ctx context.Context, q queryer, teamID string) ([]domai
 	return out, rows.Err()
 }
 
-func (s *teamGitHubReposStore) ListForOrgSystem(ctx context.Context, orgID string) ([]domain.TeamGitHubRepo, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	return listTeamGitHubReposUnion(ctx, s.q)
-}
-
-// listTeamGitHubReposUnion returns the DISTINCT (owner, repo) across
-// every team's rows — the org-wide union. SQLite is single-org so no
-// org filter is needed; the union spans all team_github_repos rows.
-func listTeamGitHubReposUnion(ctx context.Context, q queryer) ([]domain.TeamGitHubRepo, error) {
-	rows, err := q.QueryContext(ctx, `
-		SELECT DISTINCT r.owner, r.repo
-		FROM team_github_repos g
-		JOIN repositories r ON r.id = g.repository_id
-		ORDER BY r.owner ASC, r.repo ASC
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("read team_github_repos union: %w", err)
-	}
-	defer rows.Close()
-	out := []domain.TeamGitHubRepo{}
-	for rows.Next() {
-		var r domain.TeamGitHubRepo
-		if err := rows.Scan(&r.Owner, &r.Repo); err != nil {
-			return nil, fmt.Errorf("scan team_github_repos union: %w", err)
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
 func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, orgID string) ([]domain.TrackedRepoTeams, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

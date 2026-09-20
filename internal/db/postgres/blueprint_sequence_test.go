@@ -170,8 +170,8 @@ func pgSequenceScaffold(t *testing.T, h *pgtest.Harness) (db.BlueprintStore, dbt
 		},
 		ClaimTaskForUser: func(t *testing.T, taskID string) {
 			t.Helper()
-			if _, err := stores.Tasks.SetClaimedByUser(ctx, orgID, taskID, userID); err != nil {
-				t.Fatalf("SetClaimedByUser: %v", err)
+			if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+				t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 			}
 		},
 		RunCount: func(t *testing.T, taskID string) int {

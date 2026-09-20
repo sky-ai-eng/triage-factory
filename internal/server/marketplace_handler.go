@@ -217,11 +217,11 @@ func (mh *marketplaceHandler) handleMarketplacePublish(w http.ResponseWriter, r 
 	}
 
 	// Resolve the source object + its owning team, and check for an existing
-	// listing for this source — published OR delisted (GetBySource, not
-	// GetActiveBySource: a delisted listing must route the caller to relist,
-	// not let them mint a second listing for the same source_id — the
-	// published-only partial unique index wouldn't catch that at the DB
-	// layer) — all under one read tx.
+	// listing for this source — published OR delisted, which is why the read
+	// is the status-blind GetBySource: a delisted listing must route the
+	// caller to relist, not let them mint a second listing for the same
+	// source_id, and the published-only partial unique index wouldn't catch
+	// that at the DB layer — all under one read tx.
 	var (
 		snap            domain.ListingSnapshot
 		teamID          string
@@ -502,8 +502,8 @@ func (mh *marketplaceHandler) handleMarketplaceListingRelist(w http.ResponseWrit
 // handleMarketplaceListingBySource resolves the org's listing for a
 // team-side source object — published OR delisted — or null when none. The
 // badge/publish-affordance lookup the editor drives from a blueprint or
-// prompt's id: GetBySource (not GetActiveBySource) so a delisted object
-// still reports its listing and the editor can offer Relist instead of
+// prompt's id: the status-blind GetBySource, so a delisted object still
+// reports its listing and the editor can offer Relist instead of
 // reverting to "never published" (which would let a client mint a
 // duplicate listing for the same source on the next publish). Returns the
 // full ListingSummary, not just the header — the editor's republish dialog

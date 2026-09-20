@@ -22,9 +22,9 @@ import (
 // provisioning time); a future SCIM grant grafts here too. Each runs on the admin
 // pool's raw *sql.Tx, so it can't route through the app-pool store — this is how
 // the audit row commits or rolls back together with the grant, and it's why these
-// callers use this rather than the store's RecordSystem (which can't compose into
-// a caller-supplied tx). Every other write-point uses the tx-bound
-// db.AccessChangeLogStore inside its WithTx. The admin pool is BYPASSRLS, so
+// db.AccessChangeLogStore, which has no admin-pool arm, cannot serve them.
+// Every other write-point uses the tx-bound store inside its WithTx. The admin
+// pool is BYPASSRLS, so
 // org_id is set explicitly (defense in depth); id + created_at fall to their
 // column DEFAULTs. Postgres-only (these surfaces are multi-mode); mirrors
 // grantOrgMembership's raw style. Empty actor/target/team/detail values serialize

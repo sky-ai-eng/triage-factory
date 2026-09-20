@@ -26,11 +26,21 @@ func anyRepository() domain.Repository {
 // TestRepositoryStore_SQLite runs the shared conformance suite against the
 // SQLite RepositoryStore impl. Each subtest gets a fresh in-memory DB.
 func TestRepositoryStore_SQLite(t *testing.T) {
-	dbtest.RunRepositoryStoreConformance(t, func(t *testing.T) (db.RepositoryStore, string) {
+	dbtest.RunRepositoryStoreConformance(t, func(t *testing.T) (db.RepositoryStore, string, dbtest.RepositorySeeder) {
 		t.Helper()
 		conn := newSQLiteForRepoTest(t)
 		stores := sqlitestore.New(conn)
-		return stores.Repos, runmode.LocalDefaultOrgID
+		seed := dbtest.RepositorySeeder{
+			Tracking: stores.TeamGitHubRepos,
+			TeamID:   runmode.LocalDefaultTeamID,
+			Team: func(t *testing.T, slug string) string {
+				t.Helper()
+				id := uuid.New().String()
+				seedExtraTeam(t, conn, id, slug)
+				return id
+			},
+		}
+		return stores.Repos, runmode.LocalDefaultOrgID, seed
 	})
 }
 
@@ -61,8 +71,11 @@ func TestRepositoryStore_SQLite_ListTeamScoped_MirrorsList(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
 
-	if err := stores.Repos.SetConfigured(ctx, runmode.LocalDefaultOrgID, []string{"a/one", "b/two"}); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+		{Owner: "a", Repo: "one"},
+		{Owner: "b", Repo: "two"},
+	}); err != nil {
+		t.Fatalf("track repos: %v", err)
 	}
 
 	all, _, err := stores.Repos.List(ctx, runmode.LocalDefaultOrgID, db.ListOpts{Limit: 50})

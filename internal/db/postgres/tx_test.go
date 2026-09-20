@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -161,12 +162,14 @@ func TestSyntheticClaimsWithTx_Postgres_RollsBackOnError(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID := seedSyntheticClaimsOrg(t, h, "sc-rollback")
+	teamID := firstTeamForOrg(t, h, orgID)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	sentinel := errors.New("forced rollback")
 
 	err := stores.Tx.SyntheticClaimsWithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.Repos.SetConfigured(context.Background(), orgID, []string{"rolled/back"}); err != nil {
+		if err := tx.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, teamID,
+			[]domain.TeamGitHubRepo{{Owner: "rolled", Repo: "back"}}); err != nil {
 			return err
 		}
 		return sentinel
@@ -183,10 +186,11 @@ func TestSyntheticClaimsWithTx_Postgres_RollsBackOnError(t *testing.T) {
 	}
 }
 
-// registryNames reads back what SetConfigured wrote. It lists the registry
-// rather than the tracked set on purpose: SetConfigured writes repositories
-// and touches no team's tracking, so a tracked read would answer a different
-// question than the one these tests ask.
+// registryNames reads back the registry rows a tracking save minted. It lists
+// the registry rather than the tracked set on purpose: the row these tests
+// watch is the repositories row the save creates in the same transaction as
+// the team's tracking row, and a tracked read would answer for the tracking
+// row instead.
 func registryNames(t *testing.T, stores db.Stores, orgID string) []string {
 	t.Helper()
 	repos, err := stores.Repos.ListSystem(context.Background(), orgID)
@@ -214,6 +218,7 @@ func TestWithTx_Postgres_SurvivesCancelledOriginCtx(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID := seedSyntheticClaimsOrg(t, h, "withtx-detached")
+	teamID := firstTeamForOrg(t, h, orgID)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
@@ -236,8 +241,9 @@ func TestWithTx_Postgres_SurvivesCancelledOriginCtx(t *testing.T) {
 	// Inside WithTx, write a row + read it back. Both must succeed
 	// despite the parent ctx being done.
 	if err := stores.Tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-		if err := tx.Repos.SetConfigured(cleanupCtx, orgID, []string{"survives/cancel"}); err != nil {
-			return fmt.Errorf("SetConfigured under detached ctx: %w", err)
+		if err := tx.TeamGitHubRepos.ReplaceForTeam(cleanupCtx, orgID, teamID,
+			[]domain.TeamGitHubRepo{{Owner: "survives", Repo: "cancel"}}); err != nil {
+			return fmt.Errorf("ReplaceForTeam under detached ctx: %w", err)
 		}
 		return nil
 	}); err != nil {
@@ -261,13 +267,15 @@ func TestWithTx_Postgres_CanceledCtxSurfacesAsCanceled(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID := seedSyntheticClaimsOrg(t, h, "withtx-canceled")
+	teamID := firstTeamForOrg(t, h, orgID)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		if err := tx.Repos.SetConfigured(ctx, orgID, []string{"gone/client"}); err != nil {
+		if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID,
+			[]domain.TeamGitHubRepo{{Owner: "gone", Repo: "client"}}); err != nil {
 			return err
 		}
 		cancel()

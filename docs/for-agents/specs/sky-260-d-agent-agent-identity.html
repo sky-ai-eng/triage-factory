@@ -658,16 +658,13 @@ SELECT 'down not supported';</span>
   // bootstrap is safe to re-run on partial-success recovery).</span>
   Create(ctx context.Context, orgID <span class="kw">string</span>, a domain.Agent) (<span class="kw">string</span>, error)
 
-  <span class="com">// Update changes display_name, default_model, default_autonomy_suitability,
-  // credential FKs. Admin-only in Postgres (RLS enforces). No-ops on invalid UUID.</span>
-  Update(ctx context.Context, orgID <span class="kw">string</span>, a domain.Agent) error
-
   <span class="com">// SetGitHubAppInstallation is the D11 entry point. Kept narrow so the
   // App install flow doesn't accidentally touch unrelated fields.</span>
   SetGitHubAppInstallation(ctx context.Context, orgID, agentID, installationID <span class="kw">string</span>) error
 
-  <span class="com">// SetGitHubPATUser is the fallback / local entry point.</span>
-  SetGitHubPATUser(ctx context.Context, orgID, agentID, userID <span class="kw">string</span>) error
+  <span class="com">// The PAT-borrow user FK (github_pat_user_id) is stamped by Create alone:
+  // local mode fills it with the sentinel user at bootstrap. No standalone
+  // setter ships — nothing rebinds it after the row exists.</span>
 }
 </pre>
 
@@ -682,22 +679,12 @@ SELECT 'down not supported';</span>
   // bootstrap function (BootstrapTeamAgent). Idempotent on (team_id, agent_id).</span>
   AddForTeam(ctx context.Context, orgID, teamID, agentID <span class="kw">string</span>) error
 
-  <span class="com">// SetEnabled toggles the bot on or off for a single team. Team-member-
-  // writable (not admin-only) per the locked decision in the arch doc.</span>
-  SetEnabled(ctx context.Context, orgID, teamID, agentID <span class="kw">string</span>, enabled <span class="kw">bool</span>) error
-
-  <span class="com">// SetOverrides writes per-team model + autonomy overrides; NULL strings
-  // / nil pointers clear the override and fall back to agent defaults.</span>
-  SetOverrides(ctx context.Context, orgID, teamID, agentID <span class="kw">string</span>, model *<span class="kw">string</span>, autonomy *<span class="kw">float64</span>) error
-
-  <span class="com">// Remove deletes the membership entirely. Rare — only used if an
-  // admin wants to fully unhook the bot from a team rather than disable.</span>
-  Remove(ctx context.Context, orgID, teamID, agentID <span class="kw">string</span>) error
-
-  <span class="com">// ListForOrg returns every (team, enabled) pair for the org's agent —
-  // used by D-Claims' router to decide which firing-team triggers auto-
-  // claim and the admin UI's "per-team config" table.</span>
-  ListForOrg(ctx context.Context, orgID <span class="kw">string</span>) ([]domain.TeamAgent, error)
+  <span class="com">// The per-team toggle and overrides are READ on every trigger fire and
+  // delegate gesture but have no writer beyond bootstrap: no store method
+  // flips enabled, writes an override, removes a membership, or lists the
+  // org's rows. The team_agents_update / _delete RLS policies already admit
+  // a team member for the day a door writes them (the locked
+  // team-member-power decision).</span>
 }
 </pre>
 
@@ -733,8 +720,8 @@ SELECT 'down not supported';</span>
 
   <p>Required assertions, in order of importance:</p>
   <ul class="tight">
-    <li><strong>AgentStore</strong>: Create_FirstCallInserts, Create_DuplicateReturnsExisting (idempotent on org_id), GetForOrg_ReturnsNilWhenAbsent, GetForOrg_ReturnsExisting, Update_AppliesFields, Update_OnInvalidUUID_IsNoop (Postgres only — SQLite TEXT keys can't be invalid), SetGitHubAppInstallation_Writes, SetGitHubPATUser_Writes.</li>
-    <li><strong>TeamAgentStore</strong>: AddForTeam_FirstCallInserts, AddForTeam_DuplicateIsIdempotent, GetForTeam_ReturnsNilWhenAbsent, SetEnabled_TogglesBothDirections, SetOverrides_NilClears, SetOverrides_ValuesPersist, Remove_DeletesRow, ListForOrg_ReturnsAllTeams.</li>
+    <li><strong>AgentStore</strong>: Create_FirstCallInserts, Create_DuplicateReturnsExisting (idempotent on org_id), GetForOrg_ReturnsNilWhenAbsent, GetForOrg_ReturnsExisting, SetGitHubAppInstallation_Writes.</li>
+    <li><strong>TeamAgentStore</strong>: AddForTeam_FirstCallInserts, AddForTeam_DuplicateIsIdempotent (a disabled row — written directly by the fixture, since no door produces it — stays disabled), GetForTeam_ReturnsNilWhenAbsent.</li>
     <li><strong>RLS-specific</strong> (Postgres conformance harness only, runs via app-pool conn): NonAdmin_CannotUpdateAgents, NonTeamMember_CannotSelectTeamAgents, TeamMember_CanToggleOwnTeam, TeamMember_CannotToggleOtherTeam.</li>
   </ul>
 
@@ -870,7 +857,7 @@ SELECT 'down not supported';</span>
   <p>Both bootstrap functions (BootstrapAgentForOrg, BootstrapTeamAgent) run on the admin pool because at signup time the founder's <code>org_memberships</code> + <code>memberships</code> rows are being inserted in the same transaction as the agents row. By the time the test asserting RLS runs, the rows exist and gating works correctly.</p>
 
   <div class="callout callout--warn">
-    <strong>Edge case:</strong> if a non-admin team member calls <code>SetEnabled(enabled=false)</code> on every team in the org, they've effectively disabled the bot org-wide without admin approval. Not a bug — that's the team-member-power decision; if the org wants to prevent it, the workaround is "the user isn't on every team" which is enforced by membership. The arch doc accepts this trade.
+    <strong>Edge case:</strong> if a non-admin team member turns the bot off on every team in the org (the <code>team_agents_update</code> policy admits it, though no door writes the column yet), they've effectively disabled the bot org-wide without admin approval. Not a bug — that's the team-member-power decision; if the org wants to prevent it, the workaround is "the user isn't on every team" which is enforced by membership. The arch doc accepts this trade.
   </div>
 </section>
 
@@ -921,7 +908,7 @@ SELECT 'down not supported';</span>
     </li>
     <li>
       <span class="step-title">Postgres impls</span>
-      <span class="step-body"><code>internal/db/postgres/agents.go</code>, <code>internal/db/postgres/team_agents.go</code>. Admin/app pool split: Create + AddForTeam route to the admin pool (bootstrap-only callers, no JWT claims). Update + SetGitHubApp* + SetGitHubPATUser + SetEnabled + SetOverrides + Remove route to the app pool; RLS enforces admin (agents) or team-membership (team_agents). Read methods route to app pool. UUID validation up front on all string-keyed lookups (returns nil/no-op on invalid; same pattern as TaskRuleStore / TriggerStore after the SKY-260-precedent fixup).</span>
+      <span class="step-body"><code>internal/db/postgres/agents.go</code>, <code>internal/db/postgres/team_agents.go</code>. Admin/app pool split: Create + AddForTeam route to the admin pool (bootstrap-only callers, no JWT claims). SetGitHubApp* and the agents identity write route to the app pool; RLS enforces admin (agents) or team-membership (team_agents). Read methods route to app pool. UUID validation up front on all string-keyed lookups (returns nil/no-op on invalid; same pattern as TaskRuleStore / TriggerStore after the SKY-260-precedent fixup).</span>
     </li>
     <li>
       <span class="step-title">Wire into <code>db.Stores</code></span>
@@ -960,7 +947,7 @@ SELECT 'down not supported';</span>
     <thead><tr><th style="width: 30%;">Question</th><th style="width: 32%;">Default if no answer</th><th>Why it matters</th></tr></thead>
     <tbody>
       <tr>
-        <td>Should <code>SetGitHubAppInstallation</code> + <code>SetGitHubPATUser</code> be separate methods, or a single <code>SetCredentialSource</code> with a discriminator?</td>
+        <td>Should <code>SetGitHubAppInstallation</code> + a PAT-user setter be separate methods, or a single <code>SetCredentialSource</code> with a discriminator?</td>
         <td>Separate methods. The discriminator type is small (App vs PAT) and the call sites are distinct (D11 vs the local-install code). Two narrow methods read cleaner at the call site than one method + a switch.</td>
         <td>Both methods enforce the "exactly one populated" invariant by clearing the other field as a side effect. A single combined method would have to take both arguments (one nil) which is more error-prone.</td>
       </tr>
@@ -1040,10 +1027,9 @@ SELECT 'down not supported';</span>
     <li><span class="tag tag--green">PASS</span> Restarting the local binary leaves the same row count (idempotent bootstrap).</li>
     <li><span class="tag tag--green">PASS</span> Postgres <code>BootstrapAgentForOrg(ctx, orgUUID)</code> with a real orgs row + an org_memberships row inserts exactly one agents row; second call returns the existing id without error.</li>
     <li><span class="tag tag--green">PASS</span> Postgres <code>BootstrapTeamAgent(ctx, orgUUID, teamUUID)</code> inserts exactly one team_agents row with enabled=TRUE.</li>
-    <li><span class="tag tag--green">PASS</span> Org admin can <code>Update</code> the agents row via app pool; non-admin org member cannot (RLS refuses).</li>
-    <li><span class="tag tag--green">PASS</span> Team member can <code>SetEnabled</code> on their team's team_agents row via app pool; non-team-member cannot.</li>
+    <li><span class="tag tag--green">PASS</span> Org admin can update the agents row via app pool; non-admin org member cannot (RLS refuses).</li>
+    <li><span class="tag tag--green">PASS</span> Team member can flip their team's team_agents.enabled via app pool; non-team-member cannot.</li>
     <li><span class="tag tag--green">PASS</span> <code>AgentStore.GetForOrg</code> returns the row's credential FKs unchanged across both backends.</li>
-    <li><span class="tag tag--green">PASS</span> <code>TeamAgentStore.SetOverrides(nil, nil)</code> clears both override columns.</li>
     <li><span class="tag tag--cyan">TEST</span> SQLite conformance + Postgres conformance both pass; pgtest skips cleanly without Docker.</li>
     <li><span class="tag tag--cyan">TEST</span> <code>internal/db/bootstrap_test.go</code> covers the three bootstrap paths (local, org, team) + the "team before org" error case.</li>
     <li><span class="tag">CODE</span> No new free-functions added to <code>internal/db/</code> — all agent/team_agent operations go through the stores.</li>

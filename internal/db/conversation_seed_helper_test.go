@@ -59,10 +59,8 @@ func mintBlueprintRunForTest(t *testing.T, database *sql.DB, taskID string) stri
 // impl (which lives in internal/db/sqlite and would form a circular import if
 // pulled into package db).
 //
-// Mirrors the post-D2 raw-SQL test seeders (seedTaskForTest in
-// task_seed_helper_test.go). Each consumer here is testing a
-// different table — the conversations are just fixtures, not the system under
-// test — so this minimal insert is enough.
+// Each consumer here is testing a different table — the conversations are
+// just fixtures, not the system under test — so this minimal insert is enough.
 //
 // promptID may be empty; the raw SQL inserts NULL, which the
 // pre-D2 CreateConversation also tolerated via nullIfEmpty. Tests

@@ -366,15 +366,15 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("List_claimee_sort_puts_unclaimed_last_in_both_directions", func(t *testing.T) {
-		s, orgID, _, agentID, userID, seed, _ := mk(t)
+		s, orgID, teamID, agentID, userID, seed, _ := mk(t)
 		_, _, byAgent := seed(t, "claimee-agent")
 		_, _, byUser := seed(t, "claimee-user")
 		_, _, unclaimed := seed(t, "claimee-none")
-		if _, err := s.SetClaimedByAgent(ctx, orgID, byAgent, agentID); err != nil {
-			t.Fatalf("SetClaimedByAgent: %v", err)
+		if ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, byAgent, agentID, teamID); err != nil || !ok {
+			t.Fatalf("StampAgentClaimIfUnclaimed: ok=%v err=%v", ok, err)
 		}
-		if _, err := s.SetClaimedByUser(ctx, orgID, byUser, userID); err != nil {
-			t.Fatalf("SetClaimedByUser: %v", err)
+		if ok, err := s.ClaimQueuedForUser(ctx, orgID, byUser, userID); err != nil || !ok {
+			t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 		}
 
 		// The claim axis, across both lanes it now spans: claiming a task
@@ -812,8 +812,8 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		// A user owns the task: the stamp must refuse rather than steal, and
 		// the fold must still be recorded — the injection already happened.
-		if _, err := s.SetClaimedByUser(ctx, orgID, taskID, userID); err != nil {
-			t.Fatalf("SetClaimedByUser: %v", err)
+		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+			t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 		}
 		claimed, err := s.MarkEventInjectedSystem(ctx, orgID, taskID, eventID, db.AgentClaimStamp{AgentID: agentID})
 		if err != nil {
@@ -1123,12 +1123,16 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if err != nil {
 			t.Fatalf("FindOrCreate(empty team): %v", err)
 		}
-		// SetClaimedByUser is the no-guard primitive: it sets the claim
-		// without consolidating an owner, so the claimed-⇒-owned CHECK must
-		// reject claiming a NULL-team task. (Production claims go through
-		// ClaimQueuedForUser, which sets the owning team atomically.)
-		if _, err := s.SetClaimedByUser(ctx, orgID, task.ID, userID); err == nil {
-			t.Error("expected the claimed-requires-team CHECK to reject claiming an unowned task, got nil error")
+		// ClaimQueuedForUser consolidates the owner from the claimer's team in
+		// the task's visibility set, and this task has none: the derivation
+		// keeps the NULL owner, and it is the claimed-⇒-owned CHECK, not the
+		// door, that refuses to land a claim on an unowned row.
+		_, err = s.ClaimQueuedForUser(ctx, orgID, task.ID, userID)
+		if err == nil {
+			t.Fatal("expected the claimed-requires-team CHECK to reject claiming an unowned task, got nil error")
+		}
+		if !strings.Contains(err.Error(), "tasks_claimed_requires_team") {
+			t.Errorf("claim on an unowned task failed with %v, want the tasks_claimed_requires_team CHECK", err)
 		}
 	})
 
@@ -1161,21 +1165,9 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 				t.Errorf("status = %q after a refused write, want in_progress", got.Status)
 			}
 		}
-
-		// The converse is not enforced, and the primitive's clearing arm is
-		// where that shows: an empty id names nobody, so it takes the claim
-		// off and leaves the stage where it was. Only requeue returns a task
-		// to the queue, and it writes the status itself.
-		cleared, err := s.SetClaimedByUser(ctx, orgID, byUser, "")
-		if err != nil {
-			t.Fatalf("SetClaimedByUser(clear): %v", err)
-		}
-		if cleared.ClaimedByUserID != "" {
-			t.Errorf("claim = %q after clearing, want empty", cleared.ClaimedByUserID)
-		}
-		if cleared.Status != "in_progress" {
-			t.Errorf("status = %q after clearing a claim, want in_progress untouched", cleared.Status)
-		}
+		// The converse — a row in progress that nobody holds — is not a shape
+		// the schema refuses: only requeue returns a task to the queue, and
+		// it writes the status itself alongside the cleared claim.
 	})
 
 	t.Run("OwnerTeamForLatestTaskInTypes_latest_owned_excludes_null_and_out_of_set", func(t *testing.T) {
@@ -1250,14 +1242,13 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 
 	t.Run("lifecycle_writes_return_the_stored_row", func(t *testing.T) {
 		// The returned-row standard on TaskStore's converted writes:
-		// Bump[System], Close[System], SetStatus[System], SetClaimedByAgent
-		// and SetClaimedByUser. Each returns tasks' OWN columns, not the
-		// entity join Get reads alongside them — see the shape note on
-		// db.TaskStore. bareRead mirrors that: a Get with the join-populated
-		// display fields blanked, the same trick TeamsStore.Role's
-		// conformance test uses for a per-user column no write can see
-		// (settings_conformance.go).
-		s, orgID, _, agentID, userID, seed, _ := mk(t)
+		// Bump[System], Close[System] and SetStatus. Each returns tasks' OWN
+		// columns, not the entity join Get reads alongside them — see the
+		// shape note on db.TaskStore. bareRead mirrors that: a Get with the
+		// join-populated display fields blanked, the same trick
+		// TeamsStore.Role's conformance test uses for a per-user column no
+		// write can see (settings_conformance.go).
+		s, orgID, _, _, _, seed, _ := mk(t)
 		bareRead := func(taskID string) func() (*domain.Task, error) {
 			return func() (*domain.Task, error) {
 				full, err := s.Get(ctx, orgID, taskID)
@@ -1317,45 +1308,17 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			}
 		}
 
-		// SetStatus / SetStatusSystem.
-		for _, sys := range []bool{false, true} {
-			_, _, taskID := seed(t, fmt.Sprintf("rr-status-%v", sys))
-			what, got, err := "Tasks.SetStatus", domain.Task{}, error(nil)
-			if sys {
-				what = "Tasks.SetStatusSystem"
-				got, err = s.SetStatusSystem(ctx, orgID, taskID, "in_progress")
-			} else {
-				got, err = s.SetStatus(ctx, orgID, taskID, "in_progress")
-			}
+		// SetStatus.
+		{
+			_, _, taskID := seed(t, "rr-status")
+			got, err := s.SetStatus(ctx, orgID, taskID, "in_progress")
 			if err != nil {
-				t.Fatalf("%s: %v", what, err)
+				t.Fatalf("Tasks.SetStatus: %v", err)
 			}
-			AssertWriteReturnedStoredRow(t, what, got, bareRead(taskID))
+			AssertWriteReturnedStoredRow(t, "Tasks.SetStatus", got, bareRead(taskID))
 			if got.Status != "in_progress" {
-				t.Errorf("%s returned status=%q, want in_progress", what, got.Status)
+				t.Errorf("Tasks.SetStatus returned status=%q, want in_progress", got.Status)
 			}
-		}
-
-		// SetClaimedByAgent.
-		_, _, taskAgent := seed(t, "rr-claim-agent")
-		gotAgent, err := s.SetClaimedByAgent(ctx, orgID, taskAgent, agentID)
-		if err != nil {
-			t.Fatalf("Tasks.SetClaimedByAgent: %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "Tasks.SetClaimedByAgent", gotAgent, bareRead(taskAgent))
-		if gotAgent.ClaimedByAgentID != agentID {
-			t.Errorf("SetClaimedByAgent returned claimed_by_agent_id=%q, want %q", gotAgent.ClaimedByAgentID, agentID)
-		}
-
-		// SetClaimedByUser.
-		_, _, taskUser := seed(t, "rr-claim-user")
-		gotUser, err := s.SetClaimedByUser(ctx, orgID, taskUser, userID)
-		if err != nil {
-			t.Fatalf("Tasks.SetClaimedByUser: %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "Tasks.SetClaimedByUser", gotUser, bareRead(taskUser))
-		if gotUser.ClaimedByUserID != userID {
-			t.Errorf("SetClaimedByUser returned claimed_by_user_id=%q, want %q", gotUser.ClaimedByUserID, userID)
 		}
 
 		// Miss semantics: an id-keyed write against a task that never
@@ -1368,8 +1331,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			{"Tasks.Bump", func() error { _, e := s.Bump(ctx, orgID, missingID, "x"); return e }},
 			{"Tasks.Close", func() error { _, e := s.Close(ctx, orgID, missingID, "x", ""); return e }},
 			{"Tasks.SetStatus", func() error { _, e := s.SetStatus(ctx, orgID, missingID, "queued"); return e }},
-			{"Tasks.SetClaimedByAgent", func() error { _, e := s.SetClaimedByAgent(ctx, orgID, missingID, agentID); return e }},
-			{"Tasks.SetClaimedByUser", func() error { _, e := s.SetClaimedByUser(ctx, orgID, missingID, userID); return e }},
 		}
 		for _, m := range misses {
 			if err := m.call(); !errors.Is(err, db.ErrNoSuchTask) {
@@ -1601,7 +1562,7 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		// direction — the walk drops or repeats rows. Walking every sort, in
 		// both directions, across every lane is what pins the three of them
 		// together in both dialects.
-		s, orgID, _, agentID, userID, seed, _ := mk(t)
+		s, orgID, teamID, agentID, userID, seed, _ := mk(t)
 		var ids []string
 		for _, suffix := range []string{"walk-ccc", "walk-aaa", "walk-eee", "walk-bbb", "walk-ddd", "walk-fff"} {
 			_, _, id := seed(t, suffix)
@@ -1619,11 +1580,11 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		if _, err := s.SetStatus(ctx, orgID, ids[2], "snoozed"); err != nil {
 			t.Fatalf("SetStatus snoozed: %v", err)
 		}
-		if _, err := s.SetClaimedByAgent(ctx, orgID, ids[3], agentID); err != nil {
-			t.Fatalf("SetClaimedByAgent: %v", err)
+		if ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, ids[3], agentID, teamID); err != nil || !ok {
+			t.Fatalf("StampAgentClaimIfUnclaimed: ok=%v err=%v", ok, err)
 		}
-		if _, err := s.SetClaimedByUser(ctx, orgID, ids[4], userID); err != nil {
-			t.Fatalf("SetClaimedByUser: %v", err)
+		if ok, err := s.ClaimQueuedForUser(ctx, orgID, ids[4], userID); err != nil || !ok {
+			t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 		}
 
 		for _, key := range append([]string{""}, db.TaskListSortKeys...) {
