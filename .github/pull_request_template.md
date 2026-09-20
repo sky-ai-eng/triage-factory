@@ -6,23 +6,29 @@ TITLE (set the PR title, not here) — conventional-commit format:
                e.g. fix(board): guard against undefined run id in card seed
   Types: feat · fix · perf · refactor · ci · docs · chore · test
          feat, fix, and perf show up in release notes
+
+BODY — keep it short. A reviewer reads this to decide where to look in the
+diff, not to relearn the change from prose. Say what is wrong, what you did,
+and how you checked it, then stop. The diff already says how; don't restate
+it, and don't narrate the path that led here or the alternatives you passed
+over. If a section has nothing to add, one sentence is fine.
 -->
 
 ## Problem
 
 <!--
-Why this change exists, written for a reviewer who has NOT read the ticket.
-State the user- or system-visible symptom, the root cause, and — when it
-matters — the blast radius and the cost of not doing it now. If it's
-security-adjacent, say plainly whether it's an actual access hole or
-defense-in-depth / hygiene.
+Why this change exists, for a reviewer who has NOT read the ticket. A few
+sentences: the symptom, the root cause, and the blast radius only when it
+changes how carefully this should be reviewed. If it's security-adjacent, say
+plainly whether it's an actual access hole or defense-in-depth / hygiene.
 -->
 
 ## Change
 
 <!--
-What you actually did. Lead with the shape of the change, then the details as
-bullets. Use code fences for new payloads / API shapes / data structures.
+What you did. One sentence for the shape of the change, then a short bullet
+per decision a reviewer could disagree with. Skip anything the diff shows on
+its own. Use code fences for new payloads / API shapes / data structures.
 Call out anything deliberately left OUT of scope.
 -->
 
@@ -30,8 +36,8 @@ Call out anything deliberately left OUT of scope.
 <summary><strong>Scope / verification</strong></summary>
 
 <!--
-Required. The exact commands you ran and what passed, then what the new tests
-cover. Suggested baseline (matches ./scripts/lint.sh):
+Required. The commands you ran and what passed, then what the new tests cover
+in a line or two. Suggested baseline (matches ./scripts/lint.sh):
   Go:        ./scripts/lint.sh  ·  go test ./...
   Frontend:  (in ./scripts/lint.sh) prettier  ·  eslint  ·  tsc -b --noEmit
              (tests) cd frontend && pnpm exec vitest
@@ -70,7 +76,8 @@ If you counted by hand or estimated instead, say which.
 </details>
 
 <!-- ───────────────────────────────────────────────────────────────────────
-Optional sections — add any that apply, delete the rest:
+Optional sections — add one only when it says something the sections above
+don't, delete the rest:
 
 ## Docs            — docs/help text/agent prompts you updated
 ## Behavior notes  — edge cases, before/after, explicit out-of-scope items
