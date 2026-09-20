@@ -22,19 +22,23 @@ func (e *env) assertStragglerLoses(stale workitem.Receipt, situation string) {
 	e.t.Helper()
 	before := e.table()
 
+	// Each completion verb is tried through a kind that admits it, so the
+	// refusal under test is the guard's and not the strategy check's.
+	single := e.withKind(func(k *workitem.Kind) { k.Strategy = workitem.SingleTx })
 	fenced := e.withKind(func(k *workitem.Kind) { k.Strategy = workitem.FencedReplay })
 	ops := []struct {
 		name string
 		run  func() error
 	}{
 		{"Complete", func() error {
-			return workitem.Complete(e.ctx, e.conn, e.kind, stale, e.writePayload(stale.ItemID, "straggler"))
+			return workitem.Complete(single.ctx, single.conn, single.kind, stale, e.writePayload(stale.ItemID, "straggler"))
 		}},
 		{"MarkDone", func() error {
 			return workitem.MarkDone(fenced.ctx, fenced.conn, fenced.kind, stale)
 		}},
 		{"Requeue", func() error {
-			return workitem.Requeue(e.ctx, e.conn, e.kind, stale, workitem.OutcomeTransient, errors.New("straggler"))
+			_, err := workitem.Requeue(e.ctx, e.conn, e.kind, stale, workitem.OutcomeTransient, errors.New("straggler"))
+			return err
 		}},
 		{"Park", func() error {
 			return workitem.Park(e.ctx, e.conn, e.kind, stale, "straggler")
@@ -66,7 +70,7 @@ func testExpiryUnderRowLock(t *testing.T, mk Factory) {
 	if e.dialect != workitem.Postgres {
 		t.Skip("row-lock contention is a Postgres shape; SQLite serializes writers")
 	}
-	id := e.admit("locked", "original", 0)
+	id := e.admitWith("locked", "original", 0)
 	r := e.claimOne("worker-a", 1)
 
 	// A second session holds the row. The blocker runs in its own goroutine so
@@ -131,7 +135,7 @@ func testExpiryUnderRowLock(t *testing.T, mk Factory) {
 // re-evaluated guard misses and takes the domain writes down with it.
 func testExpiryInsideClosure(t *testing.T, mk Factory) {
 	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
-	id := e.admit("expire-inside", "original", 0)
+	id := e.admitWith("expire-inside", "original", 0)
 	r := e.claimOne("worker-a", 1)
 
 	err := workitem.Complete(e.ctx, e.conn, e.kind, r, func(tx *sql.Tx) error {
@@ -161,7 +165,7 @@ func testExpiryInsideClosure(t *testing.T, mk Factory) {
 // its own writes down with it.
 func testExpiryInsideDeferPredicate(t *testing.T, mk Factory) {
 	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
-	id := e.admit("defer-expire", "original", 0)
+	id := e.admitWith("defer-expire", "original", 0)
 	r := e.claimOne("worker-a", 1)
 	before := e.row(id)
 
@@ -190,7 +194,7 @@ func testLockOrderingWithCancel(t *testing.T, mk Factory) {
 	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
 
 	// Before the lock: the domain writes never run.
-	beforeID := e.admit("cancel-before", "original", 0)
+	beforeID := e.admitWith("cancel-before", "original", 0)
 	rb := e.claimOne("worker-a", 1)
 	if err := workitem.RequestCancel(e.ctx, e.conn, e.kind, e.org, beforeID, "operator", "changed my mind"); err != nil {
 		t.Fatalf("RequestCancel: %v", err)
@@ -224,7 +228,7 @@ func testLockOrderingWithCancel(t *testing.T, mk Factory) {
 	// After the lock: the request waits behind the completion and cannot undo
 	// it. Requesting from inside the closure IS "after the lock" — the
 	// transaction already holds the row.
-	afterID := e.admit("cancel-after", "original", 0)
+	afterID := e.admitWith("cancel-after", "original", 0)
 	ra := e.claimOne("worker-a", 1)
 	err = workitem.Complete(e.ctx, e.conn, e.kind, ra, func(tx *sql.Tx) error {
 		if err := workitem.RequestCancel(e.ctx, tx, e.kind, e.org, afterID, "operator", "too late"); err != nil {
@@ -259,8 +263,8 @@ func testLockOrderingWithCancel(t *testing.T, mk Factory) {
 
 // testHolderObservesCancel covers §1.7's other half: a request landing on a
 // live lease is observed by the holder's next operation, renewal included.
-func testHolderObservesCancel(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
+func testHolderObservesCancel(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: time.Minute})
 
 	for _, tc := range []struct {
 		name string
@@ -271,7 +275,8 @@ func testHolderObservesCancel(t *testing.T, mk Factory) {
 			return err
 		}},
 		{"Requeue", func(r workitem.Receipt) error {
-			return workitem.Requeue(e.ctx, e.conn, e.kind, r, workitem.OutcomeTransient, errors.New("blip"))
+			_, err := workitem.Requeue(e.ctx, e.conn, e.kind, r, workitem.OutcomeTransient, errors.New("blip"))
+			return err
 		}},
 		{"Park", func(r workitem.Receipt) error {
 			return workitem.Park(e.ctx, e.conn, e.kind, r, "stuck")
@@ -285,7 +290,7 @@ func testHolderObservesCancel(t *testing.T, mk Factory) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			id := e.admit("observe-"+tc.name, "p", 0)
+			id := e.admit("observe-" + tc.name)
 			r := e.claimOne("worker-a", 1)
 			if err := workitem.RequestCancel(e.ctx, e.conn, e.kind, e.org, id, "operator", "stop"); err != nil {
 				t.Fatalf("RequestCancel: %v", err)
@@ -311,9 +316,9 @@ func testHolderObservesCancel(t *testing.T, mk Factory) {
 // testCancelDeferred is the reason Claim's selection has a second arm: a
 // deferred ready row has no holder to observe a request, so without it the row
 // would sit on its unique key until its retry time came round.
-func testCancelDeferred(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
-	id := e.admit("deferred-cancel", "p", 0)
+func testCancelDeferred(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: time.Minute})
+	id := e.admit("deferred-cancel")
 	r := e.claimOne("worker-a", 1)
 	if err := workitem.Defer(e.ctx, e.conn, e.kind, r, "waiting on a prerequisite", time.Now().Add(time.Hour), truePredicate); err != nil {
 		t.Fatalf("Defer: %v", err)
@@ -330,10 +335,7 @@ func testCancelDeferred(t *testing.T, mk Factory) {
 	e.requireStatus(id, "cancelled")
 
 	// Settling frees the key, an hour before the retry time it was carrying.
-	newID, dup, err := workitem.Admit(e.ctx, e.conn, e.kind, e.org, "deferred-cancel", map[string]any{"payload": "again", "frozen_col": 0})
-	if err != nil {
-		t.Fatalf("re-admit: %v", err)
-	}
+	newID, dup := e.admitDup("deferred-cancel")
 	if dup {
 		t.Fatalf("re-admit deduplicated against the cancelled row %d", newID)
 	}
@@ -342,12 +344,25 @@ func testCancelDeferred(t *testing.T, mk Factory) {
 	}
 }
 
-// testUniqueWhileUnsettled walks a key through the states that hold it and the
-// two operator controls that release it.
-func testUniqueWhileUnsettled(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
-	id := e.admit("held", "p", 0)
-	replacement := e.admit("replacement", "p", 0)
+// testUniquenessByMode runs the uniqueness subtest the kind under test
+// declares, so a production table is conformed against its own mode.
+func testUniquenessByMode(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: time.Minute})
+	switch e.kind.Unique {
+	case workitem.UniqueWhileUnsettled:
+		uniqueWhileUnsettledBody(t, e)
+	case workitem.UniqueForever:
+		uniqueForeverBody(t, e)
+	default:
+		uniqueNoneBody(t, e)
+	}
+}
+
+// uniqueWhileUnsettledBody walks a key through the states that hold it and
+// the two operator controls that release it.
+func uniqueWhileUnsettledBody(t *testing.T, e *env) {
+	id := e.admit("held")
+	replacement := e.admit("replacement")
 
 	r := e.claimOne("worker-a", 1)
 	if err := workitem.Park(e.ctx, e.conn, e.kind, r, "needs a human"); err != nil {
@@ -446,17 +461,21 @@ func testUniqueWhileUnsettled(t *testing.T, mk Factory) {
 	}
 }
 
-// testUniqueForever proves the mode's whole difference: a settled row still
-// owns its key.
+// testUniqueForever proves the mode's whole difference over the fixture's
+// forever table.
 func testUniqueForever(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{
+	uniqueForeverBody(t, setup(t, mk, opts{
 		table: FixtureForeverTable, unique: workitem.UniqueForever,
 		policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute},
-	})
-	id := e.admit("forever", "p", 0)
+	}))
+}
+
+// uniqueForeverBody: a settled row still owns its key.
+func uniqueForeverBody(t *testing.T, e *env) {
+	id := e.admit("forever")
 	r := e.claimOne("worker-a", 1)
-	if err := workitem.Complete(e.ctx, e.conn, e.kind, r, e.writePayload(id, "done")); err != nil {
-		t.Fatalf("Complete: %v", err)
+	if err := e.complete(r); err != nil {
+		t.Fatalf("complete: %v", err)
 	}
 	e.requireStatus(id, "done")
 
@@ -466,16 +485,20 @@ func testUniqueForever(t *testing.T, mk Factory) {
 	}
 }
 
-// testUniqueNone covers the mode with no index: every admission inserts, and a
-// key is refused rather than stored somewhere it would dedup nothing.
+// testUniqueNone covers the mode with no index over the fixture.
 func testUniqueNone(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueNone, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
-	first := e.admit("", "p", 0)
-	second := e.admit("", "p", 0)
+	uniqueNoneBody(t, setup(t, mk, opts{unique: workitem.UniqueNone, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}}))
+}
+
+// uniqueNoneBody: every admission inserts, and a key is refused rather than
+// stored somewhere it would dedup nothing.
+func uniqueNoneBody(t *testing.T, e *env) {
+	first := e.admit("")
+	second := e.admit("")
 	if first == second {
 		t.Fatal("two unkeyed admissions returned the same row")
 	}
-	if _, _, err := workitem.Admit(e.ctx, e.conn, e.kind, e.org, "a-key", map[string]any{"payload": "p"}); err == nil {
+	if _, _, err := workitem.Admit(e.ctx, e.conn, e.kind, e.org, "a-key", e.nextCols()); err == nil {
 		t.Error("Admit accepted a unique key for a kind that dedups nothing")
 	}
 	// A column the kind never declared is an error, not an interpolation.
@@ -487,16 +510,13 @@ func testUniqueNone(t *testing.T, mk Factory) {
 // testDefer covers the refund's whole contract: once per acquisition, never on
 // a stale receipt, never on a refused predicate, and never a way to run out of
 // budget by waiting.
-func testDefer(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{
-		unique: workitem.UniqueWhileUnsettled,
-		policy: workitem.Policy{MaxAttempts: 2, Lease: time.Minute, Backoff: fastBackoff},
-	})
+func testDefer(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 2, Lease: time.Minute, Backoff: fastBackoff})
 
 	// The refund is once per acquisition: the write that spends the receipt
 	// also drops the row out of 'leased', so the same receipt cannot refund
 	// twice.
-	id := e.admit("refund", "p", 0)
+	id := e.admit("refund")
 	r := e.claimOne("worker-a", 1)
 	past := time.Now().Add(-time.Second)
 	if err := workitem.Defer(e.ctx, e.conn, e.kind, r, "waiting", past, truePredicate); err != nil {
@@ -545,7 +565,7 @@ func testDefer(t *testing.T, mk Factory) {
 	e.requireStatus(id, "leased")
 
 	// A real failure after a deferral charges normally.
-	if err := workitem.Requeue(e.ctx, e.conn, e.kind, r2, workitem.OutcomeTransient, errors.New("blip")); err != nil {
+	if _, err := workitem.Requeue(e.ctx, e.conn, e.kind, r2, workitem.OutcomeTransient, errors.New("blip")); err != nil {
 		t.Fatalf("Requeue after deferral: %v", err)
 	}
 	if got := asInt(e.row(id)["attempt"]); got != 1 {
@@ -553,7 +573,7 @@ func testDefer(t *testing.T, mk Factory) {
 	}
 
 	// Healthy waiting, repeated well past the budget, never parks the row.
-	waitID := e.admit("patient", "p", 0)
+	waitID := e.admit("patient")
 	for i := 0; i < 6; i++ {
 		wr := e.claim(workitem.Owner{ID: "worker-a", Epoch: 1}, 5)
 		var found bool
@@ -634,18 +654,18 @@ func testFairness(t *testing.T, mk Factory) {
 	busy, middling, idle := e.org, uuid.NewString(), uuid.NewString()
 
 	// Two live leases for busy, one for middling, none for idle.
-	e.admitIn(busy, "busy-live-1", "p", 0)
-	e.admitIn(busy, "busy-live-2", "p", 0)
-	e.admitIn(middling, "mid-live-1", "p", 0)
+	e.admitIn(busy, "busy-live-1")
+	e.admitIn(busy, "busy-live-2")
+	e.admitIn(middling, "mid-live-1")
 	if got := len(e.claimIn(workitem.Owner{ID: "pre", Epoch: 1}, "", 3).Claimed); got != 3 {
 		t.Fatalf("seeded %d leases, want 3", got)
 	}
 
 	// One waiting row each, admitted busiest-first so id order and fairness
 	// order disagree.
-	busyID := e.admitIn(busy, "busy-wait", "p", 0)
-	midID := e.admitIn(middling, "mid-wait", "p", 0)
-	idleID := e.admitIn(idle, "idle-wait", "p", 0)
+	busyID := e.admitIn(busy, "busy-wait")
+	midID := e.admitIn(middling, "mid-wait")
+	idleID := e.admitIn(idle, "idle-wait")
 
 	res := e.claimIn(workitem.Owner{ID: "worker", Epoch: 1}, "", 3)
 	if len(res.Claimed) != 3 {
@@ -665,13 +685,13 @@ func testFairness(t *testing.T, mk Factory) {
 	// Fairness off is strict id order, whatever the orgs are doing.
 	f := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
 	a, b := f.org, uuid.NewString()
-	f.admitIn(a, "fifo-1", "p", 0)
-	f.admitIn(a, "fifo-2", "p", 0)
+	f.admitIn(a, "fifo-1")
+	f.admitIn(a, "fifo-2")
 	if got := len(f.claimIn(workitem.Owner{ID: "pre", Epoch: 1}, "", 2).Claimed); got != 2 {
 		t.Fatalf("seeded %d leases, want 2", got)
 	}
-	first := f.admitIn(a, "fifo-3", "p", 0)
-	second := f.admitIn(b, "fifo-4", "p", 0)
+	first := f.admitIn(a, "fifo-3")
+	second := f.admitIn(b, "fifo-4")
 	res = f.claimIn(workitem.Owner{ID: "worker", Epoch: 1}, "", 2)
 	if len(res.Claimed) != 2 || res.Claimed[0].ItemID != first || res.Claimed[1].ItemID != second {
 		t.Fatalf("FIFO claim returned %v, want %d then %d", res.Claimed, first, second)
@@ -681,7 +701,7 @@ func testFairness(t *testing.T, mk Factory) {
 // admitDup admits a key expecting the uniqueness mode to have an opinion.
 func (e *env) admitDup(key string) (int64, bool) {
 	e.t.Helper()
-	id, dup, err := workitem.Admit(e.ctx, e.conn, e.kind, e.org, key, map[string]any{"payload": "again", "frozen_col": 0})
+	id, dup, err := workitem.Admit(e.ctx, e.conn, e.kind, e.org, e.key(key), e.nextCols())
 	if err != nil {
 		e.t.Fatalf("admit %q: %v", key, err)
 	}
@@ -708,7 +728,7 @@ func testAdmitUnderRowLock(t *testing.T, mk Factory) {
 	if e.dialect != workitem.Postgres {
 		t.Skip("row-lock contention is a Postgres shape; SQLite serializes writers")
 	}
-	id := e.admit("contested", "original", 0)
+	id := e.admitWith("contested", "original", 0)
 	r := e.claimOne("worker-a", 1)
 
 	// The holder's completion blocks inside its own closure, so the row stays

@@ -126,13 +126,12 @@ type Router struct {
 	sourceGate *sourceGate
 
 	// executorID/bootEpoch are this process's persistent instance-registry
-	// identity (TFAC-577), set post-construction via SetExecutorID before
-	// RunEventQueue starts. Stamped onto every event_queue row this router
-	// claims (mirroring delegate.Spawner's executorID/bootEpoch for runs), so
-	// the boot-time ResetProcessing sweep (TFAC-578) can self-scope to rows
-	// this instance itself claimed, never a live sibling's. Zero values
-	// (tests that never call SetExecutorID) degrade to the empty-string
-	// identity — fine for single-router tests, never used in production.
+	// identity, set post-construction via SetExecutorID before RunEventQueue
+	// starts. Stamped as the lease owner onto every event_queue row this
+	// router claims (mirroring delegate.Spawner's executorID/bootEpoch for
+	// runs): provenance for the reclaim log line, never the write fence,
+	// which is the lease generation. A claim refuses an empty owner, so a
+	// test that drains sets an identity too.
 	//
 	// Guarded by executorMu, mirroring delegate.Spawner's executorID/
 	// bootEpoch + s.mu: today SetExecutorID only ever runs once at startup
@@ -271,8 +270,7 @@ func (r *Router) SetExecutorID(id string, bootEpoch int64) {
 
 // executorIdentity returns the current (executorID, bootEpoch) pair under
 // lock — the read side of SetExecutorID, mirroring
-// delegate.Spawner.executorIdentity. Used by RunEventQueue's boot reset and
-// drainEventQueue's claim.
+// delegate.Spawner.executorIdentity. Read per claim by drainEventQueue.
 func (r *Router) executorIdentity() (string, int64) {
 	r.executorMu.Lock()
 	defer r.executorMu.Unlock()

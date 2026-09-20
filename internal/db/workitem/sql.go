@@ -94,7 +94,7 @@ func (k Kind) bindTime(a *args, t time.Time) string {
 func (k Kind) guardSQL(a *args, r Receipt) string {
 	return "id = " + a.bind(r.ItemID) +
 		" AND org_id = " + a.bind(r.OrgID) +
-		" AND status = 'leased'" +
+		" AND status = " + quoteLiteral(StatusLeased) +
 		" AND lease_generation = " + a.bind(r.LeaseGeneration) +
 		" AND lease_expires_at IS NOT NULL" +
 		" AND lease_expires_at > " + k.nowExpr()
@@ -155,7 +155,7 @@ type assign struct {
 // — the terminal record retains who asked and why.
 func (k Kind) cancelSettlement() []assign {
 	return []assign{
-		{"status", lit(quoteLiteral(outcomeCancelled))},
+		{"status", lit(quoteLiteral(StatusCancelled))},
 		{"done_at", lit(k.nowExpr())},
 		{"last_outcome", lit(quoteLiteral(outcomeCancelled))},
 		{"lease_owner", lit("NULL")},

@@ -42,11 +42,11 @@ func startRouteSpan(ctx context.Context, qe *domain.QueuedEvent) (context.Contex
 			telemetry.EventID(qe.EventID),
 			telemetry.EventType(qe.EventType),
 			telemetry.OrgID(qe.OrgID),
-			telemetry.Attempt(qe.Attempts),
+			telemetry.Attempt(qe.Attempt),
 		),
 	}
-	if qe.ClaimedAt != nil {
-		opts = append(opts, trace.WithAttributes(telemetry.QueueWait(queueWait(qe.EnqueuedAt, *qe.ClaimedAt))))
+	if qe.LeasedAt != nil {
+		opts = append(opts, trace.WithAttributes(telemetry.QueueWait(queueWait(qe.FirstEnqueuedAt, *qe.LeasedAt))))
 	}
 	if link, ok := producerLink(qe.Traceparent); ok {
 		opts = append(opts, trace.WithLinks(link))
@@ -95,8 +95,8 @@ func recordDisposition(ctx context.Context, disposition string) {
 // queueWait is the enqueue→claim duration. Negative results — two pods'
 // clocks disagreeing about now() across the write pair — are clamped to
 // zero rather than exported as a wait that ran backwards.
-func queueWait(enqueuedAt, claimedAt time.Time) time.Duration {
-	if d := claimedAt.Sub(enqueuedAt); d > 0 {
+func queueWait(enqueuedAt, leasedAt time.Time) time.Duration {
+	if d := leasedAt.Sub(enqueuedAt); d > 0 {
 		return d
 	}
 	return 0

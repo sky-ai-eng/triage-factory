@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // Admit inserts a ready row: the shared block filled by the package, the
@@ -47,7 +45,7 @@ func Admit(ctx context.Context, q DBTX, k Kind, orgID, uniqueKey string, cols ma
 			id      int64
 			deduped bool
 		)
-		if err := db.InTx(ctx, conn, func(tx *sql.Tx) error {
+		if err := inTx(ctx, conn, func(tx *sql.Tx) error {
 			var err error
 			id, deduped, err = k.admit(ctx, tx, orgID, uniqueKey, cols)
 			return err
@@ -80,7 +78,7 @@ func (k Kind) admit(ctx context.Context, q DBTX, orgID, uniqueKey string, cols m
 	insertCols := []string{"org_id", "status", "attempt", "max_attempts", "unique_key", "first_enqueued_at", "created_at"}
 	values := []string{
 		a.bind(orgID),
-		quoteLiteral("ready"),
+		quoteLiteral(StatusReady),
 		"0",
 		a.bind(p.MaxAttempts),
 		a.bind(nullableText(uniqueKey)),

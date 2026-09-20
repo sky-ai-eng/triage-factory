@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // Complete is the SingleTx completion: it opens a transaction, locks and
@@ -33,7 +31,7 @@ func Complete(ctx context.Context, conn *sql.DB, k Kind, r Receipt, fn func(tx *
 	// The settlement is a commit, not a failure, so it cannot travel out of the
 	// transaction as an error — that would roll the settlement back.
 	var settled error
-	err := db.InTx(ctx, conn, func(tx *sql.Tx) error {
+	err := inTx(ctx, conn, func(tx *sql.Tx) error {
 		cancelled, err := k.lockAndVerify(ctx, tx, r)
 		if err != nil {
 			return err
@@ -83,7 +81,7 @@ func (k Kind) lockAndVerify(ctx context.Context, tx *sql.Tx, r Receipt) (bool, e
 // guardBody is the guard's ownership terms without the row address, for use as
 // a selected boolean beside the lock.
 func (k Kind) guardBody(a *args, r Receipt) string {
-	return "status = 'leased'" +
+	return "status = " + quoteLiteral(StatusLeased) +
 		" AND lease_generation = " + a.bind(r.LeaseGeneration) +
 		" AND lease_expires_at IS NOT NULL" +
 		" AND lease_expires_at > " + k.nowExpr()
@@ -128,17 +126,20 @@ func MarkDone(ctx context.Context, q DBTX, k Kind, r Receipt) error {
 	return k.holderWrite(ctx, q, r, k.terminalDone())
 }
 
-// Requeue returns a failed attempt to the queue, or parks it.
+// Requeue returns a failed attempt to the queue, or parks it, and reports
+// which: parked is true when the row landed parked, false when it returned to
+// ready with a retry time. A worker logs and disposes on that answer, and a
+// metrics reader counts parks from it.
 //
 // A permanent outcome parks immediately whatever the budget: retrying a
 // rejection only spends attempts. Otherwise the stored budget decides, in SQL,
 // against the max_attempts the row was admitted under.
-func Requeue(ctx context.Context, q DBTX, k Kind, r Receipt, outcome Outcome, cause error) error {
+func Requeue(ctx context.Context, q DBTX, k Kind, r Receipt, outcome Outcome, cause error) (parked bool, err error) {
 	if err := k.Validate(); err != nil {
-		return err
+		return false, err
 	}
 	if !outcome.valid() {
-		return fmt.Errorf("workitem: %s requeue with unknown outcome %q", k.Table, outcome)
+		return false, fmt.Errorf("workitem: %s requeue with unknown outcome %q", k.Table, outcome)
 	}
 
 	var causeText any
@@ -149,7 +150,7 @@ func Requeue(ctx context.Context, q DBTX, k Kind, r Receipt, outcome Outcome, ca
 
 	var status, doneAt, nextAttempt valueExpr
 	if outcome == OutcomePermanent {
-		status = lit(quoteLiteral("parked"))
+		status = lit(quoteLiteral(StatusParked))
 		doneAt = lit(now)
 		nextAttempt = keep("next_attempt_at")
 	} else {
@@ -157,7 +158,7 @@ func Requeue(ctx context.Context, q DBTX, k Kind, r Receipt, outcome Outcome, ca
 		// chosen in SQL against the budget this row was actually admitted under
 		// rather than against whatever the policy says today.
 		exhausted := "attempt >= max_attempts"
-		status = lit("CASE WHEN " + exhausted + " THEN " + quoteLiteral("parked") + " ELSE " + quoteLiteral("ready") + " END")
+		status = lit("CASE WHEN " + exhausted + " THEN " + quoteLiteral(StatusParked) + " ELSE " + quoteLiteral(StatusReady) + " END")
 		doneAt = lit("CASE WHEN " + exhausted + " THEN " + now + " ELSE done_at END")
 		// The delay is computed in Go from the attempt this receipt charged, so
 		// the value is pinnable; only the instant it is measured from is the
@@ -175,7 +176,13 @@ func Requeue(ctx context.Context, q DBTX, k Kind, r Receipt, outcome Outcome, ca
 		{"last_outcome", bound(func(a *args) string { return a.bind(string(outcome)) })},
 		{"last_error", bound(func(a *args) string { return a.bind(causeText) })},
 	}, clearLease...)
-	return k.holderWrite(ctx, q, r, sets)
+	// The landed status is read back from the same statement rather than
+	// predicted from the receipt's attempt, so the answer is the row's.
+	landed, err := k.holderWriteReturningStatus(ctx, q, r, sets)
+	if err != nil {
+		return false, err
+	}
+	return landed == StatusParked, nil
 }
 
 // Park takes the item out of circulation for an operator to redrive or
@@ -189,7 +196,7 @@ func Park(ctx context.Context, q DBTX, k Kind, r Receipt, reason string) error {
 		return fmt.Errorf("workitem: %s park has no reason", k.Table)
 	}
 	sets := append([]assign{
-		{"status", lit(quoteLiteral("parked"))},
+		{"status", lit(quoteLiteral(StatusParked))},
 		{"done_at", lit(k.nowExpr())},
 		{"last_outcome", bound(func(a *args) string { return a.bind(reason) })},
 	}, clearLease...)
@@ -226,7 +233,7 @@ func Defer(ctx context.Context, conn *sql.DB, k Kind, r Receipt, reason string, 
 	}
 
 	var settled error
-	err := db.InTx(ctx, conn, func(tx *sql.Tx) error {
+	err := inTx(ctx, conn, func(tx *sql.Tx) error {
 		cancelled, err := k.lockAndVerify(ctx, tx, r)
 		if err != nil {
 			return err
@@ -246,7 +253,7 @@ func Defer(ctx context.Context, conn *sql.DB, k Kind, r Receipt, reason string, 
 			return ErrDeferRefused
 		}
 		sets := append([]assign{
-			{"status", lit(quoteLiteral("ready"))},
+			{"status", lit(quoteLiteral(StatusReady))},
 			{"attempt", lit("attempt - 1")},
 			{"next_attempt_at", bound(func(a *args) string { return k.bindTime(a, nextAttemptAt) })},
 			{"last_outcome", lit(quoteLiteral(outcomeDeferred))},
@@ -295,7 +302,7 @@ func RenewLease(ctx context.Context, q DBTX, k Kind, r Receipt) (Receipt, error)
 // terminalDone is the completion write both strategies share.
 func (k Kind) terminalDone() []assign {
 	return append([]assign{
-		{"status", lit(quoteLiteral("done"))},
+		{"status", lit(quoteLiteral(StatusDone))},
 		{"done_at", lit(k.nowExpr())},
 		{"last_outcome", lit(quoteLiteral(outcomeDone))},
 	}, clearLease...)
@@ -303,17 +310,25 @@ func (k Kind) terminalDone() []assign {
 
 // holderWrite runs a holder disposition as one cancel-aware guarded statement.
 func (k Kind) holderWrite(ctx context.Context, q DBTX, r Receipt, sets []assign) error {
+	_, err := k.holderWriteReturningStatus(ctx, q, r, sets)
+	return err
+}
+
+// holderWriteReturningStatus is holderWrite reporting the status the row
+// landed in, for the dispositions whose arm is chosen in SQL.
+func (k Kind) holderWriteReturningStatus(ctx context.Context, q DBTX, r Receipt, sets []assign) (string, error) {
 	a := newArgs(k.Dialect)
-	stmt := k.holderSQL(a, r, sets, nil)
+	stmt := k.holderSQL(a, r, sets, []string{"status"})
 	var cancelled dbBool
-	switch err := q.QueryRowContext(ctx, stmt, a.vals...).Scan(&cancelled); {
+	var status string
+	switch err := q.QueryRowContext(ctx, stmt, a.vals...).Scan(&cancelled, &status); {
 	case errors.Is(err, sql.ErrNoRows):
-		return ErrLeaseLost
+		return "", ErrLeaseLost
 	case err != nil:
-		return fmt.Errorf("workitem: holder write on %s: %w", k.Table, err)
+		return "", fmt.Errorf("workitem: holder write on %s: %w", k.Table, err)
 	}
 	if cancelled.V {
-		return ErrCancelled
+		return status, ErrCancelled
 	}
-	return nil
+	return status, nil
 }

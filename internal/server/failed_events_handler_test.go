@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -29,19 +30,20 @@ import (
 type stubFailedEventsQueue struct {
 	db.EventQueueStore
 
-	rows    []domain.FailedEvent
+	rows    []domain.ParkedEvent
 	total   int
 	listErr error
 
 	gotOrgID string
 	gotOpts  db.ListOpts
 	gotIDs   []int64
+	gotBy    string
 
 	requeued   int
 	requeueErr error
 }
 
-func (s *stubFailedEventsQueue) ListFailedEvents(_ context.Context, orgID string, opts db.ListOpts) ([]domain.FailedEvent, int, error) {
+func (s *stubFailedEventsQueue) ListParked(_ context.Context, orgID string, opts db.ListOpts) ([]domain.ParkedEvent, int, error) {
 	s.gotOrgID, s.gotOpts = orgID, opts
 	total := s.total
 	if total == 0 {
@@ -50,7 +52,7 @@ func (s *stubFailedEventsQueue) ListFailedEvents(_ context.Context, orgID string
 	return s.rows, total, s.listErr
 }
 
-func (s *stubFailedEventsQueue) GetFailedEvent(_ context.Context, orgID string, id int64) (*domain.FailedEvent, error) {
+func (s *stubFailedEventsQueue) GetParked(_ context.Context, orgID string, id int64) (*domain.ParkedEvent, error) {
 	s.gotOrgID = orgID
 	if s.listErr != nil {
 		return nil, s.listErr
@@ -63,8 +65,8 @@ func (s *stubFailedEventsQueue) GetFailedEvent(_ context.Context, orgID string, 
 	return nil, nil
 }
 
-func (s *stubFailedEventsQueue) RequeueFailedEvents(_ context.Context, orgID string, ids []int64) (int, error) {
-	s.gotOrgID, s.gotIDs = orgID, ids
+func (s *stubFailedEventsQueue) Redrive(_ context.Context, orgID string, ids []int64, by string) (int, error) {
+	s.gotOrgID, s.gotIDs, s.gotBy = orgID, ids, by
 	return s.requeued, s.requeueErr
 }
 
@@ -95,16 +97,19 @@ func failedEventsReq(method, target, orgID, caller, body string) *http.Request {
 
 func TestFailedEventsList_LocalMode(t *testing.T) {
 	enqueued := time.Date(2026, 8, 7, 9, 30, 0, 0, time.UTC)
-	q := &stubFailedEventsQueue{rows: []domain.FailedEvent{{
-		ID:             42,
-		EventType:      domain.EventGitHubPRCICheckFailed,
-		EntityID:       "entity-1",
-		EntitySource:   "github",
-		EntitySourceID: "owner/repo#18",
-		EntityTitle:    "Fix the flaky test",
-		Attempts:       5,
-		LastError:      "route: upsert task: db down (after 5 attempts)",
-		EnqueuedAt:     enqueued,
+	q := &stubFailedEventsQueue{rows: []domain.ParkedEvent{{
+		ID:              42,
+		EventType:       domain.EventGitHubPRCICheckFailed,
+		EntityID:        "entity-1",
+		EntitySource:    "github",
+		EntitySourceID:  "owner/repo#18",
+		EntityTitle:     "Fix the flaky test",
+		Attempt:         5,
+		MaxAttempts:     5,
+		LastOutcome:     "transient",
+		LastError:       "route: upsert task: db down (after 5 attempts)",
+		FirstEnqueuedAt: enqueued,
+		ParkedAt:        enqueued.Add(time.Minute),
 	}}}
 	h := localFailedEventsRig(t, q)
 
@@ -197,7 +202,7 @@ func TestFailedEventsList_PagingAndErrors(t *testing.T) {
 	// An empty parked population is the healthy state and must serialize as an
 	// empty array, not null — the panel renders the list without a guard.
 	t.Run("empty_list_is_an_array", func(t *testing.T) {
-		q := &stubFailedEventsQueue{rows: []domain.FailedEvent{}}
+		q := &stubFailedEventsQueue{rows: []domain.ParkedEvent{}}
 		h := localFailedEventsRig(t, q)
 		rec := httptest.NewRecorder()
 		h.handleFailedEventsList(rec, failedEventsReq(http.MethodPost, "/api/events/failed/list",
@@ -211,9 +216,9 @@ func TestFailedEventsList_PagingAndErrors(t *testing.T) {
 // The single read answers with the list's row shape, and a malformed or
 // unknown id is not-found rather than a driver error.
 func TestFailedEventGet_LocalMode(t *testing.T) {
-	rows := []domain.FailedEvent{{
+	rows := []domain.ParkedEvent{{
 		ID: 42, EventType: domain.EventGitHubPRCICheckFailed, EntityTitle: "Fix the flaky test",
-		Attempts: 5, LastError: "route: db down", EnqueuedAt: time.Date(2026, 8, 7, 9, 30, 0, 0, time.UTC),
+		Attempt: 5, LastError: "route: db down", FirstEnqueuedAt: time.Date(2026, 8, 7, 9, 30, 0, 0, time.UTC),
 	}}
 
 	t.Run("returns_the_list_row_shape", func(t *testing.T) {
@@ -282,6 +287,9 @@ func TestFailedEventsRequeue_LocalMode(t *testing.T) {
 		if len(q.gotIDs) != 3 || q.gotIDs[0] != 1 || q.gotIDs[2] != 3 {
 			t.Errorf("ids forwarded = %v, want [1 2 3]", q.gotIDs)
 		}
+		if q.gotBy != "local-user" {
+			t.Errorf("redrive requester = %q, want the caller's subject", q.gotBy)
+		}
 	})
 
 	t.Run("empty_ids_400", func(t *testing.T) {
@@ -299,7 +307,7 @@ func TestFailedEventsRequeue_LocalMode(t *testing.T) {
 	})
 
 	t.Run("oversized_selection_400", func(t *testing.T) {
-		ids := make([]string, db.MaxFailedEventsRequeueIDs+1)
+		ids := make([]string, db.MaxRedriveIDs+1)
 		for i := range ids {
 			ids[i] = fmt.Sprint(i + 1)
 		}
@@ -354,7 +362,7 @@ func TestFailedEventsHandler_AdminGate_Postgres(t *testing.T) {
 	member := pgtest.SeedUser(t, h, "failed-events-member")
 	pgtest.AddOrgMember(t, h, member, orgID, teamID, "member", "member")
 
-	// Park a row the honest way: enqueue, claim, MarkFailed.
+	// Park a row the honest way: enqueue, claim, a permanent requeue.
 	entityID := uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
@@ -366,12 +374,13 @@ func TestFailedEventsHandler_AdminGate_Postgres(t *testing.T) {
 	}, ""); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
-	claimed, err := stores.EventQueue.ClaimNext(ctx, "gate-test-executor", 1)
-	if err != nil || claimed == nil {
-		t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
+	batch, err := stores.EventQueue.Claim(ctx, workitem.Owner{ID: "gate-test-executor", Epoch: 1}, 1)
+	if err != nil || len(batch.Events) != 1 {
+		t.Fatalf("Claim: got=%+v err=%v", batch, err)
 	}
-	if err := stores.EventQueue.MarkFailed(ctx, orgID, claimed.ID, "route: db down (after 5 attempts)"); err != nil {
-		t.Fatalf("MarkFailed: %v", err)
+	claimed := batch.Events[0].Event
+	if parked, err := stores.EventQueue.Requeue(ctx, batch.Events[0].Receipt, workitem.OutcomePermanent, errors.New("route: db down")); err != nil || !parked {
+		t.Fatalf("Requeue permanent: parked=%v err=%v", parked, err)
 	}
 
 	fe := &failedEventsHandler{az: s.az, queue: stores.EventQueue}
@@ -391,9 +400,9 @@ func TestFailedEventsHandler_AdminGate_Postgres(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("requeue as plain member = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
-		rows, _, err := stores.EventQueue.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
+		rows, _, err := stores.EventQueue.ListParked(ctx, orgID, db.ListOpts{Limit: 50})
 		if err != nil {
-			t.Fatalf("ListFailedEvents: %v", err)
+			t.Fatalf("ListParked: %v", err)
 		}
 		if len(rows) != 1 || rows[0].ID != claimed.ID {
 			t.Errorf("parked rows after the refused requeue = %+v, want the row still parked", rows)
@@ -410,7 +419,7 @@ func TestFailedEventsHandler_AdminGate_Postgres(t *testing.T) {
 		if page.Items[0].EntityTitle != "Parked PR" {
 			t.Errorf("entity_title = %q, want the joined entity's title", page.Items[0].EntityTitle)
 		}
-		if page.Items[0].LastError != "route: db down (after 5 attempts)" {
+		if page.Items[0].LastError != "route: db down" {
 			t.Errorf("last_error = %q, want the park reason", page.Items[0].LastError)
 		}
 	})
@@ -448,7 +457,7 @@ func TestFailedEventsHandler_AdminGate_Postgres(t *testing.T) {
 		if resp.Requeued != 1 {
 			t.Errorf("requeued = %d, want 1", resp.Requeued)
 		}
-		rows, _, _ := stores.EventQueue.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
+		rows, _, _ := stores.EventQueue.ListParked(ctx, orgID, db.ListOpts{Limit: 50})
 		if len(rows) != 0 {
 			t.Errorf("parked rows after the requeue = %+v, want none", rows)
 		}

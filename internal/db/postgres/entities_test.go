@@ -548,8 +548,8 @@ func newPgEntitySeeder(conn *sql.DB, orgID, userID string) dbtest.EntitySeeder {
 				t.Fatalf("seed event %s on %s: %v", eventType, entityID, err)
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO event_queue (org_id, event_id, entity_id, event_type, status)
-				VALUES ($1, $2, $3, $4, $5)
+				INSERT INTO event_queue (org_id, event_id, entity_id, event_type, status, max_attempts, first_enqueued_at)
+				VALUES ($1, $2, $3, $4, $5, 5, now())
 			`, orgID, eventID, entityID, eventType, status); err != nil {
 				t.Fatalf("seed queue row %s (%s) on %s: %v", eventType, status, entityID, err)
 			}

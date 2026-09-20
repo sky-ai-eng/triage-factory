@@ -27,7 +27,7 @@ func RequestCancel(ctx context.Context, q DBTX, k Kind, orgID string, itemID int
 		", cancel_reason = " + a.bind(reason) +
 		" WHERE org_id = " + a.bind(orgID) +
 		" AND id = " + a.bind(itemID) +
-		" AND status IN ('ready','leased')" +
+		" AND status IN (" + claimableStatusList + ")" +
 		" AND cancel_requested_at IS NULL"
 
 	res, err := q.ExecContext(ctx, stmt, a.vals...)
@@ -67,7 +67,7 @@ func Redrive(ctx context.Context, q DBTX, k Kind, orgID string, itemID int64, by
 	}
 	a := newArgs(k.Dialect)
 	stmt := "UPDATE " + k.Table +
-		" SET status = 'ready'" +
+		" SET status = " + quoteLiteral(StatusReady) +
 		", attempt = 0" +
 		", next_attempt_at = NULL" +
 		", done_at = NULL" +
@@ -76,7 +76,7 @@ func Redrive(ctx context.Context, q DBTX, k Kind, orgID string, itemID int64, by
 		", last_error = NULL" +
 		" WHERE org_id = " + a.bind(orgID) +
 		" AND id = " + a.bind(itemID) +
-		" AND status = 'parked'" +
+		" AND status = " + quoteLiteral(StatusParked) +
 		" AND cancel_requested_at IS NULL"
 	return k.operatorWrite(ctx, q, stmt, a)
 }
@@ -107,14 +107,14 @@ func Supersede(ctx context.Context, q DBTX, k Kind, orgID string, itemID int64, 
 	}
 	a := newArgs(k.Dialect)
 	stmt := "UPDATE " + k.Table +
-		" SET status = 'cancelled'" +
+		" SET status = " + quoteLiteral(StatusCancelled) +
 		", done_at = " + k.nowExpr() +
 		", superseded_by = " + a.bind(supersededBy) +
 		", last_outcome = " + quoteLiteral(outcomeSuperseded) +
 		", cancel_requested_by = " + a.bind(by) +
 		" WHERE org_id = " + a.bind(orgID) +
 		" AND id = " + a.bind(itemID) +
-		" AND status = 'parked'"
+		" AND status = " + quoteLiteral(StatusParked)
 	return k.operatorWrite(ctx, q, stmt, a)
 }
 

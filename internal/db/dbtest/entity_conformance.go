@@ -54,7 +54,8 @@ type EntitySeeder struct {
 	// QueueRow inserts an events row of eventType on the entity and a queue
 	// row for it in the given status, standing in for a terminating close
 	// at that point in its life. Raw SQL because the queue store's own
-	// writers cannot place a row directly in 'processing' or 'failed'.
+	// writers reach 'leased', 'parked' or 'cancelled' only through a claim
+	// and a disposition, and the checker's predicate is what is under test.
 	QueueRow func(t *testing.T, entityID, eventType, status string)
 }
 
@@ -75,7 +76,7 @@ type EntitySeeder struct {
 //   - ListActiveTerminalCandidatesSystem surfaces active entities whose
 //     stored snapshot reads terminal (github exactly, jira against the
 //     caller's done-status union), unpolled past the grace, with no
-//     terminating close in flight — and nothing else.
+//     terminating close ready, leased or parked — and nothing else.
 //   - Descriptions dedupes the input id list and only returns ids
 //     whose description is non-empty.
 //   - MarkPolledSystem advances last_polled_at without touching the
@@ -1033,25 +1034,29 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		if _, err := s.MarkClosed(ctx, orgID, alreadyClosed); err != nil {
 			t.Fatalf("close: %v", err)
 		}
-		// The two exceptions the invariant states. A close in flight — a
-		// terminating transition or an obligation pending or processing —
-		// means the entity is about to be closed by the queue, not
-		// stranded; a parked row means nothing will drive it, so the entity
-		// counts. And a row polled within the grace is one cycle behind at
-		// most, which is the lag the obligation itself carries.
-		closePending := seedSnap("owner/repo#tc-pending", "github", `{"state":"MERGED","merged":true}`)
-		seed.QueueRow(t, closePending, domain.EventGitHubPRMerged, domain.QueuedEventStatusPending)
-		owedProcessing := seedSnap("owner/repo#tc-processing", "github", `{"state":"MERGED","merged":true}`)
-		seed.QueueRow(t, owedProcessing, domain.EventSystemEntityCloseOwed, domain.QueuedEventStatusProcessing)
+		// The two exceptions the invariant states. A close unsettled — a
+		// terminating transition or an obligation ready, leased or parked —
+		// means the entity's key is held: the queue will close it, or the
+		// parked row is itself the alarm on the parked panel, and either way
+		// the checker counting it too would double-report one fact. A done
+		// or cancelled row holds nothing, so the entity counts. And a row
+		// polled within the grace is one cycle behind at most, which is the
+		// lag the obligation itself carries.
+		closeReady := seedSnap("owner/repo#tc-ready", "github", `{"state":"MERGED","merged":true}`)
+		seed.QueueRow(t, closeReady, domain.EventGitHubPRMerged, domain.QueuedEventStatusReady)
+		owedLeased := seedSnap("owner/repo#tc-leased", "github", `{"state":"MERGED","merged":true}`)
+		seed.QueueRow(t, owedLeased, domain.EventSystemEntityCloseOwed, domain.QueuedEventStatusLeased)
 		closeParked := seedSnap("owner/repo#tc-parked", "github", `{"state":"MERGED","merged":true}`)
-		seed.QueueRow(t, closeParked, domain.EventSystemEntityCloseOwed, domain.QueuedEventStatusFailed)
+		seed.QueueRow(t, closeParked, domain.EventSystemEntityCloseOwed, domain.QueuedEventStatusParked)
 		closeDone := seedSnap("owner/repo#tc-done-row", "github", `{"state":"MERGED","merged":true}`)
 		seed.QueueRow(t, closeDone, domain.EventGitHubPRMerged, domain.QueuedEventStatusDone)
+		closeCancelled := seedSnap("owner/repo#tc-cancelled-row", "github", `{"state":"MERGED","merged":true}`)
+		seed.QueueRow(t, closeCancelled, domain.EventSystemEntityCloseOwed, domain.QueuedEventStatusCancelled)
 		freshlyPolled := seedSnap("owner/repo#tc-fresh", "github", `{"state":"MERGED","merged":true}`)
 
 		// Every row but the freshly polled one was last polled an hour ago,
 		// well past a fifteen-minute grace.
-		for _, id := range []string{merged, closedState, open, noSnapshot, jiraDone, jiraRenamed, jiraLive, alreadyClosed, closePending, owedProcessing, closeParked, closeDone} {
+		for _, id := range []string{merged, closedState, open, noSnapshot, jiraDone, jiraRenamed, jiraLive, alreadyClosed, closeReady, owedLeased, closeParked, closeDone, closeCancelled} {
 			seed.BackdatePoll(t, id, time.Hour)
 		}
 		const grace = 15 * time.Minute
@@ -1072,8 +1077,8 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{closedState, "a CLOSED PR"},
 			{jiraDone, "a Jira issue in a done status, matched by name because its snapshot predates status ids"},
 			{jiraRenamed, "a Jira issue whose done status was renamed, matched by id"},
-			{closeParked, "an entity whose only close row is parked — nothing will drive it"},
 			{closeDone, "an entity whose close row is done — the close it carried did not land"},
+			{closeCancelled, "an entity whose only close row is cancelled — it holds no key"},
 		} {
 			if !ids[want.id] {
 				t.Errorf("%s is missing; its entity row is stranded active and the checker would not count it", want.why)
@@ -1086,8 +1091,9 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{noSnapshot, "an entity with no stored snapshot"},
 			{jiraLive, "a Jira issue in a live status"},
 			{alreadyClosed, "an entity already closed"},
-			{closePending, "an entity with a terminating transition pending"},
-			{owedProcessing, "an entity with a close obligation processing"},
+			{closeReady, "an entity with a terminating transition ready"},
+			{owedLeased, "an entity with a close obligation leased"},
+			{closeParked, "an entity with a parked close obligation — it still holds the entity's key, and is the alarm itself"},
 			{freshlyPolled, "an entity polled within the grace"},
 		} {
 			if ids[skip.id] {

@@ -154,7 +154,9 @@ housekeeping.
 
 - `tf_entity_terminal_active{org_id}` — active entities carrying a terminal
   snapshot, unpolled for over fifteen minutes, with no terminating close
-  pending in the event queue. The fifteen minutes is a lag allowance: a lost
+  ready, leased or parked in the event queue. A parked close still holds the
+  entity: it is on the parked-events panel for an operator to redrive, and
+  counting it here as well would report one stuck close twice. The fifteen minutes is a lag allowance: a lost
   close is re-owed by the poll one cycle later, so a fresh divergence is not
   yet a violation. What outlives it is an entity nothing polls any more — a
   repo the org stopped tracking, a Jira project removed from settings — with

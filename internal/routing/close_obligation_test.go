@@ -116,8 +116,8 @@ func TestCloseObligation_TerminatingCloseFails_RequeuesThenClosesOnRetry(t *test
 		t.Fatalf("drainEventQueue: %v", err)
 	}
 	status, attempts, lastErr := mergedQueueRow(t, database)
-	if status != domain.QueuedEventStatusPending || attempts != 1 {
-		t.Errorf("row after a failed entity close = (%s, attempts %d), want (pending, 1) — the close is owed, not done", status, attempts)
+	if status != domain.QueuedEventStatusReady || attempts != 1 {
+		t.Errorf("row after a failed entity close = (%s, attempts %d), want (ready, 1) — the close is owed, not done", status, attempts)
 	}
 	if lastErr == "" {
 		t.Error("last_error is empty; a requeued row must record why the close did not land")
@@ -127,6 +127,7 @@ func TestCloseObligation_TerminatingCloseFails_RequeuesThenClosesOnRetry(t *test
 	}
 
 	// The store recovers and the replay finishes the job.
+	ripenQueue(t, database)
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue after recovery: %v", err)
 	}
@@ -179,8 +180,8 @@ func TestCloseObligation_TerminatingCloseIsAllOrNothing(t *testing.T) {
 	if n := activeTaskCount(t, database, entity.ID); n != 2 {
 		t.Fatalf("active tasks after the failed close = %d, want both — a terminating close lands whole or not at all", n)
 	}
-	if status, attempts, _ := mergedQueueRow(t, database); status != domain.QueuedEventStatusPending || attempts != 1 {
-		t.Errorf("row = (%s, attempts %d), want (pending, 1)", status, attempts)
+	if status, attempts, _ := mergedQueueRow(t, database); status != domain.QueuedEventStatusReady || attempts != 1 {
+		t.Errorf("row = (%s, attempts %d), want (ready, 1)", status, attempts)
 	}
 	if got := entityState(t, database, entity.ID); got != "active" {
 		t.Errorf("entity state = %q, want active — closing it would drop the replay at the closed-entity gate", got)
@@ -191,6 +192,7 @@ func TestCloseObligation_TerminatingCloseIsAllOrNothing(t *testing.T) {
 		}
 	}
 
+	ripenQueue(t, database)
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue after recovery: %v", err)
 	}
@@ -213,7 +215,7 @@ func TestCloseObligation_TerminatingCloseIsAllOrNothing(t *testing.T) {
 func mergedQueueRow(t *testing.T, database *sql.DB) (status string, attempts int, lastErr string) {
 	t.Helper()
 	if err := database.QueryRow(`
-		SELECT q.status, q.attempts, COALESCE(q.last_error, '')
+		SELECT q.status, q.attempt, COALESCE(q.last_error, '')
 		FROM event_queue q JOIN events e ON e.id = q.event_id
 		WHERE e.event_type = ?`, domain.EventGitHubPRMerged).
 		Scan(&status, &attempts, &lastErr); err != nil {

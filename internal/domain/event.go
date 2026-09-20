@@ -195,11 +195,16 @@ func EntityTerminatingEventTypes() []string {
 
 // EntityCloseSettlingEventTypes is the set of queue rows whose settlement
 // decides an entity's fate: the terminating transitions and the poll's close
-// obligation. While one of these is unsettled for an entity — pending or
-// processing — the entity's terminal snapshot is owed a close and no second
-// obligation is minted; the checker likewise excludes such an entity from
-// its violation count. A parked row does not count as unsettled: nothing
-// will drive it, so the next cycle owes a fresh obligation.
+// obligation. While one of these is unsettled for an entity — ready, leased
+// or parked in the event queue, the same three statuses under which the
+// queue's uniqueness index reserves the obligation's key — the entity's
+// terminal snapshot is owed a close and no second obligation is minted; the
+// checker likewise excludes such an entity from its violation count. A
+// parked obligation still holds the entity's key, so the tracker mints no
+// replacement and the checker does not count the entity; the parked row
+// itself is the alarm, on the parked panel. An operator redrives it, and
+// the router closes the entity or declines the close as stale if the entity
+// has moved.
 func EntityCloseSettlingEventTypes() []string {
 	return append(EntityTerminatingEventTypes(), EventSystemEntityCloseOwed)
 }

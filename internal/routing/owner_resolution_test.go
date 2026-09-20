@@ -139,6 +139,7 @@ func identityQueueRouter(database *sql.DB, spawner Delegator) *Router {
 		st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, st.TeamGitHubGroups, spawner,
 		noopScorer{}, websocket.NewHub())
 	r.SetEventQueue(st.EventQueue)
+	r.SetExecutorID(testExecutorID, 1)
 	return r
 }
 
@@ -426,7 +427,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 				t.Fatalf("drainEventQueue: %v", err)
 			}
 			status, attempts, lastErr := queueRow(t, database)
-			if status != domain.QueuedEventStatusPending {
+			if status != domain.QueuedEventStatusReady {
 				t.Errorf("row after the failed read = %q, want pending — an unresolvable owner must not consume the event", status)
 			}
 			if attempts != 1 {
@@ -441,6 +442,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 
 			// The store recovers and the retry routes the event to the team the
 			// healthy ladder names.
+			ripenQueue(t, database)
 			if err := r.drainEventQueue(context.Background()); err != nil {
 				t.Fatalf("drainEventQueue after recovery: %v", err)
 			}
@@ -547,8 +549,8 @@ func TestOwnerResolution_TransientIdentityFailure_WatcherDoesNotCaptureOwnership
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue: %v", err)
 	}
-	if status, _, lastErr := queueRow(t, database); status != domain.QueuedEventStatusPending || lastErr == "" {
-		t.Errorf("row after the failed identity read = (%s, last_error %q), want (pending, non-empty)", status, lastErr)
+	if status, _, lastErr := queueRow(t, database); status != domain.QueuedEventStatusReady || lastErr == "" {
+		t.Errorf("row after the failed identity read = (%s, last_error %q), want (ready, non-empty)", status, lastErr)
 	}
 	if n := len(activeTasksOfType(t, database, entityID, domain.EventGitHubPRCICheckFailed)); n != 0 {
 		t.Fatalf("tasks after the failed identity read = %d, want 0 — an unreadable author is not an external one", n)
@@ -559,6 +561,7 @@ func TestOwnerResolution_TransientIdentityFailure_WatcherDoesNotCaptureOwnership
 
 	// The store recovers: the PR belongs to the author's team, and the watcher
 	// — which never had a claim on it — has neither run nor owner.
+	ripenQueue(t, database)
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue after recovery: %v", err)
 	}

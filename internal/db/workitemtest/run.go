@@ -1,6 +1,7 @@
 package workitemtest
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -13,10 +14,48 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 )
 
-// Run is the whole conformance suite. Every subtest builds its own world
-// through mk, so a dialect's isolation story (a fresh in-memory database, a
-// truncated container) is the factory's business and not the suite's.
+// Run is the whole conformance suite over the fixture tables. Every subtest
+// builds its own world through mk, so a dialect's isolation story (a fresh
+// in-memory database, a truncated container) is the factory's business and
+// not the suite's.
+//
+// The subtests that read and write only the shared block are the same
+// functions RunTable runs over a production table; the rest write the
+// fixture's payload, freeze its frozen_col, need a SingleTx closure with a
+// domain write, or need several orgs, and so exist here alone.
 func Run(t *testing.T, mk Factory) {
+	fixture := func(t *testing.T, policy workitem.Policy) *env {
+		return setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: policy})
+	}
+	runShared(t, fixture)
+	t.Run("ExpiryWhileWaitingForRowLock", func(t *testing.T) { testExpiryUnderRowLock(t, mk) })
+	t.Run("ExpiryInsideSingleTxClosure", func(t *testing.T) { testExpiryInsideClosure(t, mk) })
+	t.Run("ExpiryInsideDeferPredicate", func(t *testing.T) { testExpiryInsideDeferPredicate(t, mk) })
+	t.Run("SingleTxLockOrderingWithCancel", func(t *testing.T) { testLockOrderingWithCancel(t, mk) })
+	t.Run("AdmitUnderRowLock", func(t *testing.T) { testAdmitUnderRowLock(t, mk) })
+	t.Run("UniqueForever", func(t *testing.T) { testUniqueForever(t, mk) })
+	t.Run("UniqueNone", func(t *testing.T) { testUniqueNone(t, mk) })
+	t.Run("Backoff", func(t *testing.T) { testBackoff(t) })
+	t.Run("Fairness", func(t *testing.T) { testFairness(t, mk) })
+	t.Run("FrozenColumns", func(t *testing.T) { testFrozenColumns(t, mk) })
+	t.Run("FixtureIndexPresence", func(t *testing.T) { testFixtureIndexPresence(t, mk) })
+}
+
+// RunTable is the table-agnostic half of the suite, run against an adopting
+// table as production declares it: its Kind's strategy and uniqueness mode
+// decide which completion verb and which uniqueness subtest run, and its own
+// columns come from the factory's hook. Timing is the suite's: every subtest
+// copies the Kind and swaps the policy for its own short lease and fast
+// backoff, exactly as the fixture subtests do, so production timing never
+// enters a test.
+func RunTable(t *testing.T, mk TableFactory) {
+	runShared(t, func(t *testing.T, policy workitem.Policy) *env {
+		return setupTable(t, mk, policy)
+	})
+}
+
+// runShared is the list both entry points run.
+func runShared(t *testing.T, mk envFactory) {
 	t.Run("AdmitClaimComplete", func(t *testing.T) { testAdmitClaimComplete(t, mk) })
 	t.Run("RequeueOutcomes", func(t *testing.T) { testRequeueOutcomes(t, mk) })
 	t.Run("PermanentParksRegardlessOfBudget", func(t *testing.T) { testPermanentParks(t, mk) })
@@ -26,46 +65,54 @@ func Run(t *testing.T, mk Factory) {
 	t.Run("TakeoverRejectsStragglerWrites", func(t *testing.T) { testTakeover(t, mk) })
 	t.Run("ExpiryWithNoSuccessorEndsAuthority", func(t *testing.T) { testExpiryNoSuccessor(t, mk) })
 	t.Run("Renewal", func(t *testing.T) { testRenewal(t, mk) })
-	t.Run("ExpiryWhileWaitingForRowLock", func(t *testing.T) { testExpiryUnderRowLock(t, mk) })
-	t.Run("ExpiryInsideSingleTxClosure", func(t *testing.T) { testExpiryInsideClosure(t, mk) })
-	t.Run("ExpiryInsideDeferPredicate", func(t *testing.T) { testExpiryInsideDeferPredicate(t, mk) })
-	t.Run("SingleTxLockOrderingWithCancel", func(t *testing.T) { testLockOrderingWithCancel(t, mk) })
 	t.Run("HolderObservesCancelAtNextOperation", func(t *testing.T) { testHolderObservesCancel(t, mk) })
 	t.Run("CancelOfDeferredReadyItem", func(t *testing.T) { testCancelDeferred(t, mk) })
-	t.Run("UniqueWhileUnsettled", func(t *testing.T) { testUniqueWhileUnsettled(t, mk) })
-	t.Run("AdmitUnderRowLock", func(t *testing.T) { testAdmitUnderRowLock(t, mk) })
-	t.Run("UniqueForever", func(t *testing.T) { testUniqueForever(t, mk) })
-	t.Run("UniqueNone", func(t *testing.T) { testUniqueNone(t, mk) })
+	t.Run("Uniqueness", func(t *testing.T) { testUniquenessByMode(t, mk) })
 	t.Run("Defer", func(t *testing.T) { testDefer(t, mk) })
-	t.Run("Backoff", func(t *testing.T) { testBackoff(t) })
-	t.Run("Fairness", func(t *testing.T) { testFairness(t, mk) })
 	t.Run("ClaimBatch", func(t *testing.T) { testClaimBatch(t, mk) })
 	t.Run("ClaimRoundIsAllOrNothing", func(t *testing.T) { testClaimRoundIsAllOrNothing(t, mk) })
-	t.Run("FrozenColumns", func(t *testing.T) { testFrozenColumns(t, mk) })
 	t.Run("Measure", func(t *testing.T) { testMeasure(t, mk) })
 	t.Run("IndexPresence", func(t *testing.T) { testIndexPresence(t, mk) })
 }
 
-func testAdmitClaimComplete(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 3, Lease: time.Minute}})
-	id := e.admit("k1", "initial", 7)
+// complete finishes a leased row through the kind's own strategy: Complete
+// with a no-op closure for SingleTx, MarkDone for FencedReplay.
+func (e *env) complete(r workitem.Receipt) error {
+	if e.kind.Strategy == workitem.FencedReplay {
+		return workitem.MarkDone(e.ctx, e.conn, e.kind, r)
+	}
+	return workitem.Complete(e.ctx, e.conn, e.kind, r, func(*sql.Tx) error { return nil })
+}
 
-	r := e.claimOne("worker-a", 9)
+func testAdmitClaimComplete(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 3, Lease: time.Minute})
+	id := e.admit("k1")
+
+	res := e.claim(workitem.Owner{ID: "worker-a", Epoch: 9}, 1)
+	if len(res.Claimed) != 1 {
+		t.Fatalf("claimed %d receipts, want 1", len(res.Claimed))
+	}
+	r := res.Claimed[0]
 	if r.ItemID != id || r.OrgID != e.org {
 		t.Fatalf("receipt addresses %d/%s, want %d/%s", r.ItemID, r.OrgID, id, e.org)
 	}
 	if r.Attempt != 1 || r.LeaseGeneration != 1 {
 		t.Fatalf("receipt attempt=%d generation=%d, want 1/1", r.Attempt, r.LeaseGeneration)
 	}
-	if r.UniqueKey != "k1" {
-		t.Fatalf("receipt unique key = %q, want k1", r.UniqueKey)
+	if r.UniqueKey != e.key("k1") {
+		t.Fatalf("receipt unique key = %q, want %q", r.UniqueKey, e.key("k1"))
 	}
 	if r.LeaseExpiresAt.IsZero() {
 		t.Fatal("receipt carries no lease expiry")
 	}
+	// A first acquisition of a ready row is not a reclaim, on the receipt or
+	// in the count.
+	if r.Reclaimed || r.PreviousOwner != "" || res.Reclaimed != 0 {
+		t.Fatalf("fresh claim reported a reclaim: receipt=%v/%q result=%d", r.Reclaimed, r.PreviousOwner, res.Reclaimed)
+	}
 
 	row := e.row(id)
-	if got := asString(row["status"]); got != "leased" {
+	if got := asString(row["status"]); got != workitem.StatusLeased {
 		t.Fatalf("status = %q, want leased", got)
 	}
 	if got := asString(row["lease_owner"]); got != "worker-a" {
@@ -75,18 +122,15 @@ func testAdmitClaimComplete(t *testing.T, mk Factory) {
 		t.Fatalf("lease_epoch = %d, want 9", got)
 	}
 
-	if err := workitem.Complete(e.ctx, e.conn, e.kind, r, e.writePayload(id, "completed")); err != nil {
-		t.Fatalf("Complete: %v", err)
+	if err := e.complete(r); err != nil {
+		t.Fatalf("complete: %v", err)
 	}
 	row = e.row(id)
-	if got := asString(row["status"]); got != "done" {
+	if got := asString(row["status"]); got != workitem.StatusDone {
 		t.Fatalf("status = %q, want done", got)
 	}
 	if got := asString(row["last_outcome"]); got != "done" {
 		t.Fatalf("last_outcome = %q, want done", got)
-	}
-	if got := asString(row["payload"]); got != "completed" {
-		t.Fatalf("payload = %q, want the closure's write", got)
 	}
 	if row["done_at"] == nil {
 		t.Error("done_at is NULL on a completed row")
@@ -94,20 +138,24 @@ func testAdmitClaimComplete(t *testing.T, mk Factory) {
 	e.requireLeaseCleared(id)
 }
 
-func testRequeueOutcomes(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
+func testRequeueOutcomes(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: time.Minute})
 	for _, outcome := range []workitem.Outcome{
 		workitem.OutcomeTransient, workitem.OutcomeDependencyDown,
 		workitem.OutcomePoisonSuspected, workitem.OutcomeDeadline,
 	} {
-		id := e.admit(string(outcome), "p", 0)
+		id := e.admit(string(outcome))
 		r := e.claimOne("worker-a", 1)
 		cause := fmt.Errorf("upstream said no (%s)", outcome)
-		if err := workitem.Requeue(e.ctx, e.conn, e.kind, r, outcome, cause); err != nil {
+		parked, err := workitem.Requeue(e.ctx, e.conn, e.kind, r, outcome, cause)
+		if err != nil {
 			t.Fatalf("Requeue %s: %v", outcome, err)
 		}
+		if parked {
+			t.Fatalf("%s: Requeue reported parked with budget left", outcome)
+		}
 		row := e.row(id)
-		if got := asString(row["status"]); got != "ready" {
+		if got := asString(row["status"]); got != workitem.StatusReady {
 			t.Fatalf("%s: status = %q, want ready", outcome, got)
 		}
 		if got := asString(row["last_outcome"]); got != string(outcome) {
@@ -127,23 +175,27 @@ func testRequeueOutcomes(t *testing.T, mk Factory) {
 
 	// An outcome outside the vocabulary is refused rather than stored: the
 	// typed value is what parking reasons and metrics key on.
-	id := e.admit("bogus", "p", 0)
+	id := e.admit("bogus")
 	r := e.claimOne("worker-a", 1)
-	if err := workitem.Requeue(e.ctx, e.conn, e.kind, r, workitem.Outcome("whatever"), nil); err == nil {
+	if _, err := workitem.Requeue(e.ctx, e.conn, e.kind, r, workitem.Outcome("whatever"), nil); err == nil {
 		t.Error("Requeue accepted an unknown outcome")
 	}
-	e.requireStatus(id, "leased")
+	e.requireStatus(id, workitem.StatusLeased)
 }
 
-func testPermanentParks(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 9, Lease: time.Minute}})
-	id := e.admit("perm", "p", 0)
+func testPermanentParks(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 9, Lease: time.Minute})
+	id := e.admit("perm")
 	r := e.claimOne("worker-a", 1)
-	if err := workitem.Requeue(e.ctx, e.conn, e.kind, r, workitem.OutcomePermanent, errors.New("rejected")); err != nil {
+	parked, err := workitem.Requeue(e.ctx, e.conn, e.kind, r, workitem.OutcomePermanent, errors.New("rejected"))
+	if err != nil {
 		t.Fatalf("Requeue permanent: %v", err)
 	}
+	if !parked {
+		t.Fatal("Requeue permanent reported the row returned to ready")
+	}
 	row := e.row(id)
-	if got := asString(row["status"]); got != "parked" {
+	if got := asString(row["status"]); got != workitem.StatusParked {
 		t.Fatalf("status = %q, want parked with 8 attempts left", got)
 	}
 	if got := asString(row["last_outcome"]); got != "permanent" {
@@ -152,22 +204,19 @@ func testPermanentParks(t *testing.T, mk Factory) {
 	e.requireLeaseCleared(id)
 }
 
-func testBudgetExhaustion(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{
-		unique: workitem.UniqueWhileUnsettled,
-		policy: workitem.Policy{MaxAttempts: 2, Lease: shortLease, Backoff: fastBackoff},
-	})
+func testBudgetExhaustion(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 2, Lease: shortLease, Backoff: fastBackoff})
 
 	// A requeue that leaves budget returns the row to ready; the claim that
 	// spends the last attempt leases it normally. The park happens only when
 	// that last attempt dies without a terminal write — at claim time, by the
 	// next claimer, with no requeue involved.
-	id := e.admit("budget", "p", 0)
+	id := e.admit("budget")
 	r := e.claimOne("worker-a", 1)
-	if err := workitem.Requeue(e.ctx, e.conn, e.kind, r, workitem.OutcomeTransient, errors.New("blip")); err != nil {
-		t.Fatalf("Requeue: %v", err)
+	if parked, err := workitem.Requeue(e.ctx, e.conn, e.kind, r, workitem.OutcomeTransient, errors.New("blip")); err != nil || parked {
+		t.Fatalf("Requeue: parked=%v err=%v, want ready", parked, err)
 	}
-	e.requireStatus(id, "ready")
+	e.requireStatus(id, workitem.StatusReady)
 
 	time.Sleep(10 * time.Millisecond) // let the 1ms backoff ripen
 	r2 := e.claimOne("worker-a", 1)
@@ -181,7 +230,7 @@ func testBudgetExhaustion(t *testing.T, mk Factory) {
 		t.Fatalf("reclaim of a spent row: claimed=%d parked=%d, want 0/1", len(res.Claimed), res.Parked)
 	}
 	row := e.row(id)
-	if got := asString(row["status"]); got != "parked" {
+	if got := asString(row["status"]); got != workitem.StatusParked {
 		t.Fatalf("status = %q, want parked", got)
 	}
 	if got := asString(row["last_outcome"]); got != "transient" {
@@ -191,8 +240,8 @@ func testBudgetExhaustion(t *testing.T, mk Factory) {
 
 	// A row that never recorded an outcome at all parks under the fallback
 	// reason, which is the only thing there is to say about it.
-	e3 := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 1, Lease: shortLease}})
-	id3 := e3.admit("never-reported", "p", 0)
+	e3 := mk(t, workitem.Policy{MaxAttempts: 1, Lease: shortLease})
+	id3 := e3.admit("never-reported")
 	e3.claimOne("worker-a", 1)
 	e3.expireLease()
 	if res := e3.claim(workitem.Owner{ID: "worker-b", Epoch: 1}, 1); res.Parked != 1 {
@@ -203,40 +252,47 @@ func testBudgetExhaustion(t *testing.T, mk Factory) {
 	}
 
 	// A requeue arriving while the row is already at its budget parks there
-	// instead, which is the other half of the same rule.
-	e2 := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 1, Lease: time.Minute}})
-	id2 := e2.admit("spent", "p", 0)
+	// instead, which is the other half of the same rule — and says so.
+	e2 := mk(t, workitem.Policy{MaxAttempts: 1, Lease: time.Minute})
+	id2 := e2.admit("spent")
 	r3 := e2.claimOne("worker-a", 1)
-	if err := workitem.Requeue(e2.ctx, e2.conn, e2.kind, r3, workitem.OutcomeTransient, errors.New("blip")); err != nil {
+	parked, err := workitem.Requeue(e2.ctx, e2.conn, e2.kind, r3, workitem.OutcomeTransient, errors.New("blip"))
+	if err != nil {
 		t.Fatalf("Requeue at budget: %v", err)
 	}
-	e2.requireStatus(id2, "parked")
+	if !parked {
+		t.Fatal("Requeue at budget reported the row returned to ready")
+	}
+	e2.requireStatus(id2, workitem.StatusParked)
 }
 
-func testStrategyIsEnforced(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, strategy: workitem.SingleTx, policy: workitem.Policy{Lease: time.Minute}})
-	id := e.admit("strategy", "p", 0)
+// testStrategyIsEnforced pins that the declaration is load-bearing: the other
+// strategy's completion verb refuses the kind, and its own completes it.
+func testStrategyIsEnforced(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{Lease: time.Minute})
+	id := e.admit("strategy")
 	r := e.claimOne("worker-a", 1)
 
-	if err := workitem.MarkDone(e.ctx, e.conn, e.kind, r); err == nil {
+	single := e.withKind(func(k *workitem.Kind) { k.Strategy = workitem.SingleTx })
+	fenced := e.withKind(func(k *workitem.Kind) { k.Strategy = workitem.FencedReplay })
+	if err := workitem.MarkDone(single.ctx, single.conn, single.kind, r); err == nil {
 		t.Error("MarkDone accepted a SingleTx kind")
 	}
-	fenced := e.withKind(func(k *workitem.Kind) { k.Strategy = workitem.FencedReplay })
 	if err := workitem.Complete(fenced.ctx, fenced.conn, fenced.kind, r, func(*sql.Tx) error { return nil }); err == nil {
 		t.Error("Complete accepted a FencedReplay kind")
 	}
-	e.requireStatus(id, "leased")
+	e.requireStatus(id, workitem.StatusLeased)
 
-	if err := workitem.MarkDone(fenced.ctx, fenced.conn, fenced.kind, r); err != nil {
-		t.Fatalf("MarkDone on a FencedReplay kind: %v", err)
+	if err := e.complete(r); err != nil {
+		t.Fatalf("completion through the declared %s strategy: %v", e.kind.Strategy, err)
 	}
-	e.requireStatus(id, "done")
+	e.requireStatus(id, workitem.StatusDone)
 	e.requireLeaseCleared(id)
 }
 
-func testSameOwnerReclaim(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: shortLease}})
-	id := e.admit("same-owner", "p", 0)
+func testSameOwnerReclaim(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: shortLease})
+	id := e.admit("same-owner")
 	first := e.claimOne("worker-a", 3)
 	e.expireLease()
 
@@ -249,37 +305,58 @@ func testSameOwnerReclaim(t *testing.T, mk Factory) {
 	if second.Attempt != first.Attempt+1 {
 		t.Fatalf("reclaim attempt = %d, want %d", second.Attempt, first.Attempt+1)
 	}
+	if !second.Reclaimed || second.PreviousOwner != "worker-a" {
+		t.Fatalf("same-owner reclaim receipt: reclaimed=%v previous=%q, want true/worker-a", second.Reclaimed, second.PreviousOwner)
+	}
 	e.assertStragglerLoses(first, "same-owner reclaim")
-	e.requireStatus(id, "leased")
+	e.requireStatus(id, workitem.StatusLeased)
 }
 
-func testTakeover(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: shortLease}})
-	e.admit("takeover", "p", 1)
-	e.admit("bystander", "p", 2)
+func testTakeover(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: shortLease})
+	e.admit("takeover")
+	e.admit("bystander")
 
 	straggler := e.claimOne("worker-a", 1)
 	e.expireLease()
-	successor := e.claimOne("worker-b", 1)
+	res := e.claim(workitem.Owner{ID: "worker-b", Epoch: 1}, 1)
+	if len(res.Claimed) != 1 {
+		t.Fatalf("successor claimed %d rows, want 1", len(res.Claimed))
+	}
+	successor := res.Claimed[0]
 	if successor.ItemID != straggler.ItemID {
 		t.Fatalf("successor claimed row %d, want the abandoned %d", successor.ItemID, straggler.ItemID)
 	}
+	// A takeover is exactly one reclaim, reported on the receipt with the
+	// holder it was taken from and counted once on the result.
+	if !successor.Reclaimed || successor.PreviousOwner != "worker-a" {
+		t.Fatalf("takeover receipt: reclaimed=%v previous=%q, want true/worker-a", successor.Reclaimed, successor.PreviousOwner)
+	}
+	if res.Reclaimed != 1 {
+		t.Fatalf("takeover result reported %d reclaims, want 1", res.Reclaimed)
+	}
 	e.assertStragglerLoses(straggler, "takeover by another owner")
+
+	// The bystander, never leased before, is a plain claim.
+	fresh := e.claim(workitem.Owner{ID: "worker-b", Epoch: 1}, 1)
+	if len(fresh.Claimed) != 1 || fresh.Claimed[0].Reclaimed || fresh.Reclaimed != 0 {
+		t.Fatalf("fresh claim after a takeover reported a reclaim: %+v", fresh)
+	}
 }
 
-func testExpiryNoSuccessor(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: shortLease}})
-	e.admit("lapsed", "p", 1)
+func testExpiryNoSuccessor(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: shortLease})
+	e.admit("lapsed")
 	r := e.claimOne("worker-a", 1)
 	e.expireLease()
 	// Nobody has taken over. Expiry alone ends authority.
 	e.assertStragglerLoses(r, "expiry with no successor")
 }
 
-func testRenewal(t *testing.T, mk Factory) {
+func testRenewal(t *testing.T, mk envFactory) {
 	const lease = 2 * time.Second
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: lease}})
-	id := e.admit("renew", "p", 0)
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: lease})
+	id := e.admit("renew")
 	r := e.claimOne("worker-a", 1)
 
 	// A second row, claimed straight after the renewal, is the yardstick: a
@@ -288,7 +365,7 @@ func testRenewal(t *testing.T, mk Factory) {
 	// against it rather than against a window around the old expiry keeps the
 	// assertion entirely on database time and tight enough that a wrong formula
 	// has nowhere to hide.
-	e.admit("yardstick", "p", 0)
+	e.admit("yardstick")
 
 	const elapsed = 400 * time.Millisecond
 	time.Sleep(elapsed)
@@ -309,10 +386,10 @@ func testRenewal(t *testing.T, mk Factory) {
 	if !renewed.LeaseExpiresAt.After(r.LeaseExpiresAt) {
 		t.Fatalf("renewal left expiry at %s, no later than the original %s", renewed.LeaseExpiresAt, r.LeaseExpiresAt)
 	}
-	e.requireStatus(id, "leased")
+	e.requireStatus(id, workitem.StatusLeased)
 
-	short := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: shortLease}})
-	short.admit("late-renew", "p", 0)
+	short := mk(t, workitem.Policy{MaxAttempts: 5, Lease: shortLease})
+	short.admit("late-renew")
 	lr := short.claimOne("worker-a", 1)
 	short.expireLease()
 	if _, err := workitem.RenewLease(short.ctx, short.conn, short.kind, lr); !errors.Is(err, workitem.ErrLeaseLost) {
@@ -320,11 +397,11 @@ func testRenewal(t *testing.T, mk Factory) {
 	}
 }
 
-func testClaimBatch(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
+func testClaimBatch(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: time.Minute})
 	var ids []int64
 	for i := 0; i < 5; i++ {
-		ids = append(ids, e.admit(fmt.Sprintf("batch-%d", i), "p", i))
+		ids = append(ids, e.admit(fmt.Sprintf("batch-%d", i)))
 	}
 	for _, id := range ids[:2] {
 		if err := workitem.RequestCancel(e.ctx, e.conn, e.kind, e.org, id, "operator", "not needed"); err != nil {
@@ -345,7 +422,7 @@ func testClaimBatch(t *testing.T, mk Factory) {
 		}
 	}
 	for _, id := range ids[:2] {
-		e.requireStatus(id, "cancelled")
+		e.requireStatus(id, workitem.StatusCancelled)
 		e.requireLeaseCleared(id)
 	}
 }
@@ -355,41 +432,48 @@ func testClaimBatch(t *testing.T, mk Factory) {
 // rolls its predecessors' leases back, and a receipt for a rolled-back lease is
 // worse than no receipt — its holder would act on authority the database never
 // granted, and every later operation would answer ErrLeaseLost.
-func testClaimRoundIsAllOrNothing(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
-	cancelled := e.admit("settles", "p", 0)
-	first := e.admit("leases-first", "p", 0)
-	breaks := e.admit("breaks-the-round", "p", 0)
-	untouched := e.admit("never-picked", "p", 0)
+func testClaimRoundIsAllOrNothing(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: time.Minute})
+	cancelled := e.admit("settles")
+	first := e.admit("leases-first")
+	breaks := e.admit("breaks-the-round")
+	untouched := e.admit("never-picked")
 	if err := workitem.RequestCancel(e.ctx, e.conn, e.kind, e.org, cancelled, "operator", "not needed"); err != nil {
 		t.Fatalf("RequestCancel: %v", err)
 	}
 
 	// One live lease per owner: a constraint the round's SECOND lease violates.
 	// It makes the mid-round failure deterministic on both dialects without a
-	// trigger, and it fails on exactly the statement the package issues.
+	// trigger, and it fails on exactly the statement the package issues. It is
+	// dropped again on the way out because a production table outlives the
+	// subtest on Postgres, where the harness truncates rather than recreates.
 	e.exec("CREATE UNIQUE INDEX one_lease_per_owner ON " + e.kind.Table + " (lease_owner) WHERE status = 'leased'")
+	t.Cleanup(func() {
+		if _, err := e.conn.ExecContext(context.Background(), "DROP INDEX IF EXISTS one_lease_per_owner"); err != nil {
+			t.Errorf("drop one_lease_per_owner: %v", err)
+		}
+	})
 
 	before := e.table()
 	res, err := workitem.Claim(e.ctx, e.conn, e.kind, workitem.Owner{ID: "worker-a", Epoch: 1}, e.org, 3)
 	if err == nil {
 		t.Fatal("Claim succeeded despite a constraint its second lease violates")
 	}
-	if len(res.Claimed) != 0 || res.Cancelled != 0 || res.Parked != 0 {
-		t.Fatalf("a rolled-back round reported %d receipts, %d cancelled, %d parked; want nothing",
-			len(res.Claimed), res.Cancelled, res.Parked)
+	if len(res.Claimed) != 0 || res.Cancelled != 0 || res.Parked != 0 || res.Reclaimed != 0 {
+		t.Fatalf("a rolled-back round reported %d receipts, %d cancelled, %d parked, %d reclaimed; want nothing",
+			len(res.Claimed), res.Cancelled, res.Parked, res.Reclaimed)
 	}
 	if after := e.table(); !reflect.DeepEqual(before, after) {
 		t.Errorf("a rolled-back round left changes behind\nbefore: %v\nafter:  %v", before, after)
 	}
 	for _, id := range []int64{cancelled, first, breaks, untouched} {
-		e.requireStatus(id, "ready")
+		e.requireStatus(id, workitem.StatusReady)
 	}
 }
 
 func testFrozenColumns(t *testing.T, mk Factory) {
 	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: shortLease}})
-	id := e.admit("frozen", "p", 41)
+	id := e.admitWith("frozen", "p", 41)
 	r := e.claimOne("worker-a", 1)
 	if got := asInt(r.Frozen["frozen_col"]); got != 41 {
 		t.Fatalf("frozen_col = %v, want 41", r.Frozen["frozen_col"])
@@ -409,8 +493,8 @@ func testFrozenColumns(t *testing.T, mk Factory) {
 	}
 }
 
-func testMeasure(t *testing.T, mk Factory) {
-	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
+func testMeasure(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: time.Minute})
 
 	empty, err := workitem.Measure(e.ctx, e.conn, e.kind, e.org)
 	if err != nil {
@@ -420,10 +504,10 @@ func testMeasure(t *testing.T, mk Factory) {
 		t.Fatalf("empty table measured %+v, want all zeros", empty)
 	}
 
-	ripe := e.admit("ripe", "p", 0)
-	e.admit("leased", "p", 0)
-	parked := e.admit("parked", "p", 0)
-	deferredID := e.admit("deferred", "p", 0)
+	ripe := e.admit("ripe")
+	e.admit("leased")
+	parked := e.admit("parked")
+	deferredID := e.admit("deferred")
 
 	leasedReceipt := e.claim(workitem.Owner{ID: "worker-a", Epoch: 1}, 4)
 	// Claim took all four; put three of them back into the shapes we want to
@@ -432,7 +516,7 @@ func testMeasure(t *testing.T, mk Factory) {
 	for _, r := range leasedReceipt.Claimed {
 		byID[r.ItemID] = r
 	}
-	if err := workitem.Requeue(e.ctx, e.conn, e.kind, byID[ripe], workitem.OutcomeTransient, errors.New("x")); err != nil {
+	if _, err := workitem.Requeue(e.ctx, e.conn, e.kind, byID[ripe], workitem.OutcomeTransient, errors.New("x")); err != nil {
 		t.Fatalf("requeue ripe: %v", err)
 	}
 	e.exec("UPDATE "+e.kind.Table+" SET next_attempt_at = NULL WHERE id = ?", ripe)
@@ -476,7 +560,17 @@ func testMeasure(t *testing.T, mk Factory) {
 	}
 }
 
-func testIndexPresence(t *testing.T, mk Factory) {
+// testIndexPresence asserts every index the kind's IndexDDL renders is on the
+// table under test, by name: the three claim arms, the parked list, and the
+// uniqueness index when the kind declares one.
+func testIndexPresence(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{Lease: time.Minute})
+	e.requireIndexes(e.kind)
+}
+
+// testFixtureIndexPresence is the same check over both fixture tables, each
+// in its own uniqueness mode.
+func testFixtureIndexPresence(t *testing.T, mk Factory) {
 	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{Lease: time.Minute}})
 	for _, spec := range []struct {
 		table  string
@@ -485,16 +579,24 @@ func testIndexPresence(t *testing.T, mk Factory) {
 		{FixtureTable, workitem.UniqueWhileUnsettled},
 		{FixtureForeverTable, workitem.UniqueForever},
 	} {
-		k := workitem.Kind{Table: spec.table, Dialect: e.dialect, Unique: spec.unique, Strategy: workitem.SingleTx}
-		want := workitem.IndexNames(k)
-		if len(want) != 4 {
-			t.Fatalf("%s: IndexNames returned %d names, want the three claim indexes plus uniqueness", spec.table, len(want))
-		}
-		have := e.indexNames(spec.table)
-		for _, name := range want {
-			if !have[name] {
-				t.Errorf("%s: missing index %s (present: %v)", spec.table, name, have)
-			}
+		e.requireIndexes(workitem.Kind{Table: spec.table, Dialect: e.dialect, Unique: spec.unique, Strategy: workitem.SingleTx})
+	}
+}
+
+func (e *env) requireIndexes(k workitem.Kind) {
+	e.t.Helper()
+	want := workitem.IndexNames(k)
+	wantCount := 4
+	if k.Unique != workitem.UniqueNone {
+		wantCount = 5
+	}
+	if len(want) != wantCount {
+		e.t.Fatalf("%s: IndexNames returned %d names, want %d (three claim arms, the parked list, and uniqueness when declared)", k.Table, len(want), wantCount)
+	}
+	have := e.indexNames(k.Table)
+	for _, name := range want {
+		if !have[name] {
+			e.t.Errorf("%s: missing index %s (present: %v)", k.Table, name, have)
 		}
 	}
 }
@@ -527,8 +629,13 @@ func (e *env) indexNames(table string) map[string]bool {
 }
 
 // writePayload is the domain write a SingleTx closure performs, so a test can
-// assert that fn's effects landed or rolled back with the disposition.
+// assert that fn's effects landed or rolled back with the disposition. Over a
+// production table there is no payload column, so the closure does nothing:
+// the assertions that read it back only run on the fixture.
 func (e *env) writePayload(id int64, value string) func(*sql.Tx) error {
+	if !e.fixture {
+		return func(*sql.Tx) error { return nil }
+	}
 	return func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(e.ctx, e.q("UPDATE "+e.kind.Table+" SET payload = ? WHERE id = ?"), value, id)
 		return err

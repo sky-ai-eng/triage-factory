@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -13,6 +14,13 @@ import (
 // audit row and the queue row in one transaction, so a recorded event is
 // always routable and a queued event always has its audit row.
 //
+// The queue's lifecycle is the shared work-item contract
+// (internal/db/workitem), declared for this table by workkinds.EventQueue:
+// Claim leases rows and hands back receipts, RenewLease / MarkDone / Requeue
+// are the holder's fenced writes, and Redrive is the operator control over a
+// parked row. The store adds nothing to that lifecycle; it composes the
+// package's verbs with this kind's own columns and its admission rules.
+//
 // This is a system-service store: the ingestor (poller/tracker) and the
 // drain worker run as background goroutines with no per-user identity, so
 // the Postgres impl wires against the admin pool (BYPASSRLS) and keeps
@@ -20,21 +28,16 @@ import (
 // onto its single connection and asserts the local sentinel org on the
 // org-scoped methods.
 //
-// Method shapes mirror PendingFiringsStore (the sibling DB-backed queue):
-// a claim/drain loop with a periodic sweeper. The key difference is the
-// claim — ClaimNext reserves a row (pending -> processing) rather than a
-// non-mutating pop, so a future multi-worker drainer is safe via
-// FOR UPDATE SKIP LOCKED in Postgres.
-// StaleProcessingReclaimReason is the last_error every backend stamps on a
-// row RequeueStaleProcessing reclaims. Shared so the two impls can't drift
-// and an operator reading the column sees one string for one cause.
-const StaleProcessingReclaimReason = "stale processing reclaim"
+// The queue's bookkeeping writes — the holder verbs, the prune, the
+// redrive — are exempt from the returned-row rule: each is fire-and-forget
+// from its caller's side, and the next claim reads the state, not this
+// caller.
 
-// MaxFailedEventsRequeueIDs bounds how many queue ids one requeue call may
-// name. A selection is made from a page, and a page is bounded by the list
-// contract, so this only rejects a hand-rolled request — and rejecting it
-// keeps the statement's bind list bounded.
-const MaxFailedEventsRequeueIDs = 500
+// MaxRedriveIDs bounds how many queue ids one redrive call may name. A
+// selection is made from a page, and a page is bounded by the list contract,
+// so this only rejects a hand-rolled request — and rejecting it keeps the
+// per-id statement loop bounded.
+const MaxRedriveIDs = 500
 
 // TraceparentAt reads the i-th entry of a batch's parallel traceparent
 // slice, returning "" (stored as NULL) when the slice doesn't cover i.
@@ -48,9 +51,52 @@ func TraceparentAt(traceparents []string, i int) string {
 	return ""
 }
 
+// EventQueueRowCols is the kind's own columns for one admission, shared by
+// both dialects so the two produce identical rows. An untraced producer and
+// an entity-less event store NULL rather than an empty string, so "no
+// context to link" and "no entity" are each one value in the column, and a
+// nil entityPollSeq is the ingest path's NULL.
+func EventQueueRowCols(eventID string, evt domain.Event, traceparent string, entityPollSeq *int64) map[string]any {
+	var entityID any
+	if evt.EntityID != nil && *evt.EntityID != "" {
+		entityID = *evt.EntityID
+	}
+	var tp any
+	if traceparent != "" {
+		tp = traceparent
+	}
+	var pollSeq any
+	if entityPollSeq != nil {
+		pollSeq = *entityPollSeq
+	}
+	return map[string]any{
+		"event_id":        eventID,
+		"entity_id":       entityID,
+		"event_type":      evt.EventType,
+		"traceparent":     tp,
+		"entity_poll_seq": pollSeq,
+	}
+}
+
+// ClaimedEvent is one leased queue row: the receipt that authorizes its
+// terminal write, and the row as claimed.
+type ClaimedEvent struct {
+	Receipt workitem.Receipt
+	Event   domain.QueuedEvent
+}
+
+// EventQueueClaim is one Claim call's work. Cancelled, Parked and Reclaimed
+// are workitem.ClaimResult's counts, passed through for the worker's log.
+type EventQueueClaim struct {
+	Events    []ClaimedEvent
+	Cancelled int
+	Parked    int
+	Reclaimed int
+}
+
 type EventQueueStore interface {
 	// Enqueue atomically records the event (the durable audit row) AND
-	// its queue row in a single transaction, returning the generated
+	// admits its queue row in a single transaction, returning the generated
 	// event id. Empty evt.ID is generated as a v4. The caller (ingestor)
 	// stamps the returned id onto the event before publishing it to the
 	// ephemeral bus for cosmetic subscribers, so the WS feed and the
@@ -58,6 +104,9 @@ type EventQueueStore interface {
 	//
 	// Only entity-bearing github:/jira: events are enqueued — the
 	// router's domain. System events stay bus-only and are never queued.
+	// The row is admitted ready with the kind's budget and no unique key:
+	// the snapshot diff is an ordinary event's dedup, and the queue must
+	// never suppress a transition.
 	//
 	// traceparent is the producer's W3C trace context, stamped onto the
 	// queue row so the drain worker can link an event's routing back to
@@ -100,186 +149,117 @@ type EventQueueStore interface {
 	// at, which a terminating close reads back to refuse any other. Rows
 	// enqueued through Enqueue carry NULL there.
 	//
-	// A domain.EventSystemEntityCloseOwed event in the batch is enqueued
-	// only if the entity has no unsettled row in
-	// domain.EntityCloseSettlingEventTypes — checked on this same
-	// transaction, so two cycles cannot both find the queue empty. A skipped
-	// obligation writes neither an events row nor a queue row and leaves ""
-	// in its eventIDs slot; the caller forwards nothing for it.
+	// A domain.EventSystemEntityCloseOwed event in the batch is admitted
+	// under the entity's close-obligation key, and only if the entity has
+	// no unsettled row in domain.EntityCloseSettlingEventTypes — checked on
+	// this same transaction, so two cycles cannot both find the queue
+	// empty. A skipped obligation writes neither an events row nor a queue
+	// row and leaves "" in its eventIDs slot; the caller forwards nothing
+	// for it. Should the admission nevertheless report a duplicate past
+	// that check, the batch errors and rolls back whole: the entity row
+	// lock the CAS took serializes every writer of that key, so the case
+	// cannot arise, and an invariant that cannot fail must fail loudly
+	// rather than leave an orphan events row.
 	//
 	// System-scoped like the CAS it subsumes: the tracker is a background
 	// job with no JWT claims, and org_id is bound by argument.
 	EnqueueBatchWithSnapshotCAS(ctx context.Context, orgID, entityID, snapshotJSON string, expectedPollSeq int64, events []domain.Event, traceparents []string) (ok bool, eventIDs []string, err error)
 
-	// ClaimNext claims the globally-oldest pending row (FIFO by id),
-	// flips it pending -> processing, stamps claimed_at + executor_id +
-	// boot_epoch, increments attempts, and returns it — traceparent
-	// included, since the claim is where a consumer picks the producer's
-	// trace context back up. Returns (nil, nil) when the queue is empty.
-	//
-	// executorID/bootEpoch (the caller's persistent instance-registry
-	// identity) are stamped atomically in the same claim statement,
-	// mirroring ConversationQueueStore.ClaimNextConversation — so ResetProcessing can later
-	// self-sweep only this instance's own orphaned rows.
+	// Claim leases up to n rows across every org (org "" to workitem.Claim)
+	// and reads each leased row's own columns by id in one statement after
+	// the claim. Events is in claim order. Rows the claim settled instead
+	// (a cancellation request, a spent budget) are counted, not returned.
 	//
 	// Cross-org by design: the drain worker is a single system service
-	// draining every tenant in insertion order, so this is one of the
-	// explicitly org-wide system reads (the claimed row carries its
-	// org_id, which scopes all downstream processing). Postgres uses
-	// FOR UPDATE SKIP LOCKED so a future multi-worker drainer never
-	// double-claims; SQLite is single-worker.
-	ClaimNext(ctx context.Context, executorID string, bootEpoch int64) (*domain.QueuedEvent, error)
+	// draining every tenant, interleaved by the kind's fairness policy, so
+	// this is one of the explicitly org-wide system reads — the claimed row
+	// carries its org_id, which scopes all downstream processing.
+	//
+	// A non-nil error still returns the events of rounds that committed
+	// before it, as workitem.Claim does with their receipts: they are real
+	// leases, and the caller disposes of them before it escalates.
+	Claim(ctx context.Context, owner workitem.Owner, n int) (EventQueueClaim, error)
 
-	// MarkDone marks a claimed row done (processed_at = now). Guarded by
-	// status = 'processing' so a stale call can't flip an already-terminal
-	// row. org_id is bound as defense in depth.
-	//
-	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping.
-	// The worker that flips the row is done with it; the next claim reads the
-	// state, not this caller.
-	MarkDone(ctx context.Context, orgID string, id int64) error
+	// RenewLease pushes the lease out to fresh database time plus the kind's
+	// lease, and is the point where a pending cancellation request is
+	// observed and settled. It is the worker's fence check before routing:
+	// workitem.ErrLeaseLost means the row's next holder owns it, and
+	// workitem.ErrCancelled means the row was settled by this call.
+	RenewLease(ctx context.Context, r workitem.Receipt) (workitem.Receipt, error)
 
-	// MarkFailed marks a claimed row failed with lastErr — the poison-pill
-	// terminal, reserved for a row that has exhausted its retry budget.
-	// Failed rows are retained (not pruned) for debugging. Guarded by
-	// status = 'processing'.
-	//
-	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping,
-	// same as MarkDone.
-	MarkFailed(ctx context.Context, orgID string, id int64, lastErr string) error
+	// MarkDone is the terminal flip after the routing side effects
+	// committed in their own transactions, each behind its own replay
+	// fence. A stale receipt matches nothing (workitem.ErrLeaseLost) and
+	// writes nothing.
+	MarkDone(ctx context.Context, r workitem.Receipt) error
 
-	// Requeue returns a claimed row to pending after a transient failure,
-	// recording lastErr for visibility. attempts is left as-is (the claim
-	// already counted it), so the worker can fail the row out once
-	// attempts crosses its retry budget. Guarded by status = 'processing'.
-	//
-	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping,
-	// same as MarkDone.
-	Requeue(ctx context.Context, orgID string, id int64, lastErr string) error
+	// Requeue records a failed attempt under a typed outcome: the row
+	// returns to ready with a backoff retry time, or parks when the outcome
+	// is permanent or the budget is spent. parked reports which. A stale
+	// receipt matches nothing and writes nothing.
+	Requeue(ctx context.Context, r workitem.Receipt, outcome workitem.Outcome, cause error) (parked bool, err error)
 
-	// ResetProcessing flips 'processing' rows back to pending and returns
-	// the count reset. Called once at boot: under the single worker a
-	// 'processing' row at startup means a crash mid-process, so it must be
-	// replayed.
-	//
-	// Ownership-scoped, mirroring ConversationQueueStore.ResetProcessingConversations:
-	// only rows stamped executor_id = executorID AND boot_epoch < bootEpoch
-	// are reset — this instance's own orphans from a strictly earlier boot
-	// of itself. A live sibling's still-processing row (a different
-	// executor_id) is never touched, which is what makes a rolling deploy /
-	// two-replica boot safe.
-	//
-	// It is the fast path, not the whole recovery story: an owner that never
-	// comes back (scale-down, replacement under a fresh instance id) never
-	// runs it, which is what RequeueStaleProcessing backstops.
-	ResetProcessing(ctx context.Context, executorID string, bootEpoch int64) (int, error)
+	// PruneSettled deletes done and cancelled rows with done_at before the
+	// cutoff, across orgs. Parked rows are never pruned: a parked row is the
+	// only record of routing work that will not run on its own.
+	PruneSettled(ctx context.Context, before time.Time) (int, error)
 
-	// RequeueStaleProcessing is the staleness backstop under ResetProcessing:
-	// every 'processing' row claimed longer than olderThan ago returns to
-	// pending with last_error = StaleProcessingReclaimReason, whoever owned
-	// it. Ownership-scoping alone strands a row forever when the owner is
-	// replaced rather than rebooted — the brain lease moves to another pod
-	// and the original instance id never returns — and an unrouted event is
-	// unrecoverable, since the tracker's snapshot-diff is forward-only and
-	// will not re-emit it.
-	//
-	// attempts is deliberately untouched (the claim already counted this
-	// try), so a row that keeps reaching this sweep still parks 'failed'
-	// once its budget runs out rather than looping forever. claimed_at and
-	// the ownership stamp are cleared: a pending row has no owner.
-	//
-	// olderThan is a duration rather than an absolute cutoff so the Postgres
-	// impl can subtract it from the DB's own clock — claimed_at is stamped
-	// with now() server-side, and a caller's wall clock in a multi-pod
-	// deployment is not the same clock.
-	//
-	// Reclaiming a genuinely live row is safe by construction: a routing
-	// unit is milliseconds-to-seconds of DB writes with no inline LLM call,
-	// so any sane threshold is orders of magnitude past one, and the double
-	// route a reclaim could produce is absorbed by the same fences that make
-	// a replay safe (the tasks dedup index, the (event, trigger) replay
-	// fence, the one-active index). Loss is unrecoverable, duplication is
-	// fenced — so this errs toward reclaiming.
-	RequeueStaleProcessing(ctx context.Context, olderThan time.Duration) (int, error)
-
-	// PruneDone deletes 'done' rows whose processed_at < before across all
-	// orgs, returning the count removed. The retention sweep — done rows
-	// are kept for debuggability but bounded by age; failed rows are never
-	// pruned here. Cross-org system sweep.
-	//
-	// The 'done'-only predicate is load-bearing, not incidental: a parked
-	// row is the sole record of routing work that was dropped and will not
-	// re-emit, so it has to survive until an operator has seen it and
-	// decided (ListFailedEvents / RequeueFailedEvents below). Age-pruning
-	// failed rows would delete the evidence and the recovery path together.
-	PruneDone(ctx context.Context, before time.Time) (int, error)
-
-	// ListFailedEvents returns one page of the org's parked 'failed' rows —
-	// the operator surface over routing work the queue dropped — newest
-	// first, plus the unpaged total of parked rows. id DESC is a total order
-	// (id is monotonic per insert), so the pages partition the result set.
+	// ListParked returns one page of the org's parked rows — the operator
+	// surface over routing work the queue stopped on — newest first, plus
+	// the unpaged total of parked rows. id DESC is a total order (id is
+	// monotonic per insert), so the pages partition the result set.
 	//
 	// The entity fields are outer-joined for display and read empty when the
 	// row carries no entity or the entity row is gone. That is deliberate: a
 	// queue row can outlive its entity by a cascade, and omitting it would
-	// hide a dropped event precisely because something unusual happened to it.
+	// hide a parked event precisely because something unusual happened to it.
 	//
 	// Org-scoped by argument on the admin pool, like every other method here
 	// — the store is system-service wired, so the org-admin predicate in the
 	// handler is the authorization, not RLS.
-	ListFailedEvents(ctx context.Context, orgID string, opts ListOpts) ([]domain.FailedEvent, int, error)
+	ListParked(ctx context.Context, orgID string, opts ListOpts) ([]domain.ParkedEvent, int, error)
 
-	// GetFailedEvent returns one parked row by queue id, or (nil, nil) when
-	// the org has no 'failed' row with that id. Same projection as
-	// ListFailedEvents — a single read answers with the list's row shape, not
-	// a bespoke one.
-	GetFailedEvent(ctx context.Context, orgID string, id int64) (*domain.FailedEvent, error)
+	// GetParked returns one parked row by queue id, or (nil, nil) when the
+	// org has no parked row with that id. Same projection as ListParked — a
+	// single read answers with the list's row shape, not a bespoke one.
+	GetParked(ctx context.Context, orgID string, id int64) (*domain.ParkedEvent, error)
 
-	// RequeueFailedEvents returns the named parked rows to 'pending' and
-	// grants each a fresh attempt budget (attempts = 0). The fresh budget is
-	// the point of an operator requeue: the rows parked because their budget
-	// ran out, so retaining the spent count would re-park every one of them
-	// on its first attempt. last_error is deliberately left in place until
-	// the next attempt overwrites it, so the reason a row parked survives
-	// long enough to correlate with what happens next; a row that parks
-	// again carries its new reason, not the stale one. claimed_at, the
-	// ownership stamp and processed_at are cleared — a pending row has no
-	// owner and has not been processed.
-	//
-	// Only rows currently 'failed' flip. An id that is pending, processing,
-	// done, belongs to another org, or does not exist at all is a silent
-	// no-op counted out of the return, so the count is "rows this call
-	// actually moved" and a second requeue of the same ids reports 0. That
-	// count is the operator's answer, so a backend that cannot report it
-	// errors rather than guessing. On error the count is what was confirmed
-	// moved before the failure — a backend that splits a large id set into
-	// several statements commits as it goes — so it is not necessarily 0.
+	// Redrive returns the named parked rows to ready with a fresh budget
+	// through workitem.Redrive, one call per id, and reports how many moved.
+	// An id that is not parked, belongs to another org, or does not exist is
+	// counted out (workitem.ErrNotParked), never an error — a stale
+	// selection is the normal case for a table an operator reads and then
+	// acts on. On error the count is what moved before the failure.
 	//
 	// Replay safety is the same argument every other retry in this queue
-	// rests on: a requeued row re-enters the identical at-least-once path,
+	// rests on: a redriven row re-enters the identical at-least-once path,
 	// where the tasks dedup index, the (triggering_event_id, trigger_id)
 	// replay fence and the one-active-run index collapse anything that
-	// already landed. Double-requeue, or requeue of an event whose task
-	// arrived by other means, converges to no-ops.
-	RequeueFailedEvents(ctx context.Context, orgID string, ids []int64) (int, error)
+	// already landed. That is also why this kind has no Supersede control:
+	// a supersede records a replacement row, and a parked event has none —
+	// one whose work has since been done another way is redriven and
+	// converges to a no-op through its fences.
+	Redrive(ctx context.Context, orgID string, ids []int64, by string) (int, error)
 
 	// ListForEntity returns every queue row for an entity in id order
 	// regardless of status.
 	//
 	// No production caller today: production reads the queue by status (the
-	// drain) and by key (dedup). Kept as the entity-shaped observation read
-	// — "everything queued against this entity, in any status" — that the
-	// router, tracker, ingest and delegate tests assert through, and that a
-	// debug view of a pull request's queue would ask.
+	// claim) and by key (the close obligation's dedup). Kept as the
+	// entity-shaped observation read — "everything queued against this
+	// entity, in any status" — that the router, tracker, ingest and delegate
+	// tests assert through, and that a debug view of a pull request's queue
+	// would ask.
 	ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.QueuedEvent, error)
 
-	// UnsettledCloseExistsSystem reports whether the entity has a pending or
-	// processing row in domain.EntityCloseSettlingEventTypes — a terminating
-	// transition or a close obligation the router has not yet consumed. The
-	// tracker asks before it appends an obligation to a refresh's batch, so
-	// a cycle that would only re-owe an already-owed close records nothing
-	// and, with nothing else to record, leaves the entity's version where
-	// the close in flight was judged. EnqueueBatchWithSnapshotCAS re-checks
-	// on its own transaction; this read is advisory and never the dedup.
+	// UnsettledCloseExistsSystem reports whether the entity has a ready,
+	// leased or parked row in domain.EntityCloseSettlingEventTypes — a
+	// terminating transition or a close obligation the router has not
+	// settled, where a parked one still holds the entity's key. The tracker
+	// asks before it appends an obligation to a refresh's batch, so a cycle
+	// that would only re-owe an already-owed close records nothing and, with
+	// nothing else to record, leaves the entity's version where the close
+	// in flight was judged. EnqueueBatchWithSnapshotCAS re-checks on its own
+	// transaction; this read is advisory and never the dedup.
 	UnsettledCloseExistsSystem(ctx context.Context, orgID, entityID string) (bool, error)
 }

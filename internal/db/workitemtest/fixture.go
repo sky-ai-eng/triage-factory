@@ -6,7 +6,9 @@
 //
 // One test file per dialect invokes Run, the same shape as every dbtest
 // conformance pair. The fixture tables are test-only and must never appear in
-// a production schema.
+// a production schema. RunTable is the table-agnostic half of the same suite,
+// which each adopting production table invokes against itself with the Kind
+// it declares.
 package workitemtest
 
 import (
@@ -25,6 +27,13 @@ import (
 // to scope rows to. It is called once per subtest: SQLite opens a fresh
 // in-memory database, Postgres resets the shared container and mints a new org.
 type Factory func(t *testing.T) (conn *sql.DB, dialect workitem.Dialect, orgID string)
+
+// TableFactory hands RunTable a connection, the adopting Kind as production
+// declares it, an org to scope rows to, and a way to mint valid values for
+// the kind's own columns: cols(i) returns the column map for the i-th
+// admission in a subtest, and may insert whatever parent rows a foreign key
+// needs (an events row, an entity row).
+type TableFactory func(t *testing.T) (conn *sql.DB, kind workitem.Kind, orgID string, cols func(i int) map[string]any)
 
 // The two fixture tables, one per uniqueness mode with an index. UniqueNone
 // needs no table of its own: it declares no index, so it is exercised on the
@@ -125,8 +134,8 @@ func createFixtureTable(dialect workitem.Dialect, table string) string {
 	)`
 }
 
-// env is one subtest's world: a connection, the org its rows live in, and the
-// Kind under test.
+// env is one subtest's world: a connection, the org its rows live in, the
+// Kind under test, and the hook that mints each admission's own columns.
 type env struct {
 	t       *testing.T
 	ctx     context.Context
@@ -134,9 +143,23 @@ type env struct {
 	dialect workitem.Dialect
 	org     string
 	kind    workitem.Kind
+	// cols mints the kind's own columns for the i-th admission; admissions
+	// counts them. The fixture's hook hands back payload/frozen_col; a
+	// production table's hook inserts whatever its foreign keys need.
+	cols       func(i int) map[string]any
+	admissions int
+	// fixture marks the suite's own tables, whose payload column the
+	// domain-write closures target. A production table has no such column,
+	// so those closures are no-ops there.
+	fixture bool
 }
 
-// opts is what a subtest varies about its Kind.
+// envFactory builds one subtest's env under a policy. Run and RunTable each
+// supply one, which is how a subtest that reads and writes only the shared
+// block runs unchanged over the fixture and over a production table.
+type envFactory func(t *testing.T, policy workitem.Policy) *env
+
+// opts is what a subtest varies about its fixture Kind.
 type opts struct {
 	table    string
 	unique   workitem.UniqueMode
@@ -156,7 +179,7 @@ var fastBackoff = workitem.BackoffSpec{Base: time.Millisecond, Cap: time.Millise
 func setup(t *testing.T, mk Factory, o opts) *env {
 	t.Helper()
 	conn, dialect, org := mk(t)
-	e := &env{t: t, ctx: t.Context(), conn: conn, dialect: dialect, org: org}
+	e := &env{t: t, ctx: t.Context(), conn: conn, dialect: dialect, org: org, fixture: true}
 	for _, stmt := range FixtureDDL(dialect) {
 		if _, err := conn.ExecContext(e.ctx, stmt); err != nil {
 			t.Fatalf("fixture DDL %q: %v", firstLine(stmt), err)
@@ -177,10 +200,41 @@ func setup(t *testing.T, mk Factory, o opts) *env {
 		Columns:  []string{"payload", "frozen_col"},
 		Frozen:   []string{"frozen_col"},
 	}
+	e.cols = func(int) map[string]any { return map[string]any{"payload": "p", "frozen_col": 0} }
 	if err := e.kind.Validate(); err != nil {
 		t.Fatalf("fixture kind: %v", err)
 	}
 	return e
+}
+
+// setupTable is setup for a production table: the factory's Kind, with the
+// policy swapped for the subtest's so production timing never enters a test.
+// Uniqueness mode, strategy and columns stay as declared, because those are
+// what the subtest is conforming.
+func setupTable(t *testing.T, mk TableFactory, policy workitem.Policy) *env {
+	t.Helper()
+	conn, kind, org, cols := mk(t)
+	kind.Policy = policy
+	if err := kind.Validate(); err != nil {
+		t.Fatalf("table kind: %v", err)
+	}
+	return &env{t: t, ctx: t.Context(), conn: conn, dialect: kind.Dialect, org: org, kind: kind, cols: cols}
+}
+
+// nextCols mints the next admission's columns through the hook.
+func (e *env) nextCols() map[string]any {
+	cols := e.cols(e.admissions)
+	e.admissions++
+	return cols
+}
+
+// key is the unique key an admission carries: the name as given, or none for
+// a kind that dedups nothing and would refuse one.
+func (e *env) key(name string) string {
+	if e.kind.Unique == workitem.UniqueNone {
+		return ""
+	}
+	return name
 }
 
 // withKind returns the same world seen through a differently-declared Kind,
@@ -228,33 +282,36 @@ func (e *env) exec(query string, args ...any) {
 	}
 }
 
-// admit inserts a ready row and fails the test on anything but a clean insert.
-func (e *env) admit(key, payload string, frozen int) int64 {
+// admit inserts a ready row under key, its own columns drawn from the hook,
+// and fails the test on anything but a clean insert.
+func (e *env) admit(key string) int64 {
 	e.t.Helper()
-	id, dup, err := workitem.Admit(e.ctx, e.conn, e.kind, e.org, key, map[string]any{
-		"payload": payload, "frozen_col": frozen,
-	})
-	if err != nil {
-		e.t.Fatalf("admit %q: %v", key, err)
-	}
-	if dup {
-		e.t.Fatalf("admit %q: deduplicated against an existing row", key)
-	}
-	return id
+	return e.admitCols(e.org, e.key(key), e.nextCols())
+}
+
+// admitWith is admit with the fixture's own columns chosen by the test, for
+// the assertions that read a payload back or freeze a specific value.
+func (e *env) admitWith(key, payload string, frozen int) int64 {
+	e.t.Helper()
+	e.admissions++
+	return e.admitCols(e.org, key, map[string]any{"payload": payload, "frozen_col": frozen})
 }
 
 // admitIn admits into an org other than the subtest's own, for the
 // cross-tenant assertions.
-func (e *env) admitIn(org, key, payload string, frozen int) int64 {
+func (e *env) admitIn(org, key string) int64 {
 	e.t.Helper()
-	id, dup, err := workitem.Admit(e.ctx, e.conn, e.kind, org, key, map[string]any{
-		"payload": payload, "frozen_col": frozen,
-	})
+	return e.admitCols(org, key, e.nextCols())
+}
+
+func (e *env) admitCols(org, key string, cols map[string]any) int64 {
+	e.t.Helper()
+	id, dup, err := workitem.Admit(e.ctx, e.conn, e.kind, org, key, cols)
 	if err != nil {
 		e.t.Fatalf("admit %q in %s: %v", key, org, err)
 	}
 	if dup {
-		e.t.Fatalf("admit %q in %s: deduplicated", key, org)
+		e.t.Fatalf("admit %q in %s: deduplicated against an existing row", key, org)
 	}
 	return id
 }

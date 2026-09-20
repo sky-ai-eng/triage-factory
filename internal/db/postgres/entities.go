@@ -217,7 +217,8 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 
 // ListActiveTerminalCandidatesSystem selects active entities whose stored
 // snapshot already reads terminal, unpolled for at least unpolledFor, with
-// no terminating close unsettled in the queue. Admin pool: the checker is a
+// no terminating close ready, leased or parked in the queue — a parked one
+// still holds the entity's key, and is the alarm itself. Admin pool: the checker is a
 // background job with no JWT claims. snapshot_json is jsonb, so `->>` yields
 // NULL for a missing key or an empty object — COALESCE makes those a plain
 // non-match rather than a NULL-propagating predicate, and the IS NOT NULL
@@ -262,7 +263,7 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		  AND NOT EXISTS (
 		    SELECT 1 FROM event_queue q
 		    WHERE q.org_id = entities.org_id AND q.entity_id = entities.id
-		      AND q.status IN ('pending', 'processing')
+		      AND q.status IN ('ready', 'leased', 'parked')
 		      AND q.event_type = ANY($3)
 		  )
 		  AND (

@@ -90,6 +90,17 @@ const (
 	UniqueWhileUnsettled
 )
 
+// Stored status values. The five are the whole lifecycle vocabulary; a
+// consumer that reads a row's status compares against these rather than
+// against a string of its own.
+const (
+	StatusReady     = "ready"
+	StatusLeased    = "leased"
+	StatusDone      = "done"
+	StatusParked    = "parked"
+	StatusCancelled = "cancelled"
+)
+
 // Outcome is the typed verdict on one attempt. It is what parking reasons and
 // metrics key on, so it is a closed vocabulary rather than free text.
 type Outcome string
@@ -317,6 +328,12 @@ type Receipt struct {
 	LeaseExpiresAt  time.Time
 	Attempt         int
 	UniqueKey       string
+	// Reclaimed is true when this acquisition took the row from an expired
+	// lease: the previous holder never wrote a terminal, so the unit is a
+	// replay of interrupted work. PreviousOwner names that holder for the
+	// log line; it is provenance, never a fence.
+	Reclaimed     bool
+	PreviousOwner string
 	// Frozen holds the kind's Frozen columns as read in the claim statement.
 	// They are fixed for this generation; the row may move underneath.
 	Frozen map[string]any
@@ -324,11 +341,14 @@ type Receipt struct {
 
 // ClaimResult is one Claim call's work. Claimed is in claim order — the pick's
 // own ordering, so a fairness-ordered claim hands back a fairness-ordered
-// batch. Settled rows yield no receipt and are counted instead.
+// batch. Settled rows yield no receipt and are counted instead. Reclaimed
+// counts the receipts in Claimed whose row was taken from an expired lease;
+// each such receipt also says so itself.
 type ClaimResult struct {
 	Claimed   []Receipt
 	Cancelled int
 	Parked    int
+	Reclaimed int
 }
 
 // Depths is the queue's shape right now, for a metrics reader. Ready counts

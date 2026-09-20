@@ -404,12 +404,13 @@ func (s closeTerminalOutageStore) CloseTerminalSystem(ctx context.Context, orgID
 	return s.EntityStore.CloseTerminalSystem(ctx, orgID, entityID, expected, closeTypes, closeReason, closeEventType, closingEventID)
 }
 
-// TestCloseOwed_FailedClose_ReplaysWholeAndParkedIsReissued pins the failure
-// posture. A close that fails leaves nothing half-done — both tasks open,
-// the entity active, no cancel intent — and the row replays; a row that
-// parks after its budget is re-owed by the next cycle, and the parked one
-// stays visible.
-func TestCloseOwed_FailedClose_ReplaysWholeAndParkedIsReissued(t *testing.T) {
+// TestCloseOwed_FailedClose_ReplaysWholeAndParkedHoldsTheKey pins the
+// failure posture. A close that fails leaves nothing half-done — both tasks
+// open, the entity active, no cancel intent — and the row replays; a row
+// that parks after its budget holds the entity's key, so the next cycle owes
+// nothing while it sits on the parked panel, and an operator's redrive is
+// what closes the entity.
+func TestCloseOwed_FailedClose_ReplaysWholeAndParkedHoldsTheKey(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
 	gh := newFakeGitHub(t, "MERGED")
@@ -428,8 +429,8 @@ func TestCloseOwed_FailedClose_ReplaysWholeAndParkedIsReissued(t *testing.T) {
 		t.Fatalf("drainEventQueue: %v", err)
 	}
 	owed := queueRowsOfType(t, database, entityID, domain.EventSystemEntityCloseOwed)
-	if owed[0].Status != domain.QueuedEventStatusPending || owed[0].Attempts != 1 {
-		t.Errorf("row after a failed close = (%s, attempts %d), want (pending, 1) — the close is owed, not done", owed[0].Status, owed[0].Attempts)
+	if owed[0].Status != domain.QueuedEventStatusReady || owed[0].Attempt != 1 {
+		t.Errorf("row after a failed close = (%s, attempt %d), want (ready, 1) — the close is owed, not done", owed[0].Status, owed[0].Attempt)
 	}
 	if got := entityState(t, database, entityID); got != "active" {
 		t.Errorf("entity state = %q, want active", got)
@@ -444,6 +445,7 @@ func TestCloseOwed_FailedClose_ReplaysWholeAndParkedIsReissued(t *testing.T) {
 	}
 
 	// The replay finishes the whole job.
+	ripenQueue(t, database)
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue after recovery: %v", err)
 	}
@@ -457,28 +459,53 @@ func TestCloseOwed_FailedClose_ReplaysWholeAndParkedIsReissued(t *testing.T) {
 	}
 
 	// The park: strand the entity again, let the obligation burn its budget,
-	// and watch the next cycle owe a fresh one beside the parked row.
+	// and watch the next cycle owe nothing while the parked row holds the key.
 	if _, err := database.Exec(`UPDATE entities SET state = 'active', closed_at = NULL WHERE id = ?`, entityID); err != nil {
 		t.Fatalf("re-strand the entity: %v", err)
 	}
 	pollGitHub(t, database, gh)
-	r.entities = closeTerminalOutageStore{EntityStore: sqlitestore.New(database).Entities, o: &outage{remaining: maxEventAttempts}}
-	for i := 0; i < maxEventAttempts; i++ {
+	budget := eventQueueKind.Policy.MaxAttempts
+	r.entities = closeTerminalOutageStore{EntityStore: sqlitestore.New(database).Entities, o: &outage{remaining: budget}}
+	for i := 0; i < budget; i++ {
+		ripenQueue(t, database)
 		if err := r.drainEventQueue(context.Background()); err != nil {
 			t.Fatalf("drainEventQueue attempt %d: %v", i+1, err)
 		}
 	}
 	owed = queueRowsOfType(t, database, entityID, domain.EventSystemEntityCloseOwed)
-	if len(owed) != 2 || owed[1].Status != domain.QueuedEventStatusFailed {
+	if len(owed) != 2 || owed[1].Status != domain.QueuedEventStatusParked {
 		t.Fatalf("obligation rows = %+v, want the first done and the second parked", owed)
+	}
+	if a, _, ok := r.checkOrgTerminalInvariant(context.Background(), runmode.LocalDefaultOrgID); !ok || a != 0 {
+		t.Errorf("checker counted %d stranded entities with a parked obligation, want 0 — the parked row is the alarm", a)
 	}
 	pollGitHub(t, database, gh)
 	owed = queueRowsOfType(t, database, entityID, domain.EventSystemEntityCloseOwed)
-	if len(owed) != 3 || owed[2].Status != domain.QueuedEventStatusPending {
-		t.Fatalf("obligation rows after the park = %d, want a fresh pending one beside the parked row", len(owed))
+	if len(owed) != 2 {
+		t.Fatalf("obligation rows after the park = %d, want no replacement while the parked row holds the key", len(owed))
 	}
-	if owed[1].Status != domain.QueuedEventStatusFailed {
-		t.Error("the parked row was disturbed; it must stay on the failed-events panel")
+	if owed[1].Status != domain.QueuedEventStatusParked {
+		t.Error("the parked row was disturbed; it must stay on the parked panel")
+	}
+
+	// The operator redrives it: the router closes the entity, and the next
+	// cycle owes nothing either.
+	if n, err := sqlitestore.New(database).EventQueue.Redrive(context.Background(), runmode.LocalDefaultOrgID, []int64{owed[1].ID}, "operator"); err != nil || n != 1 {
+		t.Fatalf("Redrive: n=%d err=%v", n, err)
+	}
+	if err := r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drainEventQueue after redrive: %v", err)
+	}
+	if got := entityState(t, database, entityID); got != "closed" {
+		t.Errorf("entity state after the redrive = %q, want closed", got)
+	}
+	owed = queueRowsOfType(t, database, entityID, domain.EventSystemEntityCloseOwed)
+	if len(owed) != 2 || owed[1].Status != domain.QueuedEventStatusDone {
+		t.Fatalf("obligation rows after the redrive = %+v, want the redriven row done", owed)
+	}
+	pollGitHub(t, database, gh)
+	if owed = queueRowsOfType(t, database, entityID, domain.EventSystemEntityCloseOwed); len(owed) != 2 {
+		t.Errorf("obligation rows after the close = %d, want no new obligation on a closed entity", len(owed))
 	}
 }
 

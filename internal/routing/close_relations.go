@@ -58,9 +58,11 @@ type closeRelation struct {
 	closes []string
 	// prepare runs once per firing, after target tasks are found to exist.
 	// ok=false skips the whole relation (the snapshot / identity gate); the
-	// returned context is threaded to keep. nil prepare = proceed with a nil
-	// context.
-	prepare func(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool)
+	// returned context is threaded to keep. A non-nil err is a store read
+	// the gate could not make — it joins the close phase's routing
+	// obligation, so the event replays rather than skipping the close for
+	// good. nil prepare = proceed with a nil context.
+	prepare func(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool, error)
 	// keep decides per task whether it actually closes (dedup-key narrowing,
 	// member-aware skip). nil keep = close every active task of a target type.
 	keep func(evt domain.Event, ctx closeContext, t domain.Task) bool
@@ -327,7 +329,12 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 		var cctx closeContext
 		if rel.prepare != nil {
 			var ok bool
-			if cctx, ok = rel.prepare(ctx, r, orgID, evt, entityID); !ok {
+			var err error
+			if cctx, ok, err = rel.prepare(ctx, r, orgID, evt, entityID); err != nil {
+				routerLog.Error("close: prepare failed", "on_event", evt.EventType, "entity_id", entityID, "error", err)
+				errs = append(errs, fmt.Errorf("prepare %s close: %w", evt.EventType, err))
+				continue
+			} else if !ok {
 				continue
 			}
 		}
@@ -431,16 +438,25 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 
 // prSnapshotForEntity loads + parses an entity's PR snapshot. The closes that
 // read the snapshot (CI green, review resolution) share it.
-func (r *Router) prSnapshotForEntity(ctx context.Context, orgID, entityID string) (*domain.PRSnapshot, bool) {
+//
+// A store error is err: the gate could not be evaluated, and the event
+// replays. A missing entity is ok=false — nothing to gate on, and a missing
+// entity is not transient. An unparsable snapshot is ok=false too, logged:
+// a corrupt column is not something a retry fixes.
+func (r *Router) prSnapshotForEntity(ctx context.Context, orgID, entityID string) (*domain.PRSnapshot, bool, error) {
 	entity, err := r.entities.GetSystem(ctx, orgID, entityID)
-	if err != nil || entity == nil {
-		return nil, false
+	if err != nil {
+		return nil, false, fmt.Errorf("load entity %s: %w", entityID, err)
+	}
+	if entity == nil {
+		return nil, false, nil
 	}
 	var snap domain.PRSnapshot
 	if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil {
-		return nil, false
+		routerLog.WarnContext(ctx, "close: entity snapshot is not a PR snapshot; skipping the gated close", "entity_id", entityID, "error", err)
+		return nil, false, nil
 	}
-	return &snap, true
+	return &snap, true, nil
 }
 
 // prepareCIPassed gates ci_check_failed closes on a fully-green snapshot: if
@@ -454,16 +470,16 @@ func (r *Router) prSnapshotForEntity(ctx context.Context, orgID, entityID string
 // the re-run may fail again. Once the suite completes, whichever pass event
 // lands last trips this gate, so the close arrives with the check that
 // actually recovered.
-func prepareCIPassed(ctx context.Context, r *Router, orgID string, _ domain.Event, entityID string) (closeContext, bool) {
-	snap, ok := r.prSnapshotForEntity(ctx, orgID, entityID)
-	if !ok {
-		return nil, false
+func prepareCIPassed(ctx context.Context, r *Router, orgID string, _ domain.Event, entityID string) (closeContext, bool, error) {
+	snap, ok, err := r.prSnapshotForEntity(ctx, orgID, entityID)
+	if err != nil || !ok {
+		return nil, false, err
 	}
 	switch domain.CIStatusFromCheckRuns(snap.CheckRuns) {
 	case "failure", "pending":
-		return nil, false
+		return nil, false, nil
 	}
-	return nil, true
+	return nil, true, nil
 }
 
 // reviewerFromMeta pulls the top-level "reviewer" field every typed review
@@ -480,12 +496,12 @@ func reviewerFromMeta(evt domain.Event) string {
 
 // prepareReviewerKey yields the submitting reviewer's per-user dedup key so
 // keepDedupKey closes only that reviewer's review_requested task.
-func prepareReviewerKey(_ context.Context, _ *Router, _ string, evt domain.Event, _ string) (closeContext, bool) {
+func prepareReviewerKey(_ context.Context, _ *Router, _ string, evt domain.Event, _ string) (closeContext, bool, error) {
 	reviewer := reviewerFromMeta(evt)
 	if reviewer == "" {
-		return nil, false
+		return nil, false, nil
 	}
-	return events.ReviewerDedupKeyUser(reviewer), true
+	return events.ReviewerDedupKeyUser(reviewer), true, nil
 }
 
 func keepDedupKey(_ domain.Event, ctx closeContext, t domain.Task) bool {
@@ -495,21 +511,21 @@ func keepDedupKey(_ domain.Event, ctx closeContext, t domain.Task) bool {
 
 // prepareReviewResolved gates review_changes_requested closes: the reviewer
 // must be identifiable AND no OTHER reviewer may still have changes outstanding.
-func prepareReviewResolved(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool) {
+func prepareReviewResolved(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool, error) {
 	reviewer := reviewerFromMeta(evt)
 	if reviewer == "" {
-		return nil, false
+		return nil, false, nil
 	}
-	snap, ok := r.prSnapshotForEntity(ctx, orgID, entityID)
-	if !ok {
-		return nil, false
+	snap, ok, err := r.prSnapshotForEntity(ctx, orgID, entityID)
+	if err != nil || !ok {
+		return nil, false, err
 	}
 	for _, rs := range snap.Reviews {
 		if rs.State == "CHANGES_REQUESTED" && rs.Author != reviewer {
-			return nil, false
+			return nil, false, nil
 		}
 	}
-	return nil, true
+	return nil, true, nil
 }
 
 // keepReviewRequestRemoved closes the review_requested task matching the
@@ -524,20 +540,21 @@ func keepReviewRequestRemoved(evt domain.Event, _ closeContext, t domain.Task) b
 // issue is still assigned to the local user (no accountId), skip the whole
 // close so a re-emit doesn't retire that user's own task.
 //
-// An unreadable assignee identity skips the relation rather than proceeding
-// with an empty team set: empty means "the new assignee is on none of our
-// teams," which retires every owned task on the issue. The close phase has no
-// error channel of its own yet — promoting it is its own ticket — so declining
-// to close is how this one refuses to act on an answer it doesn't have.
-func prepareJiraReassign(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool) {
+// An unreadable assignee identity is an error rather than an empty team set:
+// empty means "the new assignee is on none of our teams," which retires every
+// owned task on the issue. So are the settings and identity reads behind the
+// display-name fallback — a failed identity read that silently proceeded
+// would retire the local user's own task, which is the exact harm the
+// fallback exists to prevent. Unparsable metadata declines instead: a retry
+// does not fix the event's bytes.
+func prepareJiraReassign(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool, error) {
 	var meta events.JiraIssueAssignedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-		return nil, false
+		return nil, false, nil
 	}
 	assigneeTeams, err := r.assigneeTeams(ctx, orgID, evt)
 	if err != nil {
-		lifecycleLog.Error("jira reassign close: assignee team lookup failed, skipping the close", "entity_id", entityID, "error", err)
-		return nil, false
+		return nil, false, fmt.Errorf("resolve assignee teams for %s: %w", entityID, err)
 	}
 	newOwnerTeams := map[string]struct{}{}
 	for _, tid := range assigneeTeams {
@@ -546,17 +563,21 @@ func prepareJiraReassign(ctx context.Context, r *Router, orgID string, evt domai
 	if r.users != nil && meta.AssigneeAccountID == "" && meta.Assignee != "" {
 		var jiraHost string
 		if r.orgs != nil {
-			if orgSet, serr := r.orgs.GetSettingsSystem(ctx, orgID); serr == nil {
-				jiraHost = orgSet.JiraBaseURL
+			orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
+			if err != nil {
+				return nil, false, fmt.Errorf("read org settings: %w", err)
 			}
+			jiraHost = orgSet.JiraBaseURL
 		}
-		if _, localDisplayName, err := r.users.GetJiraIdentitySystem(ctx, runmode.LocalDefaultUserID, jiraHost); err == nil {
-			if localDisplayName != "" && strings.EqualFold(meta.Assignee, localDisplayName) {
-				return nil, false // still assigned to the local user — don't retire
-			}
+		_, localDisplayName, err := r.users.GetJiraIdentitySystem(ctx, runmode.LocalDefaultUserID, jiraHost)
+		if err != nil {
+			return nil, false, fmt.Errorf("read local jira identity: %w", err)
+		}
+		if localDisplayName != "" && strings.EqualFold(meta.Assignee, localDisplayName) {
+			return nil, false, nil // still assigned to the local user — don't retire
 		}
 	}
-	return newOwnerTeams, true
+	return newOwnerTeams, true, nil
 }
 
 // keepJiraReassign: the per-assignee assigned task survives only while still

@@ -27,13 +27,14 @@ func Measure(ctx context.Context, q DBTX, k Kind, orgID string) (Depths, error) 
 	// next pass settles it. Depth is about work waiting, and that row is waiting
 	// to be cancelled rather than run — neither bucket describes it, and a third
 	// is not in the contract.
-	ripe := "status = 'ready' AND (next_attempt_at IS NULL OR next_attempt_at <= " + now + ")"
-	deferred := "status = 'ready' AND next_attempt_at > " + now
+	ready := "status = " + quoteLiteral(StatusReady)
+	ripe := ready + " AND (next_attempt_at IS NULL OR next_attempt_at <= " + now + ")"
+	deferred := ready + " AND next_attempt_at > " + now
 
 	stmt := "SELECT " +
 		countIf(ripe) + ", " +
-		countIf("status = 'leased'") + ", " +
-		countIf("status = 'parked'") + ", " +
+		countIf("status = "+quoteLiteral(StatusLeased)) + ", " +
+		countIf("status = "+quoteLiteral(StatusParked)) + ", " +
 		countIf(deferred) + ", " +
 		k.ageSeconds(ripe) + ", " +
 		k.ageSeconds(deferred) +

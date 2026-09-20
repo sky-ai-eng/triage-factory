@@ -22,6 +22,11 @@ func IndexDDL(k Kind) []string {
 		// Claim's third arm: reclaiming expired leases.
 		"CREATE INDEX IF NOT EXISTS " + indexName(t, "leased_expiry") +
 			" ON " + t + " (lease_expires_at) WHERE status = 'leased'",
+		// The operator surface: every kind's parked list is a per-org scan of
+		// the parked rows newest first, and without this it is a scan of every
+		// terminal row the table retains.
+		"CREATE INDEX IF NOT EXISTS " + indexName(t, "parked") +
+			" ON " + t + " (org_id, id) WHERE status = 'parked'",
 	}
 	switch k.Unique {
 	case UniqueForever:
@@ -36,8 +41,12 @@ func IndexDDL(k Kind) []string {
 
 // unsettledStatusList is the statuses that still reserve a unique key under
 // UniqueWhileUnsettled. Parked is among them: parked work holds its key until
-// an operator redrives or supersedes it.
-const unsettledStatusList = "'ready','leased','parked'"
+// an operator redrives or supersedes it. claimableStatusList is the pair a
+// claim-time disposition may move.
+const (
+	unsettledStatusList = "'ready','leased','parked'"
+	claimableStatusList = "'ready','leased'"
+)
 
 // IndexNames is the names IndexDDL creates, in the same order. A conformance
 // suite asserts presence by name, and an adopting table's migration needs them
@@ -48,6 +57,7 @@ func IndexNames(k Kind) []string {
 		indexName(k.Table, "ready_next"),
 		indexName(k.Table, "ready_cancel"),
 		indexName(k.Table, "leased_expiry"),
+		indexName(k.Table, "parked"),
 	}
 	if k.Unique != UniqueNone {
 		out = append(out, uniqueIndexName(k.Table))

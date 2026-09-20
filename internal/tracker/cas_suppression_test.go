@@ -185,7 +185,7 @@ func TestRefreshGitHub_FailedCommitSuppressesTransitions(t *testing.T) {
 				t.Errorf("published event org = %q but its queue row committed under %q — the copy must name the tenant it was written under",
 					evts[0].OrgID, rows[0].OrgID)
 			}
-			if rows[0].Status != domain.QueuedEventStatusPending {
+			if rows[0].Status != domain.QueuedEventStatusReady {
 				t.Errorf("queue row status = %q, want pending", rows[0].Status)
 			}
 		})
@@ -231,7 +231,7 @@ func TestRefreshGitHub_CommittedEventsRouteWithoutTheBus(t *testing.T) {
 	if rows[0].EventType != domain.EventGitHubPRReadyForReview {
 		t.Errorf("queued event_type = %q, want %q", rows[0].EventType, domain.EventGitHubPRReadyForReview)
 	}
-	if rows[0].Status != domain.QueuedEventStatusPending {
+	if rows[0].Status != domain.QueuedEventStatusReady {
 		t.Errorf("queue row status = %q, want pending (waiting for the drain worker)", rows[0].Status)
 	}
 }

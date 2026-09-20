@@ -150,8 +150,8 @@ func newSQLiteEntitySeeder(conn *sql.DB) dbtest.EntitySeeder {
 				t.Fatalf("seed event %s on %s: %v", eventType, entityID, err)
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO event_queue (event_id, entity_id, event_type, status)
-				VALUES (?, ?, ?, ?)
+				INSERT INTO event_queue (event_id, entity_id, event_type, status, max_attempts, first_enqueued_at, created_at)
+				VALUES (?, ?, ?, ?, 5, strftime('%Y-%m-%d %H:%M:%f','now'), strftime('%Y-%m-%d %H:%M:%f','now'))
 			`, eventID, entityID, eventType, status); err != nil {
 				t.Fatalf("seed queue row %s (%s) on %s: %v", eventType, status, entityID, err)
 			}

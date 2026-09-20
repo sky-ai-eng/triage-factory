@@ -1628,11 +1628,13 @@ pass (2026-07-08). Reopening conditions noted per entry.
    `'draining'` — a milliseconds-scale claim whose redelivery is
    absorbed by the (event, trigger) fence and the one-active index,
    so any process may recover it and no reaper dependency exists).
-   `event_queue` is ownership-scoped **with a staleness backstop**:
-   the owner's boot reset is the fast path, and an unscoped 10-minute
-   sweep on the drain worker's floor scan covers the owner that is
-   *replaced* rather than rebooted (scale-down, a fresh instance id
-   after the lease moves). The original entry classified it
+   `event_queue` recovers by **lease expiry** under the durable-work
+   contract (`docs/for-agents/specs/durable-work/README.md`): a claim
+   leases a row for 60s, and a row whose holder died is claimable by
+   the next claim once that lease runs out, whoever the holder was —
+   no boot reset and no sweep, so an owner that is *replaced* rather
+   than rebooted (scale-down, a fresh instance id after the lease
+   moves) needs no path of its own. The original entry classified it
    ownership-scoped alone, on the assumption the owner always
    reboots; it does not, there is no reaper arm for this queue, and a
    routing claim is milliseconds-scale like a firing's — so the rows

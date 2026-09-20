@@ -13,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
@@ -125,7 +126,7 @@ func TestIngestor_RouterBoundEvent_DurablyEnqueuedAndPublished(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 queue row, got %d", len(rows))
 	}
-	if rows[0].Status != domain.QueuedEventStatusPending {
+	if rows[0].Status != domain.QueuedEventStatusReady {
 		t.Errorf("queue row status = %q, want pending", rows[0].Status)
 	}
 	if rows[0].EventID == "" {
@@ -210,32 +211,30 @@ func (q failingEnqueueQueue) Enqueue(context.Context, string, domain.Event, stri
 func (q failingEnqueueQueue) EnqueueBatchWithSnapshotCAS(context.Context, string, string, string, int64, []domain.Event, []string) (bool, []string, error) {
 	return false, nil, q.err
 }
-func (failingEnqueueQueue) ClaimNext(context.Context, string, int64) (*domain.QueuedEvent, error) {
-	return nil, nil
+func (failingEnqueueQueue) Claim(context.Context, workitem.Owner, int) (db.EventQueueClaim, error) {
+	return db.EventQueueClaim{}, nil
 }
-func (failingEnqueueQueue) MarkDone(context.Context, string, int64) error           { return nil }
-func (failingEnqueueQueue) MarkFailed(context.Context, string, int64, string) error { return nil }
-func (failingEnqueueQueue) Requeue(context.Context, string, int64, string) error    { return nil }
-func (failingEnqueueQueue) ResetProcessing(context.Context, string, int64) (int, error) {
-	return 0, nil
+func (failingEnqueueQueue) RenewLease(_ context.Context, r workitem.Receipt) (workitem.Receipt, error) {
+	return r, nil
 }
-func (failingEnqueueQueue) RequeueStaleProcessing(context.Context, time.Duration) (int, error) {
-	return 0, nil
+func (failingEnqueueQueue) MarkDone(context.Context, workitem.Receipt) error { return nil }
+func (failingEnqueueQueue) Requeue(context.Context, workitem.Receipt, workitem.Outcome, error) (bool, error) {
+	return false, nil
 }
-func (failingEnqueueQueue) PruneDone(context.Context, time.Time) (int, error) { return 0, nil }
+func (failingEnqueueQueue) PruneSettled(context.Context, time.Time) (int, error) { return 0, nil }
 func (failingEnqueueQueue) UnsettledCloseExistsSystem(context.Context, string, string) (bool, error) {
 	return false, nil
 }
 func (failingEnqueueQueue) ListForEntity(context.Context, string, string) ([]domain.QueuedEvent, error) {
 	return nil, nil
 }
-func (failingEnqueueQueue) ListFailedEvents(context.Context, string, db.ListOpts) ([]domain.FailedEvent, int, error) {
+func (failingEnqueueQueue) ListParked(context.Context, string, db.ListOpts) ([]domain.ParkedEvent, int, error) {
 	return nil, 0, nil
 }
-func (failingEnqueueQueue) GetFailedEvent(context.Context, string, int64) (*domain.FailedEvent, error) {
+func (failingEnqueueQueue) GetParked(context.Context, string, int64) (*domain.ParkedEvent, error) {
 	return nil, nil
 }
-func (failingEnqueueQueue) RequeueFailedEvents(context.Context, string, []int64) (int, error) {
+func (failingEnqueueQueue) Redrive(context.Context, string, []int64, string) (int, error) {
 	return 0, nil
 }
 

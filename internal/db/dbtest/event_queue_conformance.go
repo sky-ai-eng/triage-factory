@@ -2,11 +2,15 @@ package dbtest
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -26,12 +30,21 @@ type EventQueueSeeder struct {
 	// events-audit row FKs to it (and the queue row denormalizes it).
 	Entity func(t *testing.T) string
 
-	// BackdateClaim rewinds a claimed row's claimed_at by age, standing in
-	// for a claim made that long ago. Raw SQL because the store interface
-	// deliberately offers no way to write the column — every other caller
-	// gets it stamped by ClaimNext — and the staleness sweep can only be
-	// exercised against a claim old enough to be stale.
-	BackdateClaim func(t *testing.T, queueID int64, age time.Duration)
+	// ExpireLease rewinds a leased row's lease_expires_at into the past,
+	// standing in for a holder that died without a terminal write. Raw SQL
+	// because the store offers no way to write the column — every other
+	// caller gets it stamped by Claim and RenewLease — and a reclaim can
+	// only be exercised against a lease that has run out.
+	ExpireLease func(t *testing.T, queueID int64)
+
+	// Ripen clears a ready row's next_attempt_at, so a requeued row is
+	// claimable again without waiting out the kind's backoff.
+	Ripen func(t *testing.T, queueID int64)
+
+	// RequestCancel records a cancellation request on a row. The store
+	// exposes no request path yet, and the claim's and renewal's settlement
+	// of one is what these cases exercise.
+	RequestCancel func(t *testing.T, queueID int64)
 
 	// ClearEntityRef NULLs a queue row's entity_id, standing in for a row
 	// the display join finds no entity for. Raw SQL because Enqueue is the
@@ -41,6 +54,13 @@ type EventQueueSeeder struct {
 	// with it, so what a list can encounter is the empty reference, not a
 	// dangling one.
 	ClearEntityRef func(t *testing.T, queueID int64)
+
+	// KeyedRow inserts a ready row carrying the entity's close-obligation
+	// key under an ordinary event type. It is the device that forces the
+	// admission race: the batch's in-transaction unsettled check matches on
+	// event type and passes, while the uniqueness index matches on the key
+	// and refuses, which is exactly the shape the batch must fail on.
+	KeyedRow func(t *testing.T, entityID string)
 
 	// EntitySnapshot reads an entity's stored snapshot_json and poll_seq.
 	// The CAS half of EnqueueBatchWithSnapshotCAS is a write to a table
@@ -56,14 +76,9 @@ type EventQueueSeeder struct {
 	CountEventRows func(t *testing.T, entityID string) int
 }
 
-// conformanceExecutorID/conformanceBootEpoch are the fixed ownership
-// identity every claim in this suite stamps a row with, except where a test
-// is specifically exercising the ownership-scoping predicate — those pass
-// their own values inline.
-const (
-	conformanceExecutorID = "conformance-executor"
-	conformanceBootEpoch  = int64(1)
-)
+// conformanceOwner is the owner every claim in this suite stamps a row
+// with, except where a case is specifically exercising a takeover.
+var conformanceOwner = workitem.Owner{ID: "conformance-executor", Epoch: 1}
 
 // enqueueOn is a local helper: Enqueue a ci_check_failed event against
 // entityID and return the event id. ci_check_failed is a seeded catalog
@@ -93,58 +108,59 @@ func enqueueTracedOn(t *testing.T, ctx context.Context, s db.EventQueueStore, or
 	return id
 }
 
-// parkOn drives one event all the way to the 'failed' terminal — enqueue,
-// claim, MarkFailed — and returns the claimed row so the caller has its
+// claimOne claims exactly one row and returns it.
+func claimOne(t *testing.T, ctx context.Context, s db.EventQueueStore, owner workitem.Owner) db.ClaimedEvent {
+	t.Helper()
+	batch, err := s.Claim(ctx, owner, 1)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if len(batch.Events) != 1 {
+		t.Fatalf("Claim returned %d events, want 1 (cancelled=%d parked=%d)", len(batch.Events), batch.Cancelled, batch.Parked)
+	}
+	return batch.Events[0]
+}
+
+// parkOn drives one event to the parked terminal — enqueue, claim, a
+// permanent requeue — and returns the claimed row so the caller has its
 // queue id. The park is the only way a row enters the operator surface, so
 // every case below that needs a parked row builds it this way rather than
 // writing the status directly.
-func parkOn(t *testing.T, ctx context.Context, s db.EventQueueStore, orgID, entityID, reason string) *domain.QueuedEvent {
+func parkOn(t *testing.T, ctx context.Context, s db.EventQueueStore, orgID, entityID, reason string) db.ClaimedEvent {
 	t.Helper()
 	enqueueOn(t, ctx, s, orgID, entityID)
-	claimed, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-	if err != nil || claimed == nil {
-		t.Fatalf("ClaimNext while parking a row: got=%v err=%v", claimed, err)
+	ce := claimOne(t, ctx, s, conformanceOwner)
+	parked, err := s.Requeue(ctx, ce.Receipt, workitem.OutcomePermanent, errors.New(reason))
+	if err != nil {
+		t.Fatalf("Requeue permanent: %v", err)
 	}
-	if err := s.MarkFailed(ctx, orgID, claimed.ID, reason); err != nil {
-		t.Fatalf("MarkFailed: %v", err)
+	if !parked {
+		t.Fatal("a permanent requeue did not park")
 	}
-	return claimed
+	return ce
+}
+
+// rowByID reads one queue row back through ListForEntity.
+func rowByID(t *testing.T, ctx context.Context, s db.EventQueueStore, orgID, entityID string, id int64) domain.QueuedEvent {
+	t.Helper()
+	rows, err := s.ListForEntity(ctx, orgID, entityID)
+	if err != nil {
+		t.Fatalf("ListForEntity: %v", err)
+	}
+	for _, r := range rows {
+		if r.ID == id {
+			return r
+		}
+	}
+	t.Fatalf("queue row %d not found among %d rows for %s", id, len(rows), entityID)
+	return domain.QueuedEvent{}
 }
 
 // RunEventQueueStoreConformance covers the durable-queue contract every
-// backend impl must hold:
-//
-//   - Enqueue writes the events audit row + a pending queue row
-//     atomically and returns the event id (the queue row's event_id FK
-//     proves the audit row landed).
-//   - Each Enqueue is a distinct event → a distinct queue row (no
-//     dedup; every emitted event is unique).
-//   - ClaimNext returns the globally-oldest pending row (FIFO by id),
-//     flips it to processing, stamps claimed_at, and bumps attempts.
-//   - ClaimNext returns nil on an empty queue.
-//   - MarkDone / MarkFailed flip a processing row to the terminal
-//     state, guarded against non-processing rows.
-//   - Requeue returns a processing row to pending (attempts retained,
-//     claimed_at cleared) for retry.
-//   - ResetProcessing flips every processing row back to pending (boot
-//     crash recovery).
-//   - PruneDone deletes done rows older than the cutoff; failed rows
-//     are retained.
-//   - ListFailedEvents surfaces parked rows (with their entity, attempts
-//     and last_error) newest-first, and nothing else.
-//   - RequeueFailedEvents flips only 'failed' rows, grants a fresh
-//     attempt budget, keeps last_error until the next attempt, and
-//     counts out every id it did not move.
-//   - ListForEntity orders by id.
-//   - traceparent round-trips through the claim: what the producer stamped
-//     is what the consumer reads back, and an untraced producer reads back
-//     empty rather than as anything a link could be built from.
-//   - EnqueueBatchWithSnapshotCAS is all-or-nothing across BOTH tables: a
-//     won CAS advances the snapshot and queues every event in the batch; a
-//     lost CAS writes nothing; a failed insert mid-batch rolls the snapshot
-//     back with it. An empty batch is a pure CAS. Every row it writes is
-//     stamped with the poll_seq the CAS advanced to; Enqueue's rows carry
-//     none. A close obligation is enqueued once while one is unsettled.
+// backend impl must hold: admission under the work-item block, the CAS
+// batch's atomicity and its close-obligation key, the claim / renew /
+// terminal verbs' fencing, the retry outcomes, the prune's retention, the
+// parked operator surface, and the unsettled-close predicate.
 func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -160,8 +176,25 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 			DedupKey:  dedupKey,
 		}
 	}
+	owedOn := func(entityID string) domain.Event {
+		return domain.Event{EntityID: &entityID, EventType: domain.EventSystemEntityCloseOwed, MetadataJSON: `{"reason":"terminal_snapshot_active_entity"}`}
+	}
 
-	t.Run("Enqueue_persists_pending_row", func(t *testing.T) {
+	t.Run("Status_vocabulary_is_the_contracts", func(t *testing.T) {
+		for _, pair := range [][2]string{
+			{domain.QueuedEventStatusReady, workitem.StatusReady},
+			{domain.QueuedEventStatusLeased, workitem.StatusLeased},
+			{domain.QueuedEventStatusDone, workitem.StatusDone},
+			{domain.QueuedEventStatusParked, workitem.StatusParked},
+			{domain.QueuedEventStatusCancelled, workitem.StatusCancelled},
+		} {
+			if pair[0] != pair[1] {
+				t.Errorf("domain status %q does not match workitem's %q", pair[0], pair[1])
+			}
+		}
+	})
+
+	t.Run("Enqueue_admits_a_ready_row_with_block_defaults", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
 		eventID := enqueueOn(t, ctx, s, orgID, entityID)
@@ -174,8 +207,8 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 			t.Fatalf("expected 1 queue row, got %d", len(rows))
 		}
 		r := rows[0]
-		if r.Status != domain.QueuedEventStatusPending {
-			t.Errorf("status = %q, want pending", r.Status)
+		if r.Status != domain.QueuedEventStatusReady {
+			t.Errorf("status = %q, want ready", r.Status)
 		}
 		if r.EventID != eventID {
 			t.Errorf("event_id = %q, want %q (the enqueued event)", r.EventID, eventID)
@@ -186,11 +219,23 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		if r.EventType != domain.EventGitHubPRCICheckFailed {
 			t.Errorf("event_type = %q, want %q", r.EventType, domain.EventGitHubPRCICheckFailed)
 		}
-		if r.Attempts != 0 {
-			t.Errorf("attempts = %d, want 0 before any claim", r.Attempts)
+		if r.OrgID != orgID {
+			t.Errorf("org_id = %q, want %q", r.OrgID, orgID)
 		}
-		if r.ProcessedAt != nil || r.ClaimedAt != nil {
-			t.Errorf("claimed_at/processed_at should be nil for a fresh row: %+v", r)
+		if r.Attempt != 0 || r.MaxAttempts != 5 || r.LeaseGeneration != 0 {
+			t.Errorf("attempt=%d max_attempts=%d generation=%d, want 0/5/0 before any claim", r.Attempt, r.MaxAttempts, r.LeaseGeneration)
+		}
+		if r.UniqueKey != "" {
+			t.Errorf("unique_key = %q, want none on an ordinary event", r.UniqueKey)
+		}
+		if r.NextAttemptAt != nil || r.LeasedAt != nil || r.LeaseExpiresAt != nil || r.DoneAt != nil || r.LeaseOwner != "" {
+			t.Errorf("a fresh row carries lease or settlement columns: %+v", r)
+		}
+		if r.FirstEnqueuedAt.IsZero() || !r.FirstEnqueuedAt.Equal(r.CreatedAt) {
+			t.Errorf("first_enqueued_at = %s, created_at = %s, want both set and equal", r.FirstEnqueuedAt, r.CreatedAt)
+		}
+		if r.EntityPollSeq != nil {
+			t.Errorf("entity_poll_seq = %d, want NULL on the ingest path", *r.EntityPollSeq)
 		}
 	})
 
@@ -248,8 +293,8 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 			if r.EventID != ids[i] {
 				t.Errorf("row %d event_id = %q, want %q (ids are parallel to the batch)", i, r.EventID, ids[i])
 			}
-			if r.Status != domain.QueuedEventStatusPending {
-				t.Errorf("row %d status = %q, want pending", i, r.Status)
+			if r.Status != domain.QueuedEventStatusReady {
+				t.Errorf("row %d status = %q, want ready", i, r.Status)
 			}
 			if r.EntityID != entityID {
 				t.Errorf("row %d entity_id = %q, want %q", i, r.EntityID, entityID)
@@ -365,37 +410,31 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		}
 		// The claim reads the same column back: the consumer is where the
 		// version is used.
-		claimed, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err != nil || claimed == nil {
-			t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
-		}
-		if claimed.EntityPollSeq == nil || *claimed.EntityPollSeq != pollSeq+1 {
-			t.Errorf("claimed entity_poll_seq = %v, want %d", claimed.EntityPollSeq, pollSeq+1)
+		ce := claimOne(t, ctx, s, conformanceOwner)
+		if ce.Event.EntityPollSeq == nil || *ce.Event.EntityPollSeq != pollSeq+1 {
+			t.Errorf("claimed entity_poll_seq = %v, want %d", ce.Event.EntityPollSeq, pollSeq+1)
 		}
 	})
 
-	t.Run("EnqueueBatchWithSnapshotCAS_enqueues_one_close_obligation_while_one_is_unsettled", func(t *testing.T) {
+	t.Run("EnqueueBatchWithSnapshotCAS_admits_one_close_obligation_while_one_is_unsettled", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
 		_, pollSeq := seed.EntitySnapshot(t, entityID)
-		owed := func() domain.Event {
-			return domain.Event{EntityID: &entityID, EventType: domain.EventSystemEntityCloseOwed, MetadataJSON: `{"reason":"terminal_snapshot_active_entity"}`}
-		}
-		rowsOf := func(eventType string) int {
+		seq := pollSeq
+		rowsOf := func(eventType string) []domain.QueuedEvent {
 			t.Helper()
 			rows, err := s.ListForEntity(ctx, orgID, entityID)
 			if err != nil {
 				t.Fatalf("ListForEntity: %v", err)
 			}
-			n := 0
+			var out []domain.QueuedEvent
 			for _, r := range rows {
 				if r.EventType == eventType {
-					n++
+					out = append(out, r)
 				}
 			}
-			return n
+			return out
 		}
-
 		unsettled := func() bool {
 			t.Helper()
 			got, err := s.UnsettledCloseExistsSystem(ctx, orgID, entityID)
@@ -404,67 +443,103 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 			}
 			return got
 		}
+		// owe runs one cycle's obligation through the CAS and reports whether
+		// it was admitted.
+		owe := func() bool {
+			t.Helper()
+			ok, ids, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"terminal":true}`, seq, []domain.Event{owedOn(entityID)}, nil)
+			if err != nil || !ok {
+				t.Fatalf("obligation cycle at seq %d: ok=%v err=%v", seq, ok, err)
+			}
+			seq++
+			if len(ids) != 1 {
+				t.Fatalf("obligation ids = %v, want one slot", ids)
+			}
+			return ids[0] != ""
+		}
+
 		if unsettled() {
 			t.Fatal("unsettled = true on an entity with no queue rows")
 		}
 
-		// First cycle after a lost close: the obligation lands.
-		ok, ids, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"terminal":1}`, pollSeq, []domain.Event{owed()}, nil)
-		if err != nil || !ok {
-			t.Fatalf("first obligation: ok=%v err=%v", ok, err)
+		// First cycle after a lost close: the obligation lands, under its key.
+		if !owe() {
+			t.Fatal("first obligation was declined")
 		}
-		if len(ids) != 1 || ids[0] == "" {
-			t.Fatalf("first obligation ids = %v, want one minted id", ids)
+		owed := rowsOf(domain.EventSystemEntityCloseOwed)
+		if len(owed) != 1 || owed[0].UniqueKey != workkinds.EventQueueCloseOwedKey(entityID) {
+			t.Fatalf("obligation rows = %+v, want one carrying the entity's close key", owed)
 		}
 		if !unsettled() {
-			t.Error("unsettled = false with the obligation pending")
+			t.Error("unsettled = false with the obligation ready")
 		}
-		// Next cycle, the obligation still pending: the CAS still wins (the
+		// Next cycle, the obligation still ready: the CAS still wins (the
 		// snapshot advances) but the obligation is declined — no second
-		// events row, no second queue row, and an empty id in its slot.
-		ok, ids, err = s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"terminal":2}`, pollSeq+1, []domain.Event{owed()}, nil)
-		if err != nil || !ok {
-			t.Fatalf("second obligation: ok=%v err=%v", ok, err)
-		}
-		if len(ids) != 1 || ids[0] != "" {
-			t.Errorf("second obligation ids = %v, want one empty slot", ids)
-		}
-		if n := rowsOf(domain.EventSystemEntityCloseOwed); n != 1 {
-			t.Errorf("obligation rows = %d, want 1 while the first is unsettled", n)
+		// events row, no second queue row.
+		if owe() {
+			t.Error("a second obligation was admitted while the first is ready")
 		}
 		if n := seed.CountEventRows(t, entityID); n != 1 {
 			t.Errorf("events rows = %d, want 1 — a declined obligation records nothing", n)
 		}
-		if _, seq := seed.EntitySnapshot(t, entityID); seq != pollSeq+2 {
-			t.Errorf("poll_seq = %d, want %d — the snapshot still advances when the obligation is declined", seq, pollSeq+2)
+		if _, got := seed.EntitySnapshot(t, entityID); got != seq {
+			t.Errorf("poll_seq = %d, want %d — the snapshot still advances when the obligation is declined", got, seq)
 		}
 
-		// Claimed (processing) still counts as unsettled.
-		claimed, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err != nil || claimed == nil {
-			t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
-		}
-		if _, ids, err = s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"terminal":3}`, pollSeq+2, []domain.Event{owed()}, nil); err != nil || ids[0] != "" {
-			t.Fatalf("obligation while processing: ids=%v err=%v, want declined", ids, err)
-		}
-
+		// Leased still counts as unsettled.
+		ce := claimOne(t, ctx, s, conformanceOwner)
 		if !unsettled() {
-			t.Error("unsettled = false with the obligation processing")
+			t.Error("unsettled = false with the obligation leased")
+		}
+		if owe() {
+			t.Error("an obligation was admitted while one is leased")
 		}
 
-		// Parked does not: nothing will drive a failed row, so the next
-		// cycle owes a fresh one.
-		if err := s.MarkFailed(ctx, orgID, claimed.ID, "budget spent"); err != nil {
-			t.Fatalf("MarkFailed: %v", err)
+		// Parked does too: the parked row holds the key, and the operator
+		// surface is where it is dealt with.
+		if parked, err := s.Requeue(ctx, ce.Receipt, workitem.OutcomePermanent, errors.New("cannot close")); err != nil || !parked {
+			t.Fatalf("Requeue permanent: parked=%v err=%v", parked, err)
+		}
+		if !unsettled() {
+			t.Error("unsettled = false with the obligation parked; it still holds the key")
+		}
+		if owe() {
+			t.Error("an obligation was admitted while one is parked")
+		}
+		if n := len(rowsOf(domain.EventSystemEntityCloseOwed)); n != 1 {
+			t.Errorf("obligation rows = %d, want 1 across ready, leased and parked", n)
+		}
+
+		// Done releases it: a redriven, completed obligation lets the next
+		// cycle owe again.
+		if n, err := s.Redrive(ctx, orgID, []int64{ce.Event.ID}, "operator"); err != nil || n != 1 {
+			t.Fatalf("Redrive: n=%d err=%v", n, err)
+		}
+		ce2 := claimOne(t, ctx, s, conformanceOwner)
+		if err := s.MarkDone(ctx, ce2.Receipt); err != nil {
+			t.Fatalf("MarkDone: %v", err)
 		}
 		if unsettled() {
-			t.Error("unsettled = true with only a parked row; nothing will drive it")
+			t.Error("unsettled = true with only a done obligation")
 		}
-		if _, ids, err = s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"terminal":4}`, pollSeq+3, []domain.Event{owed()}, nil); err != nil || ids[0] == "" {
-			t.Fatalf("obligation after a park: ids=%v err=%v, want a fresh one", ids, err)
+		if !owe() {
+			t.Error("an obligation was declined after the previous one settled done")
 		}
-		if n := rowsOf(domain.EventSystemEntityCloseOwed); n != 2 {
-			t.Errorf("obligation rows = %d, want 2 (the parked one and the fresh one)", n)
+		if n := len(rowsOf(domain.EventSystemEntityCloseOwed)); n != 2 {
+			t.Errorf("obligation rows = %d, want 2 (the done one and the fresh one)", n)
+		}
+
+		// Cancelled releases it too.
+		fresh := rowsOf(domain.EventSystemEntityCloseOwed)[1]
+		seed.RequestCancel(t, fresh.ID)
+		if batch, err := s.Claim(ctx, conformanceOwner, 5); err != nil || batch.Cancelled != 1 || len(batch.Events) != 0 {
+			t.Fatalf("claim settling the request: %+v err=%v", batch, err)
+		}
+		if unsettled() {
+			t.Error("unsettled = true with the obligation cancelled")
+		}
+		if !owe() {
+			t.Error("an obligation was declined after the previous one was cancelled")
 		}
 
 		// A real terminating transition in flight declines the obligation
@@ -475,16 +550,50 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		if ok, _, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, other, `{"m":1}`, otherSeq, []domain.Event{merged}, nil); err != nil || !ok {
 			t.Fatalf("merged transition: ok=%v err=%v", ok, err)
 		}
-		owedOther := domain.Event{EntityID: &other, EventType: domain.EventSystemEntityCloseOwed, MetadataJSON: `{"reason":"terminal_snapshot_active_entity"}`}
-		if _, ids, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, other, `{"m":2}`, otherSeq+1, []domain.Event{owedOther}, nil); err != nil || ids[0] != "" {
-			t.Fatalf("obligation behind a pending transition: ids=%v err=%v, want declined", ids, err)
+		if _, ids, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, other, `{"m":2}`, otherSeq+1, []domain.Event{owedOn(other)}, nil); err != nil || ids[0] != "" {
+			t.Fatalf("obligation behind a ready transition: ids=%v err=%v, want declined", ids, err)
 		}
 
 		// Only the obligation is deduplicated: an ordinary event in the
 		// same batch still lands beside a declined one.
 		if _, ids, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, other, `{"m":3}`, otherSeq+2,
-			[]domain.Event{batchEvent(other, "build"), owedOther}, nil); err != nil || ids[0] == "" || ids[1] != "" {
+			[]domain.Event{batchEvent(other, "build"), owedOn(other)}, nil); err != nil || ids[0] == "" || ids[1] != "" {
 			t.Fatalf("mixed batch ids = %v err=%v, want the transition minted and the obligation declined", ids, err)
+		}
+	})
+
+	t.Run("EnqueueBatchWithSnapshotCAS_forced_admission_race_rolls_back", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		before, pollSeq := seed.EntitySnapshot(t, entityID)
+
+		// A row holding the entity's close key under an event type the
+		// unsettled check does not look at: the check passes, the index
+		// refuses, and the batch must fail whole rather than leave the
+		// obligation's events row behind.
+		seed.KeyedRow(t, entityID)
+		seededEvents := seed.CountEventRows(t, entityID)
+		ok, _, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"raced":true}`, pollSeq,
+			[]domain.Event{batchEvent(entityID, "build"), owedOn(entityID)}, nil)
+		if err == nil || !strings.Contains(err.Error(), "raced its own check") {
+			t.Fatalf("batch err = %v, want the admission-race error", err)
+		}
+		if ok {
+			t.Error("ok = true for a batch that did not commit")
+		}
+		snap, seq := seed.EntitySnapshot(t, entityID)
+		if snap != before || seq != pollSeq {
+			t.Errorf("snapshot moved despite the rolled-back batch: (%q, %d), want (%q, %d)", snap, seq, before, pollSeq)
+		}
+		if n := seed.CountEventRows(t, entityID); n != seededEvents {
+			t.Errorf("events rows = %d, want the %d seeded — the batch's rows rolled back with it", n, seededEvents)
+		}
+		rows, err := s.ListForEntity(ctx, orgID, entityID)
+		if err != nil {
+			t.Fatalf("ListForEntity: %v", err)
+		}
+		if len(rows) != 1 || rows[0].EventType != domain.EventGitHubPRCICheckFailed {
+			t.Errorf("queue rows = %+v, want only the seeded keyed row", rows)
 		}
 	})
 
@@ -518,714 +627,425 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		}
 	})
 
-	t.Run("ClaimNext_fifo_and_marks_processing", func(t *testing.T) {
+	t.Run("Claim_fifo_with_receipts_and_typed_columns", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
 		first := enqueueOn(t, ctx, s, orgID, entityID)
 		second := enqueueOn(t, ctx, s, orgID, entityID)
 
-		got, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err != nil || got == nil {
-			t.Fatalf("ClaimNext #1: got=%v err=%v", got, err)
-		}
-		if got.EventID != first {
-			t.Errorf("ClaimNext returned %q, want oldest %q", got.EventID, first)
-		}
-		if got.Status != domain.QueuedEventStatusProcessing {
-			t.Errorf("claimed row status = %q, want processing", got.Status)
-		}
-		if got.Attempts != 1 {
-			t.Errorf("attempts = %d, want 1 after first claim", got.Attempts)
-		}
-		if got.ClaimedAt == nil {
-			t.Errorf("claimed_at should be set after ClaimNext")
-		}
-
-		got2, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err != nil || got2 == nil {
-			t.Fatalf("ClaimNext #2: got=%v err=%v", got2, err)
-		}
-		if got2.EventID != second {
-			t.Errorf("ClaimNext #2 returned %q, want %q", got2.EventID, second)
-		}
-
-		empty, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		batch, err := s.Claim(ctx, workitem.Owner{ID: "worker-a", Epoch: 7}, 10)
 		if err != nil {
-			t.Fatalf("ClaimNext #3: %v", err)
+			t.Fatalf("Claim: %v", err)
 		}
-		if empty != nil {
-			t.Errorf("ClaimNext on drained queue should be nil, got %+v", empty)
+		if len(batch.Events) != 2 {
+			t.Fatalf("Claim returned %d events, want 2", len(batch.Events))
+		}
+		if batch.Cancelled != 0 || batch.Parked != 0 || batch.Reclaimed != 0 {
+			t.Errorf("fresh claim counted cancelled=%d parked=%d reclaimed=%d, want zeros", batch.Cancelled, batch.Parked, batch.Reclaimed)
+		}
+		if batch.Events[0].Event.EventID != first || batch.Events[1].Event.EventID != second {
+			t.Errorf("claim order = [%q, %q], want FIFO [%q, %q]", batch.Events[0].Event.EventID, batch.Events[1].Event.EventID, first, second)
+		}
+		for _, ce := range batch.Events {
+			r, e := ce.Receipt, ce.Event
+			if r.ItemID != e.ID || r.OrgID != e.OrgID || r.OrgID != orgID {
+				t.Errorf("receipt %+v does not address its row %d/%s", r, e.ID, e.OrgID)
+			}
+			if r.Attempt != 1 || r.LeaseGeneration != 1 || r.LeaseExpiresAt.IsZero() || r.Reclaimed {
+				t.Errorf("receipt = %+v, want attempt 1, generation 1, an expiry, not reclaimed", r)
+			}
+			if e.Status != domain.QueuedEventStatusLeased || e.Attempt != 1 || e.LeaseGeneration != 1 {
+				t.Errorf("claimed row = %+v, want leased at attempt 1 generation 1", e)
+			}
+			if e.LeaseOwner != "worker-a" || e.LeaseEpoch == nil || *e.LeaseEpoch != 7 {
+				t.Errorf("claimed row owner = %q/%v, want worker-a/7", e.LeaseOwner, e.LeaseEpoch)
+			}
+			if e.LeasedAt == nil || e.LeaseExpiresAt == nil || !e.LeaseExpiresAt.Equal(r.LeaseExpiresAt) {
+				t.Errorf("claimed row lease times %v/%v disagree with the receipt's %s", e.LeasedAt, e.LeaseExpiresAt, r.LeaseExpiresAt)
+			}
+			if e.EntityID != entityID || e.EventType != domain.EventGitHubPRCICheckFailed {
+				t.Errorf("claimed row kind columns = %q/%q, want the admitted values", e.EntityID, e.EventType)
+			}
+		}
+
+		// Nothing left: an empty batch, no error.
+		empty, err := s.Claim(ctx, workitem.Owner{ID: "worker-a", Epoch: 7}, 10)
+		if err != nil || len(empty.Events) != 0 {
+			t.Fatalf("Claim on an empty queue: %+v err=%v", empty, err)
 		}
 	})
 
-	t.Run("ClaimNext_nil_on_empty", func(t *testing.T) {
-		s, _, _ := mk(t)
-		got, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+	t.Run("Claim_counts_settled_rows_and_reports_reclaims", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+
+		// A row whose holder died: its lease expires, and the next claim
+		// takes it over and says so.
+		enqueueOn(t, ctx, s, orgID, entityID)
+		dead := claimOne(t, ctx, s, workitem.Owner{ID: "vanished-pod", Epoch: 1})
+		seed.ExpireLease(t, dead.Event.ID)
+		// A row with a cancellation request, settled at claim.
+		enqueueOn(t, ctx, s, orgID, entityID)
+		rows, _ := s.ListForEntity(ctx, orgID, entityID)
+		seed.RequestCancel(t, rows[1].ID)
+
+		batch, err := s.Claim(ctx, workitem.Owner{ID: "successor", Epoch: 1}, 10)
 		if err != nil {
-			t.Fatalf("ClaimNext: %v", err)
+			t.Fatalf("Claim: %v", err)
 		}
-		if got != nil {
-			t.Errorf("ClaimNext on empty queue should be nil, got %+v", got)
+		if batch.Cancelled != 1 || batch.Reclaimed != 1 || batch.Parked != 0 {
+			t.Errorf("counts cancelled=%d reclaimed=%d parked=%d, want 1/1/0", batch.Cancelled, batch.Reclaimed, batch.Parked)
+		}
+		if len(batch.Events) != 1 {
+			t.Fatalf("Claim returned %d events, want the reclaimed one", len(batch.Events))
+		}
+		got := batch.Events[0]
+		if got.Event.ID != dead.Event.ID || !got.Receipt.Reclaimed || got.Receipt.PreviousOwner != "vanished-pod" {
+			t.Errorf("reclaimed = %+v, want row %d taken from vanished-pod", got.Receipt, dead.Event.ID)
+		}
+		if got.Receipt.LeaseGeneration != dead.Receipt.LeaseGeneration+1 || got.Receipt.Attempt != 2 {
+			t.Errorf("reclaim receipt generation=%d attempt=%d, want %d/2", got.Receipt.LeaseGeneration, got.Receipt.Attempt, dead.Receipt.LeaseGeneration+1)
+		}
+		cancelled := rowByID(t, ctx, s, orgID, entityID, rows[1].ID)
+		if cancelled.Status != domain.QueuedEventStatusCancelled || cancelled.DoneAt == nil || cancelled.LastOutcome != "cancelled" {
+			t.Errorf("cancelled row = %+v, want settled cancelled", cancelled)
+		}
+
+		// A row whose budget is spent parks at claim, counted rather than
+		// returned.
+		enqueueOn(t, ctx, s, orgID, entityID)
+		var spent db.ClaimedEvent
+		for i := 0; i < 5; i++ {
+			spent = claimOne(t, ctx, s, conformanceOwner)
+			if i < 4 {
+				if parked, err := s.Requeue(ctx, spent.Receipt, workitem.OutcomeTransient, errors.New("blip")); err != nil || parked {
+					t.Fatalf("Requeue %d: parked=%v err=%v", i, parked, err)
+				}
+				seed.Ripen(t, spent.Event.ID)
+			}
+		}
+		// The fifth holder dies.
+		seed.ExpireLease(t, spent.Event.ID)
+		batch, err = s.Claim(ctx, conformanceOwner, 10)
+		if err != nil {
+			t.Fatalf("Claim: %v", err)
+		}
+		if batch.Parked != 1 || len(batch.Events) != 0 {
+			t.Errorf("claim over a spent row: parked=%d events=%d, want 1/0", batch.Parked, len(batch.Events))
+		}
+		if p := rowByID(t, ctx, s, orgID, entityID, spent.Event.ID); p.Status != domain.QueuedEventStatusParked || p.LastOutcome != "transient" {
+			t.Errorf("spent row = %+v, want parked under the failure that spent it", p)
 		}
 	})
 
-	t.Run("MarkDone_transitions_and_guards", func(t *testing.T) {
+	t.Run("RenewLease_observes_and_settles_a_cancellation_request", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
 		enqueueOn(t, ctx, s, orgID, entityID)
-		claimed, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		ce := claimOne(t, ctx, s, conformanceOwner)
 
-		if err := s.MarkDone(ctx, orgID, claimed.ID); err != nil {
+		renewed, err := s.RenewLease(ctx, ce.Receipt)
+		if err != nil {
+			t.Fatalf("RenewLease: %v", err)
+		}
+		if renewed.LeaseExpiresAt.Before(ce.Receipt.LeaseExpiresAt) {
+			t.Errorf("renewed expiry %s is before the original %s", renewed.LeaseExpiresAt, ce.Receipt.LeaseExpiresAt)
+		}
+
+		seed.RequestCancel(t, ce.Event.ID)
+		if _, err := s.RenewLease(ctx, renewed); !errors.Is(err, workitem.ErrCancelled) {
+			t.Fatalf("RenewLease over a request = %v, want ErrCancelled", err)
+		}
+		row := rowByID(t, ctx, s, orgID, entityID, ce.Event.ID)
+		if row.Status != domain.QueuedEventStatusCancelled || row.CancelRequestedAt == nil {
+			t.Errorf("row = %+v, want cancelled with the request retained", row)
+		}
+		// The settled row is no longer the holder's.
+		if err := s.MarkDone(ctx, renewed); !errors.Is(err, workitem.ErrLeaseLost) {
+			t.Errorf("MarkDone after settlement = %v, want ErrLeaseLost", err)
+		}
+	})
+
+	t.Run("MarkDone_and_Requeue_refuse_a_stale_receipt", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		enqueueOn(t, ctx, s, orgID, entityID)
+		stale := claimOne(t, ctx, s, workitem.Owner{ID: "slow-executor", Epoch: 1})
+		seed.ExpireLease(t, stale.Event.ID)
+
+		// Expiry alone ends authority, before any successor exists.
+		if err := s.MarkDone(ctx, stale.Receipt); !errors.Is(err, workitem.ErrLeaseLost) {
+			t.Fatalf("MarkDone after expiry = %v, want ErrLeaseLost", err)
+		}
+		successor := claimOne(t, ctx, s, workitem.Owner{ID: "successor", Epoch: 1})
+		before, _ := s.ListForEntity(ctx, orgID, entityID)
+
+		if err := s.MarkDone(ctx, stale.Receipt); !errors.Is(err, workitem.ErrLeaseLost) {
+			t.Errorf("late MarkDone = %v, want ErrLeaseLost", err)
+		}
+		if _, err := s.Requeue(ctx, stale.Receipt, workitem.OutcomeTransient, errors.New("late")); !errors.Is(err, workitem.ErrLeaseLost) {
+			t.Errorf("late Requeue = %v, want ErrLeaseLost", err)
+		}
+		if _, err := s.RenewLease(ctx, stale.Receipt); !errors.Is(err, workitem.ErrLeaseLost) {
+			t.Errorf("late RenewLease = %v, want ErrLeaseLost", err)
+		}
+		after, _ := s.ListForEntity(ctx, orgID, entityID)
+		if !reflect.DeepEqual(before, after) {
+			t.Errorf("a stale receipt changed the row\nbefore: %+v\nafter:  %+v", before, after)
+		}
+
+		// The successor's receipt still works.
+		if err := s.MarkDone(ctx, successor.Receipt); err != nil {
+			t.Fatalf("successor MarkDone: %v", err)
+		}
+		if row := rowByID(t, ctx, s, orgID, entityID, successor.Event.ID); row.Status != domain.QueuedEventStatusDone || row.DoneAt == nil || row.LeaseOwner != "" {
+			t.Errorf("row after the successor's MarkDone = %+v, want done with the lease released", row)
+		}
+	})
+
+	t.Run("Requeue_outcomes_land_where_the_contract_says", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+
+		// Transient under budget: ready with a future retry time, the
+		// charge kept, the lease released.
+		enqueueOn(t, ctx, s, orgID, entityID)
+		ce := claimOne(t, ctx, s, conformanceOwner)
+		parked, err := s.Requeue(ctx, ce.Receipt, workitem.OutcomeTransient, errors.New("db blip"))
+		if err != nil || parked {
+			t.Fatalf("Requeue transient: parked=%v err=%v", parked, err)
+		}
+		row := rowByID(t, ctx, s, orgID, entityID, ce.Event.ID)
+		if row.Status != domain.QueuedEventStatusReady || row.Attempt != 1 || row.LastOutcome != "transient" || row.LastError != "db blip" {
+			t.Errorf("requeued row = %+v, want ready at attempt 1 under transient", row)
+		}
+		if row.NextAttemptAt == nil || !row.NextAttemptAt.After(time.Now().Add(-time.Second)) {
+			t.Errorf("next_attempt_at = %v, want a backoff in the future", row.NextAttemptAt)
+		}
+		if row.LeaseOwner != "" || row.LeaseExpiresAt != nil {
+			t.Errorf("requeued row still carries a lease: %+v", row)
+		}
+		// Not claimable until it ripens.
+		if batch, _ := s.Claim(ctx, conformanceOwner, 10); len(batch.Events) != 0 {
+			t.Errorf("a deferred row was claimed before its retry time")
+		}
+
+		// The fifth failure parks.
+		for i := 2; i <= 5; i++ {
+			seed.Ripen(t, ce.Event.ID)
+			next := claimOne(t, ctx, s, conformanceOwner)
+			if next.Receipt.Attempt != i {
+				t.Fatalf("claim %d charged attempt %d", i, next.Receipt.Attempt)
+			}
+			parked, err := s.Requeue(ctx, next.Receipt, workitem.OutcomeDeadline, errors.New("slow"))
+			if err != nil {
+				t.Fatalf("Requeue %d: %v", i, err)
+			}
+			if parked != (i == 5) {
+				t.Fatalf("Requeue %d reported parked=%v", i, parked)
+			}
+		}
+		row = rowByID(t, ctx, s, orgID, entityID, ce.Event.ID)
+		if row.Status != domain.QueuedEventStatusParked || row.Attempt != 5 || row.LastOutcome != "deadline" || row.DoneAt == nil {
+			t.Errorf("row after five failures = %+v, want parked under deadline", row)
+		}
+
+		// Permanent parks at once, whatever the budget.
+		enqueueOn(t, ctx, s, orgID, entityID)
+		perm := claimOne(t, ctx, s, conformanceOwner)
+		parked, err = s.Requeue(ctx, perm.Receipt, workitem.OutcomePermanent, errors.New("event row not found"))
+		if err != nil || !parked {
+			t.Fatalf("Requeue permanent: parked=%v err=%v", parked, err)
+		}
+		row = rowByID(t, ctx, s, orgID, entityID, perm.Event.ID)
+		if row.Status != domain.QueuedEventStatusParked || row.Attempt != 1 || row.LastOutcome != "permanent" {
+			t.Errorf("row after a permanent outcome = %+v, want parked at attempt 1", row)
+		}
+	})
+
+	t.Run("PruneSettled_removes_done_and_cancelled_never_parked", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+
+		enqueueOn(t, ctx, s, orgID, entityID)
+		done := claimOne(t, ctx, s, conformanceOwner)
+		if err := s.MarkDone(ctx, done.Receipt); err != nil {
 			t.Fatalf("MarkDone: %v", err)
 		}
+		enqueueOn(t, ctx, s, orgID, entityID)
 		rows, _ := s.ListForEntity(ctx, orgID, entityID)
-		if len(rows) != 1 || rows[0].Status != domain.QueuedEventStatusDone {
-			t.Fatalf("expected one done row, got %+v", rows)
+		seed.RequestCancel(t, rows[1].ID)
+		if batch, err := s.Claim(ctx, conformanceOwner, 10); err != nil || batch.Cancelled != 1 {
+			t.Fatalf("claim settling the request: %+v err=%v", batch, err)
 		}
-		if rows[0].ProcessedAt == nil {
-			t.Errorf("processed_at should be set after MarkDone")
-		}
+		parkOn(t, ctx, s, orgID, entityID, "stuck")
+		enqueueOn(t, ctx, s, orgID, entityID) // ready
 
-		// Guard: MarkDone on an already-terminal row is a silent no-op.
-		if err := s.MarkDone(ctx, orgID, claimed.ID); err != nil {
-			t.Fatalf("MarkDone on terminal: %v", err)
+		// A cutoff in the past keeps everything.
+		if n, err := s.PruneSettled(ctx, time.Now().Add(-time.Hour)); err != nil || n != 0 {
+			t.Fatalf("PruneSettled with a past cutoff: n=%d err=%v", n, err)
+		}
+		// A cutoff in the future removes the settled rows and only those.
+		n, err := s.PruneSettled(ctx, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Fatalf("PruneSettled: %v", err)
+		}
+		if n != 2 {
+			t.Errorf("pruned %d rows, want the done and cancelled rows", n)
 		}
 		rows, _ = s.ListForEntity(ctx, orgID, entityID)
-		if rows[0].Status != domain.QueuedEventStatusDone {
-			t.Errorf("terminal row should stay done, got %q", rows[0].Status)
-		}
-	})
-
-	t.Run("MarkFailed_records_error", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-		enqueueOn(t, ctx, s, orgID, entityID)
-		claimed, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-
-		if err := s.MarkFailed(ctx, orgID, claimed.ID, "boom"); err != nil {
-			t.Fatalf("MarkFailed: %v", err)
-		}
-		rows, _ := s.ListForEntity(ctx, orgID, entityID)
-		if rows[0].Status != domain.QueuedEventStatusFailed {
-			t.Errorf("status = %q, want failed", rows[0].Status)
-		}
-		if rows[0].LastError != "boom" {
-			t.Errorf("last_error = %q, want %q", rows[0].LastError, "boom")
-		}
-	})
-
-	t.Run("Requeue_returns_to_pending", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-		enqueueOn(t, ctx, s, orgID, entityID)
-		claimed, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-
-		if err := s.Requeue(ctx, orgID, claimed.ID, "transient"); err != nil {
-			t.Fatalf("Requeue: %v", err)
-		}
-		rows, _ := s.ListForEntity(ctx, orgID, entityID)
-		if rows[0].Status != domain.QueuedEventStatusPending {
-			t.Errorf("status = %q, want pending after Requeue", rows[0].Status)
-		}
-		if rows[0].LastError != "transient" {
-			t.Errorf("last_error = %q, want %q", rows[0].LastError, "transient")
-		}
-		if rows[0].ClaimedAt != nil {
-			t.Errorf("claimed_at should be cleared on Requeue, got %v", rows[0].ClaimedAt)
-		}
-		// attempts retained (the claim counted this try).
-		if rows[0].Attempts != 1 {
-			t.Errorf("attempts = %d, want 1 retained after Requeue", rows[0].Attempts)
-		}
-		// Re-claimable.
-		again, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err != nil || again == nil {
-			t.Fatalf("re-claim after Requeue: got=%v err=%v", again, err)
-		}
-		if again.Attempts != 2 {
-			t.Errorf("attempts = %d, want 2 on second claim", again.Attempts)
-		}
-	})
-
-	t.Run("ResetProcessing_resets_in_flight", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-		enqueueOn(t, ctx, s, orgID, entityID)
-		enqueueOn(t, ctx, s, orgID, entityID)
-		// Claim both → both processing.
-		if _, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch); err != nil {
-			t.Fatalf("claim 1: %v", err)
-		}
-		if _, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch); err != nil {
-			t.Fatalf("claim 2: %v", err)
-		}
-
-		// A later boot epoch of the SAME executor sweeps both — this models
-		// a restart of the same persistent instance identity.
-		n, err := s.ResetProcessing(ctx, conformanceExecutorID, conformanceBootEpoch+1)
-		if err != nil {
-			t.Fatalf("ResetProcessing: %v", err)
-		}
-		if n != 2 {
-			t.Errorf("ResetProcessing returned %d, want 2", n)
-		}
-		rows, _ := s.ListForEntity(ctx, orgID, entityID)
-		for _, r := range rows {
-			if r.Status != domain.QueuedEventStatusPending {
-				t.Errorf("row %d status = %q, want pending after reset", r.ID, r.Status)
-			}
-			if r.ClaimedAt != nil {
-				t.Errorf("row %d claimed_at should be cleared after reset", r.ID)
-			}
-		}
-	})
-
-	// ResetProcessing must self-scope to (executor_id, boot_epoch) so a
-	// booting instance never resets a live sibling's claimed row.
-	t.Run("ResetProcessing_scoped_to_owner", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-		enqueueOn(t, ctx, s, orgID, entityID) // claimed by "exec-a"
-		enqueueOn(t, ctx, s, orgID, entityID) // claimed by "exec-b"
-
-		rowA, err := s.ClaimNext(ctx, "exec-a", 1)
-		if err != nil || rowA == nil {
-			t.Fatalf("claim as exec-a: got=%v err=%v", rowA, err)
-		}
-		rowB, err := s.ClaimNext(ctx, "exec-b", 1)
-		if err != nil || rowB == nil {
-			t.Fatalf("claim as exec-b: got=%v err=%v", rowB, err)
-		}
-
-		// exec-a booting (a later epoch of itself) must reset only its own
-		// row — exec-b's still-processing row is a live sibling's claimed
-		// work and must be untouched.
-		n, err := s.ResetProcessing(ctx, "exec-a", 2)
-		if err != nil {
-			t.Fatalf("ResetProcessing as exec-a: %v", err)
-		}
-		if n != 1 {
-			t.Errorf("ResetProcessing(exec-a) reset %d rows, want 1 (only its own)", n)
-		}
-		rows, _ := s.ListForEntity(ctx, orgID, entityID)
-		var gotA, gotB *domain.QueuedEvent
-		for i := range rows {
-			switch rows[i].ID {
-			case rowA.ID:
-				gotA = &rows[i]
-			case rowB.ID:
-				gotB = &rows[i]
-			}
-		}
-		if gotA == nil || gotA.Status != domain.QueuedEventStatusPending {
-			t.Errorf("exec-a's row = %+v, want status pending", gotA)
-		}
-		if gotB == nil || gotB.Status != domain.QueuedEventStatusProcessing {
-			t.Errorf("exec-b's row = %+v, want status processing (untouched — a live sibling's claim)", gotB)
-		}
-	})
-
-	// A boot must never reset rows claimed under its OWN current
-	// epoch — only strictly earlier boots of itself are orphans. Guards
-	// against a self-sweep treating its own in-flight claims as stale.
-	t.Run("ResetProcessing_never_resets_current_epoch", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-		enqueueOn(t, ctx, s, orgID, entityID)
-
-		claimed, err := s.ClaimNext(ctx, "exec-self", 5)
-		if err != nil || claimed == nil {
-			t.Fatalf("claim at epoch 5: got=%v err=%v", claimed, err)
-		}
-
-		// Same executor, same epoch: not an orphan of an earlier boot — must
-		// not reset.
-		if n, err := s.ResetProcessing(ctx, "exec-self", 5); err != nil {
-			t.Fatalf("ResetProcessing at epoch 5: %v", err)
-		} else if n != 0 {
-			t.Errorf("ResetProcessing at the SAME epoch reset %d rows, want 0", n)
-		}
-		rows, _ := s.ListForEntity(ctx, orgID, entityID)
-		if rows[0].Status != domain.QueuedEventStatusProcessing {
-			t.Errorf("row status = %q, want processing (untouched by a same-epoch reset)", rows[0].Status)
-		}
-
-		// A later epoch of the same executor (a restart) DOES sweep it.
-		if n, err := s.ResetProcessing(ctx, "exec-self", 6); err != nil {
-			t.Fatalf("ResetProcessing at epoch 6: %v", err)
-		} else if n != 1 {
-			t.Errorf("ResetProcessing at a later epoch reset %d rows, want 1", n)
-		}
-	})
-
-	// The staleness backstop under the ownership-scoped boot reset: a row
-	// whose owner was replaced rather than rebooted is never swept by
-	// ResetProcessing, so without this it stays 'processing' — and its event
-	// unrouted — forever.
-	t.Run("RequeueStaleProcessing_reclaims_regardless_of_owner", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-		enqueueOn(t, ctx, s, orgID, entityID)
-
-		// Claimed by an instance id that never comes back, eleven minutes
-		// ago — past the ten-minute threshold the drain worker sweeps at.
-		claimed, err := s.ClaimNext(ctx, "vanished-executor", 1)
-		if err != nil || claimed == nil {
-			t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
-		}
-		seed.BackdateClaim(t, claimed.ID, 11*time.Minute)
-
-		n, err := s.RequeueStaleProcessing(ctx, 10*time.Minute)
-		if err != nil {
-			t.Fatalf("RequeueStaleProcessing: %v", err)
-		}
-		if n != 1 {
-			t.Fatalf("RequeueStaleProcessing reclaimed %d rows, want 1", n)
-		}
-
-		rows, _ := s.ListForEntity(ctx, orgID, entityID)
-		if len(rows) != 1 {
-			t.Fatalf("expected 1 row, got %d", len(rows))
-		}
-		if rows[0].Status != domain.QueuedEventStatusPending {
-			t.Errorf("status = %q, want pending after reclaim", rows[0].Status)
-		}
-		if rows[0].ClaimedAt != nil {
-			t.Errorf("claimed_at should be cleared on reclaim, got %v", rows[0].ClaimedAt)
-		}
-		if rows[0].LastError != db.StaleProcessingReclaimReason {
-			t.Errorf("last_error = %q, want %q", rows[0].LastError, db.StaleProcessingReclaimReason)
-		}
-		// attempts untouched: the claim already counted this try, so the
-		// retry budget still bounds a row that keeps reaching this sweep.
-		if rows[0].Attempts != 1 {
-			t.Errorf("attempts = %d, want 1 (the reclaim must not reset the budget)", rows[0].Attempts)
-		}
-		// Re-claimable by whoever drains next, budget still counting up.
-		again, err := s.ClaimNext(ctx, "successor-executor", 1)
-		if err != nil || again == nil {
-			t.Fatalf("re-claim after reclaim: got=%v err=%v", again, err)
-		}
-		if again.Attempts != 2 {
-			t.Errorf("attempts = %d on the re-claim, want 2", again.Attempts)
-		}
-	})
-
-	// The negative space is the whole safety argument: the sweep must be
-	// incapable of stealing a claim that is merely in progress.
-	t.Run("RequeueStaleProcessing_leaves_fresh_and_terminal_rows", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-
-		// An in-flight claim a minute old — well inside the threshold.
-		enqueueOn(t, ctx, s, orgID, entityID)
-		fresh, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err != nil || fresh == nil {
-			t.Fatalf("ClaimNext (fresh): got=%v err=%v", fresh, err)
-		}
-		seed.BackdateClaim(t, fresh.ID, time.Minute)
-		// A done row.
-		enqueueOn(t, ctx, s, orgID, entityID)
-		doneRow, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err := s.MarkDone(ctx, orgID, doneRow.ID); err != nil {
-			t.Fatalf("MarkDone: %v", err)
-		}
-		// A failed row.
-		enqueueOn(t, ctx, s, orgID, entityID)
-		failRow, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err := s.MarkFailed(ctx, orgID, failRow.ID, "boom"); err != nil {
-			t.Fatalf("MarkFailed: %v", err)
-		}
-		// A never-claimed pending row.
-		enqueueOn(t, ctx, s, orgID, entityID)
-
-		n, err := s.RequeueStaleProcessing(ctx, 10*time.Minute)
-		if err != nil {
-			t.Fatalf("RequeueStaleProcessing: %v", err)
-		}
-		if n != 0 {
-			t.Fatalf("RequeueStaleProcessing reclaimed %d rows, want 0 (nothing is ten minutes stale)", n)
-		}
-
-		rows, _ := s.ListForEntity(ctx, orgID, entityID)
-		want := map[int64]string{
-			fresh.ID:   domain.QueuedEventStatusProcessing,
-			doneRow.ID: domain.QueuedEventStatusDone,
-			failRow.ID: domain.QueuedEventStatusFailed,
+		if len(rows) != 2 {
+			t.Fatalf("%d rows survive the prune, want the parked and ready rows", len(rows))
 		}
 		for _, r := range rows {
-			if w, ok := want[r.ID]; ok && r.Status != w {
-				t.Errorf("row %d status = %q, want %q (untouched by the sweep)", r.ID, r.Status, w)
+			if r.Status != domain.QueuedEventStatusParked && r.Status != domain.QueuedEventStatusReady {
+				t.Errorf("row %d survived the prune in status %q", r.ID, r.Status)
 			}
-			if r.LastError == db.StaleProcessingReclaimReason {
-				t.Errorf("row %d was reclaimed by a sweep that should have matched nothing", r.ID)
-			}
-		}
-		// The fresh claim is still owned — the sweep left it claimable by
-		// nobody else.
-		if next, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch); err != nil {
-			t.Fatalf("ClaimNext after sweep: %v", err)
-		} else if next == nil || next.ID == fresh.ID {
-			t.Errorf("ClaimNext returned %v, want the never-claimed pending row, not the fresh in-flight one", next)
 		}
 	})
 
-	t.Run("PruneDone_deletes_old_done_keeps_failed", func(t *testing.T) {
+	t.Run("ListParked_lists_parked_rows_with_entity_newest_first", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
-
-		// One done row.
+		older := parkOn(t, ctx, s, orgID, entityID, "route: upsert task: db down")
+		newer := parkOn(t, ctx, s, orgID, entityID, "route: fire trigger: db down")
+		// Live rows in every other status are not the operator's.
 		enqueueOn(t, ctx, s, orgID, entityID)
-		doneRow, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err := s.MarkDone(ctx, orgID, doneRow.ID); err != nil {
+		enqueueOn(t, ctx, s, orgID, entityID)
+		live := claimOne(t, ctx, s, conformanceOwner)
+		enqueueOn(t, ctx, s, orgID, entityID)
+		doneRow := claimOne(t, ctx, s, conformanceOwner)
+		if err := s.MarkDone(ctx, doneRow.Receipt); err != nil {
 			t.Fatalf("MarkDone: %v", err)
 		}
-		// One failed row.
-		enqueueOn(t, ctx, s, orgID, entityID)
-		failRow, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err := s.MarkFailed(ctx, orgID, failRow.ID, "boom"); err != nil {
-			t.Fatalf("MarkFailed: %v", err)
+		_ = live
+
+		got, total, err := s.ListParked(ctx, orgID, db.ListOpts{Limit: 50})
+		if err != nil {
+			t.Fatalf("ListParked: %v", err)
+		}
+		if total != 2 || len(got) != 2 {
+			t.Fatalf("total=%d rows=%d, want 2 and 2", total, len(got))
+		}
+		if got[0].ID != newer.Event.ID || got[1].ID != older.Event.ID {
+			t.Errorf("order = [%d, %d], want newest first [%d, %d]", got[0].ID, got[1].ID, newer.Event.ID, older.Event.ID)
+		}
+		pe := got[0]
+		if pe.EventType != domain.EventGitHubPRCICheckFailed || pe.EntityID != entityID {
+			t.Errorf("parked row = %+v, want the event's type and entity", pe)
+		}
+		if pe.EntitySource != "github" || pe.EntitySourceID == "" || pe.EntityTitle != "Test PR" {
+			t.Errorf("entity display fields = %q/%q/%q, want the joined entity", pe.EntitySource, pe.EntitySourceID, pe.EntityTitle)
+		}
+		if pe.Attempt != 1 || pe.MaxAttempts != 5 || pe.LastOutcome != "permanent" || pe.LastError != "route: fire trigger: db down" {
+			t.Errorf("parked row budget/reason = %+v, want attempt 1 of 5, permanent, the cause", pe)
+		}
+		if pe.FirstEnqueuedAt.IsZero() || pe.ParkedAt.IsZero() || pe.ParkedAt.Before(pe.FirstEnqueuedAt) {
+			t.Errorf("parked row times = %s / %s, want an enqueue and a later park", pe.FirstEnqueuedAt, pe.ParkedAt)
 		}
 
-		// Cutoff in the future → the done row is older and gets pruned;
-		// the failed row is retained regardless of age.
-		n, err := s.PruneDone(ctx, time.Now().Add(time.Hour))
+		// Paging: a page of one, then the next, with the total unchanged;
+		// a count-only read carries no items.
+		page1, total1, err := s.ListParked(ctx, orgID, db.ListOpts{Limit: 1})
+		if err != nil || total1 != 2 || len(page1) != 1 || page1[0].ID != newer.Event.ID {
+			t.Errorf("page 1 = %+v total=%d err=%v", page1, total1, err)
+		}
+		page2, _, err := s.ListParked(ctx, orgID, db.ListOpts{Limit: 1, Offset: 1})
+		if err != nil || len(page2) != 1 || page2[0].ID != older.Event.ID {
+			t.Errorf("page 2 = %+v err=%v", page2, err)
+		}
+		none, totalOnly, err := s.ListParked(ctx, orgID, db.ListOpts{CountOnly: true})
+		if err != nil || totalOnly != 2 || len(none) != 0 {
+			t.Errorf("count-only = %+v total=%d err=%v", none, totalOnly, err)
+		}
+
+		// The single read answers with the list's row.
+		one, err := s.GetParked(ctx, orgID, newer.Event.ID)
+		if err != nil || one == nil {
+			t.Fatalf("GetParked: row=%v err=%v", one, err)
+		}
+		if !reflect.DeepEqual(*one, got[0]) {
+			t.Errorf("GetParked = %+v, want the list's row %+v", *one, got[0])
+		}
+		if miss, err := s.GetParked(ctx, orgID, live.Event.ID); err != nil || miss != nil {
+			t.Errorf("GetParked on a leased row = %+v err=%v, want (nil, nil)", miss, err)
+		}
+		if miss, err := s.GetParked(ctx, orgID, 999999); err != nil || miss != nil {
+			t.Errorf("GetParked on an unknown id = %+v err=%v, want (nil, nil)", miss, err)
+		}
+	})
+
+	t.Run("ListParked_survives_a_missing_entity", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		parked := parkOn(t, ctx, s, orgID, entityID, "orphaned")
+		seed.ClearEntityRef(t, parked.Event.ID)
+
+		got, total, err := s.ListParked(ctx, orgID, db.ListOpts{Limit: 50})
 		if err != nil {
-			t.Fatalf("PruneDone: %v", err)
+			t.Fatalf("ListParked: %v", err)
+		}
+		if total != 1 || len(got) != 1 {
+			t.Fatalf("total=%d rows=%d, want the entity-less row listed", total, len(got))
+		}
+		if got[0].EntityID != "" || got[0].EntitySource != "" || got[0].EntityTitle != "" {
+			t.Errorf("entity fields = %+v, want empty for a row with no entity", got[0])
+		}
+		if got[0].LastError != "orphaned" {
+			t.Errorf("last_error = %q", got[0].LastError)
+		}
+	})
+
+	t.Run("Redrive_grants_a_fresh_budget_and_counts_only_rows_that_moved", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		parked := parkOn(t, ctx, s, orgID, entityID, "stuck")
+		enqueueOn(t, ctx, s, orgID, entityID)
+		ready := rowByID(t, ctx, s, orgID, entityID, parked.Event.ID+1)
+
+		n, err := s.Redrive(ctx, orgID, []int64{parked.Event.ID, ready.ID, 999999}, "operator")
+		if err != nil {
+			t.Fatalf("Redrive: %v", err)
 		}
 		if n != 1 {
-			t.Errorf("PruneDone removed %d, want 1 (only the done row)", n)
+			t.Errorf("redrove %d rows, want only the parked one", n)
 		}
-		rows, _ := s.ListForEntity(ctx, orgID, entityID)
-		if len(rows) != 1 || rows[0].Status != domain.QueuedEventStatusFailed {
-			t.Errorf("after prune, only the failed row should remain, got %+v", rows)
+		row := rowByID(t, ctx, s, orgID, entityID, parked.Event.ID)
+		if row.Status != domain.QueuedEventStatusReady || row.Attempt != 0 || row.NextAttemptAt != nil || row.DoneAt != nil {
+			t.Errorf("redriven row = %+v, want ready with a fresh budget", row)
+		}
+		if row.LastOutcome != "redriven" || row.LastError != "" {
+			t.Errorf("redriven row outcome/error = %q/%q, want redriven and cleared", row.LastOutcome, row.LastError)
+		}
+		if row.LeaseGeneration != parked.Receipt.LeaseGeneration+1 {
+			t.Errorf("redriven generation = %d, want %d — the pre-park receipt must be dead", row.LeaseGeneration, parked.Receipt.LeaseGeneration+1)
+		}
+		if err := s.MarkDone(ctx, parked.Receipt); !errors.Is(err, workitem.ErrLeaseLost) {
+			t.Errorf("pre-park receipt after a redrive = %v, want ErrLeaseLost", err)
+		}
+		if !row.FirstEnqueuedAt.Equal(parked.Event.FirstEnqueuedAt) {
+			t.Errorf("first_enqueued_at moved on a redrive: %s -> %s", parked.Event.FirstEnqueuedAt, row.FirstEnqueuedAt)
+		}
+
+		// A second redrive of the same ids moves nothing; empty ids move
+		// nothing.
+		if n, err := s.Redrive(ctx, orgID, []int64{parked.Event.ID}, "operator"); err != nil || n != 0 {
+			t.Errorf("second Redrive: n=%d err=%v, want 0", n, err)
+		}
+		if n, err := s.Redrive(ctx, orgID, nil, "operator"); err != nil || n != 0 {
+			t.Errorf("empty Redrive: n=%d err=%v, want 0", n, err)
+		}
+
+		// The redriven row is claimable and drives to done.
+		again := claimOne(t, ctx, s, conformanceOwner)
+		if again.Event.ID != parked.Event.ID || again.Receipt.Attempt != 1 {
+			t.Errorf("claim after redrive = %+v, want the redriven row at attempt 1", again.Receipt)
+		}
+		if err := s.MarkDone(ctx, again.Receipt); err != nil {
+			t.Fatalf("MarkDone after redrive: %v", err)
 		}
 	})
 
-	// ── The parked-row operator surface ──
-	//
-	// A 'failed' row is routing work that was dropped and will not re-emit,
-	// so these two methods are the only way it ever moves again. parkOn below
-	// is the shared fixture: enqueue, claim, MarkFailed.
-
-	t.Run("ListFailedEvents_lists_parked_rows_with_entity", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-		parked := parkOn(t, ctx, s, orgID, entityID, "route: store unavailable")
-
-		got, total, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
-		if err != nil {
-			t.Fatalf("ListFailedEvents: %v", err)
-		}
-		if len(got) != 1 || total != 1 {
-			t.Fatalf("expected 1 parked row (total 1), got %d (total %d): %+v", len(got), total, got)
-		}
-		fe := got[0]
-		if fe.ID != parked.ID {
-			t.Errorf("id = %d, want %d", fe.ID, parked.ID)
-		}
-		if fe.EventType != domain.EventGitHubPRCICheckFailed {
-			t.Errorf("event_type = %q, want %q", fe.EventType, domain.EventGitHubPRCICheckFailed)
-		}
-		if fe.EntityID != entityID {
-			t.Errorf("entity_id = %q, want %q", fe.EntityID, entityID)
-		}
-		// The entity fields are what makes the row identifiable to a human;
-		// a list of bare uuids is not an operator surface.
-		if fe.EntitySource != "github" || fe.EntitySourceID == "" || fe.EntityTitle == "" {
-			t.Errorf("entity display fields = {%q %q %q}, want all populated from the joined entity",
-				fe.EntitySource, fe.EntitySourceID, fe.EntityTitle)
-		}
-		if fe.Attempts != 1 {
-			t.Errorf("attempts = %d, want 1 (the claim that parked it)", fe.Attempts)
-		}
-		if fe.LastError != "route: store unavailable" {
-			t.Errorf("last_error = %q, want the park reason", fe.LastError)
-		}
-		if fe.EnqueuedAt.IsZero() {
-			t.Errorf("enqueued_at is zero; the list has no age to show")
-		}
-	})
-
-	// Only parked rows, and newest first — an operator scanning the table is
-	// looking for what just broke.
-	t.Run("ListFailedEvents_excludes_live_rows_and_orders_newest_first", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-
-		first := parkOn(t, ctx, s, orgID, entityID, "first")
-		second := parkOn(t, ctx, s, orgID, entityID, "second")
-		// A done row, an in-flight claim, and a never-claimed pending row —
-		// none of them is dropped work.
-		enqueueOn(t, ctx, s, orgID, entityID)
-		doneRow, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err := s.MarkDone(ctx, orgID, doneRow.ID); err != nil {
-			t.Fatalf("MarkDone: %v", err)
-		}
-		enqueueOn(t, ctx, s, orgID, entityID)
-		if _, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch); err != nil {
-			t.Fatalf("claim the in-flight row: %v", err)
-		}
-		enqueueOn(t, ctx, s, orgID, entityID)
-
-		got, total, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
-		if err != nil {
-			t.Fatalf("ListFailedEvents: %v", err)
-		}
-		if len(got) != 2 || total != 2 {
-			t.Fatalf("expected exactly the 2 parked rows (total 2), got %d (total %d): %+v", len(got), total, got)
-		}
-		if got[0].ID != second.ID || got[1].ID != first.ID {
-			t.Errorf("order = [%d %d], want newest-first [%d %d]", got[0].ID, got[1].ID, second.ID, first.ID)
-		}
-
-		// The pages partition the parked rows: each window returns its own
-		// slice of the id-DESC order, and every page reports the filtered
-		// total rather than its own length.
-		first_page, total, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 1})
-		if err != nil {
-			t.Fatalf("ListFailedEvents(limit=1): %v", err)
-		}
-		if len(first_page) != 1 || first_page[0].ID != second.ID || total != 2 {
-			t.Errorf("page 1 = %+v (total %d), want just the newest row %d and total 2", first_page, total, second.ID)
-		}
-		second_page, total, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 1, Offset: 1})
-		if err != nil {
-			t.Fatalf("ListFailedEvents(limit=1, offset=1): %v", err)
-		}
-		if len(second_page) != 1 || second_page[0].ID != first.ID || total != 2 {
-			t.Errorf("page 2 = %+v (total %d), want the older row %d and total 2", second_page, total, first.ID)
-		}
-		past, total, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 1, Offset: 2})
-		if err != nil {
-			t.Fatalf("ListFailedEvents(offset past the end): %v", err)
-		}
-		if len(past) != 0 || total != 2 {
-			t.Errorf("offset past the end = %+v (total %d), want empty with total 2", past, total)
-		}
-	})
-
-	// The single read answers with the same row the list does — a caller that
-	// opens a parked row from the table must not see a different projection
-	// than the table showed it.
-	t.Run("GetFailedEvent_matches_the_list_row", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-		parked := parkOn(t, ctx, s, orgID, entityID, "route: store unavailable")
-
-		listed, _, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
-		if err != nil {
-			t.Fatalf("ListFailedEvents: %v", err)
-		}
-		got, err := s.GetFailedEvent(ctx, orgID, parked.ID)
-		if err != nil {
-			t.Fatalf("GetFailedEvent: %v", err)
-		}
-		if got == nil {
-			t.Fatalf("GetFailedEvent(%d) = nil, want the parked row", parked.ID)
-		}
-		if *got != listed[0] {
-			t.Errorf("single read = %+v, want the list's row %+v", *got, listed[0])
-		}
-
-		// A live row is not a parked row: the single read is scoped to the
-		// same 'failed' predicate the list is, so an id an operator cannot
-		// see in the table cannot be opened out of it either.
-		enqueueOn(t, ctx, s, orgID, entityID)
-		live, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err != nil {
-			t.Fatalf("claim the live row: %v", err)
-		}
-		if got, err := s.GetFailedEvent(ctx, orgID, live.ID); err != nil || got != nil {
-			t.Errorf("GetFailedEvent(live row) = %+v, %v; want nil, nil", got, err)
-		}
-		if got, err := s.GetFailedEvent(ctx, orgID, parked.ID+9999); err != nil || got != nil {
-			t.Errorf("GetFailedEvent(absent id) = %+v, %v; want nil, nil", got, err)
-		}
-	})
-
-	// entity_id is nullable, so the join can miss. Listing must still show the
-	// row — it is the only record that the event was dropped, and a list that
-	// hid it would hide the odd case specifically.
-	t.Run("ListFailedEvents_survives_a_missing_entity", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-		parked := parkOn(t, ctx, s, orgID, entityID, "boom")
-		seed.ClearEntityRef(t, parked.ID)
-
-		got, total, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
-		if err != nil {
-			t.Fatalf("ListFailedEvents: %v", err)
-		}
-		if len(got) != 1 || total != 1 || got[0].ID != parked.ID {
-			t.Fatalf("expected the entity-less parked row (total 1), got %+v (total %d)", got, total)
-		}
-		if got[0].EntitySource != "" || got[0].EntityTitle != "" {
-			t.Errorf("entity display fields = {%q %q}, want empty for a row with no entity",
-				got[0].EntitySource, got[0].EntityTitle)
-		}
-	})
-
-	// The retention contract the operator surface depends on: a parked row
-	// has to still be there when someone comes looking, however long that
-	// takes. PruneDone is the only sweep that deletes from this table.
-	t.Run("ListFailedEvents_survives_a_prune_pass", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-		parked := parkOn(t, ctx, s, orgID, entityID, "parked before the sweep")
-
-		// A cutoff in the future makes every processed row older than it, so
-		// this is the most aggressive prune the retention sweep can run.
-		if _, err := s.PruneDone(ctx, time.Now().Add(time.Hour)); err != nil {
-			t.Fatalf("PruneDone: %v", err)
-		}
-
-		got, _, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
-		if err != nil {
-			t.Fatalf("ListFailedEvents after prune: %v", err)
-		}
-		if len(got) != 1 || got[0].ID != parked.ID {
-			t.Fatalf("parked row did not survive the prune: %+v", got)
-		}
-		if got[0].LastError != "parked before the sweep" {
-			t.Errorf("last_error = %q, want the park reason intact", got[0].LastError)
-		}
-	})
-
-	t.Run("RequeueFailedEvents_grants_a_fresh_budget", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-		parked := parkOn(t, ctx, s, orgID, entityID, "route: store unavailable")
-
-		n, err := s.RequeueFailedEvents(ctx, orgID, []int64{parked.ID})
-		if err != nil {
-			t.Fatalf("RequeueFailedEvents: %v", err)
-		}
-		if n != 1 {
-			t.Fatalf("RequeueFailedEvents moved %d rows, want 1", n)
-		}
-		if left, _, _ := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50}); len(left) != 0 {
-			t.Errorf("requeued row still lists as parked: %+v", left)
-		}
-
-		rows, _ := s.ListForEntity(ctx, orgID, entityID)
-		if len(rows) != 1 {
-			t.Fatalf("expected 1 row, got %d", len(rows))
-		}
-		if rows[0].Status != domain.QueuedEventStatusPending {
-			t.Errorf("status = %q, want pending", rows[0].Status)
-		}
-		// The whole point of the operator requeue: the row parked because its
-		// budget ran out, so it needs the budget back or it re-parks on the
-		// first attempt.
-		if rows[0].Attempts != 0 {
-			t.Errorf("attempts = %d, want 0 — an operator requeue grants a fresh budget", rows[0].Attempts)
-		}
-		if rows[0].ProcessedAt != nil || rows[0].ClaimedAt != nil {
-			t.Errorf("claimed_at/processed_at should be cleared on requeue: %+v", rows[0])
-		}
-		// last_error survives until the next attempt writes over it, so the
-		// reason it parked is still correlatable with whatever happens next.
-		if rows[0].LastError != "route: store unavailable" {
-			t.Errorf("last_error = %q, want the park reason retained until the next attempt", rows[0].LastError)
-		}
-
-		// Claimable again, counting from one.
-		again, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err != nil || again == nil {
-			t.Fatalf("re-claim after requeue: got=%v err=%v", again, err)
-		}
-		if again.ID != parked.ID || again.Attempts != 1 {
-			t.Errorf("re-claim = id %d attempts %d, want id %d attempts 1", again.ID, again.Attempts, parked.ID)
-		}
-
-		// Parking it a second time keeps the NEW reason.
-		if err := s.MarkFailed(ctx, orgID, again.ID, "route: still unavailable"); err != nil {
-			t.Fatalf("second MarkFailed: %v", err)
-		}
-		reparked, _, _ := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
-		if len(reparked) != 1 || reparked[0].LastError != "route: still unavailable" {
-			t.Errorf("re-parked row = %+v, want the second park's reason", reparked)
-		}
-	})
-
-	// The mixed-batch contract: an operator selecting rows from a stale page
-	// may name ids that have since moved on. Those are no-ops, counted out.
-	t.Run("RequeueFailedEvents_moves_only_failed_rows", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-
-		parkedA := parkOn(t, ctx, s, orgID, entityID, "a")
-		parkedB := parkOn(t, ctx, s, orgID, entityID, "b")
-		enqueueOn(t, ctx, s, orgID, entityID)
-		doneRow, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err := s.MarkDone(ctx, orgID, doneRow.ID); err != nil {
-			t.Fatalf("MarkDone: %v", err)
-		}
-
-		n, err := s.RequeueFailedEvents(ctx, orgID, []int64{parkedA.ID, doneRow.ID, parkedB.ID})
-		if err != nil {
-			t.Fatalf("RequeueFailedEvents: %v", err)
-		}
-		if n != 2 {
-			t.Fatalf("RequeueFailedEvents returned %d, want 2 (the done id is counted out)", n)
-		}
-
-		rows, _ := s.ListForEntity(ctx, orgID, entityID)
-		for _, r := range rows {
-			switch r.ID {
-			case parkedA.ID, parkedB.ID:
-				if r.Status != domain.QueuedEventStatusPending {
-					t.Errorf("row %d status = %q, want pending", r.ID, r.Status)
-				}
-			case doneRow.ID:
-				if r.Status != domain.QueuedEventStatusDone {
-					t.Errorf("done row %d status = %q, want done (untouched)", r.ID, r.Status)
-				}
-				if r.ProcessedAt == nil {
-					t.Errorf("done row %d lost its processed_at to a requeue that should not have matched it", r.ID)
-				}
-			}
-		}
-	})
-
-	// Idempotence: the second call finds nothing left to move. This is what
-	// makes a double-click on the panel's Requeue button harmless.
-	t.Run("RequeueFailedEvents_double_requeue_is_a_noop", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t)
-		parked := parkOn(t, ctx, s, orgID, entityID, "boom")
-
-		if n, err := s.RequeueFailedEvents(ctx, orgID, []int64{parked.ID}); err != nil || n != 1 {
-			t.Fatalf("first requeue: n=%d err=%v", n, err)
-		}
-		n, err := s.RequeueFailedEvents(ctx, orgID, []int64{parked.ID})
-		if err != nil {
-			t.Fatalf("second requeue: %v", err)
-		}
-		if n != 0 {
-			t.Errorf("second requeue moved %d rows, want 0", n)
-		}
-		rows, _ := s.ListForEntity(ctx, orgID, entityID)
-		if rows[0].Status != domain.QueuedEventStatusPending || rows[0].Attempts != 0 {
-			t.Errorf("row after the double requeue = %+v, want pending with a fresh budget", rows[0])
-		}
-	})
-
-	t.Run("RequeueFailedEvents_empty_and_unknown_ids", func(t *testing.T) {
-		s, orgID, _ := mk(t)
-		if n, err := s.RequeueFailedEvents(ctx, orgID, nil); err != nil || n != 0 {
-			t.Errorf("requeue of no ids = (%d, %v), want (0, nil)", n, err)
-		}
-		if n, err := s.RequeueFailedEvents(ctx, orgID, []int64{987654}); err != nil || n != 0 {
-			t.Errorf("requeue of an unknown id = (%d, %v), want (0, nil)", n, err)
-		}
-	})
-
-	// The producer's trace context has to survive the hop intact: the
-	// consumer builds a span link out of exactly these bytes, and a
-	// truncated or re-encoded value yields an invalid SpanContext, which
-	// degrades silently to "no link" — the failure mode nobody notices.
 	t.Run("Traceparent_round_trips_through_claim", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
@@ -1239,33 +1059,22 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		if len(rows) != 1 || rows[0].Traceparent != traceparent {
 			t.Fatalf("stored traceparent = %+v, want %q", rows, traceparent)
 		}
-
-		claimed, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err != nil || claimed == nil {
-			t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
-		}
-		if claimed.Traceparent != traceparent {
-			t.Errorf("claimed traceparent = %q, want %q — the claim is where the consumer picks the link up", claimed.Traceparent, traceparent)
+		ce := claimOne(t, ctx, s, conformanceOwner)
+		if ce.Event.Traceparent != traceparent {
+			t.Errorf("claimed traceparent = %q, want %q — the claim is where the consumer picks the link up", ce.Event.Traceparent, traceparent)
 		}
 	})
 
-	// An untraced producer is the common case (tracing disabled, or a path
-	// nobody instrumented), and it must be indistinguishable from any other
-	// row apart from carrying no context.
 	t.Run("Traceparent_absent_reads_empty", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
 		enqueueOn(t, ctx, s, orgID, entityID)
-
-		claimed, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
-		if err != nil || claimed == nil {
-			t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
+		ce := claimOne(t, ctx, s, conformanceOwner)
+		if ce.Event.Traceparent != "" {
+			t.Errorf("traceparent = %q, want empty for an untraced producer", ce.Event.Traceparent)
 		}
-		if claimed.Traceparent != "" {
-			t.Errorf("traceparent = %q, want empty for an untraced producer", claimed.Traceparent)
-		}
-		if claimed.Status != domain.QueuedEventStatusProcessing {
-			t.Errorf("status = %q, want processing — an untraced row claims like any other", claimed.Status)
+		if ce.Event.Status != domain.QueuedEventStatusLeased {
+			t.Errorf("status = %q, want leased — an untraced row claims like any other", ce.Event.Status)
 		}
 	})
 
@@ -1284,6 +1093,71 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		if rows[0].EventID != first || rows[1].EventID != second {
 			t.Errorf("id order broken: got [%q, %q], want [%q, %q]",
 				rows[0].EventID, rows[1].EventID, first, second)
+		}
+	})
+
+	t.Run("UnsettledCloseExistsSystem_per_status", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		unsettled := func(entityID string) bool {
+			t.Helper()
+			got, err := s.UnsettledCloseExistsSystem(ctx, orgID, entityID)
+			if err != nil {
+				t.Fatalf("UnsettledCloseExistsSystem: %v", err)
+			}
+			return got
+		}
+		// A terminating transition through the CAS path, walked through
+		// each status on its own entity.
+		mergedOn := func(entityID string) db.ClaimedEvent {
+			t.Helper()
+			_, seq := seed.EntitySnapshot(t, entityID)
+			merged := domain.Event{EntityID: &entityID, EventType: domain.EventGitHubPRMerged}
+			if ok, _, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"m":1}`, seq, []domain.Event{merged}, nil); err != nil || !ok {
+				t.Fatalf("merged transition: ok=%v err=%v", ok, err)
+			}
+			if !unsettled(entityID) {
+				t.Errorf("ready: unsettled = false")
+			}
+			ce := claimOne(t, ctx, s, conformanceOwner)
+			if !unsettled(entityID) {
+				t.Errorf("leased: unsettled = false")
+			}
+			return ce
+		}
+
+		e := seed.Entity(t)
+		ce := mergedOn(e)
+		if err := s.MarkDone(ctx, ce.Receipt); err != nil {
+			t.Fatalf("MarkDone: %v", err)
+		}
+		if unsettled(e) {
+			t.Errorf("done: unsettled = true")
+		}
+
+		e = seed.Entity(t)
+		ce = mergedOn(e)
+		if _, err := s.Requeue(ctx, ce.Receipt, workitem.OutcomePermanent, errors.New("stuck")); err != nil {
+			t.Fatalf("Requeue permanent: %v", err)
+		}
+		if !unsettled(e) {
+			t.Errorf("parked: unsettled = false — a parked close still holds the entity")
+		}
+
+		e = seed.Entity(t)
+		ce = mergedOn(e)
+		seed.RequestCancel(t, ce.Event.ID)
+		if _, err := s.RenewLease(ctx, ce.Receipt); !errors.Is(err, workitem.ErrCancelled) {
+			t.Fatalf("RenewLease over a request = %v, want ErrCancelled", err)
+		}
+		if unsettled(e) {
+			t.Errorf("cancelled: unsettled = true")
+		}
+
+		// An ordinary event never counts, whatever its status.
+		e = seed.Entity(t)
+		enqueueOn(t, ctx, s, orgID, e)
+		if unsettled(e) {
+			t.Errorf("an ordinary ready event counted as an unsettled close")
 		}
 	})
 }

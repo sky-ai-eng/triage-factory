@@ -10,6 +10,7 @@ import (
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -105,7 +106,7 @@ func mustAutoDelegate(t *testing.T, r *Router, task *domain.Task, trigger domain
 // queueRow reads the single event_queue row's terminal state.
 func queueRow(t *testing.T, database *sql.DB) (status string, attempts int, lastErr string) {
 	t.Helper()
-	if err := database.QueryRow(`SELECT status, attempts, COALESCE(last_error, '') FROM event_queue`).
+	if err := database.QueryRow(`SELECT status, attempt, COALESCE(last_error, '') FROM event_queue`).
 		Scan(&status, &attempts, &lastErr); err != nil {
 		t.Fatalf("read the queue row: %v", err)
 	}
@@ -161,13 +162,14 @@ func TestProcessQueuedEvent_ObligationFailure_RequeuesThenRoutesOnRecovery(t *te
 			enqueueCIFailed(t, database, entity.ID)
 
 			// The stage fails: the event is still owed, so the row is
-			// pending again with its attempt spent and the reason on it.
+			// ready again with its attempt spent, a retry time, and the
+			// reason on it.
 			if err := r.drainEventQueue(context.Background()); err != nil {
 				t.Fatalf("drainEventQueue: %v", err)
 			}
 			status, attempts, lastErr := queueRow(t, database)
-			if status != domain.QueuedEventStatusPending {
-				t.Errorf("row after a failed %s = %q, want pending — a store failure must not consume the event", tc.stage, status)
+			if status != domain.QueuedEventStatusReady {
+				t.Errorf("row after a failed %s = %q, want ready — a store failure must not consume the event", tc.stage, status)
 			}
 			if attempts != 1 {
 				t.Errorf("attempts = %d, want 1", attempts)
@@ -180,6 +182,7 @@ func TestProcessQueuedEvent_ObligationFailure_RequeuesThenRoutesOnRecovery(t *te
 			}
 
 			// The store recovers and the next pass routes the same event.
+			ripenQueue(t, database)
 			if err := r.drainEventQueue(context.Background()); err != nil {
 				t.Fatalf("drainEventQueue after recovery: %v", err)
 			}
@@ -212,6 +215,7 @@ func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 	st := sqlitestore.New(database)
 	r := fenceRouter(database, stub)
 	r.SetEventQueue(st.EventQueue)
+	r.SetExecutorID(testExecutorID, 1)
 
 	// Same event shape as recordFenceEvent — the author resolves the owning
 	// team, whose trigger is the one that fires — but enqueued durably, so the
@@ -236,8 +240,8 @@ func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 		t.Fatalf("drainEventQueue: %v", err)
 	}
 	status, attempts, lastErr := queueRow(t, database)
-	if status != domain.QueuedEventStatusPending || attempts != 1 {
-		t.Errorf("row after a failed fire = (%s, attempts %d), want (pending, 1)", status, attempts)
+	if status != domain.QueuedEventStatusReady || attempts != 1 {
+		t.Errorf("row after a failed fire = (%s, attempt %d), want (ready, 1)", status, attempts)
 	}
 	if lastErr == "" {
 		t.Error("last_error is empty; a requeued row must record why it did not route")
@@ -248,6 +252,7 @@ func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 
 	// The spawner recovers: the replay re-runs every stage against the
 	// task the first pass created, and fires the conversation that was owed.
+	ripenQueue(t, database)
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue after recovery: %v", err)
 	}
@@ -266,7 +271,7 @@ func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 	// what stopped the second conversation and this would prove nothing.
 	// Re-arm the row and route the same event a third time.
 	fenceCompleteConversations(t, database, entityID)
-	if _, err := database.Exec(`UPDATE event_queue SET status = 'pending', attempts = 0`); err != nil {
+	if _, err := database.Exec(`UPDATE event_queue SET status = 'ready', attempt = 0, next_attempt_at = NULL, lease_generation = lease_generation + 1`); err != nil {
 		t.Fatalf("re-arm the row: %v", err)
 	}
 	if err := r.drainEventQueue(context.Background()); err != nil {
@@ -284,10 +289,11 @@ func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 // the poison-pill half: an event whose dependency never recovers must stop
 // consuming worker cycles, and the row it leaves behind must still say why.
 //
-// It also pins the pacing that makes the budget mean anything: a requeue
-// ends the drain pass. ClaimNext takes the oldest pending row, which is the
-// one just requeued, so a pass that drained on would spend all five attempts
-// in microseconds and park an event over a blip that had no time to clear.
+// It also pins the pacing that makes the budget mean anything: a requeued
+// row carries a retry time, so a pass that drains on does not hand it
+// straight back and spend all five attempts in microseconds over a blip
+// that had no time to clear. Each pass here ripens the row by hand, which
+// is the scan tick's job in production.
 func TestProcessQueuedEvent_PersistentObligationFailure_ParksAfterBudget(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
@@ -303,21 +309,31 @@ func TestProcessQueuedEvent_PersistentObligationFailure_ParksAfterBudget(t *test
 	}
 	enqueueCIFailed(t, database, entity.ID)
 
-	for pass := 1; pass <= maxEventAttempts; pass++ {
+	budget := eventQueueKind.Policy.MaxAttempts
+	for pass := 1; pass <= budget; pass++ {
 		if err := r.drainEventQueue(context.Background()); err != nil {
 			t.Fatalf("drain pass %d: %v", pass, err)
 		}
 		status, attempts, _ := queueRow(t, database)
 		if attempts != pass {
-			t.Fatalf("after pass %d, attempts = %d, want %d — one pass must spend exactly one attempt", pass, attempts, pass)
+			t.Fatalf("after pass %d, attempt = %d, want %d — one pass must spend exactly one attempt", pass, attempts, pass)
 		}
-		want := domain.QueuedEventStatusPending
-		if pass == maxEventAttempts {
-			want = domain.QueuedEventStatusFailed
+		// A second drain in the same tick finds the row deferred and
+		// leaves it alone.
+		if err := r.drainEventQueue(context.Background()); err != nil {
+			t.Fatalf("second drain in pass %d: %v", pass, err)
+		}
+		if _, again, _ := queueRow(t, database); again != pass {
+			t.Fatalf("after a second drain in pass %d, attempt = %d, want still %d — a deferred row is not claimable before its retry time", pass, again, pass)
+		}
+		want := domain.QueuedEventStatusReady
+		if pass == budget {
+			want = domain.QueuedEventStatusParked
 		}
 		if status != want {
 			t.Fatalf("after pass %d, status = %q, want %q", pass, status, want)
 		}
+		ripenQueue(t, database)
 	}
 
 	_, _, lastErr := queueRow(t, database)
@@ -330,25 +346,24 @@ func TestProcessQueuedEvent_PersistentObligationFailure_ParksAfterBudget(t *test
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drain after park: %v", err)
 	}
-	if _, attempts, _ := queueRow(t, database); attempts != maxEventAttempts {
-		t.Errorf("attempts = %d after draining past a parked row, want %d — a failed row must not be re-claimed", attempts, maxEventAttempts)
+	if _, attempts, _ := queueRow(t, database); attempts != budget {
+		t.Errorf("attempt = %d after draining past a parked row, want %d — a parked row must not be re-claimed", attempts, budget)
 	}
 }
 
 // requeueFailingQueueStore fails the requeue write itself, which leaves the
-// row stranded in 'processing' — reachable by neither ClaimNext nor this
-// process's boot recovery.
+// row leased for its lease to run out and the next claim to reclaim.
 type requeueFailingQueueStore struct{ dbpkg.EventQueueStore }
 
-func (requeueFailingQueueStore) Requeue(ctx context.Context, orgID string, id int64, lastErr string) error {
-	return errOutage
+func (requeueFailingQueueStore) Requeue(context.Context, workitem.Receipt, workitem.Outcome, error) (bool, error) {
+	return false, errOutage
 }
 
-// TestDrainEventQueue_RequeueWriteFails_KeepsDraining pins that the
-// stop-the-pass signal means "the row is pending again," not "something went
-// wrong." A row whose requeue write failed is stuck in 'processing', so
-// ClaimNext can't hand it back — stopping over it would strand every other
-// pending row until the next scan tick for no benefit at all.
+// TestDrainEventQueue_RequeueWriteFails_KeepsDraining pins that a failed
+// terminal write does not stop the pass: the row stays leased for the
+// reclaim to pick up after its lease expires, and stopping over it would
+// strand every other ready row until the next scan tick for no benefit at
+// all.
 func TestDrainEventQueue_RequeueWriteFails_KeepsDraining(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
@@ -370,11 +385,11 @@ func TestDrainEventQueue_RequeueWriteFails_KeepsDraining(t *testing.T) {
 	if err := database.QueryRow(`SELECT status FROM event_queue WHERE entity_id = ?`, second).Scan(&secondStatus); err != nil {
 		t.Fatalf("read the second row: %v", err)
 	}
-	if firstStatus != domain.QueuedEventStatusProcessing {
-		t.Errorf("first row = %q, want processing — a failed requeue write leaves it exactly where it was", firstStatus)
+	if firstStatus != domain.QueuedEventStatusLeased {
+		t.Errorf("first row = %q, want leased — a failed requeue write leaves it exactly where it was, for the reclaim", firstStatus)
 	}
 	if secondStatus != domain.QueuedEventStatusDone {
-		t.Errorf("second row = %q, want done — the pass must not stop over a row that can no longer be re-claimed", secondStatus)
+		t.Errorf("second row = %q, want done — the pass must not stop over a row whose terminal write failed", secondStatus)
 	}
 	if n := activeTaskCount(t, database, second); n != 1 {
 		t.Errorf("tasks on the second entity = %d, want 1", n)
