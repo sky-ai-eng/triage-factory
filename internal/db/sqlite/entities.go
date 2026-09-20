@@ -260,7 +260,14 @@ func (s *entityStore) Close(ctx context.Context, orgID, id string) (*domain.Enti
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	return scanEntityRow(s.q.QueryRowContext(ctx, `
+	return closeActiveEntity(ctx, s.q, id)
+}
+
+// closeActiveEntity is the one statement that flips an active entity to
+// closed; Close and CloseTerminalSystem both run it so the two cannot drift.
+// nil means the state='active' guard declined.
+func closeActiveEntity(ctx context.Context, q queryer, id string) (*domain.Entity, error) {
+	return scanEntityRow(q.QueryRowContext(ctx, `
 		UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ? AND state = 'active'
 		RETURNING `+entitySelectCols,
 		time.Now().UTC(), id))
@@ -502,10 +509,6 @@ func (s *entityStore) UpdateURLSystem(ctx context.Context, orgID, id, url string
 		`UPDATE entities SET url = ? WHERE id = ? RETURNING `+entitySelectCols, url, id))
 }
 
-func (s *entityStore) MarkClosedSystem(ctx context.Context, orgID, id string) (domain.Entity, error) {
-	return s.MarkClosed(ctx, orgID, id)
-}
-
 // CloseSystem mirrors Close (active→closed transition). The router's
 // entity-lifecycle path consumes this through the admin pool in
 // Postgres; SQLite collapses to the non-System variant.
@@ -598,20 +601,14 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			res.ActiveConversationIDs[taskID] = conversationIDs
 		}
 
-		// Guarded on state a second time even though this transaction read
-		// it active moments ago: the statement is the same one Close runs,
-		// so the two spellings of "flip an active entity" cannot drift.
-		flip, err := q.ExecContext(ctx, `
-			UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ? AND state = 'active'
-		`, time.Now().UTC(), entityID)
+		// The guard on state runs a second time even though this transaction
+		// read it active moments ago: a declined flip here means the row
+		// changed under the transaction, which is a failure, not a no-op.
+		flipped, err := closeActiveEntity(ctx, q, entityID)
 		if err != nil {
 			return fmt.Errorf("close entity: %w", err)
 		}
-		n, err := flip.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
+		if flipped == nil {
 			return errors.New("close entity: row changed under the transaction")
 		}
 		res.Closed = true

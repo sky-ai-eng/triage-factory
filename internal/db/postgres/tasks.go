@@ -605,11 +605,11 @@ func (s *taskStore) FindOrCreate(ctx context.Context, orgID, teamID, entityID, e
 }
 
 func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
-	return findOrCreateTaskAt(ctx, s.q, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+	return findOrCreateTaskAt(ctx, s.q, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, false)
 }
 
 func (s *taskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
-	return findOrCreateTaskAt(ctx, s.admin, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+	return findOrCreateTaskAt(ctx, s.admin, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, domain.TaskMayRideClosedEntity(eventType))
 }
 
 // FindOrCreateAtUnlessEntityActiveSystem backs the became_atomic suppression
@@ -635,7 +635,7 @@ func (s *taskStore) FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, 
 			return nil
 		}
 		var e2 error
-		task, created, e2 = findOrCreateTaskAtLocked(ctx, tx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+		task, created, e2 = findOrCreateTaskAtLocked(ctx, tx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, domain.TaskMayRideClosedEntity(eventType))
 		return e2
 	})
 	if err != nil {
@@ -753,15 +753,18 @@ const entityTaskCreationLockSalt = 5
 
 // lockActiveEntity is the mint's half of the mint/close serialization: it
 // takes the entity's row lock inside the mint's transaction and refuses with
-// db.ErrEntityClosed when the row is closed or missing — except for the
-// lifecycle task a terminating transition mints on the entity it just
-// closed, which takes the lock and proceeds. The terminating close
-// (entityStore.CloseTerminalSystem) locks the same row first, so the two
-// commit in some order and each sees the other's result: a close that won
-// closes nothing this mint could add, and a mint that won is a task the
-// close walks. Held until the mint commits, so the close cannot slip between
-// this read and the insert.
-func lockActiveEntity(ctx context.Context, q queryer, orgID, entityID, eventType string) error {
+// db.ErrEntityClosed when the row is closed or missing — unless the caller
+// admits a rider, the lifecycle task a terminating transition mints on the
+// entity it just closed, which takes the lock and proceeds. Whether a rider
+// is admitted is the door's decision, not this function's: only the
+// admin-pool doors the router mints through say yes, so a request-path
+// mint of a terminating event type on a closed entity refuses like any
+// other. The terminating close (entityStore.CloseTerminalSystem) locks the
+// same row first, so the two commit in some order and each sees the other's
+// result: a close that won closes nothing this mint could add, and a mint
+// that won is a task the close walks. Held until the mint commits, so the
+// close cannot slip between this read and the insert.
+func lockActiveEntity(ctx context.Context, q queryer, orgID, entityID string, admitRider bool) error {
 	var state string
 	err := q.QueryRowContext(ctx, `
 		SELECT state FROM entities WHERE org_id = $1 AND id = $2 FOR UPDATE
@@ -772,13 +775,13 @@ func lockActiveEntity(ctx context.Context, q queryer, orgID, entityID, eventType
 	if err != nil {
 		return fmt.Errorf("lock entity for task mint: %w", err)
 	}
-	if state != "active" && !domain.TaskMayRideClosedEntity(eventType) {
+	if state != "active" && !admitRider {
 		return db.ErrEntityClosed
 	}
 	return nil
 }
 
-func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time, admitRider bool) (*domain.Task, bool, error) {
 	var task *domain.Task
 	var created bool
 	err := inTx(ctx, q, func(tx queryer) error {
@@ -786,7 +789,7 @@ func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID,
 			return fmt.Errorf("lock entity for task upsert: %w", err)
 		}
 		var err error
-		task, created, err = findOrCreateTaskAtLocked(ctx, tx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+		task, created, err = findOrCreateTaskAtLocked(ctx, tx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, admitRider)
 		return err
 	})
 	if err != nil {
@@ -795,8 +798,8 @@ func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID,
 	return task, created, nil
 }
 
-func findOrCreateTaskAtLocked(ctx context.Context, q queryer, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
-	if err := lockActiveEntity(ctx, q, orgID, entityID, eventType); err != nil {
+func findOrCreateTaskAtLocked(ctx context.Context, q queryer, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time, admitRider bool) (*domain.Task, bool, error) {
+	if err := lockActiveEntity(ctx, q, orgID, entityID, admitRider); err != nil {
 		return nil, false, err
 	}
 	// team_id is the owning/attributed team stamped on a newly created

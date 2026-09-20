@@ -31,14 +31,19 @@ const (
 	// panics if a non-github: event type declares it.
 	OwnershipRequestedParty
 	// OwnershipUnrouted — for a cataloged event type that never reaches
-	// resolveTeamRouting at all (system:* sentinels: they carry no EntityID,
+	// resolveTeamRouting at all. Most system:* sentinels carry no EntityID,
 	// so routableEntity drops them before dispatch ever classifies them, and
-	// RouterBound keeps them out of the durable queue in the first place).
-	// Distinct from OwnershipPool, which is a real routing behavior
-	// (handler-team grouping) — a system event doesn't participate in that,
-	// it just doesn't route. dispatch's switch treats it the same as Pool if
-	// it were ever reached (it structurally isn't), so this carries no
-	// behavior, only an honest label.
+	// RouterBound keeps them out of the durable queue in the first place.
+	// The poll's close obligation (system:entity:close_owed) is the one that
+	// names an entity and rides the queue — it is enqueued beside the poll's
+	// own events under the snapshot CAS — and the router returns from its
+	// terminating close before ownership is ever resolved for it. Distinct
+	// from OwnershipPool, which is a real routing behavior (handler-team
+	// grouping) — a system event doesn't participate in that, it just
+	// doesn't route. dispatch's switch treats it the same as Pool if it were
+	// ever reached (it structurally isn't), so this carries no behavior,
+	// only an honest label — and the handler create routes refuse it as a
+	// subject on that label.
 	OwnershipUnrouted
 )
 

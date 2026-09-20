@@ -283,6 +283,19 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		if open, err := tasks.ListOpenOnClosedEntitiesSystem(ctx, orgID); err != nil || len(open) != 0 {
 			t.Errorf("open-on-closed = %v (err %v), want none — the riding task lives on a closed entity by design", open, err)
 		}
+
+		// The exemption is the router's door alone. The request path's
+		// doors refuse the same event type on the same closed entity: a
+		// caller who can name any event type must not be able to name its
+		// way past the guard.
+		_, _, err = tasks.FindOrCreateAt(ctx, orgID, "", entityID, domain.EventGitHubPRClosed, "", eventID, 0.5, time.Now().UTC())
+		if !errors.Is(err, db.ErrEntityClosed) {
+			t.Errorf("FindOrCreateAt of a terminating type on a closed entity: err = %v, want ErrEntityClosed", err)
+		}
+		_, _, err = tasks.FindOrCreate(ctx, orgID, "", entityID, domain.EventGitHubPRClosed, "", eventID, 0.5)
+		if !errors.Is(err, db.ErrEntityClosed) {
+			t.Errorf("FindOrCreate of a terminating type on a closed entity: err = %v, want ErrEntityClosed", err)
+		}
 	})
 
 	t.Run("ListOpenOnClosedEntitiesSystem_counts_only_stranded_tasks", func(t *testing.T) {

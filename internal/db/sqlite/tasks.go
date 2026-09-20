@@ -621,7 +621,7 @@ func (s *taskStore) FindActiveByEntitySystem(ctx context.Context, orgID, entityI
 }
 
 func (s *taskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
-	return s.FindOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+	return s.findOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, domain.TaskMayRideClosedEntity(eventType))
 }
 
 // FindOrCreateAtUnlessEntityActiveSystem mirrors the plain check-then-act
@@ -841,6 +841,13 @@ func (s *taskStore) FindOrCreate(ctx context.Context, orgID, teamID, entityID, e
 }
 
 func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+	return s.findOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, false)
+}
+
+// findOrCreateAt is the mint both doors share. admitRider is the System
+// door's alone: the request path never admits a task onto a closed entity,
+// whatever its event type.
+func (s *taskStore) findOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time, admitRider bool) (*domain.Task, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, false, err
 	}
@@ -852,7 +859,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 	// SQLite has one writer, so the transaction itself is the lock the
 	// Postgres impl takes with FOR UPDATE.
 	err := inTx(ctx, s.q, func(tx queryer) error {
-		if err := assertEntityActive(ctx, tx, entityID, eventType); err != nil {
+		if err := assertEntityActive(ctx, tx, entityID, admitRider); err != nil {
 			return err
 		}
 		var err error
@@ -866,11 +873,11 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 }
 
 // assertEntityActive is the mint's half of the mint/close serialization: a
-// closed or missing entity refuses the mint with db.ErrEntityClosed, except
-// for the lifecycle task a terminating transition mints on the entity it
-// just closed. Run inside the mint's own transaction so the answer it reads
-// is the answer the insert commits against.
-func assertEntityActive(ctx context.Context, q queryer, entityID, eventType string) error {
+// closed or missing entity refuses the mint with db.ErrEntityClosed, unless
+// the caller admits a rider — the lifecycle task a terminating transition
+// mints on the entity it just closed. Run inside the mint's own transaction
+// so the answer it reads is the answer the insert commits against.
+func assertEntityActive(ctx context.Context, q queryer, entityID string, admitRider bool) error {
 	var state string
 	err := q.QueryRowContext(ctx, `SELECT state FROM entities WHERE id = ?`, entityID).Scan(&state)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -879,7 +886,7 @@ func assertEntityActive(ctx context.Context, q queryer, entityID, eventType stri
 	if err != nil {
 		return err
 	}
-	if state != "active" && !domain.TaskMayRideClosedEntity(eventType) {
+	if state != "active" && !admitRider {
 		return db.ErrEntityClosed
 	}
 	return nil

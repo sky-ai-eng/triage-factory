@@ -210,7 +210,9 @@ func EntityCloseSettlingEventTypes() []string {
 // card a merge-triggered blueprint rides — on the entity it just closed, and
 // that is the one task the model puts there on purpose. Every other type is
 // refused a mint on a closed entity, and counted by the terminal-state
-// checker when found there.
+// checker when found there. The store admits a rider only through the doors
+// the router mints through; a request naming one of these types is refused
+// like any other.
 func TaskMayRideClosedEntity(eventType string) bool {
 	for _, et := range EntityTerminatingEventTypes() {
 		if et == eventType {

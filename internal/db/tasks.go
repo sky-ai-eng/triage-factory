@@ -28,7 +28,7 @@ var ErrNoSuchTask = errors.New("no task with that id")
 // check rides the mint's own transaction, locking the entity row on
 // Postgres, so a close committing between the router's gate read and the
 // insert can no longer strand a task on an entity nothing will close again.
-var ErrEntityClosed = errors.New("entity is closed; no task may be minted on it")
+var ErrEntityClosed = errors.New("entity is closed or does not exist; no task may be minted on it")
 
 // AgentClaimStamp is the guarded task-claim write that rides *inside*
 // another store method's transaction — the bot taking responsibility for a
@@ -454,12 +454,13 @@ type TaskStore interface {
 	// before the select-or-insert, so a terminating close serialized against
 	// this call either sees the task it minted or made it refuse.
 	// ErrEntityClosed is that refusal — a closed or missing entity mints
-	// nothing and returns no task. The one exemption is a task whose event
-	// type is itself an entity-terminating transition
-	// (domain.TaskMayRideClosedEntity): the transition closes the entity and
-	// then mints its own lifecycle task on it, which is the only task the
-	// model deliberately places on a closed entity. The row is still locked
-	// for it. Every mint variant below holds the same guard; the lock order
+	// nothing and returns no task, whatever the event type: this door and
+	// FindOrCreateAt are the request path's, and a request can name any
+	// event type it likes. The one task the model deliberately places on a
+	// closed entity — the lifecycle task a terminating transition mints on
+	// the entity it just closed (domain.TaskMayRideClosedEntity) — is
+	// admitted only through the System doors below, which the router alone
+	// reaches. Every mint variant holds the same guard; the lock order
 	// (entity row first, then tasks) is the one EntityStore.CloseTerminalSystem
 	// takes.
 	FindOrCreate(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error)
@@ -661,6 +662,13 @@ type TaskStore interface {
 	// variants collapse.
 	GetSystem(ctx context.Context, orgID, taskID string) (*domain.Task, error)
 	FindActiveByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Task, error)
+	//
+	// The System doors carry the one exemption to the entity-active guard:
+	// an event type in domain.TaskMayRideClosedEntity is admitted onto a
+	// closed entity here (the row still read and locked), because the
+	// router mints the terminating transition's own lifecycle task through
+	// this door immediately after closing the entity in the transaction
+	// before it. FindOrCreate / FindOrCreateAt never admit it.
 	FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error)
 
 	// FindOrCreateAtUnlessEntityActiveSystem is FindOrCreateAtSystem's

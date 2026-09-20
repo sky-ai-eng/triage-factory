@@ -471,7 +471,6 @@ type EntityStore interface {
 	// moments earlier, so a miss means the row went away underneath it, which
 	// is worth its best-effort log line rather than a silent success.
 	UpdateURLSystem(ctx context.Context, orgID, id, url string) (domain.Entity, error)
-	MarkClosedSystem(ctx context.Context, orgID, id string) (domain.Entity, error)
 	CloseSystem(ctx context.Context, orgID, id string) (*domain.Entity, error)
 
 	// DescriptionsSystem mirrors Descriptions for the AI scorer —

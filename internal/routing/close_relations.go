@@ -363,7 +363,11 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 // runTerminatingClose is the close phase for an entity-terminating event:
 // the entity flip and every task the relation resolves in ONE transaction,
 // guarded on the entity being active and — when judgedAt is non-nil — on its
-// poll_seq still being the version the event was judged at. See
+// poll_seq still being the version the event was judged at. A nil judgedAt
+// is state-guarded only, and that is safe because every terminating event
+// the pollers produce reaches the router through the queue, whose CAS
+// enqueue stamps the version on the row; only a direct HandleEvent call
+// arrives without one. See
 // EntityStore.CloseTerminalSystem for the transaction; this is the routing
 // half: the post-commit stop of the conversations the transaction stamped,
 // the artifact teardown behind it, and the tasks-updated nudge, sequenced

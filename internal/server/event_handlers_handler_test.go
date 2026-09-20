@@ -206,9 +206,11 @@ func TestHandleEventHandlerCreate_RejectsSystemEventType(t *testing.T) {
 		})
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: expected 400, got %d: %s", eventType, rec.Code, rec.Body.String())
+			continue
 		}
-		if !strings.Contains(rec.Body.String(), "event_type") {
-			t.Errorf("%s: the refusal should name the field: %s", eventType, rec.Body.String())
+		items := decodeErrorItems(t, rec)
+		if len(items) != 1 || items[0].Reason != "INVALID_FIELD" || items[0].Field != "event_type" {
+			t.Errorf("%s: want one INVALID_FIELD item on event_type, got %+v", eventType, items)
 		}
 	}
 }

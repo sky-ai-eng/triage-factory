@@ -687,8 +687,12 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 		var suppressed bool
 		task, created, suppressed, err = r.tasks.FindOrCreateAtUnlessEntityActiveSystem(ctx, orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
 		if err != nil {
-			span.SetStatus(codes.Error, "find or create task")
-			routerLog.ErrorContext(ctx, "became_atomic: failed to check/create task on entity", "entity_id", entityID, "error", err)
+			// A closed entity is an answer the caller classifies and logs
+			// at its own level, not a failure of this stage.
+			if !errors.Is(err, dbpkg.ErrEntityClosed) {
+				span.SetStatus(codes.Error, "find or create task")
+				routerLog.ErrorContext(ctx, "became_atomic: failed to check/create task on entity", "entity_id", entityID, "error", err)
+			}
 			return nil, false, err
 		}
 		if suppressed {
@@ -700,8 +704,10 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 	} else {
 		task, created, err = r.tasks.FindOrCreateAtSystem(ctx, orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
 		if err != nil {
-			span.SetStatus(codes.Error, "find or create task")
-			routerLog.ErrorContext(ctx, "failed to find/create task", "event_type", evt.EventType, "entity_id", entityID, "error", err)
+			if !errors.Is(err, dbpkg.ErrEntityClosed) {
+				span.SetStatus(codes.Error, "find or create task")
+				routerLog.ErrorContext(ctx, "failed to find/create task", "event_type", evt.EventType, "entity_id", entityID, "error", err)
+			}
 			return nil, false, err
 		}
 	}

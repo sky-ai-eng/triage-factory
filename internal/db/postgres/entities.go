@@ -573,10 +573,6 @@ func (s *entityStore) MarkClosed(ctx context.Context, orgID, id string) (domain.
 	return markEntityClosed(ctx, s.q, orgID, id)
 }
 
-func (s *entityStore) MarkClosedSystem(ctx context.Context, orgID, id string) (domain.Entity, error) {
-	return markEntityClosed(ctx, s.admin, orgID, id)
-}
-
 func markEntityClosed(ctx context.Context, q queryer, orgID, id string) (domain.Entity, error) {
 	return scanWrittenEntity(q.QueryRowContext(ctx, `
 		UPDATE entities SET state = 'closed', closed_at = $1 WHERE org_id = $2 AND id = $3
@@ -680,20 +676,14 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			res.ActiveConversationIDs[taskID] = conversationIDs
 		}
 
-		// Guarded on state a second time even though this transaction holds
-		// the row lock: the statement is the same one Close runs, so the two
-		// spellings of "flip an active entity" cannot drift.
-		flip, err := q.ExecContext(ctx, `
-			UPDATE entities SET state = 'closed', closed_at = $1 WHERE org_id = $2 AND id = $3 AND state = 'active'
-		`, time.Now().UTC(), orgID, entityID)
+		// The guard on state runs a second time even though this transaction
+		// holds the row lock: a declined flip here means the row changed
+		// under the lock, which is a failure, not a no-op.
+		flipped, err := closeActiveEntity(ctx, q, orgID, entityID)
 		if err != nil {
 			return fmt.Errorf("close entity: %w", err)
 		}
-		n, err := flip.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
+		if flipped == nil {
 			return errors.New("close entity: row changed under the lock")
 		}
 		res.Closed = true
