@@ -38,11 +38,11 @@ var _ db.PendingFiringsStore = (*pendingFiringsStore)(nil)
 // committed.
 func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string, claim db.AgentClaimStamp) (bool, bool, error) {
 	// creator_user_id is NOT NULL in the Postgres schema. Resolution
-	// mirrors blueprintStore.createRunManual: prefer the caller-supplied
-	// userID, fall back to the org owner. tf.current_user_id() is
-	// intentionally skipped — admin-pool inserts run without JWT
-	// claims, so the helper would return NULL and the COALESCE would
-	// walk straight to org owner anyway.
+	// prefers the caller-supplied userID, falling back to the org
+	// owner. tf.current_user_id() is intentionally skipped —
+	// admin-pool inserts run without JWT claims, so the helper would
+	// return NULL and the COALESCE would walk straight to org owner
+	// anyway.
 	//
 	// LocalDefaultUserID sentinel handling: the router still passes
 	// runmode.LocalDefaultUserID until D9 retrofits handler-
@@ -50,8 +50,7 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 	// mode users table, so binding it directly would trip
 	// pending_firings_creator_user_id_fkey on every busy-entity
 	// enqueue. Normalize to empty here so NULLIF collapses to NULL
-	// and COALESCE walks to the org-owner fallback. Same shape as
-	// blueprintStore.createRunManual.
+	// and COALESCE walks to the org-owner fallback.
 	//
 	// queued_at uses the schema default (now()) so the insert and
 	// the index agree on the timestamp source — no clock skew between

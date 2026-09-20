@@ -768,10 +768,10 @@ func TestBlueprintStore_Postgres_CrossOrgLeakage(t *testing.T) {
 // layer for blueprint_runs. Where CrossOrgLeakage above proves the
 // defense-in-depth WHERE-clause filter is intact, this test runs the
 // store through the app pool under tf_app with real JWT claims so the
-// actual blueprint_runs_select / blueprint_runs_modify policies are exercised.
+// actual blueprint_runs_select / blueprint_runs_insert policies are exercised.
 // Same-org reads succeed; cross-org reads are silently filtered (USING);
 // a cross-org blueprint_runs insert raises 42501 from
-// blueprint_runs_modify WITH CHECK.
+// blueprint_runs_insert WITH CHECK.
 func TestBlueprintStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -830,7 +830,7 @@ func TestBlueprintStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_write_denied", func(t *testing.T) {
 		// bob's claims point at orgB; the row would land with
-		// org_id=orgA. blueprint_runs_modify WITH CHECK requires the
+		// org_id=orgA. blueprint_runs_insert WITH CHECK requires the
 		// row's org_id to match tf.current_org_id(), so 42501 is the
 		// expected outcome.
 		//
