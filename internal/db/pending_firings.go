@@ -152,9 +152,12 @@ type PendingFiringsStore interface {
 	ListTasksWithPending(ctx context.Context, orgID string) ([]string, error)
 
 	// ListForEntity returns all pending_firings rows for an entity in
-	// queue order (oldest first), regardless of status. The one read
-	// that stays entity-shaped on purpose: it backs debug/audit views
-	// and test assertions, where "everything queued against this pull
-	// request" is the question being asked.
+	// queue order (oldest first), regardless of status.
+	//
+	// No production caller today: production reads this table by status
+	// (the drain) and by key (dedup). Kept as the one entity-shaped read —
+	// "everything queued against this pull request, in any status" — that
+	// the router and delegate tests assert through, and that a debug view
+	// of an entity's queue would ask.
 	ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.PendingFiring, error)
 }

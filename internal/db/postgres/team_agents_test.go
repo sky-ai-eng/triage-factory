@@ -20,7 +20,7 @@ import (
 func TestTeamAgentStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunTeamAgentStoreConformance(t, func(t *testing.T) (db.TeamAgentStore, string, string, string) {
+	dbtest.RunTeamAgentStoreConformance(t, func(t *testing.T) (db.TeamAgentStore, string, string, string, dbtest.TeamAgentDisabler) {
 		t.Helper()
 		h.Reset(t)
 		orgID := seedPgOrgForAgents(t, h)
@@ -30,13 +30,25 @@ func TestTeamAgentStore_Postgres(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed agent: %v", err)
 		}
-		return stores.TeamAgents, orgID, teamID, agentID
+		// The disabled shape is written directly: no production door flips
+		// team_agents.enabled (see dbtest.SetTeamAgentEnabledDirect).
+		disable := func(t *testing.T) {
+			t.Helper()
+			if _, err := h.AdminDB.Exec(
+				`UPDATE team_agents SET enabled = FALSE WHERE team_id = $1 AND agent_id = $2`,
+				teamID, agentID,
+			); err != nil {
+				t.Fatalf("disable team agent: %v", err)
+			}
+		}
+		return stores.TeamAgents, orgID, teamID, agentID, disable
 	})
 }
 
 // TestTeamAgentStore_Postgres_NonMemberCannotToggle pins the RLS
-// gate: a team member can toggle their own team's bot, but cannot
-// toggle a different team's bot in the same org.
+// gate on team_agents_update: a team member's UPDATE reaches their own
+// team's row, but not a different team's row in the same org. No store
+// method writes the column, so the policy is exercised via raw SQL.
 func TestTeamAgentStore_Postgres_NonMemberCannotToggle(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

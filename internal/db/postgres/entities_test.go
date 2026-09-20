@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // TestEntityStore_Postgres runs the shared conformance suite against
@@ -594,9 +595,9 @@ func TestEntityStore_Postgres_ClearSnapshotsForSourceIsOrgScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed orgB entity: %v", err)
 	}
-	for org, id := range map[string]string{orgA: entA.ID, orgB: entB.ID} {
-		if _, err := stores.Entities.UpdateSnapshot(ctx, org, id, `{"number":7}`); err != nil {
-			t.Fatalf("seed snapshot: %v", err)
+	for org, ent := range map[string]*domain.Entity{orgA: entA, orgB: entB} {
+		if ok, err := stores.Entities.UpdateSnapshotCASSystem(ctx, org, ent.ID, `{"number":7}`, ent.PollSeq); err != nil || !ok {
+			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 		}
 	}
 	beforeB, err := stores.Entities.Get(ctx, orgB, entB.ID)

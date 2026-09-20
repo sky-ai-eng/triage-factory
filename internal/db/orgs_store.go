@@ -59,8 +59,9 @@ type OrgsStore interface {
 	// Exempt from the returned-row rule, by shape rather than by decision: it
 	// is a bulk multi-table seed (orgs / users / org_memberships / teams /
 	// memberships / org_settings / team_settings, each INSERT OR IGNORE) —
-	// the SetConfigured bulk/sync reconciliation shape, not a single-row
-	// write with one row to hand back. Nothing renders the seeded rows;
+	// the same shape as TeamGitHubReposStore.ReplaceForTeam's set
+	// reconciliation, not a single-row write with one row to hand back.
+	// Nothing renders the seeded rows;
 	// callers that need one read it back through the ordinary GetOrg /
 	// GetSettings paths.
 	CreateLocalTenant(ctx context.Context) error

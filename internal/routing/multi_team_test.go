@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -326,9 +327,7 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("add agent to team B: %v", err)
 	}
-	if _, err := stores.TeamAgents.SetEnabled(t.Context(), runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultAgentID, false); err != nil {
-		t.Fatalf("disable agent for team B: %v", err)
-	}
+	dbtest.SetTeamAgentEnabledDirect(t, database, teamB, runmode.LocalDefaultAgentID, false)
 
 	// One entity, one event, ONE task — shared across both teams.
 	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#gate", "pr", "Gate PR", "https://example.com/gate")

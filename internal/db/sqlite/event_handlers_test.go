@@ -1,6 +1,8 @@
 package sqlite_test
 
 import (
+	"database/sql"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -16,7 +18,7 @@ import (
 // the seedBlueprints hook inserts the named rows via BlueprintStore so the
 // harness stays schema-blind.
 func TestEventHandlerStore_SQLite(t *testing.T) {
-	dbtest.RunEventHandlerStoreConformance(t, func(t *testing.T) (db.EventHandlerStore, string, string, dbtest.BlueprintSeeder) {
+	dbtest.RunEventHandlerStoreConformance(t, func(t *testing.T) (db.EventHandlerStore, string, string, dbtest.BlueprintSeeder, dbtest.ShippedHandlerIDBySlug) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
@@ -39,6 +41,26 @@ func TestEventHandlerStore_SQLite(t *testing.T) {
 			}
 			return out
 		}
-		return stores.EventHandlers, orgID, teamID, seed
+		return stores.EventHandlers, orgID, teamID, seed, shippedHandlerIDBySlug(conn, orgID)
 	})
+}
+
+// shippedHandlerIDBySlug is the SQLite dbtest.ShippedHandlerIDBySlug: a raw
+// read of event_handlers by (org_id, team_id, system_slug), live rows only.
+func shippedHandlerIDBySlug(conn *sql.DB, orgID string) dbtest.ShippedHandlerIDBySlug {
+	return func(t *testing.T, teamID, slug string) string {
+		t.Helper()
+		var id string
+		err := conn.QueryRowContext(t.Context(), `
+			SELECT id FROM event_handlers
+			WHERE org_id = ? AND team_id = ? AND system_slug = ? AND deleted_at IS NULL
+		`, orgID, teamID, slug).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ""
+		}
+		if err != nil {
+			t.Fatalf("resolve shipped handler %q: %v", slug, err)
+		}
+		return id
+	}
 }

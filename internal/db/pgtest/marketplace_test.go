@@ -344,12 +344,12 @@ func TestMarketplaceRLS_CrossOrgIsolation(t *testing.T) {
 		if len(listed) != 0 {
 			t.Errorf("dave's cross-org List = %+v, want empty", listed)
 		}
-		active, err := m.GetActiveBySource(t.Context(), orgA, "00000000-0000-0000-0000-0000000000cc")
+		bySource, err := m.GetBySource(t.Context(), orgA, "00000000-0000-0000-0000-0000000000cc")
 		if err != nil {
 			return err
 		}
-		if active != nil {
-			t.Errorf("dave's cross-org GetActiveBySource = %+v, want nil", active)
+		if bySource != nil {
+			t.Errorf("dave's cross-org GetBySource = %+v, want nil", bySource)
 		}
 		return nil
 	}); err != nil {

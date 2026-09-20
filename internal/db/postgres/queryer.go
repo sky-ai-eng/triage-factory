@@ -27,9 +27,9 @@ type queryer interface {
 //
 // Mirrors the SQLite-side helper of the same name. Used by store
 // methods that must apply a multi-statement operation atomically —
-// e.g. RepositoryStore.SetConfigured deletes dropped repos and upserts
-// skeleton rows for new ones inside one tx so the table can't
-// observe a partial mid-sync state.
+// e.g. TeamGitHubReposStore.ReplaceForTeam mints registry rows, inserts
+// the team's tracking rows and prunes the dropped ones inside one tx so
+// neither table can observe a partial mid-sync state.
 func inTx(ctx context.Context, q queryer, fn func(queryer) error) error {
 	return inTxRaw(ctx, q, func(tx *sql.Tx) error { return fn(tx) })
 }

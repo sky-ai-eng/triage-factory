@@ -4,10 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -68,10 +65,9 @@ func (s *agentStore) Create(ctx context.Context, orgID string, a domain.Agent) (
 		displayName = "Triage Factory Bot"
 	}
 	// In local mode the agent borrows the lone user's PAT (the users
-	// sentinel row exists, so the FK is satisfied). Caller
-	// can override via SetGitHubPATUser later; the default-on-insert
-	// shape just keeps "the local bot has the local user's identity"
-	// true from the moment the row appears.
+	// sentinel row exists, so the FK is satisfied). The default-on-insert
+	// shape keeps "the local bot has the local user's identity" true from
+	// the moment the row appears.
 	patUser := a.GitHubPATUserID
 	if patUser == "" && orgID == runmode.LocalDefaultOrgID {
 		patUser = runmode.LocalDefaultUserID
@@ -112,39 +108,6 @@ func scanUpdatedAgent(row *sql.Row) (domain.Agent, error) {
 	return a, err
 }
 
-func (s *agentStore) Update(ctx context.Context, orgID string, a domain.Agent) (domain.Agent, error) {
-	return scanUpdatedAgent(s.q.QueryRowContext(ctx, `
-		UPDATE agents
-		SET display_name = ?,
-		    default_model = ?,
-		    default_autonomy_suitability = ?,
-		    jira_service_account_id = ?,
-		    updated_at = ?
-		WHERE org_id = ? AND id = ?
-		RETURNING `+sqliteAgentColumns,
-		a.DisplayName, nullString(a.DefaultModel), a.DefaultAutonomySuitability,
-		nullString(a.JiraServiceAccountID), time.Now().UTC(), orgID, a.ID))
-}
-
-func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) (domain.Agent, error) {
-	// Match the Postgres impl's input contract: empty = intentional
-	// clear, valid UUID = intentional set, anything else is a caller
-	// bug. SQLite's github_pat_user_id has an FK to users(id) post-269
-	// so a non-UUID would also fail at the column layer, but
-	// rejecting up front keeps the error shape friendly + matches
-	// Postgres exactly.
-	if userID != "" && !isValidUUIDLike(userID) {
-		return domain.Agent{}, fmt.Errorf("sqlite agents: SetGitHubPATUser: userID %q is not empty and not a valid UUID", userID)
-	}
-	return scanUpdatedAgent(s.q.QueryRowContext(ctx, `
-		UPDATE agents
-		SET github_pat_user_id = ?,
-		    updated_at = ?
-		WHERE org_id = ? AND id = ?
-		RETURNING `+sqliteAgentColumns,
-		nullString(userID), time.Now().UTC(), orgID, agentID))
-}
-
 func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) (domain.Agent, error) {
 	// login is a free-form GitHub login (e.g. "octocat" or "acme-bot[bot]"),
 	// not a UUID — no shape validation. The pair is all-or-nothing: either
@@ -161,15 +124,6 @@ func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, l
 		WHERE org_id = ? AND id = ?
 		RETURNING `+sqliteAgentColumns,
 		nullString(login), nullString(email), time.Now().UTC(), orgID, agentID))
-}
-
-// isValidUUIDLike is a thin local mirror of postgres/uuid.go:isValidUUID.
-// Duplicated rather than reaching across packages because the SQLite
-// store has no other reason to import postgres-internal helpers; it's
-// four lines of code and the shape is unlikely to drift.
-func isValidUUIDLike(s string) bool {
-	_, err := uuid.Parse(s)
-	return err == nil
 }
 
 // nullString returns NULL when s is empty so the column scans back as

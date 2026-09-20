@@ -357,9 +357,9 @@ func RunConversationAppPoolReturnedRowConformance(t *testing.T, mk ConversationA
 // returned row is asserted against: ConversationStore projects messages as a
 // conversation-scoped list, so this drains that list and picks the one row —
 // the same shape a real caller would need if it wanted to name one message,
-// and unrelated to the write under test (Messages is unconverted).
+// and unrelated to the write under test.
 func findMessageByID(ctx context.Context, store db.ConversationStore, orgID, conversationID string, id int) (*domain.Message, error) {
-	msgs, err := store.Messages(ctx, orgID, conversationID)
+	msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 	if err != nil {
 		return nil, err
 	}

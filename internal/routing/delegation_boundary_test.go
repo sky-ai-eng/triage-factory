@@ -183,8 +183,8 @@ func TestDrainTask_EndsThePriorConversation(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
-	if _, err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
-		t.Fatalf("stamp claim: %v", err)
+	if ok, err := testTaskStore(database).StampAgentClaimIfUnclaimed(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultTeamID); err != nil || !ok {
+		t.Fatalf("stamp claim: ok=%v err=%v", ok, err)
 	}
 
 	firingEventID := recordFenceEvent(t, database, entityID).ID

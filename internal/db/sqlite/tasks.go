@@ -658,10 +658,6 @@ func (s *taskStore) CloseSystem(ctx context.Context, orgID, taskID, closeReason,
 	return s.Close(ctx, orgID, taskID, closeReason, closeEventType)
 }
 
-func (s *taskStore) SetStatusSystem(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
-	return s.SetStatus(ctx, orgID, taskID, status)
-}
-
 func (s *taskStore) RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error {
 	return s.RecordEvent(ctx, orgID, taskID, eventID, kind)
 }
@@ -1266,49 +1262,6 @@ func setOwnerTeam(ctx context.Context, q queryer, taskID, teamID string) (domain
 }
 
 // --- Claim mutations ---
-
-func (s *taskStore) SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) (domain.Task, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return domain.Task{}, err
-	}
-	var claimedByAgentID any = agentID
-	if agentID == "" {
-		claimedByAgentID = nil
-	}
-	// A landing claim stages the row; clearing one leaves the status where it
-	// is, which is why the stage expression sits behind the claimant's own
-	// nullity rather than being written flat.
-	var t domain.Task
-	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
-		UPDATE tasks
-		   SET claimed_by_agent_id = ?,
-		       claimed_by_user_id  = NULL,
-		       status = CASE WHEN ? IS NULL THEN status ELSE `+sqliteClaimStageExpr+` END
-		 WHERE id = ?
-		RETURNING `+sqliteTaskBareColumns,
-		claimedByAgentID, claimedByAgentID, taskID), &t)
-}
-
-func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) (domain.Task, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return domain.Task{}, err
-	}
-	var claimedByUserID any = userID
-	if userID == "" {
-		// Empty string is the domain's NULL convention. Passing it raw
-		// would violate the users(id) FK on the next read.
-		claimedByUserID = nil
-	}
-	var t domain.Task
-	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
-		UPDATE tasks
-		   SET claimed_by_user_id  = ?,
-		       claimed_by_agent_id = NULL,
-		       status = CASE WHEN ? IS NULL THEN status ELSE `+sqliteClaimStageExpr+` END
-		 WHERE id = ?
-		RETURNING `+sqliteTaskBareColumns,
-		claimedByUserID, claimedByUserID, taskID), &t)
-}
 
 func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {

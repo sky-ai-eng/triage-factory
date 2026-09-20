@@ -51,8 +51,8 @@ func seedDivergentEntity(t *testing.T, database *sql.DB, source, sourceID, snaps
 	if err != nil {
 		t.Fatalf("create entity %s: %v", sourceID, err)
 	}
-	if _, err := st.Entities.UpdateSnapshot(ctx, runmode.LocalDefaultOrgID, entity.ID, snapshotJSON); err != nil {
-		t.Fatalf("seed snapshot for %s: %v", sourceID, err)
+	if ok, err := st.Entities.UpdateSnapshotCASSystem(ctx, runmode.LocalDefaultOrgID, entity.ID, snapshotJSON, entity.PollSeq); err != nil || !ok {
+		t.Fatalf("seed snapshot for %s: ok=%v err=%v", sourceID, ok, err)
 	}
 	backdatePoll(t, database, entity.ID, time.Hour)
 	for _, eventType := range taskTypes {

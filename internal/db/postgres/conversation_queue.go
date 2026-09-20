@@ -643,41 +643,6 @@ func (s *conversationQueueStore) ClaimExecutorSystem(ctx context.Context, orgID,
 	return executorID, true, nil
 }
 
-// RequeueAwaitingCredentials releases a conversation whose active claim is
-// parked in phase='awaiting_credentials' — the executor-side timeout path:
-// the brain never responded to this conversation's cred_request within the
-// awaiting-credentials deadline, so the claim is released and the (still mid-flight) conversation
-// is claimable again by the next dispatcher, this instance or a sibling.
-// Guarded on that parked claim so a stale/duplicate timeout can't act on a
-// row that already moved on (bundle arrived just after the deadline check,
-// or the conversation was reaped).
-func (s *conversationQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, conversationID string) (bool, error) {
-	var flipped int
-	err := s.conn.QueryRowContext(ctx, `
-		WITH req AS (
-			UPDATE conversations SET preferred_executor_id = NULL
-			WHERE org_id = $1 AND id = $2
-			  AND EXISTS (
-			      SELECT 1 FROM claims cl
-			      WHERE cl.conversation_id = conversations.id
-			        AND cl.released_at IS NULL AND cl.phase = 'awaiting_credentials'
-			  )
-			RETURNING id
-		),
-		rel AS (
-			UPDATE claims SET released_at = now(), outcome = 'requeued'
-			FROM req
-			WHERE claims.conversation_id = req.id AND claims.released_at IS NULL
-			RETURNING claims.id
-		)
-		SELECT count(*) FROM req
-	`, orgID, conversationID).Scan(&flipped)
-	if err != nil {
-		return false, err
-	}
-	return flipped > 0, nil
-}
-
 func (s *conversationQueueStore) ListAwaitingCredentials(ctx context.Context) ([]db.AwaitingCredentialsConversation, error) {
 	// The parked set is keyed off the active claim's phase (served by the
 	// idx_claims_active_phase partial index); an inner join is right here —

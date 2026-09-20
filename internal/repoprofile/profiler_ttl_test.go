@@ -45,7 +45,7 @@ func TestRunOrg_TTLSkipsFreshUnlessForced(t *testing.T) {
 	t.Run("force=true bypasses the TTL", func(t *testing.T) {
 		res := &countingResolver{}
 		p := NewProfiler(res, nil, nil, repos, oneOrgStore{}, nil, nil, nil)
-		// force=true must reach client resolution (it skips the GetSystem TTL
+		// force=true must reach client resolution (it skips the GetByRefSystem TTL
 		// read entirely). The resolver errors, so the repo is then skipped
 		// before any fetch — enough to prove the TTL gate was bypassed.
 		if _, err := p.RunOrg(context.Background(), "org-1", true); err != nil {
@@ -57,9 +57,9 @@ func TestRunOrg_TTLSkipsFreshUnlessForced(t *testing.T) {
 	})
 }
 
-// ttlRepositoryStore returns a single configured repo whose GetSystem reports a
+// ttlRepositoryStore returns a single tracked repo whose GetByRefSystem reports a
 // recently-profiled row, so the TTL branch is exercised. UpsertSystem and
-// the GetSystem consult are counted.
+// the GetByRefSystem consult are counted.
 type ttlRepositoryStore struct {
 	db.RepositoryStore
 	names   []string

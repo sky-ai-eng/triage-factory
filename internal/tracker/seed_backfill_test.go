@@ -97,9 +97,7 @@ func TestRefreshGitHub_SeedCommitsItsReviewBackfill(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, []string{"octo/repo"})
 
 	pub := &recordingPreEnqueuedPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
@@ -162,9 +160,7 @@ func TestRefreshGitHub_SeedCASMissCommitsNothing(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, []string{"octo/repo"})
 
 	pub := &recordingPreEnqueuedPublisher{}
 	queue := &failingBatchQueue{EventQueueStore: stores.EventQueue}
@@ -212,9 +208,7 @@ func TestRefreshGitHub_SeedBackfillsOnlyTheKnownReviewers(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, []string{"octo/repo"})
 
 	pub := &recordingPreEnqueuedPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)

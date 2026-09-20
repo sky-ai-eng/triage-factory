@@ -19,8 +19,36 @@ import (
 // invokes before any test that creates trigger rows. Triggers FK to
 // blueprints on both (blueprint_id, org_id) AND the same-team
 // (blueprint_id, team_id), so the seeded blueprints must live on the
-// factory's teamID; each backend wires its own seeding shape.
-type EventHandlerStoreFactory func(t *testing.T) (store db.EventHandlerStore, orgID, teamID string, seedBlueprints BlueprintSeeder)
+// factory's teamID; each backend wires its own seeding shape. handlerID is
+// the raw slug resolver described at ShippedHandlerIDBySlug.
+type EventHandlerStoreFactory func(t *testing.T) (store db.EventHandlerStore, orgID, teamID string, seedBlueprints BlueprintSeeder, handlerID ShippedHandlerIDBySlug)
+
+// ShippedHandlerIDBySlug resolves the id of a team's live (not soft-deleted)
+// copy of a shipped handler by its system_slug, or "" when the team has
+// none. A backend supplies it as a raw read of event_handlers, because
+// system_slug is a seed and idempotency key that no request-facing handler
+// read projects — there is no store door a suite could observe it through.
+// The suites resolve the id here and read the row itself through the
+// store's Get, so everything but the slug→id step still goes through the
+// live door.
+type ShippedHandlerIDBySlug func(t *testing.T, teamID, slug string) string
+
+// handlerCopyBySlug reads a team's copy of a shipped handler: the id via the
+// backend's ShippedHandlerIDBySlug, the row via the store's Get. nil when the
+// team has no live copy — a soft-deleted one reads as absent, as it does to
+// a request.
+func handlerCopyBySlug(t *testing.T, store db.EventHandlerStore, handlerID ShippedHandlerIDBySlug, orgID, teamID, slug string) *domain.EventHandler {
+	t.Helper()
+	id := handlerID(t, teamID, slug)
+	if id == "" {
+		return nil
+	}
+	h, err := store.Get(context.Background(), orgID, id)
+	if err != nil {
+		t.Fatalf("Get(shipped handler %q = %s): %v", slug, id, err)
+	}
+	return h
+}
 
 // BlueprintSeeder seeds blueprints into the harness DB at the given slugs so
 // trigger rows can reference them, and returns a slug→blueprint-id map. The
@@ -57,7 +85,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		// read finds — and AssertWriteReturnedStoredRow's doc covers what that
 		// stands in for (RETURNING semantics, RLS visibility on the update arm,
 		// column-list drift).
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
 		read := func(id string) func() (*domain.EventHandler, error) {
 			return func() (*domain.EventHandler, error) { return store.Get(ctx, orgID, id) }
@@ -141,7 +169,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Seed_InsertsBothKinds", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		// Trigger rows in ShippedEventHandlers reference these blueprints.
 		ids := seedBlueprints(t,
 			"system-pr-review",
@@ -175,7 +203,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Seed_IsIdempotent", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ids := seedBlueprints(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
 			"system-jira-implement", "system-fix-review-feedback",
@@ -194,7 +222,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Create_Rule_RoundTrip", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
+		store, orgID, teamID, _, _ := factory(t)
 		ctx := context.Background()
 		priority := 0.75
 		sortOrder := 3
@@ -233,7 +261,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		// flips through Update, on both backends. Default-false is asserted by
 		// the Create_Rule_RoundTrip row above (it never sets the field), so here
 		// we prove the true value persists and that Update can toggle it back.
-		store, orgID, teamID, _ := factory(t)
+		store, orgID, teamID, _, _ := factory(t)
 		ctx := context.Background()
 		priority := 0.5
 		sortOrder := 0
@@ -275,7 +303,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	t.Run("Create_RuleDefaultsAppliesToUnownedFalse", func(t *testing.T) {
 		// A rule created without setting the flag must read back false — the
 		// "blanket reset for everyone" IS the column default (TFAC-517).
-		store, orgID, teamID, _ := factory(t)
+		store, orgID, teamID, _, _ := factory(t)
 		ctx := context.Background()
 		priority := 0.5
 		sortOrder := 0
@@ -301,7 +329,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Create_Trigger_RoundTrip", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
 		ids := seedBlueprints(t, "p-trigger-test")
 		blueprintID := ids["p-trigger-test"]
@@ -338,7 +366,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("RetargetBlueprint_MovesTriggerPreservingRow", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
 		ids := seedBlueprints(t, "p-retarget-from", "p-retarget-to")
 		from, to := ids["p-retarget-from"], ids["p-retarget-to"]
@@ -372,7 +400,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Create_RejectsRuleWithTriggerFields", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
+		store, orgID, teamID, _, _ := factory(t)
 		ctx := context.Background()
 		priority := 0.5
 		sortOrder := 0
@@ -392,7 +420,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Create_RejectsTriggerWithoutBlueprintID", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
+		store, orgID, teamID, _, _ := factory(t)
 		breaker := 4
 		minAutonomy := 0.0
 		h := domain.EventHandler{
@@ -413,7 +441,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		// kind='trigger' with a non-NULL name. ValidateEventHandlerForCreate
 		// rejects the same shape earlier so the user gets a clearer
 		// error than the SQL integrity-violation surface.
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ids := seedBlueprints(t, "p-name-on-trigger")
 		breaker := 4
 		minAutonomy := 0.0
@@ -432,7 +460,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("List_KindFilter", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
 		ids := seedBlueprints(t, "p-list-trigger")
 
@@ -488,7 +516,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("GetEnabledForEvent_OrdersRulesBeforeTriggers", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
 		ids := seedBlueprints(t, "p-order-test")
 
@@ -539,7 +567,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Delete_RemovesRow", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
+		store, orgID, teamID, _, _ := factory(t)
 		ctx := context.Background()
 		priority, sortOrder := 0.5, 0
 		h := domain.EventHandler{
@@ -560,7 +588,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Promote_RuleToTrigger", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
 		ids := seedBlueprints(t, "p-promote-target")
 
@@ -602,7 +630,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Promote_RejectsTriggerSource", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
 		ids := seedBlueprints(t, "p-already-trigger")
 		blueprintID := ids["p-already-trigger"]
@@ -631,7 +659,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Reorder_AppliesPositions", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
+		store, orgID, teamID, _, _ := factory(t)
 		ctx := context.Background()
 		priority := 0.5
 		ids := make([]string, 3)
@@ -667,7 +695,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Reorder_DoesNotStampUserModified", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
+		store, orgID, teamID, _, _ := factory(t)
 		ctx := context.Background()
 		priority := 0.5
 		s0, s1 := 0, 1
@@ -699,7 +727,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Update_StampsUserModifiedOnlyWhenContentChanges", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
+		store, orgID, teamID, _, _ := factory(t)
 		ctx := context.Background()
 		priority, sortOrder := 0.5, 0
 		h := domain.EventHandler{
@@ -739,7 +767,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Promote_StampsUserModified", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
 		ids := seedBlueprints(t, "p-promote-stamp")
 		priority, sortOrder := 0.5, 0
@@ -766,7 +794,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("RetargetBlueprint_StampsUserModified", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()
 		ids := seedBlueprints(t, "p-retarget-stamp-from", "p-retarget-stamp-to")
 		breaker := 3
@@ -789,7 +817,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Delete_SoftDeletesSystemRow_SlugStaysOccupiedAndInvisible", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, handlerID := factory(t)
 		ctx := context.Background()
 		ids := seedBlueprints(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
@@ -799,9 +827,9 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			t.Fatalf("Seed: %v", err)
 		}
 		const slug = "system-rule-ci-check-failed"
-		before, err := store.GetBySystemSlug(ctx, orgID, teamID, slug)
-		if err != nil || before == nil {
-			t.Fatalf("GetBySystemSlug before delete: (%v, %v)", before, err)
+		before := handlerCopyBySlug(t, store, handlerID, orgID, teamID, slug)
+		if before == nil {
+			t.Fatalf("shipped handler %q missing before delete", slug)
 		}
 		if err := store.Delete(ctx, orgID, before.ID); err != nil {
 			t.Fatalf("Delete: %v", err)
@@ -813,8 +841,8 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if got, err := store.GetSystem(ctx, orgID, before.ID); err != nil || got != nil {
 			t.Errorf("GetSystem after soft-delete = (%v, %v); want (nil, nil) — a soft-deleted trigger/rule must never resolve as live", got, err)
 		}
-		if got, err := store.GetBySystemSlug(ctx, orgID, teamID, slug); err != nil || got != nil {
-			t.Errorf("GetBySystemSlug after soft-delete = (%v, %v); want (nil, nil)", got, err)
+		if got := handlerCopyBySlug(t, store, handlerID, orgID, teamID, slug); got != nil {
+			t.Errorf("shipped slug %q still resolves after soft-delete: %+v; want absent", slug, got)
 		}
 		all, _, err := store.List(ctx, orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
 		if err != nil {
@@ -840,13 +868,13 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
 			t.Fatalf("re-seed: %v", err)
 		}
-		if got, err := store.GetBySystemSlug(ctx, orgID, teamID, slug); err != nil || got != nil {
-			t.Errorf("GetBySystemSlug after re-seed = (%v, %v); want (nil, nil) — re-seed must not resurrect a soft-deleted shipped row", got, err)
+		if got := handlerCopyBySlug(t, store, handlerID, orgID, teamID, slug); got != nil {
+			t.Errorf("shipped slug %q resolves after re-seed: %+v; want absent — re-seed must not resurrect a soft-deleted shipped row", slug, got)
 		}
 	})
 
 	t.Run("Delete_SoftDeletedSystemTrigger_FreesBlueprintSlotForANewTrigger", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints := factory(t)
+		store, orgID, teamID, seedBlueprints, handlerID := factory(t)
 		ctx := context.Background()
 		ids := seedBlueprints(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
@@ -856,9 +884,9 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			t.Fatalf("Seed: %v", err)
 		}
 		blueprintID := ids["system-ci-fix"]
-		shipped, err := store.GetBySystemSlug(ctx, orgID, teamID, "system-trigger-ci-fix")
-		if err != nil || shipped == nil {
-			t.Fatalf("GetBySystemSlug(system-trigger-ci-fix) before delete: (%v, %v)", shipped, err)
+		shipped := handlerCopyBySlug(t, store, handlerID, orgID, teamID, "system-trigger-ci-fix")
+		if shipped == nil {
+			t.Fatal("shipped handler system-trigger-ci-fix missing before delete")
 		}
 
 		// Deleting the shipped (system_slug) trigger soft-deletes it — verify

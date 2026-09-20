@@ -65,8 +65,8 @@ import (
 //
 // # Every single-row write returns the row it persisted
 //
-// UpdateSnapshot, PatchSnapshot, UpdateTitle, UpdateDescription, UpdateURL,
-// MarkClosed and Close — and each one's ...System twin — hand back the stored
+// PatchSnapshot, UpdateTitle, UpdateDescription, UpdateURL, MarkClosed and
+// Close — and each one's ...System twin — hand back the stored
 // row, read off RETURNING on the write statement itself rather than from a
 // follow-up SELECT, projecting the point read's column list and scanner so
 // the write shape cannot drift from the read shape. Several of these stamp a
@@ -172,16 +172,9 @@ type EntityStore interface {
 	// failure so they each see a populated entity.
 	FindOrCreate(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
 
-	// UpdateSnapshot writes the new snapshot_json and stamps
-	// last_polled_at. Called by the tracker after every successful
-	// poll that found a row diff.
-	//
-	// Returns the updated row — carrying the last_polled_at it stamped — or
-	// sql.ErrNoRows.
-	UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error)
-
 	// PatchSnapshot writes the new snapshot_json **without** touching
-	// last_polled_at — deliberately distinct from UpdateSnapshot. Used
+	// last_polled_at — deliberately distinct from the tracker's
+	// UpdateSnapshotCASSystem, which stamps it. Used
 	// by handlers that mutate an entity via an external API and want
 	// the local copy to match the just-pushed state, but still expect
 	// the next poll cycle to reconcile (so last_polled_at must stay
@@ -433,8 +426,8 @@ type EntityStore interface {
 
 	// MarkPolledSystem stamps last_polled_at without touching the
 	// snapshot or poll_seq — the row was read from the source, but
-	// nothing about it was diffed. Distinct from UpdateSnapshot* (which
-	// carries a snapshot) and from PatchSnapshot (which deliberately
+	// nothing about it was diffed. Distinct from UpdateSnapshotCASSystem
+	// (which carries a snapshot) and from PatchSnapshot (which deliberately
 	// leaves last_polled_at stale so the next cycle still refreshes).
 	//
 	// It exists for reads that confirm an entity's state outside the

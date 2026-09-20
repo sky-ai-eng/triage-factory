@@ -37,6 +37,12 @@ type ModelAvailabilityStore interface {
 
 	// Get returns one row, or (nil, nil) when this model has never produced a
 	// conclusive probe. Absence is an answer, not a miss.
+	//
+	// No production caller today: the model list reads List and joins it
+	// against the catalog. Kept as the point read the returned-row rule
+	// pairs Record against — the write's RETURNING projects this read's
+	// column list and scan function, and the store conformance's
+	// AssertWriteReturnedStoredRow compares Record's result to it.
 	Get(ctx context.Context, orgID, provider, modelKey string) (*domain.ModelAvailability, error)
 
 	// Record upserts one probe's conclusion and returns the stored row.

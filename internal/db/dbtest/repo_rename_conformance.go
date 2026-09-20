@@ -350,8 +350,11 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 
 	t.Run("A_repository_with_no_external_id_is_never_renamed", func(t *testing.T) {
 		s, orgID, seed := mk(t)
-		_ = seed
-		if _, err := s.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "unidentified"}); err != nil {
+		// Tracking mints the row and learns no id, which is exactly the
+		// id-less state under test.
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, []domain.TeamGitHubRepo{
+			{Owner: "octo", Repo: "unidentified"},
+		}); err != nil {
 			t.Fatalf("seed id-less repository: %v", err)
 		}
 
@@ -421,7 +424,9 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// operation's call — so the attempt is refused, terminally.
 		s, orgID, seed := mk(t)
 		fx := seedRenameFixture(t, s, orgID, seed, "occupied")
-		if _, err := s.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
+		// The occupant is a registry row nothing tracks any more, carrying
+		// the identity the profiler recorded for it while it was live.
+		if _, err := s.Repos.UpsertSystem(ctx, orgID, domain.Repository{
 			Owner: "octo", Repo: "platform-api", ExternalID: "555000555",
 		}); err != nil {
 			t.Fatalf("seed occupant: %v", err)
@@ -453,37 +458,24 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// either to make room for a rename destroys what forward-only tracking
 		// promises to keep.
 		//
-		// This is ordinary product state, not corruption: untracking a
-		// repository drops its repositories row and deliberately keeps its
-		// entities, so the repository-row guard cannot see that the name is
-		// still spoken for. Refusing is the answer, classified so the caller
-		// treats it as terminal rather than retrying it every poll cycle.
-		s, orgID, seed := mk(t)
-		_ = seed
+		// This is ordinary product state, not corruption: an entity carries
+		// its slug rather than a reference to a repositories row, and nothing
+		// that retires a repository row touches it, so a name can be spoken
+		// for by records alone — a state the repository-row guard cannot
+		// see. Refusing is the answer, classified so the caller treats it as
+		// terminal rather than retrying it every poll cycle.
+		s, orgID, _ := mk(t)
 
-		// A tracked repository with a PR, then untracked. The entity survives.
-		if err := s.Repos.SetConfigured(ctx, orgID, []string{"octo/api"}); err != nil {
-			t.Fatalf("track the first repository: %v", err)
-		}
-		if _, err := s.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
-			Owner: "octo", Repo: "api", ExternalID: "1",
-		}); err != nil {
-			t.Fatalf("seed the first repository's identity: %v", err)
-		}
+		// A PR of a repository no registry row answers to any more. The entity
+		// is durable and was never keyed on the row.
 		orphan, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "octo/api#18", "pr", "the untracked repo's PR", "")
 		if err != nil {
 			t.Fatalf("seed the orphaned entity: %v", err)
 		}
-		if err := s.Repos.SetConfigured(ctx, orgID, []string{"octo/legacy"}); err != nil {
-			t.Fatalf("untrack it: %v", err)
-		}
-		if got, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "octo/api#18"); got == nil {
-			t.Fatal("untracking deleted the entity; forward-only tracking says it is durable")
-		}
 
-		// A second, live repository with a PR of the same number, which GitHub
-		// now renames onto the freed name.
-		if _, err := s.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
+		// A live repository with a PR of the same number, which GitHub now
+		// renames onto the freed name.
+		if _, err := s.Repos.UpsertSystem(ctx, orgID, domain.Repository{
 			Owner: "octo", Repo: "legacy", ExternalID: "2",
 		}); err != nil {
 			t.Fatalf("seed the renaming repository: %v", err)
@@ -521,14 +513,8 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// artifact index talking.
 		s, orgID, seed := mk(t)
 
-		if err := s.Repos.SetConfigured(ctx, orgID, []string{"octo/api"}); err != nil {
-			t.Fatalf("track the first repository: %v", err)
-		}
-		if _, err := s.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
-			Owner: "octo", Repo: "api", ExternalID: "1",
-		}); err != nil {
-			t.Fatalf("seed the first repository's identity: %v", err)
-		}
+		// An artifact of a repository no registry row answers to any more —
+		// the audit record outlives whatever row it was produced under.
 		orphan, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
 			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
 			Target: domain.PullRequestTarget("octo/api", 18), ExternalID: "18",
@@ -537,12 +523,9 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if err != nil {
 			t.Fatalf("seed the orphaned artifact: %v", err)
 		}
-		if err := s.Repos.SetConfigured(ctx, orgID, []string{"octo/legacy"}); err != nil {
-			t.Fatalf("untrack it: %v", err)
-		}
 
 		// The live repository whose PR of the same number would collide.
-		if _, err := s.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
+		if _, err := s.Repos.UpsertSystem(ctx, orgID, domain.Repository{
 			Owner: "octo", Repo: "legacy", ExternalID: "2",
 		}); err != nil {
 			t.Fatalf("seed the renaming repository: %v", err)
@@ -676,14 +659,19 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 	})
 
 	t.Run("ListIdentities_returns_only_rows_that_carry_an_id", func(t *testing.T) {
-		s, orgID, _ := mk(t)
-		if _, err := s.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
-			Owner: "octo", Repo: "identified", ExternalID: "1296269",
+		s, orgID, seed := mk(t)
+		// Both tracked, so both are bare rows to begin with; the poller's
+		// grant enumeration then records an id for exactly one of them.
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, []domain.TeamGitHubRepo{
+			{Owner: "octo", Repo: "identified"},
+			{Owner: "octo", Repo: "bare"},
 		}); err != nil {
-			t.Fatalf("seed identified: %v", err)
+			t.Fatalf("seed tracked set: %v", err)
 		}
-		if _, err := s.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "bare"}); err != nil {
-			t.Fatalf("seed bare: %v", err)
+		if filled, err := s.Repos.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
+			{Owner: "octo", Repo: "identified", ExternalID: "1296269"},
+		}); err != nil || filled != 1 {
+			t.Fatalf("seed identified: filled=%d err=%v", filled, err)
 		}
 
 		got, err := s.Repos.ListIdentitiesSystem(ctx, orgID)
@@ -729,10 +717,12 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	}); err != nil {
 		t.Fatalf("seed tracked set: %v", err)
 	}
-	if _, err := s.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
-		Owner: "octo", Repo: "api", ExternalID: externalID,
-	}); err != nil {
-		t.Fatalf("seed repository identity: %v", err)
+	// The identity arrives the way it does in production: tracking mints a
+	// bare row, and the poller's grant enumeration fills the id in.
+	if filled, err := s.Repos.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
+		{Owner: "octo", Repo: "api", ExternalID: externalID},
+	}); err != nil || filled != 1 {
+		t.Fatalf("seed repository identity: filled=%d err=%v", filled, err)
 	}
 	if err := setBaseBranch(ctx, s.Repos, orgID, renameOldSlug, "release"); err != nil {
 		t.Fatalf("seed base branch: %v", err)

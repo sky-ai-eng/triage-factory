@@ -8,6 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
@@ -30,6 +31,17 @@ func openLocalStores(t *testing.T) (db.Stores, *sql.DB) {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
 	return sqlitestore.New(conn), conn
+}
+
+// shippedPromptBySlug observes the team's copy of a shipped prompt through the
+// store's live List read, or nil when it has none.
+func shippedPromptBySlug(t *testing.T, stores db.Stores, org, team, slug string) *domain.Prompt {
+	t.Helper()
+	rows, _, err := stores.Prompts.List(context.Background(), org, team, db.Unwindowed)
+	if err != nil {
+		t.Fatalf("Prompts.List for %q: %v", slug, err)
+	}
+	return dbtest.ShippedCopyBySlug(t, rows, team, slug, func(p domain.Prompt) (string, string) { return p.TeamID, p.SystemSlug })
 }
 
 // TestShippedDefaultsSync_LocalBoot exercises the boot-time sweep
@@ -58,9 +70,9 @@ func TestShippedDefaultsSync_LocalBoot(t *testing.T) {
 		t.Fatalf("shipped prompt %q not found or empty", slug)
 	}
 
-	seeded, err := stores.Prompts.GetBySystemSlug(ctx, org, team, slug)
-	if err != nil || seeded == nil {
-		t.Fatalf("GetBySystemSlug after provision: (%v, %v)", seeded, err)
+	seeded := shippedPromptBySlug(t, stores, org, team, slug)
+	if seeded == nil {
+		t.Fatalf("shipped prompt %q missing after provision", slug)
 	}
 
 	// Simulate an old install: a shipped body edited directly in the DB, with no
@@ -71,7 +83,7 @@ func TestShippedDefaultsSync_LocalBoot(t *testing.T) {
 	if err := db.SyncShippedDefaultsForAllTeams(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("sync (restore): %v", err)
 	}
-	restored, _ := stores.Prompts.GetBySystemSlug(ctx, org, team, slug)
+	restored := shippedPromptBySlug(t, stores, org, team, slug)
 	if restored == nil || restored.Body != shippedBody {
 		t.Fatalf("direct-edited shipped prompt not restored: body=%q, want shipped content", bodyOf(restored))
 	}
@@ -83,7 +95,7 @@ func TestShippedDefaultsSync_LocalBoot(t *testing.T) {
 	if err := db.SyncShippedDefaultsForAllTeams(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("sync (protect): %v", err)
 	}
-	survived, _ := stores.Prompts.GetBySystemSlug(ctx, org, team, slug)
+	survived := shippedPromptBySlug(t, stores, org, team, slug)
 	if survived == nil || survived.Body != "my custom body" || survived.Name != "My CI Fix" {
 		t.Fatalf("user edit overwritten by sweep: %+v", survived)
 	}
@@ -104,9 +116,9 @@ func TestShippedDefaultsSync_EveryPromptRoundTrips(t *testing.T) {
 	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 
 	for _, want := range promptseed.Prompts() {
-		seeded, err := stores.Prompts.GetBySystemSlug(ctx, org, team, want.SystemSlug)
-		if err != nil || seeded == nil {
-			t.Fatalf("%s: not seeded: (%v, %v)", want.SystemSlug, seeded, err)
+		seeded := shippedPromptBySlug(t, stores, org, team, want.SystemSlug)
+		if seeded == nil {
+			t.Fatalf("%s: not seeded", want.SystemSlug)
 		}
 		if seeded.Body != want.Body {
 			t.Errorf("%s: seeded body differs from the shipped file", want.SystemSlug)
@@ -121,9 +133,9 @@ func TestShippedDefaultsSync_EveryPromptRoundTrips(t *testing.T) {
 	}
 
 	for _, want := range promptseed.Prompts() {
-		got, err := stores.Prompts.GetBySystemSlug(ctx, org, team, want.SystemSlug)
-		if err != nil || got == nil {
-			t.Fatalf("%s: missing after sync: (%v, %v)", want.SystemSlug, got, err)
+		got := shippedPromptBySlug(t, stores, org, team, want.SystemSlug)
+		if got == nil {
+			t.Fatalf("%s: missing after sync", want.SystemSlug)
 		}
 		if got.Body != want.Body {
 			t.Errorf("%s: drift sync did not restore the shipped body (got %q) — is it wrapped by a shipped blueprint?",

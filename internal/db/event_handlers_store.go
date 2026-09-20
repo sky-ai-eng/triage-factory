@@ -17,8 +17,7 @@ import (
 // parsing as a UUID is the same answer for the same reason — nothing can
 // answer to it.
 //
-// Only the writes return it: Get and GetBySystemSlug keep answering a miss
-// with (nil, nil).
+// Only the writes return it: Get keeps answering a miss with (nil, nil).
 var ErrNoSuchEventHandler = errors.New("no live event handler with that id")
 
 // EventHandlerStore is the unified successor to TaskRuleStore + TriggerStore.
@@ -112,7 +111,7 @@ type EventHandlerStore interface {
 	// Exempt from the returned-row rule: it reconciles a set, so there is no
 	// single row a return value could name — and its INSERT is ON CONFLICT DO
 	// NOTHING, which returns nothing at all for the rows that were already
-	// there. What it wrote is read back through List / GetBySystemSlug.
+	// there. What it wrote is read back through List.
 	Seed(ctx context.Context, orgID, teamID string, blueprintIDsBySlug map[string]string) error
 
 	// List returns one page of handlers plus the unpaged total, in the order:
@@ -123,12 +122,6 @@ type EventHandlerStore interface {
 
 	// Get returns one handler by id, or (nil, nil) if not found or soft-deleted.
 	Get(ctx context.Context, orgID string, id string) (*domain.EventHandler, error)
-
-	// GetBySystemSlug resolves a team's copy of a shipped handler by its
-	// stable system_slug. Returns (nil, nil) when the team has no copy or its
-	// copy is soft-deleted — the sync's "does this slot need an insert"
-	// probe.
-	GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.EventHandler, error)
 
 	// GetEnabledForEvent returns enabled, non-deleted handlers (both kinds)
 	// matching event_type, ordered rule-before-trigger so the router can

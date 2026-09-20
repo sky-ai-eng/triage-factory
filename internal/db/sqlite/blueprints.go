@@ -146,28 +146,6 @@ func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string)
 	return &b, nil
 }
 
-func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Blueprint, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	q := `
-		SELECT ` + sqliteBlueprintColumns + `
-		FROM blueprints WHERE org_id = ? AND system_slug = ? AND deleted_at IS NULL`
-	args := []any{orgID, systemSlug}
-	if teamID != "" {
-		q += ` AND team_id = ?`
-		args = append(args, teamID)
-	}
-	b, err := scanBlueprintRowSQLite(s.q.QueryRowContext(ctx, q, args...).Scan)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &b, nil
-}
-
 func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b domain.Blueprint) (domain.Blueprint, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return domain.Blueprint{}, err
@@ -360,20 +338,6 @@ func (s *blueprintStore) ListAllSteps(ctx context.Context, orgID string, f db.Bl
 		out = append(out, st)
 	}
 	return out, total, rows.Err()
-}
-
-func (s *blueprintStore) CountStepReferences(ctx context.Context, orgID, stepPromptID string) (int, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return 0, err
-	}
-	var n int
-	err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT bs.blueprint_id)
-		FROM blueprint_steps bs
-		JOIN blueprints b ON b.id = bs.blueprint_id
-		WHERE bs.step_prompt_id = ? AND b.deleted_at IS NULL
-	`, stepPromptID).Scan(&n)
-	return n, err
 }
 
 func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID string, stepPromptIDs, briefs []string) (domain.Blueprint, error) {

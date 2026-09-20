@@ -212,9 +212,7 @@ func TestCloseCascade_ObligationCloseTearsDownToo(t *testing.T) {
 	// The divergence the obligation repairs: the entity's snapshot says
 	// merged, but no close ever ran against it. The next poll observes the
 	// merged state again and records the obligation.
-	if _, err := sqlitestore.New(database).Entities.UpdateSnapshot(context.Background(), runmode.LocalDefaultOrgID, entityID, prSnapshotJSON(t, "MERGED")); err != nil {
-		t.Fatalf("stamp a terminal snapshot: %v", err)
-	}
+	seedSnapshot(t, database, entityID, prSnapshotJSON(t, "MERGED"))
 	pollGitHub(t, database, newFakeGitHub(t, "MERGED"))
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue: %v", err)

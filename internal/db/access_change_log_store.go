@@ -17,7 +17,11 @@ import (
 // governance action — the Record call composes with that transaction so the
 // log can't diverge from the action. The org-scoped RLS policy
 // (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id)) gates both
-// the in-tx write and the future audit-view read. SQLite is N=1 and unscoped.
+// the in-tx write and the future audit-view read. The two grants that cannot
+// carry claims — invite-accept and SSO JIT provisioning — write their audit
+// row with a raw INSERT on the admin pool's own transaction (the server's
+// recordAccessChangeTx), atomically with the membership grant, so this store
+// has no admin-pool arm. SQLite is N=1 and unscoped.
 //
 // See TFAC-471.
 type AccessChangeLogStore interface {
@@ -33,22 +37,6 @@ type AccessChangeLogStore interface {
 	// Exempt from the returned-row rule: it appends to an audit log. The row
 	// is written to be read by a later listing, never by its own writer.
 	Record(ctx context.Context, orgID string, entry domain.AccessChange) error
-
-	// RecordSystem is the admin-pool (BYPASSRLS) variant of Record for
-	// system-service writers that hold a real org identity but no JWT-claims
-	// context — the SSO JIT auto-provisioning seam, whose user has no
-	// membership/claims at provisioning time (the same reason grantOrgMembership
-	// takes the admin *sql.DB). Same insert as Record, just no RLS/claims
-	// context; mirrors external_actions' RecordSystem. The JIT production path
-	// composes its audit row inline on the grant's admin-pool tx (the
-	// access_change_log same-tx contract — see the server's GrantOrgMembership);
-	// RecordSystem is the standalone admin primitive for a writer that doesn't
-	// compose into a caller tx. Identical to Record in SQLite (N=1, no pool
-	// split). See TFAC-486.
-	//
-	// Exempt from the returned-row rule: it appends to an audit log, same as
-	// Record.
-	RecordSystem(ctx context.Context, orgID string, entry domain.AccessChange) error
 
 	// ListByOrg returns orgID's audit rows newest-first, bounded by opts.Limit
 	// (≤ 0 → a default page size). For the future org-admin audit view; the

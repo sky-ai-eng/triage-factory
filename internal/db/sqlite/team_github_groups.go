@@ -11,8 +11,7 @@ import (
 
 // teamGitHubGroupsStore is the SQLite impl of db.TeamGitHubGroupsStore.
 // The constructor accepts two queryers for signature parity with the
-// Postgres impl; SQLite has one connection so both collapse. The
-// `...System` variants delegate to their non-System counterparts.
+// Postgres impl; SQLite has one connection so both collapse.
 type teamGitHubGroupsStore struct{ q queryer }
 
 func newTeamGitHubGroupsStore(q, _ queryer) db.TeamGitHubGroupsStore {
@@ -22,15 +21,7 @@ func newTeamGitHubGroupsStore(q, _ queryer) db.TeamGitHubGroupsStore {
 var _ db.TeamGitHubGroupsStore = (*teamGitHubGroupsStore)(nil)
 
 func (s *teamGitHubGroupsStore) ListForTeam(ctx context.Context, teamID string) ([]domain.TeamGitHubGroup, error) {
-	return listTeamGitHubGroups(ctx, s.q, teamID)
-}
-
-func (s *teamGitHubGroupsStore) ListForTeamSystem(ctx context.Context, teamID string) ([]domain.TeamGitHubGroup, error) {
-	return listTeamGitHubGroups(ctx, s.q, teamID)
-}
-
-func listTeamGitHubGroups(ctx context.Context, q queryer, teamID string) ([]domain.TeamGitHubGroup, error) {
-	rows, err := q.QueryContext(ctx, `
+	rows, err := s.q.QueryContext(ctx, `
 		SELECT github_org_login, github_team_slug
 		FROM team_github_groups
 		WHERE team_id = ?
@@ -78,16 +69,8 @@ func (s *teamGitHubGroupsStore) SetForTeam(ctx context.Context, teamID string, g
 	})
 }
 
-func (s *teamGitHubGroupsStore) TeamsForGroup(ctx context.Context, orgID, orgLogin, teamSlug string) ([]string, error) {
-	return teamsForGroup(ctx, s.q, orgID, orgLogin, teamSlug)
-}
-
 func (s *teamGitHubGroupsStore) TeamsForGroupSystem(ctx context.Context, orgID, orgLogin, teamSlug string) ([]string, error) {
-	return teamsForGroup(ctx, s.q, orgID, orgLogin, teamSlug)
-}
-
-func teamsForGroup(ctx context.Context, q queryer, orgID, orgLogin, teamSlug string) ([]string, error) {
-	rows, err := q.QueryContext(ctx, `
+	rows, err := s.q.QueryContext(ctx, `
 		SELECT g.team_id
 		FROM team_github_groups g
 		JOIN teams t ON t.id = g.team_id

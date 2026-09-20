@@ -17,8 +17,8 @@ import (
 //   - app: ListForTeam + the whole of ReplaceForTeam (registry get-or-create +
 //     team-row write, atomic in the caller's claims tx, org-serialized by an
 //     advisory lock). RLS gates the team-row write by team admin.
-//   - admin: ListForTeamSystem, ListForOrgSystem, TracksRepoSystem —
-//     claims-free reads for the router gate / poll callers.
+//   - admin: ListForTeamSystem, TracksRepoSystem — claims-free reads for
+//     the router gate / poll callers.
 //
 // A row points at a repository by the registry row's id. The store's own
 // surface is still (owner, repo) — that is what a request body carries and
@@ -66,15 +66,11 @@ func listTeamGitHubRepos(ctx context.Context, q queryer, teamID string) ([]domai
 	return out, rows.Err()
 }
 
-func (s *teamGitHubReposStore) ListForOrgSystem(ctx context.Context, orgID string) ([]domain.TeamGitHubRepo, error) {
-	return listTeamGitHubReposForOrg(ctx, s.admin, orgID)
-}
-
 func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, orgID string) ([]domain.TrackedRepoTeams, error) {
 	// Admin pool: the preflight's org admin must see every team's tracking,
 	// including teams they don't belong to (the app-pool SELECT policy is
 	// team-membership-scoped). Org scope rides the teams join + the org_id
-	// filter, mirroring listTeamGitHubReposForOrg.
+	// filter — team_github_repos carries no org_id of its own to filter on.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT r.owner, r.repo, t.name
 		FROM team_github_repos g
@@ -98,22 +94,6 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 			continue
 		}
 		out = append(out, domain.TrackedRepoTeams{Owner: owner, Repo: repo, Teams: []string{team}})
-	}
-	return out, rows.Err()
-}
-
-func scanRepoRows(rows *sql.Rows, err error) ([]domain.TeamGitHubRepo, error) {
-	if err != nil {
-		return nil, fmt.Errorf("read team_github_repos union: %w", err)
-	}
-	defer rows.Close()
-	out := []domain.TeamGitHubRepo{}
-	for rows.Next() {
-		var r domain.TeamGitHubRepo
-		if err := rows.Scan(&r.Owner, &r.Repo); err != nil {
-			return nil, fmt.Errorf("scan team_github_repos union: %w", err)
-		}
-		out = append(out, r)
 	}
 	return out, rows.Err()
 }
@@ -195,20 +175,6 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 		}
 		return nil
 	})
-}
-
-// listTeamGitHubReposForOrg reads the DISTINCT (owner, repo) union across
-// the org's teams (committed state on whatever queryer is passed). org
-// scope rides the teams join — team_github_repos carries no org_id.
-func listTeamGitHubReposForOrg(ctx context.Context, q queryer, orgID string) ([]domain.TeamGitHubRepo, error) {
-	return scanRepoRows(q.QueryContext(ctx, `
-		SELECT DISTINCT r.owner, r.repo
-		FROM team_github_repos g
-		JOIN teams t ON t.id = g.team_id
-		JOIN repositories r ON r.id = g.repository_id
-		WHERE t.org_id = $1
-		ORDER BY r.owner ASC, r.repo ASC
-	`, orgID))
 }
 
 func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, owner, repo string) (bool, error) {

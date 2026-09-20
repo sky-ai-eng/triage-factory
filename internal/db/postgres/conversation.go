@@ -1061,10 +1061,6 @@ func (s *conversationStore) EndConversationsForTask(ctx context.Context, orgID, 
 	return endConversationsForTask(ctx, s.q, orgID, taskID, reason)
 }
 
-func (s *conversationStore) EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
-	return endConversationsForTask(ctx, s.admin, orgID, taskID, reason)
-}
-
 func (s *conversationStore) EndConversationsForTeamSystem(ctx context.Context, orgID, teamID string, reason domain.EndedReason) ([]domain.Conversation, error) {
 	if !domain.IsEndedReason(string(reason)) {
 		return nil, fmt.Errorf("%w: %q", db.ErrInvalidEndedReason, reason)
@@ -2188,15 +2184,7 @@ func scanMessageRow(row *sql.Row) (*domain.Message, error) {
 	return &m, nil
 }
 
-// Messages is the whole-transcript display read — MessagesSince from the
-// bottom. id is a bigserial, so no row can be at or below 0 and the watermark
-// drops out: routing both through one query is what makes the two reads'
-// visibility filter identical rather than merely matching.
-func (s *conversationStore) Messages(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
-	return s.MessagesSince(ctx, orgID, conversationID, 0)
-}
-
-func (s *conversationStore) MessagesSince(ctx context.Context, orgID, conversationID string, sinceID int) ([]domain.Message, error) {
+func (s *conversationStore) MessagesWindow(ctx context.Context, orgID, conversationID string, w db.MessageWindow) ([]domain.Message, error) {
 	// Withdrawn-pending rows (undelivered + inactive — a staged injection
 	// that was withdrawn before any flush) never happened, so the display
 	// read hides them. delivered + inactive stays visible: that is compacted
@@ -2206,26 +2194,10 @@ func (s *conversationStore) MessagesSince(ctx context.Context, orgID, conversati
 	// row placed out of insertion order renders where the model read it. The
 	// watermark stays on id: it answers "which rows has this client not seen
 	// yet", which is an insertion question, not a placement one.
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT `+pgMessageColumns+`
-		FROM messages
-		WHERE org_id = $1 AND conversation_id = $2
-		  AND id > $3
-		  AND NOT (delivered = false AND window_state = 'inactive')
-		ORDER BY COALESCE(seq, (id)::double precision) ASC
-	`, orgID, conversationID, sinceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanMessageRows(rows)
-}
-
-func (s *conversationStore) MessagesWindow(ctx context.Context, orgID, conversationID string, w db.MessageWindow) ([]domain.Message, error) {
-	// Same visibility filter and same placement ordering as MessagesSince —
-	// see its comment. What differs is the window: a backward page selects
-	// the NEWEST rows below a ceiling, which means ordering DESC to pick them
-	// and reversing afterwards so the caller always receives oldest-first.
+	//
+	// A backward page selects the NEWEST rows below a ceiling, which means
+	// ordering DESC to pick them and reversing afterwards so the caller
+	// always receives oldest-first.
 	const orderKey = `COALESCE(seq, (id)::double precision)`
 	where := `org_id = $1 AND conversation_id = $2 AND NOT (delivered = false AND window_state = 'inactive')`
 	args := []any{orgID, conversationID}
@@ -2280,7 +2252,7 @@ func (s *conversationStore) MessagesForConversations(ctx context.Context, orgID 
 	// artifactStore.ListByConversations. Ordering on (conversation_id, the effective
 	// assembly key) so the caller groups by ConversationID with each
 	// conversation's messages in the same order the single-conversation display
-	// read gives them. Withdrawn-pending rows are hidden, same as Messages.
+	// read gives them. Withdrawn-pending rows are hidden, same as MessagesWindow.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages

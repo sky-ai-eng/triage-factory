@@ -43,8 +43,8 @@ func TestMarketplaceStore_SQLite_EveryMethodReturnsErrNotApplicableInLocal(t *te
 	if _, err := m.Get(ctx, orgID, listingID, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("Get = %v, want ErrNotApplicableInLocal", err)
 	}
-	if _, err := m.GetActiveBySource(ctx, orgID, "some-source"); !errors.Is(err, db.ErrNotApplicableInLocal) {
-		t.Errorf("GetActiveBySource = %v, want ErrNotApplicableInLocal", err)
+	if _, err := m.GetBySource(ctx, orgID, "some-source"); !errors.Is(err, db.ErrNotApplicableInLocal) {
+		t.Errorf("GetBySource = %v, want ErrNotApplicableInLocal", err)
 	}
 	if _, err := m.Vote(ctx, orgID, listingID, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("Vote = %v, want ErrNotApplicableInLocal", err)

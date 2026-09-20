@@ -207,25 +207,6 @@ func (s *eventHandlerStore) Get(ctx context.Context, orgID, id string) (*domain.
 	return &h, nil
 }
 
-// GetBySystemSlug resolves a team's copy of a shipped handler by its stable
-// system_slug. Returns (nil, nil) when the team has no copy or its copy is
-// soft-deleted.
-func (s *eventHandlerStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.EventHandler, error) {
-	row := s.q.QueryRowContext(ctx, `
-		SELECT `+sqliteEventHandlerColumns+`
-		FROM event_handlers
-		WHERE org_id = ? AND team_id = ? AND system_slug = ? AND deleted_at IS NULL
-	`, orgID, teamID, systemSlug)
-	h, err := scanEventHandlerRowSQLite(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &h, nil
-}
-
 func (s *eventHandlerStore) GetEnabledForEvent(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
 	// Rules-before-triggers order (same as Postgres impl) — preserves
 	// the pre-unification observable shape.

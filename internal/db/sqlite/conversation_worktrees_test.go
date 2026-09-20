@@ -38,14 +38,29 @@ func TestConversationWorktreeStore_SQLite(t *testing.T) {
 			},
 			Repo: func(t *testing.T, slug string) {
 				t.Helper()
-				if _, err := stores.Repos.GetOrCreateSystem(context.Background(),
-					runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(slug)); err != nil {
-					t.Fatalf("seed repository %s: %v", slug, err)
-				}
+				trackRepoForTest(t, stores, slug)
 			},
 		}
 		return stores.ConversationWorktrees, runmode.LocalDefaultOrgID, seed
 	})
+}
+
+// trackRepoForTest adds slug to the local default team's tracked set, which is
+// how a repository row comes to exist for a worktree to reference: tracking is
+// the one door into the registry. It appends rather than replaces, so a
+// fixture staging several repositories keeps every one of them tracked.
+func trackRepoForTest(t *testing.T, stores db.Stores, slug string) {
+	t.Helper()
+	ctx := context.Background()
+	tracked, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
+	if err != nil {
+		t.Fatalf("list tracked repos: %v", err)
+	}
+	ref := domain.RepoRefFromSlug(slug)
+	tracked = append(tracked, domain.TeamGitHubRepo{Owner: ref.Owner, Repo: ref.Repo})
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, tracked); err != nil {
+		t.Fatalf("track repository %s: %v", slug, err)
+	}
 }
 
 // TestConversationWorktreeStore_SQLite_RejectsNonLocalOrg pins assertLocalOrg.

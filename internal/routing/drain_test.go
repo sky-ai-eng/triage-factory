@@ -201,8 +201,8 @@ func setupDrainScenario(t *testing.T, database *sql.DB) (entityID, taskID, trigg
 	); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
-	if _, err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
-		t.Fatalf("stamp claim: %v", err)
+	if ok, err := testTaskStore(database).StampAgentClaimIfUnclaimed(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultTeamID); err != nil || !ok {
+		t.Fatalf("stamp claim: ok=%v err=%v", ok, err)
 	}
 
 	trig := domain.EventHandler{

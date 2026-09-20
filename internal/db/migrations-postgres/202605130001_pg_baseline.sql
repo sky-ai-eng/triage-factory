@@ -4624,8 +4624,10 @@ CREATE TABLE public.marketplace_installs (
     created_at     timestamp with time zone DEFAULT now() NOT NULL
 );
 
--- One active listing per source object: republishing reuses the existing listing
--- rather than minting a duplicate (GetActiveBySource).
+-- One published listing per source object: republishing reuses the existing
+-- listing rather than minting a duplicate. Published-only, so a delisted
+-- listing does not hold the slot; the publish flow reads the source's listing
+-- status-blind and routes a delisted one to relist.
 CREATE UNIQUE INDEX marketplace_listings_source_active ON public.marketplace_listings USING btree (org_id, source_id) WHERE ((status = 'published'::text) AND (source_id IS NOT NULL));
 
 ALTER TABLE ONLY public.marketplace_listing_versions

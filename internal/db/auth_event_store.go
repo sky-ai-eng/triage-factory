@@ -35,13 +35,20 @@ type AuthEventStore interface {
 
 	// ListByOrgSystem returns orgID's events newest-first (created_at DESC, id
 	// DESC), bounded + filtered by opts. Admin pool. NULL-org rows are EXCLUDED
-	// (they belong to no org; the future viewer surfaces them as
-	// system/admin-only). For tests + the deferred viewer (no HTTP surface yet).
+	// (they belong to no org; a viewer surfaces them as system/admin-only).
+	//
+	// No production caller today: no HTTP surface reads auth_events, only
+	// RecordSystem is wired. Kept as the org-wide read an audit viewer would
+	// scope on, and as the read the store's own dialect tests observe
+	// RecordSystem through.
 	ListByOrgSystem(ctx context.Context, orgID string, opts domain.AuthEventListOpts) ([]domain.AuthEvent, error)
 
 	// ListByUserSystem returns userID's events newest-first, bounded + filtered
-	// by opts. Admin pool. The personal "your logins" read the deferred viewer
-	// will scope on.
+	// by opts. Admin pool.
+	//
+	// No production caller today, for the same reason as ListByOrgSystem.
+	// Kept as the personal "your logins" read a viewer would scope on, and
+	// as the other read the dialect tests observe RecordSystem through.
 	ListByUserSystem(ctx context.Context, userID string, opts domain.AuthEventListOpts) ([]domain.AuthEvent, error)
 
 	// ClaimSeatSystem atomically claims a per-seat license slot for userID in the

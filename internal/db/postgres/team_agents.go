@@ -13,18 +13,18 @@ import (
 //
 // # Pool split
 //
-//   - app   — tf_app, RLS-active. GetForTeam, SetEnabled, SetOverrides,
-//     Remove, ListForOrg. team_agents_select plus the write policies
-//     (team_agents_insert/team_agents_update/team_agents_delete) all
-//     gate on tf.user_in_team(team_id), so team members read/write
-//     their own team's row but not other teams'. The insert/update
-//     policies additionally enforce agents.org_id = teams.org_id at
-//     write time (migration 202605120004) — without that, a team
-//     member who guessed another org's agent UUID could create a
-//     cross-org reference.
-//   - admin — supabase_admin, BYPASSRLS. AddForTeam only. Same
-//     reasoning as AgentStore.Create: bootstrap runs without claims
-//     (org-create + team-create handlers, internal/db/bootstrap.go).
+//   - app   — tf_app, RLS-active. GetForTeam. team_agents_select plus
+//     the write policies (team_agents_insert/team_agents_update/
+//     team_agents_delete) all gate on tf.user_in_team(team_id), so team
+//     members read their own team's row but not other teams'. The
+//     insert/update policies additionally enforce agents.org_id =
+//     teams.org_id at write time (migration 202605120004) — without
+//     that, a team member who guessed another org's agent UUID could
+//     create a cross-org reference.
+//   - admin — supabase_admin, BYPASSRLS. AddForTeam and GetForTeamSystem.
+//     Same reasoning as AgentStore.Create: bootstrap and the router run
+//     without claims (org-create + team-create handlers,
+//     internal/db/bootstrap.go; internal/routing).
 //
 // Note: orgID is accepted for API symmetry with the SQLite impl and to
 // keep call sites uniform, but the Postgres impl doesn't filter on it
@@ -86,11 +86,11 @@ func (s *teamAgentStore) AddForTeam(ctx context.Context, orgID, teamID, agentID 
 		// bootstrap runs outside any user tx.
 		return errors.New("postgres team_agents: AddForTeam must not be called inside WithTx; call stores.TeamAgents.AddForTeam directly")
 	}
-	// Match the no-op-on-invalid-UUID convention the rest of this store
-	// uses (GetForTeam, SetEnabled, SetOverrides, Remove). Without this
-	// guard the bare ExecContext below would raise Postgres 22P02 on
-	// malformed input, which leaks the parse layer into callers and
-	// makes the API inconsistent with its peers in the same interface.
+	// Match the no-op-on-invalid-UUID convention the reads in this store
+	// use. Without this guard the bare ExecContext below would raise
+	// Postgres 22P02 on malformed input, which leaks the parse layer into
+	// callers and makes the API inconsistent with its peers in the same
+	// interface.
 	if !isValidUUID(teamID) || !isValidUUID(agentID) {
 		return nil
 	}
@@ -103,95 +103,6 @@ func (s *teamAgentStore) AddForTeam(ctx context.Context, orgID, teamID, agentID 
 		ON CONFLICT (team_id, agent_id) DO NOTHING
 	`, teamID, agentID)
 	return err
-}
-
-// scanUpdatedTeamAgent decodes a key-addressed UPDATE … RETURNING. No row
-// scanned means the (team, agent) pair named nothing — or that RLS hides
-// whatever does — and both are db.ErrNoSuchTeamAgent.
-func scanUpdatedTeamAgent(row *sql.Row) (domain.TeamAgent, error) {
-	ta, err := scanTeamAgentRowPG(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.TeamAgent{}, db.ErrNoSuchTeamAgent
-	}
-	return ta, err
-}
-
-func (s *teamAgentStore) SetEnabled(ctx context.Context, orgID, teamID, agentID string, enabled bool) (domain.TeamAgent, error) {
-	if !isValidUUID(teamID) || !isValidUUID(agentID) {
-		return domain.TeamAgent{}, db.ErrNoSuchTeamAgent
-	}
-	return scanUpdatedTeamAgent(s.app.QueryRowContext(ctx, `
-		UPDATE team_agents SET enabled = $1 WHERE team_id = $2 AND agent_id = $3
-		RETURNING `+pgTeamAgentColumns,
-		enabled, teamID, agentID))
-}
-
-func (s *teamAgentStore) SetOverrides(ctx context.Context, orgID, teamID, agentID string, model *string, autonomy *float64) (domain.TeamAgent, error) {
-	if !isValidUUID(teamID) || !isValidUUID(agentID) {
-		return domain.TeamAgent{}, db.ErrNoSuchTeamAgent
-	}
-	var modelArg any
-	if model != nil && *model != "" {
-		modelArg = *model
-	}
-	return scanUpdatedTeamAgent(s.app.QueryRowContext(ctx, `
-		UPDATE team_agents
-		SET per_team_model = $1,
-		    per_team_autonomy_suitability = $2
-		WHERE team_id = $3 AND agent_id = $4
-		RETURNING `+pgTeamAgentColumns,
-		modelArg, autonomy, teamID, agentID))
-}
-
-func (s *teamAgentStore) Remove(ctx context.Context, orgID, teamID, agentID string) error {
-	if !isValidUUID(teamID) || !isValidUUID(agentID) {
-		return nil
-	}
-	_, err := s.app.ExecContext(ctx, `
-		DELETE FROM team_agents WHERE team_id = $1 AND agent_id = $2
-	`, teamID, agentID)
-	return err
-}
-
-func (s *teamAgentStore) ListForOrg(ctx context.Context, orgID, agentID string) ([]domain.TeamAgent, error) {
-	if !isValidUUID(agentID) {
-		return nil, nil
-	}
-	rows, err := s.app.QueryContext(ctx, `
-		SELECT `+pgTeamAgentColumns+`
-		FROM team_agents
-		WHERE agent_id = $1
-		ORDER BY added_at ASC
-	`, agentID)
-	if err != nil {
-		return nil, wrapAppPoolPermErr(err, "team_agents.ListForOrg")
-	}
-	defer rows.Close()
-
-	var out []domain.TeamAgent
-	for rows.Next() {
-		ta, err := scanTeamAgentPG(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, ta)
-	}
-	return out, rows.Err()
-}
-
-func scanTeamAgentPG(rows *sql.Rows) (domain.TeamAgent, error) {
-	var ta domain.TeamAgent
-	var model sql.NullString
-	var autonomy sql.NullFloat64
-	if err := rows.Scan(&ta.TeamID, &ta.AgentID, &ta.Enabled, &model, &autonomy, &ta.AddedAt); err != nil {
-		return ta, err
-	}
-	ta.PerTeamModel = model.String
-	if autonomy.Valid {
-		v := autonomy.Float64
-		ta.PerTeamAutonomySuitability = &v
-	}
-	return ta, nil
 }
 
 func scanTeamAgentRowPG(row *sql.Row) (domain.TeamAgent, error) {

@@ -218,16 +218,6 @@ func scanWrittenEntity(row *sql.Row) (domain.Entity, error) {
 	return *e, nil
 }
 
-func (s *entityStore) UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return domain.Entity{}, err
-	}
-	return scanWrittenEntity(s.q.QueryRowContext(ctx, `
-		UPDATE entities SET snapshot_json = ?, last_polled_at = ? WHERE id = ?
-		RETURNING `+entitySelectCols,
-		snapshotJSON, time.Now().UTC(), id))
-}
-
 func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return domain.Entity{}, err

@@ -264,7 +264,13 @@ type EventQueueStore interface {
 	RequeueFailedEvents(ctx context.Context, orgID string, ids []int64) (int, error)
 
 	// ListForEntity returns every queue row for an entity in id order
-	// regardless of status. Debug/audit views and conformance assertions.
+	// regardless of status.
+	//
+	// No production caller today: production reads the queue by status (the
+	// drain) and by key (dedup). Kept as the entity-shaped observation read
+	// — "everything queued against this entity, in any status" — that the
+	// router, tracker, ingest and delegate tests assert through, and that a
+	// debug view of a pull request's queue would ask.
 	ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.QueuedEvent, error)
 
 	// UnsettledCloseExistsSystem reports whether the entity has a pending or

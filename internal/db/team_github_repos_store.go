@@ -51,9 +51,9 @@ var ErrTeamNotInOrg = errors.New("db: team does not belong to that org")
 //     reconcile runs in the caller's tx (atomic), serialized per org by a
 //     transaction advisory lock so concurrent same-org saves can't race
 //     repositories into an inconsistent state.
-//   - ListForTeamSystem, ListForOrgSystem, TracksRepoSystem run on the
-//     admin pool. The router gate + any poll caller resolve tracking
-//     without a JWT-claims context.
+//   - ListForTeamSystem, TracksRepoSystem run on the admin pool. The
+//     router gate + any poll caller resolve tracking without a
+//     JWT-claims context.
 //
 // SQLite collapses the pool split to one connection; the `...System`
 // variant delegates to its non-System counterpart, the union read needs
@@ -70,12 +70,6 @@ type TeamGitHubReposStore interface {
 	// pool in Postgres for callers without a JWT-claims context.
 	ListForTeamSystem(ctx context.Context, teamID string) ([]domain.TeamGitHubRepo, error)
 
-	// ListForOrgSystem returns the DISTINCT (owner, repo) union across
-	// every team in the org, ordered by (owner, repo) — the tracked set as
-	// slugs. Admin pool in Postgres: the union spans teams the caller may not
-	// belong to.
-	ListForOrgSystem(ctx context.Context, orgID string) ([]domain.TeamGitHubRepo, error)
-
 	// ListOrgReposWithTeamsSystem returns each tracked (owner, repo) in the
 	// org together with the display names of the teams tracking it, ordered by
 	// (owner, repo) then team name. It is the tracked-set source for the
@@ -91,13 +85,28 @@ type TeamGitHubReposStore interface {
 	// mirroring JiraStatusRulesStore.ReplaceForTeam. Passing an empty slice
 	// clears every row for the team.
 	//
-	// In the same transaction it get-or-creates the registry row each entry
-	// references, so a repository gets its row when it is first tracked
-	// rather than when profiling first succeeds. Atomic — if the tx rolls
-	// back, neither table moves. Postgres serializes concurrent same-org
-	// calls with a per-org transaction advisory lock. Composed in the
-	// caller's WithTx so RLS gates the team-row write by team admin. orgID
-	// must be the team's org (the request's authorized org).
+	// This is the single door that brings a repository into the repositories
+	// table: in the same transaction it get-or-creates the registry row each
+	// entry references, so a repository gets its row when it is first tracked
+	// rather than when profiling first succeeds, and RepositoryStore exposes
+	// no create of its own. The row it mints is bare — identity columns only,
+	// no provider id (tracking learns none; the poller and profiler record
+	// it), no profile. An existing row is left exactly as it stands: the
+	// lookup is case-insensitive on owner/repo (GitHub identifiers are), so a
+	// team spelling an already-registered repository differently gets the
+	// existing row, its stored casing stays sticky, and every cached column —
+	// profile, base branch, clone state, poll cursor — survives. Two teams
+	// tracking one repository under two casings, concurrently, resolve to one
+	// row: the folded identity index is what refuses the second, not a guard
+	// either writer holds. Atomic — if the tx rolls back, neither table
+	// moves. Postgres serializes concurrent same-org calls with a per-org
+	// transaction advisory lock. Composed in the caller's WithTx so RLS gates
+	// the team-row write by team admin. orgID must be the team's org (the
+	// request's authorized org).
+	//
+	// Control-plane only: the executor's Postgres role holds SELECT and
+	// UPDATE on repositories, not INSERT, so a repository is brought into
+	// the table by the side that tracks, never by a running agent's pod.
 	//
 	// Untracking is a delete HERE and nowhere else: the registry row for a
 	// repository no team tracks anymore survives, with its profile, base

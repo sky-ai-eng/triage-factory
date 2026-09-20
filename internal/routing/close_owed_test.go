@@ -116,9 +116,7 @@ func prSnapshotJSON(t *testing.T, state string) string {
 func seedStrandedPR(t *testing.T, r *Router, database *sql.DB) (entityID, taskID, blueprintRunID string) {
 	t.Helper()
 	entityID, taskID = seedCIFailedTaskOnEntity(t, r, database, "octo/repo#9")
-	if _, err := sqlitestore.New(database).Entities.UpdateSnapshot(context.Background(), runmode.LocalDefaultOrgID, entityID, prSnapshotJSON(t, "MERGED")); err != nil {
-		t.Fatalf("seed terminal snapshot: %v", err)
-	}
+	seedSnapshot(t, database, entityID, prSnapshotJSON(t, "MERGED"))
 	blueprintRunID, _ = seedRunOnTask(t, database, taskID, "running", "")
 	return entityID, taskID, blueprintRunID
 }
@@ -137,6 +135,16 @@ func queueRowsOfType(t *testing.T, database *sql.DB, entityID, eventType string)
 		}
 	}
 	return out
+}
+
+// seedSnapshot writes a snapshot onto an existing entity through the tracker's
+// CAS door at the entity's current version.
+func seedSnapshot(t *testing.T, database *sql.DB, entityID, snapshotJSON string) {
+	t.Helper()
+	ok, err := sqlitestore.New(database).Entities.UpdateSnapshotCASSystem(context.Background(), runmode.LocalDefaultOrgID, entityID, snapshotJSON, entityPollSeq(t, database, entityID))
+	if err != nil || !ok {
+		t.Fatalf("seed snapshot on %s: ok=%v err=%v", entityID, ok, err)
+	}
 }
 
 func entityPollSeq(t *testing.T, database *sql.DB, entityID string) int64 {
@@ -260,9 +268,7 @@ func TestCloseOwed_InFlightTransition_EmitsOnlyTheTransition(t *testing.T) {
 	r := newQueueWorkerRouter(t, database)
 	gh := newFakeGitHub(t, "OPEN")
 	entityID, _ := seedCIFailedTaskOnEntity(t, r, database, "octo/repo#9")
-	if _, err := sqlitestore.New(database).Entities.UpdateSnapshot(context.Background(), runmode.LocalDefaultOrgID, entityID, prSnapshotJSON(t, "OPEN")); err != nil {
-		t.Fatalf("seed open snapshot: %v", err)
-	}
+	seedSnapshot(t, database, entityID, prSnapshotJSON(t, "OPEN"))
 
 	pollGitHub(t, database, gh) // open → open: nothing
 	gh.set("MERGED")
@@ -347,9 +353,7 @@ func TestCloseOwed_ReopenRace_RealTransitionIsStale(t *testing.T) {
 	r.SetEventPublisher(pub)
 	gh := newFakeGitHub(t, "OPEN")
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "octo/repo#9")
-	if _, err := sqlitestore.New(database).Entities.UpdateSnapshot(context.Background(), runmode.LocalDefaultOrgID, entityID, prSnapshotJSON(t, "OPEN")); err != nil {
-		t.Fatalf("seed open snapshot: %v", err)
-	}
+	seedSnapshot(t, database, entityID, prSnapshotJSON(t, "OPEN"))
 	brID, _ := seedRunOnTask(t, database, taskID, "running", "")
 
 	pollGitHub(t, database, gh)
@@ -560,9 +564,7 @@ func TestCloseOwed_Jira(t *testing.T) {
 	}
 	snap, _ := json.Marshal(domain.JiraSnapshot{Key: "SKY-1", Summary: "Owed issue", Status: "Done", StatusID: "st-Done",
 		Assignee: "Alice", AssigneeAccountID: "acc-1", UpdatedAt: "2026-06-10T10:00:00.000+0000"})
-	if _, err := st.Entities.UpdateSnapshot(ctx, runmode.LocalDefaultOrgID, entity.ID, string(snap)); err != nil {
-		t.Fatalf("seed done snapshot: %v", err)
-	}
+	seedSnapshot(t, database, entity.ID, string(snap))
 	evtID, err := st.Events.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.Event{
 		OrgID: runmode.LocalDefaultOrgID, EntityID: &entity.ID, EventType: domain.EventJiraIssueAssigned, MetadataJSON: "{}",
 	})

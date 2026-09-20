@@ -86,6 +86,19 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}
 	}
 
+	// grant reads everything the mirror holds for class, unpaged, through the
+	// picker's read — the door production lists the mirror through. The cases
+	// below assert on what the mirror holds, so the read they see it through
+	// is the one a person would.
+	grant := func(t *testing.T, b ReachableReposBackend, class domain.GitHubCredentialClass) []domain.ReachableRepository {
+		t.Helper()
+		rows, _, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, class, "", db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListReachableSystem(%q): %v", class, err)
+		}
+		return rows
+	}
+
 	slugs := func(t *testing.T, rows []domain.ReachableRepository) []string {
 		t.Helper()
 		out := make([]string, 0, len(rows))
@@ -135,10 +148,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem (narrowed): %v", err)
 		}
 
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
-		if err != nil {
-			t.Fatalf("ListForOrgSystem: %v", err)
-		}
+		got := grant(t, b, byoApp)
 		equal(t, "mirror after a narrowed grant", slugs(t, got), []string{"acme/api", "acme/worker"})
 	})
 
@@ -154,12 +164,9 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
-		if err != nil {
-			t.Fatalf("ListForOrgSystem: %v", err)
-		}
+		got := grant(t, b, byoApp)
 		if len(got) != 2 {
-			t.Fatalf("ListForOrgSystem = %d rows; want 2", len(got))
+			t.Fatalf("grant = %d rows; want 2", len(got))
 		}
 		if got[0].ExternalID != "424242" {
 			t.Errorf("acme/api ExternalID = %q; want %q", got[0].ExternalID, "424242")
@@ -187,12 +194,9 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
-		if err != nil {
-			t.Fatalf("ListForOrgSystem: %v", err)
-		}
+		got := grant(t, b, byoApp)
 		if len(got) != 1 {
-			t.Fatalf("ListForOrgSystem = %d rows for two casings of one repository; want 1 (%v)", len(got), slugs(t, got))
+			t.Fatalf("grant = %d rows for two casings of one repository; want 1 (%v)", len(got), slugs(t, got))
 		}
 	})
 
@@ -220,10 +224,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatal("ReplaceForInstallationSystem accepted an unknown source; want an error")
 		}
 
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
-		if err != nil {
-			t.Fatalf("ListForOrgSystem: %v", err)
-		}
+		got := grant(t, b, byoApp)
 		equal(t, "mirror after a rejected replace", slugs(t, got), []string{"acme/api"})
 	})
 
@@ -249,19 +250,15 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
-		if err != nil {
-			t.Fatalf("ListForOrgSystem: %v", err)
-		}
+		got := grant(t, b, byoApp)
 		equal(t, "mirror after one installation was removed", slugs(t, got), []string{"other/tool"})
 	})
 
-	t.Run("ClearingWithoutAnInstallationIsRefused", func(t *testing.T) {
-		// A write path called only when the grant is KNOWN to be gone. "No rows
-		// matched" and "the caller named no installation" must not be the same
-		// answer: reporting success for the second would leave every
-		// installation's mirror standing while the caller believes one was
-		// cleared.
+	t.Run("ReplacingWithoutAnInstallationIsRefused", func(t *testing.T) {
+		// A replace is addressed by installation, and one that names none has
+		// no scope to replace: "no rows matched" and "the caller named no
+		// installation" must not be the same answer, or a caller believing it
+		// reconciled a grant has written nothing and been told it succeeded.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
@@ -270,24 +267,18 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
 
-		if err := b.Mirror.ClearForInstallationSystem(ctx, b.OrgID, ""); err == nil {
-			t.Error("ClearForInstallationSystem accepted an empty installation id; want an error")
-		}
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "", nil); err == nil {
 			t.Error("ReplaceForInstallationSystem accepted an empty installation id; want an error")
 		}
 
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
-		if err != nil {
-			t.Fatalf("ListForOrgSystem: %v", err)
-		}
-		equal(t, "mirror after two refused writes", slugs(t, got), []string{"acme/api"})
+		got := grant(t, b, byoApp)
+		equal(t, "mirror after a refused write", slugs(t, got), []string{"acme/api"})
 	})
 
 	t.Run("MirrorsAreScopedToTheirInstallation", func(t *testing.T) {
-		// Two accounts, two grants. Reconciling one must not disturb the other:
-		// a per-installation replace that reached across would make a
-		// second-account failure look like a first-account revocation.
+		// Two accounts, two grants. Removing one must not disturb the other: a
+		// per-installation clear that reached across would make a
+		// second-account uninstall look like a first-account revocation.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
 		install(t, b, "2", "other", domain.RepositorySelectionAll)
@@ -301,15 +292,12 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem (2): %v", err)
 		}
-		if err := b.Mirror.ClearForInstallationSystem(ctx, b.OrgID, "2"); err != nil {
-			t.Fatalf("ClearForInstallationSystem: %v", err)
+		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "2"); err != nil {
+			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 
-		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, byoApp)
-		if err != nil {
-			t.Fatalf("ListForOrgSystem: %v", err)
-		}
-		equal(t, "mirror after clearing the other installation", slugs(t, got), []string{"acme/api"})
+		got := grant(t, b, byoApp)
+		equal(t, "mirror after removing the other installation", slugs(t, got), []string{"acme/api"})
 	})
 
 	t.Run("SelectedAndAllAreDistinguishableAfterReconcile", func(t *testing.T) {
@@ -701,10 +689,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ListScopeDriftSystem(managed): %v", err)
 		}
 		equal(t, "managed scope drift", trackedSlugs(drift), []string{"acme/legacy"})
-		all, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, managed)
-		if err != nil {
-			t.Fatalf("ListForOrgSystem(managed): %v", err)
-		}
+		all := grant(t, b, managed)
 		equal(t, "managed grant", slugs(t, all), []string{"acme/api", "acme/secrets"})
 
 		// The other App class sees none of it: no reach, and no refreshed
@@ -729,9 +714,6 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}
 		if _, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, pat, db.Unwindowed); err == nil {
 			t.Error("ListScopeDriftSystem(pat) = nil error; want a refusal")
-		}
-		if _, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID, pat); err == nil {
-			t.Error("ListForOrgSystem(pat) = nil error; want a refusal")
 		}
 	})
 

@@ -39,21 +39,17 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 	t.Helper()
 	ctx := context.Background()
 
-	handlerBySlug := func(t *testing.T, stores db.Stores, orgID, teamID, slug string) *domain.EventHandler {
+	handlerBySlug := func(t *testing.T, stores db.Stores, handlerID ShippedHandlerIDBySlug, orgID, teamID, slug string) *domain.EventHandler {
 		t.Helper()
-		h, err := stores.EventHandlers.GetBySystemSlug(ctx, orgID, teamID, slug)
-		if err != nil {
-			t.Fatalf("GetBySystemSlug(handler %q): %v", slug, err)
-		}
-		return h
+		return handlerCopyBySlug(t, stores.EventHandlers, handlerID, orgID, teamID, slug)
 	}
 	blueprintBySlug := func(t *testing.T, stores db.Stores, orgID, teamID, slug string) *domain.Blueprint {
 		t.Helper()
-		b, err := stores.Blueprints.GetBySystemSlug(ctx, orgID, teamID, slug)
+		rows, _, err := stores.Blueprints.List(ctx, orgID, db.BlueprintListFilter{TeamID: teamID}, db.Unwindowed)
 		if err != nil {
-			t.Fatalf("GetBySystemSlug(blueprint %q): %v", slug, err)
+			t.Fatalf("Blueprints.List for blueprint %q: %v", slug, err)
 		}
-		return b
+		return ShippedCopyBySlug(t, rows, teamID, slug, blueprintKey)
 	}
 
 	// seedOneStepBlueprint syncs a single trigger-target blueprint (via the
@@ -74,7 +70,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 	}
 
 	t.Run("InsertMissing_HonorsEnabledConventions", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, handlerID := factory(t)
 		bpID := seedOneStepBlueprint(t, stores, orgID, teamID, "hbp-conv")
 		handlers := []db.ShippedEventHandler{
 			syncRule("hr-conv", domain.EventGitHubPRCICheckFailed, "", "HRule", 0.5, 0),
@@ -83,44 +79,44 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlers, map[string]string{"hbp-conv": bpID}); err != nil {
 			t.Fatalf("sync: %v", err)
 		}
-		rule := handlerBySlug(t, stores, orgID, teamID, "hr-conv")
+		rule := handlerBySlug(t, stores, handlerID, orgID, teamID, "hr-conv")
 		if rule == nil || !rule.Enabled {
 			t.Errorf("inserted rule = %+v; want a row with enabled=true", rule)
 		}
-		trig := handlerBySlug(t, stores, orgID, teamID, "ht-conv")
+		trig := handlerBySlug(t, stores, handlerID, orgID, teamID, "ht-conv")
 		if trig == nil || trig.Enabled {
 			t.Errorf("inserted trigger = %+v; want a row with enabled=false", trig)
 		}
 	})
 
 	t.Run("EqualContent_ZeroWrites", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, handlerID := factory(t)
 		handlers := []db.ShippedEventHandler{
 			syncRule("hr-eq", domain.EventGitHubPRCICheckFailed, `{"author_in":[]}`, "HEq", 0.5, 0),
 		}
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlers, nil); err != nil {
 			t.Fatalf("sync: %v", err)
 		}
-		before := handlerBySlug(t, stores, orgID, teamID, "hr-eq").UpdatedAt
+		before := handlerBySlug(t, stores, handlerID, orgID, teamID, "hr-eq").UpdatedAt
 		time.Sleep(15 * time.Millisecond)
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlers, nil); err != nil {
 			t.Fatalf("re-sync: %v", err)
 		}
-		after := handlerBySlug(t, stores, orgID, teamID, "hr-eq").UpdatedAt
+		after := handlerBySlug(t, stores, handlerID, orgID, teamID, "hr-eq").UpdatedAt
 		if !after.Equal(before) {
 			t.Errorf("updated_at churned on an equal re-sync: before=%s after=%s", before, after)
 		}
 	})
 
 	t.Run("StaleContent_UpdatedWithoutTouchingEnabled_WhenDisabled", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, handlerID := factory(t)
 		handlersA := []db.ShippedEventHandler{
 			syncRule("hr-stale-off", domain.EventGitHubPRCICheckFailed, `{"author_in":[]}`, "HStale", 0.5, 0),
 		}
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlersA, nil); err != nil {
 			t.Fatalf("sync A: %v", err)
 		}
-		r := handlerBySlug(t, stores, orgID, teamID, "hr-stale-off")
+		r := handlerBySlug(t, stores, handlerID, orgID, teamID, "hr-stale-off")
 		// Disabled the way a user disables it: an enabled-only Update, which is
 		// what the rule and trigger switches PATCH. That write must not stamp
 		// user_modified, or the sync below would skip this row as user-owned
@@ -136,7 +132,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlersB, nil); err != nil {
 			t.Fatalf("sync B: %v", err)
 		}
-		got := handlerBySlug(t, stores, orgID, teamID, "hr-stale-off")
+		got := handlerBySlug(t, stores, handlerID, orgID, teamID, "hr-stale-off")
 		if got == nil {
 			t.Fatal("rule vanished after sync")
 		}
@@ -160,7 +156,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 	})
 
 	t.Run("StaleContent_UpdatedWithoutTouchingEnabled_WhenEnabled", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, handlerID := factory(t)
 		handlersA := []db.ShippedEventHandler{
 			syncRule("hr-stale-on", domain.EventGitHubPRCICheckFailed, "", "HStaleOn", 0.5, 0),
 		}
@@ -173,7 +169,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlersB, nil); err != nil {
 			t.Fatalf("sync B: %v", err)
 		}
-		got := handlerBySlug(t, stores, orgID, teamID, "hr-stale-on")
+		got := handlerBySlug(t, stores, handlerID, orgID, teamID, "hr-stale-on")
 		if got == nil || !got.Enabled {
 			t.Errorf("Enabled=%v after content sync; want true (shipped-insert convention untouched)", got != nil && got.Enabled)
 		}
@@ -183,14 +179,14 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 	})
 
 	t.Run("SoftDeletedHandler_SkippedBySync", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, handlerID := factory(t)
 		handlersA := []db.ShippedEventHandler{
 			syncRule("hr-del", domain.EventGitHubPRCICheckFailed, "", "HDel", 0.5, 0),
 		}
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlersA, nil); err != nil {
 			t.Fatalf("sync A: %v", err)
 		}
-		r := handlerBySlug(t, stores, orgID, teamID, "hr-del")
+		r := handlerBySlug(t, stores, handlerID, orgID, teamID, "hr-del")
 		if err := stores.EventHandlers.Delete(ctx, orgID, r.ID); err != nil {
 			t.Fatalf("delete: %v", err)
 		}
@@ -200,20 +196,20 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlersB, nil); err != nil {
 			t.Fatalf("sync B: %v", err)
 		}
-		if got := handlerBySlug(t, stores, orgID, teamID, "hr-del"); got != nil {
+		if got := handlerBySlug(t, stores, handlerID, orgID, teamID, "hr-del"); got != nil {
 			t.Errorf("soft-deleted handler resurrected by sync: %+v", got)
 		}
 	})
 
 	t.Run("UserModifiedHandler_SkippedBySync", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, handlerID := factory(t)
 		handlersA := []db.ShippedEventHandler{
 			syncRule("hr-mod", domain.EventGitHubPRCICheckFailed, "", "HMod", 0.5, 0),
 		}
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlersA, nil); err != nil {
 			t.Fatalf("sync A: %v", err)
 		}
-		r := handlerBySlug(t, stores, orgID, teamID, "hr-mod")
+		r := handlerBySlug(t, stores, handlerID, orgID, teamID, "hr-mod")
 		edited := *r
 		edited.Name = "User Renamed"
 		if _, err := stores.EventHandlers.Update(ctx, orgID, edited); err != nil {
@@ -225,14 +221,14 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlersB, nil); err != nil {
 			t.Fatalf("sync B: %v", err)
 		}
-		got := handlerBySlug(t, stores, orgID, teamID, "hr-mod")
+		got := handlerBySlug(t, stores, handlerID, orgID, teamID, "hr-mod")
 		if got == nil || got.Name != "User Renamed" {
 			t.Errorf("user-modified handler overwritten by sync: %+v", got)
 		}
 	})
 
 	t.Run("Trigger_BlueprintBinding_ReResolvedOnRebind", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, handlerID := factory(t)
 		idA := seedOneStepBlueprint(t, stores, orgID, teamID, "hbp-rebind-a")
 		idB := seedOneStepBlueprint(t, stores, orgID, teamID, "hbp-rebind-b")
 		bySlug := map[string]string{"hbp-rebind-a": idA, "hbp-rebind-b": idB}
@@ -243,7 +239,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlersA, bySlug); err != nil {
 			t.Fatalf("sync A: %v", err)
 		}
-		if got := handlerBySlug(t, stores, orgID, teamID, "ht-rebind"); got == nil || got.BlueprintID != idA {
+		if got := handlerBySlug(t, stores, handlerID, orgID, teamID, "ht-rebind"); got == nil || got.BlueprintID != idA {
 			t.Fatalf("trigger not bound to hbp-rebind-a: %+v", got)
 		}
 
@@ -255,21 +251,21 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlersB, bySlug); err != nil {
 			t.Fatalf("sync B: %v", err)
 		}
-		got := handlerBySlug(t, stores, orgID, teamID, "ht-rebind")
+		got := handlerBySlug(t, stores, handlerID, orgID, teamID, "ht-rebind")
 		if got == nil || got.BlueprintID != idB {
 			t.Errorf("trigger re-point not applied: got=%+v want blueprint_id=%s", got, idB)
 		}
 	})
 
 	t.Run("Trigger_UnresolvableBlueprintSlug_Skipped", func(t *testing.T) {
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, handlerID := factory(t)
 		handlers := []db.ShippedEventHandler{
 			syncTrigger("ht-orphan", domain.EventGitHubPRCICheckFailed, "", "no-such-blueprint-slug", 3, 0.0),
 		}
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlers, map[string]string{}); err != nil {
 			t.Fatalf("sync: %v", err)
 		}
-		if got := handlerBySlug(t, stores, orgID, teamID, "ht-orphan"); got != nil {
+		if got := handlerBySlug(t, stores, handlerID, orgID, teamID, "ht-orphan"); got != nil {
 			t.Errorf("trigger inserted despite an unresolvable blueprint slug: %+v", got)
 		}
 	})
@@ -279,7 +275,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 		// production entry point, resolving each trigger's blueprint slug
 		// against the blueprint-sync pass that ran just before it in the same
 		// call.
-		stores, orgID, teamID, _ := factory(t)
+		stores, orgID, teamID, _, handlerID := factory(t)
 		prompts := make([]domain.Prompt, 0)
 		bps := make([]domain.SeedBlueprint, 0)
 		seen := map[string]bool{}
@@ -296,7 +292,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 			t.Fatalf("SyncShippedIntoTeam: %v", err)
 		}
 		for _, h := range db.ShippedEventHandlers {
-			got := handlerBySlug(t, stores, orgID, teamID, h.ID)
+			got := handlerBySlug(t, stores, handlerID, orgID, teamID, h.ID)
 			if got == nil {
 				t.Errorf("shipped handler %s not inserted by SyncShippedIntoTeam", h.ID)
 				continue

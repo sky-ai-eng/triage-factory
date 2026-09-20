@@ -44,8 +44,9 @@ type ClaimCredentialsSeeder struct {
 // ACTIVE claim (phase='awaiting_credentials') with the sidecar pubkey in one
 // write while the conversation row stays 'running', GetClaim / the sweep
 // reads return the key, the phase-IS-NULL guard never overwrites a key
-// already recorded, RequeueAwaitingCredentials only fires on a parked claim,
-// and every path that releases a claim clears the key with the rest of the
+// already recorded, a claim parked awaiting its bundle requeues through the
+// same door as any other setup failure (RequeueConversation), and every path
+// that releases a claim clears the key with the rest of the
 // ownership stamp — a claimless row has no owner and no key, so the brain
 // can never seal a fresh claim's bundle to a stale sidecar.
 func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
@@ -187,48 +188,6 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		}
 	})
 
-	t.Run("RequeueAwaitingCredentials_requires_parked_claim", func(t *testing.T) {
-		store, orgID, seed := mk(t)
-		conversationID := seed.StageStep(t)
-		claim(t, store, conversationID)
-
-		// Not parked yet: the guard must refuse — a timeout racing a claim
-		// that never parked (or already moved on) must not resurrect it.
-		if matched, err := store.RequeueAwaitingCredentials(ctx, orgID, conversationID); err != nil || matched {
-			t.Fatalf("RequeueAwaitingCredentials before park = (%v, %v), want (false, nil)", matched, err)
-		}
-		if st := seed.ConversationStatus(t, conversationID); st != "" {
-			t.Errorf("status after refused requeue = %q, want no stored status", st)
-		}
-
-		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, conversationID, pubKey); err != nil || !matched {
-			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
-		}
-		matched, err := store.RequeueAwaitingCredentials(ctx, orgID, conversationID)
-		if err != nil || !matched {
-			t.Fatalf("RequeueAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
-		}
-		// Releasing the claim IS the requeue: the row stays mid-flight and
-		// nothing writes a status.
-		if st := seed.ConversationStatus(t, conversationID); st != "" {
-			t.Errorf("status after requeue = %q, want no stored status", st)
-		}
-		got, ok, err := store.GetClaim(ctx, orgID, conversationID)
-		if err != nil || !ok {
-			t.Fatalf("GetClaim = (ok=%v, err=%v), want (true, nil)", ok, err)
-		}
-		if got.CredPubKey != "" {
-			t.Errorf("CredPubKey = %q after requeue, want empty", got.CredPubKey)
-		}
-		if got.ExecutorID != "" || got.BootEpoch != 0 {
-			t.Errorf("ownership = (%q, %d) after requeue, want cleared", got.ExecutorID, got.BootEpoch)
-		}
-		// A duplicate timeout after the release finds no parked claim.
-		if matched, err := store.RequeueAwaitingCredentials(ctx, orgID, conversationID); err != nil || matched {
-			t.Errorf("duplicate RequeueAwaitingCredentials = (%v, %v), want (false, nil)", matched, err)
-		}
-	})
-
 	t.Run("RequeueConversation_clears_key", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.StageStep(t)
@@ -257,11 +216,12 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 	})
 
 	t.Run("RequeueConversation_from_parked_claim_requeues", func(t *testing.T) {
-		// A sidecar bring-up that fails AFTER MarkAwaitingCredentials leaves
+		// A sidecar bring-up that fails AFTER MarkAwaitingCredentials — the
+		// awaiting-credentials deadline lapsing is one such failure — leaves
 		// the active claim parked, and the setup-failure path requeues via
-		// RequeueConversation (not the timeout-only RequeueAwaitingCredentials). The
-		// run must reset and become claimable — anything else strands it
-		// forever while the backstop sweep re-seals its bundle every tick.
+		// RequeueConversation like any other. The run must reset and become
+		// claimable — anything else strands it forever while the backstop
+		// sweep re-seals its bundle every tick.
 		store, orgID, seed := mk(t)
 		conversationID := seed.StageStep(t)
 		claim(t, store, conversationID)

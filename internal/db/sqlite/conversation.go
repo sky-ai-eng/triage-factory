@@ -675,10 +675,6 @@ func endConversation(ctx context.Context, q queryer, orgID, conversationID strin
 	return r, err
 }
 
-func (s *conversationStore) EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
-	return s.EndConversationsForTask(ctx, orgID, taskID, reason)
-}
-
 func (s *conversationStore) EndConversationSystem(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
 	return s.EndConversation(ctx, orgID, conversationID, reason)
 }
@@ -2059,15 +2055,7 @@ func scanMessageRow(row *sql.Row) (*domain.Message, error) {
 	return &m, nil
 }
 
-// Messages is the whole-transcript display read — MessagesSince from the
-// bottom. id is AUTOINCREMENT, so no row can be at or below 0 and the
-// watermark drops out: routing both through one query is what makes the
-// two reads' visibility filter identical rather than merely matching.
-func (s *conversationStore) Messages(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
-	return s.MessagesSince(ctx, orgID, conversationID, 0)
-}
-
-func (s *conversationStore) MessagesSince(ctx context.Context, orgID, conversationID string, sinceID int) ([]domain.Message, error) {
+func (s *conversationStore) MessagesWindow(ctx context.Context, orgID, conversationID string, w db.MessageWindow) ([]domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -2080,29 +2068,10 @@ func (s *conversationStore) MessagesSince(ctx context.Context, orgID, conversati
 	// row placed out of insertion order renders where the model read it. The
 	// watermark stays on id: it answers "which rows has this client not seen
 	// yet", which is an insertion question, not a placement one.
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT `+sqliteMessageColumns+`
-		FROM messages
-		WHERE conversation_id = ?
-		  AND id > ?
-		  AND NOT (delivered = 0 AND window_state = 'inactive')
-		ORDER BY COALESCE(seq, id) ASC
-	`, conversationID, sinceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanMessageRows(rows)
-}
-
-func (s *conversationStore) MessagesWindow(ctx context.Context, orgID, conversationID string, w db.MessageWindow) ([]domain.Message, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	// Same visibility filter and same placement ordering as MessagesSince —
-	// see its comment. What differs is the window: a backward page selects
-	// the NEWEST rows below a ceiling, which means ordering DESC to pick them
-	// and reversing afterwards so the caller always receives oldest-first.
+	//
+	// A backward page selects the NEWEST rows below a ceiling, which means
+	// ordering DESC to pick them and reversing afterwards so the caller
+	// always receives oldest-first.
 	where := `conversation_id = ? AND NOT (delivered = 0 AND window_state = 'inactive')`
 	args := []any{conversationID}
 	order := `ORDER BY COALESCE(seq, id) ASC`
@@ -2164,7 +2133,7 @@ func (s *conversationStore) MessagesForConversations(ctx context.Context, orgID 
 			placeholders[i] = "?"
 			args[i] = id
 		}
-		// Withdrawn-pending rows are hidden, same as Messages.
+		// Withdrawn-pending rows are hidden, same as MessagesWindow.
 		rows, err := s.q.QueryContext(ctx, `
 			SELECT `+sqliteMessageColumns+`
 			FROM messages

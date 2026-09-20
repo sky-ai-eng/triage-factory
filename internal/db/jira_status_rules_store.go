@@ -53,8 +53,7 @@ type JiraStatusRulesStore interface {
 	// caller (toTrackerJiraRules) merges members per project_key. Ordered
 	// by (project_key, team_id) for a deterministic merge. Admin pool in
 	// Postgres: the union spans teams via the teams.org_id join
-	// (jira_project_status_rules has no org_id column). Mirrors
-	// TeamGitHubReposStore.ListForOrgSystem.
+	// (jira_project_status_rules has no org_id column).
 	ListForOrgSystem(ctx context.Context, orgID string) ([]domain.JiraProjectStatusRules, error)
 
 	// TracksProjectSystem reports whether the team has a

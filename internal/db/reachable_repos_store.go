@@ -120,36 +120,12 @@ type ReachableReposStore interface {
 	// as ReplaceForInstallationSystem.
 	ReplaceForPATSystem(ctx context.Context, orgID, host string, repos []domain.ReachableRepository) error
 
-	// ClearForInstallationSystem drops one installation's entries. This is the
-	// soft-removal path — an uninstalled installation reaches nothing, and its
-	// row lives on only as history. MarkInstallationRemoved does the same delete
-	// inline (one transaction with the soft removal, so a `deleted` webhook
-	// clears the reach at the moment it arrives); this is the standalone door for
-	// a caller holding an installation it knows is gone. A hard delete of the
-	// installation row takes its entries with it through the FK.
-	//
-	// Not to be confused with a failed refresh: this is called when the reach is
-	// known to be gone, never when it could not be read. Which is exactly why it
-	// validates its arguments and returns an error rather than treating a
-	// malformed org or an empty installation id as "nothing to clear" — a delete
-	// that silently matched no rows would report success for a grant that is
-	// still on the page.
-	//
-	// It takes no class, unlike the replace beside it. An installation that is
-	// gone reaches nothing under any class, and only the App classes carry an
-	// installation at all, so the delete is addressed by installation and clears
-	// whichever class observed it — the same delete MarkInstallationRemoved
-	// writes inline, which has no class to be told either.
-	//
-	// Exempt from the returned-row rule: it clears a set, so there is no
-	// single row a return value could name.
-	ClearForInstallationSystem(ctx context.Context, orgID, installationID string) error
-
-	// ListForOrgSystem returns every entry across the org's LIVE installations
-	// under class, ordered by (installation, owner, repo). Removed installations
-	// contribute nothing — their rows are cleared on removal, and the join
-	// re-states that so a row surviving some future write path cannot leak back
-	// into a display.
+	// ListReachWithoutPurposeSystem returns one page of the entries across the
+	// org's LIVE installations that no team in the org tracks — repositories the
+	// App can reach for no reason TF can name — with the total across every
+	// page. Removed installations contribute nothing: their rows are cleared on
+	// removal, and the join re-states that so a row surviving some future write
+	// path cannot leak back into a finding.
 	//
 	// class is the org's current App-tier class — its own registration or the
 	// deployment's shared App — and a read takes it rather than matching every
@@ -157,11 +133,6 @@ type ReachableReposStore interface {
 	// left one class for the other must never be served the reach it used to
 	// have. The PAT class is refused: a PAT entry is not a grant entry, and a
 	// caller asking for "the grant" of a PAT org has already gone wrong.
-	ListForOrgSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass) ([]domain.ReachableRepository, error)
-
-	// ListReachWithoutPurposeSystem returns one page of the entries no team in
-	// the org tracks — repositories the App can reach for no reason TF can name —
-	// with the total across every page. Same class rule as ListForOrgSystem.
 	//
 	// Tracking is read from team_github_repos (the union across every team),
 	// never from repositories: that table is a superset, since get-or-create
@@ -176,7 +147,7 @@ type ReachableReposStore interface {
 	// ListScopeDriftSystem returns one page of the repositories some team tracks
 	// that no live installation's grant contains — tracked, unreachable, and
 	// therefore silently unpolled — with the total across every page. Same
-	// class rule as ListForOrgSystem.
+	// class rule as ListReachWithoutPurposeSystem.
 	//
 	// Three things keep it a finding rather than a fabrication:
 	//

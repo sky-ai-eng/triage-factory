@@ -1,6 +1,8 @@
 package postgres_test
 
 import (
+	"database/sql"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -25,7 +27,7 @@ import (
 func TestEventHandlerStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunEventHandlerStoreConformance(t, func(t *testing.T) (db.EventHandlerStore, string, string, dbtest.BlueprintSeeder) {
+	dbtest.RunEventHandlerStoreConformance(t, func(t *testing.T) (db.EventHandlerStore, string, string, dbtest.BlueprintSeeder, dbtest.ShippedHandlerIDBySlug) {
 		t.Helper()
 		h.Reset(t)
 		orgID := seedPgOrgForAgents(t, h)
@@ -52,6 +54,27 @@ func TestEventHandlerStore_Postgres(t *testing.T) {
 			}
 			return out
 		}
-		return stores.EventHandlers, orgID, teamID, seed
+		return stores.EventHandlers, orgID, teamID, seed, shippedHandlerIDBySlug(h, orgID)
 	})
+}
+
+// shippedHandlerIDBySlug is the Postgres dbtest.ShippedHandlerIDBySlug: a raw
+// admin-pool read of event_handlers by (org_id, team_id, system_slug), live
+// rows only.
+func shippedHandlerIDBySlug(h *pgtest.Harness, orgID string) dbtest.ShippedHandlerIDBySlug {
+	return func(t *testing.T, teamID, slug string) string {
+		t.Helper()
+		var id string
+		err := h.AdminDB.QueryRowContext(t.Context(), `
+			SELECT id FROM event_handlers
+			WHERE org_id = $1::uuid AND team_id = $2::uuid AND system_slug = $3 AND deleted_at IS NULL
+		`, orgID, teamID, slug).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ""
+		}
+		if err != nil {
+			t.Fatalf("resolve shipped handler %q: %v", slug, err)
+		}
+		return id
+	}
 }

@@ -1028,16 +1028,8 @@ func closeTaskWithCancelIntent(ctx context.Context, q queryer, orgID, taskID, cl
 }
 
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
-	return setTaskStatus(ctx, s.q, orgID, taskID, status)
-}
-
-func (s *taskStore) SetStatusSystem(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
-	return setTaskStatus(ctx, s.admin, orgID, taskID, status)
-}
-
-func setTaskStatus(ctx context.Context, q queryer, orgID, taskID, status string) (domain.Task, error) {
 	var t domain.Task
-	return scanTaskBareRow(q.QueryRowContext(ctx, `
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks SET status = $1 WHERE org_id = $2 AND id = $3
 		RETURNING `+pgTaskBareColumns,
 		status, orgID, taskID), &t)
@@ -1121,41 +1113,6 @@ func (s *taskStore) MarkEventInjectedSystem(ctx context.Context, orgID, taskID, 
 // claim on is already held, so it is already in progress. The
 // `tasks_queue_unclaimed` CHECK is the backstop underneath.
 const pgClaimStageExpr = `CASE WHEN status IN ('queued', 'snoozed') THEN 'in_progress' ELSE status END`
-
-func (s *taskStore) SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) (domain.Task, error) {
-	var a any
-	if agentID != "" {
-		a = agentID
-	}
-	// A landing claim stages the row; clearing one leaves the status where it
-	// is, which is why the stage expression sits behind the claimant's own
-	// nullity rather than being written flat.
-	var t domain.Task
-	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
-		UPDATE tasks
-		   SET claimed_by_agent_id = $1,
-		       claimed_by_user_id  = NULL,
-		       status = CASE WHEN $1::uuid IS NULL THEN status ELSE `+pgClaimStageExpr+` END
-		 WHERE org_id = $2 AND id = $3
-		RETURNING `+pgTaskBareColumns,
-		a, orgID, taskID), &t)
-}
-
-func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) (domain.Task, error) {
-	var u any
-	if userID != "" {
-		u = userID
-	}
-	var t domain.Task
-	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
-		UPDATE tasks
-		   SET claimed_by_user_id  = $1,
-		       claimed_by_agent_id = NULL,
-		       status = CASE WHEN $1::uuid IS NULL THEN status ELSE `+pgClaimStageExpr+` END
-		 WHERE org_id = $2 AND id = $3
-		RETURNING `+pgTaskBareColumns,
-		u, orgID, taskID), &t)
-}
 
 func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
 	return stampAgentClaimIfUnclaimed(ctx, s.q, orgID, taskID, agentID, actingTeamID)

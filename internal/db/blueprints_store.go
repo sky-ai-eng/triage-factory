@@ -27,8 +27,7 @@ var (
 	// ErrNoSuchBlueprint means an id-keyed write named no live blueprint —
 	// either no row carries the id or the row is soft-deleted, which a caller
 	// holding only an id cannot tell apart and does not need to. Only the
-	// writes return it; Get and GetBySystemSlug keep answering a miss with
-	// (nil, nil).
+	// writes return it; Get keeps answering a miss with (nil, nil).
 	ErrNoSuchBlueprint = errors.New("db: no live blueprint with that id")
 	// ErrNoSuchBlueprintRun means an id-keyed blueprint_runs write named no
 	// row. Same split as ErrNoSuchBlueprint: the writes refuse, GetRun answers
@@ -191,7 +190,7 @@ func DedupPreserveOrder(ids []string) []string {
 // BlueprintStore owns the blueprint primitive and its in-flight tables:
 //
 //   - blueprints          — the triggerable, team-scoped header (header CRUD
-//     modeled on PromptStore: Create / Get / List / GetBySystemSlug).
+//     modeled on PromptStore: Create / Get / List).
 //   - blueprint_steps      — ordered membership list for a blueprint.
 //   - blueprint_runs       — one row per multi-step blueprint run,
 //     owning the worktree shared across every step.
@@ -337,10 +336,6 @@ type BlueprintStore interface {
 	// request-facing paths).
 	Get(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
-	// GetBySystemSlug resolves a team's copy of a shipped blueprint by its
-	// stable system_slug. Returns (nil, nil) when the team has no copy.
-	GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Blueprint, error)
-
 	// Create inserts a new blueprint (user or imported source) owned by
 	// teamID. Caller-provided ID. The Postgres impl binds teamID directly
 	// (it satisfies the team-membership RLS); the SQLite impl ignores it.
@@ -407,12 +402,6 @@ type BlueprintStore interface {
 	// steps are excluded (the canvas only renders listed blueprints). Caller
 	// groups by blueprint_id.
 	ListAllSteps(ctx context.Context, orgID string, f BlueprintStepListFilter, opts ListOpts) ([]domain.BlueprintStep, int, error)
-
-	// CountStepReferences returns the number of distinct non-deleted blueprints
-	// that reference the given prompt as a step. Request-facing, so it filters
-	// blueprints.deleted_at IS NULL. With the copy-only unique index this is
-	// always 0 or 1; kept for the "used by a blueprint" surfacing.
-	CountStepReferences(ctx context.Context, orgID string, stepPromptID string) (int, error)
 
 	// ReplaceSteps replaces the entire step list for a blueprint in a single
 	// transaction. step_index is densely packed 0..N-1 by the writer; briefs

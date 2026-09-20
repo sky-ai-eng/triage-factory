@@ -94,7 +94,7 @@ CREATE TABLE prompts (
     -- deleted_at soft-deletes a prompt. The row + its runs stay as the
     -- durable audit trail (runs.prompt_id is RESTRICT, so a hard DELETE on a
     -- prompt with run history would 500); request-facing reads (List/Get/
-    -- pickers/CountStepReferences) filter deleted_at IS NULL, while the
+    -- pickers) filter deleted_at IS NULL, while the
     -- ...System reads keep resolving it so in-flight runs + past-run timelines
     -- still render the prompt's name/body. Auto-wrapping every new prompt as a
     -- 1-step blueprint makes hard-delete impossible (the step FK is RESTRICT),

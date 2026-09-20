@@ -860,11 +860,10 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 
 // TestTaskDelegate_RefusedWhenBotDisabled pins the
 // acceptance criterion "swipe-to-delegate re-checks team_agents.enabled
-// at swipe time." A team admin can toggle the bot off via SetEnabled
-// — subsequent /delegate gestures must 409, with no claim
-// stamp, no spawn, no audit row. Local-mode N=1 doesn't normally
-// flip this off but the data-layer enforcement is what multi-tenant
-// will need.
+// at swipe time." With the bot off for the team, /delegate gestures
+// must 409, with no claim stamp, no spawn, no audit row. No door flips
+// the column today, so the fixture writes the row shape directly; the
+// data-layer enforcement is what multi-tenant will need.
 func TestTaskDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	s := newTestServer(t)
 	// Flip the bot OFF on the local team.
@@ -1079,8 +1078,8 @@ func TestTaskDelegate_TransfersOwnUserClaim(t *testing.T) {
 // TestTaskClaim_AgainstOtherUserClaimReturns409 pins the
 // anti-steal guarantee: if a different user already owns the task,
 // the swipe-claim handler must refuse with 409 rather than
-// overwriting the other user's claim. The previous unconditional
-// SetClaimedByUser would have silently stolen the row.
+// overwriting the other user's claim — an unguarded claim write
+// would silently steal the row.
 //
 // At N=1 local mode this can't happen via real user gestures, but
 // the helper-level race-safety is load-bearing for multi-mode and
