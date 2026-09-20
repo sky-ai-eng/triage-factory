@@ -7,11 +7,11 @@ TITLE (set the PR title, not here) — conventional-commit format:
   Types: feat · fix · perf · refactor · ci · docs · chore · test
          feat, fix, and perf show up in release notes
 
-BODY — keep it short. A reviewer reads this to decide where to look in the
-diff, not to relearn the change from prose. Say what is wrong, what you did,
+BODY — keep it short. Say what is wrong, what you did,
 and how you checked it, then stop. The diff already says how; don't restate
 it, and don't narrate the path that led here or the alternatives you passed
-over. If a section has nothing to add, one sentence is fine.
+over. Highlight anything that could be missing or problematic with this
+PR in the same body.
 -->
 
 ## Problem
