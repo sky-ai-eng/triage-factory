@@ -211,5 +211,9 @@ func New(conn *sql.DB) db.Stores {
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),
 		Tx:  s,
 	}
+	// The work-kind registry is filled from the stores above rather than
+	// declared beside them, so a kind is registered exactly once and only as
+	// the store that owns its table.
+	s.stores.WorkKinds = []db.WorkKindHandle{s.stores.EventQueue.(db.WorkKindHandle)}
 	return s.stores
 }

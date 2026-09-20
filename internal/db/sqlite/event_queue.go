@@ -264,113 +264,70 @@ func (s *eventQueueStore) PruneSettled(ctx context.Context, before time.Time) (i
 	return int(n), nil
 }
 
-// sqliteParkedEventSelect is the projection both the list and the single read
-// answer with, so a row read one way is byte-identical to the same row read
-// the other. LEFT JOIN for the same reason as the Postgres impl: entity_id is
-// nullable and a parked row must list whether or not its entity is still
-// there. No org_id term on the join — local is N=1, so every row in both
-// tables carries the one sentinel org and the extra predicate would only
-// restate assertLocalOrg.
-const sqliteParkedEventSelect = `
-	SELECT q.id, q.event_type,
-	       COALESCE(q.entity_id, ''), COALESCE(e.source, ''), COALESCE(e.source_id, ''), COALESCE(e.title, ''),
-	       q.attempt, q.max_attempts, COALESCE(q.last_outcome, ''), COALESCE(q.last_error, ''),
-	       q.first_enqueued_at, q.done_at
-	FROM event_queue q
-	LEFT JOIN entities e ON e.id = q.entity_id
-	WHERE q.status = 'parked'`
+// The store is also the event queue's WorkKindHandle: what the operator
+// surface and the metrics depth observer see of this table. The surface runs
+// the package's own reads and controls on Conn; local is N=1, and the
+// sentinel org the handler binds is the one every row carries.
+var _ db.WorkKindHandle = (*eventQueueStore)(nil)
 
-func (s *eventQueueStore) ListParked(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.ParkedEvent, int, error) {
+func (s *eventQueueStore) Name() string          { return workkinds.EventQueueName }
+func (s *eventQueueStore) Label() string         { return workkinds.EventQueueLabel }
+func (s *eventQueueStore) Kind() workitem.Kind   { return s.kind }
+func (s *eventQueueStore) Conn() workitem.DBTX   { return s.conn }
+func (s *eventQueueStore) Access() db.WorkAccess { return db.WorkAccessOrgAdmin }
+
+// Controls: redrive and cancel, never supersede — a parked event has no
+// replacement row, and a redrive converges through the routing fences. See
+// the Postgres impl.
+func (s *eventQueueStore) Controls() db.WorkControls {
+	return db.WorkControls{Redrive: true, Cancel: true}
+}
+
+func (s *eventQueueStore) Objective() db.WorkObjective {
+	return db.WorkObjective{OldestReadyAge: workkinds.EventQueueOldestReadyObjective}
+}
+
+// Describe names each row by the entity its event was about. LEFT JOIN for the
+// same reason as the Postgres impl: entity_id is nullable and a row must be
+// described whether or not its entity is still there. No org_id term on the
+// join — local is N=1, so every row in both tables carries the one sentinel
+// org and the extra predicate would only restate assertLocalOrg.
+func (s *eventQueueStore) Describe(ctx context.Context, orgID string, ids []int64) (map[int64]db.WorkSubject, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	var total int
-	if err := s.conn.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM event_queue WHERE status = 'parked'
-	`).Scan(&total); err != nil {
-		return nil, 0, err
+	if len(ids) == 0 {
+		return map[int64]db.WorkSubject{}, nil
 	}
-	if opts.CountOnly {
-		return []domain.ParkedEvent{}, total, nil
+	marks := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		marks[i] = "?"
+		args[i] = id
 	}
-
-	// id DESC is enqueue order reversed — the most recently parked work
-	// first — and it is a total order, so offset paging can neither drop nor
-	// repeat a row between pages.
-	query := sqliteParkedEventSelect + `
-		ORDER BY q.id DESC`
-	args := []any{}
-	if opts.Limit > 0 {
-		query += `
-		LIMIT ? OFFSET ?`
-		args = append(args, opts.Limit, opts.Offset)
-	}
-	rows, err := s.conn.QueryContext(ctx, query, args...)
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT q.id, q.event_id, q.event_type,
+		       COALESCE(q.entity_id, ''), COALESCE(e.source, ''), COALESCE(e.source_id, ''), COALESCE(e.title, '')
+		FROM event_queue q
+		LEFT JOIN entities e ON e.id = q.entity_id
+		WHERE q.id IN (`+strings.Join(marks, ", ")+`)
+	`, args...)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	defer rows.Close()
-	out := []domain.ParkedEvent{}
+	out := make(map[int64]db.WorkSubject, len(ids))
 	for rows.Next() {
-		pe, err := scanParkedEvent(rows)
-		if err != nil {
-			return nil, 0, err
+		var (
+			id                                                    int64
+			eventID, eventType, entityID, source, sourceID, title string
+		)
+		if err := rows.Scan(&id, &eventID, &eventType, &entityID, &source, &sourceID, &title); err != nil {
+			return nil, err
 		}
-		out = append(out, pe)
+		out[id] = db.EventQueueSubject(eventID, eventType, entityID, source, sourceID, title)
 	}
-	return out, total, rows.Err()
-}
-
-func (s *eventQueueStore) GetParked(ctx context.Context, orgID string, id int64) (*domain.ParkedEvent, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	pe, err := scanParkedEvent(s.conn.QueryRowContext(ctx, sqliteParkedEventSelect+`
-		AND q.id = ?`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &pe, nil
-}
-
-// scanParkedEvent reads one sqliteParkedEventSelect row. It takes the narrow
-// Scan interface so *sql.Row and *sql.Rows share it — the two reads must not
-// drift on column order.
-func scanParkedEvent(row interface{ Scan(...any) error }) (domain.ParkedEvent, error) {
-	var (
-		pe              domain.ParkedEvent
-		firstEnqueuedAt blockTime
-		parkedAt        blockTime
-	)
-	err := row.Scan(
-		&pe.ID, &pe.EventType,
-		&pe.EntityID, &pe.EntitySource, &pe.EntitySourceID, &pe.EntityTitle,
-		&pe.Attempt, &pe.MaxAttempts, &pe.LastOutcome, &pe.LastError,
-		&firstEnqueuedAt, &parkedAt,
-	)
-	pe.FirstEnqueuedAt = firstEnqueuedAt.Time
-	pe.ParkedAt = parkedAt.Time
-	return pe, err
-}
-
-func (s *eventQueueStore) Redrive(ctx context.Context, orgID string, ids []int64, by string) (int, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return 0, err
-	}
-	moved := 0
-	for _, id := range ids {
-		switch err := workitem.Redrive(ctx, s.conn, s.kind, orgID, id, by); {
-		case err == nil:
-			moved++
-		case errors.Is(err, workitem.ErrNotParked):
-		default:
-			return moved, err
-		}
-	}
-	return moved, nil
+	return out, rows.Err()
 }
 
 func (s *eventQueueStore) UnsettledCloseExistsSystem(ctx context.Context, orgID, entityID string) (bool, error) {

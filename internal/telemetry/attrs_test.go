@@ -42,6 +42,7 @@ var approvedKeys = []string{
 	"outcome",
 	"provider",
 	"queue.wait_ms",
+	"reason",
 	"runtime",
 	"size_bytes",
 	"snapshot.bundle_bytes",
@@ -53,6 +54,7 @@ var approvedKeys = []string{
 	"task.id",
 	"team.id",
 	"transport",
+	"work.kind",
 	"workspace.provenance",
 }
 
@@ -69,6 +71,7 @@ func TestAttributeHelpersEmitOnlyApprovedKeys(t *testing.T) {
 		SnapshotBundleBytes(1024), SnapshotPatchBytes(512),
 		SnapshotTranscriptBytes(2048), SnapshotRawBytes(8192), SnapshotWaitedMs(250),
 		AgentCostUSD(0.42), AgentDuration(9000),
+		WorkKind("event_queue"), Reason("budget_exhausted"),
 	}
 	for _, kv := range produced {
 		if !slices.Contains(approvedKeys, string(kv.Key)) {
@@ -110,6 +113,7 @@ func TestEveryAttributeHelperIsCovered(t *testing.T) {
 		"SnapshotTranscriptBytes": true, "SnapshotRawBytes": true,
 		"SnapshotWaitedMs": true,
 		"AgentCostUSD":     true, "AgentDuration": true,
+		"WorkKind": true, "Reason": true,
 	}
 	sort.Strings(declared)
 	for _, name := range declared {

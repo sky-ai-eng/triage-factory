@@ -49,9 +49,37 @@ func Complete(ctx context.Context, conn *sql.DB, k Kind, r Receipt, fn func(tx *
 		return k.flipDone(ctx, tx, r)
 	})
 	if err != nil {
+		k.reportLost(r, OpComplete, err)
 		return err
 	}
-	return settled
+	if settled != nil {
+		k.observe().Cancelled(r.OrgID)
+		return settled
+	}
+	k.observe().Completed(r.OrgID)
+	return nil
+}
+
+// reportLost tells the observer about a guard miss and nothing else: any
+// other failure is a statement that did not run, which is not a disposition.
+func (k Kind) reportLost(r Receipt, op string, err error) {
+	if errors.Is(err, ErrLeaseLost) {
+		k.observe().LeaseLost(r.OrgID, op)
+	}
+}
+
+// reportHolder tells the observer how a holder verb landed: the guard miss,
+// the cancellation it settled instead, or — when err is nil — the verb's own
+// disposition through onOK.
+func (k Kind) reportHolder(r Receipt, op string, err error, onOK func()) {
+	switch {
+	case err == nil:
+		onOK()
+	case errors.Is(err, ErrCancelled):
+		k.observe().Cancelled(r.OrgID)
+	default:
+		k.reportLost(r, op, err)
+	}
 }
 
 // lockAndVerify takes the item row's lock and evaluates the guard against
@@ -123,7 +151,9 @@ func MarkDone(ctx context.Context, q DBTX, k Kind, r Receipt) error {
 	if k.Strategy != FencedReplay {
 		return fmt.Errorf("workitem: %s is %s, so it completes with Complete", k.Table, k.Strategy)
 	}
-	return k.holderWrite(ctx, q, r, k.terminalDone())
+	err := k.holderWrite(ctx, q, r, k.terminalDone())
+	k.reportHolder(r, OpMarkDone, err, func() { k.observe().Completed(r.OrgID) })
+	return err
 }
 
 // Requeue returns a failed attempt to the queue, or parks it, and reports
@@ -179,15 +209,28 @@ func Requeue(ctx context.Context, q DBTX, k Kind, r Receipt, outcome Outcome, ca
 	// The landed status is read back from the same statement rather than
 	// predicted from the receipt's attempt, so the answer is the row's.
 	landed, err := k.holderWriteReturningStatus(ctx, q, r, sets)
+	parked = landed == StatusParked
+	k.reportHolder(r, OpRequeue, err, func() {
+		if parked {
+			k.observe().Parked(r.OrgID, string(outcome))
+		} else {
+			k.observe().Requeued(r.OrgID, outcome)
+		}
+	})
 	if err != nil {
 		return false, err
 	}
-	return landed == StatusParked, nil
+	return parked, nil
 }
 
 // Park takes the item out of circulation for an operator to redrive or
 // supersede. reason is required: a parked row whose last_outcome says nothing
 // is a row nobody can triage.
+//
+// reason is stored as the row's last_outcome and passed through to the
+// Observer as a label, so it must be a constant from a closed vocabulary the
+// kind declares — never text derived from the failure, which would put an
+// unbounded value on a metric.
 func Park(ctx context.Context, q DBTX, k Kind, r Receipt, reason string) error {
 	if err := k.Validate(); err != nil {
 		return err
@@ -200,7 +243,9 @@ func Park(ctx context.Context, q DBTX, k Kind, r Receipt, reason string) error {
 		{"done_at", lit(k.nowExpr())},
 		{"last_outcome", bound(func(a *args) string { return a.bind(reason) })},
 	}, clearLease...)
-	return k.holderWrite(ctx, q, r, sets)
+	err := k.holderWrite(ctx, q, r, sets)
+	k.reportHolder(r, OpPark, err, func() { k.observe().Parked(r.OrgID, reason) })
+	return err
 }
 
 // Defer returns the row to ready for expected waiting, refunding this
@@ -262,9 +307,17 @@ func Defer(ctx context.Context, conn *sql.DB, k Kind, r Receipt, reason string, 
 		return k.plainGuardedWrite(ctx, tx, r, sets)
 	})
 	if err != nil {
+		// A refused predicate rolled back and disposed of nothing, so only
+		// the guard miss is reported.
+		k.reportLost(r, OpDefer, err)
 		return err
 	}
-	return settled
+	if settled != nil {
+		k.observe().Cancelled(r.OrgID)
+		return settled
+	}
+	k.observe().Deferred(r.OrgID)
+	return nil
 }
 
 // RenewLease pushes the lease out to fresh database time plus the policy
@@ -287,11 +340,13 @@ func RenewLease(ctx context.Context, q DBTX, k Kind, r Receipt) (Receipt, error)
 	var expires dbTime
 	switch err := q.QueryRowContext(ctx, stmt, a.vals...).Scan(&cancelled, &expires); {
 	case errors.Is(err, sql.ErrNoRows):
+		k.observe().LeaseLost(r.OrgID, OpRenew)
 		return Receipt{}, ErrLeaseLost
 	case err != nil:
 		return Receipt{}, fmt.Errorf("workitem: renew %s row %d: %w", k.Table, r.ItemID, err)
 	}
 	if cancelled.V {
+		k.observe().Cancelled(r.OrgID)
 		return Receipt{}, ErrCancelled
 	}
 	renewed := r

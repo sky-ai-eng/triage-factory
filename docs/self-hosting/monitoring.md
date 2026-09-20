@@ -91,7 +91,7 @@ route `9464` externally**; scrape it from inside the compose network / cluster.
 
 Beyond the standard Go runtime and process collectors (`go_*`, `process_*`),
 the TF-specific set today covers dropped audit records, the entity
-terminal-state invariant, and Slack message-event volume.
+terminal-state invariant, the work queues, and Slack message-event volume.
 
 ### Dropped audit records
 
@@ -155,7 +155,7 @@ housekeeping.
 - `tf_entity_terminal_active{org_id}` — active entities carrying a terminal
   snapshot, unpolled for over fifteen minutes, with no terminating close
   ready, leased or parked in the event queue. A parked close still holds the
-  entity: it is on the parked-events panel for an operator to redrive, and
+  entity: it is on the Parked work panel for an operator to redrive, and
   counting it here as well would report one stuck close twice. The fifteen minutes is a lag allowance: a lost
   close is re-owed by the poll one cycle later, so a fresh divergence is not
   yet a violation. What outlives it is an entity nothing polls any more — a
@@ -175,6 +175,66 @@ Each pass also logs a `WARN` line per nonzero count naming up to twenty ids.
 max_over_time(tf_entity_terminal_active[30m]) > 0
 tf_tasks_open_on_closed_entity > 0
 ```
+
+### Work queues
+
+A **work kind** is one table of durable, leased work on the shared work-item
+contract (`internal/db/workitem`): a row is admitted `ready`, a worker leases
+it, and every attempt ends in a disposition — done, returned to ready with a
+backoff, deferred, cancelled, or **parked** for a person, once the attempt
+budget is spent or the failure is permanent. Nothing re-drives a parked row on
+its own. Adopting a kind brings these metrics with it, so a new kind registers
+and appears here under its own `work_kind`; today the one registered kind is
+`event_queue`, the router's durable event queue. Every label is a closed
+vocabulary or an opaque id: the kind name, the org id, the typed attempt
+outcome, the park reason, the verb.
+
+Counters are per process, incremented by whichever process committed the
+disposition (in multi mode that is the executor or control pod running the
+kind's worker, and a control pod for the operator controls); `sum` across
+pods in an HA topology.
+
+| Metric | Labels | What it counts |
+| --- | --- | --- |
+| `tf_work_claims_total` | `work_kind`, `org_id` | Rows leased. |
+| `tf_work_reclaims_total` | `work_kind`, `org_id` | Rows leased from an expired lease: a previous holder died mid-unit and the unit is being replayed. Interrupted work, not a failure of the queue. |
+| `tf_work_completions_total` | `work_kind`, `org_id` | Rows driven to done. |
+| `tf_work_requeues_total` | `work_kind`, `org_id`, `outcome` | Failed attempts returned to ready, by typed outcome (`transient`, `dependency_down`, `poison_suspected`, `deadline`). |
+| `tf_work_parks_total` | `work_kind`, `org_id`, `reason` | Rows taken out of circulation for a person: the outcome that parked it (`permanent`, or the outcome of the attempt that spent the budget), a kind's own park constant, or `budget_exhausted` when a claim found the budget already spent. |
+| `tf_work_deferrals_total` | `work_kind`, `org_id` | Attempts refunded for expected waiting. |
+| `tf_work_cancellations_total` | `work_kind`, `org_id` | Cancellation requests settled, at claim or by the holder. |
+| `tf_work_lease_lost_total` | `work_kind`, `org_id`, `op` | Holder writes refused because the lease was lost, by verb (`complete`, `mark_done`, `requeue`, `park`, `defer`, `renew`). A straggler that lost a takeover. |
+| `tf_work_redrives_total` | `work_kind`, `org_id` | Parked rows an operator returned to ready. |
+| `tf_work_supersedes_total` | `work_kind`, `org_id` | Parked rows an operator settled in favour of a replacement. |
+
+Gauges are measured every thirty seconds by whichever control pod holds the
+background-brain lease (local mode: the one process), one aggregate per kind
+over its unsettled rows, and reported at scrape time. An org with no unsettled
+rows stops reporting rather than freezing at its last value.
+
+| Metric | Labels | What it reads |
+| --- | --- | --- |
+| `tf_work_ready` | `work_kind`, `org_id` | Rows claimable now. |
+| `tf_work_leased` | `work_kind`, `org_id` | Rows a holder is driving. |
+| `tf_work_parked` | `work_kind`, `org_id` | Rows that will not run without a person. **Zero is the steady state.** |
+| `tf_work_deferred` | `work_kind`, `org_id` | Ready rows whose retry time has not come. |
+| `tf_work_oldest_ready_age_seconds` | `work_kind`, `org_id` | Age of the oldest claimable row, from its original enqueue (a redrive keeps it). |
+| `tf_work_oldest_deferred_age_seconds` | `work_kind`, `org_id` | Age of the oldest deferred row, from its original enqueue. |
+| `tf_work_oldest_ready_age_objective_seconds` | `work_kind` | The kind's declared bound on oldest ready age — `60` for `event_queue` — so a rule compares two series instead of hard-coding a number. |
+
+Three alerts, in Prometheus terms. The third is what tells an idle queue from
+one that has stopped draining: an idle queue has nothing ready, a stopped one
+has ready work and no claims.
+
+```
+tf_work_parked > 0                                                              # for 15m: work that will not run without a person
+tf_work_oldest_ready_age_seconds > on (work_kind) group_left tf_work_oldest_ready_age_objective_seconds   # for 5m: the drain is behind
+tf_work_ready > 0 and rate(tf_work_claims_total[5m]) == 0                       # for 5m: ready work, nobody claiming — stopped, not idle
+```
+
+A parked row is on the Parked work section of the org's settings, for an
+org admin to redrive or cancel; the same rows are `POST
+/api/orgs/{org_id}/work/{kind}/items/list`.
 
 ### Slack ingest
 

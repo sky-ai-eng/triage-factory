@@ -140,7 +140,15 @@ impersonation surface.
 a *named* org or team, so the caller is asserting a scope and the
 handler authorizes them against it. Anything an admin reads about
 somebody else's scope belongs here, because the id in the path is what
-the authorization check has to be about.
+the authorization check has to be about. Durable work is addressed this
+way, per registered kind: `GET /api/orgs/{org_id}/work` (the catalogue),
+`GET /api/orgs/{org_id}/work/{kind}/depth`,
+`POST /api/orgs/{org_id}/work/{kind}/items/list`,
+`GET /api/orgs/{org_id}/work/{kind}/items/{id}`,
+`POST /api/orgs/{org_id}/work/{kind}/items/redrive` and
+`POST /api/orgs/{org_id}/work/{kind}/items/cancel` (plus
+`POST …/items/{id}/supersede` behind the kind's controls), each gated by
+the kind's declared access policy in `internal/server/work_handler.go`.
 
 **Query-scoped — operator diagnostics.** The fleet console's `?org=`.
 The subject is a deployment-wide view being narrowed for inspection, not
@@ -393,9 +401,6 @@ fields.
 
 **Silent clamps and defaults:**
 
-- `GET /api/events/failed?limit=`
-  (`internal/db/event_queue_store.go:48-57`) — ≤0 → 100, >500 →
-  clamped, never rejected.
 - `GET /api/usage/org/access-log` (`usage_access_log.go:147-166`) —
   malformed `limit`/`offset` silently default, while
   `parseArtifactListOpts` in the same handler family 400s the same

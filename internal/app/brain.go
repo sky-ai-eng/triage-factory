@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/workmetrics"
 )
 
 // startBrain starts the leader-elected background brain as ONE UNIT
@@ -75,6 +76,10 @@ func (a *App) startBrain(term int64) {
 	// Minutes-cadence: a rare-divergence count, not a hot path. Kept its
 	// own goroutine, apart from the reaper below.
 	go a.router.RunTerminalInvariantChecker(brainCtx, routing.DefaultTerminalCheckInterval)
+	// Work-queue depth gauges: one measure per registered kind per tick,
+	// reported at scrape time. Brain-gated for the same reason as the checker
+	// above — one process reports, standbys do not — and read-only.
+	go workmetrics.RunDepthObserver(brainCtx, a.workDepthSources(), workmetrics.DefaultDepthInterval)
 	// Durable event-queue drain worker: claims github:/jira: events the
 	// ingestor enqueued under the work-item contract's leases, routes them,
 	// and marks them done under the lease's fence. A failed attempt returns
@@ -176,6 +181,18 @@ func (a *App) startBrain(term int64) {
 	// cheap to repeat every boot — the equality check makes an already-synced
 	// team a pure read. Spawned so the non-blocking contract above holds.
 	go a.runShippedDefaultsSync(brainCtx)
+}
+
+// workDepthSources is the work-kind registry as the depth observer reads it.
+// A slice of one interface does not convert to a slice of another, so the
+// handles are re-collected here rather than the registry being typed for the
+// observer.
+func (a *App) workDepthSources() []workmetrics.DepthSource {
+	out := make([]workmetrics.DepthSource, 0, len(a.stores.WorkKinds))
+	for _, k := range a.stores.WorkKinds {
+		out = append(out, k)
+	}
+	return out
 }
 
 // runShippedDefaultsSync sweeps every provisioned org × team, bringing each

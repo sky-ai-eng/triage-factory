@@ -80,6 +80,27 @@ type EventQueueSeeder struct {
 // with, except where a case is specifically exercising a takeover.
 var conformanceOwner = workitem.Owner{ID: "conformance-executor", Epoch: 1}
 
+// handleOf is the store as the operator surface sees it. Every dialect's
+// event queue store is also its work-kind handle.
+func handleOf(t *testing.T, s db.EventQueueStore) db.WorkKindHandle {
+	t.Helper()
+	h, ok := s.(db.WorkKindHandle)
+	if !ok {
+		t.Fatalf("%T does not implement db.WorkKindHandle", s)
+	}
+	return h
+}
+
+// redriveOn is the operator redrive of one row, run the way the work handler
+// runs it: the package's control on the kind's handle.
+func redriveOn(ctx context.Context, s db.EventQueueStore, orgID string, id int64) error {
+	h, ok := s.(db.WorkKindHandle)
+	if !ok {
+		return errors.New("store is not a work-kind handle")
+	}
+	return workitem.Redrive(ctx, h.Conn(), h.Kind(), orgID, id, "operator")
+}
+
 // enqueueOn is a local helper: Enqueue a ci_check_failed event against
 // entityID and return the event id. ci_check_failed is a seeded catalog
 // entry, so the events.event_type FK is satisfied. No traceparent — the
@@ -512,8 +533,8 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 
 		// Done releases it: a redriven, completed obligation lets the next
 		// cycle owe again.
-		if n, err := s.Redrive(ctx, orgID, []int64{ce.Event.ID}, "operator"); err != nil || n != 1 {
-			t.Fatalf("Redrive: n=%d err=%v", n, err)
+		if err := redriveOn(ctx, s, orgID, ce.Event.ID); err != nil {
+			t.Fatalf("Redrive: %v", err)
 		}
 		ce2 := claimOne(t, ctx, s, conformanceOwner)
 		if err := s.MarkDone(ctx, ce2.Receipt); err != nil {
@@ -904,95 +925,93 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		}
 	})
 
-	t.Run("ListParked_lists_parked_rows_with_entity_newest_first", func(t *testing.T) {
+	t.Run("Describe_names_rows_by_their_entity", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
 		older := parkOn(t, ctx, s, orgID, entityID, "route: upsert task: db down")
 		newer := parkOn(t, ctx, s, orgID, entityID, "route: fire trigger: db down")
-		// Live rows in every other status are not the operator's.
-		enqueueOn(t, ctx, s, orgID, entityID)
-		enqueueOn(t, ctx, s, orgID, entityID)
-		live := claimOne(t, ctx, s, conformanceOwner)
-		enqueueOn(t, ctx, s, orgID, entityID)
-		doneRow := claimOne(t, ctx, s, conformanceOwner)
-		if err := s.MarkDone(ctx, doneRow.Receipt); err != nil {
-			t.Fatalf("MarkDone: %v", err)
-		}
-		_ = live
 
-		got, total, err := s.ListParked(ctx, orgID, db.ListOpts{Limit: 50})
+		// The operator surface reads the block through the package and asks
+		// the kind for the subjects of the page it got.
+		h := handleOf(t, s)
+		got, total, err := workitem.List(ctx, h.Conn(), h.Kind(), orgID, workitem.StatusParked, 50, 0)
 		if err != nil {
-			t.Fatalf("ListParked: %v", err)
+			t.Fatalf("List parked: %v", err)
 		}
-		if total != 2 || len(got) != 2 {
-			t.Fatalf("total=%d rows=%d, want 2 and 2", total, len(got))
+		if total != 2 || len(got) != 2 || got[0].ID != newer.Event.ID || got[1].ID != older.Event.ID {
+			t.Fatalf("parked page = %+v (total %d), want the two parked rows newest first", got, total)
 		}
-		if got[0].ID != newer.Event.ID || got[1].ID != older.Event.ID {
-			t.Errorf("order = [%d, %d], want newest first [%d, %d]", got[0].ID, got[1].ID, newer.Event.ID, older.Event.ID)
+		subjects, err := h.Describe(ctx, orgID, []int64{newer.Event.ID, older.Event.ID})
+		if err != nil {
+			t.Fatalf("Describe: %v", err)
 		}
-		pe := got[0]
-		if pe.EventType != domain.EventGitHubPRCICheckFailed || pe.EntityID != entityID {
-			t.Errorf("parked row = %+v, want the event's type and entity", pe)
+		if len(subjects) != 2 {
+			t.Fatalf("Describe returned %d subjects, want 2", len(subjects))
 		}
-		if pe.EntitySource != "github" || pe.EntitySourceID == "" || pe.EntityTitle != "Test PR" {
-			t.Errorf("entity display fields = %q/%q/%q, want the joined entity", pe.EntitySource, pe.EntitySourceID, pe.EntityTitle)
+		subject := subjects[newer.Event.ID]
+		if subject.Label == "" || subject.Detail != "Test PR" {
+			t.Errorf("subject = %+v, want the entity's source id as the label and its title as the detail", subject)
 		}
-		if pe.Attempt != 1 || pe.MaxAttempts != 5 || pe.LastOutcome != "permanent" || pe.LastError != "route: fire trigger: db down" {
-			t.Errorf("parked row budget/reason = %+v, want attempt 1 of 5, permanent, the cause", pe)
+		if subject.Fields["event_type"] != domain.EventGitHubPRCICheckFailed || subject.Fields["entity_id"] != entityID {
+			t.Errorf("subject fields = %+v, want the event's type and entity", subject.Fields)
 		}
-		if pe.FirstEnqueuedAt.IsZero() || pe.ParkedAt.IsZero() || pe.ParkedAt.Before(pe.FirstEnqueuedAt) {
-			t.Errorf("parked row times = %s / %s, want an enqueue and a later park", pe.FirstEnqueuedAt, pe.ParkedAt)
+		if subject.Fields["entity_source"] != "github" || subject.Fields["entity_source_id"] != subject.Label {
+			t.Errorf("subject fields = %+v, want the entity's source pair", subject.Fields)
 		}
-
-		// Paging: a page of one, then the next, with the total unchanged;
-		// a count-only read carries no items.
-		page1, total1, err := s.ListParked(ctx, orgID, db.ListOpts{Limit: 1})
-		if err != nil || total1 != 2 || len(page1) != 1 || page1[0].ID != newer.Event.ID {
-			t.Errorf("page 1 = %+v total=%d err=%v", page1, total1, err)
-		}
-		page2, _, err := s.ListParked(ctx, orgID, db.ListOpts{Limit: 1, Offset: 1})
-		if err != nil || len(page2) != 1 || page2[0].ID != older.Event.ID {
-			t.Errorf("page 2 = %+v err=%v", page2, err)
-		}
-		none, totalOnly, err := s.ListParked(ctx, orgID, db.ListOpts{CountOnly: true})
-		if err != nil || totalOnly != 2 || len(none) != 0 {
-			t.Errorf("count-only = %+v total=%d err=%v", none, totalOnly, err)
+		if subject.Fields["event_id"] != newer.Event.EventID {
+			t.Errorf("subject event_id = %q, want %q", subject.Fields["event_id"], newer.Event.EventID)
 		}
 
-		// The single read answers with the list's row.
-		one, err := s.GetParked(ctx, orgID, newer.Event.ID)
-		if err != nil || one == nil {
-			t.Fatalf("GetParked: row=%v err=%v", one, err)
+		// An empty selection describes nothing, and an id the org does not
+		// have is absent rather than an error.
+		if none, err := h.Describe(ctx, orgID, nil); err != nil || len(none) != 0 {
+			t.Errorf("Describe of nothing = %+v err=%v", none, err)
 		}
-		if !reflect.DeepEqual(*one, got[0]) {
-			t.Errorf("GetParked = %+v, want the list's row %+v", *one, got[0])
-		}
-		if miss, err := s.GetParked(ctx, orgID, live.Event.ID); err != nil || miss != nil {
-			t.Errorf("GetParked on a leased row = %+v err=%v, want (nil, nil)", miss, err)
-		}
-		if miss, err := s.GetParked(ctx, orgID, 999999); err != nil || miss != nil {
-			t.Errorf("GetParked on an unknown id = %+v err=%v, want (nil, nil)", miss, err)
+		if miss, err := h.Describe(ctx, orgID, []int64{999999}); err != nil || len(miss) != 0 {
+			t.Errorf("Describe of an unknown id = %+v err=%v, want nothing", miss, err)
 		}
 	})
 
-	t.Run("ListParked_survives_a_missing_entity", func(t *testing.T) {
+	t.Run("Describe_survives_a_missing_entity", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
 		parked := parkOn(t, ctx, s, orgID, entityID, "orphaned")
 		seed.ClearEntityRef(t, parked.Event.ID)
 
-		got, total, err := s.ListParked(ctx, orgID, db.ListOpts{Limit: 50})
+		h := handleOf(t, s)
+		subjects, err := h.Describe(ctx, orgID, []int64{parked.Event.ID})
 		if err != nil {
-			t.Fatalf("ListParked: %v", err)
+			t.Fatalf("Describe: %v", err)
 		}
-		if total != 1 || len(got) != 1 {
-			t.Fatalf("total=%d rows=%d, want the entity-less row listed", total, len(got))
+		subject, ok := subjects[parked.Event.ID]
+		if !ok {
+			t.Fatal("the entity-less row was not described; the surface would hide exactly the row worth looking at")
 		}
-		if got[0].EntityID != "" || got[0].EntitySource != "" || got[0].EntityTitle != "" {
-			t.Errorf("entity fields = %+v, want empty for a row with no entity", got[0])
+		if subject.Label != domain.EventGitHubPRCICheckFailed || subject.Detail != "" {
+			t.Errorf("subject = %+v, want the event type as the label and no detail", subject)
 		}
-		if got[0].LastError != "orphaned" {
-			t.Errorf("last_error = %q", got[0].LastError)
+		if subject.Fields["entity_id"] != "" || subject.Fields["entity_source"] != "" || subject.Fields["entity_source_id"] != "" {
+			t.Errorf("subject fields = %+v, want empty entity fields for a row with no entity", subject.Fields)
+		}
+	})
+
+	t.Run("Handle_declares_the_kind", func(t *testing.T) {
+		s, _, _ := mk(t)
+		h := handleOf(t, s)
+		if h.Name() != workkinds.EventQueueName || h.Label() != workkinds.EventQueueLabel {
+			t.Errorf("handle = %q/%q, want the event queue's registered name and label", h.Name(), h.Label())
+		}
+		if h.Kind().Table != workkinds.EventQueue(h.Kind().Dialect).Table {
+			t.Errorf("handle kind table = %q, want the declared kind", h.Kind().Table)
+		}
+		if h.Access() != db.WorkAccessOrgAdmin {
+			t.Errorf("access = %d, want org admin", h.Access())
+		}
+		if c := h.Controls(); !c.Redrive || !c.Cancel || c.Supersede {
+			t.Errorf("controls = %+v, want redrive and cancel without supersede", c)
+		}
+		if h.Objective().OldestReadyAge != workkinds.EventQueueOldestReadyObjective {
+			t.Errorf("objective = %s, want %s", h.Objective().OldestReadyAge, workkinds.EventQueueOldestReadyObjective)
 		}
 	})
 
@@ -1003,12 +1022,15 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		enqueueOn(t, ctx, s, orgID, entityID)
 		ready := rowByID(t, ctx, s, orgID, entityID, parked.Event.ID+1)
 
-		n, err := s.Redrive(ctx, orgID, []int64{parked.Event.ID, ready.ID, 999999}, "operator")
-		if err != nil {
+		if err := redriveOn(ctx, s, orgID, parked.Event.ID); err != nil {
 			t.Fatalf("Redrive: %v", err)
 		}
-		if n != 1 {
-			t.Errorf("redrove %d rows, want only the parked one", n)
+		// Neither a ready row nor an unknown id is redrivable, and each is
+		// counted out with ErrNotParked rather than failing.
+		for _, id := range []int64{ready.ID, 999999} {
+			if err := redriveOn(ctx, s, orgID, id); !errors.Is(err, workitem.ErrNotParked) {
+				t.Errorf("Redrive of %d = %v, want ErrNotParked", id, err)
+			}
 		}
 		row := rowByID(t, ctx, s, orgID, entityID, parked.Event.ID)
 		if row.Status != domain.QueuedEventStatusReady || row.Attempt != 0 || row.NextAttemptAt != nil || row.DoneAt != nil {
@@ -1027,13 +1049,9 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 			t.Errorf("first_enqueued_at moved on a redrive: %s -> %s", parked.Event.FirstEnqueuedAt, row.FirstEnqueuedAt)
 		}
 
-		// A second redrive of the same ids moves nothing; empty ids move
-		// nothing.
-		if n, err := s.Redrive(ctx, orgID, []int64{parked.Event.ID}, "operator"); err != nil || n != 0 {
-			t.Errorf("second Redrive: n=%d err=%v, want 0", n, err)
-		}
-		if n, err := s.Redrive(ctx, orgID, nil, "operator"); err != nil || n != 0 {
-			t.Errorf("empty Redrive: n=%d err=%v, want 0", n, err)
+		// A second redrive of the same id moves nothing.
+		if err := redriveOn(ctx, s, orgID, parked.Event.ID); !errors.Is(err, workitem.ErrNotParked) {
+			t.Errorf("second Redrive = %v, want ErrNotParked", err)
 		}
 
 		// The redriven row is claimable and drives to done.

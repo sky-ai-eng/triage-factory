@@ -490,8 +490,8 @@ func TestCloseOwed_FailedClose_ReplaysWholeAndParkedHoldsTheKey(t *testing.T) {
 
 	// The operator redrives it: the router closes the entity, and the next
 	// cycle owes nothing either.
-	if n, err := sqlitestore.New(database).EventQueue.Redrive(context.Background(), runmode.LocalDefaultOrgID, []int64{owed[1].ID}, "operator"); err != nil || n != 1 {
-		t.Fatalf("Redrive: n=%d err=%v", n, err)
+	if err := redriveQueueRow(database, owed[1].ID); err != nil {
+		t.Fatalf("Redrive: %v", err)
 	}
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue after redrive: %v", err)

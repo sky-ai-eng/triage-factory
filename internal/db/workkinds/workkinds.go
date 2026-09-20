@@ -1,17 +1,31 @@
 // Package workkinds declares the production work kinds — each adopting
 // table's workitem.Kind, once, for both dialect packages to share.
 //
-// It is a leaf: it imports workitem and nothing else under internal/db. The
-// declaration cannot live in internal/db beside the store interfaces, because
-// a Kind value there would pull the package's SQL builders into every
+// The declaration cannot live in internal/db beside the store interfaces,
+// because a Kind value there would pull the package's SQL builders into every
 // consumer of db; and it cannot live in either dialect package, because the
-// other would then have to import its sibling or restate it.
+// other would then have to import its sibling or restate it. Each Kind
+// carries its metrics observer, so the store that adopts the table needs no
+// wiring to be counted.
 package workkinds
 
 import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
+	"github.com/sky-ai-eng/triage-factory/internal/workmetrics"
+)
+
+// The event queue's identity on the work-kind registry: the path segment and
+// metric label, the panel heading, and the age its oldest ready row may reach
+// before the drain counts as behind. A routing unit is database writes, so a
+// minute of ready backlog means the worker is not draining, not that a unit
+// is slow. Declared beside the Kind so the observer's label and the handle's
+// name cannot disagree.
+const (
+	EventQueueName                 = "event_queue"
+	EventQueueLabel                = "Event routing"
+	EventQueueOldestReadyObjective = 60 * time.Second
 )
 
 // EventQueue is the router's durable event queue as a work kind.
@@ -62,6 +76,7 @@ func EventQueue(d workitem.Dialect) workitem.Kind {
 		Unique:   workitem.UniqueWhileUnsettled,
 		Strategy: workitem.FencedReplay,
 		Columns:  []string{"event_id", "entity_id", "event_type", "traceparent", "entity_poll_seq"},
+		Observer: workmetrics.Observe(EventQueueName),
 	}
 }
 

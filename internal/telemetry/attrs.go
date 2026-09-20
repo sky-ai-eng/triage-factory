@@ -40,6 +40,8 @@ const (
 	keyProvider       = attribute.Key("provider")
 	keyTransport      = attribute.Key("transport")
 	keyOp             = attribute.Key("op")
+	keyReason         = attribute.Key("reason")
+	keyWorkKind       = attribute.Key("work.kind")
 	keyWorkspace      = attribute.Key("workspace.provenance")
 	keySizeBytes      = attribute.Key("size_bytes")
 	keySnapBundle     = attribute.Key("snapshot.bundle_bytes")
@@ -102,6 +104,13 @@ func Provider(name string) attribute.KeyValue     { return keyProvider.String(na
 func Transport(name string) attribute.KeyValue    { return keyTransport.String(name) }
 func Op(name string) attribute.KeyValue           { return keyOp.String(name) }
 func Workspace(value string) attribute.KeyValue   { return keyWorkspace.String(value) }
+
+// WorkKind names an adopting work table by its registered kind name, and
+// Reason says why a work item was parked. Both are closed vocabularies TF
+// declares itself: kind names are registry identifiers, reasons are the
+// typed outcomes and the package's own park constants.
+func WorkKind(name string) attribute.KeyValue { return keyWorkKind.String(name) }
+func Reason(value string) attribute.KeyValue  { return keyReason.String(value) }
 
 // Outcome names how a span finished. It exists to separate "failed" from
 // "correctly declined to do anything" — provider backoff, a quiet-skip, a

@@ -152,6 +152,9 @@ type env struct {
 	// domain-write closures target. A production table has no such column,
 	// so those closures are no-ops there.
 	fixture bool
+	// obs is the recording observer installed on kind, so a subtest can
+	// assert exactly which dispositions the package reported.
+	obs *recorder
 }
 
 // envFactory builds one subtest's env under a policy. Run and RunTable each
@@ -191,6 +194,7 @@ func setup(t *testing.T, mk Factory, o opts) *env {
 	if o.strategy == workitem.StrategyUnset {
 		o.strategy = workitem.SingleTx
 	}
+	e.obs = &recorder{}
 	e.kind = workitem.Kind{
 		Table:    o.table,
 		Dialect:  dialect,
@@ -199,6 +203,7 @@ func setup(t *testing.T, mk Factory, o opts) *env {
 		Strategy: o.strategy,
 		Columns:  []string{"payload", "frozen_col"},
 		Frozen:   []string{"frozen_col"},
+		Observer: e.obs,
 	}
 	e.cols = func(int) map[string]any { return map[string]any{"payload": "p", "frozen_col": 0} }
 	if err := e.kind.Validate(); err != nil {
@@ -208,17 +213,20 @@ func setup(t *testing.T, mk Factory, o opts) *env {
 }
 
 // setupTable is setup for a production table: the factory's Kind, with the
-// policy swapped for the subtest's so production timing never enters a test.
-// Uniqueness mode, strategy and columns stay as declared, because those are
-// what the subtest is conforming.
+// policy swapped for the subtest's so production timing never enters a test,
+// and the observer swapped for the suite's recorder so production metrics
+// never see a test's dispositions. Uniqueness mode, strategy and columns stay
+// as declared, because those are what the subtest is conforming.
 func setupTable(t *testing.T, mk TableFactory, policy workitem.Policy) *env {
 	t.Helper()
 	conn, kind, org, cols := mk(t)
 	kind.Policy = policy
+	obs := &recorder{}
+	kind.Observer = obs
 	if err := kind.Validate(); err != nil {
 		t.Fatalf("table kind: %v", err)
 	}
-	return &env{t: t, ctx: t.Context(), conn: conn, dialect: kind.Dialect, org: org, kind: kind, cols: cols}
+	return &env{t: t, ctx: t.Context(), conn: conn, dialect: kind.Dialect, org: org, kind: kind, cols: cols, obs: obs}
 }
 
 // nextCols mints the next admission's columns through the hook.
