@@ -338,12 +338,13 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// under system_llm_runs_all RLS would be rejected. Same admin-only
 		// shape as PendingFirings / EventQueue.
 		SystemLLMRuns: newSystemLLMRunStore(admin),
-		// AccessChangeLog holds both pools (like ExternalActions): app for Record
-		// (governance handlers, composing inside their claims-bearing WithTx so the
-		// access_change_log_all RLS policy gates the write + the audit view's read
-		// by org) + ListByOrg, admin for RecordSystem (the SSO JIT auto-provision
-		// seam, whose user has no claims/membership at grant time). See TFAC-471 /
-		// TFAC-486.
+		// AccessChangeLog is app-pool only: Record composes inside the
+		// governance handlers' claims-bearing WithTx so the access_change_log_all
+		// RLS policy gates the write and the audit view's read by org. The two
+		// grants that cannot carry claims — invite-accept and SSO JIT
+		// provisioning — write their audit row with a raw INSERT on the admin
+		// pool's own transaction (the server's recordAccessChangeTx), so the
+		// store has no admin arm.
 		AccessChangeLog: newAccessChangeLogStore(app),
 		// ExternalActions holds both pools (like Artifacts): app for Record
 		// (manual bot runs + server approval/board handlers, under claims) +
