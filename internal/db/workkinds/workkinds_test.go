@@ -31,8 +31,10 @@ func TestPendingFiringsValidates(t *testing.T) {
 	if got := PendingFiringKey("task-1", "trig-1"); got != "task-1:trig-1" {
 		t.Errorf("firing key = %q", got)
 	}
-	const pg = "NOT EXISTS (SELECT 1 FROM conversations r WHERE r.org_id = t.org_id AND r.task_id = t.task_id AND r.ended_at IS NULL AND r.parent_conversation_id IS NULL AND (r.status IS NULL OR r.status NOT IN ('completed','failed')))"
-	const lite = "NOT EXISTS (SELECT 1 FROM conversations r WHERE r.task_id = t.task_id AND r.ended_at IS NULL AND r.parent_conversation_id IS NULL AND (r.status IS NULL OR r.status NOT IN ('completed','failed')))"
+	const pg = "NOT (EXISTS (SELECT 1 FROM conversations r WHERE r.org_id = t.org_id AND r.task_id = t.task_id AND r.ended_at IS NULL AND r.parent_conversation_id IS NULL AND (r.status IS NULL OR r.status NOT IN ('completed','failed')))" +
+		" OR EXISTS (SELECT 1 FROM blueprint_runs b WHERE b.org_id = t.org_id AND b.task_id = t.task_id AND b.status = 'running'))"
+	const lite = "NOT (EXISTS (SELECT 1 FROM conversations r WHERE r.task_id = t.task_id AND r.ended_at IS NULL AND r.parent_conversation_id IS NULL AND (r.status IS NULL OR r.status NOT IN ('completed','failed')))" +
+		" OR EXISTS (SELECT 1 FROM blueprint_runs b WHERE b.task_id = t.task_id AND b.status = 'running'))"
 	if got := PendingFiringsClaimFilter(workitem.Postgres); got != pg {
 		t.Errorf("postgres claim filter = %q", got)
 	}

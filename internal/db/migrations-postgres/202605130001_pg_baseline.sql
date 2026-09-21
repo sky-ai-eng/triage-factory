@@ -708,8 +708,9 @@ CREATE TABLE public.orgs (
 -- the next claim once a dead holder's lease expires; returned to ready with a
 -- backoff on a transient failure, or parked for an operator once the budget is
 -- spent. The claim query admits a ready row only while its task holds no live
--- top-level conversation (the kind's claim filter), so a row behind a busy
--- task is deferred rather than ready. The six columns after the block are
+-- top-level conversation and no blueprint run still marked running (the
+-- kind's claim filter), so a row behind a busy task is deferred rather than
+-- ready. The six columns after the block are
 -- this kind's own: skip_reason is set on a done row that did not fire,
 -- fired_run_id on one that did.
 --

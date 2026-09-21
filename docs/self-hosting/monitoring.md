@@ -220,9 +220,9 @@ rows stops reporting rather than freezing at its last value.
 | `tf_work_ready` | `work_kind`, `org_id` | Rows claimable now. |
 | `tf_work_leased` | `work_kind`, `org_id` | Rows a holder is driving. |
 | `tf_work_parked` | `work_kind`, `org_id` | Rows that will not run without a person. **Zero is the steady state.** |
-| `tf_work_deferred` | `work_kind`, `org_id` | Ready rows whose retry time has not come. |
+| `tf_work_deferred` | `work_kind`, `org_id` | Ready rows that are not claimable yet: their retry time has not come, or, for `pending_firings`, their task is busy — it has a live conversation, or a run still marked running. |
 | `tf_work_oldest_ready_age_seconds` | `work_kind`, `org_id` | Age of the oldest claimable row, from its original enqueue (a redrive keeps it). |
-| `tf_work_oldest_deferred_age_seconds` | `work_kind`, `org_id` | Age of the oldest deferred row, from its original enqueue. |
+| `tf_work_oldest_deferred_age_seconds` | `work_kind`, `org_id` | Age of the oldest deferred row, from its original enqueue. For `pending_firings` it grows for as long as a task stays busy, so a value far past the length of a run points at a conversation or run that never reached its terminal. |
 | `tf_work_oldest_ready_age_objective_seconds` | `work_kind` | The kind's declared bound on oldest ready age — `60` for `event_queue`, `60` for `pending_firings`, `60` for `task_rederive_queue` — so a rule compares two series instead of hard-coding a number. |
 
 Three alerts, in Prometheus terms. The third is what tells an idle queue from

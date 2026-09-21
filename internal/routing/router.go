@@ -87,7 +87,8 @@ type EventPublisher interface {
 //     folds the event into the task's live conversation if it has one, and
 //     admits a firing onto pending_firings when the task is busy, where the
 //     firing worker (RunFiringQueue) claims it once the task's gate — no live
-//     conversation, the claim query's own filter — opens.
+//     conversation and no run still marked running, the claim query's own
+//     filter — opens.
 //  8. Runs inline close checks for the event type
 type Router struct {
 	prompts       dbpkg.PromptStore

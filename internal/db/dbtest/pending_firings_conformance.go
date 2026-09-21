@@ -54,13 +54,20 @@ type PendingFiringsSeeder struct {
 	// exercise the stamp's no-steal refusal against a real competing claim.
 	ClaimTaskForUser func(t *testing.T, taskID string)
 
-	// RunForTask inserts a blueprint_run against the task and returns its
-	// id, so MarkFired's fired_run_id foreign key is satisfied.
+	// RunForTask inserts a blueprint_run against the task, marked running,
+	// and returns its id. It satisfies MarkFired's fired_run_id foreign key,
+	// and with no conversation beside it, it is the run half of the claim
+	// filter's gate on its own.
 	RunForTask func(t *testing.T, taskID string) string
 
+	// SettleRuns marks every running blueprint_run on the task completed,
+	// which is what reopens the run half of the gate.
+	SettleRuns func(t *testing.T, taskID string)
+
 	// LiveConversation inserts a live top-level conversation on the task —
-	// ended_at NULL, no parent, no terminal status — and returns its id. It
-	// is what closes the claim filter's gate.
+	// ended_at NULL, no parent, no terminal status — and returns its id. No
+	// running blueprint_run stands behind it, so it is the conversation half
+	// of the claim filter's gate on its own.
 	LiveConversation func(t *testing.T, taskID, promptID string) string
 
 	// EndConversation ends a conversation: a terminal status and an ended_at
@@ -397,6 +404,42 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 
+	t.Run("Claim_skips_a_task_with_a_running_run_until_it_settles", func(t *testing.T) {
+		// The run's last conversation is already terminal and the run is
+		// not yet: no conversation is live, and the fenced insert would
+		// still refuse. The filter holds the row rather than claim it into
+		// that refusal.
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		enqueue(t, s, orgID, tup, tup.TaskID, db.AgentClaimStamp{})
+		seed.RunForTask(t, tup.TaskID)
+
+		batch, err := s.Claim(ctx, firingOwner, 10)
+		if err != nil {
+			t.Fatalf("Claim: %v", err)
+		}
+		if len(batch.Firings) != 0 {
+			t.Fatalf("Claim behind a running run = %+v, want nothing", batch)
+		}
+		held := one(t, s, orgID, tup.EntityID)
+		if held.Status != workitem.StatusReady || held.Attempt != 0 {
+			t.Errorf("held row = %+v, want ready and uncharged", held)
+		}
+		h := handle(t, s)
+		d, err := workitem.Measure(ctx, h.Conn(), h.Kind(), orgID)
+		if err != nil {
+			t.Fatalf("Measure: %v", err)
+		}
+		if d.Ready != 0 || d.Deferred != 1 {
+			t.Errorf("depths = %+v, want the held row deferred", d)
+		}
+
+		seed.SettleRuns(t, tup.TaskID)
+		if cf := claimOne(t, s); cf.Firing.TaskID != tup.TaskID || cf.Receipt.Attempt != 1 {
+			t.Errorf("claim after the run settled = %+v, want the held row on its first attempt", cf)
+		}
+	})
+
 	t.Run("RenewLease_observes_a_cancellation_request_and_settles_it", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		h := handle(t, s)
@@ -558,6 +601,30 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 
+	t.Run("DeferWhileTaskBusy_refunds_behind_a_running_run_with_no_live_conversation", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		enqueue(t, s, orgID, tup, tup.TaskID, db.AgentClaimStamp{})
+		cf := claimOne(t, s)
+		seed.RunForTask(t, tup.TaskID)
+		if err := s.DeferWhileTaskBusy(ctx, cf.Receipt); err != nil {
+			t.Fatalf("DeferWhileTaskBusy behind a running run: %v", err)
+		}
+		got := one(t, s, orgID, tup.EntityID)
+		if got.Status != workitem.StatusReady || got.Attempt != 0 || got.LastError != workkinds.PendingFiringDeferTaskBusy {
+			t.Errorf("row after the deferral = %+v, want ready, refunded, deferred as task_busy", got)
+		}
+		// The row the deferral released is one the filter holds: the two
+		// read the same condition.
+		if batch, err := s.Claim(ctx, firingOwner, 10); err != nil || len(batch.Firings) != 0 {
+			t.Fatalf("claim behind the running run = %+v err=%v, want nothing", batch, err)
+		}
+		seed.SettleRuns(t, tup.TaskID)
+		if cf := claimOne(t, s); cf.Receipt.Attempt != 1 {
+			t.Errorf("claim after the run settled charged attempt %d, want 1", cf.Receipt.Attempt)
+		}
+	})
+
 	t.Run("HasUnsettledForTask_by_status", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		h := handle(t, s)
@@ -657,8 +724,8 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 			if has, err := tx.HasUnsettledForTask(ctx, orgID, tup.TaskID); err != nil || !has {
 				t.Errorf("HasUnsettledForTask inside the transaction = %v err=%v, want true", has, err)
 			}
-			if _, err := tx.Claim(ctx, firingOwner, 1); !errors.Is(err, db.ErrNotOnTransaction) {
-				t.Errorf("Claim on a transaction-bound store = %v, want ErrNotOnTransaction", err)
+			if _, err := tx.Claim(ctx, firingOwner, 1); !errors.Is(err, db.ErrTxBoundStore) {
+				t.Errorf("Claim on a transaction-bound store = %v, want ErrTxBoundStore", err)
 			}
 			return rolledBack
 		})

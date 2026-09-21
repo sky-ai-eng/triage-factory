@@ -8,12 +8,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// ErrNotOnTransaction is returned by a verb that opens its own transaction
+// ErrTxBoundStore is returned by a verb that opens its own transaction
 // through the work-item package when it is called on a store bound to a
 // caller's transaction: it cannot nest there, and running it on the pool
 // behind the caller's back would hide a write from the transaction the
 // caller thinks it is in.
-var ErrNotOnTransaction = errors.New("db: this verb opens its own transaction and is not available on a transaction-bound store")
+var ErrTxBoundStore = errors.New("db: this verb opens its own transaction and is not available on a transaction-bound store")
 
 // PendingFiringsStore owns the pending_firings table — the per-task queue of
 // auto-delegation intents the router admits when a matched trigger cannot
@@ -24,9 +24,11 @@ var ErrNotOnTransaction = errors.New("db: this verb opens its own transaction an
 // rows and hands back receipts, and RenewLease / MarkFired / MarkSkipped /
 // Requeue / DeferWhileTaskBusy are the holder's fenced writes. The per-task
 // gate lives in the claim query itself, as the kind's claim filter: a firing
-// is claimable only while its task holds no live top-level conversation, so
-// a row behind a busy task is deferred rather than ready and becomes ripe
-// when the task frees with no write of anyone's. The operator surface —
+// is claimable only while its task is not busy — no live top-level
+// conversation, and no blueprint run still marked running
+// (workkinds.PendingFiringsTaskBusy) — so a row behind a busy task is
+// deferred rather than ready and becomes ripe when the task frees with no
+// write of anyone's. The operator surface —
 // listing, redrive, cancel — reaches the table through the WorkKindHandle
 // the store also implements, with the package's own reads and controls.
 //
@@ -52,7 +54,7 @@ var ErrNotOnTransaction = errors.New("db: this verb opens its own transaction an
 //
 // A store bound to a caller's transaction answers Enqueue,
 // HasUnsettledForTask and ListForEntity on that transaction, and refuses
-// the verbs that open their own with ErrNotOnTransaction.
+// the verbs that open their own with ErrTxBoundStore.
 type PendingFiringsStore interface {
 	// Enqueue admits a ready firing for (task, trigger) under
 	// workkinds.PendingFiringKey and stamps the task's agent claim in the
@@ -74,10 +76,11 @@ type PendingFiringsStore interface {
 	// Claim leases up to n claimable rows across every org (org "" to
 	// workitem.Claim) and reads each leased row's own columns by id in one
 	// statement after the claim. Firings is in claim order. A ready row whose
-	// task holds a live conversation is not claimable (the kind's
-	// ClaimFilter). Rows the claim settled instead (a cancellation request,
-	// a spent budget) are counted, not returned. A non-nil error still
-	// returns the firings of rounds that committed before it.
+	// task is busy — a live conversation, or a run still marked running — is
+	// not claimable (the kind's ClaimFilter). Rows the claim settled instead
+	// (a cancellation request, a spent budget) are counted, not returned. A
+	// non-nil error still returns the firings of rounds that committed before
+	// it.
 	Claim(ctx context.Context, owner workitem.Owner, n int) (FiringClaim, error)
 
 	// RenewLease pushes the lease out to fresh database time plus the kind's
@@ -102,10 +105,11 @@ type PendingFiringsStore interface {
 	Requeue(ctx context.Context, r workitem.Receipt, outcome workitem.Outcome, cause error) (parked bool, err error)
 
 	// DeferWhileTaskBusy returns the row to ready with its attempt refunded,
-	// through workitem.Defer under the predicate "the task holds a live
-	// conversation" and a retry time of now: the row is ripe at once, and
-	// the claim filter is what holds it until the task is free.
-	// workitem.ErrDeferRefused when the predicate finds no live conversation.
+	// through workitem.Defer under the predicate "the task is busy" — the
+	// condition the claim filter negates, workkinds.PendingFiringsTaskBusy —
+	// and a retry time of now: the row is ripe at once, and the claim filter
+	// is what holds it until the task is free. workitem.ErrDeferRefused when
+	// the predicate finds the task free.
 	DeferWhileTaskBusy(ctx context.Context, r workitem.Receipt) error
 
 	// HasUnsettledForTask reports whether the task has a ready, leased or

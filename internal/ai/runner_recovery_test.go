@@ -111,6 +111,40 @@ func TestRun_ScoresCommitAdmitsTheReEvaluationBeforeTheCompletionCallback(t *tes
 	}
 }
 
+// TestRun_AScoreNamingNoTaskIsDroppedAndTheRestAreSaved: the id on a score is
+// the model's echo, and the score write admits a re-evaluation row per score
+// under a foreign key to the task. One id naming no task must cost that one
+// score, not the cycle.
+func TestRun_AScoreNamingNoTaskIsDroppedAndTheRestAreSaved(t *testing.T) {
+	ctx := context.Background()
+	database := newScoringTestDB(t)
+	stores := sqlitestore.New(database)
+	ids := seedScoringTasks(t, database, 2)
+
+	var announced []string
+	r := NewRunner(stores.Scores, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel, RunnerCallbacks{
+		OnScoringCompleted: func(_ context.Context, _ string, scored []string) { announced = scored },
+	})
+	r.scoreFn = func(ctx context.Context, tasks []TaskInput, orgID, model string, secrets agentproc.SecretsReader) ([]TaskScore, error) {
+		out, err := stubScoreFn(0.8)(ctx, tasks, orgID, model, secrets)
+		return append(out, TaskScore{ID: "no-such-task", PriorityScore: 0.5, AutonomySuitability: 0.8, PriorityReasoning: "stub", Summary: "stub"}), err
+	}
+
+	r.run(ctx)
+
+	for _, id := range ids {
+		if status, autonomy := readScoringState(t, database, id); status != "scored" || autonomy == nil {
+			t.Errorf("task %s scoring_status = %q autonomy = %v, want scored with a score", id, status, autonomy)
+		}
+		if got := countReDeriveRows(t, database, id, "ready"); got != 1 {
+			t.Errorf("task %s has %d ready re-evaluation rows, want 1", id, got)
+		}
+	}
+	if len(announced) != len(ids) {
+		t.Errorf("callback announced %v, want the %d real tasks only", announced, len(ids))
+	}
+}
+
 func countReDeriveRows(t *testing.T, database *sql.DB, taskID, status string) int {
 	t.Helper()
 	var n int

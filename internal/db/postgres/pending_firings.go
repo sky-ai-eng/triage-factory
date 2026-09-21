@@ -24,7 +24,7 @@ import (
 // q is the admission and read side, the caller's transaction when the store
 // is transaction-bound. conn is the pool the package's own transactions open
 // on, nil on a transaction-bound store: the verbs that need it answer
-// db.ErrNotOnTransaction there rather than nesting a transaction the caller
+// db.ErrTxBoundStore there rather than nesting a transaction the caller
 // cannot see.
 type pendingFiringsStore struct {
 	q    queryer
@@ -86,7 +86,7 @@ const pgPendingFiringSelect = `
 
 func (s *pendingFiringsStore) Claim(ctx context.Context, owner workitem.Owner, n int) (db.FiringClaim, error) {
 	if s.conn == nil {
-		return db.FiringClaim{}, db.ErrNotOnTransaction
+		return db.FiringClaim{}, db.ErrTxBoundStore
 	}
 	res, claimErr := workitem.Claim(ctx, s.conn, s.kind, owner, "", n)
 	out := db.FiringClaim{Cancelled: res.Cancelled, Parked: res.Parked, Reclaimed: res.Reclaimed}
@@ -129,7 +129,7 @@ func (s *pendingFiringsStore) Claim(ctx context.Context, owner workitem.Owner, n
 
 func (s *pendingFiringsStore) RenewLease(ctx context.Context, r workitem.Receipt) (workitem.Receipt, error) {
 	if s.conn == nil {
-		return workitem.Receipt{}, db.ErrNotOnTransaction
+		return workitem.Receipt{}, db.ErrTxBoundStore
 	}
 	return workitem.RenewLease(ctx, s.conn, s.kind, r)
 }
@@ -149,7 +149,7 @@ func (s *pendingFiringsStore) MarkSkipped(ctx context.Context, r workitem.Receip
 
 func (s *pendingFiringsStore) markDoneWith(ctx context.Context, r workitem.Receipt, column, value string) error {
 	if s.conn == nil {
-		return db.ErrNotOnTransaction
+		return db.ErrTxBoundStore
 	}
 	return db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
 		if err := workitem.MarkDone(ctx, tx, s.kind, r); err != nil {
@@ -162,24 +162,24 @@ func (s *pendingFiringsStore) markDoneWith(ctx context.Context, r workitem.Recei
 
 func (s *pendingFiringsStore) Requeue(ctx context.Context, r workitem.Receipt, outcome workitem.Outcome, cause error) (bool, error) {
 	if s.conn == nil {
-		return false, db.ErrNotOnTransaction
+		return false, db.ErrTxBoundStore
 	}
 	return workitem.Requeue(ctx, s.conn, s.kind, r, outcome, cause)
 }
 
-// DeferWhileTaskBusy defers under the predicate the claim filter applies,
-// read on the row's task inside the deferral's own transaction, so the
-// refund is granted only while a live conversation actually holds the task.
+// DeferWhileTaskBusy defers under the condition the claim filter negates,
+// rendered from the same text and read on the row inside the deferral's own
+// transaction, so the refund is granted only while the task really is busy
+// and the row it returns to ready is one the filter holds.
 func (s *pendingFiringsStore) DeferWhileTaskBusy(ctx context.Context, r workitem.Receipt) error {
 	if s.conn == nil {
-		return db.ErrNotOnTransaction
+		return db.ErrTxBoundStore
 	}
 	return workitem.Defer(ctx, s.conn, s.kind, r, workkinds.PendingFiringDeferTaskBusy, time.Now().UTC(), func(tx *sql.Tx) (bool, error) {
-		var taskID string
-		if err := tx.QueryRowContext(ctx, `SELECT task_id FROM public.pending_firings WHERE id = $1 AND org_id = $2`, r.ItemID, r.OrgID).Scan(&taskID); err != nil {
-			return false, err
-		}
-		return hasLiveConversationForTask(ctx, tx, r.OrgID, taskID)
+		var busy bool
+		err := tx.QueryRowContext(ctx, `SELECT `+workkinds.PendingFiringsTaskBusy(workitem.Postgres)+`
+			FROM public.pending_firings t WHERE t.id = $1 AND t.org_id = $2`, r.ItemID, r.OrgID).Scan(&busy)
+		return busy, err
 	})
 }
 

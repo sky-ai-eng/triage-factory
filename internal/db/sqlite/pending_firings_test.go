@@ -234,8 +234,14 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB, stores db.Stores) dbtest.Pendin
 	}
 
 	return dbtest.PendingFiringsSeeder{
-		Tuple:            tuple,
-		RunForTask:       runForTask,
+		Tuple:      tuple,
+		RunForTask: runForTask,
+		SettleRuns: func(t *testing.T, taskID string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE task_id = ? AND status = 'running'`, taskID); err != nil {
+				t.Fatalf("settle blueprint_runs: %v", err)
+			}
+		},
 		AgentID:          agentID,
 		TaskClaim:        taskClaim,
 		ClaimTaskForUser: claimTaskForUser,

@@ -257,10 +257,14 @@ func TestFiringWorker_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	if err != nil || !inserted {
 		t.Fatalf("seed prior blueprint_run: inserted=%v err=%v", inserted, err)
 	}
-	// The prior firing concluded: the worker must read it as already-fired,
-	// not as a live engagement to wait behind.
+	// The prior firing concluded, conversation and run both: the worker must
+	// read it as already-fired, not as a live engagement to wait behind. A
+	// run still marked running would hold the row at the claim instead.
 	if _, err := database.Exec(`UPDATE conversations SET status = 'completed' WHERE id = ?`, priorStepID); err != nil {
 		t.Fatalf("conclude prior step: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?`, priorBlueprintRunID); err != nil {
+		t.Fatalf("settle prior run: %v", err)
 	}
 
 	// Queue a firing carrying the same triggering event.
