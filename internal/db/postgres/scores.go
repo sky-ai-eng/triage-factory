@@ -2,10 +2,14 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -63,81 +67,78 @@ func (s *scoreStore) ResetStaleScoring(ctx context.Context, orgID string) (int, 
 	return int(n), nil
 }
 
+// UpdateTaskScores is one transaction: every task's task_rederive_queue row
+// admitted or raised first, in ascending task id order, then the batched
+// tasks statement. The queue row's requested_revision is set from the task's
+// pre-increment score_revision plus one, and the tasks statement then
+// increments score_revision, so after the commit the two are equal.
+//
+// Lock order: task_rederive_queue before tasks, every transaction that
+// touches both. The admission's conflict arm and the UPDATE that follows it
+// both lock the queue row, which is what serializes this writer against a
+// completion holding that row — the writer waits, then finds the row done and
+// admits a fresh one, or finds it still unsettled and raises it. The fixed
+// task order keeps two concurrent score writers from deadlocking on each
+// other's queue rows.
 func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates []domain.TaskScoreUpdate) error {
 	if len(updates) == 0 {
 		return nil
 	}
-	// Single UPDATE ... FROM (VALUES ...) so the whole batch lands in
-	// one round-trip. Atomic by construction (single statement =
-	// implicit tx in Postgres), so no inTx wrapper needed. Avoids the
-	// N-round-trip-per-cycle bottleneck the per-row loop had.
-	//
-	// Placeholders are emitted with explicit ::uuid/::real/::text casts
-	// because the VALUES literal's types are inferred from the first
-	// row, and a NULL or empty string there would make later rows fail
-	// to coerce. Explicit casts pin every column's type at parse time.
-	var (
-		rowExprs []string
-		args     = []any{orgID}
-		n        = 2 // $1 is orgID
-	)
-	for _, u := range updates {
-		rowExprs = append(rowExprs, fmt.Sprintf(
-			"($%d::uuid, $%d::real, $%d::real, $%d::text, $%d::text)",
-			n, n+1, n+2, n+3, n+4))
-		args = append(args, u.ID, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning)
-		n += 5
-	}
-	// rederive_owed rides the same statement as the scores it is owed for:
-	// one write, so no crash can commit a score whose deferred triggers
-	// nothing is on the hook to evaluate.
-	query := fmt.Sprintf(`
-		UPDATE tasks t
-		SET priority_score = v.priority_score,
-		    autonomy_suitability = v.autonomy_suitability,
-		    ai_summary = v.ai_summary,
-		    priority_reasoning = v.priority_reasoning,
-		    scoring_status = 'scored',
-		    rederive_owed = true
-		FROM (VALUES %s) AS v(id, priority_score, autonomy_suitability, ai_summary, priority_reasoning)
-		WHERE t.id = v.id AND t.org_id = $1
-	`, strings.Join(rowExprs, ", "))
-	_, err := s.q.ExecContext(ctx, query, args...)
-	return err
-}
+	ordered := make([]domain.TaskScoreUpdate, len(updates))
+	copy(ordered, updates)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
 
-func (s *scoreStore) TasksOwedReDerive(ctx context.Context, orgID string) ([]string, error) {
-	rows, err := s.q.QueryContext(ctx,
-		`SELECT id FROM tasks WHERE org_id = $1 AND rederive_owed ORDER BY created_at ASC`,
-		orgID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+	kind := workkinds.TaskReDerive(workitem.Postgres)
+	return inTxRaw(ctx, s.q, func(tx *sql.Tx) error {
+		for _, u := range ordered {
+			id, _, err := workitem.Admit(ctx, tx, kind, orgID, u.ID, db.TaskReDeriveRowCols(u.ID))
+			if err != nil {
+				return err
+			}
+			// Runs whether the admission inserted or deduplicated, so a fresh
+			// row and a raised one take the same path.
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE public.task_rederive_queue
+				   SET requested_revision = (SELECT score_revision + 1 FROM public.tasks WHERE id = $1 AND org_id = $2)
+				 WHERE id = $3 AND org_id = $2
+			`, u.ID, orgID, id); err != nil {
+				return fmt.Errorf("raise task_rederive_queue row %d: %w", id, err)
+			}
 		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
 
-func (s *scoreStore) ClearReDeriveOwed(ctx context.Context, orgID string, taskIDs []string) error {
-	if len(taskIDs) == 0 {
-		return nil
-	}
-	// org_id is load-bearing rather than defense in depth, as in
-	// ResetStaleScoring: the per-org runners drain concurrently, and an
-	// unscoped clear would discharge another tenant's debt on IDs it never
-	// evaluated.
-	_, err := s.q.ExecContext(ctx,
-		`UPDATE tasks SET rederive_owed = false WHERE org_id = $1 AND id = ANY($2)`,
-		orgID, taskIDs)
-	return err
+		// Single UPDATE ... FROM (VALUES ...) so the whole batch lands in
+		// one round-trip.
+		//
+		// Placeholders are emitted with explicit ::uuid/::real/::text casts
+		// because the VALUES literal's types are inferred from the first
+		// row, and a NULL or empty string there would make later rows fail
+		// to coerce. Explicit casts pin every column's type at parse time.
+		var (
+			rowExprs []string
+			args     = []any{orgID}
+			n        = 2 // $1 is orgID
+		)
+		for _, u := range ordered {
+			rowExprs = append(rowExprs, fmt.Sprintf(
+				"($%d::uuid, $%d::real, $%d::real, $%d::text, $%d::text)",
+				n, n+1, n+2, n+3, n+4))
+			args = append(args, u.ID, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning)
+			n += 5
+		}
+		query := fmt.Sprintf(`
+			UPDATE tasks t
+			SET priority_score = v.priority_score,
+			    autonomy_suitability = v.autonomy_suitability,
+			    ai_summary = v.ai_summary,
+			    priority_reasoning = v.priority_reasoning,
+			    scoring_status = 'scored',
+			    score_revision = score_revision + 1
+			FROM (VALUES %s) AS v(id, priority_score, autonomy_suitability, ai_summary, priority_reasoning)
+			WHERE t.id = v.id AND t.org_id = $1
+		`, strings.Join(rowExprs, ", "))
+		_, err := tx.ExecContext(ctx, query, args...)
+		return err
+	})
 }
 
 func (s *scoreStore) UnscoredTasks(ctx context.Context, orgID string) ([]domain.Task, error) {

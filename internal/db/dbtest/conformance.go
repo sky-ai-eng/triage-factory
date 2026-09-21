@@ -12,29 +12,55 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // ScoreStoreFactory is what a per-backend test file hands to
-// RunScoreStoreConformance. The factory returns:
-//   - the wired ScoreStore impl
-//   - the orgID to pass to every method (sqlite returns
-//     runmode.LocalDefaultOrgID, postgres returns a fresh org UUID)
-//   - a seed function that creates the underlying task rows the
-//     conformance suite needs. The harness doesn't know how to
-//     create tasks directly (TaskStore lands in a later wave); the
-//     backend test owns that wiring against its own connection.
-type ScoreStoreFactory func(t *testing.T) (store db.ScoreStore, orgID string, seed ScoreSeeder)
+// RunScoreStoreConformance. It is called once per subtest and returns a
+// fresh ScoreFixture: the wired stores, the orgID to pass to every method,
+// and the schema-aware probes the harness itself cannot write.
+type ScoreStoreFactory func(t *testing.T) ScoreFixture
 
 // ScoreSeeder lets the conformance harness ask the backend test to
 // create N queued/pending tasks and return their IDs. Backend tests
 // implement this against whatever raw-SQL path matches their schema
 // (the conformance harness is intentionally schema-blind).
 type ScoreSeeder func(t *testing.T, n int) []string
+
+// ScoreFixture is one subtest's world for the score store suite.
+type ScoreFixture struct {
+	Store db.ScoreStore
+	OrgID string
+	Seed  ScoreSeeder
+	// ReDerive is the re-evaluation queue the score write admits into, so
+	// the suite can drive a row through leased, parked and done and watch
+	// what the next score write does to it.
+	ReDerive db.TaskReDeriveStore
+	// ScoreRevision reads tasks.score_revision for one task.
+	ScoreRevision func(t *testing.T, taskID string) int64
+	// QueueRows reads the task's task_rederive_queue rows, oldest first.
+	QueueRows func(t *testing.T, taskID string) []ReDeriveQueueRow
+}
+
+// ReDeriveQueueRow is one task_rederive_queue row as the suite reads it.
+type ReDeriveQueueRow struct {
+	ID                int64
+	Status            string
+	Attempt           int
+	RequestedRevision int64
+	UniqueKey         string
+}
+
+// scoreOwner is the owner every claim in this suite stamps a row with.
+var scoreOwner = workitem.Owner{ID: "conformance-score-suite", Epoch: 1}
 
 // RunScoreStoreConformance is the shared assertion suite for any
 // db.ScoreStore implementation. Backend tests invoke it with their
@@ -43,10 +69,49 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
 
+	score := func(t *testing.T, f ScoreFixture, ids ...string) {
+		t.Helper()
+		updates := make([]domain.TaskScoreUpdate, len(ids))
+		for i, id := range ids {
+			updates[i] = domain.TaskScoreUpdate{ID: id, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r"}
+		}
+		if err := f.Store.UpdateTaskScores(ctx, f.OrgID, updates); err != nil {
+			t.Fatalf("UpdateTaskScores: %v", err)
+		}
+	}
+	oneRow := func(t *testing.T, f ScoreFixture, taskID string) ReDeriveQueueRow {
+		t.Helper()
+		rows := f.QueueRows(t, taskID)
+		if len(rows) != 1 {
+			t.Fatalf("task %s has %d task_rederive_queue rows, want 1: %+v", taskID, len(rows), rows)
+		}
+		return rows[0]
+	}
+	requireRow := func(t *testing.T, got ReDeriveQueueRow, taskID, status string, revision int64) {
+		t.Helper()
+		if got.Status != status || got.RequestedRevision != revision {
+			t.Fatalf("queue row = %+v, want status %s at requested_revision %d", got, status, revision)
+		}
+		if got.UniqueKey != taskID {
+			t.Errorf("queue row unique_key = %q, want the task id %q", got.UniqueKey, taskID)
+		}
+	}
+	claimOne := func(t *testing.T, f ScoreFixture) db.ClaimedReDerive {
+		t.Helper()
+		batch, err := f.ReDerive.Claim(ctx, scoreOwner, 1)
+		if err != nil {
+			t.Fatalf("Claim: %v", err)
+		}
+		if len(batch.Items) != 1 {
+			t.Fatalf("Claim returned %d items, want 1 (cancelled=%d parked=%d)", len(batch.Items), batch.Cancelled, batch.Parked)
+		}
+		return batch.Items[0]
+	}
+
 	t.Run("UnscoredTasks_returns_only_pending_queued", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		ids := seed(t, 3)
-		tasks, err := s.UnscoredTasks(ctx, orgID)
+		f := mk(t)
+		ids := f.Seed(t, 3)
+		tasks, err := f.Store.UnscoredTasks(ctx, f.OrgID)
 		if err != nil {
 			t.Fatalf("UnscoredTasks: %v", err)
 		}
@@ -64,14 +129,14 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 	})
 
 	t.Run("MarkScoring_flips_to_in_progress", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		ids := seed(t, 2)
-		if err := s.MarkScoring(ctx, orgID, ids); err != nil {
+		f := mk(t)
+		ids := f.Seed(t, 2)
+		if err := f.Store.MarkScoring(ctx, f.OrgID, ids); err != nil {
 			t.Fatalf("MarkScoring: %v", err)
 		}
 		// UnscoredTasks only picks up scoring_status='pending', so a
 		// re-read after MarkScoring should now exclude these rows.
-		tasks, err := s.UnscoredTasks(ctx, orgID)
+		tasks, err := f.Store.UnscoredTasks(ctx, f.OrgID)
 		if err != nil {
 			t.Fatalf("UnscoredTasks after MarkScoring: %v", err)
 		}
@@ -85,15 +150,15 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 	})
 
 	t.Run("ResetScoringToPending_restores_visibility", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		ids := seed(t, 2)
-		if err := s.MarkScoring(ctx, orgID, ids); err != nil {
+		f := mk(t)
+		ids := f.Seed(t, 2)
+		if err := f.Store.MarkScoring(ctx, f.OrgID, ids); err != nil {
 			t.Fatalf("MarkScoring: %v", err)
 		}
-		if err := s.ResetScoringToPending(ctx, orgID, ids); err != nil {
+		if err := f.Store.ResetScoringToPending(ctx, f.OrgID, ids); err != nil {
 			t.Fatalf("ResetScoringToPending: %v", err)
 		}
-		tasks, err := s.UnscoredTasks(ctx, orgID)
+		tasks, err := f.Store.UnscoredTasks(ctx, f.OrgID)
 		if err != nil {
 			t.Fatalf("UnscoredTasks after Reset: %v", err)
 		}
@@ -109,15 +174,15 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 	})
 
 	t.Run("ResetStaleScoring_recovers_crash_residue_only", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		residue := seed(t, 2)   // marked in_progress, then "the process died"
-		untouched := seed(t, 1) // still pending — never picked
-		done := seed(t, 1)      // scored — a completed cycle's output
+		f := mk(t)
+		residue := f.Seed(t, 2)   // marked in_progress, then "the process died"
+		untouched := f.Seed(t, 1) // still pending — never picked
+		done := f.Seed(t, 1)      // scored — a completed cycle's output
 
-		if err := s.MarkScoring(ctx, orgID, residue); err != nil {
+		if err := f.Store.MarkScoring(ctx, f.OrgID, residue); err != nil {
 			t.Fatalf("MarkScoring: %v", err)
 		}
-		if err := s.UpdateTaskScores(ctx, orgID, []domain.TaskScoreUpdate{{
+		if err := f.Store.UpdateTaskScores(ctx, f.OrgID, []domain.TaskScoreUpdate{{
 			ID:                  done[0],
 			PriorityScore:       0.7,
 			AutonomySuitability: 0.7,
@@ -127,7 +192,7 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 			t.Fatalf("UpdateTaskScores: %v", err)
 		}
 
-		n, err := s.ResetStaleScoring(ctx, orgID)
+		n, err := f.Store.ResetStaleScoring(ctx, f.OrgID)
 		if err != nil {
 			t.Fatalf("ResetStaleScoring: %v", err)
 		}
@@ -136,7 +201,7 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 		}
 
 		unscored := map[string]bool{}
-		tasks, err := s.UnscoredTasks(ctx, orgID)
+		tasks, err := f.Store.UnscoredTasks(ctx, f.OrgID)
 		if err != nil {
 			t.Fatalf("UnscoredTasks after ResetStaleScoring: %v", err)
 		}
@@ -157,7 +222,7 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 
 		// Idempotent: a second call has nothing left to move, which is
 		// also what every crash-free cycle sees.
-		again, err := s.ResetStaleScoring(ctx, orgID)
+		again, err := f.Store.ResetStaleScoring(ctx, f.OrgID)
 		if err != nil {
 			t.Fatalf("ResetStaleScoring (second call): %v", err)
 		}
@@ -167,8 +232,8 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 	})
 
 	t.Run("UpdateTaskScores_applies_scores_and_marks_scored", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		ids := seed(t, 2)
+		f := mk(t)
+		ids := f.Seed(t, 2)
 		updates := make([]domain.TaskScoreUpdate, len(ids))
 		for i, id := range ids {
 			updates[i] = domain.TaskScoreUpdate{
@@ -179,11 +244,11 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 				PriorityReasoning:   "priority reason " + id,
 			}
 		}
-		if err := s.UpdateTaskScores(ctx, orgID, updates); err != nil {
+		if err := f.Store.UpdateTaskScores(ctx, f.OrgID, updates); err != nil {
 			t.Fatalf("UpdateTaskScores: %v", err)
 		}
 		// After UpdateTaskScores, rows should drop out of UnscoredTasks.
-		tasks, err := s.UnscoredTasks(ctx, orgID)
+		tasks, err := f.Store.UnscoredTasks(ctx, f.OrgID)
 		if err != nil {
 			t.Fatalf("UnscoredTasks after UpdateTaskScores: %v", err)
 		}
@@ -196,138 +261,155 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 		}
 	})
 
-	t.Run("UpdateTaskScores_owes_a_rederive", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		ids := seed(t, 2)
-
-		owed, err := s.TasksOwedReDerive(ctx, orgID)
-		if err != nil {
-			t.Fatalf("TasksOwedReDerive (before scoring): %v", err)
-		}
-		if len(owed) != 0 {
-			t.Fatalf("TasksOwedReDerive before any scores = %v, want none — an unscored task owes nothing", owed)
-		}
-
-		updates := make([]domain.TaskScoreUpdate, len(ids))
-		for i, id := range ids {
-			updates[i] = domain.TaskScoreUpdate{ID: id, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r"}
-		}
-		if err := s.UpdateTaskScores(ctx, orgID, updates); err != nil {
-			t.Fatalf("UpdateTaskScores: %v", err)
-		}
-
-		owed, err = s.TasksOwedReDerive(ctx, orgID)
-		if err != nil {
-			t.Fatalf("TasksOwedReDerive: %v", err)
-		}
-		gotOwed := map[string]bool{}
-		for _, id := range owed {
-			gotOwed[id] = true
-		}
+	// The score write admits the re-evaluation obligation in its own
+	// transaction: one ready row keyed on the task, at the revision the tasks
+	// row now carries. A second save raises both in place.
+	t.Run("UpdateTaskScores_admits_a_rederive_at_the_new_revision", func(t *testing.T) {
+		f := mk(t)
+		ids := f.Seed(t, 2)
 		for _, id := range ids {
-			if !gotOwed[id] {
-				t.Errorf("task %s scored but owes no re-derive; the mark must ride the same write as the scores", id)
+			if rows := f.QueueRows(t, id); len(rows) != 0 {
+				t.Fatalf("unscored task %s already has queue rows %+v", id, rows)
 			}
+			if rev := f.ScoreRevision(t, id); rev != 0 {
+				t.Fatalf("unscored task %s has score_revision %d, want 0", id, rev)
+			}
+		}
+
+		score(t, f, ids...)
+		for _, id := range ids {
+			requireRow(t, oneRow(t, f, id), id, workitem.StatusReady, 1)
+			if rev := f.ScoreRevision(t, id); rev != 1 {
+				t.Errorf("task %s score_revision = %d after one save, want 1", id, rev)
+			}
+		}
+
+		first := oneRow(t, f, ids[0])
+		score(t, f, ids[0])
+		second := oneRow(t, f, ids[0])
+		if second.ID != first.ID {
+			t.Errorf("second save minted row %d beside the ready row %d; it must raise the ready row in place", second.ID, first.ID)
+		}
+		requireRow(t, second, ids[0], workitem.StatusReady, 2)
+		if rev := f.ScoreRevision(t, ids[0]); rev != 2 {
+			t.Errorf("score_revision = %d after two saves, want 2", rev)
+		}
+		// The sibling was not touched by a save that did not name it.
+		requireRow(t, oneRow(t, f, ids[1]), ids[1], workitem.StatusReady, 1)
+	})
+
+	// A score landing while the row is leased raises it in place: the holder
+	// completes against its frozen revision and finds the row has moved on.
+	t.Run("UpdateTaskScores_raises_a_leased_row_in_place", func(t *testing.T) {
+		f := mk(t)
+		id := f.Seed(t, 1)[0]
+		score(t, f, id)
+		item := claimOne(t, f)
+		if item.TaskID != id || item.RequestedRevision != 1 {
+			t.Fatalf("claimed %+v, want task %s at revision 1", item, id)
+		}
+
+		score(t, f, id)
+		row := oneRow(t, f, id)
+		requireRow(t, row, id, workitem.StatusLeased, 2)
+		if row.ID != item.Receipt.ItemID {
+			t.Errorf("save while leased minted row %d beside the leased row %d", row.ID, item.Receipt.ItemID)
+		}
+		if row.Attempt != 1 {
+			t.Errorf("raising a leased row changed its attempt to %d", row.Attempt)
 		}
 	})
 
-	t.Run("ClearReDeriveOwed_discharges_only_the_named_tasks", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		ids := seed(t, 3)
-		updates := make([]domain.TaskScoreUpdate, len(ids))
-		for i, id := range ids {
-			updates[i] = domain.TaskScoreUpdate{ID: id, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r"}
-		}
-		if err := s.UpdateTaskScores(ctx, orgID, updates); err != nil {
-			t.Fatalf("UpdateTaskScores: %v", err)
-		}
-
-		// The re-derive pass evaluated the first task and bailed on the rest.
-		if err := s.ClearReDeriveOwed(ctx, orgID, ids[:1]); err != nil {
-			t.Fatalf("ClearReDeriveOwed: %v", err)
-		}
-		owed, err := s.TasksOwedReDerive(ctx, orgID)
-		if err != nil {
-			t.Fatalf("TasksOwedReDerive: %v", err)
-		}
-		if len(owed) != 2 {
-			t.Fatalf("TasksOwedReDerive after clearing 1 of 3 = %v, want the other 2", owed)
-		}
-		for _, id := range owed {
-			if id == ids[0] {
-				t.Errorf("task %s still owed after its clear", id)
-			}
+	// A parked row still holds its key, so a score raises it in place too;
+	// redriving it evaluates the latest revision.
+	t.Run("UpdateTaskScores_raises_a_parked_row_in_place", func(t *testing.T) {
+		f := mk(t)
+		id := f.Seed(t, 1)[0]
+		score(t, f, id)
+		item := claimOne(t, f)
+		parked, err := f.ReDerive.Requeue(ctx, item.Receipt, workitem.OutcomePermanent, errors.New("rejected"))
+		if err != nil || !parked {
+			t.Fatalf("Requeue permanent: parked=%v err=%v", parked, err)
 		}
 
-		// Idempotent: the pass runs again on the same set (a drain racing the
-		// completion callback) and finds nothing left to discharge.
-		if err := s.ClearReDeriveOwed(ctx, orgID, ids); err != nil {
-			t.Fatalf("ClearReDeriveOwed (second call): %v", err)
+		score(t, f, id)
+		row := oneRow(t, f, id)
+		requireRow(t, row, id, workitem.StatusParked, 2)
+		if row.ID != item.Receipt.ItemID {
+			t.Errorf("save while parked minted row %d beside the parked row %d", row.ID, item.Receipt.ItemID)
 		}
-		owed, err = s.TasksOwedReDerive(ctx, orgID)
-		if err != nil {
-			t.Fatalf("TasksOwedReDerive (after full clear): %v", err)
+
+		h, ok := f.ReDerive.(db.WorkKindHandle)
+		if !ok {
+			t.Fatalf("%T does not implement db.WorkKindHandle", f.ReDerive)
 		}
-		if len(owed) != 0 {
-			t.Errorf("TasksOwedReDerive after clearing every task = %v, want none", owed)
+		if err := workitem.Redrive(ctx, h.Conn(), h.Kind(), f.OrgID, row.ID, "operator"); err != nil {
+			t.Fatalf("Redrive: %v", err)
+		}
+		redriven := claimOne(t, f)
+		if redriven.Receipt.ItemID != row.ID || redriven.RequestedRevision != 2 {
+			t.Errorf("redriven claim = %+v, want row %d frozen at revision 2", redriven, row.ID)
 		}
 	})
 
-	t.Run("ReDeriveOwed_survives_the_scoring_status_writes", func(t *testing.T) {
-		// The mark has exactly two writers: the scores write raises it, the
-		// re-derive pass clears it. A task may legitimately be back to
-		// 'pending' for a re-score while still owing a re-derive from the
-		// last one, so the scoring-status writes must leave it alone — and
-		// owing one must not hide the task from the cycle that re-scores it.
-		s, orgID, seed := mk(t)
-		ids := seed(t, 1)
-		if err := s.UpdateTaskScores(ctx, orgID, []domain.TaskScoreUpdate{{
-			ID: ids[0], PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r",
-		}}); err != nil {
-			t.Fatalf("UpdateTaskScores: %v", err)
+	// After the row is done its key is free: the next score admits a fresh
+	// ready row at the next revision, and the done row keeps its own.
+	t.Run("UpdateTaskScores_admits_a_fresh_row_after_done", func(t *testing.T) {
+		f := mk(t)
+		id := f.Seed(t, 1)[0]
+		score(t, f, id)
+		item := claimOne(t, f)
+		if err := f.ReDerive.Complete(ctx, item.Receipt, func(db.PendingFiringsStore) error { return nil }); err != nil {
+			t.Fatalf("Complete: %v", err)
 		}
 
-		for _, step := range []struct {
-			name string
-			run  func() error
-		}{
-			{"MarkScoring", func() error { return s.MarkScoring(ctx, orgID, ids) }},
-			{"ResetStaleScoring", func() error { _, err := s.ResetStaleScoring(ctx, orgID); return err }},
-			{"MarkScoring (again)", func() error { return s.MarkScoring(ctx, orgID, ids) }},
-			{"ResetScoringToPending", func() error { return s.ResetScoringToPending(ctx, orgID, ids) }},
-		} {
-			if err := step.run(); err != nil {
-				t.Fatalf("%s: %v", step.name, err)
-			}
-			owed, err := s.TasksOwedReDerive(ctx, orgID)
-			if err != nil {
-				t.Fatalf("TasksOwedReDerive after %s: %v", step.name, err)
-			}
-			if len(owed) != 1 || owed[0] != ids[0] {
-				t.Fatalf("TasksOwedReDerive after %s = %v, want [%s] — only the re-derive pass may discharge the mark", step.name, owed, ids[0])
-			}
+		score(t, f, id)
+		rows := f.QueueRows(t, id)
+		if len(rows) != 2 {
+			t.Fatalf("task has %d queue rows after a save past done, want the done row and a fresh ready one: %+v", len(rows), rows)
 		}
+		requireRow(t, rows[0], id, workitem.StatusDone, 1)
+		requireRow(t, rows[1], id, workitem.StatusReady, 2)
+		if rows[1].Attempt != 0 {
+			t.Errorf("fresh row attempt = %d, want 0", rows[1].Attempt)
+		}
+		if rev := f.ScoreRevision(t, id); rev != 2 {
+			t.Errorf("score_revision = %d, want 2", rev)
+		}
+	})
 
-		// ...and the mark never gates scoring itself.
-		tasks, err := s.UnscoredTasks(ctx, orgID)
+	// The obligation and the scores are one commit: a queue write that cannot
+	// land — here an update naming a task that does not exist, which the
+	// queue row's foreign key refuses — leaves every tasks row of the batch
+	// untouched.
+	t.Run("UpdateTaskScores_is_all_or_nothing_when_the_queue_write_fails", func(t *testing.T) {
+		f := mk(t)
+		id := f.Seed(t, 1)[0]
+		err := f.Store.UpdateTaskScores(ctx, f.OrgID, []domain.TaskScoreUpdate{
+			{ID: id, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r"},
+			{ID: uuid.New().String(), PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r"},
+		})
+		if err == nil {
+			t.Fatal("UpdateTaskScores naming a task that does not exist succeeded")
+		}
+		if rows := f.QueueRows(t, id); len(rows) != 0 {
+			t.Errorf("a failed save left queue rows behind: %+v", rows)
+		}
+		if rev := f.ScoreRevision(t, id); rev != 0 {
+			t.Errorf("a failed save moved score_revision to %d", rev)
+		}
+		tasks, err := f.Store.UnscoredTasks(ctx, f.OrgID)
 		if err != nil {
 			t.Fatalf("UnscoredTasks: %v", err)
 		}
-		if len(tasks) != 1 || tasks[0].ID != ids[0] {
-			t.Errorf("UnscoredTasks = %v, want the owed-but-pending task %s", tasks, ids[0])
-		}
-	})
-
-	t.Run("ClearReDeriveOwed_empty_slice_is_noop", func(t *testing.T) {
-		s, orgID, _ := mk(t)
-		if err := s.ClearReDeriveOwed(ctx, orgID, nil); err != nil {
-			t.Errorf("ClearReDeriveOwed(nil): %v", err)
+		if len(tasks) != 1 || tasks[0].ID != id || tasks[0].AutonomySuitability != nil {
+			t.Errorf("UnscoredTasks after a failed save = %+v, want the task still pending and unscored", tasks)
 		}
 	})
 
 	t.Run("MarkScoring_empty_slice_is_noop", func(t *testing.T) {
-		s, orgID, _ := mk(t)
-		if err := s.MarkScoring(ctx, orgID, nil); err != nil {
+		f := mk(t)
+		if err := f.Store.MarkScoring(ctx, f.OrgID, nil); err != nil {
 			t.Errorf("MarkScoring(nil): %v", err)
 		}
 	})
@@ -337,12 +419,12 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 	// ExecContext / QueryContext under the hood, so a ctx that's
 	// already cancelled should fail fast.
 	t.Run("CtxCancellation_fails_fast", func(t *testing.T) {
-		s, orgID, _ := mk(t)
+		f := mk(t)
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
 		// Give the cancellation a moment to propagate through the driver.
 		time.Sleep(time.Millisecond)
-		if _, err := s.UnscoredTasks(cancelled, orgID); err == nil {
+		if _, err := f.Store.UnscoredTasks(cancelled, f.OrgID); err == nil {
 			t.Errorf("UnscoredTasks with cancelled ctx: want error, got nil")
 		}
 	})

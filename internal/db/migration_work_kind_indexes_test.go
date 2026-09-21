@@ -30,6 +30,11 @@ var workKindSchemas = []struct {
 		kind:       workkinds.PendingFirings,
 		old:        []string{"'pending'", "'draining'", "'fired'", "'skipped_stale'", "idx_pending_firings_dedup", "idx_pending_firings_entity_pending"},
 	},
+	{
+		name:       "task_rederive_queue",
+		sqliteFile: taskReDeriveQueueFile,
+		kind:       workkinds.TaskReDerive,
+	},
 }
 
 // TestWorkKindSchemasCarryWorkItemIndexes pins that both dialects' schema

@@ -8,6 +8,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -15,14 +17,22 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// updateScores wraps the SQLite ScoreStore's UpdateTaskScores to keep
-// the existing rederive tests terse while the D2 ScoreStore rewrite
-// is in flight. Inlining the bundle constructor per call is fine
-// for tests (negligible per-test cost) and avoids threading a
-// Stores bundle through every helper in this file.
+// updateScores writes scores through the SQLite ScoreStore, which is also
+// what admits the task's re-evaluation row: every test here scores the way
+// production scores, so the queue row comes from the same transaction.
 func updateScores(t *testing.T, database *sql.DB, updates []domain.TaskScoreUpdate) error {
 	t.Helper()
 	return sqlitestore.New(database).Scores.UpdateTaskScores(context.Background(), runmode.LocalDefaultOrgID, updates)
+}
+
+// scoreTask scores one task with the given autonomy suitability.
+func scoreTask(t *testing.T, database *sql.DB, taskID string, autonomy float64) {
+	t.Helper()
+	if err := updateScores(t, database, []domain.TaskScoreUpdate{{
+		ID: taskID, PriorityScore: 0.5, AutonomySuitability: autonomy, Summary: "test",
+	}}); err != nil {
+		t.Fatalf("update scores: %v", err)
+	}
 }
 
 // noopScorer satisfies the Scorer interface without doing anything.
@@ -45,6 +55,112 @@ func newTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
 	return database
+}
+
+// seedLocalBot stages the org's agent and its membership of the local
+// default team, so a planned firing resolves an agent and stamps the bot's
+// claim the way production's preflight does.
+func seedLocalBot(t *testing.T, database *sql.DB) {
+	t.Helper()
+	if _, err := database.Exec(
+		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	if err := sqlitestore.New(database).TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("add agent to the default team: %v", err)
+	}
+}
+
+// reDeriveRouter builds a router over the database wired for the re-derive
+// worker: the re-evaluation queue, the agent and team_agents stores so a
+// planned firing stamps the bot's claim, and an executor identity so the
+// claim has an owner. spawner may be nil — the worker never fires inline.
+func reDeriveRouter(t *testing.T, database *sql.DB, spawner Delegator) *Router {
+	t.Helper()
+	seedLocalBot(t, database)
+	st := sqlitestore.New(database)
+	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
+	r.SetTaskReDerive(st.TaskReDerive)
+	r.SetExecutorID("rederive-worker-test", 1)
+	return r
+}
+
+// drainReDeriveOnce runs one full drain pass of the re-derive worker
+// synchronously.
+func drainReDeriveOnce(t *testing.T, r *Router) {
+	t.Helper()
+	if err := r.drainReDeriveQueue(context.Background()); err != nil {
+		t.Fatalf("drainReDeriveQueue: %v", err)
+	}
+}
+
+// firingsForTask lists the firings admitted against the task's entity.
+func firingsForTask(t *testing.T, database *sql.DB, taskID string) []domain.PendingFiring {
+	t.Helper()
+	task, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
+	if err != nil || task == nil {
+		t.Fatalf("get task %s: %v", taskID, err)
+	}
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, task.EntityID)
+	if err != nil {
+		t.Fatalf("list firings: %v", err)
+	}
+	return rows
+}
+
+// reDeriveRow is the task's one task_rederive_queue row as the tests read it.
+type reDeriveRow struct {
+	id          int64
+	status      string
+	attempt     int
+	revision    int64
+	generation  int64
+	lastOutcome string
+	nextAttempt sql.NullString
+}
+
+// reDeriveRowFor reads the task's single queue row and fails if there is
+// not exactly one.
+func reDeriveRowFor(t *testing.T, database *sql.DB, taskID string) reDeriveRow {
+	t.Helper()
+	rows, err := database.Query(`
+		SELECT id, status, attempt, requested_revision, lease_generation, COALESCE(last_outcome, ''), next_attempt_at
+		FROM task_rederive_queue WHERE task_id = ? ORDER BY id`, taskID)
+	if err != nil {
+		t.Fatalf("read task_rederive_queue: %v", err)
+	}
+	defer rows.Close()
+	var out []reDeriveRow
+	for rows.Next() {
+		var r reDeriveRow
+		if err := rows.Scan(&r.id, &r.status, &r.attempt, &r.revision, &r.generation, &r.lastOutcome, &r.nextAttempt); err != nil {
+			t.Fatalf("scan task_rederive_queue: %v", err)
+		}
+		out = append(out, r)
+	}
+	if len(out) != 1 {
+		t.Fatalf("task %s has %d task_rederive_queue rows, want 1: %+v", taskID, len(out), out)
+	}
+	return out[0]
+}
+
+// requireReDeriveDone asserts the task's re-evaluation row was completed:
+// the evaluation reached a verdict, whatever it was.
+func requireReDeriveDone(t *testing.T, database *sql.DB, taskID string) {
+	t.Helper()
+	if row := reDeriveRowFor(t, database, taskID); row.status != workitem.StatusDone {
+		t.Errorf("task_rederive_queue row = %+v, want done", row)
+	}
+}
+
+// requireNoFirings asserts the evaluation admitted nothing for the task.
+func requireNoFirings(t *testing.T, database *sql.DB, taskID string) {
+	t.Helper()
+	if firings := firingsForTask(t, database, taskID); len(firings) != 0 {
+		t.Errorf("re-derive admitted %d firing(s), want 0: %+v", len(firings), firings)
+	}
 }
 
 // setupReDeriveScenario creates an entity, event, task, trigger, and prompt
@@ -107,194 +223,112 @@ func setupReDeriveScenario(t *testing.T, database *sql.DB, minAutonomy float64) 
 	return task.ID, trigger.ID
 }
 
-func TestReDeriveAfterScoring_AboveThreshold_Delegates(t *testing.T) {
+// TestReDeriveWorker_AboveThreshold_AdmitsAFiringWithTheClaim is the happy
+// path: the score crosses the deferred trigger's threshold, so the worker
+// admits one firing for the (task, trigger) and the admission stamps the
+// bot's claim, exactly as an event-time busy-task firing does. The firing
+// worker fires it later; nothing fires here.
+func TestReDeriveWorker_AboveThreshold_AdmitsAFiringWithTheClaim(t *testing.T) {
 	database := newTestDB(t)
-	taskID, _ := setupReDeriveScenario(t, database, 0.6)
+	taskID, triggerID := setupReDeriveScenario(t, database, 0.6)
+	scoreTask(t, database, taskID, 0.8)
 
-	// Score the task above threshold
-	score := 0.8
-	err := updateScores(t, database, []domain.TaskScoreUpdate{{
-		ID:                  taskID,
-		PriorityScore:       0.5,
-		AutonomySuitability: score,
-		Summary:             "test",
-	}})
-	if err != nil {
-		t.Fatalf("update scores: %v", err)
+	r := reDeriveRouter(t, database, nil)
+	drainReDeriveOnce(t, r)
+
+	firings := firingsForTask(t, database, taskID)
+	if len(firings) != 1 {
+		t.Fatalf("re-derive admitted %d firing(s), want 1: %+v", len(firings), firings)
 	}
-
-	// Create router without spawner — fireDelegate guards nil spawner and
-	// returns early, so the task stays queued. The test verifies the full
-	// gate-check path runs (suitability >= threshold, predicate matched)
-	// without panicking. The log output confirms the trigger fired.
-	ws := websocket.NewHub()
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-
-	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
-
-	// Task stays queued because no spawner is configured, but the trigger
-	// matched (visible in log output: "re-derive: task ... firing").
+	if f := firings[0]; f.TriggerID != triggerID || f.Status != workitem.StatusReady || f.UniqueKey != workkinds.PendingFiringKey(taskID, triggerID) {
+		t.Errorf("firing = %+v, want a ready row for the trigger under the (task, trigger) key", f)
+	}
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
-	if task == nil {
-		t.Fatal("task not found")
+	if task.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+		t.Errorf("ClaimedByAgentID = %q, want the bot's claim stamped with the admission", task.ClaimedByAgentID)
 	}
-	if task.Status != "queued" {
-		t.Errorf("expected queued (no spawner), got %s", task.Status)
+	requireReDeriveDone(t, database, taskID)
+
+	// A second pass has nothing to claim and admits nothing more.
+	drainReDeriveOnce(t, r)
+	if firings := firingsForTask(t, database, taskID); len(firings) != 1 {
+		t.Errorf("a second drain changed the firings to %d", len(firings))
 	}
 }
 
-func TestReDeriveAfterScoring_BelowThreshold_Skips(t *testing.T) {
+func TestReDeriveWorker_BelowThreshold_AdmitsNothing(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
+	scoreTask(t, database, taskID, 0.4)
 
-	// Score below threshold
-	score := 0.4
-	err := updateScores(t, database, []domain.TaskScoreUpdate{{
-		ID:                  taskID,
-		PriorityScore:       0.5,
-		AutonomySuitability: score,
-		Summary:             "test",
-	}})
-	if err != nil {
-		t.Fatalf("update scores: %v", err)
-	}
+	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
 
-	ws := websocket.NewHub()
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
-
-	// Task should remain queued — trigger was skipped
+	requireNoFirings(t, database, taskID)
+	requireReDeriveDone(t, database, taskID)
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
-	if task == nil {
-		t.Fatal("task not found")
-	}
-	if task.Status != "queued" {
-		t.Errorf("expected queued, got %s", task.Status)
+	if task.Status != "queued" || task.ClaimedByAgentID != "" {
+		t.Errorf("task = %s claimed by %q, want queued and unclaimed", task.Status, task.ClaimedByAgentID)
 	}
 }
 
-// TestReDeriveAfterScoring_BotClaimed_Skips covers the
-// shape of "already delegated": the responsibility axis lives on
-// claimed_by_agent_id, not on status='delegated' (which is gone).
-// Re-derive must skip claim-stamped tasks regardless of their status
-// — they're not the re-derive's business. Without this guard, a
-// queued-but-bot-claimed task would fire a duplicate firing on every
-// re-derive cycle.
-func TestReDeriveAfterScoring_BotClaimed_Skips(t *testing.T) {
+// TestReDeriveWorker_BotClaimed_AdmitsNothing covers the shape of "already
+// delegated": the responsibility axis lives on claimed_by_agent_id. A
+// bot-claimed task is not the re-derive's business; without this guard a
+// queued-but-bot-claimed task would get a duplicate firing on every
+// re-evaluation.
+func TestReDeriveWorker_BotClaimed_AdmitsNothing(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
-
-	// Score above threshold so the re-derive's autonomy gate would
-	// otherwise let the trigger fire.
-	err := updateScores(t, database, []domain.TaskScoreUpdate{{
-		ID:                  taskID,
-		PriorityScore:       0.5,
-		AutonomySuitability: 0.9,
-		Summary:             "test",
-	}})
-	if err != nil {
-		t.Fatalf("update scores: %v", err)
-	}
-
-	// Seed the local-sentinel agent row to satisfy the FK on
-	// claimed_by_agent_id. setupReDeriveScenario doesn't bootstrap
-	// agents — drain_test.go does the same inline seed.
-	if _, err := database.Exec(
-		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
-		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
-	); err != nil {
-		t.Fatalf("seed agent: %v", err)
-	}
-	// Stamp the bot claim, which is also what puts the task in progress.
+	scoreTask(t, database, taskID, 0.9)
+	seedLocalBot(t, database)
 	if ok, err := testTaskStore(database).StampAgentClaimIfUnclaimed(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultTeamID); err != nil || !ok {
 		t.Fatalf("stamp agent claim: ok=%v err=%v", ok, err)
 	}
 
-	ws := websocket.NewHub()
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
+	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
 
-	// Task still bot-claimed, no second firing enqueued.
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
 	if task.ClaimedByAgentID != runmode.LocalDefaultAgentID {
-		t.Errorf("ClaimedByAgentID = %q, want %q (re-derive must not clear claim)", task.ClaimedByAgentID, runmode.LocalDefaultAgentID)
+		t.Errorf("ClaimedByAgentID = %q, want %q (re-derive must not clear the claim)", task.ClaimedByAgentID, runmode.LocalDefaultAgentID)
 	}
 	if task.Status != "in_progress" {
 		t.Errorf("Status = %q, want in_progress", task.Status)
 	}
-	firings, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, task.EntityID)
-	if err != nil {
-		t.Fatalf("list firings: %v", err)
-	}
-	if len(firings) != 0 {
-		t.Errorf("re-derive enqueued %d firing(s) on bot-claimed task; want 0", len(firings))
-	}
+	requireNoFirings(t, database, taskID)
+	requireReDeriveDone(t, database, taskID)
 }
 
-// TestReDeriveAfterScoring_UserClaimed_Skips is the human-side guard:
-// when a user has claimed a task ("I'll take this myself") the
-// re-derive must not promote it to a bot run, which would also trip
-// the XOR CHECK at the DB level (stamping agent claim on top of a
-// user claim). The skip happens BEFORE the would-be DB write so the
-// XOR is never tested; this test pins that earlier exit.
-func TestReDeriveAfterScoring_UserClaimed_Skips(t *testing.T) {
+// TestReDeriveWorker_UserClaimed_AdmitsNothing is the human-side guard: a
+// user who claimed the task keeps it, and the re-derive never stamps the
+// bot's claim over theirs.
+func TestReDeriveWorker_UserClaimed_AdmitsNothing(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
-
-	err := updateScores(t, database, []domain.TaskScoreUpdate{{
-		ID:                  taskID,
-		PriorityScore:       0.5,
-		AutonomySuitability: 0.9,
-		Summary:             "test",
-	}})
-	if err != nil {
-		t.Fatalf("update scores: %v", err)
-	}
-
-	ok, err := testTaskStore(database).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultUserID)
-	if err != nil || !ok {
+	scoreTask(t, database, taskID, 0.9)
+	if ok, err := testTaskStore(database).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultUserID); err != nil || !ok {
 		t.Fatalf("stamp user claim: ok=%v err=%v", ok, err)
 	}
 
-	ws := websocket.NewHub()
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
+	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
 
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
 	if task.ClaimedByUserID != runmode.LocalDefaultUserID {
-		t.Errorf("ClaimedByUserID = %q; want %q (re-derive must not clear user claim)", task.ClaimedByUserID, runmode.LocalDefaultUserID)
+		t.Errorf("ClaimedByUserID = %q; want %q (re-derive must not clear a user claim)", task.ClaimedByUserID, runmode.LocalDefaultUserID)
 	}
 	if task.ClaimedByAgentID != "" {
 		t.Errorf("ClaimedByAgentID = %q; want empty (re-derive must not steal a user-claimed task)", task.ClaimedByAgentID)
 	}
-	firings, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, task.EntityID)
-	if err != nil {
-		t.Fatalf("list firings: %v", err)
-	}
-	if len(firings) != 0 {
-		t.Errorf("re-derive enqueued %d firing(s) on user-claimed task; want 0", len(firings))
-	}
+	requireNoFirings(t, database, taskID)
+	requireReDeriveDone(t, database, taskID)
 }
 
-// TestReDeriveAfterScoring_Snoozed_Skips guards the lifecycle axis:
-// status='snoozed' is a "do not act" signal. A snoozed task should
-// not be promoted to a bot run by re-derive, even if its score
-// crosses the threshold — the wake-on-bump path is the correct path
-// to revive the task, not a deferred re-derive.
-func TestReDeriveAfterScoring_Snoozed_Skips(t *testing.T) {
+// TestReDeriveWorker_Snoozed_AdmitsNothing guards the lifecycle axis: a
+// snoozed task is a "do not act" signal, and the wake-on-bump path is the
+// way it revives, not a deferred re-evaluation.
+func TestReDeriveWorker_Snoozed_AdmitsNothing(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
-
-	err := updateScores(t, database, []domain.TaskScoreUpdate{{
-		ID:                  taskID,
-		PriorityScore:       0.5,
-		AutonomySuitability: 0.9,
-		Summary:             "test",
-	}})
-	if err != nil {
-		t.Fatalf("update scores: %v", err)
-	}
-
+	scoreTask(t, database, taskID, 0.9)
 	if _, err := database.Exec(
 		`UPDATE tasks SET status='snoozed', snooze_until='2099-01-01 00:00:00' WHERE id = ?`,
 		taskID,
@@ -302,40 +336,24 @@ func TestReDeriveAfterScoring_Snoozed_Skips(t *testing.T) {
 		t.Fatalf("snooze task: %v", err)
 	}
 
-	ws := websocket.NewHub()
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
+	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
 
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
-	if task.Status != "snoozed" {
-		t.Errorf("Status = %q; want snoozed (re-derive must not touch snoozed task)", task.Status)
+	if task.Status != "snoozed" || task.ClaimedByAgentID != "" {
+		t.Errorf("task = %s claimed by %q, want snoozed and unclaimed", task.Status, task.ClaimedByAgentID)
 	}
-	if task.ClaimedByAgentID != "" {
-		t.Errorf("ClaimedByAgentID = %q; want empty", task.ClaimedByAgentID)
-	}
-	firings, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, task.EntityID)
-	if err != nil {
-		t.Fatalf("list firings: %v", err)
-	}
-	if len(firings) != 0 {
-		t.Errorf("re-derive enqueued %d firing(s) on snoozed task; want 0", len(firings))
-	}
+	requireNoFirings(t, database, taskID)
+	requireReDeriveDone(t, database, taskID)
 }
 
-// TestReDeriveAfterScoring_CrossTeamTrigger_Skips pins the cross-team
-// isolation: when a task is created for team A and team B has its own
-// deferred trigger matching the same event type + predicate, the
-// re-derive pass must NOT fire team B's trigger against team A's
-// task. Previously reDeriveTask loaded all enabled triggers for the
-// event type and matched on predicate alone, leaking cross-team
-// after scoring landed.
-func TestReDeriveAfterScoring_CrossTeamTrigger_Skips(t *testing.T) {
+// TestReDeriveWorker_CrossTeamTrigger_AdmitsOnlyTheVisibleTeams pins the
+// cross-team isolation: a task created for team A with team B holding its
+// own deferred trigger on the same event type and predicate must not get a
+// firing for team B's trigger.
+func TestReDeriveWorker_CrossTeamTrigger_AdmitsOnlyTheVisibleTeams(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
 
-	// Add a second team and stage a competing deferred trigger
-	// directly in that team's scope. createTriggerForTestRouting
-	// hard-codes LocalDefaultTeamID, so we insert raw.
 	teamB := "00000000-0000-0000-0000-0000000000b0"
 	if _, err := database.Exec(
 		`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, ?, ?)`,
@@ -344,8 +362,7 @@ func TestReDeriveAfterScoring_CrossTeamTrigger_Skips(t *testing.T) {
 		t.Fatalf("seed team B: %v", err)
 	}
 	// The prompt + blueprint must be owned by team B so the same-team
-	// trigger→blueprint FK holds; createTestPrompt /
-	// blueprintWrappingPrompt would pin them to team A.
+	// trigger→blueprint FK holds.
 	insertPromptForTeam(t, database, "p-teamB", teamB)
 	bpTeamB := insertBlueprintForTeam(t, database, "bp-teamB", "p-teamB", teamB)
 	if _, err := database.Exec(`
@@ -363,47 +380,31 @@ func TestReDeriveAfterScoring_CrossTeamTrigger_Skips(t *testing.T) {
 		t.Fatalf("seed team B trigger: %v", err)
 	}
 
-	// Score above both teams' thresholds so the only reason to skip
-	// team B is the team-mismatch guard.
-	if err := updateScores(t, database, []domain.TaskScoreUpdate{{
-		ID: taskID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "test",
-	}}); err != nil {
-		t.Fatalf("update scores: %v", err)
-	}
+	// Score above both teams' thresholds so the only reason to skip team B
+	// is the team-mismatch guard.
+	scoreTask(t, database, taskID, 0.9)
+	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
 
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
-	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
-
-	// Inspect pending_firings: team B's trigger must not have fired
-	// against team A's task. The team A trigger from
-	// setupReDeriveScenario may or may not have fired depending on
-	// spawner wiring (nil → fireDelegate exits early without
-	// enqueueing); what we pin here is the cross-team negative.
-	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
-	firings, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, task.EntityID)
-	if err != nil {
-		t.Fatalf("list firings: %v", err)
-	}
-	for _, f := range firings {
+	for _, f := range firingsForTask(t, database, taskID) {
 		if f.TriggerID == "trigger-teamB" {
-			t.Errorf("team B trigger fired against team A task; want re-derive to filter by team")
+			t.Errorf("team B trigger got a firing against team A's task; re-derive must filter by team")
 		}
 	}
+	requireReDeriveDone(t, database, taskID)
 }
 
-// TestReDeriveAfterScoring_TeamNotInVisibilitySet_Skips pins the leak
-// the visibility gate closes: a team with auto-delegation fully enabled
-// (team_settings + team_agents) and a deferred trigger matching the
-// stored event must NOT fire against — and consolidate ownership of — a
-// task whose visibility set doesn't include it. Unlike the kill-switch
-// path, here every other gate is open, so only the task_teams
-// membership check can stop the fire.
-func TestReDeriveAfterScoring_TeamNotInVisibilitySet_Skips(t *testing.T) {
+// TestReDeriveWorker_TeamNotInVisibilitySet_AdmitsNothing pins the leak the
+// visibility gate closes: a team with auto-delegation fully enabled and a
+// deferred trigger matching the stored event must not get a firing against
+// — nor consolidate ownership of — a task whose visibility set doesn't
+// include it. Every other gate is open here, so only the task_teams
+// membership check can stop it.
+func TestReDeriveWorker_TeamNotInVisibilitySet_AdmitsNothing(t *testing.T) {
 	database := newTestDB(t)
 	stores := sqlitestore.New(database)
 
-	// Entity + event + task owned by the local-default team. The task
-	// has NO task_teams rows, so its visibility set is just the owner.
+	// Entity + event + task owned by the local-default team, with NO
+	// task_teams rows, so its visibility set is just the owner.
 	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#novis", "pr", "No-vis PR", "https://example.com/novis")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
@@ -423,8 +424,7 @@ func TestReDeriveAfterScoring_TeamNotInVisibilitySet_Skips(t *testing.T) {
 	}
 
 	// Team B: fully opted into auto-delegation, with a deferred trigger
-	// that matches the same event — but team B is NOT in the task's
-	// visibility set.
+	// that matches the same event — but not in the task's visibility set.
 	teamB := "00000000-0000-0000-0000-0000000000bb"
 	if _, err := database.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'team-b-novis', 'Team B No-Vis')`, teamB, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("seed team B: %v", err)
@@ -432,14 +432,10 @@ func TestReDeriveAfterScoring_TeamNotInVisibilitySet_Skips(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO team_settings (team_id, auto_delegate_enabled) VALUES (?, 1)`, teamB); err != nil {
 		t.Fatalf("seed team B settings: %v", err)
 	}
-	if _, err := database.Exec(`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`, runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID); err != nil {
-		t.Fatalf("seed agent: %v", err)
-	}
+	seedLocalBot(t, database)
 	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("add agent to team B: %v", err)
 	}
-	// Team-B-owned prompt + blueprint so the same-team trigger→blueprint FK
-	// holds.
 	insertPromptForTeam(t, database, "p-novis", teamB)
 	bpNovis := insertBlueprintForTeam(t, database, "bp-novis", "p-novis", teamB)
 	if _, err := database.Exec(`
@@ -457,21 +453,14 @@ func TestReDeriveAfterScoring_TeamNotInVisibilitySet_Skips(t *testing.T) {
 		t.Fatalf("seed team B trigger: %v", err)
 	}
 
-	// Score above the threshold so the only thing standing between team
-	// B's trigger and a fire is the visibility gate.
-	if err := updateScores(t, database, []domain.TaskScoreUpdate{{
-		ID: task.ID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "test",
-	}}); err != nil {
-		t.Fatalf("update scores: %v", err)
-	}
-
+	scoreTask(t, database, task.ID, 0.9)
 	stub := &stubDelegator{db: database}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.Conversations, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
-	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{task.ID})
+	drainReDeriveOnce(t, reDeriveRouter(t, database, stub))
 
 	if stub.calls != 0 {
-		t.Errorf("team B trigger delegated (%d calls) despite team B not being in the task's visibility set", stub.calls)
+		t.Errorf("the re-derive delegated (%d calls); it admits firings and never fires inline", stub.calls)
 	}
+	requireNoFirings(t, database, task.ID)
 	got, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, task.ID)
 	if got.ClaimedByAgentID != "" {
 		t.Errorf("task claimed by agent (%q); a team outside the visibility set must not consolidate ownership", got.ClaimedByAgentID)
@@ -479,12 +468,12 @@ func TestReDeriveAfterScoring_TeamNotInVisibilitySet_Skips(t *testing.T) {
 	if teamIDValue(got) != runmode.LocalDefaultTeamID {
 		t.Errorf("owner team_id = %q, want unchanged %q (no cross-team consolidation)", teamIDValue(got), runmode.LocalDefaultTeamID)
 	}
+	requireReDeriveDone(t, database, task.ID)
 }
 
-func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.T) {
+func TestReDeriveWorker_ZeroThresholdTrigger_IsNotReDerived(t *testing.T) {
 	database := newTestDB(t)
 
-	// Create entity + event + task
 	entity2, _, _ := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#2", "pr", "Test PR 2", "https://github.com/owner/repo/pull/2")
 	entityID := entity2.ID
 	meta := events.GitHubPRCICheckFailedMetadata{
@@ -497,7 +486,6 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 	})
 	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "lint", eventID, 0.5)
 
-	// Prompt
 	createTestPrompt(t, database, domain.Prompt{ID: "p2", Name: "Test2", Body: "Do", Source: "user"})
 
 	// Trigger with min_autonomy_suitability=0 (immediate fire, not deferred)
@@ -508,28 +496,23 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 		MinAutonomySuitability: floatPtr(0.0), Enabled: true,
 	})
 
-	// Score the task
-	_ = updateScores(t, database, []domain.TaskScoreUpdate{{
-		ID: task.ID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "test",
-	}})
+	scoreTask(t, database, task.ID, 0.9)
+	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
 
-	ws := websocket.NewHub()
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{task.ID})
-
-	// Task should remain queued — zero-threshold trigger is skipped in re-derive
-	// (it would have fired already in HandleEvent)
+	// A zero-threshold trigger is HandleEvent's to fire; the re-derive
+	// leaves it alone.
+	requireNoFirings(t, database, task.ID)
+	requireReDeriveDone(t, database, task.ID)
 	got, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, task.ID)
 	if got.Status != "queued" {
 		t.Errorf("expected queued (zero-threshold trigger skipped), got %s", got.Status)
 	}
 }
 
-func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
+func TestReDeriveWorker_PredicateMismatch_AdmitsNothing(t *testing.T) {
 	database := newTestDB(t)
 
-	// Create entity + event where the author isn't in the predicate's
-	// author_in allowlist — the rederive pass should skip the trigger.
+	// The event's author isn't in the predicate's author_in allowlist.
 	entity3, _, _ := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#3", "pr", "Test PR 3", "https://github.com/owner/repo/pull/3")
 	entityID := entity3.ID
 	meta := events.GitHubPRCICheckFailedMetadata{
@@ -542,11 +525,8 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 	})
 	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
 
-	// Prompt
 	createTestPrompt(t, database, domain.Prompt{ID: "p3", Name: "Test3", Body: "Do", Source: "user"})
 
-	// Trigger with predicate requiring author in {"aidan"} — the event
-	// above has author "someone-else", so the predicate won't match.
 	pred := `{"author_in":["aidan"]}`
 	createTriggerForTestRouting(t, database, domain.EventHandler{
 		ID: "t-pred", Kind: domain.EventHandlerKindTrigger,
@@ -556,16 +536,11 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 		ScopePredicateJSON: &pred,
 	})
 
-	// Score above threshold
-	_ = updateScores(t, database, []domain.TaskScoreUpdate{{
-		ID: task.ID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "test",
-	}})
+	scoreTask(t, database, task.ID, 0.9)
+	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
 
-	ws := websocket.NewHub()
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{task.ID})
-
-	// Task should stay queued — predicate doesn't match
+	requireNoFirings(t, database, task.ID)
+	requireReDeriveDone(t, database, task.ID)
 	got, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, task.ID)
 	if got.Status != "queued" {
 		t.Errorf("expected queued (predicate mismatch), got %s", got.Status)

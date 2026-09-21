@@ -161,6 +161,13 @@ type Stores struct {
 	// worker run as background goroutines with no per-user identity.
 	EventQueue EventQueueStore
 
+	// TaskReDerive owns the task_rederive_queue table — the post-scoring
+	// re-evaluation of a task's deferred triggers as a work kind. The score
+	// store admits into it; the router's re-derive worker claims from it. A
+	// system-service store (admin pool in Postgres) with no transaction-bound
+	// twin: nothing composes its verbs into a caller's transaction.
+	TaskReDerive TaskReDeriveStore
+
 	// WorkKinds is the registry of every adopting work table, as the
 	// operator surface and the metrics depth observer see them. Each
 	// dialect's constructor fills it from the stores that implement

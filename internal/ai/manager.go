@@ -12,9 +12,9 @@ import (
 // Manager owns per-org scoring Runners. Each org gets its own Runner —
 // its own trigger channel, its own single-flight cycle gate — so a slow
 // scoring cycle on one tenant doesn't head-of-line-block scoring on
-// others. This matters specifically because OnScoringCompleted drives
-// the router's ReDeriveAfterScoring → delegation flow: a stalled cycle
-// on org A would otherwise gate every org B's min_autonomy_suitability
+// others. This matters specifically because a cycle's score write is
+// what admits the re-evaluation of min_autonomy_suitability triggers: a
+// stalled cycle on org A would otherwise gate every org B's deferred
 // trigger behind it.
 //
 // Runners are lazy-created on first Trigger(orgID). Every caller has an

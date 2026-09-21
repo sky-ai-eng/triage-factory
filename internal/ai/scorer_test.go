@@ -171,19 +171,13 @@ func (s *stubScoreStore) ResetStaleScoring(_ context.Context, _ string) (int, er
 func (s *stubScoreStore) UpdateTaskScores(_ context.Context, _ string, _ []domain.TaskScoreUpdate) error {
 	return nil
 }
-func (s *stubScoreStore) TasksOwedReDerive(_ context.Context, _ string) ([]string, error) {
-	return nil, nil
-}
-func (s *stubScoreStore) ClearReDeriveOwed(_ context.Context, _ string, _ []string) error {
-	return nil
-}
 
 // TestRun_OnScoringCompletedReceivesOnlyFreshlyScored pins that Runner.run
 // passes only the IDs of tasks that actually received fresh scores to
 // OnScoringCompleted — not the full set picked at cycle start. When some
 // batches fail, the skipped tasks are reset to 'pending' and excluded from
-// updates; their IDs must not appear in the callback or ReDeriveAfterScoring
-// would fire triggers against stale scores from a prior cycle.
+// updates; their IDs must not appear in the callback, which announces the
+// scores a cycle wrote and nothing else.
 func TestRun_OnScoringCompletedReceivesOnlyFreshlyScored(t *testing.T) {
 	// 25 tasks → 3 batches (10, 10, 5). The poisoned task lands in the
 	// second batch so 10 tasks are skipped; the other 15 score fine.

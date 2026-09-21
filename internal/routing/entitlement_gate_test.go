@@ -4,11 +4,9 @@ import (
 	"context"
 	"testing"
 
-	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // testGateFeature is the synthetic feature these tests gate a real source
@@ -95,35 +93,28 @@ func TestHandleEvent_UngatedSource_Unaffected(t *testing.T) {
 	}
 }
 
-// TestReDeriveTask_GatedSource_FiresNothing pins the rederive.go half of the
-// Part 6 freeze: a task whose event type's source is gated off must not
-// fire its deferred trigger during the post-scoring re-derive pass, even
-// though the score crosses the trigger's threshold and every other gate is
-// open.
-func TestReDeriveTask_GatedSource_FiresNothing(t *testing.T) {
+// TestReDeriveWorker_GatedSource_AdmitsNothing pins the rederive.go half of
+// the Part 6 freeze: a task whose event type's source is gated off must not
+// get a firing from the post-scoring re-evaluation, even though the score
+// crosses the trigger's threshold and every other gate is open.
+func TestReDeriveWorker_GatedSource_AdmitsNothing(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
 
 	entitlements.GateEventSource("github", testGateFeature)
 	t.Cleanup(entitlements.Reset)
 
-	if err := updateScores(t, database, []domain.TaskScoreUpdate{{
-		ID: taskID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "test",
-	}}); err != nil {
-		t.Fatalf("update scores: %v", err)
-	}
-
+	scoreTask(t, database, taskID, 0.9)
 	stub := &stubDelegator{db: database}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
-		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
-	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
+	drainReDeriveOnce(t, reDeriveRouter(t, database, stub))
 
 	if stub.calls != 0 {
-		t.Errorf("gated task delegated (%d calls), want 0 (rederive must freeze a task on a gated-off event type)", stub.calls)
+		t.Errorf("gated task delegated (%d calls), want 0", stub.calls)
 	}
+	requireNoFirings(t, database, taskID)
+	requireReDeriveDone(t, database, taskID)
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
-	if task.Status != "queued" {
-		t.Errorf("Status = %q, want queued (gated task must not be promoted)", task.Status)
+	if task.Status != "queued" || task.ClaimedByAgentID != "" {
+		t.Errorf("task = %s claimed by %q, want queued and unclaimed (a gated task must not be promoted)", task.Status, task.ClaimedByAgentID)
 	}
 }

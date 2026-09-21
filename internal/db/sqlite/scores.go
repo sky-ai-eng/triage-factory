@@ -3,9 +3,12 @@ package sqlite
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -69,6 +72,20 @@ func (s *scoreStore) ResetStaleScoring(ctx context.Context, orgID string) (int, 
 // leaves margin if the UPDATE row shape grows.
 const updateTaskScoresChunkSize = 150
 
+// UpdateTaskScores is one transaction: every task's task_rederive_queue row
+// admitted or raised first, in ascending task id order, then the batched
+// tasks statements. The queue row's requested_revision is set from the
+// task's pre-increment score_revision plus one, and the tasks statement then
+// increments score_revision, so after the commit the two are equal.
+//
+// Lock order: task_rederive_queue before tasks, every transaction that
+// touches both. The handle's IMMEDIATE begin already serializes this writer
+// against a completion for the same task; the order is kept anyway, so the
+// two dialects' transactions read alike. The tasks UPDATE is chunked to keep
+// the placeholder count conservatively low across SQLite builds, and every
+// chunk rides the one transaction so a mid-stream failure rolls back the
+// whole batch. inTx reuses the caller's *sql.Tx if we're already inside one
+// (Stores.Tx.WithTx), or opens a fresh tx otherwise.
 func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates []domain.TaskScoreUpdate) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -76,27 +93,33 @@ func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates
 	if len(updates) == 0 {
 		return nil
 	}
-	// Single UPDATE ... FROM (VALUES ...) per chunk, all chunks inside
-	// one tx for all-or-nothing semantics across the batch. Atomicity
-	// matters because a mid-stream failure must NOT leave the cycle's
-	// tasks half-marked 'scored' (the scorer's reset path keys off
-	// scoring_status, and partial state confuses it). inTx reuses the
-	// caller's *sql.Tx if we're already inside one (Stores.Tx.WithTx),
-	// or opens a fresh tx otherwise.
-	//
-	// Dialect note: SQLite supports UPDATE-FROM (>= 3.33) and VALUES as
-	// a table source, but does NOT accept column aliasing directly on a
-	// VALUES source ("(VALUES ...) AS v(col1, col2)" — that form is a
-	// Postgres extension). The VALUES is wrapped in a SELECT that
-	// renames the default column1/column2/... aliases into the columns
-	// the UPDATE references.
+	ordered := make([]domain.TaskScoreUpdate, len(updates))
+	copy(ordered, updates)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+
+	kind := workkinds.TaskReDerive(workitem.SQLite)
 	return inTx(ctx, s.q, func(q queryer) error {
-		for start := 0; start < len(updates); start += updateTaskScoresChunkSize {
-			end := start + updateTaskScoresChunkSize
-			if end > len(updates) {
-				end = len(updates)
+		for _, u := range ordered {
+			id, _, err := workitem.Admit(ctx, q, kind, orgID, u.ID, db.TaskReDeriveRowCols(u.ID))
+			if err != nil {
+				return err
 			}
-			if err := applyScoresChunk(ctx, q, updates[start:end]); err != nil {
+			// Runs whether the admission inserted or deduplicated, so a fresh
+			// row and a raised one take the same path.
+			if _, err := q.ExecContext(ctx, `
+				UPDATE task_rederive_queue
+				   SET requested_revision = (SELECT score_revision + 1 FROM tasks WHERE id = ?)
+				 WHERE id = ?
+			`, u.ID, id); err != nil {
+				return fmt.Errorf("raise task_rederive_queue row %d: %w", id, err)
+			}
+		}
+		for start := 0; start < len(ordered); start += updateTaskScoresChunkSize {
+			end := start + updateTaskScoresChunkSize
+			if end > len(ordered) {
+				end = len(ordered)
+			}
+			if err := applyScoresChunk(ctx, q, ordered[start:end]); err != nil {
 				return err
 			}
 		}
@@ -104,6 +127,13 @@ func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates
 	})
 }
 
+// applyScoresChunk is one UPDATE ... FROM (VALUES ...) over a chunk.
+//
+// Dialect note: SQLite supports UPDATE-FROM (>= 3.33) and VALUES as a table
+// source, but does NOT accept column aliasing directly on a VALUES source
+// ("(VALUES ...) AS v(col1, col2)" is a Postgres extension). The VALUES is
+// wrapped in a SELECT that renames the default column1/column2/... aliases
+// into the columns the UPDATE references.
 func applyScoresChunk(ctx context.Context, q queryer, chunk []domain.TaskScoreUpdate) error {
 	rowExprs := make([]string, 0, len(chunk))
 	args := make([]any, 0, len(chunk)*5)
@@ -111,9 +141,6 @@ func applyScoresChunk(ctx context.Context, q queryer, chunk []domain.TaskScoreUp
 		rowExprs = append(rowExprs, "(?, ?, ?, ?, ?)")
 		args = append(args, u.ID, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning)
 	}
-	// rederive_owed rides the same statement as the scores it is owed for:
-	// one write, so no crash can commit a score whose deferred triggers
-	// nothing is on the hook to evaluate.
 	query := `
 		UPDATE tasks
 		SET priority_score = v.priority_score,
@@ -121,7 +148,7 @@ func applyScoresChunk(ctx context.Context, q queryer, chunk []domain.TaskScoreUp
 		    ai_summary = v.ai_summary,
 		    priority_reasoning = v.priority_reasoning,
 		    scoring_status = 'scored',
-		    rederive_owed = 1
+		    score_revision = score_revision + 1
 		FROM (
 			SELECT column1 AS id,
 			       column2 AS priority_score,
@@ -134,44 +161,6 @@ func applyScoresChunk(ctx context.Context, q queryer, chunk []domain.TaskScoreUp
 	`
 	_, err := q.ExecContext(ctx, query, args...)
 	return err
-}
-
-func (s *scoreStore) TasksOwedReDerive(ctx context.Context, orgID string) ([]string, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	rows, err := s.q.QueryContext(ctx,
-		`SELECT id FROM tasks WHERE rederive_owed = 1 ORDER BY created_at ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
-func (s *scoreStore) ClearReDeriveOwed(ctx context.Context, orgID string, taskIDs []string) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
-	}
-	// Per-id, unwrapped, like MarkScoring's loop: a failure partway leaves
-	// the rest owed, and an owed task is only ever re-evaluated — never
-	// double-fired, since firing sits behind the replay fence and the
-	// one-active-run index.
-	for _, id := range taskIDs {
-		if _, err := s.q.ExecContext(ctx, `UPDATE tasks SET rederive_owed = 0 WHERE id = ?`, id); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *scoreStore) UnscoredTasks(ctx context.Context, orgID string) ([]domain.Task, error) {

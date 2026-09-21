@@ -62,113 +62,9 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 // suppress only the informational duplicate while leaving every task/rule
 // write on the normal router path.
 func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string, actingTeamID string, injectedConversationID *string) (fired bool, err error) {
-	// Exclusive claim: one task, one owner. If the bot has already
-	// claimed this task on behalf of a different team (an earlier
-	// matched team won the CAS), this team's trigger must not pile on a
-	// second conversation against the same situation — that is the cross-team
-	// duplication the one-task model exists to prevent. A trigger whose
-	// acting team IS the current owner still proceeds, so multiple
-	// prompts one team configured on the same event all run.
-	if task.ClaimedByAgentID != "" && actingTeamID != "" && teamIDValue(task) != actingTeamID {
-		routerLog.Info("auto-trigger skipped: task already claimed by the bot for another team",
-			"task_id", task.ID, "claimed_team", teamIDValue(task), "acting_team", actingTeamID)
-		return false, nil
-	}
-	// Resolve the org's agent ONCE here. It's the single source for three
-	// consumers that must agree: the bot-disabled-team gate, the blueprint
-	// run's actor (frozen onto blueprint_runs.actor_agent_id via DelegateOpts),
-	// and the task's claim (the AgentClaimStamp each commitment carries).
-	// Resolving once guarantees conversations.actor_agent_id and
-	// tasks.claimed_by_agent_id are the same id with no second lookup to drift,
-	// and it's available at step-0 enqueue — which is what lets the claim ride
-	// the blueprint-run insert's own transaction instead of following it as a
-	// separate write.
-	//
-	// Nil r.agents is pre-D-Claims test wiring: skip the gate, leave agentID
-	// empty (the blueprint run records no actor, the claim stamp is the zero
-	// value and every store skips it) — preserving the "proceed with
-	// auto-fire" degrade. Production always wires it.
-	var agentID string
-	if r.agents != nil {
-		a, err := r.agents.GetForOrgSystem(ctx, orgID)
-		if err != nil {
-			routerLog.Warn("auto-trigger deferred: agent lookup failed", "error", err)
-			return false, fmt.Errorf("agent lookup: %w", err)
-		}
-		if a != nil {
-			agentID = a.ID
-		}
-
-		// Bot-disabled-team gate. If the task's team has the bot
-		// turned off in team_agents.enabled, the auto-trigger is a no-op
-		// — the task is already in the team queue (created by HandleEvent
-		// upstream); a human will delegate it later if they want a
-		// conversation. Skip silently rather than firing on a disabled team.
-		// Requires team_agents too; nil (older test wiring) degrades to "proceed".
-		if r.teamAgents != nil {
-			if a == nil {
-				// No bootstrapped agent — bootstrap is now fatal at
-				// startup, so this shouldn't reach us in practice.
-				// Log + bail rather than crashing the goroutine. Not an
-				// error: nothing about replaying the event bootstraps an
-				// agent, so retrying would spend the event's attempts and
-				// park it over a startup-time condition.
-				routerLog.Warn("auto-trigger skipped: no agent bootstrapped", "task_id", task.ID)
-				return false, nil
-			}
-			// Read the bot-enabled flag for the FIRING team — the team
-			// whose trigger routed the bot here — not the task's owner
-			// team. One task is now visible to many teams; the gate must
-			// read the acting team's own team_agents row so a two-team org
-			// where team B disabled the bot doesn't auto-fire on team B by
-			// reading team A's flag. Fall back to the task's owner team,
-			// then the local sentinel, when the caller didn't supply one.
-			teamID := actingTeamID
-			if teamID == "" {
-				teamID = teamIDValue(task)
-			}
-			if teamID == "" {
-				teamID = runmode.LocalDefaultTeamID
-			}
-			ta, err := r.teamAgents.GetForTeamSystem(ctx, orgID, teamID, a.ID)
-			if err != nil {
-				routerLog.Warn("auto-trigger deferred: team_agents lookup failed", "task_id", task.ID, "error", err)
-				return false, fmt.Errorf("team_agents lookup: %w", err)
-			}
-			if ta == nil || !ta.Enabled {
-				routerLog.Info("auto-trigger skipped: bot disabled for team", "task_id", task.ID, "team", teamID)
-				return false, nil
-			}
-		}
-	}
-	// Breaker gate. trigger.BreakerThreshold is *int because the column
-	// is nullable at the schema level (rule rows have NULL); kind='trigger'
-	// rows are guaranteed non-nil by the per-kind CHECK constraint. The
-	// breaker keys on the blueprint's first step prompt (runs are prompt-
-	// keyed; for the 1-step blueprints every shipped trigger uses, that is
-	// the wrapped prompt — identical to the pre-blueprint behavior).
-	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
-	breakerPromptID := r.breakerPromptID(ctx, orgID, trigger.BlueprintID)
-	failures, err := r.tasks.CountConsecutiveFailedConversationsSystem(ctx, orgID, entityID, breakerPromptID)
-	if err != nil {
-		routerLog.Error("breaker query failed", "entity", entityID, "prompt", breakerPromptID, "error", err)
-		return false, fmt.Errorf("breaker query: %w", err)
-	}
-	if failures >= breakerThreshold {
-		routerLog.Info("breaker tripped",
-			"entity", entityID, "prompt", breakerPromptID, "failures", failures, "threshold", breakerThreshold)
-		// Look up prompt name for the toast — opportunistic, falls back to a
-		// generic message if the lookup fails since the breaker trip itself
-		// is the load-bearing signal. One toast per trip (happens rarely).
-		promptName := ""
-		if p, perr := r.prompts.GetSystem(ctx, orgID, breakerPromptID); perr == nil && p != nil {
-			promptName = p.Name
-		}
-		if promptName == "" {
-			promptName = "prompt"
-		}
-		toast.Warning(r.ws, orgID, fmt.Sprintf("Auto-delegation paused: %s tripped the breaker (%d consecutive failures on this entity)", promptName, failures))
-		return false, nil
+	agentID, proceed, err := r.autoDelegatePreflight(ctx, orgID, task, trigger, entityID, actingTeamID)
+	if err != nil || !proceed {
+		return false, err
 	}
 
 	// Per-task gate. Closed if a conversation is live on THIS TASK, or any
@@ -282,6 +178,126 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 	// moved.
 	r.syncClaimAfterCommit(ctx, orgID, task, agentID)
 	return true, nil
+}
+
+// autoDelegatePreflight runs the checks every auto-fired trigger passes
+// before its firing is decided, at event time and at the post-scoring
+// re-evaluation alike: the cross-team exclusive-claim skip, the org agent
+// resolution, the per-team team_agents.enabled gate, and the breaker. It
+// returns the agent the firing runs as and claims for; proceed=false is a
+// decided skip, logged where each check finds it, and a non-nil error is a
+// read that reached no verdict, which the caller retries rather than treats
+// as a decision. The breaker toast fires from here, so both callers keep it.
+func (r *Router) autoDelegatePreflight(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, actingTeamID string) (agentID string, proceed bool, err error) {
+	// Exclusive claim: one task, one owner. If the bot has already
+	// claimed this task on behalf of a different team (an earlier
+	// matched team won the CAS), this team's trigger must not pile on a
+	// second conversation against the same situation — that is the cross-team
+	// duplication the one-task model exists to prevent. A trigger whose
+	// acting team IS the current owner still proceeds, so multiple
+	// prompts one team configured on the same event all run.
+	if task.ClaimedByAgentID != "" && actingTeamID != "" && teamIDValue(task) != actingTeamID {
+		routerLog.Info("auto-trigger skipped: task already claimed by the bot for another team",
+			"task_id", task.ID, "claimed_team", teamIDValue(task), "acting_team", actingTeamID)
+		return "", false, nil
+	}
+	// Resolve the org's agent ONCE here. It's the single source for three
+	// consumers that must agree: the bot-disabled-team gate, the blueprint
+	// run's actor (frozen onto blueprint_runs.actor_agent_id via DelegateOpts),
+	// and the task's claim (the AgentClaimStamp each commitment carries).
+	// Resolving once guarantees conversations.actor_agent_id and
+	// tasks.claimed_by_agent_id are the same id with no second lookup to drift,
+	// and it's available at step-0 enqueue — which is what lets the claim ride
+	// the blueprint-run insert's own transaction instead of following it as a
+	// separate write.
+	//
+	// Nil r.agents is pre-D-Claims test wiring: skip the gate, leave agentID
+	// empty (the blueprint run records no actor, the claim stamp is the zero
+	// value and every store skips it) — preserving the "proceed with
+	// auto-fire" degrade. Production always wires it.
+	if r.agents != nil {
+		a, err := r.agents.GetForOrgSystem(ctx, orgID)
+		if err != nil {
+			routerLog.Warn("auto-trigger deferred: agent lookup failed", "error", err)
+			return "", false, fmt.Errorf("agent lookup: %w", err)
+		}
+		if a != nil {
+			agentID = a.ID
+		}
+
+		// Bot-disabled-team gate. If the task's team has the bot
+		// turned off in team_agents.enabled, the auto-trigger is a no-op
+		// — the task is already in the team queue (created by HandleEvent
+		// upstream); a human will delegate it later if they want a
+		// conversation. Skip silently rather than firing on a disabled team.
+		// Requires team_agents too; nil (older test wiring) degrades to "proceed".
+		if r.teamAgents != nil {
+			if a == nil {
+				// No bootstrapped agent — bootstrap is now fatal at
+				// startup, so this shouldn't reach us in practice.
+				// Log + bail rather than crashing the goroutine. Not an
+				// error: nothing about replaying the event bootstraps an
+				// agent, so retrying would spend the event's attempts and
+				// park it over a startup-time condition.
+				routerLog.Warn("auto-trigger skipped: no agent bootstrapped", "task_id", task.ID)
+				return "", false, nil
+			}
+			// Read the bot-enabled flag for the FIRING team — the team
+			// whose trigger routed the bot here — not the task's owner
+			// team. One task is now visible to many teams; the gate must
+			// read the acting team's own team_agents row so a two-team org
+			// where team B disabled the bot doesn't auto-fire on team B by
+			// reading team A's flag. Fall back to the task's owner team,
+			// then the local sentinel, when the caller didn't supply one.
+			teamID := actingTeamID
+			if teamID == "" {
+				teamID = teamIDValue(task)
+			}
+			if teamID == "" {
+				teamID = runmode.LocalDefaultTeamID
+			}
+			ta, err := r.teamAgents.GetForTeamSystem(ctx, orgID, teamID, a.ID)
+			if err != nil {
+				routerLog.Warn("auto-trigger deferred: team_agents lookup failed", "task_id", task.ID, "error", err)
+				return "", false, fmt.Errorf("team_agents lookup: %w", err)
+			}
+			if ta == nil || !ta.Enabled {
+				routerLog.Info("auto-trigger skipped: bot disabled for team", "task_id", task.ID, "team", teamID)
+				return "", false, nil
+			}
+		}
+	}
+	// Breaker gate. trigger.BreakerThreshold is *int because the column
+	// is nullable at the schema level (rule rows have NULL); kind='trigger'
+	// rows are guaranteed non-nil by the per-kind CHECK constraint. The
+	// breaker keys on the blueprint's first step prompt (runs are prompt-
+	// keyed; for the 1-step blueprints every shipped trigger uses, that is
+	// the wrapped prompt — identical to the pre-blueprint behavior).
+	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
+	breakerPromptID := r.breakerPromptID(ctx, orgID, trigger.BlueprintID)
+	failures, err := r.tasks.CountConsecutiveFailedConversationsSystem(ctx, orgID, entityID, breakerPromptID)
+	if err != nil {
+		routerLog.Error("breaker query failed", "entity", entityID, "prompt", breakerPromptID, "error", err)
+		return "", false, fmt.Errorf("breaker query: %w", err)
+	}
+	if failures >= breakerThreshold {
+		routerLog.Info("breaker tripped",
+			"entity", entityID, "prompt", breakerPromptID, "failures", failures, "threshold", breakerThreshold)
+		// Look up prompt name for the toast — opportunistic, falls back to a
+		// generic message if the lookup fails since the breaker trip itself
+		// is the load-bearing signal. One toast per trip (happens rarely).
+		promptName := ""
+		if p, perr := r.prompts.GetSystem(ctx, orgID, breakerPromptID); perr == nil && p != nil {
+			promptName = p.Name
+		}
+		if promptName == "" {
+			promptName = "prompt"
+		}
+		toast.Warning(r.ws, orgID, fmt.Sprintf("Auto-delegation paused: %s tripped the breaker (%d consecutive failures on this entity)", promptName, failures))
+		return "", false, nil
+	}
+
+	return agentID, true, nil
 }
 
 // enqueueBusyFiring defers a valid firing onto pending_firings because the

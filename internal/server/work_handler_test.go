@@ -846,16 +846,16 @@ func parkLocalFiring(t *testing.T, database *sql.DB, title string) int64 {
 	return batch.Firings[0].Firing.ID
 }
 
-// TestWorkHandler_RegistryListsBothKindsAndRedrivesAParkedFiring pins the
-// second registered kind: the store bundle's registry carries the event
-// queue and the firing queue, the catalogue lists both with the controls
-// each declares, a parked firing lists with its cause and subject, and a
-// redrive puts it back to ready.
-func TestWorkHandler_RegistryListsBothKindsAndRedrivesAParkedFiring(t *testing.T) {
+// TestWorkHandler_RegistryListsEveryKindAndRedrivesAParkedFiring pins the
+// registry: the store bundle carries the event queue, the firing queue and
+// the re-evaluation queue in that order, the catalogue lists all three with
+// the controls each declares, a parked firing lists with its cause and
+// subject, and a redrive puts it back to ready.
+func TestWorkHandler_RegistryListsEveryKindAndRedrivesAParkedFiring(t *testing.T) {
 	_, database := localEventQueueKind(t)
 	kinds := sqlitestore.New(database).WorkKinds
-	if len(kinds) != 2 || kinds[0].Name() != workkinds.EventQueueName || kinds[1].Name() != workkinds.PendingFiringsName {
-		t.Fatalf("registry = %v, want event_queue then pending_firings", kinds)
+	if len(kinds) != 3 || kinds[0].Name() != workkinds.EventQueueName || kinds[1].Name() != workkinds.PendingFiringsName || kinds[2].Name() != workkinds.TaskReDeriveName {
+		t.Fatalf("registry = %v, want event_queue, pending_firings, task_rederive_queue", kinds)
 	}
 	parkedID := parkLocalFiring(t, database, "Fix the flaky test")
 	h := localWorkRig(t, kinds...)
@@ -868,8 +868,11 @@ func TestWorkHandler_RegistryListsBothKindsAndRedrivesAParkedFiring(t *testing.T
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(body.Kinds) != 2 || body.Kinds[1].Kind != workkinds.PendingFiringsName || body.Kinds[1].Label != workkinds.PendingFiringsLabel {
-		t.Fatalf("catalogue = %+v, want both kinds", body.Kinds)
+	if len(body.Kinds) != 3 || body.Kinds[1].Kind != workkinds.PendingFiringsName || body.Kinds[1].Label != workkinds.PendingFiringsLabel {
+		t.Fatalf("catalogue = %+v, want all three kinds", body.Kinds)
+	}
+	if body.Kinds[2].Kind != workkinds.TaskReDeriveName || body.Kinds[2].Label != workkinds.TaskReDeriveLabel {
+		t.Errorf("third kind = %+v, want the re-evaluation queue", body.Kinds[2])
 	}
 	if c := body.Kinds[1].Controls; !c.Redrive || !c.Cancel || c.Supersede {
 		t.Errorf("pending_firings controls = %+v, want redrive and cancel only", c)
@@ -901,4 +904,74 @@ func TestWorkHandler_RegistryListsBothKindsAndRedrivesAParkedFiring(t *testing.T
 	if err != nil || item == nil || item.Status != workitem.StatusReady || item.Attempt != 0 {
 		t.Errorf("firing after redrive = %+v err=%v, want ready with a fresh budget", item, err)
 	}
+}
+
+// TestWorkHandler_RedrivesAParkedReEvaluation pins the third kind on the
+// panel: a parked re-evaluation lists under its own kind with the task's
+// entity as its subject and the revision it is owed at, and a redrive from
+// the panel puts it back to ready with a fresh budget.
+func TestWorkHandler_RedrivesAParkedReEvaluation(t *testing.T) {
+	_, database := localEventQueueKind(t)
+	kinds := sqlitestore.New(database).WorkKinds
+	parkedID := parkLocalReEvaluation(t, database, "Rescore this one")
+	h := localWorkRig(t, kinds...)
+	pv := map[string]string{"kind": workkinds.TaskReDeriveName}
+
+	rec := httptest.NewRecorder()
+	h.handleItemsList(rec, workReq(http.MethodPost, "/api/orgs/x/work/task_rederive_queue/items/list", runmode.LocalDefaultOrgID, "local-user", `{"status":"parked"}`, pv))
+	page := decodeList[workItemJSON](t, rec)
+	if page.Total() != 1 || len(page.Items) != 1 || page.Items[0].ID != parkedID {
+		t.Fatalf("parked list = total %d items %+v, want the parked re-evaluation", page.Total(), page.Items)
+	}
+	got := page.Items[0]
+	if got.Kind != workkinds.TaskReDeriveName || got.LastOutcome != "permanent" {
+		t.Errorf("parked re-evaluation = %+v", got)
+	}
+	if got.Subject == nil || got.Subject.Detail != "Rescore this one" || got.Subject.Fields["requested_revision"] != "1" || got.Subject.Fields["task_id"] == "" {
+		t.Errorf("subject = %+v, want the entity's title, the task and the revision", got.Subject)
+	}
+
+	rec = httptest.NewRecorder()
+	h.handleRedrive(rec, workReq(http.MethodPost, "/api/orgs/x/work/task_rederive_queue/items/redrive", runmode.LocalDefaultOrgID, "local-user", fmt.Sprintf(`{"ids":[%d]}`, parkedID), pv))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"redriven":1`) {
+		t.Fatalf("redrive = %d %s, want redriven 1", rec.Code, rec.Body.String())
+	}
+	item, err := workitem.Get(context.Background(), kinds[2].Conn(), kinds[2].Kind(), runmode.LocalDefaultOrgID, parkedID)
+	if err != nil || item == nil || item.Status != workitem.StatusReady || item.Attempt != 0 {
+		t.Errorf("row after redrive = %+v err=%v, want ready with a fresh budget", item, err)
+	}
+}
+
+// parkLocalReEvaluation scores one task against a fresh chain in the local
+// database — which admits its re-evaluation row — then claims the row and
+// parks it permanently, returning its id.
+func parkLocalReEvaluation(t *testing.T, database *sql.DB, title string) int64 {
+	t.Helper()
+	suf := uuid.NewString()[:8]
+	stores := sqlitestore.New(database)
+	ctx := context.Background()
+	entityID, eventID, taskID := "e-"+suf, "ev-"+suf, "t-"+suf
+	for _, stmt := range []struct {
+		q    string
+		args []any
+	}{
+		{`INSERT INTO entities (id, source, source_id, kind, title, url) VALUES (?, 'github', ?, 'pr', ?, '')`, []any{entityID, "owner/repo#" + suf, title}},
+		{`INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')`, []any{eventID, entityID, domain.EventGitHubPRCICheckFailed}},
+		{`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status) VALUES (?, ?, ?, '', ?, 'queued', 'pending')`, []any{taskID, entityID, domain.EventGitHubPRCICheckFailed, eventID}},
+	} {
+		if _, err := database.Exec(stmt.q, stmt.args...); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	if err := stores.Scores.UpdateTaskScores(ctx, runmode.LocalDefaultOrgID, []domain.TaskScoreUpdate{{ID: taskID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r"}}); err != nil {
+		t.Fatalf("UpdateTaskScores: %v", err)
+	}
+	batch, err := stores.TaskReDerive.Claim(ctx, workitem.Owner{ID: "test", Epoch: 1}, 1)
+	if err != nil || len(batch.Items) != 1 {
+		t.Fatalf("Claim: %+v %v", batch, err)
+	}
+	if parked, err := stores.TaskReDerive.Requeue(ctx, batch.Items[0].Receipt, workitem.OutcomePermanent, errors.New("evaluate: refused")); err != nil || !parked {
+		t.Fatalf("Requeue permanent: parked=%v err=%v", parked, err)
+	}
+	return batch.Items[0].Receipt.ItemID
 }

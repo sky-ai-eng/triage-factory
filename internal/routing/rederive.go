@@ -2,148 +2,122 @@ package routing
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
-// ReDeriveAfterScoring re-checks deferred triggers for tasks that just
-// received AI scores. Triggers with MinAutonomySuitability > 0 are skipped
-// during HandleEvent and deferred to this pass. orgID is the scoring
-// context — the scorer batches per-org so every task in the slice belongs
-// to the same tenant. Per-team auto_delegate_enabled is checked inside
-// reDeriveTask after the task's team_id is resolved.
+// The post-scoring re-evaluation. Triggers with MinAutonomySuitability > 0
+// are skipped during HandleEvent on the promise that a task's deferred
+// triggers are evaluated once it has a score. That obligation is a
+// task_rederive_queue row, admitted by the score write in the transaction
+// that writes the scores (workkinds.TaskReDerive); the worker in
+// rederive_worker.go claims it, evaluates the task through evaluateReDerive
+// below, and admits whatever the evaluation decided to fire onto
+// pending_firings inside the completion, so the decision and its record
+// commit together or not at all.
 //
-// Two callers drive it, both from the scorer: the OnScoringCompleted hook
-// right after the scores commit (the fast path), and the cycle-start drain
-// of tasks.rederive_owed (the crash backstop, for scores whose callback
-// never got to run). Both hand it the same work, so the pass discharges the
-// owed mark itself — per pass, after the evaluations it covers.
-//
-// ctx is the scoring cycle's, minus its cancellation (the caller applies
-// context.WithoutCancel): this runs asynchronously and outlives the cycle
-// that scheduled it, and firing half a deferred trigger — a run inserted,
-// its claim unstamped — is worse than one that lands late.
-func (r *Router) ReDeriveAfterScoring(ctx context.Context, orgID string, taskIDs []string) {
-	evaluated := make([]string, 0, len(taskIDs))
-	for _, taskID := range taskIDs {
-		if r.reDeriveTask(ctx, orgID, taskID) {
-			evaluated = append(evaluated, taskID)
-		}
-	}
-	r.clearReDeriveOwed(ctx, orgID, evaluated)
+// The evaluation itself is a pure function of what it reads: it fires
+// nothing and writes nothing. It returns a plan, and the completion is where
+// the plan becomes rows.
+
+// reDeriveFiring is one trigger the evaluation decided to fire: the handler,
+// the team it fires for, and the agent it claims the task for.
+type reDeriveFiring struct {
+	Trigger    domain.EventHandler
+	FiringTeam string
+	AgentID    string
 }
 
-// clearReDeriveOwed discharges the owed mark for the tasks this pass
-// actually evaluated. Batched at the end of the pass rather than per task:
-// the ordering rule is only that a task is never cleared before its own
-// evaluation, and a crash before the batch lands just leaves the whole set
-// owed for the next cycle to redo — which is safe, because re-deriving a
-// task twice fires at most once (the (triggering_event_id, trigger_id)
-// replay fence and the one-active-run index).
-//
-// A clear failure is logged and dropped for the same reason: the cost is a
-// redundant re-derive next cycle.
-func (r *Router) clearReDeriveOwed(ctx context.Context, orgID string, taskIDs []string) {
-	if r.scores == nil || len(taskIDs) == 0 {
-		return
-	}
-	if err := r.scores.ClearReDeriveOwed(ctx, orgID, taskIDs); err != nil {
-		routerLog.Error("re-derive: failed to clear the owed mark", "org", orgID, "count", len(taskIDs), "error", err)
-	}
+// reDerivePlan is the evaluation's verdict. Task is the task as read, nil
+// when it is gone; Firings is empty for the many decided outcomes that fire
+// nothing.
+type reDerivePlan struct {
+	Task    *domain.Task
+	Firings []reDeriveFiring
 }
 
-// reDeriveTask evaluates one task's deferred triggers. It reports whether
-// the evaluation ran to a conclusion — true for every decided outcome,
-// including the many "nothing to fire" ones, and false only when a store
-// read bailed out before the task could be decided. Only a true discharges
-// the owed mark; a bail keeps it, so the next cycle's drain retries rather
-// than silently swallowing the deferral the same way a crash used to.
-func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) bool {
+// evaluateReDerive evaluates one task's deferred triggers against the score
+// it carries now. Every decided outcome — including "nothing to fire" and
+// "task gone" — returns a plan and nil. err is non-nil only where a read
+// failed before a verdict could be reached: the task load, the handlers
+// read, the metadata read, the visibility read, an unreadable per-team
+// switch, or a preflight read; the caller retries those rather than treating
+// them as a decision.
+//
+// orgID is the scoring context — every task the scorer writes belongs to the
+// org whose runner wrote it. Per-team auto_delegate_enabled is checked per
+// firing team after the task's teams are resolved, and the preflight the
+// event-time path runs (autoDelegatePreflight) runs here per candidate
+// trigger, so a re-derived firing passes exactly the gates an event-time
+// one does.
+func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (reDerivePlan, error) {
 	task, err := r.tasks.GetSystem(ctx, orgID, taskID)
 	if err != nil {
-		routerLog.Error("re-derive: failed to load task", "task_id", taskID, "error", err)
-		return false
+		return reDerivePlan{}, fmt.Errorf("load task: %w", err)
 	}
+	plan := reDerivePlan{Task: task}
 	// A task that no longer exists is decided, not deferred — there is
-	// nothing left to evaluate and nothing left to owe.
+	// nothing left to evaluate.
 	if task == nil {
-		return true
+		return plan, nil
 	}
 
-	// Entitlement gate (TFAC-524) — a task on a now-gated-off event type
-	// fires nothing during the post-scoring deferred-trigger pass, mirroring
-	// HandleEvent's freeze.
+	// Entitlement gate — a task on a now-gated-off event type fires nothing
+	// during the post-scoring pass, mirroring HandleEvent's freeze.
 	if !entitlements.EventTypeAllowed(orgID, task.EventType) {
-		return true
+		return plan, nil
 	}
 
-	// Only re-derive queued tasks. The lifecycle axis
-	// collapsed to {queued, snoozed, done, dismissed} so this gate
-	// also has to cover snoozed (a snoozed task is on a "wait" until
-	// its wake-on-bump event lands; a deferred-threshold re-derive
-	// should not bypass that signal). done/dismissed naturally fall
-	// out of the != "queued" check.
+	// Only queued tasks are re-derived. The lifecycle axis is {queued,
+	// in_progress, snoozed, done, dismissed}, so this gate also covers
+	// snoozed (a snoozed task is on a "wait" until its wake-on-bump event
+	// lands; a deferred-threshold re-derive should not bypass that signal).
 	if task.Status != "queued" {
-		return true
+		return plan, nil
 	}
-
-	// The per-team auto_delegate kill switch is checked per firing team
-	// inside the trigger loop below — one task is now visible to many
-	// teams, so a single owner-team gate here would wrongly suppress (or
-	// admit) other teams' deferred triggers.
 
 	// Re-derive must not promote a task that's already claimed. The
-	// responsibility axis lives on the claim cols, not
-	// status — so a queued task may still be "already taken" by either
-	// the bot (auto-delegate already fired and enqueued a firing, or
-	// drag-to-bot stamped) or a user ("I'll take this myself" claim).
-	// Without this guard, re-derive could:
-	//   - stamp an agent claim onto a user-claimed task (XOR violation
-	//     blocked at the DB level, but the visible state would be a
-	//     spurious 500 log + WS toast)
-	//   - fire a second bot run on a task the bot is already
-	//     committed to (duplicate firing, breaker noise)
-	// Either claim col set = "not the re-derive's business; the
-	// commitment is real and the lifecycle event that ends the
-	// commitment will arrive via its own path."
+	// responsibility axis lives on the claim columns, not status — so a
+	// queued task may still be "already taken" by either the bot
+	// (auto-delegate already fired and enqueued a firing, or drag-to-bot
+	// stamped) or a user ("I'll take this myself" claim). Either claim
+	// column set means the commitment is real and the lifecycle event that
+	// ends it will arrive via its own path.
 	if task.ClaimedByAgentID != "" || task.ClaimedByUserID != "" {
-		return true
+		return plan, nil
 	}
 
 	// No score landed — nothing to gate against. Decided, not deferred: a
-	// task with no score has nothing for a later pass to do differently, and
-	// keeping it owed would re-derive it every cycle forever.
+	// task with no score has nothing for a later pass to do differently.
 	if task.AutonomySuitability == nil {
-		return true
+		return plan, nil
 	}
 
 	// Fetch handlers for this event type — same call HandleEvent uses,
 	// kind-discriminated here.
 	handlers, err := r.handlers.GetEnabledForEventSystem(ctx, orgID, task.EventType)
 	if err != nil {
-		routerLog.Error("re-derive: failed to query event_handlers", "event_type", task.EventType, "error", err)
-		return false
+		return reDerivePlan{}, fmt.Errorf("query event_handlers for %s: %w", task.EventType, err)
 	}
 
 	// Fetch the primary event's metadata for predicate matching.
 	metadata, err := r.events.GetMetadataSystem(ctx, orgID, task.PrimaryEventID)
 	if err != nil {
-		routerLog.Error("re-derive: failed to fetch event metadata", "event_id", task.PrimaryEventID, "error", err)
-		return false
+		return reDerivePlan{}, fmt.Errorf("fetch metadata of event %s: %w", task.PrimaryEventID, err)
 	}
 
-	// The task's recorded visibility set — the teams whose handlers
-	// matched the original event. Re-derive re-queries every enabled
-	// trigger for the event type, so without this gate a trigger whose
-	// team was never part of the situation (enabled after the fact, or
-	// otherwise absent from the match) could match the stored metadata,
-	// fire, and consolidate ownership onto a task that team can't see.
-	// The owner team_id always grants visibility, so it qualifies too.
+	// The task's recorded visibility set — the teams whose handlers matched
+	// the original event. Re-derive re-queries every enabled trigger for the
+	// event type, so without this gate a trigger whose team was never part
+	// of the situation (enabled after the fact, or otherwise absent from the
+	// match) could match the stored metadata, fire, and consolidate
+	// ownership onto a task that team can't see. The owner team_id always
+	// grants visibility, so it qualifies too.
 	visibleTeams, err := r.tasks.VisibilityTeamsSystem(ctx, orgID, taskID)
 	if err != nil {
-		routerLog.Error("re-derive: failed to fetch visibility teams for task", "task_id", taskID, "error", err)
-		return false
+		return reDerivePlan{}, fmt.Errorf("fetch visibility teams of task %s: %w", taskID, err)
 	}
 	visibleSet := map[string]struct{}{}
 	if owner := teamIDValue(task); owner != "" {
@@ -154,16 +128,11 @@ func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) bool {
 	}
 
 	// Author-centric tasks fire only the OWNER's automation (the same rule
-	// HandleEvent applies): a deferred trigger must belong to the owning team,
-	// and a NULL owner fires nothing. Other event types keep the visibility-set
-	// gate so a matched team's deferred trigger fires against the shared task.
+	// HandleEvent applies): a deferred trigger must belong to the owning
+	// team, and a NULL owner fires nothing. Other event types keep the
+	// visibility-set gate so a matched team's deferred trigger fires against
+	// the shared task.
 	authorCentric := isAuthorCentricGitHubEvent(task.EventType)
-
-	// Set false by a per-trigger read that couldn't reach a verdict, so the
-	// task keeps its owed mark and the next cycle's drain revisits it. A
-	// trigger that was evaluated and declined — or fired and failed — is a
-	// verdict; only "couldn't find out" defers.
-	decided := true
 
 	for _, trigger := range handlers {
 		if trigger.Kind != domain.EventHandlerKindTrigger {
@@ -181,19 +150,17 @@ func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) bool {
 			continue
 		}
 		// An unreadable kill switch is never treated as permission, but it is
-		// also not a decision: the task keeps its owed mark so the next
-		// cycle's drain asks again. A switch that reads false is a decision
-		// and needs no retry.
+		// also not a decision: the read failed before a verdict. A switch
+		// that reads false is a decision.
 		enabled, err := r.autoDelegateEnabledForTeam(ctx, firingTeam)
 		if err != nil {
-			decided = false
-			continue
+			return reDerivePlan{}, fmt.Errorf("read auto_delegate switch of team %s: %w", firingTeam, err)
 		}
 		if !enabled {
 			continue
 		}
 		minAutonomy := derefFloatDefault(trigger.MinAutonomySuitability, 0)
-		// Only process deferred triggers — immediate ones already fired in HandleEvent.
+		// Only deferred triggers — immediate ones already fired in HandleEvent.
 		if minAutonomy <= 0 {
 			continue
 		}
@@ -218,20 +185,34 @@ func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) bool {
 			continue
 		}
 
-		routerLog.Info("re-derive: task suitability meets trigger threshold, firing", "task_id", taskID, "suitability", *task.AutonomySuitability, "trigger_id", trigger.ID, "threshold", minAutonomy)
-		// Triggering event for the queued firing is the task's primary
-		// event — that's the one whose match scored autonomously above
-		// threshold. Real-event provenance keeps the audit trail honest
-		// when a re-derived firing ends up enqueued.
-		// A firing that errors is still a decision this pass reached: the
-		// task is now the firing machinery's business (the replay fence, the
-		// pending-firings queue, the breaker), and re-deriving it every
-		// subsequent cycle would just retry the same call forever.
-		if _, err := r.tryAutoDelegate(ctx, orgID, task, trigger, task.EntityID, task.PrimaryEventID, firingTeam); err != nil {
-			routerLog.Error("re-derive: deferred trigger failed to fire", "task_id", taskID, "trigger_id", trigger.ID, "error", err)
+		// The checks the event-time path runs before it decides a firing:
+		// the cross-team exclusive-claim skip, the org agent, the per-team
+		// bot switch, the breaker.
+		agentID, proceed, err := r.autoDelegatePreflight(ctx, orgID, task, trigger, task.EntityID, firingTeam)
+		if err != nil {
+			return reDerivePlan{}, fmt.Errorf("preflight trigger %s: %w", trigger.ID, err)
+		}
+		if !proceed {
+			continue
+		}
+
+		routerLog.Info("re-derive: task suitability meets trigger threshold, planning a firing", "task_id", taskID, "suitability", *task.AutonomySuitability, "trigger_id", trigger.ID, "threshold", minAutonomy)
+		plan.Firings = append(plan.Firings, reDeriveFiring{Trigger: trigger, FiringTeam: firingTeam, AgentID: agentID})
+		// The firing's admission stamps the bot's claim for this team, and
+		// the event-time path reads that claim off the in-memory task when
+		// the next matched trigger comes round: a second team's trigger
+		// against the same task is the cross-team duplication the one-task
+		// model refuses. Mirror the claim the way claimCommitted will after
+		// the commit, so the remaining candidates see what they would have
+		// seen at event time.
+		if agentID != "" {
+			task.ClaimedByAgentID = agentID
+			if firingTeam != "" {
+				task.TeamID = teamIDPtr(firingTeam)
+			}
 		}
 	}
-	return decided
+	return plan, nil
 }
 
 // derefIntDefault unwraps a *int with a default if nil. Used on

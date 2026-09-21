@@ -72,6 +72,12 @@ func (a *App) startBrain(term int64) {
 	// opens. A conversation terminal wakes it; the scan tick is the floor.
 	// Same single-worker discipline as the event-queue worker below.
 	go a.router.RunFiringQueue(brainCtx, routing.DefaultFiringScanInterval)
+	// Re-derive worker: claims the re-evaluation rows the score write admits
+	// for every task it scores, evaluates the task's deferred triggers
+	// against the revision it claimed, and admits the firings it decides on
+	// inside its completion. The scorer's completion callback wakes it; the
+	// scan tick is the floor. Same single-worker discipline.
+	go a.router.RunReDeriveQueue(brainCtx, routing.DefaultReDeriveScanInterval)
 	// Terminal-state invariant checker: read-only. Counts the entities the
 	// poll's enforcement should have closed and did not — active with a
 	// terminal snapshot, past the grace, no close in flight — and the tasks

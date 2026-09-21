@@ -23,7 +23,7 @@ import (
 // queued+pending task rows the harness asserts against. See
 // internal/db/dbtest for the assertion bodies.
 func TestScoreStore_SQLite(t *testing.T) {
-	dbtest.RunScoreStoreConformance(t, func(t *testing.T) (db.ScoreStore, string, dbtest.ScoreSeeder) {
+	dbtest.RunScoreStoreConformance(t, func(t *testing.T) dbtest.ScoreFixture {
 		t.Helper()
 		conn, err := sql.Open("sqlite", db.TestDSNMemory)
 		if err != nil {
@@ -38,12 +38,58 @@ func TestScoreStore_SQLite(t *testing.T) {
 		}
 
 		stores := sqlitestore.New(conn)
-		seeder := func(t *testing.T, n int) []string {
-			t.Helper()
-			return seedSQLiteTasks(t, conn, n)
+		return dbtest.ScoreFixture{
+			Store:    stores.Scores,
+			OrgID:    runmode.LocalDefaultOrgID,
+			Seed:     func(t *testing.T, n int) []string { t.Helper(); return seedSQLiteTasks(t, conn, n) },
+			ReDerive: stores.TaskReDerive,
+			ScoreRevision: func(t *testing.T, taskID string) int64 {
+				t.Helper()
+				return readSQLiteScoreRevision(t, conn, taskID)
+			},
+			QueueRows: func(t *testing.T, taskID string) []dbtest.ReDeriveQueueRow {
+				t.Helper()
+				return readSQLiteReDeriveRows(t, conn, taskID)
+			},
 		}
-		return stores.Scores, runmode.LocalDefaultOrgID, seeder
 	})
+}
+
+// readSQLiteScoreRevision reads tasks.score_revision, the one column no
+// domain read projects.
+func readSQLiteScoreRevision(t *testing.T, conn *sql.DB, taskID string) int64 {
+	t.Helper()
+	var rev int64
+	if err := conn.QueryRow(`SELECT score_revision FROM tasks WHERE id = ?`, taskID).Scan(&rev); err != nil {
+		t.Fatalf("read score_revision of %s: %v", taskID, err)
+	}
+	return rev
+}
+
+// readSQLiteReDeriveRows reads a task's task_rederive_queue rows, oldest
+// first, in the shape the conformance suites compare.
+func readSQLiteReDeriveRows(t *testing.T, conn *sql.DB, taskID string) []dbtest.ReDeriveQueueRow {
+	t.Helper()
+	rows, err := conn.Query(`
+		SELECT id, status, attempt, requested_revision, COALESCE(unique_key, '')
+		FROM task_rederive_queue WHERE task_id = ? ORDER BY id
+	`, taskID)
+	if err != nil {
+		t.Fatalf("read task_rederive_queue rows of %s: %v", taskID, err)
+	}
+	defer rows.Close()
+	out := []dbtest.ReDeriveQueueRow{}
+	for rows.Next() {
+		var r dbtest.ReDeriveQueueRow
+		if err := rows.Scan(&r.ID, &r.Status, &r.Attempt, &r.RequestedRevision, &r.UniqueKey); err != nil {
+			t.Fatalf("scan task_rederive_queue row: %v", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read task_rederive_queue rows: %v", err)
+	}
+	return out
 }
 
 // seedSQLiteTasks inserts n rows of (entity + task) directly via raw
