@@ -540,7 +540,8 @@ func (a *App) wire() {
 
 	// The router and reloader are brain components. spawner.Delegate ←
 	// router (construction arg); router.WakeFirings ← spawner
-	// (post-construction) — the latter closes the cycle. An executor has
+	// (post-construction) — the latter closes the cycle; router.WakeReDerive
+	// ← the scorer's completion callback (buildAI). An executor has
 	// neither: its spawner's firing waker stays nil (nil-safe) and the
 	// brain's scan tick is the floor for a conversation ending there, and
 	// it runs no poller for the reloader to nudge.

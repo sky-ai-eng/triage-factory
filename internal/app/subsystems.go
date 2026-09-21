@@ -84,31 +84,13 @@ func (a *App) buildAI() {
 				OrgID: orgID,
 				Data:  map[string]any{"task_ids": taskIDs},
 			})
-			// Post-scoring re-derive: check deferred triggers whose
-			// min_autonomy_suitability threshold the scored tasks now meet.
-			// Async so it doesn't block the scorer clearing its running flag.
-			// a.router is set in buildRouting (before Run), so it's non-nil
-			// by the time any scoring cycle completes.
-			//
-			// WithoutCancel, not Background: the cycle that scheduled this
-			// returns immediately (and its ctx dies with it), but the work
-			// this fires — deferred triggers, conversations, claims — must
-			// finish, while the cycle's values stay attached so the
-			// re-derive is still recognizably part of the scoring that
-			// caused it.
+			// The score write admitted each task's re-evaluation row in its
+			// own transaction; wake the router's re-derive worker so they
+			// are claimed now rather than on its next scan tick. a.router is
+			// set in buildRouting (before Run), so it's non-nil by the time
+			// any scoring cycle completes.
 			if a.router != nil {
-				go a.router.ReDeriveAfterScoring(context.WithoutCancel(ctx), orgID, taskIDs)
-			}
-		},
-		OnReDeriveOwed: func(ctx context.Context, orgID string, taskIDs []string) {
-			// The crash backstop for the callback above: tasks whose scores
-			// committed while the process died before their re-derive ran.
-			// Same pass, same WithoutCancel reasoning — a half-fired deferred
-			// trigger is worse than a late one — but synchronous, because the
-			// cycle must not start writing fresh scores while this decides
-			// whether to clear the marks the last one left.
-			if a.router != nil {
-				a.router.ReDeriveAfterScoring(context.WithoutCancel(ctx), orgID, taskIDs)
+				a.router.WakeReDerive()
 			}
 		},
 		OnTasksSkipped: func(orgID string, skipped, total int) {
@@ -513,10 +495,9 @@ func (a *App) buildRouting() {
 	// skip beside it: the answer is cached per org behind a short TTL and
 	// invalidated by the admin write (in process, or over the tf_ctl relay).
 	a.router.SetEventSourceGate(a.stores.OrgEventSources)
-	// The post-scoring re-derive discharges tasks.rederive_owed through the
-	// score store — the clear half of the mark UpdateTaskScores raises with
-	// every scores write.
-	a.router.SetReDeriveLedger(a.stores.Scores)
+	// The re-derive worker claims the re-evaluation rows the score store
+	// admits with every scores write.
+	a.router.SetTaskReDerive(a.stores.TaskReDerive)
 	// Mirror the per-event routing disposition sentinel onto the bus
 	// (TFAC-593) so an async event source (e.g. Slack) can learn
 	// synchronously-unavailable routing outcomes. The bus is built in

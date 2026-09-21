@@ -40,3 +40,23 @@ func TestPendingFiringsValidates(t *testing.T) {
 		t.Errorf("sqlite claim filter = %q", got)
 	}
 }
+
+// TestTaskReDeriveValidates pins the same for the re-evaluation kind, and
+// that its one frozen column is the revision the score write raises.
+func TestTaskReDeriveValidates(t *testing.T) {
+	for _, d := range []workitem.Dialect{workitem.SQLite, workitem.Postgres} {
+		k := TaskReDerive(d)
+		if err := k.Validate(); err != nil {
+			t.Errorf("%s: %v", d, err)
+		}
+		if k.Strategy != workitem.SingleTx {
+			t.Errorf("%s: strategy = %s, want single_tx", d, k.Strategy)
+		}
+		if len(k.Frozen) != 1 || k.Frozen[0] != "requested_revision" {
+			t.Errorf("%s: frozen = %v, want [requested_revision]", d, k.Frozen)
+		}
+	}
+	if TaskReDeriveDeferScoreMoved != "score_moved" {
+		t.Errorf("defer reason = %q", TaskReDeriveDeferScoreMoved)
+	}
+}

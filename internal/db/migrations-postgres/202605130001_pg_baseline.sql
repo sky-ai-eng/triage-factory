@@ -1171,10 +1171,10 @@ CREATE TABLE public.tasks (
     autonomy_suitability real,
     priority_reasoning text,
     scoring_status text DEFAULT 'pending'::text NOT NULL,
-    -- An owed post-scoring re-derive: the event-time trigger pass skips deferred
-    -- (min_autonomy_suitability > 0) triggers on the promise a re-derive fires them
-    -- once a score exists. Written with the scores; the scorer drains the owed set.
-    rederive_owed boolean DEFAULT false NOT NULL,
+    -- Counts score writes. UpdateTaskScores raises it with the scores and, in
+    -- the same transaction, raises the task's task_rederive_queue row to match;
+    -- a re-evaluation completes only against the revision it claimed.
+    score_revision bigint DEFAULT 0 NOT NULL,
     severity text,
     relevance_reason text,
     source_status text,
@@ -1752,11 +1752,6 @@ CREATE INDEX idx_tasks_org_status ON public.tasks USING btree (org_id, status);
 
 
 CREATE INDEX idx_tasks_org_status_priority ON public.tasks USING btree (org_id, status, priority_score DESC);
-
-
--- Partial: the owed set is empty in a crash-free cycle, so the index spans only the
--- rare owed rows. created_at trails org_id because the drain reads oldest-first.
-CREATE INDEX idx_tasks_rederive_owed ON public.tasks USING btree (org_id, created_at) WHERE rederive_owed;
 
 
 CREATE INDEX conversations_actor_agent_idx ON public.conversations USING btree (actor_agent_id) WHERE (actor_agent_id IS NOT NULL);
@@ -3869,6 +3864,93 @@ GRANT ALL ON TABLE public.event_queue TO anon;
 GRANT ALL ON TABLE public.event_queue TO authenticated;
 GRANT ALL ON TABLE public.event_queue TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.event_queue TO tf_app;
+
+
+-- The post-scoring re-evaluation as a work kind, on the shared work-item block
+-- (internal/db/workitem; the kind is workkinds.TaskReDerive). One row per task
+-- whose scores have landed and whose deferred (min_autonomy_suitability > 0)
+-- triggers have not yet been evaluated against them, keyed on the task id
+-- while the row is ready, leased or parked. UpdateTaskScores admits the row
+-- and raises its requested_revision in the transaction that writes the
+-- scores, taking this table before tasks; the worker freezes
+-- requested_revision into its receipt at claim and completes only while the
+-- row still carries that value, deferring otherwise. The two columns after
+-- the block are this kind's own.
+--
+-- Admin-pool wired with org_id bound per statement; the task_rederive_queue_all
+-- policy below is defense-in-depth, and it is FOR ALL because admission's
+-- conflict arm and every guarded write are UPDATEs.
+--
+CREATE TABLE public.task_rederive_queue (
+    id                   bigint NOT NULL,
+    org_id               uuid NOT NULL,
+    status               TEXT NOT NULL CHECK (status IN ('ready','leased','done','parked','cancelled')),
+    attempt              INTEGER NOT NULL DEFAULT 0,
+    max_attempts         INTEGER NOT NULL,
+    next_attempt_at      TIMESTAMPTZ NULL,
+    lease_generation     BIGINT NOT NULL DEFAULT 0,
+    lease_owner          TEXT NULL,
+    lease_epoch          BIGINT NULL,
+    leased_at            TIMESTAMPTZ NULL,
+    lease_expires_at     TIMESTAMPTZ NULL,
+    cancel_requested_at  TIMESTAMPTZ NULL,
+    cancel_requested_by  TEXT NULL,
+    cancel_reason        TEXT NULL,
+    last_error           TEXT NULL,
+    last_outcome         TEXT NULL,
+    unique_key           TEXT NULL,
+    superseded_by        BIGINT NULL,
+    first_enqueued_at    TIMESTAMPTZ NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    done_at              TIMESTAMPTZ NULL,
+    task_id              uuid NOT NULL,
+    requested_revision   BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE SEQUENCE public.task_rederive_queue_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+ALTER SEQUENCE public.task_rederive_queue_id_seq OWNED BY public.task_rederive_queue.id;
+
+ALTER TABLE ONLY public.task_rederive_queue ALTER COLUMN id SET DEFAULT nextval('public.task_rederive_queue_id_seq'::regclass);
+
+ALTER TABLE ONLY public.task_rederive_queue
+    ADD CONSTRAINT task_rederive_queue_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.task_rederive_queue
+    ADD CONSTRAINT task_rederive_queue_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.task_rederive_queue
+    ADD CONSTRAINT task_rederive_queue_task_id_org_id_fkey FOREIGN KEY (task_id, org_id) REFERENCES public.tasks(id, org_id) ON DELETE CASCADE;
+
+-- The work-item indexes as workitem.IndexDDL renders them for this kind,
+-- naming the table through its schema like every other statement here; a
+-- test asserts each is present.
+CREATE INDEX IF NOT EXISTS idx_task_rederive_queue_ready_next ON public.task_rederive_queue (next_attempt_at, id) WHERE status = 'ready';
+CREATE INDEX IF NOT EXISTS idx_task_rederive_queue_ready_cancel ON public.task_rederive_queue (id) WHERE status = 'ready' AND cancel_requested_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_task_rederive_queue_leased_expiry ON public.task_rederive_queue (lease_expires_at) WHERE status = 'leased';
+CREATE INDEX IF NOT EXISTS idx_task_rederive_queue_parked ON public.task_rederive_queue (org_id, id) WHERE status = 'parked';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_task_rederive_queue_unique_key ON public.task_rederive_queue (org_id, unique_key) WHERE unique_key IS NOT NULL AND status IN ('ready','leased','parked');
+
+ALTER TABLE public.task_rederive_queue ENABLE ROW LEVEL SECURITY;
+CREATE POLICY task_rederive_queue_all ON public.task_rederive_queue
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+GRANT ALL ON TABLE public.task_rederive_queue TO postgres;
+GRANT ALL ON TABLE public.task_rederive_queue TO anon;
+GRANT ALL ON TABLE public.task_rederive_queue TO authenticated;
+GRANT ALL ON TABLE public.task_rederive_queue TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.task_rederive_queue TO tf_app;
+
+GRANT ALL ON SEQUENCE public.task_rederive_queue_id_seq TO postgres;
+GRANT ALL ON SEQUENCE public.task_rederive_queue_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.task_rederive_queue_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.task_rederive_queue_id_seq TO service_role;
+GRANT SELECT,USAGE ON SEQUENCE public.task_rederive_queue_id_seq TO tf_app;
 
 
 -- Per-org Atlassian OAuth (3LO) app registration for the per-user "Connect

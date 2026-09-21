@@ -168,3 +168,66 @@ func PendingFiringsClaimFilter(d workitem.Dialect) string {
 		"r.task_id = t.task_id AND r.ended_at IS NULL AND r.parent_conversation_id IS NULL" +
 		" AND (r.status IS NULL OR r.status NOT IN ('completed','failed')))"
 }
+
+// The score re-evaluation kind's identity on the work-kind registry, declared
+// beside the Kind for the same reason the others are. A re-evaluation unit
+// is a handful of store reads and one small transaction, so a minute of
+// ready backlog means the worker is not draining.
+const (
+	TaskReDeriveName                 = "task_rederive_queue"
+	TaskReDeriveLabel                = "Score re-evaluations"
+	TaskReDeriveOldestReadyObjective = 60 * time.Second
+	// TaskReDeriveDeferScoreMoved is the deferral reason a re-evaluation
+	// records when a newer score landed after it was claimed.
+	TaskReDeriveDeferScoreMoved = "score_moved"
+)
+
+// TaskReDerive is the post-scoring re-evaluation of a task's deferred
+// triggers as a work kind: one row per task whose scores have landed and
+// whose min_autonomy_suitability triggers have not yet been evaluated
+// against them.
+//
+// SingleTx: the evaluation's effect is a pending_firings admission and the
+// task's claim stamp, which is exactly what a completion closure can hold.
+// The firing itself happens later, under the firings kind's own contract.
+//
+// Frozen requested_revision: the score write raises the row's
+// requested_revision in the transaction that writes the scores, and the
+// claim freezes the value into the receipt. Completion compares the frozen
+// value with the row's current one under the row lock — equal commits the
+// evaluation, higher commits nothing and defers — so an evaluation can never
+// mark a newer score's obligation done on the strength of an older read.
+// task_id is immutable after admission, so the store reads it by id after
+// the claim, as the event queue reads its columns.
+//
+// UniqueWhileUnsettled keyed on the task id itself: a score landing while a
+// row is ready, leased or parked raises that row in place instead of
+// minting another, and a score landing after the row is done admits a fresh
+// ready one.
+//
+// Timing and budget are the event queue's, for the same reason: the unit is
+// reads and one small transaction, so a 30s deadline is an order of
+// magnitude past a slow unit and every unit finishes inside the 60s lease
+// by construction. Nothing renews on a timer; RenewEvery is declared
+// because Validate requires a coherent value. Backoff is the package
+// default, so a read that keeps failing retries at roughly 5s, 10s, 20s,
+// 40s and then parks. Fairness interleaves at batch granularity, which is
+// why the worker claims ten at a time.
+func TaskReDerive(d workitem.Dialect) workitem.Kind {
+	return workitem.Kind{
+		Table:   "task_rederive_queue",
+		Dialect: d,
+		Policy: workitem.Policy{
+			MaxAttempts:  5,
+			Lease:        60 * time.Second,
+			RenewEvery:   20 * time.Second,
+			UnitDeadline: 30 * time.Second,
+			Fairness:     true,
+		},
+		Unique:   workitem.UniqueWhileUnsettled,
+		Strategy: workitem.SingleTx,
+		Columns:  []string{"task_id", "requested_revision"},
+		Frozen:   []string{"requested_revision"},
+		Observer: workmetrics.Observe(TaskReDeriveName),
+	}
+}

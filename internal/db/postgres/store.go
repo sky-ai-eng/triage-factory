@@ -226,6 +226,10 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// via an EXISTS subquery against tasks; org_id defense-in-
 		// depth fires in every WHERE/INSERT clause regardless.
 		PendingFirings: newPendingFiringsStore(admin, admin),
+		// TaskReDerive wires admin for the same reason: the re-derive worker
+		// is a system service with no per-user identity, and its
+		// completions admit firings on the same footing the router does.
+		TaskReDerive: newTaskReDeriveStore(admin),
 		// Events wires both pools: app for request-handler
 		// equivalents (stock carry-over, factory drag-to-delegate) and
 		// admin for background goroutines without JWT-claims context
@@ -446,7 +450,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 	// The work-kind registry is filled from the stores above rather than
 	// declared beside them, so a kind is registered exactly once and only as
 	// the store that owns its table.
-	s.stores.WorkKinds = []db.WorkKindHandle{s.stores.EventQueue.(db.WorkKindHandle), s.stores.PendingFirings.(db.WorkKindHandle)}
+	s.stores.WorkKinds = []db.WorkKindHandle{
+		s.stores.EventQueue.(db.WorkKindHandle),
+		s.stores.PendingFirings.(db.WorkKindHandle),
+		s.stores.TaskReDerive.(db.WorkKindHandle),
+	}
 	return s.stores
 }
 

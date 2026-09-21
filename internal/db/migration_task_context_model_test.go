@@ -29,8 +29,9 @@ const (
 // unsnoozed, with the rebuilt table refusing that shape from then on.
 //
 // The rebuild also has to carry the table: every column, every row, and the
-// eight indexes — including rederive_owed and its partial index, which arrived
-// after the baseline and is exactly the kind of thing a hand-copied DDL drops.
+// seven indexes that survive to HEAD — the assertions read the table as the
+// whole migration tree leaves it, so a column a later migration drops is
+// asserted absent rather than copied.
 // The FK children are seeded for the same reason the merge migration's test
 // seeds them: the swap drops and recreates `tasks`, so a child row that the
 // rebuild strands announces itself here rather than at someone's boot.
@@ -73,9 +74,9 @@ func TestMigrate_TasksRebuild_RetiresInReviewAndEmptiesTheQueueOfClaims(t *testi
 		// retired status, carrying enough of the rest of the table that a
 		// column the rebuild forgot to copy shows up as a lost value.
 		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id, status,
-			priority_score, ai_summary, scoring_status, claimed_by_user_id, rederive_owed)
+			priority_score, ai_summary, scoring_status, claimed_by_user_id)
 			VALUES ('t-review', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'ir', 'ev1', 'in_review',
-			0.75, 'the summary', 'scored', '` + userID + `', 1)`,
+			0.75, 'the summary', 'scored', '` + userID + `')`,
 		// The statuses that stay, so the rewrite is shown to be targeted
 		// rather than a blanket write over the board.
 		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id, status)
@@ -184,18 +185,18 @@ func TestMigrate_TasksRebuild_RetiresInReviewAndEmptiesTheQueueOfClaims(t *testi
 		summary   string
 		scoring   string
 		claimedBy string
-		rederive  bool
+		revision  int64
 		closeReas *string
 	)
 	if err := database.QueryRow(`
-		SELECT priority_score, ai_summary, scoring_status, claimed_by_user_id, rederive_owed, close_reason
+		SELECT priority_score, ai_summary, scoring_status, claimed_by_user_id, score_revision, close_reason
 		  FROM tasks WHERE id = 't-review'`,
-	).Scan(&priority, &summary, &scoring, &claimedBy, &rederive, &closeReas); err != nil {
+	).Scan(&priority, &summary, &scoring, &claimedBy, &revision, &closeReas); err != nil {
 		t.Fatalf("read the rebuilt row: %v", err)
 	}
-	if priority != 0.75 || summary != "the summary" || scoring != "scored" || claimedBy != userID || !rederive || closeReas != nil {
-		t.Errorf("rebuilt row = {priority %v, summary %q, scoring %q, claimed_by %q, rederive_owed %v, close_reason %v}; the rebuild lost a column",
-			priority, summary, scoring, claimedBy, rederive, closeReas)
+	if priority != 0.75 || summary != "the summary" || scoring != "scored" || claimedBy != userID || revision != 0 || closeReas != nil {
+		t.Errorf("rebuilt row = {priority %v, summary %q, scoring %q, claimed_by %q, score_revision %v, close_reason %v}; the rebuild lost a column",
+			priority, summary, scoring, claimedBy, revision, closeReas)
 	}
 
 	// The CHECK is what makes the value unwritable rather than merely
@@ -224,13 +225,12 @@ func TestMigrate_TasksRebuild_RetiresInReviewAndEmptiesTheQueueOfClaims(t *testi
 		t.Error("inserting a held snoozed task succeeded; tasks_queue_unclaimed must refuse it")
 	}
 
-	// The eight indexes the dropped table carried are back — an index lost in
-	// a rebuild is invisible until a lane gets slow or a dedup race lands two
+	// The indexes the dropped table carried are back — an index lost in a
+	// rebuild is invisible until a lane gets slow or a dedup race lands two
 	// tasks for one situation.
 	wantIndexes := []string{
 		"idx_tasks_active_entity_event_dedup",
 		"idx_tasks_entity",
-		"idx_tasks_rederive_owed",
 		"idx_tasks_status",
 		"idx_tasks_status_priority",
 		"tasks_claimed_agent_idx",

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"sort"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -57,48 +58,56 @@ type ScoreStore interface {
 	// overwrite.
 	ResetStaleScoring(ctx context.Context, orgID string) (int, error)
 
-	// UpdateTaskScores applies AI-generated scores and summaries to
-	// tasks and sets scoring_status = 'scored'. Atomic across the
-	// whole batch (single tx); a partial-application failure rolls
-	// back so the runner sees an all-or-nothing outcome.
+	// UpdateTaskScores applies AI-generated scores and summaries to tasks
+	// and sets scoring_status = 'scored'. Atomic across the whole batch (one
+	// transaction); a partial-application failure rolls back so the runner
+	// sees an all-or-nothing outcome.
 	//
-	// It also raises rederive_owed in the same statement. The scores and
-	// the obligation they create — evaluate this task's deferred triggers
-	// against the new autonomy_suitability — are one write, so no crash can
-	// land the scores without the debt.
+	// In the same transaction, and before it writes any tasks row, it admits
+	// or raises each task's task_rederive_queue row (workkinds.TaskReDerive,
+	// keyed on the task id) and sets the row's requested_revision to the
+	// revision the tasks statement then stamps as score_revision. The scores
+	// and the obligation they create — evaluate this task's deferred
+	// triggers against the new autonomy_suitability — are one commit, so no
+	// crash can land the scores without the obligation, and a re-evaluation
+	// claimed against an older revision cannot complete against the newer
+	// one. It is the only writer of priority_score, autonomy_suitability,
+	// ai_summary, priority_reasoning and score_revision, and the only writer
+	// of requested_revision; a future path that persists scoring results
+	// goes through it.
+	//
+	// Lock order: task_rederive_queue before tasks, every task in ascending
+	// id order. A completion holding a queue row reaches tasks only through
+	// its firings admission, so a score writer that took the queue row first
+	// waits behind it rather than deadlocking with it.
 	//
 	// Exempt from the returned-row rule: it writes a batch atomically. The
 	// scorer applies a cycle's worth of updates in one transaction, so there
 	// is no single row to hand back.
 	UpdateTaskScores(ctx context.Context, orgID string, updates []domain.TaskScoreUpdate) error
 
-	// TasksOwedReDerive returns the org's task IDs whose scores committed
-	// but whose post-scoring re-derive has not been recorded as done. The
-	// runner drains it at the top of a cycle, which is the crash backstop
-	// behind the OnScoringCompleted fast path: the callback runs after the
-	// scores commit, so a process killed in between leaves tasks 'scored'
-	// (invisible to UnscoredTasks forever) with their deferred triggers
-	// never evaluated.
-	//
-	// Empty on every crash-free cycle. Oldest first, so a backlog drains in
-	// the order it accrued.
-	TasksOwedReDerive(ctx context.Context, orgID string) ([]string, error)
-
-	// ClearReDeriveOwed discharges the obligation for tasks the re-derive
-	// pass has evaluated. Called by that pass and by nothing else: clearing
-	// before the evaluation would recreate the very window the column
-	// exists to close, and clearing on a bail (a store error mid-evaluation)
-	// would drop work the next cycle should retry.
-	//
-	// Re-clearing an already-clear task is a no-op, which is what a drain
-	// that races the callback sees.
-	//
-	// Exempt from the returned-row rule: it writes a batch, same as
-	// MarkScoring.
-	ClearReDeriveOwed(ctx context.Context, orgID string, taskIDs []string) error
-
 	// UnscoredTasks returns queued tasks that haven't been scored
 	// yet (status='queued' AND scoring_status='pending'), joined to
 	// their entity. Used by the runner to discover work per cycle.
 	UnscoredTasks(ctx context.Context, orgID string) ([]domain.Task, error)
+}
+
+// OrderedScoreUpdates is the batch as UpdateTaskScores applies it on both
+// dialects: one update per task, the last one for a repeated id winning, in
+// ascending task id order. One per task is what keeps the queue row's
+// requested_revision equal to the task's score_revision — a repeated id
+// would raise the revision once per repetition on one side and once per
+// row on the other — and the fixed order is what keeps two concurrent
+// writers from deadlocking on each other's queue rows.
+func OrderedScoreUpdates(updates []domain.TaskScoreUpdate) []domain.TaskScoreUpdate {
+	last := make(map[string]domain.TaskScoreUpdate, len(updates))
+	for _, u := range updates {
+		last[u.ID] = u
+	}
+	ordered := make([]domain.TaskScoreUpdate, 0, len(last))
+	for _, u := range last {
+		ordered = append(ordered, u)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	return ordered
 }

@@ -5,244 +5,257 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// TestReDeriveAfterScoring_CrashResidueStrandsDeferredTrigger is the
-// blast radius the scorer's crash-recovery reset closes, stated as a
-// test: a task the scorer claimed ('in_progress') and never scored is
-// invisible to UnscoredTasks, so its autonomy_suitability stays NULL and
-// the re-derive — the whole promise behind deferring a
-// min_autonomy_suitability trigger at event time — returns early on it.
-// Nothing errors; the trigger just never fires.
-func TestReDeriveAfterScoring_CrashResidueStrandsDeferredTrigger(t *testing.T) {
-	ctx := context.Background()
-	database := newTestDB(t)
-	taskID, _ := setupReDeriveScenario(t, database, 0.6)
-	scores := sqlitestore.New(database).Scores
+// The worker's recovery and race behavior, on the SQLite handle the local
+// brain runs on. Every scenario scores through the store, so the queue row
+// under test is the one production's score write admits.
 
-	// The crash: claimed before the LLM call, process killed before the
-	// scores landed.
-	if err := scores.MarkScoring(ctx, runmode.LocalDefaultOrgID, []string{taskID}); err != nil {
-		t.Fatalf("MarkScoring: %v", err)
+// hookedReDerive wraps the queue store with a hook that runs before the
+// completion opens its transaction: the seam between the evaluation's reads
+// and the completion's lock, where a newer score or a lost lease lands in
+// the race these tests stage.
+type hookedReDerive struct {
+	db.TaskReDeriveStore
+	beforeComplete func()
+}
+
+func (h hookedReDerive) Complete(ctx context.Context, r workitem.Receipt, effects func(db.PendingFiringsStore) error) error {
+	if h.beforeComplete != nil {
+		h.beforeComplete()
 	}
+	return h.TaskReDeriveStore.Complete(ctx, r, effects)
+}
 
-	unscored, err := scores.UnscoredTasks(ctx, runmode.LocalDefaultOrgID)
+// hookedReDeriveRouter is reDeriveRouter with the queue store wrapped.
+func hookedReDeriveRouter(t *testing.T, database *sql.DB, handlers db.EventHandlerStore, beforeComplete func()) *Router {
+	t.Helper()
+	seedLocalBot(t, database)
+	st := sqlitestore.New(database)
+	if handlers == nil {
+		handlers = testEventHandlerStore(database)
+	}
+	r := NewRouter(testPromptStore(database), testBlueprintStore(database), handlers, st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	r.SetTaskReDerive(hookedReDerive{TaskReDeriveStore: st.TaskReDerive, beforeComplete: beforeComplete})
+	r.SetExecutorID("rederive-worker-test", 1)
+	return r
+}
+
+// expireReDeriveLease rewinds a leased row's lease into the past, standing
+// in for a holder that died without a terminal write.
+func expireReDeriveLease(t *testing.T, database *sql.DB, taskID string) {
+	t.Helper()
+	res, err := database.Exec(`UPDATE task_rederive_queue SET lease_expires_at = strftime('%Y-%m-%d %H:%M:%f','now','-1 hours') WHERE task_id = ? AND status = 'leased'`, taskID)
 	if err != nil {
-		t.Fatalf("UnscoredTasks: %v", err)
+		t.Fatalf("expire lease: %v", err)
 	}
-	if len(unscored) != 0 {
-		t.Fatalf("UnscoredTasks returned %d tasks, want 0 — the fixture must actually be stranded", len(unscored))
-	}
-
-	stub := &stubDelegator{db: database}
-	crashResidueRouter(database, stub).ReDeriveAfterScoring(ctx, runmode.LocalDefaultOrgID, []string{taskID})
-	if stub.calls != 0 {
-		t.Errorf("unscored task delegated (%d calls), want 0 — re-derive has no score to gate on", stub.calls)
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("expire lease touched %d rows, want the one leased row", n)
 	}
 }
 
-// TestReDeriveAfterScoring_RecoveredResidueFiresDeferredTrigger is the
-// same fixture carried through the recovery: the next cycle's
-// ResetStaleScoring hands the stranded task back to UnscoredTasks, it
-// gets scored, and the deferred trigger fires on the re-derive that
-// follows.
-func TestReDeriveAfterScoring_RecoveredResidueFiresDeferredTrigger(t *testing.T) {
-	ctx := context.Background()
-	database := newTestDB(t)
-	taskID, _ := setupReDeriveScenario(t, database, 0.6)
-	scores := sqlitestore.New(database).Scores
-
-	if err := scores.MarkScoring(ctx, runmode.LocalDefaultOrgID, []string{taskID}); err != nil {
-		t.Fatalf("MarkScoring: %v", err)
-	}
-
-	// Next cycle starts: recovery first, then the cycle picks its work.
-	recovered, err := scores.ResetStaleScoring(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("ResetStaleScoring: %v", err)
-	}
-	if recovered != 1 {
-		t.Fatalf("ResetStaleScoring recovered %d tasks, want 1", recovered)
-	}
-	unscored, err := scores.UnscoredTasks(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("UnscoredTasks: %v", err)
-	}
-	if len(unscored) != 1 || unscored[0].ID != taskID {
-		t.Fatalf("UnscoredTasks = %v, want the recovered task %s", unscored, taskID)
-	}
-	if err := updateScores(t, database, []domain.TaskScoreUpdate{{
-		ID: taskID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "test",
-	}}); err != nil {
-		t.Fatalf("update scores: %v", err)
-	}
-
-	task, err := testTaskStore(database).Get(ctx, runmode.LocalDefaultOrgID, taskID)
-	if err != nil || task == nil {
-		t.Fatalf("get task: %v", err)
-	}
-	if task.AutonomySuitability == nil {
-		t.Fatal("autonomy_suitability is NULL after the recovering cycle scored the task")
-	}
-
-	stub := &stubDelegator{db: database}
-	crashResidueRouter(database, stub).ReDeriveAfterScoring(ctx, runmode.LocalDefaultOrgID, []string{taskID})
-	if stub.calls != 1 {
-		t.Errorf("delegate calls = %d, want 1 — the deferred trigger must fire once the recovered task is scored", stub.calls)
+// ripenReDerive clears a ready row's retry time, so a requeued row is
+// claimable again without waiting out the backoff.
+func ripenReDerive(t *testing.T, database *sql.DB, taskID string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE task_rederive_queue SET next_attempt_at = NULL WHERE task_id = ? AND status = 'ready'`, taskID); err != nil {
+		t.Fatalf("ripen: %v", err)
 	}
 }
 
-// TestReDeriveAfterScoring_OwedDrainFiresAfterMissedCallback is the window
-// on the far side of the scores commit, stated as a test: the scores landed,
-// the process died before the post-scoring callback ran, and the task is now
-// 'scored' — so no future cycle re-picks it and its deferred trigger would
-// never be evaluated. The debt the scores write recorded is the only thing
-// that gets it evaluated, and draining it must fire the trigger exactly once.
-func TestReDeriveAfterScoring_OwedDrainFiresAfterMissedCallback(t *testing.T) {
-	ctx := context.Background()
+// TestReDeriveWorker_ReclaimsADeadHoldersRowAndEvaluatesOnce: a holder
+// claimed the row and died before completing. Nothing it did landed —
+// its admissions were inside its uncommitted completion — so the reclaim
+// evaluates the task once and admits its firing once, and a later pass has
+// nothing left to do.
+func TestReDeriveWorker_ReclaimsADeadHoldersRowAndEvaluatesOnce(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
-	scores := sqlitestore.New(database).Scores
+	scoreTask(t, database, taskID, 0.9)
+	st := sqlitestore.New(database)
 
-	// The crash: scores committed, callback never ran. Written through the
-	// store so the owed mark comes from the same statement production uses.
-	if err := scores.UpdateTaskScores(ctx, runmode.LocalDefaultOrgID, []domain.TaskScoreUpdate{{
-		ID: taskID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "test",
-	}}); err != nil {
-		t.Fatalf("UpdateTaskScores: %v", err)
+	// The dead holder: claimed, never came back.
+	batch, err := st.TaskReDerive.Claim(t.Context(), workitem.Owner{ID: "dead-pod", Epoch: 1}, 1)
+	if err != nil || len(batch.Items) != 1 {
+		t.Fatalf("Claim: %+v %v", batch, err)
 	}
-	unscored, err := scores.UnscoredTasks(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("UnscoredTasks: %v", err)
-	}
-	if len(unscored) != 0 {
-		t.Fatalf("UnscoredTasks returned %d tasks, want 0 — a scored task is never re-picked, which is what makes the missed callback permanent", len(unscored))
-	}
+	expireReDeriveLease(t, database, taskID)
 
-	// The next cycle's drain.
-	owed, err := scores.TasksOwedReDerive(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("TasksOwedReDerive: %v", err)
+	r := reDeriveRouter(t, database, nil)
+	drainReDeriveOnce(t, r)
+
+	firings := firingsForTask(t, database, taskID)
+	if len(firings) != 1 {
+		t.Fatalf("reclaimed evaluation admitted %d firing(s), want exactly 1: %+v", len(firings), firings)
 	}
-	if len(owed) != 1 || owed[0] != taskID {
-		t.Fatalf("TasksOwedReDerive = %v, want [%s] — the scores write must record the debt", owed, taskID)
+	row := reDeriveRowFor(t, database, taskID)
+	if row.status != workitem.StatusDone || row.attempt != 2 || row.generation != 2 {
+		t.Errorf("row after the reclaim = %+v, want done at attempt 2, generation 2", row)
 	}
 
-	stub := &stubDelegator{db: database}
-	router := crashResidueRouter(database, stub)
-	router.ReDeriveAfterScoring(ctx, runmode.LocalDefaultOrgID, owed)
-
-	if stub.calls != 1 {
-		t.Fatalf("delegate calls = %d, want 1 — the drain is the only thing left that can fire this task's deferred trigger", stub.calls)
-	}
-
-	// The debt is discharged, so the cycle after that drains nothing...
-	owed, err = scores.TasksOwedReDerive(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("TasksOwedReDerive (after the pass): %v", err)
-	}
-	if len(owed) != 0 {
-		t.Errorf("TasksOwedReDerive after an evaluated pass = %v, want none", owed)
-	}
-	// ...and even a redundant pass over the same task fires nothing more:
-	// the trigger sits behind the replay fence and the task's own agent
-	// claim, which is why the drain needs no dedup of its own.
-	router.ReDeriveAfterScoring(ctx, runmode.LocalDefaultOrgID, []string{taskID})
-	if stub.calls != 1 {
-		t.Errorf("delegate calls = %d after a redundant re-derive, want 1", stub.calls)
-	}
-	if runs := countBlueprintRuns(t, database); runs != 1 {
-		t.Errorf("blueprint_runs = %d, want 1 — the (triggering_event_id, trigger_id) fence must absorb the replay", runs)
+	drainReDeriveOnce(t, r)
+	if firings := firingsForTask(t, database, taskID); len(firings) != 1 {
+		t.Errorf("a later pass changed the firings to %d; the obligation was already settled", len(firings))
 	}
 }
 
-// TestReDeriveAfterScoring_ClearsOwedMarkWithNothingToFire is the negative
-// space: the overwhelming majority of scored tasks have no deferred trigger
-// to fire. The pass still evaluated them, so it still discharges their debt
-// — otherwise the owed set would grow without bound and every cycle would
-// re-derive the whole board.
-func TestReDeriveAfterScoring_ClearsOwedMarkWithNothingToFire(t *testing.T) {
-	ctx := context.Background()
+// TestReDeriveWorker_ScoreLandingAfterTheClaimDefersAndReEvaluates: the
+// evaluation read a score above the threshold and planned a firing; before
+// its completion locked the row a newer score landed below the threshold.
+// The completion sees the raised revision and commits nothing; the deferral
+// refunds the attempt; the next claim freezes the newer revision and decides
+// on the newer score, which fires nothing. A score that crossed the threshold
+// downward is never acted on through the older read.
+func TestReDeriveWorker_ScoreLandingAfterTheClaimDefersAndReEvaluates(t *testing.T) {
 	database := newTestDB(t)
-	// Threshold above the score below: the trigger is evaluated and declines.
-	taskID, _ := setupReDeriveScenario(t, database, 0.9)
-	scores := sqlitestore.New(database).Scores
+	taskID, _ := setupReDeriveScenario(t, database, 0.6)
+	scoreTask(t, database, taskID, 0.9)
 
-	if err := scores.UpdateTaskScores(ctx, runmode.LocalDefaultOrgID, []domain.TaskScoreUpdate{{
-		ID: taskID, PriorityScore: 0.5, AutonomySuitability: 0.2, Summary: "test",
-	}}); err != nil {
-		t.Fatalf("UpdateTaskScores: %v", err)
+	landed := false
+	r := hookedReDeriveRouter(t, database, nil, func() {
+		if landed {
+			return
+		}
+		landed = true
+		scoreTask(t, database, taskID, 0.4)
+	})
+
+	drainReDeriveOnce(t, r)
+	if !landed {
+		t.Fatal("the newer score never landed; the hook did not run before the completion")
+	}
+	requireNoFirings(t, database, taskID)
+	row := reDeriveRowFor(t, database, taskID)
+	if row.status != workitem.StatusReady || row.attempt != 0 || row.revision != 2 || row.lastOutcome != "deferred" {
+		t.Fatalf("row after the moved score = %+v, want ready at attempt 0 (refunded), revision 2, deferred", row)
 	}
 
-	stub := &stubDelegator{db: database}
-	crashResidueRouter(database, stub).ReDeriveAfterScoring(ctx, runmode.LocalDefaultOrgID, []string{taskID})
-
-	if stub.calls != 0 {
-		t.Errorf("delegate calls = %d, want 0 — the task scored below the trigger's threshold", stub.calls)
+	drainReDeriveOnce(t, r)
+	requireNoFirings(t, database, taskID)
+	row = reDeriveRowFor(t, database, taskID)
+	if row.status != workitem.StatusDone || row.attempt != 1 {
+		t.Errorf("row after the re-evaluation = %+v, want done after one charged attempt", row)
 	}
-	owed, err := scores.TasksOwedReDerive(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("TasksOwedReDerive: %v", err)
-	}
-	if len(owed) != 0 {
-		t.Errorf("TasksOwedReDerive = %v, want none — a task with nothing to fire was still evaluated", owed)
+	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
+	if task.ClaimedByAgentID != "" {
+		t.Errorf("task claimed by %q; the evaluation against the older score must not have landed", task.ClaimedByAgentID)
 	}
 }
 
-// TestReDeriveAfterScoring_KeepsOwedMarkWhenEvaluationBails is the other
-// half of the clear's contract. The pass reads several stores per task; when
-// one of them fails, the task was never actually decided. Clearing there
-// would be the same silent loss the column exists to prevent, just with a
-// store error in place of a crash — so the mark survives and the next
-// cycle's drain asks again.
-func TestReDeriveAfterScoring_KeepsOwedMarkWhenEvaluationBails(t *testing.T) {
-	ctx := context.Background()
+// TestReDeriveWorker_ReadFailureRequeuesWithBackoffAndParksOnTheFifth: a
+// store read that keeps failing mid-evaluation is not a decision. Each
+// attempt returns the row to the queue with a retry time; the fifth parks
+// it for a person, with the failure that spent the budget on the row.
+func TestReDeriveWorker_ReadFailureRequeuesWithBackoffAndParksOnTheFifth(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
-	store := sqlitestore.New(database)
+	scoreTask(t, database, taskID, 0.9)
 
-	if err := store.Scores.UpdateTaskScores(ctx, runmode.LocalDefaultOrgID, []domain.TaskScoreUpdate{{
-		ID: taskID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "test",
-	}}); err != nil {
-		t.Fatalf("UpdateTaskScores: %v", err)
-	}
-
-	stub := &stubDelegator{db: database}
 	handlers := failingHandlerStore{
 		EventHandlerStore: testEventHandlerStore(database),
 		err:               errors.New("simulated store failure"),
 	}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), handlers, nil, nil, nil,
-		testTaskStore(database), store.Conversations, store.Entities, store.PendingFirings,
-		store.Events, store.Orgs, store.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
-	router.SetReDeriveLedger(store.Scores)
-	router.ReDeriveAfterScoring(ctx, runmode.LocalDefaultOrgID, []string{taskID})
+	r := hookedReDeriveRouter(t, database, handlers, nil)
 
-	if stub.calls != 0 {
-		t.Errorf("delegate calls = %d, want 0 — the trigger read failed, so nothing was decided", stub.calls)
+	drainReDeriveOnce(t, r)
+	row := reDeriveRowFor(t, database, taskID)
+	if row.status != workitem.StatusReady || row.attempt != 1 || row.lastOutcome != string(workitem.OutcomeTransient) || !row.nextAttempt.Valid {
+		t.Fatalf("row after the first failure = %+v, want ready at attempt 1 with a backoff", row)
 	}
-	owed, err := store.Scores.TasksOwedReDerive(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("TasksOwedReDerive: %v", err)
-	}
-	if len(owed) != 1 || owed[0] != taskID {
-		t.Fatalf("TasksOwedReDerive after a bailed pass = %v, want [%s]", owed, taskID)
+	// Not yet ripe: a pass now claims nothing.
+	drainReDeriveOnce(t, r)
+	if row := reDeriveRowFor(t, database, taskID); row.attempt != 1 {
+		t.Fatalf("a pass before the backoff ripened charged attempt %d", row.attempt)
 	}
 
-	// The retry the surviving mark buys: same task, a store that works.
-	crashResidueRouter(database, stub).ReDeriveAfterScoring(ctx, runmode.LocalDefaultOrgID, owed)
-	if stub.calls != 1 {
-		t.Errorf("delegate calls = %d on the retry, want 1", stub.calls)
+	// Each failed attempt's retry sits inside the kind's backoff band for
+	// that attempt — 5s, 10s, 20s, 40s before jitter — so the delays grow
+	// rather than repeat.
+	requireBackoff(t, row, 1)
+	for attempt := 2; attempt <= 5; attempt++ {
+		ripenReDerive(t, database, taskID)
+		drainReDeriveOnce(t, r)
+		row := reDeriveRowFor(t, database, taskID)
+		if row.attempt != attempt {
+			t.Fatalf("after pass %d the row charged attempt %d", attempt, row.attempt)
+		}
+		if attempt < 5 {
+			if row.status != workitem.StatusReady {
+				t.Fatalf("after pass %d the row is %q, want ready with budget left", attempt, row.status)
+			}
+			requireBackoff(t, row, attempt)
+		}
+	}
+	row = reDeriveRowFor(t, database, taskID)
+	if row.status != workitem.StatusParked || row.lastOutcome != string(workitem.OutcomeTransient) {
+		t.Errorf("row after the fifth failure = %+v, want parked under the transient outcome that spent the budget", row)
+	}
+	requireNoFirings(t, database, taskID)
+
+	// A working read after a redrive evaluates it and admits the firing.
+	h := sqlitestore.New(database).TaskReDerive.(db.WorkKindHandle)
+	if err := workitem.Redrive(t.Context(), h.Conn(), h.Kind(), runmode.LocalDefaultOrgID, row.id, "operator"); err != nil {
+		t.Fatalf("Redrive: %v", err)
+	}
+	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
+	if firings := firingsForTask(t, database, taskID); len(firings) != 1 {
+		t.Errorf("redriven evaluation admitted %d firing(s), want 1", len(firings))
+	}
+	requireReDeriveDone(t, database, taskID)
+}
+
+// TestReDeriveWorker_CompletionThatLosesItsLeaseAdmitsNothing: the lease
+// lapses between the evaluation and the completion's lock. The completion
+// matches nothing and rolls back, so the planned firing never lands, and the
+// next claim reclaims the row and evaluates it again.
+func TestReDeriveWorker_CompletionThatLosesItsLeaseAdmitsNothing(t *testing.T) {
+	database := newTestDB(t)
+	taskID, _ := setupReDeriveScenario(t, database, 0.6)
+	scoreTask(t, database, taskID, 0.9)
+
+	lost := false
+	r := hookedReDeriveRouter(t, database, nil, func() {
+		if lost {
+			return
+		}
+		lost = true
+		expireReDeriveLease(t, database, taskID)
+	})
+
+	drainReDeriveOnce(t, r)
+	if !lost {
+		t.Fatal("the lease was never expired; the hook did not run before the completion")
+	}
+	requireNoFirings(t, database, taskID)
+	row := reDeriveRowFor(t, database, taskID)
+	if row.status != workitem.StatusLeased || row.attempt != 1 {
+		t.Fatalf("row after the lost lease = %+v, want still leased (expired) at attempt 1", row)
+	}
+	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
+	if task.ClaimedByAgentID != "" {
+		t.Errorf("task claimed by %q after a completion that lost its lease", task.ClaimedByAgentID)
+	}
+
+	// The successor reclaims and its evaluation lands once.
+	drainReDeriveOnce(t, r)
+	if firings := firingsForTask(t, database, taskID); len(firings) != 1 {
+		t.Errorf("successor admitted %d firing(s), want 1", len(firings))
+	}
+	row = reDeriveRowFor(t, database, taskID)
+	if row.status != workitem.StatusDone || row.generation != 2 {
+		t.Errorf("row after the successor = %+v, want done at generation 2", row)
 	}
 }
 
-// failingHandlerStore fails the trigger lookup the re-derive pass makes per
+// failingHandlerStore fails the trigger lookup the evaluation makes per
 // task, leaving every other store on the path working — the shape of a
 // transient DB blip mid-evaluation.
 type failingHandlerStore struct {
@@ -254,20 +267,26 @@ func (s failingHandlerStore) GetEnabledForEventSystem(context.Context, string, s
 	return nil, s.err
 }
 
-func countBlueprintRuns(t *testing.T, database *sql.DB) int {
+// requireBackoff asserts a requeued row's retry time lies in the kind's
+// jitter band for the attempt that failed: Base * 2^(attempt-1), within
+// ±25%, measured from now. The bands do not overlap, so a delay that failed
+// to grow lands outside its attempt's band.
+func requireBackoff(t *testing.T, row reDeriveRow, attempt int) {
 	t.Helper()
-	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM blueprint_runs`).Scan(&n); err != nil {
-		t.Fatalf("count blueprint_runs: %v", err)
+	if !row.nextAttempt.Valid {
+		t.Fatalf("attempt %d: next_attempt_at is NULL, want a backoff", attempt)
 	}
-	return n
-}
-
-func crashResidueRouter(database *sql.DB, stub *stubDelegator) *Router {
-	store := sqlitestore.New(database)
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), store.Conversations, store.Entities, store.PendingFirings,
-		store.Events, store.Orgs, store.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
-	r.SetReDeriveLedger(store.Scores)
-	return r
+	next, err := time.Parse("2006-01-02 15:04:05.000", row.nextAttempt.String)
+	if err != nil {
+		t.Fatalf("attempt %d: parse next_attempt_at %q: %v", attempt, row.nextAttempt.String, err)
+	}
+	delay := next.Sub(time.Now().UTC())
+	spec := taskReDeriveKind.Policy.Backoff
+	lo := workitem.Backoff(spec, attempt, func() float64 { return 0 })
+	hi := workitem.Backoff(spec, attempt, func() float64 { return 1 })
+	// The write happened moments ago, so the delay measured now is a little
+	// under what was written; a second of slack covers a slow runner.
+	if delay < lo-time.Second || delay > hi {
+		t.Errorf("attempt %d: retry in %s, want within the backoff band [%s, %s]", attempt, delay, lo, hi)
+	}
 }

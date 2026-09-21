@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -28,16 +29,65 @@ func TestScoreStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
-	dbtest.RunScoreStoreConformance(t, func(t *testing.T) (db.ScoreStore, string, dbtest.ScoreSeeder) {
+	dbtest.RunScoreStoreConformance(t, func(t *testing.T) dbtest.ScoreFixture {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID := seedPgOrgAndUser(t, h)
-		seeder := func(t *testing.T, n int) []string {
-			t.Helper()
-			return seedPgTasks(t, h.AdminDB, orgID, userID, n)
+		return dbtest.ScoreFixture{
+			Store: stores.Scores,
+			OrgID: orgID,
+			Seed: func(t *testing.T, n int) []string {
+				t.Helper()
+				return seedPgTasks(t, h.AdminDB, orgID, userID, n)
+			},
+			ReDerive: stores.TaskReDerive,
+			ScoreRevision: func(t *testing.T, taskID string) int64 {
+				t.Helper()
+				return readPgScoreRevision(t, h.AdminDB, taskID)
+			},
+			QueueRows: func(t *testing.T, taskID string) []dbtest.ReDeriveQueueRow {
+				t.Helper()
+				return readPgReDeriveRows(t, h.AdminDB, taskID)
+			},
 		}
-		return stores.Scores, orgID, seeder
 	})
+}
+
+// readPgScoreRevision reads tasks.score_revision, the one column no domain
+// read projects.
+func readPgScoreRevision(t *testing.T, conn *sql.DB, taskID string) int64 {
+	t.Helper()
+	var rev int64
+	if err := conn.QueryRow(`SELECT score_revision FROM tasks WHERE id = $1`, taskID).Scan(&rev); err != nil {
+		t.Fatalf("read score_revision of %s: %v", taskID, err)
+	}
+	return rev
+}
+
+// readPgReDeriveRows reads a task's task_rederive_queue rows, oldest first,
+// in the shape the conformance suites compare.
+func readPgReDeriveRows(t *testing.T, conn *sql.DB, taskID string) []dbtest.ReDeriveQueueRow {
+	t.Helper()
+	rows, err := conn.Query(`
+		SELECT id, status, attempt, requested_revision, COALESCE(unique_key, '')
+		FROM task_rederive_queue WHERE task_id = $1 ORDER BY id
+	`, taskID)
+	if err != nil {
+		t.Fatalf("read task_rederive_queue rows of %s: %v", taskID, err)
+	}
+	defer rows.Close()
+	out := []dbtest.ReDeriveQueueRow{}
+	for rows.Next() {
+		var r dbtest.ReDeriveQueueRow
+		if err := rows.Scan(&r.ID, &r.Status, &r.Attempt, &r.RequestedRevision, &r.UniqueKey); err != nil {
+			t.Fatalf("scan task_rederive_queue row: %v", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read task_rederive_queue rows: %v", err)
+	}
+	return out
 }
 
 // TestScoreStore_Postgres_ResetStaleScoring_OrgScoped pins the half of
@@ -89,14 +139,12 @@ func TestScoreStore_Postgres_ResetStaleScoring_OrgScoped(t *testing.T) {
 	}
 }
 
-// TestScoreStore_Postgres_ReDeriveOwed_OrgScoped is the multi-tenant half
-// of the owed-re-derive contract, which SQLite's N=1 harness can't express:
-// the per-org scoring runners drain concurrently, so one org's list must not
-// surface another's debts and one org's clear must not discharge them. An
-// unscoped clear is the dangerous direction — it would mark another tenant's
-// tasks as re-derived by a pass that never looked at them, which is exactly
-// the silent never-fires this column exists to prevent.
-func TestScoreStore_Postgres_ReDeriveOwed_OrgScoped(t *testing.T) {
+// TestScoreStore_Postgres_ReDeriveAdmission_OrgScoped is the multi-tenant
+// half of the re-evaluation contract, which SQLite's N=1 harness can't
+// express: the per-org scoring runners write concurrently, so one org's
+// score write must admit obligations for its own tasks alone, and the
+// operator surface for one org must list none of another's.
+func TestScoreStore_Postgres_ReDeriveAdmission_OrgScoped(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
@@ -107,47 +155,35 @@ func TestScoreStore_Postgres_ReDeriveOwed_OrgScoped(t *testing.T) {
 	tasksB := seedPgTasks(t, h.AdminDB, orgB, userB, 2)
 
 	ctx := context.Background()
-	score := func(orgID string, ids []string) {
-		t.Helper()
-		updates := make([]domain.TaskScoreUpdate, len(ids))
-		for i, id := range ids {
-			updates[i] = domain.TaskScoreUpdate{ID: id, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r"}
+	updates := make([]domain.TaskScoreUpdate, len(tasksA))
+	for i, id := range tasksA {
+		updates[i] = domain.TaskScoreUpdate{ID: id, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r"}
+	}
+	if err := stores.Scores.UpdateTaskScores(ctx, orgA, updates); err != nil {
+		t.Fatalf("UpdateTaskScores(orgA): %v", err)
+	}
+
+	for _, id := range tasksA {
+		rows := readPgReDeriveRows(t, h.AdminDB, id)
+		if len(rows) != 1 || rows[0].Status != workitem.StatusReady || rows[0].RequestedRevision != 1 {
+			t.Errorf("orgA task %s queue rows = %+v, want one ready row at revision 1", id, rows)
 		}
-		if err := stores.Scores.UpdateTaskScores(ctx, orgID, updates); err != nil {
-			t.Fatalf("UpdateTaskScores(%s): %v", orgID, err)
+	}
+	for _, id := range tasksB {
+		if rows := readPgReDeriveRows(t, h.AdminDB, id); len(rows) != 0 {
+			t.Errorf("orgB task %s has queue rows %+v after orgA's save", id, rows)
+		}
+		if rev := readPgScoreRevision(t, h.AdminDB, id); rev != 0 {
+			t.Errorf("orgB task %s score_revision = %d after orgA's save", id, rev)
 		}
 	}
-	score(orgA, tasksA)
-	score(orgB, tasksB)
 
-	owedA, err := stores.Scores.TasksOwedReDerive(ctx, orgA)
-	if err != nil {
-		t.Fatalf("TasksOwedReDerive(orgA): %v", err)
+	h2 := stores.TaskReDerive.(db.WorkKindHandle)
+	if _, total, err := workitem.List(ctx, h2.Conn(), h2.Kind(), orgB, "", 10, 0); err != nil || total != 0 {
+		t.Errorf("orgB lists %d re-evaluations (err %v), want none", total, err)
 	}
-	if len(owedA) != len(tasksA) {
-		t.Errorf("TasksOwedReDerive(orgA) returned %d ids, want %d — org B's debts must not appear", len(owedA), len(tasksA))
-	}
-
-	// orgA's re-derive pass runs and discharges its own set, naming orgB's
-	// task IDs too (what a confused caller or a cross-tenant ID mixup would
-	// produce). The org predicate has to reject them.
-	if err := stores.Scores.ClearReDeriveOwed(ctx, orgA, append(append([]string{}, tasksA...), tasksB...)); err != nil {
-		t.Fatalf("ClearReDeriveOwed(orgA): %v", err)
-	}
-
-	owedA, err = stores.Scores.TasksOwedReDerive(ctx, orgA)
-	if err != nil {
-		t.Fatalf("TasksOwedReDerive(orgA) after clear: %v", err)
-	}
-	if len(owedA) != 0 {
-		t.Errorf("orgA still owes %d re-derives after its own clear, want 0", len(owedA))
-	}
-	owedB, err := stores.Scores.TasksOwedReDerive(ctx, orgB)
-	if err != nil {
-		t.Fatalf("TasksOwedReDerive(orgB): %v", err)
-	}
-	if len(owedB) != len(tasksB) {
-		t.Errorf("orgB owes %d re-derives after orgA's clear, want %d — its tasks were never evaluated by that pass", len(owedB), len(tasksB))
+	if _, total, err := workitem.List(ctx, h2.Conn(), h2.Kind(), orgA, "", 10, 0); err != nil || total != len(tasksA) {
+		t.Errorf("orgA lists %d re-evaluations (err %v), want %d", total, err, len(tasksA))
 	}
 }
 

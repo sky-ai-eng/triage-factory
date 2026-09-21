@@ -22,35 +22,21 @@ type RunnerCallbacks struct {
 	// orgID identifies the cycle's tenant so subscribers (the WS
 	// scoring_started broadcast) can scope per-connection fanout.
 	OnScoringStarted func(orgID string, taskIDs []string)
-	// OnScoringCompleted fires once per scoring cycle after the
-	// task_scores writes commit. orgID is the scoring context (the
-	// runner is per-org); the slice is the set of task IDs that
-	// received fresh scores. Downstream re-derive needs orgID
-	// threaded so its store calls hit the right tenant in multi
-	// mode (every task in the slice belongs to orgID by construction).
+	// OnScoringCompleted fires once per scoring cycle after the scores
+	// commit. orgID is the scoring context (the runner is per-org); the
+	// slice is the set of task IDs that received fresh scores, for the
+	// websocket broadcast.
 	//
-	// ctx is the cycle's, and this hook alone takes one: the
-	// post-scoring re-derive it drives does durable work (fires
-	// deferred triggers), so it needs the cycle's values — trace
-	// context above all — rather than starting from nothing. The
-	// hook must not treat it as a lifetime; the cycle returns while
-	// the re-derive is still running, so a caller that keeps ctx
-	// past the call drops its cancellation first.
+	// The post-scoring re-evaluation of those tasks' deferred triggers is
+	// not this hook's to run: the score write admitted one
+	// task_rederive_queue row per task in the transaction that wrote the
+	// scores, and the router's re-derive worker claims them. The hook wakes
+	// that worker so the rows are claimed at once rather than on its next
+	// scan tick; a hook that never runs costs one tick, never an evaluation.
+	//
+	// ctx is the cycle's, carrying its values — trace context above all —
+	// and is valid for the duration of the call only.
 	OnScoringCompleted func(ctx context.Context, orgID string, taskIDs []string)
-	// OnReDeriveOwed fires at the top of a cycle for the org's tasks whose
-	// scores committed but whose post-scoring re-derive was never recorded
-	// as done — the crash backstop behind OnScoringCompleted. It is wired to
-	// the same ReDeriveAfterScoring pass, and that pass clears the owed mark
-	// for what it evaluates, so a normal cycle passes an empty set and this
-	// hook never fires.
-	//
-	// Called synchronously and before the cycle picks its work, which is
-	// what keeps the drain's clear from racing this cycle's own scores
-	// write: the scorer is single-flight per org, so nothing can raise a
-	// fresh mark on a task while the drain is deciding to clear its old one.
-	// Latency is therefore a cycle's worth of scoring, which is the right
-	// trade for a rare-crash repair.
-	OnReDeriveOwed func(ctx context.Context, orgID string, taskIDs []string)
 	// OnTasksSkipped fires once per scoring cycle if one or more batches
 	// errored. skipped is the exact count of tasks that weren't scored;
 	// total is len(tasks) at cycle start. orgID is the scoring context
@@ -189,19 +175,17 @@ func (r *Runner) run(ctx context.Context) {
 	// a row this cycle just claimed. Best-effort — a failure here leaves
 	// the residue for the next cycle rather than costing this one the
 	// genuinely-pending tasks it can still score.
+	//
+	// This is the whole of the cycle's crash recovery. The far side of the
+	// scores commit needs none here: the score write admits each task's
+	// re-evaluation obligation in its own transaction, and the router's
+	// re-derive worker reclaims a row whose holder died once its lease
+	// expires.
 	if stale, err := r.scores.ResetStaleScoring(ctx, r.orgID); err != nil {
 		aiLog.WarnContext(ctx, "reset stale in-progress scoring failed", "error", err)
 	} else if stale > 0 {
 		aiLog.InfoContext(ctx, "recovered tasks stranded mid-scoring by a crashed cycle", "count", stale)
 	}
-
-	// The other half of the same recovery, on the far side of the scores
-	// commit: tasks whose scores landed but whose post-scoring re-derive
-	// never ran, so their deferred triggers were never evaluated. Both
-	// sweeps are independent — a task can be stale-'in_progress' from a
-	// crashed cycle AND still owe a re-derive from the one before it — and
-	// both run before this cycle claims any work.
-	r.drainOwedReDerives(ctx)
 
 	tasks, err := r.scores.UnscoredTasks(ctx, r.orgID)
 	if err != nil {
@@ -328,35 +312,12 @@ func (r *Runner) run(ctx context.Context) {
 		// Pass only the IDs of tasks that actually received fresh scores
 		// (the updates slice), not taskIDs (all originally-picked tasks).
 		// When some batches fail, the skipped tasks are reset to 'pending'
-		// and excluded from updates — calling OnScoringCompleted with their
-		// IDs would let ReDeriveAfterScoring fire triggers against stale
-		// scores from a prior cycle.
+		// and excluded from updates, and the broadcast must not announce
+		// scores they did not receive.
 		scoredIDs := make([]string, len(updates))
 		for i, u := range updates {
 			scoredIDs[i] = u.ID
 		}
 		r.callbacks.OnScoringCompleted(ctx, r.orgID, scoredIDs)
 	}
-}
-
-// drainOwedReDerives hands the org's outstanding post-scoring re-derives to
-// the same pass the completion callback drives. Best-effort in the same
-// sense the stale-scoring reset is: a store error leaves the debt for the
-// next cycle rather than costing this cycle the tasks it can still score.
-// The mark itself is only cleared by the pass, and only for tasks it
-// actually evaluated — this side never writes it.
-func (r *Runner) drainOwedReDerives(ctx context.Context) {
-	if r.callbacks.OnReDeriveOwed == nil {
-		return
-	}
-	owed, err := r.scores.TasksOwedReDerive(ctx, r.orgID)
-	if err != nil {
-		aiLog.WarnContext(ctx, "list tasks owed a post-scoring re-derive failed", "error", err)
-		return
-	}
-	if len(owed) == 0 {
-		return
-	}
-	aiLog.InfoContext(ctx, "re-deriving tasks whose post-scoring pass never ran", "count", len(owed))
-	r.callbacks.OnReDeriveOwed(ctx, r.orgID, owed)
 }
