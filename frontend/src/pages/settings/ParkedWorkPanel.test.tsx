@@ -255,6 +255,26 @@ describe('ParkedWorkPanel', () => {
     expect(listBodies.length - before).toBe(kinds.length)
   })
 
+  it('a redrive on one kind refetches only that kind and keeps the rest', async () => {
+    kinds = [kind('event_queue'), kind('pending_firings', { label: 'Pending firings' })]
+    rows = [
+      row({ id: 7 }),
+      row({ id: 3, kind: 'pending_firings', subject: { label: 'SKY-12', fields: {} } }),
+    ]
+    render(<Harness />)
+    await screen.findByText('owner/repo#18')
+    const before = listBodies.length
+
+    const rowEl = screen.getByText('owner/repo#18').closest('tr')!
+    fireEvent.click(within(rowEl).getByRole('button', { name: /redrive/i }))
+
+    await waitFor(() => expect(screen.queryByText('owner/repo#18')).not.toBeInTheDocument())
+    // The other kind's loaded rows stay, without a refetch that would reset
+    // its paging.
+    expect(screen.getByText('SKY-12')).toBeInTheDocument()
+    expect(listBodies.slice(before).map((l) => l.kind)).toEqual(['event_queue'])
+  })
+
   it('still renders a row the kind could not describe', async () => {
     rows = [row({ id: 9, subject: undefined })]
     render(<Harness />)

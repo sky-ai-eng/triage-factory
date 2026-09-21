@@ -248,11 +248,15 @@ func NewDepthObserver(provider metric.MeterProvider, kinds []DepthSource) *Depth
 }
 
 // Close unregisters the gauge callback, so a stopped observer stops
-// reporting. Run defers it: the depth observer is started with the background
-// brain, and a control pod that loses and re-acquires the lease starts a new
-// one — without this, every earlier observer's callback would keep reporting
-// its last values under the same series and an org that vanished from the
-// live one would never drop. Safe to call more than once.
+// reporting, and it has done so when it returns. The observer is started with
+// the background brain, and a control pod that loses and re-acquires the lease
+// starts a new one: without an unregister, every earlier observer's callback
+// would keep reporting its last values under the same series, and an org that
+// vanished from the live one would never drop. The brain calls this itself on
+// demotion rather than relying on Run's deferred call, because Run notices
+// its cancellation only between ticks and the next acquisition must not
+// register a second callback while the first is still on its way out. Safe to
+// call more than once, and while Run is still ticking.
 func (d *DepthObserver) Close() {
 	d.mu.Lock()
 	reg := d.reg
@@ -285,10 +289,10 @@ func (d *DepthObserver) Tick(ctx context.Context) {
 	}
 }
 
-// Run ticks until ctx is cancelled, then unregisters the gauges. The first
-// measure happens on the first tick rather than at start, so a freshly
-// promoted brain does not run every kind's aggregate inside the promotion
-// callback.
+// Run ticks until ctx is cancelled, then unregisters the gauges for a caller
+// that did not already. The first measure happens on the first tick rather
+// than at start, so a freshly promoted brain does not run every kind's
+// aggregate inside the promotion callback.
 func (d *DepthObserver) Run(ctx context.Context, interval time.Duration) {
 	defer d.Close()
 	ticker := time.NewTicker(interval)
@@ -301,12 +305,4 @@ func (d *DepthObserver) Run(ctx context.Context, interval time.Duration) {
 			d.Tick(ctx)
 		}
 	}
-}
-
-// RunDepthObserver builds the depth observer on the global meter provider and
-// runs it until ctx is cancelled. Started from the background brain, so in
-// multi mode the lease holder reports and standbys do not; local mode runs it
-// directly.
-func RunDepthObserver(ctx context.Context, kinds []DepthSource, interval time.Duration) {
-	NewDepthObserver(otel.GetMeterProvider(), kinds).Run(ctx, interval)
 }

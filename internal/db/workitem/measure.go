@@ -68,19 +68,9 @@ func MeasureByOrg(ctx context.Context, q DBTX, k Kind) (map[string]Depths, error
 
 // depthColumns is the six aggregate columns both measures select, in the
 // order scanDepths reads them.
-//
-// Ripe and deferred partition status='ready' on the retry time alone, which is
-// narrower than Claim's eligibility: Claim also takes a ready row whose
-// cancellation was requested, whatever its retry time. So a deferred row with
-// a pending request counts as Deferred here for the seconds before the next
-// pass settles it. Depth is about work waiting, and that row is waiting to be
-// cancelled rather than run — neither bucket describes it, and a third is not
-// in the contract.
 func (k Kind) depthColumns() string {
-	now := k.nowExpr()
-	ready := "status = " + quoteLiteral(StatusReady)
-	ripe := ready + " AND (next_attempt_at IS NULL OR next_attempt_at <= " + now + ")"
-	deferred := ready + " AND next_attempt_at > " + now
+	ripe := k.ripePredicate()
+	deferred := k.deferredPredicate()
 	return countIf(ripe) + ", " +
 		countIf("status = "+quoteLiteral(StatusLeased)) + ", " +
 		countIf("status = "+quoteLiteral(StatusParked)) + ", " +

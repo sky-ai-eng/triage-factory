@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/workmetrics"
+	"go.opentelemetry.io/otel"
 )
 
 // startBrain starts the leader-elected background brain as ONE UNIT
@@ -78,8 +79,11 @@ func (a *App) startBrain(term int64) {
 	go a.router.RunTerminalInvariantChecker(brainCtx, routing.DefaultTerminalCheckInterval)
 	// Work-queue depth gauges: one measure per registered kind per tick,
 	// reported at scrape time. Brain-gated for the same reason as the checker
-	// above — one process reports, standbys do not — and read-only.
-	go workmetrics.RunDepthObserver(brainCtx, a.workDepthSources(), workmetrics.DefaultDepthInterval)
+	// above — one process reports, standbys do not — and read-only. Built
+	// here, under brainMu, so its callback registers only after stopBrain has
+	// unregistered the previous holder's.
+	a.workDepth = workmetrics.NewDepthObserver(otel.GetMeterProvider(), a.workDepthSources())
+	go a.workDepth.Run(brainCtx, workmetrics.DefaultDepthInterval)
 	// Durable event-queue drain worker: claims github:/jira: events the
 	// ingestor enqueued under the work-item contract's leases, routes them,
 	// and marks them done under the lease's fence. A failed attempt returns
@@ -240,6 +244,13 @@ func (a *App) stopBrain(reason string) {
 	if a.brainCancel != nil {
 		a.brainCancel()
 		a.brainCancel = nil
+	}
+	// Unregister the depth gauges before returning, not when the observer's
+	// goroutine gets around to it, so a re-acquisition that follows this call
+	// never overlaps two callbacks on the same series.
+	if a.workDepth != nil {
+		a.workDepth.Close()
+		a.workDepth = nil
 	}
 	if a.pollerMgr != nil {
 		a.pollerMgr.StopAll()

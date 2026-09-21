@@ -145,14 +145,13 @@ func Get(ctx context.Context, q DBTX, k Kind, orgID string, id int64) (*Item, er
 // outside the vocabulary is an error rather than an empty page: a filter that
 // silently matched nothing would read as "nothing there".
 func (k Kind) statusPredicate(status string) (string, error) {
-	ready := "status = " + quoteLiteral(StatusReady)
 	switch status {
 	case "":
 		return "", nil
 	case StatusReady:
-		return ready + " AND (next_attempt_at IS NULL OR next_attempt_at <= " + k.nowExpr() + ")", nil
+		return k.ripePredicate(), nil
 	case StatusDeferred:
-		return ready + " AND next_attempt_at > " + k.nowExpr(), nil
+		return k.deferredPredicate(), nil
 	case StatusLeased, StatusDone, StatusParked, StatusCancelled:
 		return "status = " + quoteLiteral(status), nil
 	default:

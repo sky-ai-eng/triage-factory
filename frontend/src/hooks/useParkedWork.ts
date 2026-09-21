@@ -70,7 +70,7 @@ export interface UseParkedWork {
   /** The sum of every loaded kind's parked depth — the badge's number, which
    *  is the org's whole parked population rather than the length of a page. */
   parkedTotal: number
-  /** The rows loaded so far under `status`, across every kind that loaded. */
+  /** The rows loaded so far under `status`, in catalogue order by kind. */
   items: WorkItem[]
   /** What `status` matches across every loaded kind, summed. */
   total: number
@@ -89,10 +89,11 @@ export interface UseParkedWork {
   reload: () => Promise<void>
   /** Return the named parked rows of one kind to ready. Resolves to the number
    *  that actually moved — ids that are no longer parked are counted out by
-   *  the backend, so a stale selection is a partial no-op, not a failure. */
+   *  the backend, so a stale selection is a partial no-op, not a failure.
+   *  Only that kind refetches afterwards; the other kinds' loaded pages stay. */
   redrive: (kind: string, ids: number[]) => Promise<number>
-  /** Redrive across kinds with one refresh at the end, for a selection that
-   *  spans the table. Resolves to the total moved. */
+  /** Redrive across kinds with one refresh of the touched kinds at the end,
+   *  for a selection that spans the table. Resolves to the total moved. */
   redriveMany: (selections: WorkSelection[]) => Promise<number>
   /** Record a cancellation request against the named ready or leased rows of
    *  one kind. Resolves to the number recorded; the row settles at its next
@@ -105,6 +106,13 @@ export interface UseParkedWork {
 type KindLoad =
   | { kind: WorkKind; depth: WorkDepth; page: ListPage<WorkItem> }
   | { kind: WorkKind; failure: unknown }
+
+// One kind's loaded rows under the current filter, with the filtered total
+// the list envelope reported.
+interface KindPage {
+  items: WorkItem[]
+  total: number
+}
 
 // useParkedWork owns the parked-work operator surface: the catalogue of kinds,
 // each kind's depth, and one page per kind of the rows under the status
@@ -121,6 +129,8 @@ type KindLoad =
 // load independently, and one kind's failure is reported beside the others'
 // rows rather than in place of them: the panel's job is to show what is
 // parked, and a transient fault on one queue must not hide the backlog on
+// another. A control refetches only the kinds it acted on, so an operator
+// three pages into one queue does not lose their place by redriving a row in
 // another.
 //
 // No websocket wiring. A row parks at most once every few thousand events in
@@ -129,11 +139,14 @@ type KindLoad =
 export function useParkedWork(orgId: string | null, enabled: boolean): UseParkedWork {
   const [kinds, setKinds] = useState<WorkKind[]>([])
   const [depths, setDepths] = useState<Record<string, WorkDepth>>({})
-  const [items, setItems] = useState<WorkItem[]>([])
-  const [total, setTotal] = useState(0)
+  const [pages, setPages] = useState<Record<string, KindPage>>({})
   const [status, setStatusState] = useState<WorkStatusFilter>('parked')
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  // A failure of the whole surface (the catalogue, a further page), and the
+  // per-kind failures of the last load that touched each kind. Kept apart so
+  // a refresh of one kind neither clears nor restates another's.
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [failures, setFailures] = useState<Record<string, string>>({})
   const [hasMore, setHasMore] = useState(false)
 
   // The next-page token per kind, valid only for the filter the items were
@@ -142,6 +155,8 @@ export function useParkedWork(orgId: string | null, enabled: boolean): UseParked
   // fetches so a token never pairs with another status.
   const tokensRef = useRef<Record<string, string>>({})
   const statusRef = useRef<WorkStatusFilter>('parked')
+  // The catalogue as last loaded, for a refresh to look kinds up by name.
+  const kindsRef = useRef<WorkKind[]>([])
   // Bumped per load, so a response applies only if it is still the latest.
   const requestIdRef = useRef(0)
   const inFlight = useRef(false)
@@ -151,25 +166,22 @@ export function useParkedWork(orgId: string | null, enabled: boolean): UseParked
   const clear = useCallback(() => {
     setKinds([])
     setDepths({})
-    setItems([])
-    setTotal(0)
+    setPages({})
+    setFailures({})
     setHasMore(false)
     tokensRef.current = {}
+    kindsRef.current = []
   }, [])
 
-  const reload = useCallback(async () => {
-    if (!enabled || !base) {
-      clear()
-      return
-    }
-    const requestId = ++requestIdRef.current
-    inFlight.current = true
-    setLoading(true)
-    try {
-      const catalogue = await apiJSON<{ kinds: WorkKind[] }>(base)
+  const anyMore = () => Object.values(tokensRef.current).some((tok) => tok !== '')
+
+  // loadKinds reads each kind's depth and first page under the current
+  // filter, independently, so one kind's fault is one entry of the result.
+  const loadKinds = useCallback(
+    (ks: WorkKind[]): Promise<KindLoad[]> => {
       const filter = statusRef.current
-      const perKind: KindLoad[] = await Promise.all(
-        catalogue.kinds.map(async (k): Promise<KindLoad> => {
+      return Promise.all(
+        ks.map(async (k): Promise<KindLoad> => {
           try {
             const [depth, page] = await Promise.all([
               apiJSON<WorkDepth>(`${base}/${encodeURIComponent(k.kind)}/depth`),
@@ -183,43 +195,86 @@ export function useParkedWork(orgId: string | null, enabled: boolean): UseParked
           }
         }),
       )
-      if (requestId !== requestIdRef.current) return
-      const nextDepths: Record<string, WorkDepth> = {}
-      const nextTokens: Record<string, string> = {}
-      let nextItems: WorkItem[] = []
-      let nextTotal = 0
-      const failed: string[] = []
-      for (const load of perKind) {
+    },
+    [base],
+  )
+
+  // applyLoads merges a batch of kind loads into the loaded state, replacing
+  // exactly the kinds it carries. Returns false when the gate has closed
+  // (a 403 on any kind), after clearing the surface: that is the whole
+  // surface gone, not one kind of it.
+  const applyLoads = useCallback(
+    (loads: KindLoad[]): boolean => {
+      for (const load of loads) {
+        if ('failure' in load && load.failure instanceof HttpError && load.failure.status === 403) {
+          clear()
+          setLoadError(null)
+          return false
+        }
+      }
+      const nextPages: Record<string, KindPage> = {}
+      const nextFailures: Record<string, string> = {}
+      for (const load of loads) {
+        const name = load.kind.kind
         if ('failure' in load) {
-          if (load.failure instanceof HttpError && load.failure.status === 403) {
-            // The gate closed mid-session: the whole surface is gone, not
-            // one kind of it.
-            clear()
-            setError(null)
-            return
-          }
-          failed.push(`${load.kind.label}: ${httpErrorMessage(load.failure, 'could not be read')}`)
+          nextFailures[name] =
+            `${load.kind.label}: ${httpErrorMessage(load.failure, 'could not be read')}`
           continue
         }
-        nextDepths[load.kind.kind] = load.depth
-        nextTokens[load.kind.kind] = load.page.next_page_token
-        nextItems = nextItems.concat(load.page.items)
-        nextTotal += load.page.total_count ?? load.page.items.length
+        nextPages[name] = {
+          items: load.page.items,
+          total: load.page.total_count ?? load.page.items.length,
+        }
+        tokensRef.current[name] = load.page.next_page_token
       }
+      setDepths((prev) => {
+        const out = { ...prev }
+        for (const load of loads) {
+          if ('failure' in load) continue
+          out[load.kind.kind] = load.depth
+        }
+        return out
+      })
+      setPages((prev) => ({ ...prev, ...nextPages }))
+      setFailures((prev) => {
+        const out = { ...prev }
+        for (const load of loads) delete out[load.kind.kind]
+        return { ...out, ...nextFailures }
+      })
+      setHasMore(anyMore())
+      return true
+    },
+    [clear],
+  )
+
+  const reload = useCallback(async () => {
+    if (!enabled || !base) {
+      clear()
+      return
+    }
+    const requestId = ++requestIdRef.current
+    inFlight.current = true
+    setLoading(true)
+    try {
+      const catalogue = await apiJSON<{ kinds: WorkKind[] }>(base)
+      const perKind = await loadKinds(catalogue.kinds)
+      if (requestId !== requestIdRef.current) return
+      // A full load starts from nothing: a kind that left the catalogue
+      // leaves the state with it.
+      kindsRef.current = catalogue.kinds
+      tokensRef.current = {}
       setKinds(catalogue.kinds)
-      setDepths(nextDepths)
-      setItems(nextItems)
-      setTotal(nextTotal)
-      tokensRef.current = nextTokens
-      setHasMore(Object.values(nextTokens).some((tok) => tok !== ''))
-      setError(failed.length === 0 ? null : `Could not load ${failed.join('; ')}.`)
+      setDepths({})
+      setPages({})
+      setFailures({})
+      if (applyLoads(perKind)) setLoadError(null)
     } catch (err) {
       if (requestId !== requestIdRef.current) return
       if (err instanceof HttpError && err.status === 403) {
         clear()
-        setError(null)
+        setLoadError(null)
       } else {
-        setError(httpErrorMessage(err, 'Could not load parked work.'))
+        setLoadError(httpErrorMessage(err, 'Could not load parked work.'))
       }
     } finally {
       if (requestId === requestIdRef.current) {
@@ -227,7 +282,33 @@ export function useParkedWork(orgId: string | null, enabled: boolean): UseParked
         setLoading(false)
       }
     }
-  }, [enabled, base, clear])
+  }, [enabled, base, clear, loadKinds, applyLoads])
+
+  // refreshKinds refetches the named kinds from their first page and leaves
+  // every other kind's loaded pages and place in place. A name the catalogue
+  // does not carry is skipped.
+  const refreshKinds = useCallback(
+    async (names: string[]) => {
+      if (!enabled || !base) return
+      const wanted = new Set(names)
+      const ks = kindsRef.current.filter((k) => wanted.has(k.kind))
+      if (ks.length === 0) return
+      const requestId = ++requestIdRef.current
+      inFlight.current = true
+      setLoading(true)
+      try {
+        const loads = await loadKinds(ks)
+        if (requestId !== requestIdRef.current) return
+        if (applyLoads(loads)) setLoadError(null)
+      } finally {
+        if (requestId === requestIdRef.current) {
+          inFlight.current = false
+          setLoading(false)
+        }
+      }
+    },
+    [enabled, base, loadKinds, applyLoads],
+  )
 
   useEffect(() => {
     void reload()
@@ -252,7 +333,7 @@ export function useParkedWork(orgId: string | null, enabled: boolean): UseParked
     setLoading(true)
     try {
       const filter = statusRef.current
-      const pages = await Promise.all(
+      const fetched = await Promise.all(
         pending.map(async ([kind, tok]) => {
           const page: ListPage<WorkItem> = await apiList<WorkItem>(
             `${base}/${encodeURIComponent(kind)}/items/list`,
@@ -262,17 +343,22 @@ export function useParkedWork(orgId: string | null, enabled: boolean): UseParked
         }),
       )
       if (requestId !== requestIdRef.current) return
-      let appended: WorkItem[] = []
-      for (const { kind, page } of pages) {
+      for (const { kind, page } of fetched) {
         tokensRef.current[kind] = page.next_page_token
-        appended = appended.concat(page.items)
       }
-      setItems((prev) => prev.concat(appended))
-      setHasMore(Object.values(tokensRef.current).some((tok) => tok !== ''))
-      setError(null)
+      setPages((prev) => {
+        const out = { ...prev }
+        for (const { kind, page } of fetched) {
+          const cur = out[kind] ?? { items: [], total: 0 }
+          out[kind] = { ...cur, items: cur.items.concat(page.items) }
+        }
+        return out
+      })
+      setHasMore(anyMore())
+      setLoadError(null)
     } catch (err) {
       if (requestId !== requestIdRef.current) return
-      setError(httpErrorMessage(err, 'Could not load more parked work.'))
+      setLoadError(httpErrorMessage(err, 'Could not load more parked work.'))
     } finally {
       if (requestId === requestIdRef.current) {
         inFlight.current = false
@@ -281,17 +367,19 @@ export function useParkedWork(orgId: string | null, enabled: boolean): UseParked
     }
   }, [enabled, base])
 
-  // redriveMany runs one call per kind and refreshes once afterwards, so a
-  // selection spanning N kinds costs N controls and one reload rather than N
-  // reloads of every kind. A failure part-way still refreshes: whatever moved
-  // before it has to leave the table.
+  // redriveMany runs one call per kind and refreshes the touched kinds once
+  // afterwards, so a selection spanning N kinds costs N controls and one
+  // refetch of each rather than N reloads of everything. A failure part-way
+  // still refreshes: whatever moved before it has to leave the table.
   const redriveMany = useCallback(
     async (selections: WorkSelection[]): Promise<number> => {
       if (!base) return 0
       let moved = 0
+      const touched: string[] = []
       try {
         for (const { kind, ids } of selections) {
           if (ids.length === 0) continue
+          touched.push(kind)
           const res = await apiJSON<{ redriven: number }>(
             `${base}/${encodeURIComponent(kind)}/items/redrive`,
             {
@@ -303,11 +391,11 @@ export function useParkedWork(orgId: string | null, enabled: boolean): UseParked
           moved += res.redriven
         }
       } finally {
-        await reload()
+        await refreshKinds(touched)
       }
       return moved
     },
-    [base, reload],
+    [base, refreshKinds],
   )
 
   const redrive = useCallback(
@@ -326,13 +414,17 @@ export function useParkedWork(orgId: string | null, enabled: boolean): UseParked
           body: JSON.stringify({ ids, reason }),
         },
       )
-      await reload()
+      await refreshKinds([kind])
       return res.requested
     },
-    [base, reload],
+    [base, refreshKinds],
   )
 
   const parkedTotal = Object.values(depths).reduce((sum, d) => sum + d.parked, 0)
+  const items = kinds.flatMap((k) => pages[k.kind]?.items ?? [])
+  const total = kinds.reduce((sum, k) => sum + (pages[k.kind]?.total ?? 0), 0)
+  const failed = kinds.map((k) => failures[k.kind]).filter((f): f is string => f !== undefined)
+  const error = loadError ?? (failed.length === 0 ? null : `Could not load ${failed.join('; ')}.`)
 
   return {
     kinds,

@@ -58,6 +58,26 @@ func (k Kind) nowExpr() string {
 	return sqliteNowExpr
 }
 
+// ripePredicate and deferredPredicate are the two halves of status='ready',
+// split on the retry time: ripe rows may be claimed now, deferred rows wait
+// for a retry time still ahead. The list filter and the depth gauges both
+// read the partition through these, so what an operator lists as deferred is
+// exactly what the deferred gauge counts.
+//
+// The split is narrower than Claim's eligibility, which also takes a ready
+// row whose cancellation was requested, whatever its retry time. Such a row
+// counts as deferred here for the seconds before the next pass settles it:
+// it is waiting to be cancelled rather than run, neither half describes it,
+// and a third is not in the contract.
+func (k Kind) ripePredicate() string {
+	return "status = " + quoteLiteral(StatusReady) +
+		" AND (next_attempt_at IS NULL OR next_attempt_at <= " + k.nowExpr() + ")"
+}
+
+func (k Kind) deferredPredicate() string {
+	return "status = " + quoteLiteral(StatusReady) + " AND next_attempt_at > " + k.nowExpr()
+}
+
 // nowPlusExpr is database time offset by a Go-computed duration. The duration
 // is a parameter — a policy lease, a computed backoff — while the instant it
 // is measured from stays the database's.

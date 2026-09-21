@@ -148,3 +148,43 @@ func TestDepthObserver_CloseStopsReporting(t *testing.T) {
 		t.Errorf("objective gauge has %d points after a flap, want 1", len(g.DataPoints))
 	}
 }
+
+// TestDepthObserver_CloseWhileRunningStopsReporting is the same-pod flap as
+// the brain drives it: demotion closes the observer before its goroutine has
+// noticed the cancellation, and re-acquisition registers a new one while the
+// old goroutine is still on its way out. The old callback must already be
+// gone when Close returns, so the two never report the same series together.
+func TestDepthObserver_CloseWhileRunningStopsReporting(t *testing.T) {
+	src, conn := newFixtureSource(t)
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	admit(t, conn, src.kind, "org-a", "a-1")
+	old := NewDepthObserver(provider, []DepthSource{src})
+	old.Tick(context.Background())
+
+	// The old goroutine keeps running: nothing cancels it until the end.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { old.Run(ctx, time.Hour); close(done) }()
+	old.Close()
+
+	fresh := NewDepthObserver(provider, []DepthSource{src})
+	defer fresh.Close()
+	fresh.Tick(context.Background())
+
+	ms := collect(t, reader)
+	m := ms["work.oldest_ready_age_objective"]
+	g, _ := m.Data.(metricdata.Gauge[int64])
+	if len(g.DataPoints) != 1 {
+		t.Errorf("objective gauge has %d points with the old observer closed but still running, want 1", len(g.DataPoints))
+	}
+	m = ms["work.ready"]
+	g, _ = m.Data.(metricdata.Gauge[int64])
+	if len(g.DataPoints) != 1 {
+		t.Errorf("work.ready has %d points with the old observer closed but still running, want 1", len(g.DataPoints))
+	}
+
+	cancel()
+	<-done
+}
