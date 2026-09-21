@@ -170,9 +170,10 @@ func initMetrics(res *resource.Resource) (addr string) {
 		otelprom.WithNamespace(metricsNamespace),
 		otelprom.WithoutScopeInfo(),
 		// Full Prometheus-style naming: dots → underscores, counters get
-		// _total. Instruments here carry no units, so no unit suffixes ever
-		// materialize. Pinned explicitly because the exporter's default
-		// currently varies with prometheus/common's validation scheme.
+		// _total, and an instrument declaring a unit gets its suffix (the
+		// work-queue age gauges declare seconds and export as _seconds).
+		// Pinned explicitly because the exporter's default currently
+		// varies with prometheus/common's validation scheme.
 		otelprom.WithTranslationStrategy(otlptranslator.UnderscoreEscapingWithSuffixes),
 	)
 	if err != nil {

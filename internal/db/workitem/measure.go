@@ -12,46 +12,84 @@ import (
 // It is a read: counts and ages only, with no emission and no side effect. A
 // metrics surface composes it; this package stays out of the metrics pipeline
 // so that adopting a work kind does not also mean adopting a collector.
+//
+// Only unsettled rows are scanned. Terminal rows contribute to no depth, and
+// on a retained table they are most of it, so the restriction is what keeps a
+// periodic measure off the bulk of the table.
 func Measure(ctx context.Context, q DBTX, k Kind, orgID string) (Depths, error) {
-	var d Depths
 	if err := k.Validate(); err != nil {
-		return d, err
+		return Depths{}, err
 	}
-
 	a := newArgs(k.Dialect)
-	now := k.nowExpr()
-	// Ripe and deferred partition status='ready' on the retry time alone, which
-	// is narrower than Claim's eligibility: Claim also takes a ready row whose
-	// cancellation was requested, whatever its retry time. So a deferred row
-	// with a pending request counts as Deferred here for the seconds before the
-	// next pass settles it. Depth is about work waiting, and that row is waiting
-	// to be cancelled rather than run — neither bucket describes it, and a third
-	// is not in the contract.
-	ready := "status = " + quoteLiteral(StatusReady)
-	ripe := ready + " AND (next_attempt_at IS NULL OR next_attempt_at <= " + now + ")"
-	deferred := ready + " AND next_attempt_at > " + now
+	stmt := "SELECT " + k.depthColumns() + " FROM " + k.Table +
+		" WHERE status IN (" + unsettledStatusList + ")"
+	if orgID != "" {
+		stmt += " AND org_id = " + a.bind(orgID)
+	}
+	var d Depths
+	if err := scanDepths(q.QueryRowContext(ctx, stmt, a.vals...), &d); err != nil {
+		return Depths{}, fmt.Errorf("workitem: measure %s: %w", k.Table, err)
+	}
+	return d, nil
+}
 
-	stmt := "SELECT " +
-		countIf(ripe) + ", " +
+// MeasureByOrg is Measure grouped by org, in one statement over the unsettled
+// rows. An org with no unsettled row is absent from the map rather than
+// present at zero, which is what lets a reader retire a series for an org that
+// no longer has one.
+func MeasureByOrg(ctx context.Context, q DBTX, k Kind) (map[string]Depths, error) {
+	if err := k.Validate(); err != nil {
+		return nil, err
+	}
+	stmt := "SELECT org_id, " + k.depthColumns() + " FROM " + k.Table +
+		" WHERE status IN (" + unsettledStatusList + ")" +
+		" GROUP BY org_id"
+	rows, err := q.QueryContext(ctx, stmt)
+	if err != nil {
+		return nil, fmt.Errorf("workitem: measure %s by org: %w", k.Table, err)
+	}
+	defer rows.Close()
+	out := map[string]Depths{}
+	for rows.Next() {
+		var (
+			org string
+			d   Depths
+		)
+		if err := scanDepths(rows, &d, &org); err != nil {
+			return nil, fmt.Errorf("workitem: measure %s by org: %w", k.Table, err)
+		}
+		out[org] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("workitem: measure %s by org: %w", k.Table, err)
+	}
+	return out, nil
+}
+
+// depthColumns is the six aggregate columns both measures select, in the
+// order scanDepths reads them.
+func (k Kind) depthColumns() string {
+	ripe := k.ripePredicate()
+	deferred := k.deferredPredicate()
+	return countIf(ripe) + ", " +
 		countIf("status = "+quoteLiteral(StatusLeased)) + ", " +
 		countIf("status = "+quoteLiteral(StatusParked)) + ", " +
 		countIf(deferred) + ", " +
 		k.ageSeconds(ripe) + ", " +
-		k.ageSeconds(deferred) +
-		" FROM " + k.Table
-	if orgID != "" {
-		stmt += " WHERE org_id = " + a.bind(orgID)
-	}
+		k.ageSeconds(deferred)
+}
 
+// scanDepths reads one depthColumns row, after any leading columns the
+// caller selected ahead of them.
+func scanDepths(row interface{ Scan(...any) error }, d *Depths, leading ...any) error {
 	var readyAge, deferredAge sql.NullFloat64
-	err := q.QueryRowContext(ctx, stmt, a.vals...).
-		Scan(&d.Ready, &d.Leased, &d.Parked, &d.Deferred, &readyAge, &deferredAge)
-	if err != nil {
-		return Depths{}, fmt.Errorf("workitem: measure %s: %w", k.Table, err)
+	dest := append(leading, &d.Ready, &d.Leased, &d.Parked, &d.Deferred, &readyAge, &deferredAge)
+	if err := row.Scan(dest...); err != nil {
+		return err
 	}
 	d.OldestReadyAge = secondsToDuration(readyAge)
 	d.OldestDeferredAge = secondsToDuration(deferredAge)
-	return d, nil
+	return nil
 }
 
 // countIf is a conditional count written as a SUM so the expression is the

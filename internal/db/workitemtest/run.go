@@ -37,6 +37,8 @@ func Run(t *testing.T, mk Factory) {
 	t.Run("UniqueNone", func(t *testing.T) { testUniqueNone(t, mk) })
 	t.Run("Backoff", func(t *testing.T) { testBackoff(t) })
 	t.Run("Fairness", func(t *testing.T) { testFairness(t, mk) })
+	t.Run("MeasureByOrgAcrossOrgs", func(t *testing.T) { testMeasureByOrgAcrossOrgs(t, mk) })
+	t.Run("ClaimAcrossOrgsReportsPerOrg", func(t *testing.T) { testClaimAcrossOrgsReportsPerOrg(t, mk) })
 	t.Run("FrozenColumns", func(t *testing.T) { testFrozenColumns(t, mk) })
 	t.Run("FixtureIndexPresence", func(t *testing.T) { testFixtureIndexPresence(t, mk) })
 }
@@ -72,6 +74,9 @@ func runShared(t *testing.T, mk envFactory) {
 	t.Run("ClaimBatch", func(t *testing.T) { testClaimBatch(t, mk) })
 	t.Run("ClaimRoundIsAllOrNothing", func(t *testing.T) { testClaimRoundIsAllOrNothing(t, mk) })
 	t.Run("Measure", func(t *testing.T) { testMeasure(t, mk) })
+	t.Run("MeasureByOrg", func(t *testing.T) { testMeasureByOrg(t, mk) })
+	t.Run("ListAndGet", func(t *testing.T) { testListAndGet(t, mk) })
+	t.Run("NilObserver", func(t *testing.T) { testNilObserver(t, mk) })
 	t.Run("IndexPresence", func(t *testing.T) { testIndexPresence(t, mk) })
 }
 
@@ -121,6 +126,7 @@ func testAdmitClaimComplete(t *testing.T, mk envFactory) {
 	if got := asInt(row["lease_epoch"]); got != 9 {
 		t.Fatalf("lease_epoch = %d, want 9", got)
 	}
+	e.requireObserved("claimed 1/0/0/0")
 
 	if err := e.complete(r); err != nil {
 		t.Fatalf("complete: %v", err)
@@ -136,6 +142,7 @@ func testAdmitClaimComplete(t *testing.T, mk envFactory) {
 		t.Error("done_at is NULL on a completed row")
 	}
 	e.requireLeaseCleared(id)
+	e.requireObserved("completed")
 }
 
 func testRequeueOutcomes(t *testing.T, mk envFactory) {
@@ -171,16 +178,19 @@ func testRequeueOutcomes(t *testing.T, mk envFactory) {
 			t.Fatalf("%s: next_attempt_at is NULL, want a backoff", outcome)
 		}
 		e.requireLeaseCleared(id)
+		e.requireObserved("claimed 1/0/0/0", "requeued "+string(outcome))
 	}
 
 	// An outcome outside the vocabulary is refused rather than stored: the
-	// typed value is what parking reasons and metrics key on.
+	// typed value is what parking reasons and metrics key on. Nothing was
+	// written, so nothing is reported.
 	id := e.admit("bogus")
 	r := e.claimOne("worker-a", 1)
 	if _, err := workitem.Requeue(e.ctx, e.conn, e.kind, r, workitem.Outcome("whatever"), nil); err == nil {
 		t.Error("Requeue accepted an unknown outcome")
 	}
 	e.requireStatus(id, workitem.StatusLeased)
+	e.requireObserved("claimed 1/0/0/0")
 }
 
 func testPermanentParks(t *testing.T, mk envFactory) {
@@ -202,6 +212,7 @@ func testPermanentParks(t *testing.T, mk envFactory) {
 		t.Fatalf("last_outcome = %q", got)
 	}
 	e.requireLeaseCleared(id)
+	e.requireObserved("claimed 1/0/0/0", "parked permanent")
 }
 
 func testBudgetExhaustion(t *testing.T, mk envFactory) {
@@ -217,6 +228,7 @@ func testBudgetExhaustion(t *testing.T, mk envFactory) {
 		t.Fatalf("Requeue: parked=%v err=%v, want ready", parked, err)
 	}
 	e.requireStatus(id, workitem.StatusReady)
+	e.requireObserved("claimed 1/0/0/0", "requeued transient")
 
 	time.Sleep(10 * time.Millisecond) // let the 1ms backoff ripen
 	r2 := e.claimOne("worker-a", 1)
@@ -237,6 +249,9 @@ func testBudgetExhaustion(t *testing.T, mk envFactory) {
 		t.Fatalf("last_outcome = %q, want the failure that spent the budget", got)
 	}
 	e.requireLeaseCleared(id)
+	// The claim-time park is reported under the budget reason whatever the
+	// row's own last_outcome kept: the metric says why the claim parked it.
+	e.requireObserved("claimed 1/0/0/0", "claimed 0/0/0/1", "parked budget_exhausted")
 
 	// A row that never recorded an outcome at all parks under the fallback
 	// reason, which is the only thing there is to say about it.
@@ -250,6 +265,7 @@ func testBudgetExhaustion(t *testing.T, mk envFactory) {
 	if got := asString(e3.row(id3)["last_outcome"]); got != "budget_exhausted" {
 		t.Fatalf("last_outcome = %q, want budget_exhausted", got)
 	}
+	e3.requireObserved("claimed 1/0/0/0", "claimed 0/0/0/1", "parked budget_exhausted")
 
 	// A requeue arriving while the row is already at its budget parks there
 	// instead, which is the other half of the same rule — and says so.
@@ -264,6 +280,7 @@ func testBudgetExhaustion(t *testing.T, mk envFactory) {
 		t.Fatal("Requeue at budget reported the row returned to ready")
 	}
 	e2.requireStatus(id2, workitem.StatusParked)
+	e2.requireObserved("claimed 1/0/0/0", "parked transient")
 }
 
 // testStrategyIsEnforced pins that the declaration is load-bearing: the other
@@ -335,6 +352,7 @@ func testTakeover(t *testing.T, mk envFactory) {
 	if res.Reclaimed != 1 {
 		t.Fatalf("takeover result reported %d reclaims, want 1", res.Reclaimed)
 	}
+	e.requireObserved("claimed 1/0/0/0", "claimed 1/1/0/0")
 	e.assertStragglerLoses(straggler, "takeover by another owner")
 
 	// The bystander, never leased before, is a plain claim.
@@ -425,6 +443,10 @@ func testClaimBatch(t *testing.T, mk envFactory) {
 		e.requireStatus(id, workitem.StatusCancelled)
 		e.requireLeaseCleared(id)
 	}
+	// Two rounds: the first picks three, settles two and leases one, so the
+	// second picks the remaining two. Each settlement is reported on its own
+	// beside its round's shape.
+	e.requireObserved("claimed 1/0/2/0", "cancelled", "cancelled", "claimed 2/0/0/0")
 }
 
 // testClaimRoundIsAllOrNothing pins the boundary between a round and the result
@@ -469,6 +491,7 @@ func testClaimRoundIsAllOrNothing(t *testing.T, mk envFactory) {
 	for _, id := range []int64{cancelled, first, breaks, untouched} {
 		e.requireStatus(id, workitem.StatusReady)
 	}
+	e.requireObserved()
 }
 
 func testFrozenColumns(t *testing.T, mk Factory) {
@@ -643,3 +666,326 @@ func (e *env) writePayload(id int64, value string) func(*sql.Tx) error {
 }
 
 func truePredicate(*sql.Tx) (bool, error) { return true, nil }
+
+// testMeasureByOrg pins that the grouped read agrees with the org-scoped one
+// for the subtest's org, and reports nothing for an org with no unsettled
+// rows — including this one once everything settles.
+func testMeasureByOrg(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: time.Minute})
+
+	byOrg, err := workitem.MeasureByOrg(e.ctx, e.conn, e.kind)
+	if err != nil {
+		t.Fatalf("MeasureByOrg on an empty table: %v", err)
+	}
+	if _, ok := byOrg[e.org]; ok {
+		t.Fatalf("an org with no rows is present in %+v", byOrg)
+	}
+
+	ripe := e.admit("ripe")
+	e.admit("leased")
+	parked := e.admit("parked")
+	deferredID := e.admit("deferred")
+	res := e.claim(workitem.Owner{ID: "worker-a", Epoch: 1}, 4)
+	byID := map[int64]workitem.Receipt{}
+	for _, r := range res.Claimed {
+		byID[r.ItemID] = r
+	}
+	if _, err := workitem.Requeue(e.ctx, e.conn, e.kind, byID[ripe], workitem.OutcomeTransient, errors.New("x")); err != nil {
+		t.Fatalf("requeue ripe: %v", err)
+	}
+	e.exec("UPDATE "+e.kind.Table+" SET next_attempt_at = NULL WHERE id = ?", ripe)
+	if err := workitem.Park(e.ctx, e.conn, e.kind, byID[parked], "stuck"); err != nil {
+		t.Fatalf("park: %v", err)
+	}
+	if err := workitem.Defer(e.ctx, e.conn, e.kind, byID[deferredID], "waiting", time.Now().Add(time.Hour), truePredicate); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+
+	scoped, err := workitem.Measure(e.ctx, e.conn, e.kind, e.org)
+	if err != nil {
+		t.Fatalf("Measure: %v", err)
+	}
+	byOrg, err = workitem.MeasureByOrg(e.ctx, e.conn, e.kind)
+	if err != nil {
+		t.Fatalf("MeasureByOrg: %v", err)
+	}
+	got, ok := byOrg[e.org]
+	if !ok {
+		t.Fatalf("org %s absent from %+v", e.org, byOrg)
+	}
+	if got.Ready != scoped.Ready || got.Leased != scoped.Leased || got.Parked != scoped.Parked || got.Deferred != scoped.Deferred {
+		t.Fatalf("grouped depths %+v disagree with the scoped read %+v", got, scoped)
+	}
+	if got.Ready != 1 || got.Leased != 1 || got.Parked != 1 || got.Deferred != 1 {
+		t.Fatalf("depths = %+v, want one of each", got)
+	}
+	if got.OldestReadyAge <= 0 || got.OldestDeferredAge <= 0 {
+		t.Errorf("ages = %s/%s, want both positive", got.OldestReadyAge, got.OldestDeferredAge)
+	}
+
+	// Terminal rows contribute to no depth: settle everything and the org
+	// disappears from the grouped read rather than reporting zeros.
+	e.exec("UPDATE " + e.kind.Table + " SET status = 'done', done_at = " + e.nowSQL() + ", lease_owner = NULL, lease_epoch = NULL, leased_at = NULL, lease_expires_at = NULL")
+	byOrg, err = workitem.MeasureByOrg(e.ctx, e.conn, e.kind)
+	if err != nil {
+		t.Fatalf("MeasureByOrg after settling: %v", err)
+	}
+	if _, ok := byOrg[e.org]; ok {
+		t.Fatalf("an org with only settled rows is present in %+v", byOrg)
+	}
+	if d, err := workitem.Measure(e.ctx, e.conn, e.kind, e.org); err != nil || d != (workitem.Depths{}) {
+		t.Fatalf("Measure after settling = %+v err=%v, want zeros", d, err)
+	}
+}
+
+// testMeasureByOrgAcrossOrgs is the fixture-only half: three orgs with
+// different shapes in one table, each reported under its own key and
+// matching its own scoped read.
+func testMeasureByOrgAcrossOrgs(t *testing.T, mk Factory) {
+	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
+	a, b, c, idle := e.org, uuid.NewString(), uuid.NewString(), uuid.NewString()
+
+	e.admitIn(a, "a-1")
+	e.admitIn(a, "a-2")
+	e.admitIn(b, "b-1")
+	e.admitIn(c, "c-1")
+	// b's row leased, c's row settled, idle never had one.
+	if got := len(e.claimIn(workitem.Owner{ID: "w", Epoch: 1}, b, 1).Claimed); got != 1 {
+		t.Fatalf("leased %d rows in b, want 1", got)
+	}
+	cres := e.claimIn(workitem.Owner{ID: "w", Epoch: 1}, c, 1)
+	if len(cres.Claimed) != 1 {
+		t.Fatalf("leased %d rows in c, want 1", len(cres.Claimed))
+	}
+	if err := e.complete(cres.Claimed[0]); err != nil {
+		t.Fatalf("complete c: %v", err)
+	}
+
+	byOrg, err := workitem.MeasureByOrg(e.ctx, e.conn, e.kind)
+	if err != nil {
+		t.Fatalf("MeasureByOrg: %v", err)
+	}
+	for _, org := range []string{a, b} {
+		scoped, err := workitem.Measure(e.ctx, e.conn, e.kind, org)
+		if err != nil {
+			t.Fatalf("Measure %s: %v", org, err)
+		}
+		got, ok := byOrg[org]
+		if !ok {
+			t.Fatalf("org %s absent from %+v", org, byOrg)
+		}
+		if got.Ready != scoped.Ready || got.Leased != scoped.Leased || got.Parked != scoped.Parked || got.Deferred != scoped.Deferred {
+			t.Errorf("org %s: grouped %+v disagrees with scoped %+v", org, got, scoped)
+		}
+	}
+	if byOrg[a].Ready != 2 || byOrg[b].Leased != 1 {
+		t.Errorf("depths = %+v, want a: 2 ready, b: 1 leased", byOrg)
+	}
+	for _, org := range []string{c, idle} {
+		if _, ok := byOrg[org]; ok {
+			t.Errorf("org %s with no unsettled rows is present in %+v", org, byOrg)
+		}
+	}
+}
+
+// testClaimAcrossOrgsReportsPerOrg pins the observer's rule for a cross-org
+// claim: one round mixing tenants is reported once per org with that org's
+// counts, in a fixed order, with each settlement and budget park beside it.
+func testClaimAcrossOrgsReportsPerOrg(t *testing.T, mk Factory) {
+	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 1, Lease: shortLease}})
+	a, b := e.org, uuid.NewString()
+	if a > b {
+		a, b = b, a
+	}
+	e.admitIn(a, "a-lease")
+	e.admitIn(a, "a-cancel")
+	cancelled := e.admitIn(a, "a-cancel-2")
+	spent := e.admitIn(b, "b-spent")
+	e.admitIn(b, "b-lease")
+	if err := workitem.RequestCancel(e.ctx, e.conn, e.kind, a, cancelled, "operator", "no"); err != nil {
+		t.Fatalf("RequestCancel: %v", err)
+	}
+	// b's first row spends its one attempt and dies, so the cross-org round
+	// below parks it at claim.
+	if got := e.claimIn(workitem.Owner{ID: "w", Epoch: 1}, b, 1); len(got.Claimed) != 1 || got.Claimed[0].ItemID != spent {
+		t.Fatalf("pre-claim in b = %+v, want the spent row", got)
+	}
+	e.expireLease()
+	e.obs.take()
+
+	res := e.claimIn(workitem.Owner{ID: "w", Epoch: 2}, "", 10)
+	if len(res.Claimed) != 3 || res.Cancelled != 1 || res.Parked != 1 {
+		t.Fatalf("cross-org claim = %d leased, %d cancelled, %d parked; want 3/1/1", len(res.Claimed), res.Cancelled, res.Parked)
+	}
+	got := e.obs.take()
+	want := []string{
+		"claimed " + a + " 2/0/1/0",
+		"cancelled " + a,
+		"claimed " + b + " 1/0/0/1",
+		"parked " + b + " " + workitem.ReasonBudgetExhausted,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("observer saw\n  %q\nwant\n  %q", got, want)
+	}
+}
+
+// testListAndGet pins the operator reads: newest first, a correct total per
+// status filter including the deferred partition, a clean miss, and the
+// block's timestamps scanning on both dialects.
+func testListAndGet(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: time.Minute})
+
+	ripe := e.admit("ripe")
+	leasedID := e.admit("leased")
+	parked := e.admit("parked")
+	deferredID := e.admit("deferred")
+	doneID := e.admit("done")
+	res := e.claim(workitem.Owner{ID: "worker-a", Epoch: 7}, 5)
+	byID := map[int64]workitem.Receipt{}
+	for _, r := range res.Claimed {
+		byID[r.ItemID] = r
+	}
+	if _, err := workitem.Requeue(e.ctx, e.conn, e.kind, byID[ripe], workitem.OutcomeTransient, errors.New("blip")); err != nil {
+		t.Fatalf("requeue ripe: %v", err)
+	}
+	e.exec("UPDATE "+e.kind.Table+" SET next_attempt_at = NULL WHERE id = ?", ripe)
+	if err := workitem.Park(e.ctx, e.conn, e.kind, byID[parked], "stuck"); err != nil {
+		t.Fatalf("park: %v", err)
+	}
+	if err := workitem.Defer(e.ctx, e.conn, e.kind, byID[deferredID], "waiting", time.Now().Add(time.Hour), truePredicate); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	if err := e.complete(byID[doneID]); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if err := workitem.RequestCancel(e.ctx, e.conn, e.kind, e.org, leasedID, "operator", "stop"); err != nil {
+		t.Fatalf("RequestCancel: %v", err)
+	}
+
+	all, total, err := workitem.List(e.ctx, e.conn, e.kind, e.org, "", 50, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 5 || len(all) != 5 {
+		t.Fatalf("unfiltered list: total=%d rows=%d, want 5", total, len(all))
+	}
+	for i := 1; i < len(all); i++ {
+		if all[i].ID >= all[i-1].ID {
+			t.Fatalf("list is not newest first: %d then %d", all[i-1].ID, all[i].ID)
+		}
+	}
+	for _, it := range all {
+		if it.OrgID != e.org || it.FirstEnqueuedAt.IsZero() || it.CreatedAt.IsZero() || it.MaxAttempts != 5 {
+			t.Errorf("row %d = %+v, want the block scanned", it.ID, it)
+		}
+	}
+
+	// Each status filter counts and lists exactly its partition.
+	for status, want := range map[string]int64{
+		workitem.StatusReady:     ripe,
+		workitem.StatusLeased:    leasedID,
+		workitem.StatusParked:    parked,
+		workitem.StatusDeferred:  deferredID,
+		workitem.StatusDone:      doneID,
+		workitem.StatusCancelled: 0,
+	} {
+		got, total, err := workitem.List(e.ctx, e.conn, e.kind, e.org, status, 50, 0)
+		if err != nil {
+			t.Fatalf("List %s: %v", status, err)
+		}
+		if want == 0 {
+			if total != 0 || len(got) != 0 {
+				t.Errorf("%s: total=%d rows=%d, want none", status, total, len(got))
+			}
+			continue
+		}
+		if total != 1 || len(got) != 1 || got[0].ID != want {
+			t.Errorf("%s: total=%d rows=%v, want only row %d", status, total, got, want)
+		}
+	}
+	if _, _, err := workitem.List(e.ctx, e.conn, e.kind, e.org, "whatever", 50, 0); err == nil {
+		t.Error("List accepted an unknown status")
+	}
+
+	// A window of one pages the unfiltered set without dropping a row; a zero
+	// window is the count alone.
+	page1, _, err := workitem.List(e.ctx, e.conn, e.kind, e.org, "", 1, 0)
+	if err != nil || len(page1) != 1 || page1[0].ID != all[0].ID {
+		t.Fatalf("page 1 = %+v err=%v", page1, err)
+	}
+	page2, _, err := workitem.List(e.ctx, e.conn, e.kind, e.org, "", 1, 1)
+	if err != nil || len(page2) != 1 || page2[0].ID != all[1].ID {
+		t.Fatalf("page 2 = %+v err=%v", page2, err)
+	}
+	none, countOnly, err := workitem.List(e.ctx, e.conn, e.kind, e.org, workitem.StatusParked, 0, 0)
+	if err != nil || countOnly != 1 || len(none) != 0 {
+		t.Fatalf("count-only = %+v total=%d err=%v", none, countOnly, err)
+	}
+
+	// The single read answers with the list's row, lease and cancel columns
+	// included; a miss and another org's id are (nil, nil).
+	got, err := workitem.Get(e.ctx, e.conn, e.kind, e.org, leasedID)
+	if err != nil || got == nil {
+		t.Fatalf("Get: row=%v err=%v", got, err)
+	}
+	if got.Status != workitem.StatusLeased || got.LeaseOwner != "worker-a" || got.LeaseEpoch == nil || *got.LeaseEpoch != 7 {
+		t.Errorf("leased row = %+v, want its lease columns", got)
+	}
+	if got.LeasedAt == nil || got.LeaseExpiresAt == nil || !got.LeaseExpiresAt.After(*got.LeasedAt) {
+		t.Errorf("lease timestamps = %v/%v, want an expiry after the acquisition", got.LeasedAt, got.LeaseExpiresAt)
+	}
+	if got.CancelRequestedAt == nil || got.CancelRequestedBy != "operator" || got.CancelReason != "stop" {
+		t.Errorf("cancel columns = %v/%q/%q, want the recorded request", got.CancelRequestedAt, got.CancelRequestedBy, got.CancelReason)
+	}
+	var fromList *workitem.Item
+	for i := range all {
+		if all[i].ID == leasedID {
+			fromList = &all[i]
+		}
+	}
+	if fromList == nil || !reflect.DeepEqual(*fromList, *got) {
+		t.Errorf("Get = %+v, want the list's row %+v", got, fromList)
+	}
+	parkedRow, err := workitem.Get(e.ctx, e.conn, e.kind, e.org, parked)
+	if err != nil || parkedRow == nil || parkedRow.DoneAt == nil || parkedRow.LastOutcome != "stuck" {
+		t.Errorf("parked row = %+v err=%v, want done_at and the park reason", parkedRow, err)
+	}
+	if miss, err := workitem.Get(e.ctx, e.conn, e.kind, e.org, 999999); err != nil || miss != nil {
+		t.Errorf("Get of an unknown id = %+v err=%v, want (nil, nil)", miss, err)
+	}
+	if miss, err := workitem.Get(e.ctx, e.conn, e.kind, uuid.NewString(), leasedID); err != nil || miss != nil {
+		t.Errorf("Get under another org = %+v err=%v, want (nil, nil)", miss, err)
+	}
+	if other, total, err := workitem.List(e.ctx, e.conn, e.kind, uuid.NewString(), "", 50, 0); err != nil || total != 0 || len(other) != 0 {
+		t.Errorf("List under another org = %+v total=%d err=%v, want nothing", other, total, err)
+	}
+}
+
+// testNilObserver pins that a Kind with no observer behaves identically: every
+// disposition lands, and nothing is reported anywhere.
+func testNilObserver(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: time.Minute})
+	bare := e.withKind(func(k *workitem.Kind) { k.Observer = nil })
+
+	id := bare.admit("quiet")
+	r := bare.claimOne("worker-a", 1)
+	if _, err := workitem.Requeue(bare.ctx, bare.conn, bare.kind, r, workitem.OutcomeTransient, errors.New("blip")); err != nil {
+		t.Fatalf("Requeue: %v", err)
+	}
+	bare.exec("UPDATE "+bare.kind.Table+" SET next_attempt_at = NULL WHERE id = ?", id)
+	r2 := bare.claimOne("worker-a", 1)
+	if err := workitem.Park(bare.ctx, bare.conn, bare.kind, r2, "stuck"); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+	if err := workitem.Redrive(bare.ctx, bare.conn, bare.kind, bare.org, id, "operator"); err != nil {
+		t.Fatalf("Redrive: %v", err)
+	}
+	r3 := bare.claimOne("worker-a", 1)
+	if err := bare.complete(r3); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	bare.requireStatus(id, workitem.StatusDone)
+	// The recorder is still the shared env's, and the bare kind never spoke
+	// to it.
+	e.requireObserved()
+}

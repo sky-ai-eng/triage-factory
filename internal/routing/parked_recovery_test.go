@@ -13,6 +13,34 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+// parkedRows reads the operator surface's parked page the way the work
+// handler does: the package's list on the kind's handle, then the kind's
+// description of each row.
+func parkedRows(t *testing.T, database *sql.DB) ([]workitem.Item, map[int64]db.WorkSubject) {
+	t.Helper()
+	handle := sqlitestore.New(database).EventQueue.(db.WorkKindHandle)
+	items, _, err := workitem.List(t.Context(), handle.Conn(), handle.Kind(), runmode.LocalDefaultOrgID, workitem.StatusParked, 50, 0)
+	if err != nil {
+		t.Fatalf("List parked: %v", err)
+	}
+	ids := make([]int64, len(items))
+	for i, it := range items {
+		ids[i] = it.ID
+	}
+	subjects, err := handle.Describe(t.Context(), runmode.LocalDefaultOrgID, ids)
+	if err != nil {
+		t.Fatalf("Describe: %v", err)
+	}
+	return items, subjects
+}
+
+// redriveQueueRow is the operator redrive of one row through the kind's
+// handle, as the work handler runs it.
+func redriveQueueRow(database *sql.DB, id int64) error {
+	handle := sqlitestore.New(database).EventQueue.(db.WorkKindHandle)
+	return workitem.Redrive(context.Background(), handle.Conn(), handle.Kind(), runmode.LocalDefaultOrgID, id, "operator")
+}
+
 // queueRowStatus reads one named queue row's status — the by-id sibling of
 // queueRow, for the cases below that have more than one row in the table.
 func queueRowStatus(t *testing.T, database *sql.DB, id int64) string {
@@ -52,7 +80,6 @@ func drainUntilParked(t *testing.T, r *Router, database *sql.DB) {
 func TestParkedEvent_ListedThenRedriven_RoutesExactlyOnce(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
-	st := sqlitestore.New(database)
 	budget := eventQueueKind.Policy.MaxAttempts
 
 	// An outage exactly as long as the retry budget: every attempt fails, so
@@ -76,18 +103,16 @@ func TestParkedEvent_ListedThenRedriven_RoutesExactlyOnce(t *testing.T) {
 	}
 
 	// What the operator sees.
-	parked, _, err := st.EventQueue.ListParked(t.Context(), runmode.LocalDefaultOrgID, db.ListOpts{Limit: 50})
-	if err != nil {
-		t.Fatalf("ListParked: %v", err)
-	}
+	parked, subjects := parkedRows(t, database)
 	if len(parked) != 1 {
 		t.Fatalf("parked rows = %d, want 1", len(parked))
 	}
-	if parked[0].EventType != domain.EventGitHubPRCICheckFailed {
-		t.Errorf("event_type = %q, want %q", parked[0].EventType, domain.EventGitHubPRCICheckFailed)
+	subject := subjects[parked[0].ID]
+	if subject.Fields["event_type"] != domain.EventGitHubPRCICheckFailed {
+		t.Errorf("event_type = %q, want %q", subject.Fields["event_type"], domain.EventGitHubPRCICheckFailed)
 	}
-	if parked[0].EntityID != entityID || parked[0].EntitySourceID != "owner/repo#parked" {
-		t.Errorf("entity = {%q %q}, want the PR the event was about", parked[0].EntityID, parked[0].EntitySourceID)
+	if subject.Fields["entity_id"] != entityID || subject.Label != "owner/repo#parked" {
+		t.Errorf("entity = {%q %q}, want the PR the event was about", subject.Fields["entity_id"], subject.Label)
 	}
 	// The row has to name the failure AND the exhausted budget: "it kept
 	// failing" and "it stopped trying" are different things to an operator.
@@ -102,12 +127,8 @@ func TestParkedEvent_ListedThenRedriven_RoutesExactlyOnce(t *testing.T) {
 
 	// The dependency is back (the outage's budget is spent) and the operator
 	// redrives.
-	n, err := st.EventQueue.Redrive(t.Context(), runmode.LocalDefaultOrgID, []int64{parked[0].ID}, "operator")
-	if err != nil {
+	if err := redriveQueueRow(database, parked[0].ID); err != nil {
 		t.Fatalf("Redrive: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("Redrive moved %d rows, want 1", n)
 	}
 
 	if err := r.drainEventQueue(context.Background()); err != nil {
@@ -123,7 +144,7 @@ func TestParkedEvent_ListedThenRedriven_RoutesExactlyOnce(t *testing.T) {
 	if n := activeTaskCount(t, database, entityID); n != 1 {
 		t.Errorf("tasks after the redriven pass = %d, want exactly 1", n)
 	}
-	if left, _, _ := st.EventQueue.ListParked(t.Context(), runmode.LocalDefaultOrgID, db.ListOpts{Limit: 50}); len(left) != 0 {
+	if left, _ := parkedRows(t, database); len(left) != 0 {
 		t.Errorf("parked rows after recovery = %d, want 0", len(left))
 	}
 }
@@ -136,7 +157,6 @@ func TestParkedEvent_ListedThenRedriven_RoutesExactlyOnce(t *testing.T) {
 func TestParkedEvent_RedriveAfterTaskArrivedByOtherMeans(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
-	st := sqlitestore.New(database)
 
 	o := &outage{remaining: eventQueueKind.Policy.MaxAttempts}
 	r.tasks = outageTaskStore{TaskStore: testTaskStore(database), o: o}
@@ -144,7 +164,7 @@ func TestParkedEvent_RedriveAfterTaskArrivedByOtherMeans(t *testing.T) {
 	entityID := newEntity(t, database, "owner/repo#converge")
 	enqueueCIFailed(t, database, entityID)
 	drainUntilParked(t, r, database)
-	parked, _, _ := st.EventQueue.ListParked(t.Context(), runmode.LocalDefaultOrgID, db.ListOpts{Limit: 50})
+	parked, _ := parkedRows(t, database)
 	if len(parked) != 1 {
 		t.Fatalf("parked rows = %d, want 1", len(parked))
 	}
@@ -160,8 +180,8 @@ func TestParkedEvent_RedriveAfterTaskArrivedByOtherMeans(t *testing.T) {
 	}
 
 	// Redriving the parked row now replays a pass whose work is already done.
-	if n, err := st.EventQueue.Redrive(t.Context(), runmode.LocalDefaultOrgID, []int64{parked[0].ID}, "operator"); err != nil || n != 1 {
-		t.Fatalf("Redrive: n=%d err=%v", n, err)
+	if err := redriveQueueRow(database, parked[0].ID); err != nil {
+		t.Fatalf("Redrive: %v", err)
 	}
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue after redrive: %v", err)

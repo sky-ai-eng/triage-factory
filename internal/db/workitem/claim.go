@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -38,7 +39,7 @@ func Claim(ctx context.Context, conn *sql.DB, k Kind, owner Owner, orgID string,
 	}
 
 	for round := 0; round < claimRounds && len(out.Claimed) < n; round++ {
-		picked, committed, err := k.claimRound(ctx, conn, owner, orgID, n-len(out.Claimed))
+		picked, committed, byOrg, err := k.claimRound(ctx, conn, owner, orgID, n-len(out.Claimed))
 		if err != nil {
 			return out, err
 		}
@@ -46,11 +47,46 @@ func Claim(ctx context.Context, conn *sql.DB, k Kind, owner Owner, orgID string,
 		out.Cancelled += committed.Cancelled
 		out.Parked += committed.Parked
 		out.Reclaimed += committed.Reclaimed
+		k.reportRound(byOrg)
 		if picked == 0 {
 			break
 		}
 	}
 	return out, nil
+}
+
+// orgRound is one committed round's shape for one org, as the observer is
+// told it. A cross-org claim's round mixes tenants, and every observer call
+// names one org, so the round is tallied per org as it is applied.
+type orgRound struct {
+	leased, reclaimed, cancelled, parked int
+}
+
+// reportRound tells the observer about one committed round, one org at a
+// time in a fixed order so a recording observer sees a deterministic
+// sequence. Each budget park and each settled cancellation is reported on its
+// own beside the round's shape, because those are dispositions the counters
+// key on and Claimed is the round's summary rather than a second count.
+func (k Kind) reportRound(byOrg map[string]*orgRound) {
+	if len(byOrg) == 0 {
+		return
+	}
+	obs := k.observe()
+	orgs := make([]string, 0, len(byOrg))
+	for org := range byOrg {
+		orgs = append(orgs, org)
+	}
+	sort.Strings(orgs)
+	for _, org := range orgs {
+		r := byOrg[org]
+		obs.Claimed(org, r.leased, r.reclaimed, r.cancelled, r.parked)
+		for i := 0; i < r.parked; i++ {
+			obs.Parked(org, ReasonBudgetExhausted)
+		}
+		for i := 0; i < r.cancelled; i++ {
+			obs.Cancelled(org)
+		}
+	}
 }
 
 // picked is one row the claim statement selected, with everything the
@@ -88,15 +124,24 @@ type picked struct {
 // through takes its predecessors' leases down with it — and a receipt for a
 // rolled-back lease is worse than no receipt at all, since its holder would act
 // on authority the database never granted.
-func (k Kind) claimRound(ctx context.Context, conn *sql.DB, owner Owner, orgID string, limit int) (int, ClaimResult, error) {
+func (k Kind) claimRound(ctx context.Context, conn *sql.DB, owner Owner, orgID string, limit int) (int, ClaimResult, map[string]*orgRound, error) {
 	var (
 		n     int
 		round ClaimResult
+		byOrg map[string]*orgRound
 	)
+	tally := func(org string) *orgRound {
+		t, ok := byOrg[org]
+		if !ok {
+			t = &orgRound{}
+			byOrg[org] = t
+		}
+		return t
+	}
 	err := inTx(ctx, conn, func(tx *sql.Tx) error {
 		// Reset per attempt: database/sql may retry the begin, and a partially
 		// filled result from an abandoned run must not survive into this one.
-		n, round = 0, ClaimResult{}
+		n, round, byOrg = 0, ClaimResult{}, map[string]*orgRound{}
 		rows, err := k.pick(ctx, tx, orgID, limit)
 		if err != nil {
 			return err
@@ -111,28 +156,32 @@ func (k Kind) claimRound(ctx context.Context, conn *sql.DB, owner Owner, orgID s
 					return err
 				}
 				round.Cancelled++
+				tally(row.orgID).cancelled++
 			case row.attempt >= row.maxTries:
 				if err := k.parkAtClaim(ctx, tx, row); err != nil {
 					return err
 				}
 				round.Parked++
+				tally(row.orgID).parked++
 			default:
 				r, err := k.lease(ctx, tx, row, owner)
 				if err != nil {
 					return err
 				}
 				round.Claimed = append(round.Claimed, r)
+				tally(row.orgID).leased++
 				if r.Reclaimed {
 					round.Reclaimed++
+					tally(row.orgID).reclaimed++
 				}
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return 0, ClaimResult{}, err
+		return 0, ClaimResult{}, nil, err
 	}
-	return n, round, nil
+	return n, round, byOrg, nil
 }
 
 // pick selects claimable rows. The three arms are: a ripe ready row, a ready

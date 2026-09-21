@@ -79,8 +79,8 @@ import { ChoiceCards } from '../../setup/parts'
 import GitHubAccessControl from './GitHubAccessControl'
 import SSOSettings from './SSOSettings'
 import SettingsSection from './SettingsSection'
-import FailedEventsPanel from '../FailedEventsPanel'
-import { useFailedEvents, type UseFailedEvents } from '../../../hooks/useFailedEvents'
+import ParkedWorkPanel, { ParkedWorkBadge } from '../ParkedWorkPanel'
+import { useParkedWork } from '../../../hooks/useParkedWork'
 import { useEntitlements, FeatureSSO, FeatureSlack } from '../../../hooks/useEntitlements'
 
 const intervalLabel = (d: string): string => d.replace(/m0s$/, 'm')
@@ -109,7 +109,7 @@ export default function OrgSettings({
   // body mounts — a diagnostics surface nobody opens is a diagnostics surface
   // nobody sees. Enabled unconditionally: OrgSettings only renders for an org
   // admin (multi) or N=1 (local), which is exactly the API's own gate.
-  const failedEvents = useFailedEvents(true)
+  const parkedWork = useParkedWork(orgId, true)
 
   // EE SSO / Slack entitlements — dark until the probe resolves, matching the
   // backend's 404-and-hide at every /api/sso/* and /api/slack/* seam.
@@ -1129,38 +1129,21 @@ export default function OrgSettings({
         </div>
       </SettingsSection>
 
-      {/* ── Parked events ── The operator surface over routing work the event
-          queue gave up on. Sits with the other operational sections rather
-          than in the danger zone: requeueing is a recovery, not a destructive
-          act. The summary carries the count so a non-zero population is
-          visible without expanding — the whole point of a diagnostics panel
-          is that you notice it before you go looking. */}
-      <SettingsSection title="Parked events" summary={<ParkedEventsBadge state={failedEvents} />}>
-        <FailedEventsPanel state={failedEvents} />
+      {/* ── Parked work ── The operator surface over durable work that will
+          not run on its own, across every registered kind. Sits with the
+          other operational sections rather than in the danger zone: a
+          redrive is a recovery, not a destructive act. The summary carries
+          the count so a non-zero population is visible without expanding —
+          the whole point of a diagnostics panel is that you notice it before
+          you go looking. */}
+      <SettingsSection title="Parked work" summary={<ParkedWorkBadge state={parkedWork} />}>
+        <ParkedWorkPanel state={parkedWork} />
       </SettingsSection>
 
       <SettingsSection title="Danger zone" summary="Clear stored tokens">
         <DangerZone orgId={orgId} />
       </SettingsSection>
     </div>
-  )
-}
-
-// ParkedEventsBadge is the Parked events section's collapsed summary. Zero is
-// the healthy state and reads as plain text; anything above zero gets a
-// warning-toned count pill, because a parked row is work that was silently
-// dropped and will not come back on its own.
-function ParkedEventsBadge({ state }: { state: UseFailedEvents }) {
-  if (state.loading || state.error) return <>Dropped events</>
-  const n = state.events.length
-  if (n === 0) return <>None parked</>
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className="rounded-full bg-alarm/10 px-2 py-0.5 text-reported font-medium text-alarm">
-        {n}
-      </span>
-      never routed
-    </span>
   )
 }
 

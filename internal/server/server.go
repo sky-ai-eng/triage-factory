@@ -1241,14 +1241,6 @@ func (s *Server) routes() {
 	s.apiMutating("DELETE /api/event-handlers/{id}", eh.handleEventHandlerDelete)
 	s.apiMutating("POST /api/event-handlers/{id}/promote", eh.handleEventHandlerPromote)
 	s.apiMutating("POST /api/event-handlers/{id}/retarget", eh.handleEventHandlerRetarget)
-	// Parked event_queue rows — the operator surface over routing work the
-	// queue gave up on, and the requeue that puts it back. Org-admin gated
-	// inside the handler; the store is the admin-pool EventQueueStore with
-	// org_id bound by argument, the same shape as the usage-ops read.
-	fe := &failedEventsHandler{az: s.az, queue: s.allStores.EventQueue}
-	s.apiMutating("POST /api/events/failed/list", fe.handleFailedEventsList)
-	s.api("GET /api/events/failed/{id}", fe.handleFailedEventGet)
-	s.apiMutating("POST /api/events/failed/requeue", fe.handleFailedEventsRequeue)
 	s.apiMutating("POST /api/prompts/list", ph.handlePromptsList)
 	s.apiMutating("POST /api/prompts", ph.handlePromptCreate)
 	s.api("GET /api/prompts/{id}", ph.handlePromptGet)
@@ -1442,6 +1434,20 @@ func (s *Server) routes() {
 	// — and because unbinding its credential already takes an org admin.
 	s.api("GET /api/orgs/{org_id}/sources/{kind}", s.handleOrgSource)
 	s.apiMutating("PATCH /api/orgs/{org_id}/sources/{kind}", s.handleOrgSourcePatch)
+
+	// Durable work across every registered kind — the depth of each queue
+	// and the operator controls over its rows. Gated per kind's declared
+	// access policy inside the handler; every kind runs on the admin pool
+	// with org_id bound by argument, so the handler's predicate is the whole
+	// enforcement. See work_handler.go.
+	wh := &workHandler{az: s.az, kinds: s.allStores.WorkKinds}
+	s.api("GET /api/orgs/{org_id}/work", wh.handleCatalogue)
+	s.api("GET /api/orgs/{org_id}/work/{kind}/depth", wh.handleDepth)
+	s.apiMutating("POST /api/orgs/{org_id}/work/{kind}/items/list", wh.handleItemsList)
+	s.api("GET /api/orgs/{org_id}/work/{kind}/items/{id}", wh.handleItemGet)
+	s.apiMutating("POST /api/orgs/{org_id}/work/{kind}/items/redrive", wh.handleRedrive)
+	s.apiMutating("POST /api/orgs/{org_id}/work/{kind}/items/cancel", wh.handleCancel)
+	s.apiMutating("POST /api/orgs/{org_id}/work/{kind}/items/{id}/supersede", wh.handleSupersede)
 
 	// The org's LLM provider credential — one resource per credential SHAPE,
 	// so a route's required fields are fixed and a blank secret never selects

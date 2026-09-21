@@ -11,6 +11,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/workmetrics"
+	"go.opentelemetry.io/otel"
 )
 
 // startBrain starts the leader-elected background brain as ONE UNIT
@@ -75,6 +77,13 @@ func (a *App) startBrain(term int64) {
 	// Minutes-cadence: a rare-divergence count, not a hot path. Kept its
 	// own goroutine, apart from the reaper below.
 	go a.router.RunTerminalInvariantChecker(brainCtx, routing.DefaultTerminalCheckInterval)
+	// Work-queue depth gauges: one measure per registered kind per tick,
+	// reported at scrape time. Brain-gated for the same reason as the checker
+	// above — one process reports, standbys do not — and read-only. Built
+	// here, under brainMu, so its callback registers only after stopBrain has
+	// unregistered the previous holder's.
+	a.workDepth = workmetrics.NewDepthObserver(otel.GetMeterProvider(), a.workDepthSources())
+	go a.workDepth.Run(brainCtx, workmetrics.DefaultDepthInterval)
 	// Durable event-queue drain worker: claims github:/jira: events the
 	// ingestor enqueued under the work-item contract's leases, routes them,
 	// and marks them done under the lease's fence. A failed attempt returns
@@ -178,6 +187,18 @@ func (a *App) startBrain(term int64) {
 	go a.runShippedDefaultsSync(brainCtx)
 }
 
+// workDepthSources is the work-kind registry as the depth observer reads it.
+// A slice of one interface does not convert to a slice of another, so the
+// handles are re-collected here rather than the registry being typed for the
+// observer.
+func (a *App) workDepthSources() []workmetrics.DepthSource {
+	out := make([]workmetrics.DepthSource, 0, len(a.stores.WorkKinds))
+	for _, k := range a.stores.WorkKinds {
+		out = append(out, k)
+	}
+	return out
+}
+
 // runShippedDefaultsSync sweeps every provisioned org × team, bringing each
 // team's unmodified shipped-default copies equal to the current shipped content
 // (db.SyncShippedDefaultsForAllTeams). Per-team failures are logged and skipped
@@ -223,6 +244,13 @@ func (a *App) stopBrain(reason string) {
 	if a.brainCancel != nil {
 		a.brainCancel()
 		a.brainCancel = nil
+	}
+	// Unregister the depth gauges before returning, not when the observer's
+	// goroutine gets around to it, so a re-acquisition that follows this call
+	// never overlaps two callbacks on the same series.
+	if a.workDepth != nil {
+		a.workDepth.Close()
+		a.workDepth = nil
 	}
 	if a.pollerMgr != nil {
 		a.pollerMgr.StopAll()

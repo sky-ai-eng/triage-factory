@@ -51,11 +51,19 @@ func (e *env) assertStragglerLoses(stale workitem.Receipt, situation string) {
 			return err
 		}},
 	}
+	e.obs.take()
 	for _, op := range ops {
 		if err := op.run(); !errors.Is(err, workitem.ErrLeaseLost) {
 			e.t.Errorf("%s: %s with a stale receipt = %v, want ErrLeaseLost", situation, op.name, err)
 		}
 	}
+	// Each guard miss is reported under its own verb and nothing else is:
+	// a straggler's writes are counted, never mistaken for dispositions.
+	e.requireObserved(
+		"lease_lost "+workitem.OpComplete, "lease_lost "+workitem.OpMarkDone,
+		"lease_lost "+workitem.OpRequeue, "lease_lost "+workitem.OpPark,
+		"lease_lost "+workitem.OpDefer, "lease_lost "+workitem.OpRenew,
+	)
 
 	if after := e.table(); !reflect.DeepEqual(before, after) {
 		e.t.Errorf("%s: the table changed under a stale receipt\nbefore: %v\nafter:  %v", situation, before, after)
@@ -309,6 +317,9 @@ func testHolderObservesCancel(t *testing.T, mk envFactory) {
 				t.Error("done_at is NULL on a cancelled row")
 			}
 			e.requireLeaseCleared(id)
+			// The holder's verb settled a cancellation, so that is what it
+			// reports — never its own disposition.
+			e.requireObserved("claimed 1/0/0/0", "cancelled")
 		})
 	}
 }
@@ -328,11 +339,13 @@ func testCancelDeferred(t *testing.T, mk envFactory) {
 	if err := workitem.RequestCancel(e.ctx, e.conn, e.kind, e.org, id, "operator", "no longer needed"); err != nil {
 		t.Fatalf("RequestCancel: %v", err)
 	}
+	e.obs.take()
 	res := e.claim(workitem.Owner{ID: "worker-b", Epoch: 1}, 1)
 	if len(res.Claimed) != 0 || res.Cancelled != 1 {
 		t.Fatalf("claim over a cancelled deferred row: claimed=%d cancelled=%d, want 0/1", len(res.Claimed), res.Cancelled)
 	}
 	e.requireStatus(id, "cancelled")
+	e.requireObserved("claimed 0/0/1/0", "cancelled")
 
 	// Settling frees the key, an hour before the retry time it was carrying.
 	newID, dup := e.admitDup("deferred-cancel")
@@ -369,6 +382,7 @@ func uniqueWhileUnsettledBody(t *testing.T, e *env) {
 		t.Fatalf("Park: %v", err)
 	}
 	e.requireStatus(id, "parked")
+	e.requireObserved("claimed 1/0/0/0", "parked needs a human")
 
 	// Parked work keeps its key, so a replacement cannot be admitted behind
 	// its back.
@@ -380,6 +394,7 @@ func uniqueWhileUnsettledBody(t *testing.T, e *env) {
 	if err := workitem.Redrive(e.ctx, e.conn, e.kind, e.org, id, "operator"); err != nil {
 		t.Fatalf("Redrive: %v", err)
 	}
+	e.requireObserved("redriven")
 	row := e.row(id)
 	if got := asString(row["status"]); got != "ready" {
 		t.Fatalf("status = %q, want ready", got)
@@ -416,6 +431,7 @@ func uniqueWhileUnsettledBody(t *testing.T, e *env) {
 	if err := workitem.Supersede(e.ctx, e.conn, e.kind, e.org, id, "operator", replacement); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
+	e.requireObserved("claimed 1/0/0/0", "parked still stuck", "superseded")
 	row = e.row(id)
 	if got := asString(row["status"]); got != "cancelled" {
 		t.Fatalf("status = %q, want cancelled", got)
@@ -452,13 +468,16 @@ func uniqueWhileUnsettledBody(t *testing.T, e *env) {
 		t.Fatalf("Redrive of a cancel-requested parked row = %v, want ErrNotParked", err)
 	}
 
-	// Neither control reaches a row that is not parked.
+	// Neither control reaches a row that is not parked, and a miss reports
+	// nothing: it moved no row.
+	e.obs.take()
 	if err := workitem.Redrive(e.ctx, e.conn, e.kind, e.org, freshID, "operator"); !errors.Is(err, workitem.ErrNotParked) {
 		t.Fatalf("Redrive of a ready row = %v, want ErrNotParked", err)
 	}
 	if err := workitem.Supersede(e.ctx, e.conn, e.kind, e.org, freshID, "operator", replacement); !errors.Is(err, workitem.ErrNotParked) {
 		t.Fatalf("Supersede of a ready row = %v, want ErrNotParked", err)
 	}
+	e.requireObserved()
 }
 
 // testUniqueForever proves the mode's whole difference over the fixture's
@@ -530,12 +549,14 @@ func testDefer(t *testing.T, mk envFactory) {
 		t.Fatalf("last_outcome = %q", got)
 	}
 	e.requireLeaseCleared(id)
+	e.requireObserved("claimed 1/0/0/0", "deferred")
 	if err := workitem.Defer(e.ctx, e.conn, e.kind, r, "waiting", past, truePredicate); !errors.Is(err, workitem.ErrLeaseLost) {
 		t.Fatalf("second Defer on one receipt = %v, want ErrLeaseLost", err)
 	}
 	if got := asInt(e.row(id)["attempt"]); got != 0 {
 		t.Fatalf("attempt = %d after a refused second refund, want 0", got)
 	}
+	e.requireObserved("lease_lost defer")
 
 	// A false predicate is not a failure and not a refund. The row stays
 	// leased and the holder still owes it a disposition.
@@ -563,6 +584,9 @@ func testDefer(t *testing.T, mk envFactory) {
 		t.Fatalf("Defer with a failing predicate = %v, want the predicate's error", err)
 	}
 	e.requireStatus(id, "leased")
+	// Neither the refusal nor the predicate's error disposed of anything, so
+	// neither was reported.
+	e.requireObserved("claimed 1/0/0/0")
 
 	// A real failure after a deferral charges normally.
 	if _, err := workitem.Requeue(e.ctx, e.conn, e.kind, r2, workitem.OutcomeTransient, errors.New("blip")); err != nil {
@@ -571,6 +595,7 @@ func testDefer(t *testing.T, mk envFactory) {
 	if got := asInt(e.row(id)["attempt"]); got != 1 {
 		t.Fatalf("attempt = %d after a real failure, want the charge kept", got)
 	}
+	e.requireObserved("requeued transient")
 
 	// Healthy waiting, repeated well past the budget, never parks the row.
 	waitID := e.admit("patient")

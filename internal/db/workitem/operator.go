@@ -78,7 +78,11 @@ func Redrive(ctx context.Context, q DBTX, k Kind, orgID string, itemID int64, by
 		" AND id = " + a.bind(itemID) +
 		" AND status = " + quoteLiteral(StatusParked) +
 		" AND cancel_requested_at IS NULL"
-	return k.operatorWrite(ctx, q, stmt, a)
+	if err := k.operatorWrite(ctx, q, stmt, a); err != nil {
+		return err
+	}
+	k.observe().Redriven(orgID)
+	return nil
 }
 
 // Supersede settles a parked row as cancelled and records the row that
@@ -115,7 +119,11 @@ func Supersede(ctx context.Context, q DBTX, k Kind, orgID string, itemID int64, 
 		" WHERE org_id = " + a.bind(orgID) +
 		" AND id = " + a.bind(itemID) +
 		" AND status = " + quoteLiteral(StatusParked)
-	return k.operatorWrite(ctx, q, stmt, a)
+	if err := k.operatorWrite(ctx, q, stmt, a); err != nil {
+		return err
+	}
+	k.observe().Superseded(orgID)
+	return nil
 }
 
 // operatorWrite runs a parked-row control, mapping a miss onto ErrNotParked.

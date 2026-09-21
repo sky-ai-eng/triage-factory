@@ -60,16 +60,8 @@ func TestEventQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.EventQueue.ListForEntity(ctx, bogusOrg, "e"); err == nil {
 		t.Errorf("ListForEntity with non-local orgID should error")
 	}
-	if _, _, err := stores.EventQueue.ListParked(ctx, bogusOrg, db.ListOpts{Limit: 50}); err == nil {
-		t.Errorf("ListParked with non-local orgID should error")
-	}
-	if _, err := stores.EventQueue.GetParked(ctx, bogusOrg, 1); err == nil {
-		t.Errorf("GetParked with non-local orgID should error")
-	}
-	// Non-empty ids: the guard must run before the per-id loop, or a
-	// cross-org redrive would pass by looking like a no-op.
-	if _, err := stores.EventQueue.Redrive(ctx, bogusOrg, []int64{1}, "operator"); err == nil {
-		t.Errorf("Redrive with non-local orgID should error")
+	if _, err := stores.EventQueue.(db.WorkKindHandle).Describe(ctx, bogusOrg, []int64{1}); err == nil {
+		t.Errorf("Describe with non-local orgID should error")
 	}
 	if _, err := stores.EventQueue.UnsettledCloseExistsSystem(ctx, bogusOrg, "e"); err == nil {
 		t.Errorf("UnsettledCloseExistsSystem with non-local orgID should error")

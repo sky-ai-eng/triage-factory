@@ -16,28 +16,53 @@ import (
 //
 // The queue's lifecycle is the shared work-item contract
 // (internal/db/workitem), declared for this table by workkinds.EventQueue:
-// Claim leases rows and hands back receipts, RenewLease / MarkDone / Requeue
-// are the holder's fenced writes, and Redrive is the operator control over a
-// parked row. The store adds nothing to that lifecycle; it composes the
-// package's verbs with this kind's own columns and its admission rules.
+// Claim leases rows and hands back receipts, and RenewLease / MarkDone /
+// Requeue are the holder's fenced writes. The store adds nothing to that
+// lifecycle; it composes the package's verbs with this kind's own columns and
+// its admission rules. The operator surface — listing, redrive, cancel —
+// reaches the table through the WorkKindHandle the store also implements,
+// with the package's own reads and controls, so there is no store method for
+// any of it.
 //
 // This is a system-service store: the ingestor (poller/tracker) and the
 // drain worker run as background goroutines with no per-user identity, so
 // the Postgres impl wires against the admin pool (BYPASSRLS) and keeps
 // org_id bound in every statement as defense in depth. SQLite collapses
 // onto its single connection and asserts the local sentinel org on the
-// org-scoped methods.
+// org-scoped methods of this interface; the operator surface's verbs run
+// through the WorkKindHandle on the package, which binds org_id without
+// asserting it, so the handler enforces the sentinel there.
 //
-// The queue's bookkeeping writes — the holder verbs, the prune, the
-// redrive — are exempt from the returned-row rule: each is fire-and-forget
-// from its caller's side, and the next claim reads the state, not this
-// caller.
+// The queue's bookkeeping writes — the holder verbs and the prune — are
+// exempt from the returned-row rule: each is fire-and-forget from its
+// caller's side, and the next claim reads the state, not this caller.
 
-// MaxRedriveIDs bounds how many queue ids one redrive call may name. A
-// selection is made from a page, and a page is bounded by the list contract,
-// so this only rejects a hand-rolled request — and rejecting it keeps the
-// per-id statement loop bounded.
-const MaxRedriveIDs = 500
+// EventQueueSubject is the WorkSubject both dialects describe a queue row
+// with, so the two produce identical subjects. The label is what an operator
+// recognizes: the entity's source id ("owner/repo#18", "SKY-123"), the bare
+// entity id when the entity row is gone, and the event type when the row
+// never named an entity. Fields carry every value the kind has for the row,
+// empty strings included, so a consumer reads one fixed set of keys.
+func EventQueueSubject(eventID, eventType, entityID, source, sourceID, title string) WorkSubject {
+	label := sourceID
+	if label == "" {
+		label = entityID
+	}
+	if label == "" {
+		label = eventType
+	}
+	return WorkSubject{
+		Label:  label,
+		Detail: title,
+		Fields: map[string]string{
+			"event_type":       eventType,
+			"entity_id":        entityID,
+			"entity_source":    source,
+			"entity_source_id": sourceID,
+			"event_id":         eventID,
+		},
+	}
+}
 
 // TraceparentAt reads the i-th entry of a batch's parallel traceparent
 // slice, returning "" (stored as NULL) when the slice doesn't cover i.
@@ -203,43 +228,6 @@ type EventQueueStore interface {
 	// cutoff, across orgs. Parked rows are never pruned: a parked row is the
 	// only record of routing work that will not run on its own.
 	PruneSettled(ctx context.Context, before time.Time) (int, error)
-
-	// ListParked returns one page of the org's parked rows — the operator
-	// surface over routing work the queue stopped on — newest first, plus
-	// the unpaged total of parked rows. id DESC is a total order (id is
-	// monotonic per insert), so the pages partition the result set.
-	//
-	// The entity fields are outer-joined for display and read empty when the
-	// row carries no entity or the entity row is gone. That is deliberate: a
-	// queue row can outlive its entity by a cascade, and omitting it would
-	// hide a parked event precisely because something unusual happened to it.
-	//
-	// Org-scoped by argument on the admin pool, like every other method here
-	// — the store is system-service wired, so the org-admin predicate in the
-	// handler is the authorization, not RLS.
-	ListParked(ctx context.Context, orgID string, opts ListOpts) ([]domain.ParkedEvent, int, error)
-
-	// GetParked returns one parked row by queue id, or (nil, nil) when the
-	// org has no parked row with that id. Same projection as ListParked — a
-	// single read answers with the list's row shape, not a bespoke one.
-	GetParked(ctx context.Context, orgID string, id int64) (*domain.ParkedEvent, error)
-
-	// Redrive returns the named parked rows to ready with a fresh budget
-	// through workitem.Redrive, one call per id, and reports how many moved.
-	// An id that is not parked, belongs to another org, or does not exist is
-	// counted out (workitem.ErrNotParked), never an error — a stale
-	// selection is the normal case for a table an operator reads and then
-	// acts on. On error the count is what moved before the failure.
-	//
-	// Replay safety is the same argument every other retry in this queue
-	// rests on: a redriven row re-enters the identical at-least-once path,
-	// where the tasks dedup index, the (triggering_event_id, trigger_id)
-	// replay fence and the one-active-run index collapse anything that
-	// already landed. That is also why this kind has no Supersede control:
-	// a supersede records a replacement row, and a parked event has none —
-	// one whose work has since been done another way is redriven and
-	// converges to a no-op through its fences.
-	Redrive(ctx context.Context, orgID string, ids []int64, by string) (int, error)
 
 	// ListForEntity returns every queue row for an entity in id order
 	// regardless of status.

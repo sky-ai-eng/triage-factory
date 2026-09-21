@@ -228,15 +228,6 @@ func (failingEnqueueQueue) UnsettledCloseExistsSystem(context.Context, string, s
 func (failingEnqueueQueue) ListForEntity(context.Context, string, string) ([]domain.QueuedEvent, error) {
 	return nil, nil
 }
-func (failingEnqueueQueue) ListParked(context.Context, string, db.ListOpts) ([]domain.ParkedEvent, int, error) {
-	return nil, 0, nil
-}
-func (failingEnqueueQueue) GetParked(context.Context, string, int64) (*domain.ParkedEvent, error) {
-	return nil, nil
-}
-func (failingEnqueueQueue) Redrive(context.Context, string, []int64, string) (int, error) {
-	return 0, nil
-}
 
 var _ db.EventQueueStore = failingEnqueueQueue{}
 

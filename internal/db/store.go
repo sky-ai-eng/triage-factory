@@ -160,6 +160,13 @@ type Stores struct {
 	// worker run as background goroutines with no per-user identity.
 	EventQueue EventQueueStore
 
+	// WorkKinds is the registry of every adopting work table, as the
+	// operator surface and the metrics depth observer see them. Each
+	// dialect's constructor fills it from the stores that implement
+	// WorkKindHandle, so registering a kind is what puts it on the panel
+	// and on the gauges.
+	WorkKinds []WorkKindHandle
+
 	// ConversationQueue owns the conversation queue — the work list the
 	// delegation dispatcher drains to drive blueprints through their steps
 	// (sibling of EventQueue). A blueprint step is enqueued as a

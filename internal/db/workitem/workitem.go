@@ -225,6 +225,9 @@ type Kind struct {
 	// Frozen is the subset of Columns read into Receipt.Frozen at claim, where
 	// the value is fixed for that generation whatever the row does afterwards.
 	Frozen []string
+	// Observer is told about every disposition the package commits for this
+	// kind. Nil is a no-op; Validate does not require one.
+	Observer Observer
 }
 
 // identRE is the shape a table or column name must have to be interpolated.
@@ -310,6 +313,14 @@ func (k Kind) Validate() error {
 		return fmt.Errorf("workitem: kind %s has backoff jitter %v outside [0,1)", k.Table, p.Backoff.Jitter)
 	}
 	return nil
+}
+
+// Objective is a kind's monitoring objective: how old its oldest ready row
+// may get before the drain counts as behind. It lives here rather than beside
+// the operator surface's handle because the metrics observer reports it per
+// kind and must not depend on the store bundle.
+type Objective struct {
+	OldestReadyAge time.Duration
 }
 
 // Owner identifies the process taking a lease. It is provenance: the write

@@ -88,20 +88,22 @@ func TestEventQueueStore_Postgres_CrossOrg(t *testing.T) {
 	if parked, err := stores.EventQueue.Requeue(ctx, claimed.Receipt, workitem.OutcomePermanent, errors.New("boom")); err != nil || !parked {
 		t.Fatalf("Requeue orgA: parked=%v err=%v", parked, err)
 	}
-	if parkedB, _, err := stores.EventQueue.ListParked(ctx, orgB, db.ListOpts{Limit: 50}); err != nil {
-		t.Fatalf("ListParked orgB: %v", err)
+	handle := stores.EventQueue.(db.WorkKindHandle)
+	if parkedB, _, err := workitem.List(ctx, handle.Conn(), handle.Kind(), orgB, workitem.StatusParked, 50, 0); err != nil {
+		t.Fatalf("List orgB: %v", err)
 	} else if len(parkedB) != 0 {
-		t.Errorf("orgB ListParked returned %d of orgA's parked rows", len(parkedB))
+		t.Errorf("orgB List returned %d of orgA's parked rows", len(parkedB))
 	}
-	if row, err := stores.EventQueue.GetParked(ctx, orgB, claimed.Event.ID); err != nil || row != nil {
-		t.Errorf("orgB GetParked = %+v err=%v, want (nil, nil)", row, err)
+	if row, err := workitem.Get(ctx, handle.Conn(), handle.Kind(), orgB, claimed.Event.ID); err != nil || row != nil {
+		t.Errorf("orgB Get = %+v err=%v, want (nil, nil)", row, err)
 	}
-	if n, err := stores.EventQueue.Redrive(ctx, orgB, []int64{claimed.Event.ID}, "operator"); err != nil {
-		t.Fatalf("Redrive orgB: %v", err)
-	} else if n != 0 {
-		t.Errorf("orgB redrove %d of orgA's parked rows, want 0", n)
+	if subjects, err := handle.Describe(ctx, orgB, []int64{claimed.Event.ID}); err != nil || len(subjects) != 0 {
+		t.Errorf("orgB Describe = %+v err=%v, want nothing", subjects, err)
 	}
-	parkedA, _, _ := stores.EventQueue.ListParked(ctx, orgA, db.ListOpts{Limit: 50})
+	if err := workitem.Redrive(ctx, handle.Conn(), handle.Kind(), orgB, claimed.Event.ID, "operator"); !errors.Is(err, workitem.ErrNotParked) {
+		t.Errorf("orgB Redrive of orgA's parked row = %v, want ErrNotParked", err)
+	}
+	parkedA, _, _ := workitem.List(ctx, handle.Conn(), handle.Kind(), orgA, workitem.StatusParked, 50, 0)
 	if len(parkedA) != 1 || parkedA[0].ID != claimed.Event.ID {
 		t.Fatalf("orgA's parked row = %+v, want the row it parked, untouched", parkedA)
 	}
@@ -111,8 +113,8 @@ func TestEventQueueStore_Postgres_CrossOrg(t *testing.T) {
 
 	// The correctly-scoped redrive puts it back, and the correctly-scoped
 	// receipt still drives it to a terminal.
-	if n, err := stores.EventQueue.Redrive(ctx, orgA, []int64{claimed.Event.ID}, "operator"); err != nil || n != 1 {
-		t.Fatalf("Redrive orgA: n=%d err=%v", n, err)
+	if err := workitem.Redrive(ctx, handle.Conn(), handle.Kind(), orgA, claimed.Event.ID, "operator"); err != nil {
+		t.Fatalf("Redrive orgA: %v", err)
 	}
 	again, err := stores.EventQueue.Claim(ctx, workitem.Owner{ID: "cross-org-executor", Epoch: 1}, 1)
 	if err != nil || len(again.Events) != 1 {

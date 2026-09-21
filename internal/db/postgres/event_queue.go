@@ -235,107 +235,67 @@ func (s *eventQueueStore) PruneSettled(ctx context.Context, before time.Time) (i
 	return int(n), nil
 }
 
-// pgParkedEventSelect is the projection both the list and the single read
-// answer with, so a row read one way is byte-identical to the same row read
-// the other.
-//
-// LEFT JOIN, not JOIN: entity_id is nullable and a queue row can outlive the
-// entity it named (the FK cascades, but a parked row read mid-cascade or one
-// enqueued without an entity must still list). The join is bound on org_id as
-// well as id — the composite FK means the pair is what identifies an entity,
-// and binding only id would let a future cross-org id collision join the wrong
-// title in.
-const pgParkedEventSelect = `
-	SELECT q.id, q.event_type,
-	       COALESCE(q.entity_id::text, ''), COALESCE(e.source, ''), COALESCE(e.source_id, ''), COALESCE(e.title, ''),
-	       q.attempt, q.max_attempts, COALESCE(q.last_outcome, ''), COALESCE(q.last_error, ''),
-	       q.first_enqueued_at, q.done_at
-	FROM public.event_queue q
-	LEFT JOIN public.entities e ON e.id = q.entity_id AND e.org_id = q.org_id
-	WHERE q.org_id = $1 AND q.status = 'parked'`
+// The store is also the event queue's WorkKindHandle: what the operator
+// surface and the metrics depth observer see of this table. The surface runs
+// the package's own reads and controls on Conn, org-scoped by argument on the
+// admin pool, so the org-admin predicate in the handler is the authorization,
+// not RLS.
+var _ db.WorkKindHandle = (*eventQueueStore)(nil)
 
-func (s *eventQueueStore) ListParked(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.ParkedEvent, int, error) {
-	var total int
-	if err := s.conn.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM public.event_queue WHERE org_id = $1 AND status = 'parked'
-	`, orgID).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	if opts.CountOnly {
-		return []domain.ParkedEvent{}, total, nil
-	}
+func (s *eventQueueStore) Name() string          { return workkinds.EventQueueName }
+func (s *eventQueueStore) Label() string         { return workkinds.EventQueueLabel }
+func (s *eventQueueStore) Kind() workitem.Kind   { return s.kind }
+func (s *eventQueueStore) Conn() workitem.DBTX   { return s.conn }
+func (s *eventQueueStore) Access() db.WorkAccess { return db.WorkAccessOrgAdmin }
 
-	// id DESC is enqueue order reversed: the most recently parked work is
-	// what an operator is looking for, and id is monotonic per insert so the
-	// order is total and stable across pages.
-	query := pgParkedEventSelect + `
-		ORDER BY q.id DESC`
-	args := []any{orgID}
-	if opts.Limit > 0 {
-		query += `
-		LIMIT $2 OFFSET $3`
-		args = append(args, opts.Limit, opts.Offset)
-	}
-	rows, err := s.conn.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-	out := []domain.ParkedEvent{}
-	for rows.Next() {
-		pe, err := scanParkedEvent(rows)
-		if err != nil {
-			return nil, 0, err
-		}
-		out = append(out, pe)
-	}
-	return out, total, rows.Err()
+// Controls: redrive and cancel, never supersede. A supersede records a
+// replacement row, and a parked event has none — one whose work has since
+// been done another way is redriven and converges to a no-op through the
+// routing fences (the tasks dedup index, the (triggering_event_id,
+// trigger_id) replay fence, the one-active-run index).
+func (s *eventQueueStore) Controls() db.WorkControls {
+	return db.WorkControls{Redrive: true, Cancel: true}
 }
 
-func (s *eventQueueStore) GetParked(ctx context.Context, orgID string, id int64) (*domain.ParkedEvent, error) {
-	pe, err := scanParkedEvent(s.conn.QueryRowContext(ctx, pgParkedEventSelect+`
-		AND q.id = $2`, orgID, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+func (s *eventQueueStore) Objective() db.WorkObjective {
+	return db.WorkObjective{OldestReadyAge: workkinds.EventQueueOldestReadyObjective}
+}
+
+// Describe names each row by the entity its event was about. LEFT JOIN, not
+// JOIN: entity_id is nullable and a queue row can outlive the entity it named
+// (a row enqueued without an entity, or read mid-cascade), and such a row is
+// still described — by its event type — because omitting it would hide a
+// parked event precisely because something unusual happened to it. The join
+// is bound on org_id as well as id: the composite FK means the pair is what
+// identifies an entity, and binding only id would let a cross-org id
+// collision join the wrong title in.
+func (s *eventQueueStore) Describe(ctx context.Context, orgID string, ids []int64) (map[int64]db.WorkSubject, error) {
+	if len(ids) == 0 {
+		return map[int64]db.WorkSubject{}, nil
 	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT q.id, q.event_id, q.event_type,
+		       COALESCE(q.entity_id::text, ''), COALESCE(e.source, ''), COALESCE(e.source_id, ''), COALESCE(e.title, '')
+		FROM public.event_queue q
+		LEFT JOIN public.entities e ON e.id = q.entity_id AND e.org_id = q.org_id
+		WHERE q.org_id = $1 AND q.id = ANY($2)
+	`, orgID, ids)
 	if err != nil {
 		return nil, err
 	}
-	return &pe, nil
-}
-
-// scanParkedEvent reads one pgParkedEventSelect row. It takes the narrow Scan
-// interface so *sql.Row and *sql.Rows share it — the two reads must not
-// drift on column order.
-func scanParkedEvent(row interface{ Scan(...any) error }) (domain.ParkedEvent, error) {
-	var (
-		pe       domain.ParkedEvent
-		parkedAt sql.NullTime
-	)
-	err := row.Scan(
-		&pe.ID, &pe.EventType,
-		&pe.EntityID, &pe.EntitySource, &pe.EntitySourceID, &pe.EntityTitle,
-		&pe.Attempt, &pe.MaxAttempts, &pe.LastOutcome, &pe.LastError,
-		&pe.FirstEnqueuedAt, &parkedAt,
-	)
-	if parkedAt.Valid {
-		pe.ParkedAt = parkedAt.Time
-	}
-	return pe, err
-}
-
-func (s *eventQueueStore) Redrive(ctx context.Context, orgID string, ids []int64, by string) (int, error) {
-	moved := 0
-	for _, id := range ids {
-		switch err := workitem.Redrive(ctx, s.conn, s.kind, orgID, id, by); {
-		case err == nil:
-			moved++
-		case errors.Is(err, workitem.ErrNotParked):
-		default:
-			return moved, err
+	defer rows.Close()
+	out := make(map[int64]db.WorkSubject, len(ids))
+	for rows.Next() {
+		var (
+			id                                                    int64
+			eventID, eventType, entityID, source, sourceID, title string
+		)
+		if err := rows.Scan(&id, &eventID, &eventType, &entityID, &source, &sourceID, &title); err != nil {
+			return nil, err
 		}
+		out[id] = db.EventQueueSubject(eventID, eventType, entityID, source, sourceID, title)
 	}
-	return moved, nil
+	return out, rows.Err()
 }
 
 func (s *eventQueueStore) UnsettledCloseExistsSystem(ctx context.Context, orgID, entityID string) (bool, error) {

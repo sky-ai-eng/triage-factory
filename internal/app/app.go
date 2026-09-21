@@ -56,6 +56,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"github.com/sky-ai-eng/triage-factory/internal/workmetrics"
 	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -238,6 +239,14 @@ type App struct {
 	// workers) — stopBrain's actual stop mechanism. nil when the brain
 	// isn't running.
 	brainCancel context.CancelFunc
+	// workDepth is the brain's work-queue depth observer, whose gauge
+	// callback is registered on the global meter provider. stopBrain closes
+	// it synchronously rather than leaving that to its goroutine's
+	// cancellation: the goroutine notices brainCtx only between ticks, and
+	// a re-acquisition that started a new observer before the old one got
+	// there would have two callbacks reporting the same series. nil when the
+	// brain isn't running.
+	workDepth *workmetrics.DepthObserver
 
 	// shuttingDown latches once Run's blocking listener has unwound and the
 	// dispatch drain has begun (drainDispatches). The executor healthz reads

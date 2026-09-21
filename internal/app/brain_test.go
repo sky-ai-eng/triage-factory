@@ -5,11 +5,16 @@ import (
 	"testing"
 	"time"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
 	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/lease"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/workmetrics"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // fakeLeaseStore is a minimal in-memory lease.Store for driving a real
@@ -177,4 +182,65 @@ func TestApp_DispatchCtl_RoutesAllKindsNilSafe(t *testing.T) {
 	} {
 		a.dispatchCtl(payload)
 	}
+}
+
+// depthSourceStub is a DepthSource the depth observer can register gauges
+// for without a database: stopBrain is under test, and it never ticks.
+type depthSourceStub struct{}
+
+func (depthSourceStub) Name() string        { return "stub" }
+func (depthSourceStub) Kind() workitem.Kind { return workitem.Kind{} }
+func (depthSourceStub) Conn() workitem.DBTX { return nil }
+func (depthSourceStub) Objective() workitem.Objective {
+	return workitem.Objective{OldestReadyAge: time.Minute}
+}
+
+// TestApp_StopBrain_UnregistersDepthGaugesBeforeReturning pins that a
+// demotion has unregistered the depth observer's callback by the time
+// stopBrain returns, rather than whenever its goroutine notices the
+// cancellation: the next startBrain registers a new callback under the same
+// mutex, and an old one still registered would report the same series twice.
+func TestApp_StopBrain_UnregistersDepthGaugesBeforeReturning(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	obs := workmetrics.NewDepthObserver(provider, []workmetrics.DepthSource{depthSourceStub{}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	a := &App{brainRunning: true, brainCancel: cancel, workDepth: obs}
+	go obs.Run(ctx, time.Hour)
+
+	var before metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &before); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if n := objectivePoints(before); n != 1 {
+		t.Fatalf("objective gauge has %d points while the brain runs, want 1", n)
+	}
+
+	a.stopBrain("test")
+
+	var after metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &after); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if n := objectivePoints(after); n != 0 {
+		t.Errorf("objective gauge has %d points after stopBrain returned, want 0", n)
+	}
+	if a.workDepth != nil {
+		t.Error("stopBrain left workDepth set")
+	}
+}
+
+func objectivePoints(rm metricdata.ResourceMetrics) int {
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "work.oldest_ready_age_objective" {
+				continue
+			}
+			if g, ok := m.Data.(metricdata.Gauge[int64]); ok {
+				return len(g.DataPoints)
+			}
+		}
+	}
+	return 0
 }

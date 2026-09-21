@@ -254,7 +254,7 @@ term between batches.
 
 **Operator controls** are request paths. Every kind declares one access policy:
 
-- Org-admin-only, following `failedEventsHandler`: admin-pool access behind `RequireOrgAdminRole`,
+- Org-admin-only, following `workHandler`: admin-pool access behind `RequireOrgAdminRole`,
   with no RLS backstop. Document and test that responsibility explicitly.
 - A named visibility join for team- or user-scoped rows.
 
@@ -266,7 +266,8 @@ drains nothing and reads as permanently empty.
 Each kind must preserve its authorization rules through retention and parent deletion, and ship
 handler authorization tests alongside its Postgres tests.
 
-The shared package supplies these metrics per table:
+The shared package reports every disposition to a `Kind.Observer`; `internal/workmetrics` turns
+those into the metrics below:
 
 - **Gauges:** ready depth, leased count, parked count, oldest-ready age, deferred depth and age.
 - **Counters:** claims, completions, parks by reason, deferrals, requeues by typed outcome, and
@@ -276,8 +277,9 @@ Each kind declares an oldest-ready-age objective and a steady-state target of ze
 with alerts when those objectives are breached. Monitoring must distinguish an idle queue from
 one that has stopped draining.
 
-Generalize the TFAC-780 failed-event panel to show parked work across kinds, with accurate total
-counts and per-row redrive and supersede controls.
+The parked-work panel (`/api/orgs/{org_id}/work`, the Parked work section of org settings) shows
+parked work across every registered kind, with accurate total counts and per-row redrive and
+supersede controls.
 
 ### 1.9 Required conformance tests
 

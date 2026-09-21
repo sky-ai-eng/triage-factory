@@ -14,7 +14,6 @@ var (
 	delegateSpawnLog   = logging.Component("delegate-spawn")
 	eventHandlersLog   = logging.Component("event_handlers")
 	externalActionLog  = logging.Component("external-action")
-	failedEventsLog    = logging.Component("failed-events")
 	factoryLog         = logging.Component("factory")
 	githubAccessLog    = logging.Component("github-access")
 	githubAppLog       = logging.Component("github-app")
@@ -40,4 +39,5 @@ var (
 	taskActionLog      = logging.Component("task-action")
 	tasksLog           = logging.Component("tasks")
 	teamsLog           = logging.Component("teams")
+	workLog            = logging.Component("work")
 )
