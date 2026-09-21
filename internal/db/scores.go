@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"sort"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -89,4 +90,24 @@ type ScoreStore interface {
 	// yet (status='queued' AND scoring_status='pending'), joined to
 	// their entity. Used by the runner to discover work per cycle.
 	UnscoredTasks(ctx context.Context, orgID string) ([]domain.Task, error)
+}
+
+// OrderedScoreUpdates is the batch as UpdateTaskScores applies it on both
+// dialects: one update per task, the last one for a repeated id winning, in
+// ascending task id order. One per task is what keeps the queue row's
+// requested_revision equal to the task's score_revision — a repeated id
+// would raise the revision once per repetition on one side and once per
+// row on the other — and the fixed order is what keeps two concurrent
+// writers from deadlocking on each other's queue rows.
+func OrderedScoreUpdates(updates []domain.TaskScoreUpdate) []domain.TaskScoreUpdate {
+	last := make(map[string]domain.TaskScoreUpdate, len(updates))
+	for _, u := range updates {
+		last[u.ID] = u
+	}
+	ordered := make([]domain.TaskScoreUpdate, 0, len(last))
+	for _, u := range last {
+		ordered = append(ordered, u)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	return ordered
 }

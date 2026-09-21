@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -84,9 +83,7 @@ func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates
 	if len(updates) == 0 {
 		return nil
 	}
-	ordered := make([]domain.TaskScoreUpdate, len(updates))
-	copy(ordered, updates)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	ordered := db.OrderedScoreUpdates(updates)
 
 	kind := workkinds.TaskReDerive(workitem.Postgres)
 	return inTxRaw(ctx, s.q, func(tx *sql.Tx) error {

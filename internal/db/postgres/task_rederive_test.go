@@ -1,6 +1,7 @@
 package postgres_test
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitemtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // TestTaskReDeriveStore_Postgres runs the shared conformance suite against
@@ -68,4 +70,38 @@ func TestTaskReDeriveWorkItem_Postgres(t *testing.T) {
 		}
 		return h.AdminDB, workkinds.TaskReDerive(workitem.Postgres), orgID, cols
 	})
+}
+
+// TestTaskReDeriveStore_Postgres_DescribeIsOrgScoped pins the operator
+// surface's read: a row's description is answered for the org the row
+// belongs to alone, so the panel of one org never carries another org's
+// task or entity title, whatever ids it names.
+func TestTaskReDeriveStore_Postgres_DescribeIsOrgScoped(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgA, userA, agentA := seedPgPendingFiringsOrg(t, h)
+	tupA := newPgPendingFiringsSeeder(h, stores, orgA, userA, agentA).Tuple(t)
+	orgB, _, _ := seedPgPendingFiringsOrg(t, h)
+
+	if err := stores.Scores.UpdateTaskScores(ctx, orgA, []domain.TaskScoreUpdate{{
+		ID: tupA.TaskID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r",
+	}}); err != nil {
+		t.Fatalf("UpdateTaskScores: %v", err)
+	}
+	rows := readPgReDeriveRows(t, h.AdminDB, tupA.TaskID)
+	if len(rows) != 1 {
+		t.Fatalf("orgA task has %d queue rows, want 1", len(rows))
+	}
+
+	handle := stores.TaskReDerive.(db.WorkKindHandle)
+	if got, err := handle.Describe(ctx, orgB, []int64{rows[0].ID}); err != nil || len(got) != 0 {
+		t.Errorf("orgB Describe of orgA's row = %+v err=%v, want nothing", got, err)
+	}
+	got, err := handle.Describe(ctx, orgA, []int64{rows[0].ID})
+	if err != nil || len(got) != 1 || got[rows[0].ID].Detail != "Test PR" {
+		t.Errorf("orgA Describe of its own row = %+v err=%v, want the entity's title", got, err)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -175,6 +176,10 @@ func TestReDeriveWorker_ReadFailureRequeuesWithBackoffAndParksOnTheFifth(t *test
 		t.Fatalf("a pass before the backoff ripened charged attempt %d", row.attempt)
 	}
 
+	// Each failed attempt's retry sits inside the kind's backoff band for
+	// that attempt — 5s, 10s, 20s, 40s before jitter — so the delays grow
+	// rather than repeat.
+	requireBackoff(t, row, 1)
 	for attempt := 2; attempt <= 5; attempt++ {
 		ripenReDerive(t, database, taskID)
 		drainReDeriveOnce(t, r)
@@ -182,8 +187,11 @@ func TestReDeriveWorker_ReadFailureRequeuesWithBackoffAndParksOnTheFifth(t *test
 		if row.attempt != attempt {
 			t.Fatalf("after pass %d the row charged attempt %d", attempt, row.attempt)
 		}
-		if attempt < 5 && row.status != workitem.StatusReady {
-			t.Fatalf("after pass %d the row is %q, want ready with budget left", attempt, row.status)
+		if attempt < 5 {
+			if row.status != workitem.StatusReady {
+				t.Fatalf("after pass %d the row is %q, want ready with budget left", attempt, row.status)
+			}
+			requireBackoff(t, row, attempt)
 		}
 	}
 	row = reDeriveRowFor(t, database, taskID)
@@ -257,4 +265,28 @@ type failingHandlerStore struct {
 
 func (s failingHandlerStore) GetEnabledForEventSystem(context.Context, string, string) ([]domain.EventHandler, error) {
 	return nil, s.err
+}
+
+// requireBackoff asserts a requeued row's retry time lies in the kind's
+// jitter band for the attempt that failed: Base * 2^(attempt-1), within
+// ±25%, measured from now. The bands do not overlap, so a delay that failed
+// to grow lands outside its attempt's band.
+func requireBackoff(t *testing.T, row reDeriveRow, attempt int) {
+	t.Helper()
+	if !row.nextAttempt.Valid {
+		t.Fatalf("attempt %d: next_attempt_at is NULL, want a backoff", attempt)
+	}
+	next, err := time.Parse("2006-01-02 15:04:05.000", row.nextAttempt.String)
+	if err != nil {
+		t.Fatalf("attempt %d: parse next_attempt_at %q: %v", attempt, row.nextAttempt.String, err)
+	}
+	delay := next.Sub(time.Now().UTC())
+	spec := taskReDeriveKind.Policy.Backoff
+	lo := workitem.Backoff(spec, attempt, func() float64 { return 0 })
+	hi := workitem.Backoff(spec, attempt, func() float64 { return 1 })
+	// The write happened moments ago, so the delay measured now is a little
+	// under what was written; a second of slack covers a slow runner.
+	if delay < lo-time.Second || delay > hi {
+		t.Errorf("attempt %d: retry in %s, want within the backoff band [%s, %s]", attempt, delay, lo, hi)
+	}
 }

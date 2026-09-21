@@ -298,6 +298,31 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 		requireRow(t, oneRow(t, f, ids[1]), ids[1], workitem.StatusReady, 1)
 	})
 
+	// A batch that names one task twice is one save of that task: the last
+	// update wins, and the revision moves once — on the task and on the
+	// queue row alike — so the two cannot drift apart.
+	t.Run("UpdateTaskScores_applies_a_repeated_id_once", func(t *testing.T) {
+		f := mk(t)
+		id := f.Seed(t, 1)[0]
+		if err := f.Store.UpdateTaskScores(ctx, f.OrgID, []domain.TaskScoreUpdate{
+			{ID: id, PriorityScore: 0.1, AutonomySuitability: 0.2, Summary: "first", PriorityReasoning: "r"},
+			{ID: id, PriorityScore: 0.9, AutonomySuitability: 0.8, Summary: "last", PriorityReasoning: "r"},
+		}); err != nil {
+			t.Fatalf("UpdateTaskScores: %v", err)
+		}
+		requireRow(t, oneRow(t, f, id), id, workitem.StatusReady, 1)
+		if rev := f.ScoreRevision(t, id); rev != 1 {
+			t.Errorf("score_revision = %d after one save naming the task twice, want 1", rev)
+		}
+		tasks, err := f.Store.UnscoredTasks(ctx, f.OrgID)
+		if err != nil {
+			t.Fatalf("UnscoredTasks: %v", err)
+		}
+		if len(tasks) != 0 {
+			t.Fatalf("task still unscored after the save: %+v", tasks)
+		}
+	})
+
 	// A score landing while the row is leased raises it in place: the holder
 	// completes against its frozen revision and finds the row has moved on.
 	t.Run("UpdateTaskScores_raises_a_leased_row_in_place", func(t *testing.T) {
