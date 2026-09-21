@@ -284,9 +284,10 @@ func TestMigrate_EventQueueAdoptsWorkItemBlock(t *testing.T) {
 }
 
 // TestEventQueueSchemaCarriesWorkItemIndexes pins that both dialects' schema
-// files carry every statement workitem.IndexDDL renders for the kind,
-// verbatim, so the index shape the claim relies on cannot drift from the
-// package that owns it.
+// files carry every statement workitem.IndexDDL renders for the kind — the
+// SQLite migration verbatim, the Postgres baseline with the table named
+// through its schema like every statement beside it — so the index shape the
+// claim relies on cannot drift from the package that owns it.
 func TestEventQueueSchemaCarriesWorkItemIndexes(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -304,8 +305,12 @@ func TestEventQueueSchemaCarriesWorkItemIndexes(t *testing.T) {
 			}
 			kind := workkinds.EventQueue(tc.dialect)
 			for i, stmt := range workitem.IndexDDL(kind) {
-				if !strings.Contains(string(raw), stmt+";") {
-					t.Errorf("%s lacks index %s verbatim:\n%s", tc.file, workitem.IndexNames(kind)[i], stmt)
+				want := stmt
+				if tc.dialect == workitem.Postgres {
+					want = strings.Replace(stmt, " ON "+kind.Table+" (", " ON public."+kind.Table+" (", 1)
+				}
+				if !strings.Contains(string(raw), want+";") {
+					t.Errorf("%s lacks index %s:\n%s", tc.file, workitem.IndexNames(kind)[i], want)
 				}
 			}
 			for _, old := range []string{"'pending'", "'processing'", "idx_event_queue_pending", "idx_event_queue_status_processed"} {

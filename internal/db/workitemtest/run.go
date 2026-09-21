@@ -550,6 +550,11 @@ func testMeasure(t *testing.T, mk envFactory) {
 		t.Fatalf("defer: %v", err)
 	}
 
+	// Ages are measured from first_enqueued_at, which SQLite stores at
+	// millisecond resolution: an admit and a measure in the same millisecond
+	// read as zero. Backdating the rows makes the age a fact of the fixture
+	// rather than of how fast this machine ran the lines above.
+	e.exec("UPDATE "+e.kind.Table+" SET first_enqueued_at = "+e.pastExpr()+" WHERE org_id = ?", e.org)
 	d, err := workitem.Measure(e.ctx, e.conn, e.kind, e.org)
 	if err != nil {
 		t.Fatalf("Measure: %v", err)
@@ -557,11 +562,11 @@ func testMeasure(t *testing.T, mk envFactory) {
 	if d.Ready != 1 || d.Leased != 1 || d.Parked != 1 || d.Deferred != 1 {
 		t.Fatalf("depths = %+v, want one of each", d)
 	}
-	if d.OldestReadyAge <= 0 {
-		t.Error("OldestReadyAge is zero with a ripe ready row")
+	if d.OldestReadyAge < 59*time.Minute {
+		t.Errorf("OldestReadyAge = %s with a ripe ready row enqueued an hour ago", d.OldestReadyAge)
 	}
-	if d.OldestDeferredAge <= 0 {
-		t.Error("OldestDeferredAge is zero with a deferred row")
+	if d.OldestDeferredAge < 59*time.Minute {
+		t.Errorf("OldestDeferredAge = %s with a deferred row enqueued an hour ago", d.OldestDeferredAge)
 	}
 
 	// An org with nothing in it measures zero, not the other org's rows.
@@ -701,6 +706,11 @@ func testMeasureByOrg(t *testing.T, mk envFactory) {
 		t.Fatalf("defer: %v", err)
 	}
 
+	// Ages are measured from first_enqueued_at, which SQLite stores at
+	// millisecond resolution: an admit and a measure in the same millisecond
+	// read as zero. Backdating the rows makes the age a fact of the fixture
+	// rather than of how fast this machine ran the lines above.
+	e.exec("UPDATE "+e.kind.Table+" SET first_enqueued_at = "+e.pastExpr()+" WHERE org_id = ?", e.org)
 	scoped, err := workitem.Measure(e.ctx, e.conn, e.kind, e.org)
 	if err != nil {
 		t.Fatalf("Measure: %v", err)
@@ -719,8 +729,8 @@ func testMeasureByOrg(t *testing.T, mk envFactory) {
 	if got.Ready != 1 || got.Leased != 1 || got.Parked != 1 || got.Deferred != 1 {
 		t.Fatalf("depths = %+v, want one of each", got)
 	}
-	if got.OldestReadyAge <= 0 || got.OldestDeferredAge <= 0 {
-		t.Errorf("ages = %s/%s, want both positive", got.OldestReadyAge, got.OldestDeferredAge)
+	if got.OldestReadyAge < 59*time.Minute || got.OldestDeferredAge < 59*time.Minute {
+		t.Errorf("ages = %s/%s, want both about an hour", got.OldestReadyAge, got.OldestDeferredAge)
 	}
 
 	// Terminal rows contribute to no depth: settle everything and the org

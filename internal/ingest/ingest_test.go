@@ -127,7 +127,7 @@ func TestIngestor_RouterBoundEvent_DurablyEnqueuedAndPublished(t *testing.T) {
 		t.Fatalf("expected 1 queue row, got %d", len(rows))
 	}
 	if rows[0].Status != domain.QueuedEventStatusReady {
-		t.Errorf("queue row status = %q, want pending", rows[0].Status)
+		t.Errorf("queue row status = %q, want ready", rows[0].Status)
 	}
 	if rows[0].EventID == "" {
 		t.Errorf("queue row has empty event_id")

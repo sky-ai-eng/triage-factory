@@ -107,7 +107,7 @@ func TestIngestor_UntracedProducerStampsNothing(t *testing.T) {
 		t.Errorf("traceparent = %q, want empty with tracing disabled", rows[0].Traceparent)
 	}
 	if rows[0].Status != domain.QueuedEventStatusReady {
-		t.Errorf("status = %q, want pending — an untraced event enqueues like any other", rows[0].Status)
+		t.Errorf("status = %q, want ready — an untraced event enqueues like any other", rows[0].Status)
 	}
 	// And the bus fan-out is unchanged, id stamped from the durable row.
 	e := awaitEvent(t, got)

@@ -3818,13 +3818,14 @@ CREATE INDEX idx_event_queue_entity ON public.event_queue USING btree (entity_id
 CREATE UNIQUE INDEX idx_event_queue_event ON public.event_queue USING btree (event_id);
 -- The prune's scan: settled rows older than the retention cutoff.
 CREATE INDEX idx_event_queue_done_at ON public.event_queue (done_at) WHERE status IN ('done','cancelled');
--- The work-item indexes, verbatim as workitem.IndexDDL renders them for this
--- kind; a test asserts each is present by name.
-CREATE INDEX IF NOT EXISTS idx_event_queue_ready_next ON event_queue (next_attempt_at, id) WHERE status = 'ready';
-CREATE INDEX IF NOT EXISTS idx_event_queue_ready_cancel ON event_queue (id) WHERE status = 'ready' AND cancel_requested_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_event_queue_leased_expiry ON event_queue (lease_expires_at) WHERE status = 'leased';
-CREATE INDEX IF NOT EXISTS idx_event_queue_parked ON event_queue (org_id, id) WHERE status = 'parked';
-CREATE UNIQUE INDEX IF NOT EXISTS uq_event_queue_unique_key ON event_queue (org_id, unique_key) WHERE unique_key IS NOT NULL AND status IN ('ready','leased','parked');
+-- The work-item indexes as workitem.IndexDDL renders them for this kind,
+-- naming the table through its schema like every other statement here; a
+-- test asserts each is present.
+CREATE INDEX IF NOT EXISTS idx_event_queue_ready_next ON public.event_queue (next_attempt_at, id) WHERE status = 'ready';
+CREATE INDEX IF NOT EXISTS idx_event_queue_ready_cancel ON public.event_queue (id) WHERE status = 'ready' AND cancel_requested_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_event_queue_leased_expiry ON public.event_queue (lease_expires_at) WHERE status = 'leased';
+CREATE INDEX IF NOT EXISTS idx_event_queue_parked ON public.event_queue (org_id, id) WHERE status = 'parked';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_event_queue_unique_key ON public.event_queue (org_id, unique_key) WHERE unique_key IS NOT NULL AND status IN ('ready','leased','parked');
 
 ALTER TABLE public.event_queue ENABLE ROW LEVEL SECURITY;
 CREATE POLICY event_queue_all ON public.event_queue

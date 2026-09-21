@@ -445,7 +445,7 @@ func TestSourceRegistry_SwallowedFailure_IsRefusedNotBelieved(t *testing.T) {
 
 	status, _, lastErr := queueRow(t, database)
 	if status != domain.QueuedEventStatusReady {
-		t.Errorf("row after the swallowed failure = %q, want pending — an unclaimed empty resolution is not an answer", status)
+		t.Errorf("row after the swallowed failure = %q, want ready — an unclaimed empty resolution is not an answer", status)
 	}
 	if !strings.Contains(lastErr, `source "fake"`) || !strings.Contains(lastErr, "Unowned") {
 		t.Errorf("last_error = %q, want it to name the offending source and the flag it failed to set", lastErr)
