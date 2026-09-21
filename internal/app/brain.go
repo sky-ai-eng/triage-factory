@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -67,8 +66,12 @@ func (a *App) startBrain(term int64) {
 	a.brainCancel = cancel
 	appLog.Info("background brain: starting", "term", term)
 
-	// Drain sweeper: safety net for queues stuck on transient fire errors.
-	go a.router.RunDrainSweeper(brainCtx, 30*time.Second)
+	// Firing worker: claims the auto-delegation intents the router admitted
+	// while their tasks were busy, under the work-item contract's leases,
+	// once the claim query's own gate — no live conversation on the task —
+	// opens. A conversation terminal wakes it; the scan tick is the floor.
+	// Same single-worker discipline as the event-queue worker below.
+	go a.router.RunFiringQueue(brainCtx, routing.DefaultFiringScanInterval)
 	// Terminal-state invariant checker: read-only. Counts the entities the
 	// poll's enforcement should have closed and did not — active with a
 	// terminal snapshot, past the grace, no close in flight — and the tasks
@@ -130,7 +133,7 @@ func (a *App) startBrain(term int64) {
 	}
 	// Fleet reaper (dead-executor requeue/fail/cancel-finalize) + registry
 	// GC (TFAC-586, spec §4.3/§4.1(5)) — leader-only, singleton sweeps
-	// exactly like the drain sweeper above. nil in local mode and at
+	// exactly like the firing worker above. nil in local mode and at
 	// TF_ROLE=executor (buildReaper never constructs a.reaperStore there).
 	if a.reaperStore != nil {
 		go reaper.RunReaper(brainCtx, a.reaperStore, reaper.DefaultReapInterval, a.reaperStaleThreshold, a.reaperMaxAttempts)

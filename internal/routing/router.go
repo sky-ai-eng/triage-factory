@@ -95,7 +95,9 @@ type EventPublisher interface {
 //  6. Enqueues AI scoring
 //  7. Auto-delegates on matching triggers — fires if the task is idle,
 //     folds the event into the task's live conversation if it has one, and
-//     enqueues onto pending_firings when there are earlier queued firings.
+//     admits a firing onto pending_firings when the task is busy, where the
+//     firing worker (RunFiringQueue) claims it once the task's gate — no live
+//     conversation, the claim query's own filter — opens.
 //  8. Runs inline close checks for the event type
 type Router struct {
 	prompts       dbpkg.PromptStore
@@ -107,10 +109,10 @@ type Router struct {
 	tasks         dbpkg.TaskStore             // task lifecycle, dedup, claims, breaker
 	conversations dbpkg.ConversationStore     // lookup active runs for the task-close cancel cascade
 	entities      dbpkg.EntityStore           // closed-entity guard + entity-terminating close cascade
-	firings       dbpkg.PendingFiringsStore   // per-task firing queue + active-run gate
+	firings       dbpkg.PendingFiringsStore   // per-task firing queue the firing worker claims from; its unsettled read is half the gate
 	events        dbpkg.EventStore            // admin-pool RecordSystem + GetMetadataSystem for the background subscriber
 	eventQueue    dbpkg.EventQueueStore       // durable router queue the drain worker claims from; set post-construction via SetEventQueue (nil → worker is a no-op)
-	orgs          dbpkg.OrgsStore             // per-org iteration for the drain sweeper; required (RunDrainSweeper dereferences it directly)
+	orgs          dbpkg.OrgsStore             // per-org iteration for the terminal-state checker and the org-settings reads of team routing; required (the checker dereferences it directly)
 	teams         dbpkg.TeamsStore            // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
 	teamRepos     dbpkg.TeamGitHubReposStore  // team↔repo tracking gate; nil-safe — gate is skipped (no filtering) when unset
 	jiraRules     dbpkg.JiraStatusRulesStore  // team↔project tracking gate; nil-safe — Jira gate skipped when unset
@@ -143,19 +145,10 @@ type Router struct {
 	executorID string
 	bootEpoch  int64
 
-	// drainLocks serializes DrainTask calls per task. Without this, the
-	// window between a pop and MarkFired/MarkSkipped lets a
-	// concurrent drain (typically spawned by a fast-terminating run that
-	// the first drain just fired) pop the same row and double-fire it. The
-	// mutex closes the window: a second drain blocks until the first marks
-	// the firing terminal, so its pop returns the next row (or nothing).
-	//
-	// Map grows monotonically with the count of distinct tasks ever
-	// drained. Bounded by task count for the lifetime of the process,
-	// which is small enough that we don't bother evicting on task
-	// close.
-	drainLockMu sync.Mutex
-	drainLocks  map[string]*sync.Mutex
+	// firingWake is the firing worker's doorbell: a conversation terminal
+	// sends on it (WakeFirings) so the task's next firing is claimed at once
+	// rather than on the next scan tick. Capacity one, non-blocking sends.
+	firingWake chan struct{}
 
 	// terminalGauges is the checker's gauge set, created from the global
 	// meter provider on the first pass (or from a test's provider through
@@ -170,9 +163,9 @@ type Router struct {
 // behavior). users is nil-safe too — the inline-close gate
 // degrades to "treat every reassignment as away-from-me" when missing,
 // which over-closes (acceptable: user can reopen via the next poll).
-// orgs is required — the drain sweeper (RunDrainSweeper) iterates it per
-// org and dereferences it directly, so a nil orgs is a startup wiring bug
-// that panics there, not a degraded mode.
+// orgs is required — the terminal-state checker iterates it per org and
+// dereferences it directly, so a nil orgs is a startup wiring bug that
+// panics there, not a degraded mode.
 // teamRepos is nil-safe — the team↔repo gate is skipped (no
 // handler is dropped) when missing, matching prior behavior where
 // repos were org-global and every team implicitly tracked them all.
@@ -202,7 +195,7 @@ func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handl
 		spawner:       spawner,
 		scorer:        scorer,
 		ws:            ws,
-		drainLocks:    make(map[string]*sync.Mutex),
+		firingWake:    make(chan struct{}, 1),
 	}
 }
 
@@ -226,7 +219,7 @@ func (r *Router) breakerPromptID(ctx context.Context, orgID, blueprintID string)
 }
 
 // SetEventQueue wires the durable router queue post-
-// construction, mirroring the spawner.SetQueueDrainer pattern. The drain
+// construction, mirroring the spawner.SetFiringWaker pattern. The drain
 // worker (RunEventQueue) claims from this store; the ingestor enqueues to
 // it. Kept off NewRouter's already-wide signature — it's a late-bound dep
 // only the worker needs, and leaving it nil makes RunEventQueue a no-op so
@@ -312,19 +305,6 @@ func (r *Router) autoDelegateEnabledForTeam(ctx context.Context, teamID string) 
 // the identical event rather than each spelling out the same literal.
 func (r *Router) broadcastTasksUpdated(orgID string) {
 	r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
-}
-
-// taskDrainLock returns the per-task mutex used to serialize
-// DrainTask calls. Lazily created on first use; never evicted.
-func (r *Router) taskDrainLock(taskID string) *sync.Mutex {
-	r.drainLockMu.Lock()
-	defer r.drainLockMu.Unlock()
-	mu, ok := r.drainLocks[taskID]
-	if !ok {
-		mu = &sync.Mutex{}
-		r.drainLocks[taskID] = mu
-	}
-	return mu
 }
 
 func matchPredicate(eventType, predJSON, metaJSON string) (bool, error) {

@@ -518,9 +518,10 @@ type ConversationStore interface {
 	// conversation the rule exists to keep out.
 
 	// HasLiveConversationForTask returns true if the task holds a live
-	// conversation, whatever trigger type minted it. Used by the drain
-	// sweeper, which skips a task whose own conversation will drain the queue
-	// when it ends.
+	// conversation, whatever trigger type minted it. The same question the
+	// firing kind's claim filter asks of a queued firing's task, in the
+	// dialect store's own spelling; a test in each dialect package holds the
+	// two to the same answer.
 	//
 	// The task is the unit, not the entity: a task IS one situation needing
 	// attention (that is what its dedup key means), so two tasks on one pull

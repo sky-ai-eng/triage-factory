@@ -187,8 +187,8 @@ func TestStop_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
 }
 
 // TestStop_SystemInitiated_PreflightSkipsSynthClaims pins the other
-// side of the gate: router-driven cancels (DrainTask rollback,
-// task-close cleanup) pass userID="" because they're system actors
+// side of the gate: router-driven cancels (task-close cleanup) pass
+// userID="" because they're system actors
 // with no user identity to project. Those must still scope by orgID
 // but go through the admin pool, not synth claims — otherwise the
 // router's no-user-context path would FK-fail in multi-mode.

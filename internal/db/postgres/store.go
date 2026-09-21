@@ -220,12 +220,12 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// in depth.
 		Repos: newRepositoryStore(app, admin),
 		// PendingFirings wires admin — the router has no per-user
-		// identity (system service) and the drain sweeper runs as a
+		// identity (system service) and the firing worker runs as a
 		// background goroutine, so impersonating any one user via
 		// the app pool would be wrong. RLS still gates statements
 		// via an EXISTS subquery against tasks; org_id defense-in-
 		// depth fires in every WHERE/INSERT clause regardless.
-		PendingFirings: newPendingFiringsStore(admin),
+		PendingFirings: newPendingFiringsStore(admin, admin),
 		// Events wires both pools: app for request-handler
 		// equivalents (stock carry-over, factory drag-to-delegate) and
 		// admin for background goroutines without JWT-claims context
@@ -446,7 +446,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 	// The work-kind registry is filled from the stores above rather than
 	// declared beside them, so a kind is registered exactly once and only as
 	// the store that owns its table.
-	s.stores.WorkKinds = []db.WorkKindHandle{s.stores.EventQueue.(db.WorkKindHandle)}
+	s.stores.WorkKinds = []db.WorkKindHandle{s.stores.EventQueue.(db.WorkKindHandle), s.stores.PendingFirings.(db.WorkKindHandle)}
 	return s.stores
 }
 
@@ -500,7 +500,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Artifacts:             newArtifactStore(tx, tx),
 		Entities:              newEntityStore(tx, tx),
 		Repos:                 newRepositoryStore(tx, tx),
-		PendingFirings:        newPendingFiringsStore(tx),
+		PendingFirings:        newPendingFiringsStore(tx, nil),
 		Events:                newEventStore(tx, tx),
 		TaskMemory:            newTaskMemoryStore(tx, tx),
 		MemoryAttempts:        newMemoryAttemptStore(tx),

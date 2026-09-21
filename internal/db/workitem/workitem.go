@@ -225,6 +225,19 @@ type Kind struct {
 	// Frozen is the subset of Columns read into Receipt.Frozen at claim, where
 	// the value is fixed for that generation whatever the row does afterwards.
 	Frozen []string
+	// ClaimFilter is an extra predicate over the alias t, ANDed into the
+	// ripe-ready arm of the claim statement and into every read that asks
+	// whether a ready row is claimable now. A ready row it excludes is not
+	// ripe: it is never picked, it counts as deferred, and it lists as
+	// deferred. Empty means no filter. It is a constant SQL fragment the
+	// kind's package declares, interpolated rather than bound, and it may
+	// reference t's columns and whatever tables it names itself.
+	//
+	// A cancellation request and an expired lease are settled and reclaimed
+	// whatever the filter says: a row nobody wants must not wait behind the
+	// condition, and a reclaimed unit is fenced, so a replay that finds the
+	// condition still holding defers on its own.
+	ClaimFilter string
 	// Observer is told about every disposition the package commits for this
 	// kind. Nil is a no-op; Validate does not require one.
 	Observer Observer
@@ -296,6 +309,18 @@ func (k Kind) Validate() error {
 	for _, f := range k.Frozen {
 		if !seen[f] {
 			return fmt.Errorf("workitem: kind %s freezes %q, which is not one of its declared columns", k.Table, f)
+		}
+	}
+
+	// A filter that references nothing on the row is a constant — a no-op or
+	// a total block — and a semicolon is the one way a fragment becomes a
+	// second statement.
+	if k.ClaimFilter != "" {
+		if !strings.Contains(k.ClaimFilter, "t.") {
+			return fmt.Errorf("workitem: kind %s claim filter references no column of t", k.Table)
+		}
+		if strings.Contains(k.ClaimFilter, ";") {
+			return fmt.Errorf("workitem: kind %s claim filter contains a semicolon", k.Table)
 		}
 	}
 

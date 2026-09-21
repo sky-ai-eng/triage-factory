@@ -20,27 +20,22 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 )
 
-// fakeDrainer captures DrainTask invocations so tests can assert
-// the spawner's terminal-state hooks fire correctly. Synchronized
-// because notifyDrainer dispatches the call in a goroutine.
-type drainCall struct {
-	orgID  string
-	taskID string
-}
-
-type fakeDrainer struct {
+// fakeWaker captures WakeFirings invocations so tests can assert the
+// spawner's terminal-state hooks ring the firing worker's doorbell.
+// Synchronized because a terminal may arrive from another goroutine.
+type fakeWaker struct {
 	mu     sync.Mutex
-	calls  []drainCall
+	calls  int
 	called chan struct{}
 }
 
-func newFakeDrainer() *fakeDrainer {
-	return &fakeDrainer{called: make(chan struct{}, 8)}
+func newFakeWaker() *fakeWaker {
+	return &fakeWaker{called: make(chan struct{}, 8)}
 }
 
-func (f *fakeDrainer) DrainTask(orgID, taskID string) {
+func (f *fakeWaker) WakeFirings() {
 	f.mu.Lock()
-	f.calls = append(f.calls, drainCall{orgID: orgID, taskID: taskID})
+	f.calls++
 	f.mu.Unlock()
 	select {
 	case f.called <- struct{}{}:
@@ -48,20 +43,17 @@ func (f *fakeDrainer) DrainTask(orgID, taskID string) {
 	}
 }
 
-func (f *fakeDrainer) callsCopy() []drainCall {
+func (f *fakeWaker) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]drainCall, len(f.calls))
-	copy(out, f.calls)
-	return out
+	return f.calls
 }
 
-// TestStop_OpenAutoRun_DrainsQueue pins the fix for the
-// "stop without active goroutine never calls notifyDrainer" leak.
-// An auto-fired conversation parked `open` has no goroutine defer to piggy-back
-// on, so without the explicit drain the task's firing queue would stick until
-// some other conversation terminated.
-func TestStop_OpenAutoRun_DrainsQueue(t *testing.T) {
+// TestStop_OpenAutoRun_WakesFirings pins the "stop without an active
+// goroutine never wakes the worker" leak. An auto-fired conversation parked
+// `open` has no goroutine defer to piggy-back on, so without the explicit
+// wake the task's queued firings would wait on the scan tick.
+func TestStop_OpenAutoRun_WakesFirings(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r1", "sess-1", "/tmp/wt-r1")
 	if _, err := database.Exec(`UPDATE conversations SET status = 'open', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r1'`); err != nil {
@@ -69,39 +61,28 @@ func TestStop_OpenAutoRun_DrainsQueue(t *testing.T) {
 	}
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	drainer := newFakeDrainer()
-	s.SetQueueDrainer(drainer)
+	waker := newFakeWaker()
+	s.SetFiringWaker(waker)
 
 	if err := s.Stop(runmode.LocalDefaultOrgID, "r1", ""); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 
-	// notifyDrainer dispatches in a goroutine — wait briefly.
 	select {
-	case <-drainer.called:
+	case <-waker.called:
 	case <-time.After(time.Second):
-		t.Fatal("DrainTask was never called")
+		t.Fatal("WakeFirings was never called")
 	}
-
-	calls := drainer.callsCopy()
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 drain call, got %d (%v)", len(calls), calls)
-	}
-	if calls[0].taskID == "" {
-		t.Errorf("DrainTask called with empty taskID")
-	}
-	if calls[0].orgID != runmode.LocalDefaultOrgID {
-		t.Errorf("DrainTask orgID = %q, want %q", calls[0].orgID, runmode.LocalDefaultOrgID)
+	if n := waker.count(); n != 1 {
+		t.Fatalf("expected 1 wake, got %d", n)
 	}
 }
 
-// TestStop_OpenManualRun_DrainsQueue is the other half of the one-live-
+// TestStop_OpenManualRun_WakesFirings is the other half of the one-live-
 // conversation-per-task rule: a manual conversation holds the task's firing
 // gate exactly as an auto-fired one does, so its stop is the moment that gate
-// opens and the queued firings behind it have to be drained. Before the rule,
-// notifyDrainer short-circuited on trigger_type='manual' and those firings sat
-// until the periodic sweeper noticed.
-func TestStop_OpenManualRun_DrainsQueue(t *testing.T) {
+// opens and the queued firings behind it have to be claimed.
+func TestStop_OpenManualRun_WakesFirings(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-manual", "sess-2", "/tmp/wt-rm")
 	// Manual is the seedConversation default but we set it explicitly for
@@ -111,30 +92,27 @@ func TestStop_OpenManualRun_DrainsQueue(t *testing.T) {
 	}
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	drainer := newFakeDrainer()
-	s.SetQueueDrainer(drainer)
+	waker := newFakeWaker()
+	s.SetFiringWaker(waker)
 
 	if err := s.Stop(runmode.LocalDefaultOrgID, "r-manual", ""); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 
-	// notifyDrainer dispatches in a goroutine — wait briefly.
 	select {
-	case <-drainer.called:
+	case <-waker.called:
 	case <-time.After(time.Second):
-		t.Fatal("DrainTask was never called for a manual conversation's stop")
+		t.Fatal("WakeFirings was never called for a manual conversation's stop")
 	}
-	calls := drainer.callsCopy()
-	if len(calls) != 1 || calls[0].taskID == "" {
-		t.Fatalf("expected 1 drain call naming the task, got %v", calls)
+	if n := waker.count(); n != 1 {
+		t.Fatalf("expected 1 wake, got %d", n)
 	}
 }
 
-// TestStop_AlreadyTerminal_NoDrain confirms we don't double-drain
-// a row that some other path already terminated. Without the
-// "only on flipped == true" guard, a stale stop on a completed
-// conversation would fire a redundant drain.
-func TestStop_AlreadyTerminal_NoDrain(t *testing.T) {
+// TestStop_AlreadyTerminal_NoWake confirms a stale stop on a row some other
+// path already terminated rings nothing. Without the "only on flipped ==
+// true" guard, it would wake the worker for a terminal that already did.
+func TestStop_AlreadyTerminal_NoWake(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-done", "sess-3", "/tmp/wt-rd")
 	// Trigger_type='event' requires creator_user_id IS NULL per the
@@ -145,16 +123,16 @@ func TestStop_AlreadyTerminal_NoDrain(t *testing.T) {
 	}
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	drainer := newFakeDrainer()
-	s.SetQueueDrainer(drainer)
+	waker := newFakeWaker()
+	s.SetFiringWaker(waker)
 
 	if err := s.Stop(runmode.LocalDefaultOrgID, "r-done", ""); err == nil {
 		t.Fatal("expected 'no active conversation' error on terminal row")
 	}
 
 	select {
-	case <-drainer.called:
-		t.Fatal("DrainTask called on already-terminal row")
+	case <-waker.called:
+		t.Fatal("WakeFirings called on already-terminal row")
 	case <-time.After(200 * time.Millisecond):
 	}
 }

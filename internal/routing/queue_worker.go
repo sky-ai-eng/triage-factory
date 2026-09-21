@@ -21,7 +21,8 @@ import (
 // no-op: (1) task mint and bump are idempotent under the tasks partial unique
 // index on (entity_id, event_type, dedup_key) for active rows; (2) trigger
 // firing is fenced on blueprint_runs (triggering_event_id, trigger_id) plus
-// the one-active-run index, with ErrTaskBusy deferring onto pending_firings;
+// the one-active-run index, with ErrTaskBusy admitting the firing onto
+// pending_firings for the firing worker (firing_worker.go);
 // (3) the close phase is fenced on the entity's poll_seq (entity_poll_seq on
 // the queue row, CloseTerminalSystem's guard) for terminating events, and on
 // Tasks.Close being a guarded transition that no-ops on an already-closed
@@ -36,15 +37,6 @@ import (
 // because the kind's fairness interleaves at batch granularity: a batch from
 // one org leaves it with ten leased rows, so the next pick prefers another.
 const eventClaimBatch = 10
-
-// claimErrorEscalateThreshold is how many consecutive claim failures the
-// worker tolerates before escalating from a one-line notice to a loud
-// "routing stalled" warning. A transient blip clears in one tick; a
-// persistent schema/connection fault would otherwise only ever drip a
-// uniform log line, so the threshold turns a sustained outage into an
-// obviously-different, periodically-repeated signal (and a recovery line
-// when it clears).
-const claimErrorEscalateThreshold = 5
 
 // terminalWriteTimeout bounds a unit's terminal write on its own context: a
 // unit that hit its deadline must still be able to record that fact, and the
@@ -93,28 +85,10 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 	prune := time.NewTicker(pruneInterval)
 	defer prune.Stop()
 
-	// drain runs one full drain pass and tracks consecutive claim
-	// failures so a sustained DB fault escalates loudly instead of only
-	// dripping a per-tick line (see claimErrorEscalateThreshold). The
-	// floor scan paces retries at scanInterval, so no extra backoff is
-	// needed — and adding one would only slow recovery once the DB heals.
-	claimFails := 0
-	drain := func() {
-		if err := r.drainEventQueue(ctx); err != nil {
-			claimFails++
-			switch {
-			case claimFails == 1:
-				routerLog.Warn("event-queue claim failed, retrying on the next scan", "error", err)
-			case claimFails == claimErrorEscalateThreshold || claimFails%claimErrorEscalateThreshold == 0:
-				routerLog.Error("event-queue routing stalled, not progressing", "claim_failures", claimFails, "error", err)
-			}
-			return
-		}
-		if claimFails >= claimErrorEscalateThreshold {
-			routerLog.Info("event-queue routing recovered", "claim_failures", claimFails)
-		}
-		claimFails = 0
-	}
+	// drain runs one full drain pass; claimFailures escalates a sustained
+	// database fault instead of dripping a per-tick line.
+	fails := claimFailures{name: "event-queue routing"}
+	drain := func() { fails.observe(r.drainEventQueue(ctx)) }
 
 	drain() // drain whatever survived the restart
 

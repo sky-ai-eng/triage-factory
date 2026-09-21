@@ -184,14 +184,15 @@ it, and every attempt ends in a disposition — done, returned to ready with a
 backoff, deferred, cancelled, or **parked** for a person, once the attempt
 budget is spent or the failure is permanent. Nothing re-drives a parked row on
 its own. Adopting a kind brings these metrics with it, so a new kind registers
-and appears here under its own `work_kind`; today the one registered kind is
-`event_queue`, the router's durable event queue. Every label is a closed
+and appears here under its own `work_kind`; the registered kinds are
+`event_queue`, the router's durable event queue, and `pending_firings`, the
+per-task queue of auto-delegation intents the firing worker drains. Every label is a closed
 vocabulary or an opaque id: the kind name, the org id, the typed attempt
 outcome, the park reason, the verb.
 
 Counters are per process, incremented by whichever process committed the
-disposition: the process running the kind's worker (for `event_queue`, the
-control pod holding the background-brain lease) and the control pod that
+disposition: the process running the kind's worker (for `event_queue` and
+`pending_firings`, the control pod holding the background-brain lease) and the control pod that
 served an operator control. `sum` across pods in an HA topology.
 
 | Metric | Labels | What it counts |
@@ -220,7 +221,7 @@ rows stops reporting rather than freezing at its last value.
 | `tf_work_deferred` | `work_kind`, `org_id` | Ready rows whose retry time has not come. |
 | `tf_work_oldest_ready_age_seconds` | `work_kind`, `org_id` | Age of the oldest claimable row, from its original enqueue (a redrive keeps it). |
 | `tf_work_oldest_deferred_age_seconds` | `work_kind`, `org_id` | Age of the oldest deferred row, from its original enqueue. |
-| `tf_work_oldest_ready_age_objective_seconds` | `work_kind` | The kind's declared bound on oldest ready age — `60` for `event_queue` — so a rule compares two series instead of hard-coding a number. |
+| `tf_work_oldest_ready_age_objective_seconds` | `work_kind` | The kind's declared bound on oldest ready age — `60` for `event_queue`, `60` for `pending_firings` — so a rule compares two series instead of hard-coding a number. |
 
 Three alerts, in Prometheus terms. The third is what tells an idle queue from
 one that has stopped draining: an idle queue has nothing ready, a stopped one

@@ -56,7 +56,7 @@ func New(conn *sql.DB) db.Stores {
 		Artifacts:      newArtifactStore(conn),
 		Entities:       newEntityStore(conn, conn),
 		Repos:          newRepositoryStore(conn, conn),
-		PendingFirings: newPendingFiringsStore(conn),
+		PendingFirings: newPendingFiringsStore(conn, conn),
 		// Events wires both args to conn — SQLite has one connection
 		// so the dual-pool constructor collapses, same as TaskStore.
 		Events: newEventStore(conn, conn),
@@ -214,6 +214,6 @@ func New(conn *sql.DB) db.Stores {
 	// The work-kind registry is filled from the stores above rather than
 	// declared beside them, so a kind is registered exactly once and only as
 	// the store that owns its table.
-	s.stores.WorkKinds = []db.WorkKindHandle{s.stores.EventQueue.(db.WorkKindHandle)}
+	s.stores.WorkKinds = []db.WorkKindHandle{s.stores.EventQueue.(db.WorkKindHandle), s.stores.PendingFirings.(db.WorkKindHandle)}
 	return s.stores
 }

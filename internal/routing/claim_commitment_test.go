@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"testing"
 
-	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -271,11 +270,12 @@ func TestDefer_CommittedClaimClearsTheStaleUserClaimInMemory(t *testing.T) {
 	}
 }
 
-// TestDrain_DoesNotReStampAClearedClaim is the constraint that rules out the
-// obvious fixes, pinned as behavior: a user requeue with a live run is a
-// legitimate state, and the drain path must never quietly put the bot's claim
-// back. It re-validates the claim instead, and skips the firing when it's gone.
-func TestDrain_DoesNotReStampAClearedClaim(t *testing.T) {
+// TestFiringWorker_DoesNotReStampAClearedClaim is the constraint that rules
+// out the obvious fixes, pinned as behavior: a user requeue with a live run
+// is a legitimate state, and the worker must never quietly put the bot's
+// claim back. It re-validates the claim instead, and skips the firing when
+// it's gone.
+func TestFiringWorker_DoesNotReStampAClearedClaim(t *testing.T) {
 	s := setupClaimScenario(t, "drain-noclaim")
 
 	if fired := mustAutoDelegate(t, s.router, s.task, s.trigger, s.entity, s.event, runmode.LocalDefaultTeamID); !fired {
@@ -290,26 +290,22 @@ func TestDrain_DoesNotReStampAClearedClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record queued event: %v", err)
 	}
-	if _, _, err := sqlitestore.New(s.db).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID,
-		runmode.LocalDefaultUserID, s.entity, s.task.ID, s.trigger.ID, queuedEvent, dbpkg.AgentClaimStamp{}); err != nil {
-		t.Fatalf("seed pending firing: %v", err)
-	}
+	enqueueFiring(t, s.db, s.entity, s.task.ID, s.trigger.ID, queuedEvent)
 	if ok, err := sqlitestore.New(s.db).Swipes.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID); err != nil || !ok {
 		t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 	}
-	// Terminate the run so the drain is eligible to pop.
-	if _, err := s.db.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE task_id = ?`, s.task.ID); err != nil {
-		t.Fatalf("terminate run: %v", err)
-	}
+	// End the run so the task's gate opens and the firing is claimable.
+	endTaskConversations(t, s.db, s.task.ID)
 
 	before := s.autoRuns(t)
-	s.router.DrainTask(runmode.LocalDefaultOrgID, s.task.ID)
+	s.router.SetExecutorID("firing-worker-test", 1)
+	drainOnce(t, s.router)
 
 	if agent, user := s.claim(t); agent != "" || user != "" {
-		t.Errorf("claim after drain = (agent=%q, user=%q), want the requeue's cleared claim to hold", agent, user)
+		t.Errorf("claim after the pass = (agent=%q, user=%q), want the requeue's cleared claim to hold", agent, user)
 	}
 	if got := s.autoRuns(t); got != before {
-		t.Errorf("auto runs = %d, want %d — the drain fired against a task the user had taken back", got, before)
+		t.Errorf("auto runs = %d, want %d — the worker fired against a task the user had taken back", got, before)
 	}
 	rows, _ := sqlitestore.New(s.db).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, s.entity)
 	if len(rows) != 1 || rows[0].SkipReason != domain.PendingFiringSkipClaimChanged {

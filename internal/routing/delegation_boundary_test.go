@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"testing"
 
-	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -20,7 +19,7 @@ import (
 // the fixture, not the seam.
 
 // realSpawnerRouter wires a production *delegate.Spawner behind the router, so
-// HandleEvent and DrainTask reach the boundary stamp the same way they reach
+// HandleEvent and the firing worker reach the boundary stamp the same way they reach
 // the replay fence. Returns the spawner too, for the memory doorbell.
 func realSpawnerRouter(t *testing.T, database *sql.DB) (*Router, *delegate.Spawner) {
 	t.Helper()
@@ -150,9 +149,10 @@ func TestHandleEvent_ReplayedEvent_StampsNothingTwice(t *testing.T) {
 	}
 }
 
-// TestDrainTask_EndsThePriorConversation: the drain takes the same fireDelegate
-// the immediate path does, so it inherits the stamp with no code of its own.
-func TestDrainTask_EndsThePriorConversation(t *testing.T) {
+// TestFiringWorker_EndsThePriorConversation: the worker takes the same
+// fireDelegate the immediate path does, so it inherits the stamp with no
+// code of its own.
+func TestFiringWorker_EndsThePriorConversation(t *testing.T) {
 	database := newTestDB(t)
 	entityID := setupFenceScenario(t, database)
 	router, spawner := realSpawnerRouter(t, database)
@@ -170,7 +170,7 @@ func TestDrainTask_EndsThePriorConversation(t *testing.T) {
 	concluded := live[0]
 	fenceCompleteConversations(t, database, entityID)
 
-	// The drain fires only while the bot's claim still holds; the immediate
+	// The worker fires only while the bot's claim still holds; the immediate
 	// path's claim rode its own insert, so stamp it the way setupDrainScenario
 	// does for a firing inserted directly.
 	var taskID string
@@ -188,19 +188,17 @@ func TestDrainTask_EndsThePriorConversation(t *testing.T) {
 	}
 
 	firingEventID := recordFenceEvent(t, database, entityID).ID
-	if _, _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID,
-		runmode.LocalDefaultUserID, entityID, taskID, "t-fence", firingEventID, dbpkg.AgentClaimStamp{}); err != nil {
-		t.Fatalf("enqueue the deferred firing: %v", err)
-	}
-	router.DrainTask(runmode.LocalDefaultOrgID, taskID)
+	enqueueFiring(t, database, entityID, taskID, "t-fence", firingEventID)
+	router.SetExecutorID("firing-worker-test", 1)
+	drainOnce(t, router)
 
 	endedAt, reason := conversationBoundary(t, database, concluded)
 	if !endedAt.Valid || reason != string(domain.EndedDelegated) {
-		t.Errorf("the drained fire left the concluded run at (ended_at valid=%v, reason=%q), want a `delegated` stamp",
+		t.Errorf("the worker's fire left the concluded run at (ended_at valid=%v, reason=%q), want a `delegated` stamp",
 			endedAt.Valid, reason)
 	}
 	if got := unEndedConversations(t, database, entityID); len(got) != 1 || got[0] == concluded {
-		t.Errorf("un-ended conversations = %v, want exactly the drain's new step 0", got)
+		t.Errorf("un-ended conversations = %v, want exactly the worker's new step 0", got)
 	}
 	if len(rung) != 1 || rung[0] != concluded {
 		t.Errorf("memory doorbell rang for %v, want exactly [%s]", rung, concluded)

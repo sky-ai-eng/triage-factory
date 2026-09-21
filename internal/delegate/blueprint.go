@@ -207,9 +207,9 @@ func (s *Spawner) terminateBlueprint(
 	// failed step's blob safe rather than a leak. See workspace_snapshot.go's
 	// write-policy note for the pair.
 
-	// Drain the task's queue exactly once for the blueprint (independent of
-	// how many steps ran).
-	s.notifyDrainer(orgID, taskID)
+	// Wake the firing worker exactly once for the blueprint (independent of
+	// how many steps ran): the task's gate is open.
+	s.wakeFirings()
 
 	dur := time.Since(startTime)
 	blueprintLog.Info("blueprint_run terminated",

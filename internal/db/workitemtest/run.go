@@ -40,6 +40,7 @@ func Run(t *testing.T, mk Factory) {
 	t.Run("MeasureByOrgAcrossOrgs", func(t *testing.T) { testMeasureByOrgAcrossOrgs(t, mk) })
 	t.Run("ClaimAcrossOrgsReportsPerOrg", func(t *testing.T) { testClaimAcrossOrgsReportsPerOrg(t, mk) })
 	t.Run("FrozenColumns", func(t *testing.T) { testFrozenColumns(t, mk) })
+	t.Run("ClaimFilter", func(t *testing.T) { testClaimFilter(t, mk) })
 	t.Run("FixtureIndexPresence", func(t *testing.T) { testFixtureIndexPresence(t, mk) })
 }
 
@@ -998,4 +999,98 @@ func testNilObserver(t *testing.T, mk envFactory) {
 	// The recorder is still the shared env's, and the bare kind never spoke
 	// to it.
 	e.requireObserved()
+}
+
+// testClaimFilter pins the kind's claim filter: a ready row it excludes is
+// not ripe — never picked, counted and listed as deferred — while a
+// cancellation request on it still settles at the next claim and an expired
+// lease on it is still reclaimed. The filter is a constant fragment over the
+// alias t, so the fixture's copy of the kind blocks on its payload column.
+func testClaimFilter(t *testing.T, mk Factory) {
+	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: shortLease}})
+	e = e.withKind(func(k *workitem.Kind) { k.ClaimFilter = "t.payload <> 'blocked'" })
+
+	open := e.admitWith("open", "p", 0)
+	blocked := e.admitWith("blocked", "blocked", 0)
+
+	// Only the admitted row passes the filter; the blocked one is never
+	// picked however many rounds the claim runs.
+	res := e.claim(workitem.Owner{ID: "worker-a", Epoch: 1}, 5)
+	if len(res.Claimed) != 1 || res.Claimed[0].ItemID != open {
+		t.Fatalf("claim returned %+v, want only the unblocked row %d", res.Claimed, open)
+	}
+	e.requireStatus(blocked, workitem.StatusReady)
+	if err := e.complete(res.Claimed[0]); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	// Measure and List agree: the blocked row is deferred, not ready, and
+	// its age is the deferred age.
+	e.exec("UPDATE "+e.kind.Table+" SET first_enqueued_at = "+e.pastExpr()+" WHERE id = ?", blocked)
+	d, err := workitem.Measure(e.ctx, e.conn, e.kind, e.org)
+	if err != nil {
+		t.Fatalf("Measure: %v", err)
+	}
+	if d.Ready != 0 || d.Deferred != 1 {
+		t.Fatalf("depths = %+v, want the blocked row deferred and nothing ready", d)
+	}
+	if d.OldestDeferredAge < 59*time.Minute || d.OldestReadyAge != 0 {
+		t.Errorf("ages = ready %s / deferred %s, want the blocked row's hour on the deferred side only", d.OldestReadyAge, d.OldestDeferredAge)
+	}
+	byOrg, err := workitem.MeasureByOrg(e.ctx, e.conn, e.kind)
+	if err != nil {
+		t.Fatalf("MeasureByOrg: %v", err)
+	}
+	if got := byOrg[e.org]; got.Ready != 0 || got.Deferred != 1 {
+		t.Errorf("MeasureByOrg[%s] = %+v, want one deferred", e.org, got)
+	}
+	ready, total, err := workitem.List(e.ctx, e.conn, e.kind, e.org, workitem.StatusReady, 50, 0)
+	if err != nil || total != 0 || len(ready) != 0 {
+		t.Errorf("List(ready) = %+v total=%d err=%v, want nothing", ready, total, err)
+	}
+	deferred, total, err := workitem.List(e.ctx, e.conn, e.kind, e.org, workitem.StatusDeferred, 50, 0)
+	if err != nil || total != 1 || len(deferred) != 1 || deferred[0].ID != blocked {
+		t.Errorf("List(deferred) = %+v total=%d err=%v, want the blocked row", deferred, total, err)
+	}
+
+	// Unblocking the row makes it ripe with no write of the package's own.
+	e.exec("UPDATE "+e.kind.Table+" SET payload = 'p' WHERE id = ?", blocked)
+	r := e.claimOne("worker-a", 1)
+	if r.ItemID != blocked {
+		t.Fatalf("claimed %d after unblocking, want %d", r.ItemID, blocked)
+	}
+
+	// A blocked row that is leased and whose lease expires is reclaimed
+	// whatever the filter says: the unit it replays is fenced.
+	e.exec("UPDATE "+e.kind.Table+" SET payload = 'blocked' WHERE id = ?", blocked)
+	e.expireLease()
+	res = e.claim(workitem.Owner{ID: "worker-b", Epoch: 1}, 5)
+	if len(res.Claimed) != 1 || res.Claimed[0].ItemID != blocked || !res.Claimed[0].Reclaimed {
+		t.Fatalf("claim after expiry = %+v, want the blocked row reclaimed", res.Claimed)
+	}
+	if _, err := workitem.Requeue(e.ctx, e.conn, e.kind, res.Claimed[0], workitem.OutcomeTransient, errors.New("blip")); err != nil {
+		t.Fatalf("Requeue: %v", err)
+	}
+	e.exec("UPDATE "+e.kind.Table+" SET next_attempt_at = NULL WHERE id = ?", blocked)
+
+	// A cancellation request on a blocked ready row settles at the next
+	// claim whatever the filter says.
+	if err := workitem.RequestCancel(e.ctx, e.conn, e.kind, e.org, blocked, "operator", "stop"); err != nil {
+		t.Fatalf("RequestCancel: %v", err)
+	}
+	res = e.claim(workitem.Owner{ID: "worker-a", Epoch: 1}, 5)
+	if len(res.Claimed) != 0 || res.Cancelled != 1 {
+		t.Fatalf("claim with a cancelled blocked row = %+v, want one settled and nothing leased", res)
+	}
+	e.requireStatus(blocked, workitem.StatusCancelled)
+
+	// Validate refuses a fragment that could be a second statement, and one
+	// that references nothing on the row.
+	for _, bad := range []string{"t.payload <> 'x'; DROP TABLE " + e.kind.Table, "1 = 1"} {
+		k := e.kind
+		k.ClaimFilter = bad
+		if err := k.Validate(); err == nil {
+			t.Errorf("Validate accepted claim filter %q", bad)
+		}
+	}
 }

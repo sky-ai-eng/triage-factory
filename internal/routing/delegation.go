@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -48,7 +47,7 @@ import (
 // dependency this decision rests on failed, so whether the trigger should
 // have fired is unknown. The caller propagates it to the queue worker, which
 // replays the whole event; the fences (the (event, trigger) replay fence, the
-// one-active-run index, the pending_firings pending-unique) make that
+// one-active-run index, the firing kind's (task, trigger) key) make that
 // replay a no-op for anything that already committed. The line between the
 // two is whether a retry could come out differently — a state a replay would
 // find unchanged is a skip, not an error, or the event burns its attempt
@@ -173,10 +172,11 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 	}
 
 	// Per-task gate. Closed if a conversation is live on THIS TASK, or any
-	// pending_firings rows are already queued for it (FIFO fairness). Compose
-	// the gate from its two halves: ConversationStore owns the
-	// conversation-shaped predicate, PendingFiringsStore owns the queue-shaped
-	// one. The gate opens only when neither side blocks.
+	// unsettled firing — ready, leased or parked — is already queued for it
+	// (FIFO fairness; a parked row still holds its key). Compose the gate
+	// from its two halves: ConversationStore owns the conversation-shaped
+	// predicate, PendingFiringsStore owns the queue-shaped one. The gate
+	// opens only when neither side blocks.
 	//
 	// Whatever minted the live conversation holds the gate. A task has one, and
 	// a human's delegation is as much the task's live conversation as an
@@ -201,19 +201,19 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 		return false, fmt.Errorf("task gate live-conversation query: %w", err)
 	}
 	hasActive := activeConversationID != ""
-	hasPending := false
+	hasQueued := false
 	if !hasActive {
-		hasPending, err = r.firings.HasPendingForTask(ctx, orgID, task.ID)
+		hasQueued, err = r.firings.HasUnsettledForTask(ctx, orgID, task.ID)
 		if err != nil {
-			routerLog.Error("task gate pending query failed", "task_id", task.ID, "error", err)
-			return false, fmt.Errorf("task gate pending query: %w", err)
+			routerLog.Error("task gate queued query failed", "task_id", task.ID, "error", err)
+			return false, fmt.Errorf("task gate queued query: %w", err)
 		}
 	}
-	if hasActive || hasPending {
+	if hasActive || hasQueued {
 		// A busy gate now always means THIS task's own conversation is live,
 		// so absorption is the default rather than a same-task special case:
 		// fold the event into the conversation instead of deferring a second
-		// one. Only a firing with no live conversation to fold into (hasPending
+		// one. Only a firing with no live conversation to fold into (hasQueued
 		// with the conversation already gone) still defers.
 		if hasActive {
 			// The claim rides whichever durable write the injection makes —
@@ -253,7 +253,7 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 	// user claiming mid-fire, or the bot already owning the task) leaves the
 	// run committed and the owner unmoved. A refusal is otherwise not a
 	// rollback: the human wins the claim, the conversation still runs, and the
-	// drain path's claim_changed guard keeps later firings off it.
+	// firing worker's claim_changed guard keeps later firings off it.
 	if _, err := r.fireDelegate(ctx, orgID, task, trigger, triggeringEventID, agentID, claimStamp(agentID, actingTeamID), actingTeamID); err != nil {
 		// A replayed event (at-least-once queue) whose first blueprint run
 		// already committed hits the (event, trigger) fence and comes back
@@ -293,21 +293,15 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 // onto an already-queued (task, trigger) duplicate (whose own enqueue already
 // stamped the claim); (false, err) when the enqueue itself failed — the
 // deferral is the firing's last durable record, so losing it loses the intent
-// entirely, and the caller replays instead. The pending-unique makes that
-// replay collapse rather than double-queue.
+// entirely, and the caller replays instead. The kind's (task, trigger) key
+// makes that replay collapse rather than double-queue.
 func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID, actingTeamID, agentID string) (bool, error) {
-	// System-actor firing rows have no human author. Empty user
-	// here lets the Postgres impl's COALESCE walk to the org-
-	// owner fallback (creator_user_id is NOT NULL but the table
-	// has no separate "actor" column); SQLite ignores the column
-	// entirely.
-	//
 	// The claim rides the insert's transaction: a queued firing commits the
 	// bot to this task just as a fired blueprint run does, so a failed enqueue
 	// leaves no phantom claim and a landed one is never claim-less. The store skips the
 	// stamp on the collapse path, where the already-queued duplicate's own
 	// enqueue made the commitment.
-	inserted, claimed, err := r.firings.Enqueue(ctx, orgID, "", entityID, task.ID, trigger.ID, triggeringEventID, claimStamp(agentID, actingTeamID))
+	inserted, claimed, err := r.firings.Enqueue(ctx, orgID, entityID, task.ID, trigger.ID, triggeringEventID, claimStamp(agentID, actingTeamID))
 	if err != nil {
 		routerLog.Error("enqueue firing failed",
 			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "error", err)
@@ -520,14 +514,13 @@ func (r *Router) stampAgentClaim(ctx context.Context, orgID string, task *domain
 	r.claimCommitted(orgID, task, claim.ActingTeamID, claim.AgentID, ok)
 }
 
-// fireDelegate transitions the task to delegated status, broadcasts the
-// change, then fires the spawner. Returns the blueprint-run ID on success —
-// used by DrainTask to record which blueprint run a queued firing
-// materialized into.
+// fireDelegate fires the spawner for a (task, trigger) and returns the
+// blueprint-run ID on success — what the firing worker records as the run a
+// queued firing materialized into.
 //
 // triggeringEventID is the event instance driving this fire:
-// the immediate path passes tryAutoDelegate's event id, the drain path
-// passes the pending firing's. It threads into DelegateOpts so the
+// the immediate path passes tryAutoDelegate's event id, the firing worker
+// passes the queued firing's. It threads into DelegateOpts so the
 // blueprint-run insert is fenced on (triggering_event_id, trigger_id); a
 // replayed event whose first blueprint run already committed surfaces as
 // delegate.ErrAlreadyFired, which both callers treat as a clean skip
@@ -535,14 +528,14 @@ func (r *Router) stampAgentClaim(ctx context.Context, orgID string, task *domain
 //
 // actorAgentID is the executing bot, resolved once by the caller — the immediate
 // path passes the agent it resolved up front (and stamps the same id as the
-// claim); the drain path passes the firing's already-stamped task claim. It's
+// claim); the firing worker passes the firing's already-stamped task claim. It's
 // frozen onto blueprint_runs.actor_agent_id at mint and inherited by every step.
 //
 // claim is the task claim to write inside the firing's own transaction, and is
 // deliberately NOT derived from actorAgentID. The immediate path passes
-// one: this fire is the commitment, so the claim must land with it. The drain
-// path passes the zero stamp: its firing's claim was committed by the enqueue
-// that queued it, and attemptDrainOne has just re-validated that the claim is
+// one: this fire is the commitment, so the claim must land with it. The firing
+// worker passes the zero stamp: its firing's claim was committed by the enqueue
+// that queued it, and the worker has just re-validated that the claim is
 // still the bot's — re-stamping here would silently re-impose a claim a user
 // cleared by requeueing in the interim.
 //
@@ -550,7 +543,7 @@ func (r *Router) stampAgentClaim(ctx context.Context, orgID string, task *domain
 // transaction, and it is separate from the claim for the reason the claim is
 // separate from the actor: a stamp refusal still commits the run, so the
 // consolidation cannot ride on the stamp landing. Empty leaves the owner
-// alone — the drain path's consolidation happened at the enqueue that queued
+// alone — the firing worker's consolidation happened at the enqueue that queued
 // the firing, and re-imposing it here would fight a user's requeue the same
 // way a re-stamped claim would.
 func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID, actorAgentID string, claim dbpkg.AgentClaimStamp, ownerTeamID string) (string, error) {
@@ -622,356 +615,3 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 	routerLog.InfoContext(ctx, "started blueprint run for task", "blueprint_run", blueprintRunID, "task_id", task.ID)
 	return blueprintRunID, nil
 }
-
-// DrainTask is the spawner's hook into the per-task firing queue.
-// Called when the task's live conversation terminates (any terminal status,
-// whatever minted it). A completed conversation that left an unresolved
-// artifact still counts as terminal here — the artifact is an async sidecar,
-// so it releases the task lock and doesn't block downstream processing.
-//
-// Pops the task's pending firings in FIFO order, validates each against
-// current state (task still active? trigger still enabled? breaker still
-// under threshold?), and fires the first valid one. Stale firings are
-// soft-deleted with a skip_reason and the loop continues. At most one
-// firing actually fires per drain — that blueprint run becomes the new
-// in-flight for the task and gates further drains naturally. A sibling task on the
-// same entity has its own queue and its own drain; neither waits on the
-// other.
-func (r *Router) DrainTask(orgID, taskID string) {
-	// The drain is its own unit of work rather than its caller's: the
-	// spawner hooks it off a conversation's terminal (a goroutine whose context
-	// is already unwinding) and the sweeper off a periodic tick. Both need
-	// every pop to reach a terminal mark — a firing abandoned mid-drain sits
-	// in 'draining' until the staleness sweep notices — so the drain holds a
-	// detached context instead of borrowing one that is about to die.
-	ctx := context.Background()
-
-	// Serialize drains per task. Without this, a fast-terminating conversation
-	// fired by an earlier drain can spawn a second DrainTask goroutine
-	// that pops the same pending_firings row before the first drain
-	// transitions it out of 'pending' — leading to duplicate fireDelegate
-	// calls. The MarkFired/MarkSkipped guards on
-	// status='pending' protect the row's own mutation but cannot un-fire
-	// the duplicate blueprint run. This mutex closes the window: the second
-	// drain blocks until the first releases, by which point the firing has
-	// landed in a terminal status and the second drain's pop returns the
-	// next row (or nothing).
-	mu := r.taskDrainLock(taskID)
-	mu.Lock()
-	defer mu.Unlock()
-
-	for {
-		firing, err := r.firings.PopForTask(ctx, orgID, taskID)
-		if err != nil {
-			routerLog.Error("drain pop failed", "task_id", taskID, "error", err)
-			return
-		}
-		if firing == nil {
-			return // queue empty
-		}
-
-		blueprintRunID, skipReason, transientErr := r.attemptDrainOne(ctx, orgID, firing)
-		if transientErr != nil {
-			// Transient failure (DB read, Delegate). PopForTask already
-			// claimed this row into 'draining', so release it
-			// back to 'pending' rather than leaving it stuck — marking
-			// 'skipped_stale' here would permanently drop a queued intent
-			// over a temporary problem, and a 'draining' row left
-			// unresolved is invisible to HasPendingForTask /
-			// ListTasksWithPending and would never be retried. The
-			// periodic sweeper or the next conversation terminal will retry
-			// once released.
-			if err := r.firings.Release(ctx, orgID, firing.ID); err != nil {
-				routerLog.Error("release firing after transient drain error failed",
-					"firing_id", firing.ID, "task_id", taskID, "error", err)
-			}
-			if errors.Is(transientErr, errDrainTaskBusy) {
-				// Routine gate race, not a failure: another conversation went
-				// active between the pop and the fire; the release above
-				// re-queues the intent for the busy conversation's own terminal
-				// drain.
-				routerLog.Info("drain deferred: task busy, firing released for retry",
-					"firing_id", firing.ID, "task_id", taskID)
-			} else {
-				routerLog.Warn("drain transient error, released firing for retry",
-					"firing_id", firing.ID, "task_id", taskID, "error", transientErr)
-			}
-			return
-		}
-		if blueprintRunID != "" {
-			if err := r.firings.MarkFired(ctx, orgID, firing.ID, blueprintRunID); err != nil {
-				// Durability race: the blueprint run was created (side-effect
-				// committed inside the spawner goroutine) but the UPDATE
-				// that records the firing→blueprint-run association failed.
-				//
-				// Roll the side-effect chain back in reverse: tear down
-				// the blueprint run we just spawned — every step of it, since
-				// the firing that minted it is being undone. Mirrors what
-				// fireDelegate already does when spawner.Delegate itself
-				// fails.
-				//
-				// The task's own row is left exactly as it is, and that is
-				// the whole of its rollback: the bot's claim has to stay —
-				// the next drain pass needs it or attemptDrainOne's
-				// ClaimedByAgentID guard skips the retry as claim_changed,
-				// silently dropping the queued intent — and a claim is the
-				// stage marker, so a row the bot still holds belongs in In
-				// Progress whether or not a run is live under it right now.
-				//
-				// PopForTask already claimed this row into 'draining'
-				// — release it back to 'pending' so a later
-				// drain retries it fresh, mirroring the transientErr
-				// branch above. Without this the row is stuck in
-				// 'draining' forever: PopForTask only ever claims
-				// 'pending' rows, and HasPendingForTask /
-				// ListTasksWithPending don't see 'draining' rows
-				// either, so nothing would ever pick it up again.
-				routerLog.Error("mark firing fired failed, rolling back: tearing down blueprint run, task keeps the bot's claim for the retry",
-					"firing_id", firing.ID, "blueprint_run", blueprintRunID, "error", err)
-				// Addressed by blueprint run, which is what Delegate returned
-				// and the only id this path holds: its steps' conversations are
-				// minted below it, so the teardown resolves them itself.
-				if r.spawner != nil {
-					cerr := r.spawner.StopBlueprintRun(orgID, blueprintRunID, delegate.StopCauseFiringReverted)
-					switch {
-					case cerr == nil:
-					case errors.Is(cerr, delegate.ErrBlueprintRunConcluded):
-						// The run beat the rollback to a terminal of its own,
-						// so the thing this teardown exists to prevent — a run
-						// still executing under a task that no longer claims it
-						// — cannot happen. Recorded rather than silent because
-						// an auto run concluding inside the mark-fired window
-						// is rare enough to be worth seeing next to the failure
-						// above.
-						routerLog.Warn("tear down blueprint run after mark-fired failure: run had already concluded, nothing left to stop",
-							"firing_id", firing.ID, "blueprint_run", blueprintRunID, "error", cerr)
-					default:
-						// The rest of the rollback lands regardless, which is
-						// what makes this the bad outcome rather than a partial
-						// one: the firing goes back to 'pending' under a
-						// blueprint run that, as far as anything here knows,
-						// is still executing for nobody.
-						routerLog.Error("tear down blueprint run after mark-fired failure: rollback may have left a live run with no task claiming it",
-							"firing_id", firing.ID, "blueprint_run", blueprintRunID, "error", cerr)
-					}
-				}
-				if rerr := r.firings.Release(ctx, orgID, firing.ID); rerr != nil {
-					routerLog.Error("release firing after mark-fired failure failed",
-						"firing_id", firing.ID, "error", rerr)
-				}
-			}
-			return // one fire per drain — the new blueprint run gates the rest
-		}
-		// Skipped or fire failed; record reason and continue draining.
-		if err := r.firings.MarkSkipped(ctx, orgID, firing.ID, skipReason); err != nil {
-			// Same stuck-in-'draining' risk as the MarkFired branch above:
-			// the skip decision itself is definitive (attemptDrainOne only
-			// reaches here with a non-empty skipReason), but persisting it
-			// failed, so release the claim rather than strand the row.
-			routerLog.Error("mark firing skipped failed", "firing_id", firing.ID, "skip_reason", skipReason, "error", err)
-			if rerr := r.firings.Release(ctx, orgID, firing.ID); rerr != nil {
-				routerLog.Error("release firing after mark-skipped failure failed",
-					"firing_id", firing.ID, "error", rerr)
-			}
-			return
-		}
-		routerLog.Debug("skipped firing", "firing_id", firing.ID, "task_id", taskID, "skip_reason", skipReason)
-	}
-}
-
-// RunDrainSweeper periodically attempts to drain every task that has at
-// least one pending firing. The sweeper is the safety net for stuck
-// queues: a firing left in 'pending' after a transient validation/fire
-// error needs *some* drain to retry it, and the natural trigger
-// (notifyDrainer from a conversation's terminal) only fires when one is
-// actively terminating. If nothing's terminating — task has no live
-// conversation and no events arrive — the queue would otherwise sit
-// indefinitely.
-//
-// Cadence is 30s by default; tuneable via interval. Each tick lists
-// tasks with pending firings (cheap — partial index) and calls
-// DrainTask on each. DrainTask's per-task mutex makes the sweeper
-// safe to run alongside event-triggered drains: if a drain is already
-// running for a task, the sweeper's call blocks then re-pops, which
-// is fine. Empty queues are no-ops.
-//
-// Returns when ctx is cancelled. Caller is responsible for the lifetime
-// (typically a goroutine started from main, cancelled at shutdown).
-func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			// Per-org iteration mirrors the established poller /
-			// scorer pattern. In local mode this collapses to N=1
-			// over the sentinel org (the only row in orgs); in multi
-			// mode it fans across every active tenant. OrgsStore is
-			// a required NewRouter parameter — if it were nil the
-			// dereference below would panic, which is the right
-			// behavior for a wiring bug at startup.
-			orgIDs, err := r.orgs.ListActiveSystem(ctx)
-			if err != nil {
-				routerLog.Error("drain sweeper: list orgs failed", "error", err)
-				continue
-			}
-			for _, orgID := range orgIDs {
-				r.sweepOrg(ctx, orgID)
-			}
-		}
-	}
-}
-
-// drainingStaleAfter is how old a 'draining' claim must be before the
-// sweeper treats its drainer as dead and requeues the firing. A drain is
-// a handful of DB round-trips (spawner.Delegate is a pure enqueue — no
-// process spawn, no network beyond Postgres), so minutes of staleness is
-// a crashed drainer, not a slow one; generous enough that a live drain
-// can never be stolen mid-flight.
-const drainingStaleAfter = 2 * time.Minute
-
-// sweepOrg drains every task in a single org that has at least one
-// pending firing. Factored out of RunDrainSweeper so the per-org loop
-// reads as one statement and per-org errors don't bail the whole
-// cycle.
-func (r *Router) sweepOrg(ctx context.Context, orgID string) {
-	// Crash recovery first: requeue firings stuck in 'draining' past the
-	// staleness cutoff (their drainer died between pop and resolve), so
-	// the pass below sees and drains them like any queued intent.
-	if n, err := r.firings.RequeueStaleDraining(ctx, orgID, time.Now().UTC().Add(-drainingStaleAfter)); err != nil {
-		routerLog.Error("drain sweeper: requeue stale draining failed", "org", orgID, "error", err)
-	} else if n > 0 {
-		routerLog.Warn("drain sweeper: requeued firings orphaned in 'draining' (drainer died mid-drain?)",
-			"count", n, "org", orgID)
-	}
-
-	ids, err := r.firings.ListTasksWithPending(ctx, orgID)
-	if err != nil {
-		routerLog.Error("drain sweeper: list tasks with pending failed", "org", orgID, "error", err)
-		return
-	}
-	for _, tid := range ids {
-		// Skip a task whose own conversation is still live — its terminal will
-		// drain the queue. Scoped to the task, so one task parked indefinitely no
-		// longer makes the sweeper step over every sibling task's queue on
-		// the same entity, which is how a stopped conversation used to halt
-		// triage for a whole pull request.
-		active, err := r.conversations.HasLiveConversationForTaskSystem(ctx, orgID, tid)
-		if err != nil {
-			routerLog.Error("drain sweeper: live-check failed", "task_id", tid, "org", orgID, "error", err)
-			continue
-		}
-		if active {
-			continue
-		}
-		r.DrainTask(orgID, tid)
-	}
-}
-
-// attemptDrainOne validates a popped firing against current state and
-// fires it if everything still holds. Three outcomes:
-//
-//   - (blueprintRunID, "", nil)         — fire succeeded; caller marks 'fired'.
-//   - ("", skipReason, nil)    — definitive "no longer relevant"; caller
-//     marks 'skipped_stale'. Reserved for: task_closed (done /
-//     dismissed / snoozed — task isn't drain-eligible on the
-//     lifecycle axis), trigger_disabled, breaker_tripped,
-//     claim_changed (a user took the task over or
-//     requeued it after the firing was enqueued, so the bot's
-//     original commitment is no longer current; drainer must not
-//     fire a phantom bot conversation against a now-user-claimed task).
-//   - ("", "", err)            — transient failure (DB read, fire-time);
-//     caller leaves the firing in 'pending' state and bails the drain
-//     loop. The periodic sweeper or next conversation terminal will retry.
-//
-// Validation reads from live tables, not from the firing row, so the
-// drainer reflects the world *now* — invalidation falls out for free
-// from the close cascade and trigger config.
-//
-// We classify Delegate errors as transient too: even when spawner.Delegate
-// refuses (rate-limited GitHub, missing creds, worktree race), the firing
-// intent is still valid and worth retrying. The breaker handles the
-// "actually broken, repeated failure" case via conversation-level failure
-// counts — but only once we've started enough conversations to trip it.
-// Until then, retry.
-func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *domain.PendingFiring) (blueprintRunID, skipReason string, transientErr error) {
-	task, err := r.tasks.GetSystem(ctx, orgID, firing.TaskID)
-	if err != nil {
-		return "", "", fmt.Errorf("task lookup: %w", err)
-	}
-	// status='snoozed' belongs on the lifecycle-skip axis,
-	// not the claim axis. A bot-claimed task that gets snoozed (e.g.,
-	// the user said "wait until Tuesday") shouldn't fire a queued
-	// drain when the entity slot opens — the snooze itself is a "do
-	// not act" signal on the lifecycle axis. Grouped with
-	// done/dismissed under task_closed because all three mean "the
-	// task is not currently drain-eligible." A snooze wake-on-bump
-	// will create a NEW event → new firing if the trigger still
-	// matches; the deferred firing is the wrong path to wake it.
-	if task == nil || task.Status == "done" || task.Status == "dismissed" || task.Status == "snoozed" {
-		return "", domain.PendingFiringSkipTaskClosed, nil
-	}
-
-	// Drain only fires if the bot's claim still holds.
-	// User-claim (claimed_by_user_id set) or requeue (both cleared)
-	// invalidates the original commitment. Without this check, a
-	// pending firing would fire even after the user explicitly took
-	// the task over, producing a phantom bot conversation on a now-user-
-	// claimed task.
-	if task.ClaimedByAgentID == "" {
-		return "", domain.PendingFiringSkipClaimChanged, nil
-	}
-
-	trigger, err := r.handlers.GetSystem(ctx, orgID, firing.TriggerID)
-	if err != nil {
-		return "", "", fmt.Errorf("trigger lookup: %w", err)
-	}
-	if trigger == nil || trigger.Kind != domain.EventHandlerKindTrigger || !trigger.Enabled {
-		return "", domain.PendingFiringSkipTriggerDisabled, nil
-	}
-
-	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
-	failures, err := r.tasks.CountConsecutiveFailedConversationsSystem(ctx, orgID, firing.EntityID, r.breakerPromptID(ctx, orgID, trigger.BlueprintID))
-	if err != nil {
-		return "", "", fmt.Errorf("breaker query: %w", err)
-	}
-	if failures >= breakerThreshold {
-		return "", domain.PendingFiringSkipBreakerTripped, nil
-	}
-
-	// The actor is the agent that already claimed this task (guaranteed non-empty
-	// by the claim guard above) — the drain re-fires the same bot's commitment, so
-	// the new blueprint_run's frozen actor matches the standing task claim. No
-	// claim stamp rides this insert: the claim is already the bot's (the guard
-	// above just read it), and re-writing it would be the one shape that turns a
-	// user's requeue-with-a-live-conversation back into a bot claim.
-	id, err := r.fireDelegate(ctx, orgID, task, *trigger, firing.TriggeringEventID, task.ClaimedByAgentID, dbpkg.AgentClaimStamp{}, "")
-	if err != nil {
-		// The blueprint run for this (event, trigger) already exists — a
-		// prior drain attempt fired it (process died before MarkFired), or
-		// the immediate path did before this firing was popped. Definitive
-		// "no longer relevant": mark skipped_stale so the firing doesn't
-		// retry forever. The existing blueprint run gates / drains the entity.
-		if errors.Is(err, delegate.ErrAlreadyFired) {
-			return "", domain.PendingFiringSkipAlreadyFired, nil
-		}
-		// A different (event, trigger) went active on the task between
-		// this drain's pop and the fenced insert (a fresh immediate fire,
-		// or a racing drainer). NOT a skip: the queued intent is still
-		// valid — surface it transient-shaped so the caller releases the
-		// firing back to 'pending'; the busy conversation's own terminal drain
-		// (or the sweeper) retries it.
-		if errors.Is(err, delegate.ErrTaskBusy) {
-			return "", "", errDrainTaskBusy
-		}
-		return "", "", fmt.Errorf("fire delegate: %w", err)
-	}
-	return id, "", nil
-}
-
-// errDrainTaskBusy marks the drain-time task-busy race for DrainTask's
-// transient branch: same release-and-retry handling, but logged as routine
-// (Info) rather than as a Warn-worthy transient failure.
-var errDrainTaskBusy = errors.New("routing: task busy at drain fire; firing released for retry")
