@@ -21,10 +21,10 @@ func Measure(ctx context.Context, q DBTX, k Kind, orgID string) (Depths, error) 
 		return Depths{}, err
 	}
 	a := newArgs(k.Dialect)
-	stmt := "SELECT " + k.depthColumns() + " FROM " + k.Table +
-		" WHERE status IN (" + unsettledStatusList + ")"
+	stmt := "SELECT " + k.depthColumns() + " FROM " + k.Table + " t" +
+		" WHERE t.status IN (" + unsettledStatusList + ")"
 	if orgID != "" {
-		stmt += " AND org_id = " + a.bind(orgID)
+		stmt += " AND t.org_id = " + a.bind(orgID)
 	}
 	var d Depths
 	if err := scanDepths(q.QueryRowContext(ctx, stmt, a.vals...), &d); err != nil {
@@ -41,9 +41,9 @@ func MeasureByOrg(ctx context.Context, q DBTX, k Kind) (map[string]Depths, error
 	if err := k.Validate(); err != nil {
 		return nil, err
 	}
-	stmt := "SELECT org_id, " + k.depthColumns() + " FROM " + k.Table +
-		" WHERE status IN (" + unsettledStatusList + ")" +
-		" GROUP BY org_id"
+	stmt := "SELECT t.org_id, " + k.depthColumns() + " FROM " + k.Table + " t" +
+		" WHERE t.status IN (" + unsettledStatusList + ")" +
+		" GROUP BY t.org_id"
 	rows, err := q.QueryContext(ctx, stmt)
 	if err != nil {
 		return nil, fmt.Errorf("workitem: measure %s by org: %w", k.Table, err)
@@ -67,13 +67,14 @@ func MeasureByOrg(ctx context.Context, q DBTX, k Kind) (map[string]Depths, error
 }
 
 // depthColumns is the six aggregate columns both measures select, in the
-// order scanDepths reads them.
+// order scanDepths reads them. Rendered over the alias t, which both measures
+// give their table.
 func (k Kind) depthColumns() string {
 	ripe := k.ripePredicate()
 	deferred := k.deferredPredicate()
 	return countIf(ripe) + ", " +
-		countIf("status = "+quoteLiteral(StatusLeased)) + ", " +
-		countIf("status = "+quoteLiteral(StatusParked)) + ", " +
+		countIf("t.status = "+quoteLiteral(StatusLeased)) + ", " +
+		countIf("t.status = "+quoteLiteral(StatusParked)) + ", " +
 		countIf(deferred) + ", " +
 		k.ageSeconds(ripe) + ", " +
 		k.ageSeconds(deferred)
@@ -104,7 +105,7 @@ func countIf(pred string) string {
 // preserves — so the age reports the obligation, not the retry. NULL when no
 // row matches.
 func (k Kind) ageSeconds(pred string) string {
-	oldest := "MIN(CASE WHEN " + pred + " THEN first_enqueued_at END)"
+	oldest := "MIN(CASE WHEN " + pred + " THEN t.first_enqueued_at END)"
 	if k.Dialect == Postgres {
 		return "EXTRACT(EPOCH FROM (clock_timestamp() - " + oldest + "))"
 	}

@@ -13,14 +13,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestPendingFiringsStore_Postgres runs the shared conformance suite
-// against the Postgres PendingFiringsStore impl. Wires both pools
-// against AdminDB (BYPASSRLS) so behavior tests stay independent of
-// the auth path; the cross-org leakage test below exercises the
-// org_id filter directly.
+// TestPendingFiringsStore_Postgres runs the shared conformance suite against
+// the Postgres PendingFiringsStore impl. Wires both pools against AdminDB
+// (BYPASSRLS) so behavior tests stay independent of the auth path; the
+// cross-org leakage test below exercises the org_id filter directly.
 func TestPendingFiringsStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -29,15 +29,15 @@ func TestPendingFiringsStore_Postgres(t *testing.T) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, agentID := seedPgPendingFiringsOrg(t, h)
-		return stores.PendingFirings, orgID, newPgPendingFiringsSeeder(h, orgID, userID, agentID)
+		return stores.PendingFirings, orgID, newPgPendingFiringsSeeder(h, stores, orgID, userID, agentID)
 	})
 }
 
-// TestPendingFiringsStore_Postgres_CrossOrgLeakage pins the defense-
-// in-depth org_id filter on every read + mutation path. The
-// pending_firings_all RLS policy gates via an EXISTS-against-tasks
-// subquery — the org_id = $N clause in each query is the belt to
-// RLS's suspenders.
+// TestPendingFiringsStore_Postgres_CrossOrgLeakage pins the defense-in-depth
+// org_id filter on every org-scoped read and on the receipt-addressed
+// writes. The pending_firings_all RLS policy gates via an EXISTS-against-
+// tasks subquery — the org_id bound in each statement is the belt to RLS's
+// suspenders.
 func TestPendingFiringsStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -45,121 +45,63 @@ func TestPendingFiringsStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	ctx := context.Background()
 
 	orgA, userA, agentA := seedPgPendingFiringsOrg(t, h)
-	seedA := newPgPendingFiringsSeeder(h, orgA, userA, agentA)
+	seedA := newPgPendingFiringsSeeder(h, stores, orgA, userA, agentA)
 	tupA := seedA.Tuple(t)
 
 	orgB, userB, agentB := seedPgPendingFiringsOrg(t, h)
-	seedB := newPgPendingFiringsSeeder(h, orgB, userB, agentB)
+	seedB := newPgPendingFiringsSeeder(h, stores, orgB, userB, agentB)
 	tupB := seedB.Tuple(t)
 
-	// Seed a pending firing in orgA only.
-	if _, _, err := stores.PendingFirings.Enqueue(ctx, orgA, userA, tupA.EntityID, tupA.TaskID, tupA.TriggerID, tupA.EventID, db.AgentClaimStamp{}); err != nil {
+	if _, _, err := stores.PendingFirings.Enqueue(ctx, orgA, tupA.EntityID, tupA.TaskID, tupA.TriggerID, tupA.EventID, db.AgentClaimStamp{}); err != nil {
 		t.Fatalf("Enqueue orgA: %v", err)
 	}
-
-	// PopForTask scoped to orgB must NOT see orgA's row.
-	if got, err := stores.PendingFirings.PopForTask(ctx, orgB, tupA.TaskID); err != nil {
-		t.Fatalf("PopForTask cross-org: %v", err)
-	} else if got != nil {
-		t.Errorf("orgB Pop returned orgA firing %d", got.ID)
+	if has, _ := stores.PendingFirings.HasUnsettledForTask(ctx, orgB, tupA.TaskID); has {
+		t.Errorf("orgB HasUnsettledForTask returned true for orgA's task")
 	}
-
-	// HasPendingForTask scoped to orgB must be false.
-	if has, _ := stores.PendingFirings.HasPendingForTask(ctx, orgB, tupA.TaskID); has {
-		t.Errorf("orgB HasPendingForTask returned true for orgA's task")
-	}
-
-	// ListForEntity scoped to orgB must be empty.
 	if rows, _ := stores.PendingFirings.ListForEntity(ctx, orgB, tupA.EntityID); len(rows) != 0 {
 		t.Errorf("orgB ListForEntity returned %d rows for orgA's entity", len(rows))
 	}
 
-	// ListTasksWithPending scoped to orgB must be empty (despite
-	// orgA having pending rows). orgB has its own clean task (tupB)
-	// so the test exercises the org_id filter, not the empty-table
-	// path.
-	if ids, _ := stores.PendingFirings.ListTasksWithPending(ctx, orgB); len(ids) != 0 {
-		t.Errorf("orgB ListTasksWithPending = %v, want empty", ids)
-	}
-
-	// MarkFired/MarkSkipped cross-org must NOT mutate orgA's row.
-	// Read orgA's firing id first.
+	// A receipt forged with orgB's id over orgA's row matches nothing.
 	rowsA, _ := stores.PendingFirings.ListForEntity(ctx, orgA, tupA.EntityID)
 	if len(rowsA) != 1 {
 		t.Fatalf("expected one orgA firing, got %d", len(rowsA))
 	}
-	firingID := rowsA[0].ID
-	runIDInOrgB := seedB.RunForTask(t, tupB.TaskID)
-	if err := stores.PendingFirings.MarkFired(ctx, orgB, firingID, runIDInOrgB); err != nil {
-		t.Fatalf("MarkFired cross-org: %v", err)
+	batch, err := stores.PendingFirings.Claim(ctx, workitem.Owner{ID: "w", Epoch: 1}, 10)
+	if err != nil || len(batch.Firings) != 1 {
+		t.Fatalf("Claim: %+v err=%v", batch, err)
 	}
-	if err := stores.PendingFirings.MarkSkipped(ctx, orgB, firingID, "hack"); err != nil {
-		t.Fatalf("MarkSkipped cross-org: %v", err)
+	forged := batch.Firings[0].Receipt
+	forged.OrgID = orgB
+	runIDInOrgB := seedB.RunForTask(t, tupB.TaskID)
+	if err := stores.PendingFirings.MarkFired(ctx, forged, runIDInOrgB); err == nil {
+		t.Error("MarkFired with another org's id on the receipt succeeded")
+	}
+	if err := stores.PendingFirings.MarkSkipped(ctx, forged, "hack"); err == nil {
+		t.Error("MarkSkipped with another org's id on the receipt succeeded")
 	}
 	rowsAAfter, _ := stores.PendingFirings.ListForEntity(ctx, orgA, tupA.EntityID)
-	if rowsAAfter[0].Status != "pending" {
-		t.Errorf("orgA's firing was mutated by cross-org Mark*: status=%q, want pending", rowsAAfter[0].Status)
+	if rowsAAfter[0].Status != workitem.StatusLeased || rowsAAfter[0].SkipReason != "" || rowsAAfter[0].FiredBlueprintRunID != nil {
+		t.Errorf("orgA's firing was mutated through a cross-org receipt: %+v", rowsAAfter[0])
+	}
+	if subjects, err := stores.PendingFirings.(db.WorkKindHandle).Describe(ctx, orgB, []int64{rowsA[0].ID}); err != nil || len(subjects) != 0 {
+		t.Errorf("orgB Describe of orgA's row = %+v err=%v, want nothing", subjects, err)
 	}
 }
 
-// TestPendingFiringsStore_Postgres_EnqueueWithLocalSentinelUser is the
-// regression test for the SQLite-only LocalDefaultUserID sentinel
-// leaking into Postgres. The router still passes runmode.LocalDefault
-// UserID until D9 retrofits handler-level claims; binding it directly
-// would trip pending_firings_creator_user_id_fkey because that uuid
-// has no row in the multi-mode users table. The store normalizes the
-// sentinel to empty so the COALESCE walks to org-owner.
-func TestPendingFiringsStore_Postgres_EnqueueWithLocalSentinelUser(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	ctx := context.Background()
-
-	orgID, ownerUserID, agentID := seedPgPendingFiringsOrg(t, h)
-	tup := newPgPendingFiringsSeeder(h, orgID, ownerUserID, agentID).Tuple(t)
-
-	// Caller passes the SQLite-only sentinel rather than ownerUserID.
-	inserted, _, err := stores.PendingFirings.Enqueue(ctx, orgID, runmode.LocalDefaultUserID,
-		tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{})
-	if err != nil {
-		t.Fatalf("Enqueue with LocalDefaultUserID sentinel: %v (FK would trip if sentinel weren't filtered)", err)
-	}
-	if !inserted {
-		t.Fatal("Enqueue should report inserted=true on fresh row")
-	}
-
-	// Verify creator_user_id resolved to the org owner, not the sentinel.
-	var creator string
-	if err := h.AdminDB.QueryRow(
-		`SELECT creator_user_id FROM pending_firings WHERE task_id = $1 AND trigger_id = $2`,
-		tup.TaskID, tup.TriggerID,
-	).Scan(&creator); err != nil {
-		t.Fatalf("read creator_user_id: %v", err)
-	}
-	if creator != ownerUserID {
-		t.Errorf("creator_user_id = %q, want org owner %q (sentinel should fall through COALESCE to org-owner)",
-			creator, ownerUserID)
-	}
-}
-
-// TestPendingFiringsStore_Postgres_ConcurrentPopNeverDoublePops is the
-// Concurrently draining a task from several goroutines (simulating separate
-// DrainTask calls — different processes, or a leader-failover overlap within
-// one) must never hand the same pending_firings row to two callers. The claiming pop (UPDATE
-// ... FOR UPDATE SKIP LOCKED ... RETURNING) is what makes this safe; a bare
-// SELECT would let two concurrent drains observe and each act on the same
-// row.
-func TestPendingFiringsStore_Postgres_ConcurrentPopNeverDoublePops(t *testing.T) {
+// TestPendingFiringsStore_Postgres_ConcurrentClaimsNeverDoubleLease drives
+// several claimers at one task's queue at once. The claim's FOR UPDATE SKIP
+// LOCKED is what keeps two claimers from leasing the same row; a bare
+// SELECT would let both observe and each act on it.
+func TestPendingFiringsStore_Postgres_ConcurrentClaimsNeverDoubleLease(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID, agentID := seedPgPendingFiringsOrg(t, h)
-	seed := newPgPendingFiringsSeeder(h, orgID, userID, agentID)
+	seed := newPgPendingFiringsSeeder(h, stores, orgID, userID, agentID)
 
-	// Every row on ONE task (distinct triggers), since the queue the drain
-	// pops from is the task's.
 	const rows = 6
 	var entityID, taskID string
 	for i := 0; i < rows; i++ {
@@ -167,37 +109,32 @@ func TestPendingFiringsStore_Postgres_ConcurrentPopNeverDoublePops(t *testing.T)
 		if i == 0 {
 			entityID, taskID = tup.EntityID, tup.TaskID
 		}
-		if _, _, err := stores.PendingFirings.Enqueue(ctx, orgID, tup.UserID, entityID, taskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil {
+		if _, _, err := stores.PendingFirings.Enqueue(ctx, orgID, entityID, taskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue %d: %v", i, err)
 		}
 	}
 
-	// More concurrent poppers than rows, so every row gets claimed and the
-	// excess poppers reliably observe an empty queue (got == nil) rather
-	// than the test being sensitive to goroutine scheduling luck.
-	const poppers = 12
+	const claimers = 12
 	var wg sync.WaitGroup
-	claimed := make([]int64, poppers)
-	gotErr := make([]error, poppers)
+	claimed := make([][]int64, claimers)
+	gotErr := make([]error, claimers)
 	var ready sync.WaitGroup
-	ready.Add(poppers)
+	ready.Add(claimers)
 	start := make(chan struct{})
-	for i := 0; i < poppers; i++ {
+	for i := 0; i < claimers; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			ready.Done()
 			<-start
-			row, err := stores.PendingFirings.PopForTask(ctx, orgID, taskID)
+			batch, err := stores.PendingFirings.Claim(ctx, workitem.Owner{ID: fmt.Sprintf("claimer-%d", i), Epoch: 1}, 1)
 			if err != nil {
 				gotErr[i] = err
 				return
 			}
-			if row == nil {
-				claimed[i] = 0
-				return
+			for _, cf := range batch.Firings {
+				claimed[i] = append(claimed[i], cf.Firing.ID)
 			}
-			claimed[i] = row.ID
 		}(i)
 	}
 	ready.Wait()
@@ -205,37 +142,30 @@ func TestPendingFiringsStore_Postgres_ConcurrentPopNeverDoublePops(t *testing.T)
 	wg.Wait()
 
 	seen := map[int64]int{}
-	for i, id := range claimed {
+	for i, ids := range claimed {
 		if gotErr[i] != nil {
-			t.Fatalf("popper %d: %v", i, gotErr[i])
+			t.Fatalf("claimer %d: %v", i, gotErr[i])
 		}
-		if id != 0 {
+		for _, id := range ids {
 			seen[id]++
 		}
 	}
 	if len(seen) != rows {
-		t.Fatalf("expected %d distinct rows claimed, got %d (claimed=%v)", rows, len(seen), claimed)
+		t.Fatalf("expected %d distinct rows leased, got %d (%v)", rows, len(seen), claimed)
 	}
 	for id, n := range seen {
 		if n != 1 {
-			t.Errorf("firing %d was popped by %d poppers, want exactly 1 (double-pop)", id, n)
+			t.Errorf("firing %d was leased by %d claimers, want exactly 1", id, n)
 		}
 	}
-
-	// Every claimed row must have been atomically flipped to 'draining' —
-	// not left 'pending' (which would mean the pop wasn't a real claim).
 	all, err := stores.PendingFirings.ListForEntity(ctx, orgID, entityID)
 	if err != nil {
 		t.Fatalf("ListForEntity: %v", err)
 	}
-	draining := 0
-	for _, r := range all {
-		if r.Status == "draining" {
-			draining++
+	for _, f := range all {
+		if f.Status != workitem.StatusLeased {
+			t.Errorf("row %d = %q after the claim race, want leased", f.ID, f.Status)
 		}
-	}
-	if draining != rows {
-		t.Errorf("expected all %d rows draining after the claim race, got %d", rows, draining)
 	}
 }
 
@@ -275,11 +205,11 @@ func seedPgPendingFiringsOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, ag
 	return orgID, userID, agentID
 }
 
-// newPgPendingFiringsSeeder builds the seeder bag against AdminDB so
-// raw inserts bypass RLS. Every Tuple call creates a fresh chain
-// (entity → prompt → event → task → event_handler[trigger]) so dedup
-// keys stay distinct across subtests.
-func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID, agentID string) dbtest.PendingFiringsSeeder {
+// newPgPendingFiringsSeeder builds the seeder bag against AdminDB so raw
+// inserts bypass RLS. Every Tuple call creates a fresh chain (entity →
+// prompt → event → task → event_handler[trigger]) so dedup keys stay
+// distinct across subtests.
+func newPgPendingFiringsSeeder(h *pgtest.Harness, stores db.Stores, orgID, userID, agentID string) dbtest.PendingFiringsSeeder {
 	conn := h.AdminDB
 	var teamID string
 	if err := conn.QueryRow(
@@ -349,14 +279,13 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID, agentID string)
 			TaskID:    taskID,
 			TriggerID: triggerID,
 			EventID:   eventID,
-			UserID:    userID,
+			PromptID:  promptID,
 		}
 	}
 
 	// runForTask inserts a blueprint + blueprint_run row so MarkFired's
-	// fired_run_id FK to blueprint_runs(id) is satisfied — the firing unit is
-	// the blueprint_run now. The conformance suite doesn't probe gate semantics
-	// here — those live in ConversationStore's own tests.
+	// fired_run_id FK to blueprint_runs(id) is satisfied — the firing unit
+	// is the blueprint_run.
 	runForTask := func(t *testing.T, taskID string) string {
 		t.Helper()
 		bpID := uuid.New().String()
@@ -387,8 +316,8 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID, agentID string)
 		return agent.String, user.String
 	}
 
-	// A claim lands the row in progress, the way every claim door does — the
-	// tasks_queue_unclaimed CHECK refuses the held-queued row otherwise.
+	// A claim lands the row in progress, the way every claim door does —
+	// the tasks_queue_unclaimed CHECK refuses the held-queued row otherwise.
 	claimTaskForUser := func(t *testing.T, taskID string) {
 		t.Helper()
 		if _, err := conn.Exec(`
@@ -407,5 +336,45 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID, agentID string)
 		AgentID:          agentID,
 		TaskClaim:        taskClaim,
 		ClaimTaskForUser: claimTaskForUser,
+		LiveConversation: func(t *testing.T, taskID, promptID string) string {
+			t.Helper()
+			return seedPgLiveConversation(t, h, orgID, userID, taskID, promptID)
+		},
+		EndConversation: func(t *testing.T, conversationID string) {
+			t.Helper()
+			pgExecOne(t, h, "end conversation",
+				`UPDATE conversations SET status = 'completed', ended_at = now(), ended_reason = $1 WHERE id = $2`,
+				string(domain.EndedStepAdvanced), conversationID)
+		},
+		ExpireLease: func(t *testing.T, firingID int64) {
+			t.Helper()
+			// Rewound against the server clock — the one the claim stamped
+			// the lease from and the guard compares against.
+			pgExecOne(t, h, "expire lease",
+				`UPDATE pending_firings SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = $1 AND status = 'leased'`, firingID)
+		},
+		Ripen: func(t *testing.T, firingID int64) {
+			t.Helper()
+			pgExecOne(t, h, "ripen", `UPDATE pending_firings SET next_attempt_at = NULL WHERE id = $1 AND status = 'ready'`, firingID)
+		},
+		InTx: func(t *testing.T, fn func(s db.PendingFiringsStore) error) error {
+			t.Helper()
+			return stores.Tx.SyntheticClaimsWithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
+				return fn(tx.PendingFirings)
+			})
+		},
 	}
+}
+
+// seedPgLiveConversation stages a live top-level conversation on the task:
+// a blueprint run of its own (the origin CHECK wants one, and a step
+// conversation names its run), no creator, no terminal status, no end.
+func seedPgLiveConversation(t *testing.T, h *pgtest.Harness, orgID, userID, taskID, promptID string) string {
+	t.Helper()
+	brID := seedPgBlueprintRun(t, h, orgID, userID, taskID)
+	stepIdx := 0
+	return seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
+		TaskID: taskID, PromptID: promptID, Model: "m", TriggerType: "event",
+		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
+	})
 }

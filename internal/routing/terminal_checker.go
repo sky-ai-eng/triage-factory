@@ -140,7 +140,7 @@ func (r *Router) setTerminalGauges(g *terminalInvariantGauges) {
 // Returns when ctx is cancelled.
 //
 // Brain-gated in multi mode (started from the leader-elected background
-// brain, like the drain sweeper), so exactly one process counts at a time:
+// brain, like the firing worker), so exactly one process counts at a time:
 // a courtesy rather than a correctness requirement, since the pass writes
 // nothing, but two pods reporting the same org's gauge would only race each
 // other for the same number.

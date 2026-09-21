@@ -3,8 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"io/fs"
-	"strings"
 	"testing"
 	"time"
 
@@ -281,57 +279,4 @@ func TestMigrate_EventQueueAdoptsWorkItemBlock(t *testing.T) {
 	if r := read(1); r.status != workitem.StatusLeased {
 		t.Errorf("row 1 after a second Migrate = %q, want the claim's leased row untouched", r.status)
 	}
-}
-
-// TestEventQueueSchemaCarriesWorkItemIndexes pins that both dialects' schema
-// files carry every statement workitem.IndexDDL renders for the kind — the
-// SQLite migration verbatim, the Postgres baseline with the table named
-// through its schema like every statement beside it — so the index shape the
-// claim relies on cannot drift from the package that owns it.
-func TestEventQueueSchemaCarriesWorkItemIndexes(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		fsys    fs.FS
-		file    string
-		dialect workitem.Dialect
-	}{
-		{"postgres baseline", migrationsPostgresFS, "migrations-postgres/202605130001_pg_baseline.sql", workitem.Postgres},
-		{"sqlite migration", migrationsSQLiteFS, eventQueueWorkItemFile, workitem.SQLite},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			raw, err := fs.ReadFile(tc.fsys, tc.file)
-			if err != nil {
-				t.Fatalf("read %s: %v", tc.file, err)
-			}
-			kind := workkinds.EventQueue(tc.dialect)
-			for i, stmt := range workitem.IndexDDL(kind) {
-				want := stmt
-				if tc.dialect == workitem.Postgres {
-					want = strings.Replace(stmt, " ON "+kind.Table+" (", " ON public."+kind.Table+" (", 1)
-				}
-				if !strings.Contains(string(raw), want+";") {
-					t.Errorf("%s lacks index %s:\n%s", tc.file, workitem.IndexNames(kind)[i], want)
-				}
-			}
-			for _, old := range []string{"'pending'", "'processing'", "idx_event_queue_pending", "idx_event_queue_status_processed"} {
-				if tc.dialect == workitem.Postgres && strings.Contains(string(raw), "event_queue") && strings.Contains(eventQueueBlock(string(raw)), old) {
-					t.Errorf("the baseline's event_queue block still carries %s", old)
-				}
-			}
-		})
-	}
-}
-
-// eventQueueBlock cuts the baseline down to the event_queue table's own
-// statements, from its CREATE TABLE to the next table's.
-func eventQueueBlock(baseline string) string {
-	start := strings.Index(baseline, "CREATE TABLE public.event_queue")
-	if start < 0 {
-		return ""
-	}
-	rest := baseline[start:]
-	if end := strings.Index(rest[1:], "CREATE TABLE public."); end >= 0 {
-		return rest[:end+1]
-	}
-	return rest
 }

@@ -1,6 +1,6 @@
 // The Spawner type — central coordinator for delegated agent runs — and
 // the small cross-cutting helpers (status broadcasts, status updates,
-// drainer/classification wiring) every other file in this package
+// waker/classification wiring) every other file in this package
 // reaches for. The lifecycle methods (Delegate, Stop, SendMessage)
 // live in their own files; this one is the type definition + the bits
 // that don't belong anywhere else.
@@ -54,15 +54,15 @@ func shortConversationID(conversationID string) string {
 	return conversationID[:8]
 }
 
-// QueueDrainer is the interface the spawner uses to notify the per-task
-// firing queue that a conversation has reached a terminal state and the
-// task may be ready to drain its next pending firing. Implemented by
-// the routing.Router. Whatever minted the conversation calls it: a manual
-// delegation holds the task's gate like any other, so its terminal is a
-// moment the queue can move. orgID scopes the drain to the run's tenant so
-// multi-mode lookups hit the right pending_firings rows.
-type QueueDrainer interface {
-	DrainTask(orgID, taskID string)
+// FiringWaker is the interface the spawner uses to tell the firing worker
+// that a conversation has reached a terminal state and a task's gate may
+// have opened. Implemented by the routing.Router. Whatever minted the
+// conversation calls it: a manual delegation holds the task's gate like any
+// other, so its terminal is a moment the queue can move. It carries no
+// arguments because the worker claims across every task and org; which
+// firing is ripe is the claim query's to decide.
+type FiringWaker interface {
+	WakeFirings()
 }
 
 // EventPublisher is the bus-publish seam the spawner uses to mirror run
@@ -328,13 +328,13 @@ type Spawner struct {
 	engagements map[string]*engagement
 
 	dispatchWake   chan struct{}  // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
-	drainer        QueueDrainer   // nil-safe; set post-construction via SetQueueDrainer
+	firingWaker    FiringWaker    // nil-safe; set post-construction via SetFiringWaker
 	eventPublisher EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors run status/activity onto the bus (TFAC-592)
 	// memoryOwed is the doorbell every boundary this spawner stamps rings:
 	// the conversation may have ended without its agent having written its
 	// memory, and the brain is what generates the one it owes. Nil-safe; set
 	// post-construction via SetOnMemoryOwed. Read through kickMemoryOwed
-	// under mu, like drainer beside it.
+	// under mu, like firingWaker beside it.
 	//
 	// It relays rather than calling: the spawner runs on an executor, which is
 	// never the brain, so this reaches the holder over tf_ctl. Which is also
@@ -642,20 +642,21 @@ func (s *Spawner) getStores() (db.Stores, bool) {
 	return *s.stores, true
 }
 
-// SetQueueDrainer wires the firing-queue drainer into the spawner. Done
-// post-construction because the router (which implements QueueDrainer)
+// SetFiringWaker wires the firing worker's doorbell into the spawner. Done
+// post-construction because the router (which implements FiringWaker)
 // holds a reference to the spawner, so the spawner can't take it as a
 // constructor arg without a circular dependency. Same post-construction
 // injection pattern as SetRunCredentialResolvers. Safe to call once at
-// startup; nil drainer disables the drain hook (used in tests).
-func (s *Spawner) SetQueueDrainer(d QueueDrainer) {
+// startup; a nil waker leaves the worker's scan tick as the floor (an
+// executor, and every test).
+func (s *Spawner) SetFiringWaker(w FiringWaker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.drainer = d
+	s.firingWaker = w
 }
 
 // SetOnMemoryOwed wires the memory doorbell. Post-construction, same pattern
-// as SetQueueDrainer; nil (the default, and every test) leaves each boundary
+// as SetFiringWaker; nil (the default, and every test) leaves each boundary
 // stamping its row and ringing nothing, which costs the brain's sweep one
 // interval and nothing else.
 func (s *Spawner) SetOnMemoryOwed(fn func(orgID, conversationID string)) {
@@ -682,7 +683,7 @@ func (s *Spawner) kickMemoryOwed(orgID, conversationID string) {
 }
 
 // SetPresenceChecker wires the multi-mode fleet-wide presence check
-// (TFAC-584). Post-construction, same pattern as SetQueueDrainer/
+// (TFAC-584). Post-construction, same pattern as SetFiringWaker/
 // SetEventPublisher. Safe to call once at startup; nil (the default,
 // always true in local mode) leaves presentFor reading wsHub.PresentFor
 // directly, unchanged from before this existed.
@@ -694,7 +695,7 @@ func (s *Spawner) SetPresenceChecker(pc PresenceChecker) {
 
 // SetEventPublisher wires the bus publisher the spawner mirrors run
 // status/activity onto (TFAC-592). Post-construction, same pattern as
-// SetQueueDrainer — the bus is built before the spawner in app
+// SetFiringWaker — the bus is built before the spawner in app
 // composition, but the setter keeps internal/delegate decoupled from
 // internal/eventbus's concrete type. Safe to call once at startup; nil
 // publisher (the default) disables the bus mirror entirely (tests).
@@ -765,24 +766,20 @@ func (s *Spawner) publishedRunURLFor(orgID, conversationID string) string {
 	return agentmeta.PublishedRunURL(publicURL, orgID, conversationID)
 }
 
-// notifyDrainer fires the QueueDrainer hook for a task if a drainer is
-// configured. Whatever minted the conversation that just ended, it was the
-// task's live one and its end is the moment the task's gate opens — a manual
-// delegation holds that gate exactly as an auto-fired one does, so its
-// terminal has to drain the queue too or the firings behind it wait on the
-// periodic sweeper for no reason. Runs in a goroutine to keep teardown latency
-// unaffected.
-func (s *Spawner) notifyDrainer(orgID, taskID string) {
-	if taskID == "" {
-		return
-	}
+// wakeFirings rings the firing worker's doorbell if one is wired. Whatever
+// minted the conversation that just ended, it was the task's live one and
+// its end is the moment the task's gate opens — a manual delegation holds
+// that gate exactly as an auto-fired one does, so its terminal has to wake
+// the worker too or the firings behind it wait on the scan tick for no
+// reason. The send does not block, so no goroutine is needed.
+func (s *Spawner) wakeFirings() {
 	s.mu.Lock()
-	d := s.drainer
+	w := s.firingWaker
 	s.mu.Unlock()
-	if d == nil {
+	if w == nil {
 		return
 	}
-	go d.DrainTask(orgID, taskID)
+	w.WakeFirings()
 }
 
 // SetRunCredentialResolvers wires the per-org run-credential seam:

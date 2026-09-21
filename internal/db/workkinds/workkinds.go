@@ -85,3 +85,86 @@ func EventQueue(d workitem.Dialect) workitem.Kind {
 func EventQueueCloseOwedKey(entityID string) string {
 	return "close_owed:" + entityID
 }
+
+// The pending-firings kind's identity on the work-kind registry, declared
+// beside the Kind for the same reason the event queue's is. A firing unit is
+// a handful of store reads and one fenced insert, so a minute of ready
+// backlog means the worker is not draining.
+const (
+	PendingFiringsName                 = "pending_firings"
+	PendingFiringsLabel                = "Queued auto-delegations"
+	PendingFiringsOldestReadyObjective = 60 * time.Second
+	// PendingFiringDeferTaskBusy is the deferral reason a firing records
+	// while its task holds a live conversation.
+	PendingFiringDeferTaskBusy = "task_busy"
+)
+
+// PendingFirings is the router's per-task auto-delegation queue as a work
+// kind: one row per (task, trigger) intent that could not fire when its
+// event arrived because the task was busy.
+//
+// FencedReplay, on two named domain fences: (1) the blueprint-run insert is
+// fenced on blueprint_runs (triggering_event_id, trigger_id), so a replay of
+// a firing whose run committed returns delegate.ErrAlreadyFired and the row
+// is skipped with that reason; (2) the one-active-run-per-task index refuses
+// a second live run, returning delegate.ErrTaskBusy, which the worker turns
+// into a deferral. A firing's only domain write is that insert, one
+// transaction, so a replay either finds it committed or repeats it whole.
+//
+// UniqueWhileUnsettled keyed on (task, trigger): a parked firing holds its
+// key, so a later event for the same pair collapses onto the parked row
+// rather than minting a new one, and an operator redrives or cancels it.
+//
+// The claim filter is the per-task gate as the claim query applies it: a
+// firing is claimable only while its task holds no live top-level
+// conversation. A ready row behind a busy task is deferred, not ready, and
+// becomes ripe when the task frees with no write of anyone's.
+//
+// MaxAttempts 5 with the package's default backoff: a fault that survives
+// retries at roughly 5s, 10s, 20s and 40s is one a person has to look at.
+// Lease and deadline are the event queue's, for the same reason — the unit
+// is database writes, and spawner.Delegate is a pure enqueue. Fairness
+// interleaves at batch granularity, which is why the worker claims ten at a
+// time. Frozen is empty: the kind's columns are immutable after admission
+// except skip_reason and fired_run_id, which only the terminal write sets,
+// so the store reads them by id after Claim returns.
+func PendingFirings(d workitem.Dialect) workitem.Kind {
+	return workitem.Kind{
+		Table:   "pending_firings",
+		Dialect: d,
+		Policy: workitem.Policy{
+			MaxAttempts:  5,
+			Lease:        60 * time.Second,
+			RenewEvery:   20 * time.Second,
+			UnitDeadline: 30 * time.Second,
+			Fairness:     true,
+		},
+		Unique:      workitem.UniqueWhileUnsettled,
+		Strategy:    workitem.FencedReplay,
+		Columns:     []string{"entity_id", "task_id", "trigger_id", "triggering_event_id", "skip_reason", "fired_run_id"},
+		ClaimFilter: PendingFiringsClaimFilter(d),
+		Observer:    workmetrics.Observe(PendingFiringsName),
+	}
+}
+
+// PendingFiringKey is the unique key one firing is admitted under: one per
+// (task, trigger) while one is unsettled. The SQLite migration spells the
+// same key in SQL for the rows it carries over, and a test holds the two to
+// the same text.
+func PendingFiringKey(taskID, triggerID string) string { return taskID + ":" + triggerID }
+
+// PendingFiringsClaimFilter is the per-task gate as the claim query applies
+// it: a firing is claimable only while its task holds no live top-level
+// conversation. It is the conversation store's live-conversation predicate
+// applied to the row's task, and each dialect package tests that the two
+// keep answering the same question. Postgres binds the org as well because
+// its conversations table is org-wide; SQLite is one org.
+func PendingFiringsClaimFilter(d workitem.Dialect) string {
+	org := ""
+	if d == workitem.Postgres {
+		org = "r.org_id = t.org_id AND "
+	}
+	return "NOT EXISTS (SELECT 1 FROM conversations r WHERE " + org +
+		"r.task_id = t.task_id AND r.ended_at IS NULL AND r.parent_conversation_id IS NULL" +
+		" AND (r.status IS NULL OR r.status NOT IN ('completed','failed')))"
+}

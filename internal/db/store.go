@@ -138,10 +138,11 @@ type Stores struct {
 	// (owner, repo) and queries by the natural key UNIQUE(org_id, owner, repo).
 	Repos RepositoryStore
 
-	// PendingFirings owns the pending_firings table — the FIFO queue
-	// of intent-to-auto-delegate rows the router enqueues when the task
-	// already has firings ahead of this one. Admin pool in Postgres
-	// (the router has no per-user identity; system service).
+	// PendingFirings owns the pending_firings table — the per-task queue
+	// of auto-delegation intents the router admits when the task is busy,
+	// on the shared work-item contract, which the firing worker claims
+	// from. Admin pool in Postgres (the router and the worker have no
+	// per-user identity; system services).
 	PendingFirings PendingFiringsStore
 
 	// Events owns the events audit log — append-only event rows the

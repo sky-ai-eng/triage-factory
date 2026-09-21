@@ -121,7 +121,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		Artifacts:                newArtifactStore(tx),
 		Entities:                 newEntityStore(tx, tx),
 		Repos:                    newRepositoryStore(tx, tx),
-		PendingFirings:           newPendingFiringsStore(tx),
+		PendingFirings:           newPendingFiringsStore(tx, nil),
 		Events:                   newEventStore(tx, tx),
 		TaskMemory:               newTaskMemoryStore(tx, tx),
 		MemoryAttempts:           newMemoryAttemptStore(tx),

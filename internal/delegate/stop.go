@@ -104,9 +104,6 @@ const (
 	StopCauseTaskTakenOver StopCause = "task_taken_over"
 	// StopCauseTeamArchived — the team that owns the work was archived.
 	StopCauseTeamArchived StopCause = "team_archived"
-	// StopCauseFiringReverted — the firing that spawned the run was rolled
-	// back, so the run should never have existed.
-	StopCauseFiringReverted StopCause = "firing_reverted"
 )
 
 // note is the sentence this cause writes into the transcript. Every arm names
@@ -126,8 +123,6 @@ func (c StopCause) note() string {
 		return "Run stopped: a person took the task over."
 	case StopCauseTeamArchived:
 		return "Run stopped: the team that owns this work was archived."
-	case StopCauseFiringReverted:
-		return "Run stopped: the firing that started it was rolled back."
 	}
 	return "Run stopped: the work it belonged to was closed out."
 }
@@ -363,14 +358,12 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// is also a defensive catch for any other "row not terminal" edge case —
 	// including a run already parked `open` with no subprocess to kill.
 	//
-	// We also have to drain the task's firing queue ourselves: a stop that
-	// finds no goroutine — a run parked `open`, or one owned by another pod —
-	// has no defer to piggy-back on, and a run stopped in that state would
-	// leave the queue stuck until some other run on that task terminated.
-	// Draining alongside a killed goroutine's own defer is safe: DrainTask
-	// serializes per task and every pop is a guarded status transition, so
-	// whichever runs first fires the queued intent and the other finds nothing
-	// to pop.
+	// We also have to wake the firing worker ourselves: a stop that finds
+	// no goroutine — a run parked `open`, or one owned by another pod — has
+	// no defer to piggy-back on, and a run stopped in that state would leave
+	// the task's queued firings waiting on the worker's scan tick. A second
+	// wake beside a killed goroutine's own is harmless: the wake carries no
+	// work, and the claim is what decides which firing is ripe.
 
 	// User-initiated stop: write under the stopping user's
 	// synthetic claims so RLS sees a legitimate user-attributed
@@ -451,7 +444,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 		// stopped conversation permanently unresumable.
 		s.finalizeParkedBlueprintOnCancel(bgCtx, orgID, conv, userID)
 	}
-	s.notifyDrainer(orgID, conv.TaskID)
+	s.wakeFirings()
 	return nil
 }
 

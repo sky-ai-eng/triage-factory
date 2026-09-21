@@ -213,13 +213,13 @@ func TestHandleEvent_DistinctEvents_FireIndependently(t *testing.T) {
 	}
 }
 
-// TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate covers the drain
-// path's fence handling: a pending firing whose triggering event
-// already has a committed blueprint run (a prior drain fired it but died
-// before MarkFired, or the immediate path fired it before this firing was
-// popped) must skip with reason "already_fired" rather than spawn a
-// duplicate or retry forever.
-func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
+// TestFiringWorker_AlreadyFiredRun_SkipsWithoutDuplicate covers the
+// worker's fence handling: a queued firing whose triggering event already
+// has a committed blueprint run (a previous holder fired it and lost its
+// lease before the terminal write, or the immediate path fired it before
+// this row was claimed) must skip with reason "already_fired" rather than
+// spawn a duplicate or retry forever.
+func TestFiringWorker_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 	stub := &fenceStubDelegator{db: database}
@@ -247,7 +247,7 @@ func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	}, dbpkg.AgentClaimStamp{}, "", domain.Conversation{
 		ID:                 priorStepID,
 		TaskID:             taskID,
-		PromptID:           "p-drain",
+		PromptID:           "p-drain-1",
 		Model:              "m",
 		TriggerType:        "event",
 		TriggerID:          triggerID,
@@ -257,34 +257,25 @@ func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	if err != nil || !inserted {
 		t.Fatalf("seed prior blueprint_run: inserted=%v err=%v", inserted, err)
 	}
-	// The prior firing concluded: the drain must read it as already-fired, not
-	// as a live engagement it should defer behind.
+	// The prior firing concluded: the worker must read it as already-fired,
+	// not as a live engagement to wait behind.
 	if _, err := database.Exec(`UPDATE conversations SET status = 'completed' WHERE id = ?`, priorStepID); err != nil {
 		t.Fatalf("conclude prior step: %v", err)
 	}
 
 	// Queue a firing carrying the same triggering event.
-	if _, _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID, dbpkg.AgentClaimStamp{}); err != nil {
-		t.Fatalf("enqueue: %v", err)
-	}
+	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
 
 	router := fenceRouter(database, stub)
-	router.DrainTask(runmode.LocalDefaultOrgID, taskID)
+	router.SetExecutorID("firing-worker-test", 1)
+	drainOnce(t, router)
 
-	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, entityID)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
+	rows := firingsFor(t, database, entityID)
 	if len(rows) != 1 {
 		t.Fatalf("want 1 firing row, got %d", len(rows))
 	}
-	if rows[0].Status != domain.PendingFiringStatusSkippedStale {
-		t.Errorf("status = %q, want skipped_stale", rows[0].Status)
-	}
-	if rows[0].SkipReason != domain.PendingFiringSkipAlreadyFired {
-		t.Errorf("skip_reason = %q, want %q", rows[0].SkipReason, domain.PendingFiringSkipAlreadyFired)
-	}
-	// Still exactly one conversation — the fence kept the drain from
+	requireSkipped(t, rows[0], domain.PendingFiringSkipAlreadyFired)
+	// Still exactly one conversation — the fence kept the worker from
 	// duplicating.
 	if n := fenceConversationCount(t, database, entityID); n != 1 {
 		t.Errorf("want 1 conversation (drain fenced), got %d", n)

@@ -367,8 +367,13 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	t.Run("pending_firings", func(t *testing.T) {
 		evtID := seedEventForEntity(t, h, orgID, entityID, "github:pr:opened")
 		triggerID := seedTrigger(t, h, orgID, userID, teamID, blueprintID)
-		if _, _, err := stores.PendingFirings.Enqueue(ctx, orgID, userID, entityID, taskID, triggerID, evtID, db.AgentClaimStamp{}); err != nil {
+		if _, _, err := stores.PendingFirings.Enqueue(ctx, orgID, entityID, taskID, triggerID, evtID, db.AgentClaimStamp{}); err != nil {
 			t.Errorf("PendingFirings.Enqueue (inject signal gone-compensation): %v", err)
+		}
+		// A duplicate collapses through admission's conflict arm, which is an
+		// UPDATE of the unsettled row: the role needs UPDATE for it.
+		if inserted, _, err := stores.PendingFirings.Enqueue(ctx, orgID, entityID, taskID, triggerID, evtID, db.AgentClaimStamp{}); err != nil || inserted {
+			t.Errorf("PendingFirings.Enqueue duplicate: inserted=%v err=%v, want a collapse", inserted, err)
 		}
 	})
 

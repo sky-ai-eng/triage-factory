@@ -3,86 +3,62 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// pendingFiringsStore is the Postgres impl of db.PendingFiringsStore.
-// Wired against the admin pool in postgres.New: the router has no per-
-// user identity and the drain sweeper runs as a background goroutine,
-// so impersonating any one user via the app pool would be wrong.
-// Defense-in-depth org_id filters fire in every WHERE/INSERT clause
-// alongside the RLS policy (which gates by an EXISTS subquery against
-// tasks rather than a bare current_org_id() check — the policy is
-// kept honest by the explicit filter here in case the policy is ever
-// loosened).
+// pendingFiringsStore is the Postgres impl of db.PendingFiringsStore — the
+// router's per-task auto-delegation queue, on the shared work-item contract.
+// Wired against the admin pool in postgres.New: the router and the firing
+// worker are system services with no per-user identity, so impersonating a
+// user via the app pool would be wrong. The pending_firings_all RLS policy
+// is defense-in-depth (admin bypasses it) and org_id is bound in every
+// statement.
 //
-// The per-task firing gate's conversation-shaped half lives on
-// ConversationStore — strict ownership. The router composes the gate from
-// this store's HasPendingForTask + ConversationStore's live-conversation
-// read.
-type pendingFiringsStore struct{ q queryer }
+// q is the admission and read side, the caller's transaction when the store
+// is transaction-bound. conn is the pool the package's own transactions open
+// on, nil on a transaction-bound store: the verbs that need it answer
+// db.ErrNotOnTransaction there rather than nesting a transaction the caller
+// cannot see.
+type pendingFiringsStore struct {
+	q    queryer
+	conn *sql.DB
+	kind workitem.Kind
+}
 
-func newPendingFiringsStore(q queryer) db.PendingFiringsStore {
-	return &pendingFiringsStore{q: q}
+func newPendingFiringsStore(q queryer, conn *sql.DB) db.PendingFiringsStore {
+	return &pendingFiringsStore{q: q, conn: conn, kind: workkinds.PendingFirings(workitem.Postgres)}
 }
 
 var _ db.PendingFiringsStore = (*pendingFiringsStore)(nil)
 
-// Enqueue inserts the firing and stamps the task's agent claim in one
-// transaction — see db.AgentClaimStamp for why the two writes are
-// inseparable. A stamp refusal is not an error and leaves the firing
+// unsettledFiringStatuses is the predicate for a firing that still holds its
+// key and keeps the task's gate closed. Parked is in it: a parked firing is
+// redriven or cancelled by an operator, never replaced by a fresh row.
+const unsettledFiringStatuses = "'ready','leased','parked'"
+
+// Enqueue admits the firing through the package and stamps the task's agent
+// claim in one transaction — see db.AgentClaimStamp for why the two writes
+// are inseparable. A stamp refusal is not an error and leaves the firing
 // committed.
-func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string, claim db.AgentClaimStamp) (bool, bool, error) {
-	// creator_user_id is NOT NULL in the Postgres schema. Resolution
-	// prefers the caller-supplied userID, falling back to the org
-	// owner. tf.current_user_id() is intentionally skipped —
-	// admin-pool inserts run without JWT claims, so the helper would
-	// return NULL and the COALESCE would walk straight to org owner
-	// anyway.
-	//
-	// LocalDefaultUserID sentinel handling: the router still passes
-	// runmode.LocalDefaultUserID until D9 retrofits handler-
-	// level claims. That sentinel UUID has no FK target in a multi-
-	// mode users table, so binding it directly would trip
-	// pending_firings_creator_user_id_fkey on every busy-entity
-	// enqueue. Normalize to empty here so NULLIF collapses to NULL
-	// and COALESCE walks to the org-owner fallback.
-	//
-	// queued_at uses the schema default (now()) so the insert and
-	// the index agree on the timestamp source — no clock skew between
-	// app-side time.Now() and the partial index's FIFO ordering.
-	creatorBind := userID
-	if creatorBind == runmode.LocalDefaultUserID {
-		creatorBind = ""
-	}
+func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, entityID, taskID, triggerID, triggeringEventID string, claim db.AgentClaimStamp) (bool, bool, error) {
 	inserted, claimed := false, false
 	err := inTx(ctx, s.q, func(q queryer) error {
-		// The dedup target includes 'draining': a firing mid-drain is still
-		// queued intent for (task, trigger), and a duplicate enqueued during
-		// the drain window would fire a second blueprint run for the same intent
-		// as soon as the first one's conversation terminates. The predicate must
-		// stay textually equivalent to idx_pending_firings_dedup for conflict
-		// inference.
-		res, err := q.ExecContext(ctx, `
-			INSERT INTO pending_firings
-			  (org_id, creator_user_id, entity_id, task_id, trigger_id, triggering_event_id, status)
-			VALUES
-			  ($1,
-			   COALESCE(NULLIF($2, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $1)),
-			   $3, $4, $5, $6, 'pending')
-			ON CONFLICT (task_id, trigger_id) WHERE status IN ('pending', 'draining') DO NOTHING
-		`, orgID, creatorBind, entityID, taskID, triggerID, triggeringEventID)
+		_, deduplicated, err := workitem.Admit(ctx, q, s.kind, orgID, workkinds.PendingFiringKey(taskID, triggerID),
+			db.PendingFiringRowCols(entityID, taskID, triggerID, triggeringEventID))
 		if err != nil {
 			return err
 		}
-		n, _ := res.RowsAffected()
-		inserted = n > 0
-		// Nothing was committed on the collapse path — the duplicate already
-		// queued carries the commitment, and its own enqueue stamped the claim.
+		inserted = !deduplicated
+		// Nothing was committed on the collapse path — the unsettled row
+		// already carries the commitment, and its own admission stamped the
+		// claim.
 		if !inserted || claim.AgentID == "" {
 			return nil
 		}
@@ -95,120 +71,141 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 	return inserted, claimed, nil
 }
 
-// PopForTask is a claiming pop: the subquery locks the oldest pending row
-// under FOR UPDATE SKIP LOCKED (so a concurrent claimant skips it rather
-// than blocking on it) and the outer UPDATE flips it to 'draining' in the
-// same statement — there is no window between "read the candidate" and
-// "claim it" for a second drain to observe. Two concurrent PopForTask
-// calls against the same task therefore never return the same row: the
-// loser's subquery either skips the now-locked row and returns the next
-// candidate, or finds none.
-func (s *pendingFiringsStore) PopForTask(ctx context.Context, orgID, taskID string) (*domain.PendingFiring, error) {
-	if !isValidUUID(taskID) {
-		return nil, nil
+// pgPendingFiringSelect is the projection every PendingFiring read answers
+// with: the shared block and the kind's own columns.
+const pgPendingFiringSelect = `
+	SELECT id, org_id,
+	       entity_id, task_id, trigger_id, triggering_event_id,
+	       COALESCE(skip_reason, ''), fired_run_id::text,
+	       status, attempt, max_attempts, next_attempt_at,
+	       lease_generation, COALESCE(lease_owner, ''), lease_epoch, leased_at, lease_expires_at,
+	       cancel_requested_at, COALESCE(cancel_requested_by, ''), COALESCE(cancel_reason, ''),
+	       COALESCE(last_error, ''), COALESCE(last_outcome, ''), COALESCE(unique_key, ''), superseded_by,
+	       first_enqueued_at, created_at, done_at
+	FROM public.pending_firings`
+
+func (s *pendingFiringsStore) Claim(ctx context.Context, owner workitem.Owner, n int) (db.FiringClaim, error) {
+	if s.conn == nil {
+		return db.FiringClaim{}, db.ErrNotOnTransaction
 	}
-	row := s.q.QueryRowContext(ctx, `
-		UPDATE pending_firings
-		SET status = 'draining', claimed_at = now()
-		WHERE id = (
-			SELECT id FROM pending_firings
-			WHERE org_id = $1 AND task_id = $2 AND status = 'pending'
-			ORDER BY queued_at ASC, id ASC
-			LIMIT 1
-			FOR UPDATE SKIP LOCKED
-		)
-		RETURNING id, entity_id, task_id, trigger_id, triggering_event_id,
-		          status, COALESCE(skip_reason, ''), queued_at, drained_at, fired_run_id
-	`, orgID, taskID)
-	return scanPgPendingFiring(row)
-}
-
-func (s *pendingFiringsStore) Release(ctx context.Context, orgID string, firingID int64) error {
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE pending_firings
-		SET status = 'pending', claimed_at = NULL
-		WHERE org_id = $1 AND id = $2 AND status = 'draining'
-	`, orgID, firingID)
-	return err
-}
-
-// RequeueStaleDraining is the claiming pop's crash recovery — see the
-// interface doc. NULL claimed_at 'draining' rows (claimed before the
-// column existed) are recovered unconditionally.
-func (s *pendingFiringsStore) RequeueStaleDraining(ctx context.Context, orgID string, before time.Time) (int, error) {
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE pending_firings
-		SET status = 'pending', claimed_at = NULL
-		WHERE org_id = $1 AND status = 'draining'
-		  AND (claimed_at IS NULL OR claimed_at < $2)
-	`, orgID, before)
+	res, claimErr := workitem.Claim(ctx, s.conn, s.kind, owner, "", n)
+	out := db.FiringClaim{Cancelled: res.Cancelled, Parked: res.Parked, Reclaimed: res.Reclaimed}
+	if len(res.Claimed) == 0 {
+		return out, claimErr
+	}
+	// The identity columns are immutable after admission, so reading them
+	// by id after the claim reads the values the row was admitted with.
+	ids := make([]int64, len(res.Claimed))
+	for i, r := range res.Claimed {
+		ids[i] = r.ItemID
+	}
+	rows, err := s.conn.QueryContext(ctx, pgPendingFiringSelect+`
+		WHERE id = ANY($1)`, ids)
 	if err != nil {
-		return 0, err
+		return out, errors.Join(claimErr, err)
 	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
+	defer rows.Close()
+	byID := make(map[int64]domain.PendingFiring, len(res.Claimed))
+	for rows.Next() {
+		f, err := scanPgPendingFiring(rows)
+		if err != nil {
+			return out, errors.Join(claimErr, err)
+		}
+		byID[f.ID] = f
+	}
+	if err := rows.Err(); err != nil {
+		return out, errors.Join(claimErr, err)
+	}
+	out.Firings = make([]db.ClaimedFiring, 0, len(res.Claimed))
+	for _, r := range res.Claimed {
+		f, ok := byID[r.ItemID]
+		if !ok {
+			return out, errors.Join(claimErr, fmt.Errorf("pending_firings row %d leased but not readable", r.ItemID))
+		}
+		out.Firings = append(out.Firings, db.ClaimedFiring{Receipt: r, Firing: f})
+	}
+	return out, claimErr
 }
 
-func (s *pendingFiringsStore) MarkFired(ctx context.Context, orgID string, firingID int64, blueprintRunID string) error {
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE pending_firings
-		SET status = 'fired', drained_at = now(), fired_run_id = $1
-		WHERE org_id = $2 AND id = $3 AND status = 'draining'
-	`, blueprintRunID, orgID, firingID)
-	return err
+func (s *pendingFiringsStore) RenewLease(ctx context.Context, r workitem.Receipt) (workitem.Receipt, error) {
+	if s.conn == nil {
+		return workitem.Receipt{}, db.ErrNotOnTransaction
+	}
+	return workitem.RenewLease(ctx, s.conn, s.kind, r)
 }
 
-func (s *pendingFiringsStore) MarkSkipped(ctx context.Context, orgID string, firingID int64, reason string) error {
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE pending_firings
-		SET status = 'skipped_stale', drained_at = now(), skip_reason = $1
-		WHERE org_id = $2 AND id = $3 AND status = 'draining'
-	`, reason, orgID, firingID)
-	return err
+// MarkFired and MarkSkipped each run one transaction: the package's terminal
+// flip first, then the kind's own column. The second statement needs no
+// guard of its own — the first proved this holder's authority inside the
+// same transaction, and its row lock holds until commit, so nothing can move
+// the row in between.
+func (s *pendingFiringsStore) MarkFired(ctx context.Context, r workitem.Receipt, blueprintRunID string) error {
+	return s.markDoneWith(ctx, r, "fired_run_id", blueprintRunID)
 }
 
-func (s *pendingFiringsStore) HasPendingForTask(ctx context.Context, orgID, taskID string) (bool, error) {
+func (s *pendingFiringsStore) MarkSkipped(ctx context.Context, r workitem.Receipt, reason string) error {
+	return s.markDoneWith(ctx, r, "skip_reason", reason)
+}
+
+func (s *pendingFiringsStore) markDoneWith(ctx context.Context, r workitem.Receipt, column, value string) error {
+	if s.conn == nil {
+		return db.ErrNotOnTransaction
+	}
+	return db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+		if err := workitem.MarkDone(ctx, tx, s.kind, r); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE public.pending_firings SET `+column+` = $1 WHERE id = $2 AND org_id = $3`, value, r.ItemID, r.OrgID)
+		return err
+	})
+}
+
+func (s *pendingFiringsStore) Requeue(ctx context.Context, r workitem.Receipt, outcome workitem.Outcome, cause error) (bool, error) {
+	if s.conn == nil {
+		return false, db.ErrNotOnTransaction
+	}
+	return workitem.Requeue(ctx, s.conn, s.kind, r, outcome, cause)
+}
+
+// DeferWhileTaskBusy defers under the predicate the claim filter applies,
+// read on the row's task inside the deferral's own transaction, so the
+// refund is granted only while a live conversation actually holds the task.
+func (s *pendingFiringsStore) DeferWhileTaskBusy(ctx context.Context, r workitem.Receipt) error {
+	if s.conn == nil {
+		return db.ErrNotOnTransaction
+	}
+	return workitem.Defer(ctx, s.conn, s.kind, r, workkinds.PendingFiringDeferTaskBusy, time.Now().UTC(), func(tx *sql.Tx) (bool, error) {
+		var taskID string
+		if err := tx.QueryRowContext(ctx, `SELECT task_id FROM public.pending_firings WHERE id = $1 AND org_id = $2`, r.ItemID, r.OrgID).Scan(&taskID); err != nil {
+			return false, err
+		}
+		return hasLiveConversationForTask(ctx, tx, r.OrgID, taskID)
+	})
+}
+
+func (s *pendingFiringsStore) HasUnsettledForTask(ctx context.Context, orgID, taskID string) (bool, error) {
 	if !isValidUUID(taskID) {
 		return false, nil
 	}
-	// 'draining' counts as queued intent (see the interface doc): a drain
-	// mid-flight must keep the task gate closed or a fresh event in
-	// that window jumps the queue.
-	var count int
+	var one int
 	err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM pending_firings
-		WHERE org_id = $1 AND task_id = $2 AND status IN ('pending', 'draining')
-	`, orgID, taskID).Scan(&count)
-	return count > 0, err
-}
-
-func (s *pendingFiringsStore) ListTasksWithPending(ctx context.Context, orgID string) ([]string, error) {
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT DISTINCT task_id FROM pending_firings
-		WHERE org_id = $1 AND status = 'pending'
-	`, orgID)
-	if err != nil {
-		return nil, err
+		SELECT 1 FROM public.pending_firings
+		WHERE org_id = $1 AND task_id = $2 AND status IN (`+unsettledFiringStatuses+`)
+		LIMIT 1
+	`, orgID, taskID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
 	}
-	defer rows.Close()
-	out := []string{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
+	return err == nil, err
 }
 
 func (s *pendingFiringsStore) ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.PendingFiring, error) {
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, entity_id, task_id, trigger_id, triggering_event_id,
-		       status, COALESCE(skip_reason, ''), queued_at, drained_at, fired_run_id
-		FROM pending_firings
+	if !isValidUUID(entityID) {
+		return []domain.PendingFiring{}, nil
+	}
+	rows, err := s.q.QueryContext(ctx, pgPendingFiringSelect+`
 		WHERE org_id = $1 AND entity_id = $2
-		ORDER BY queued_at ASC, id ASC
+		ORDER BY id
 	`, orgID, entityID)
 	if err != nil {
 		return nil, err
@@ -216,68 +213,122 @@ func (s *pendingFiringsStore) ListForEntity(ctx context.Context, orgID, entityID
 	defer rows.Close()
 	out := []domain.PendingFiring{}
 	for rows.Next() {
-		f, err := scanPgPendingFiringRow(rows)
+		f, err := scanPgPendingFiring(rows)
 		if err != nil {
 			return nil, err
 		}
-		if f != nil {
-			out = append(out, *f)
-		}
+		out = append(out, f)
 	}
 	return out, rows.Err()
 }
 
-// scanPgPendingFiring scans a sql.Row into *domain.PendingFiring.
-// (nil, nil) on sql.ErrNoRows so callers can treat "no pending" as a
-// non-error empty result. Mirrors the SQLite-side helper.
-func scanPgPendingFiring(row *sql.Row) (*domain.PendingFiring, error) {
-	var (
-		f                   domain.PendingFiring
-		drainedAt           sql.NullTime
-		firedBlueprintRunID sql.NullString
-	)
-	err := row.Scan(
-		&f.ID, &f.EntityID, &f.TaskID, &f.TriggerID, &f.TriggeringEventID,
-		&f.Status, &f.SkipReason, &f.QueuedAt, &drainedAt, &firedBlueprintRunID,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
+// The store is also the kind's WorkKindHandle: what the operator surface and
+// the metrics depth observer see of this table. As the event queue's: the
+// surface runs the package's own reads and controls on Conn, org-scoped by
+// argument on the admin pool, so the org-admin predicate in the handler is
+// the authorization, not RLS. A transaction-bound store answers these too,
+// on its transaction.
+var _ db.WorkKindHandle = (*pendingFiringsStore)(nil)
+
+func (s *pendingFiringsStore) Name() string        { return workkinds.PendingFiringsName }
+func (s *pendingFiringsStore) Label() string       { return workkinds.PendingFiringsLabel }
+func (s *pendingFiringsStore) Kind() workitem.Kind { return s.kind }
+func (s *pendingFiringsStore) Conn() workitem.DBTX {
+	if s.conn != nil {
+		return s.conn
 	}
-	if err != nil {
-		return nil, err
-	}
-	if drainedAt.Valid {
-		t := drainedAt.Time
-		f.DrainedAt = &t
-	}
-	if firedBlueprintRunID.Valid {
-		s := firedBlueprintRunID.String
-		f.FiredBlueprintRunID = &s
-	}
-	return &f, nil
+	return s.q
+}
+func (s *pendingFiringsStore) Access() db.WorkAccess { return db.WorkAccessOrgAdmin }
+
+// Controls: redrive and cancel, never supersede. A supersede records a
+// replacement row, and a parked firing has none: a redrive fires it once,
+// from its own triggering event, or the worker's validations decline it.
+func (s *pendingFiringsStore) Controls() db.WorkControls {
+	return db.WorkControls{Redrive: true, Cancel: true}
 }
 
-// scanPgPendingFiringRow is the sql.Rows variant.
-func scanPgPendingFiringRow(rows *sql.Rows) (*domain.PendingFiring, error) {
-	var (
-		f                   domain.PendingFiring
-		drainedAt           sql.NullTime
-		firedBlueprintRunID sql.NullString
-	)
-	err := rows.Scan(
-		&f.ID, &f.EntityID, &f.TaskID, &f.TriggerID, &f.TriggeringEventID,
-		&f.Status, &f.SkipReason, &f.QueuedAt, &drainedAt, &firedBlueprintRunID,
-	)
+func (s *pendingFiringsStore) Objective() db.WorkObjective {
+	return db.WorkObjective{OldestReadyAge: workkinds.PendingFiringsOldestReadyObjective}
+}
+
+// Describe names each row by the entity its firing is about and the handler
+// that would fire. LEFT JOINs, because a parked row must be described
+// whether or not its entity or handler is still there. The joins are bound
+// on org_id as well as id: the composite FKs mean the pair is what
+// identifies each, and binding only id would let a cross-org id collision
+// join the wrong title in.
+func (s *pendingFiringsStore) Describe(ctx context.Context, orgID string, ids []int64) (map[int64]db.WorkSubject, error) {
+	if len(ids) == 0 {
+		return map[int64]db.WorkSubject{}, nil
+	}
+	rows, err := s.Conn().QueryContext(ctx, `
+		SELECT f.id, f.entity_id::text, f.task_id::text, f.trigger_id::text, f.triggering_event_id::text,
+		       COALESCE(f.skip_reason, ''), COALESCE(f.fired_run_id::text, ''),
+		       COALESCE(e.source_id, ''), COALESCE(e.title, ''),
+		       (h.id IS NOT NULL), COALESCE(h.name, '')
+		FROM public.pending_firings f
+		LEFT JOIN public.entities e ON e.id = f.entity_id AND e.org_id = f.org_id
+		LEFT JOIN public.event_handlers h ON h.id = f.trigger_id AND h.org_id = f.org_id
+		WHERE f.org_id = $1 AND f.id = ANY($2)
+	`, orgID, ids)
 	if err != nil {
 		return nil, err
 	}
-	if drainedAt.Valid {
-		t := drainedAt.Time
-		f.DrainedAt = &t
+	defer rows.Close()
+	out := make(map[int64]db.WorkSubject, len(ids))
+	for rows.Next() {
+		var (
+			f                                  domain.PendingFiring
+			firedRunID, sourceID, title, tname string
+			found                              bool
+		)
+		if err := rows.Scan(&f.ID, &f.EntityID, &f.TaskID, &f.TriggerID, &f.TriggeringEventID,
+			&f.SkipReason, &firedRunID, &sourceID, &title, &found, &tname); err != nil {
+			return nil, err
+		}
+		if firedRunID != "" {
+			f.FiredBlueprintRunID = &firedRunID
+		}
+		out[f.ID] = db.PendingFiringSubject(f, sourceID, title, tname, found)
 	}
-	if firedBlueprintRunID.Valid {
-		s := firedBlueprintRunID.String
-		f.FiredBlueprintRunID = &s
+	return out, rows.Err()
+}
+
+// scanPgPendingFiring reads one pgPendingFiringSelect row.
+func scanPgPendingFiring(row interface{ Scan(...any) error }) (domain.PendingFiring, error) {
+	var (
+		f                                     domain.PendingFiring
+		firedRunID                            sql.NullString
+		nextAt, leasedAt, expiresAt, cancelAt sql.NullTime
+		doneAt                                sql.NullTime
+		leaseEpoch, supersededBy              sql.NullInt64
+	)
+	err := row.Scan(
+		&f.ID, &f.OrgID,
+		&f.EntityID, &f.TaskID, &f.TriggerID, &f.TriggeringEventID,
+		&f.SkipReason, &firedRunID,
+		&f.Status, &f.Attempt, &f.MaxAttempts, &nextAt,
+		&f.LeaseGeneration, &f.LeaseOwner, &leaseEpoch, &leasedAt, &expiresAt,
+		&cancelAt, &f.CancelRequestedBy, &f.CancelReason,
+		&f.LastError, &f.LastOutcome, &f.UniqueKey, &supersededBy,
+		&f.FirstEnqueuedAt, &f.CreatedAt, &doneAt,
+	)
+	if err != nil {
+		return domain.PendingFiring{}, err
 	}
-	return &f, nil
+	if firedRunID.Valid {
+		v := firedRunID.String
+		f.FiredBlueprintRunID = &v
+	}
+	f.FirstEnqueuedAt = f.FirstEnqueuedAt.UTC()
+	f.CreatedAt = f.CreatedAt.UTC()
+	f.NextAttemptAt = nullTimePtr(nextAt)
+	f.LeasedAt = nullTimePtr(leasedAt)
+	f.LeaseExpiresAt = nullTimePtr(expiresAt)
+	f.CancelRequestedAt = nullTimePtr(cancelAt)
+	f.DoneAt = nullTimePtr(doneAt)
+	f.LeaseEpoch = queueNullInt64(leaseEpoch)
+	f.SupersededBy = queueNullInt64(supersededBy)
+	return f, nil
 }

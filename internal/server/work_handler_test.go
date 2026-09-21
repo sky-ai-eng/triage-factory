@@ -798,3 +798,107 @@ func TestWorkHandler_Gate_Postgres(t *testing.T) {
 		}
 	})
 }
+
+// parkLocalFiring admits one firing against a fresh chain in the local
+// database, claims it and parks it permanently, returning its id and the
+// entity's title for the subject assertion.
+func parkLocalFiring(t *testing.T, database *sql.DB, title string) int64 {
+	t.Helper()
+	suf := uuid.NewString()[:8]
+	stores := sqlitestore.New(database)
+	ctx := context.Background()
+	entityID, eventID, taskID, triggerID, promptID, blueprintID := "e-"+suf, "ev-"+suf, "t-"+suf, "tr-"+suf, "p-"+suf, "bp-"+suf
+	for _, stmt := range []struct {
+		q    string
+		args []any
+	}{
+		{`INSERT INTO entities (id, source, source_id, kind, title, url) VALUES (?, 'github', ?, 'pr', ?, '')`, []any{entityID, "owner/repo#" + suf, title}},
+		{`INSERT INTO prompts (id, name, body, source, creator_user_id, team_id) VALUES (?, 'Test', 'x', 'user', ?, ?)`, []any{promptID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID}},
+		{`INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')`, []any{eventID, entityID, domain.EventGitHubPRCICheckFailed}},
+		{`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status) VALUES (?, ?, ?, '', ?, 'queued', 'pending')`, []any{taskID, entityID, domain.EventGitHubPRCICheckFailed, eventID}},
+	} {
+		if _, err := database.Exec(stmt.q, stmt.args...); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	if _, err := stores.Blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{ID: blueprintID, Name: "BP", Source: "user", TeamID: runmode.LocalDefaultTeamID}); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
+		t.Fatalf("seed blueprint step: %v", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO event_handlers (id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability, enabled, source, creator_user_id, team_id)
+		VALUES (?, 'trigger', ?, ?, 4, 0, 1, 'user', ?, ?)
+	`, triggerID, domain.EventGitHubPRCICheckFailed, blueprintID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("seed trigger: %v", err)
+	}
+	if _, _, err := stores.PendingFirings.Enqueue(ctx, runmode.LocalDefaultOrgID, entityID, taskID, triggerID, eventID, db.AgentClaimStamp{}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	batch, err := stores.PendingFirings.Claim(ctx, workitem.Owner{ID: "test", Epoch: 1}, 1)
+	if err != nil || len(batch.Firings) != 1 {
+		t.Fatalf("Claim: %+v %v", batch, err)
+	}
+	if parked, err := stores.PendingFirings.Requeue(ctx, batch.Firings[0].Receipt, workitem.OutcomePermanent, errors.New("fire delegate: no credential")); err != nil || !parked {
+		t.Fatalf("Requeue permanent: parked=%v err=%v", parked, err)
+	}
+	return batch.Firings[0].Firing.ID
+}
+
+// TestWorkHandler_RegistryListsBothKindsAndRedrivesAParkedFiring pins the
+// second registered kind: the store bundle's registry carries the event
+// queue and the firing queue, the catalogue lists both with the controls
+// each declares, a parked firing lists with its cause and subject, and a
+// redrive puts it back to ready.
+func TestWorkHandler_RegistryListsBothKindsAndRedrivesAParkedFiring(t *testing.T) {
+	_, database := localEventQueueKind(t)
+	kinds := sqlitestore.New(database).WorkKinds
+	if len(kinds) != 2 || kinds[0].Name() != workkinds.EventQueueName || kinds[1].Name() != workkinds.PendingFiringsName {
+		t.Fatalf("registry = %v, want event_queue then pending_firings", kinds)
+	}
+	parkedID := parkLocalFiring(t, database, "Fix the flaky test")
+	h := localWorkRig(t, kinds...)
+
+	rec := httptest.NewRecorder()
+	h.handleCatalogue(rec, workReq(http.MethodGet, "/api/orgs/x/work", runmode.LocalDefaultOrgID, "local-user", "", nil))
+	var body struct {
+		Kinds []workKindJSON `json:"kinds"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Kinds) != 2 || body.Kinds[1].Kind != workkinds.PendingFiringsName || body.Kinds[1].Label != workkinds.PendingFiringsLabel {
+		t.Fatalf("catalogue = %+v, want both kinds", body.Kinds)
+	}
+	if c := body.Kinds[1].Controls; !c.Redrive || !c.Cancel || c.Supersede {
+		t.Errorf("pending_firings controls = %+v, want redrive and cancel only", c)
+	}
+	if body.Kinds[1].Objective.OldestReadyAgeSeconds != 60 {
+		t.Errorf("pending_firings objective = %+v, want 60s", body.Kinds[1].Objective)
+	}
+
+	rec = httptest.NewRecorder()
+	h.handleItemsList(rec, workReq(http.MethodPost, "/api/orgs/x/work/pending_firings/items/list", runmode.LocalDefaultOrgID, "local-user", `{"status":"parked"}`, map[string]string{"kind": workkinds.PendingFiringsName}))
+	page := decodeList[workItemJSON](t, rec)
+	if page.Total() != 1 || len(page.Items) != 1 || page.Items[0].ID != parkedID {
+		t.Fatalf("parked list = total %d items %+v, want the parked firing", page.Total(), page.Items)
+	}
+	got := page.Items[0]
+	if got.Kind != workkinds.PendingFiringsName || got.LastError != "fire delegate: no credential" || got.LastOutcome != "permanent" {
+		t.Errorf("parked firing = %+v", got)
+	}
+	if got.Subject == nil || got.Subject.Detail != "Fix the flaky test" || got.Subject.Fields["trigger_id"] == "" {
+		t.Errorf("subject = %+v, want the entity's title and the firing's identity", got.Subject)
+	}
+
+	rec = httptest.NewRecorder()
+	h.handleRedrive(rec, workReq(http.MethodPost, "/api/orgs/x/work/pending_firings/items/redrive", runmode.LocalDefaultOrgID, "local-user", fmt.Sprintf(`{"ids":[%d]}`, parkedID), map[string]string{"kind": workkinds.PendingFiringsName}))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"redriven":1`) {
+		t.Fatalf("redrive = %d %s, want redriven 1", rec.Code, rec.Body.String())
+	}
+	item, err := workitem.Get(context.Background(), kinds[1].Conn(), kinds[1].Kind(), runmode.LocalDefaultOrgID, parkedID)
+	if err != nil || item == nil || item.Status != workitem.StatusReady || item.Attempt != 0 {
+		t.Errorf("firing after redrive = %+v err=%v, want ready with a fresh budget", item, err)
+	}
+}

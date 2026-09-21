@@ -187,13 +187,16 @@ func (k Kind) claimRound(ctx context.Context, conn *sql.DB, owner Owner, orgID s
 // pick selects claimable rows. The three arms are: a ripe ready row, a ready
 // row carrying a cancellation request whatever its retry time, and a leased row
 // whose lease has expired. The third is the whole of recovery — no sweeper
-// resets anything, an expired lease is simply claimable.
+// resets anything, an expired lease is simply claimable. The kind's claim
+// filter applies to the first arm alone: a cancellation is settled whatever it
+// says, and an expired lease is reclaimed whatever it says, because the unit a
+// reclaim replays is fenced and defers on its own if the condition holds.
 func (k Kind) pick(ctx context.Context, tx *sql.Tx, orgID string, limit int) ([]picked, error) {
 	a := newArgs(k.Dialect)
 	now := k.nowExpr()
 
 	ready, leased := quoteLiteral(StatusReady), quoteLiteral(StatusLeased)
-	where := "((t.status = " + ready + " AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= " + now + "))" +
+	where := "((t.status = " + ready + " AND " + k.ripeCondition() + ")" +
 		" OR (t.status = " + ready + " AND t.cancel_requested_at IS NOT NULL)" +
 		" OR (t.status = " + leased + " AND t.lease_expires_at <= " + now + "))"
 	if orgID != "" {

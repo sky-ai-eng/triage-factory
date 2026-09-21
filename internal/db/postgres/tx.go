@@ -212,7 +212,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		Artifacts:      newArtifactStore(tx, s.admin),
 		Entities:       newEntityStore(tx, tx),
 		Repos:          newRepositoryStore(tx, tx),
-		PendingFirings: newPendingFiringsStore(tx),
+		PendingFirings: newPendingFiringsStore(tx, nil),
 		// Events: app-side write routes through the tx; admin half
 		// stays pinned to the real admin pool so RecordSystem /
 		// GetMetadataSystem inside WithTx routes outside the tx —

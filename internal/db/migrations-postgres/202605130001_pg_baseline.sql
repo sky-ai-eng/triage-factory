@@ -699,23 +699,65 @@ CREATE TABLE public.orgs (
 );
 
 
+-- The router's per-task auto-delegation queue, on the shared work-item block
+-- (internal/db/workitem; the kind is workkinds.PendingFirings). One row per
+-- (task, trigger) intent that could not fire when its event arrived because
+-- the task was busy: admitted ready under the key task_id || ':' || trigger_id,
+-- which one pair holds while a row is ready, leased or parked; leased by the
+-- firing worker with a generation that fences every later write; reclaimed by
+-- the next claim once a dead holder's lease expires; returned to ready with a
+-- backoff on a transient failure, or parked for an operator once the budget is
+-- spent. The claim query admits a ready row only while its task holds no live
+-- top-level conversation (the kind's claim filter), so a row behind a busy
+-- task is deferred rather than ready. The six columns after the block are
+-- this kind's own: skip_reason is set on a done row that did not fire,
+-- fired_run_id on one that did.
+--
+-- Admin-pool wired with org_id bound per statement; the pending_firings_all
+-- policy below is defense-in-depth, and it is FOR ALL because admission's
+-- conflict arm and every guarded write are UPDATEs.
+--
 CREATE TABLE public.pending_firings (
-    id bigint NOT NULL,
-    org_id uuid NOT NULL,
-    creator_user_id uuid NOT NULL,
-    entity_id uuid NOT NULL,
-    task_id uuid NOT NULL,
-    trigger_id uuid NOT NULL,
-    triggering_event_id uuid NOT NULL,
-    status text DEFAULT 'pending'::text NOT NULL,
-    skip_reason text,
-    queued_at timestamp with time zone DEFAULT now() NOT NULL,
-    -- claimed_at stamps a claiming pop (status -> 'draining'); cleared on release.
-    -- The drain sweeper requeues 'draining' rows whose claim is stale.
-    claimed_at timestamp with time zone,
-    drained_at timestamp with time zone,
-    fired_run_id uuid
+    id                   bigint NOT NULL,
+    org_id               uuid NOT NULL,
+    status               TEXT NOT NULL CHECK (status IN ('ready','leased','done','parked','cancelled')),
+    attempt              INTEGER NOT NULL DEFAULT 0,
+    max_attempts         INTEGER NOT NULL,
+    next_attempt_at      TIMESTAMPTZ NULL,
+    lease_generation     BIGINT NOT NULL DEFAULT 0,
+    lease_owner          TEXT NULL,
+    lease_epoch          BIGINT NULL,
+    leased_at            TIMESTAMPTZ NULL,
+    lease_expires_at     TIMESTAMPTZ NULL,
+    cancel_requested_at  TIMESTAMPTZ NULL,
+    cancel_requested_by  TEXT NULL,
+    cancel_reason        TEXT NULL,
+    last_error           TEXT NULL,
+    last_outcome         TEXT NULL,
+    unique_key           TEXT NULL,
+    superseded_by        BIGINT NULL,
+    first_enqueued_at    TIMESTAMPTZ NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    done_at              TIMESTAMPTZ NULL,
+    entity_id            uuid NOT NULL,
+    task_id              uuid NOT NULL,
+    trigger_id           uuid NOT NULL,
+    triggering_event_id  uuid NOT NULL,
+    skip_reason          text,
+    fired_run_id         uuid
 );
+
+-- The gate read: does the task have an unsettled firing? Parked is in it,
+-- because a parked row still holds its key.
+CREATE INDEX idx_pending_firings_task_unsettled ON public.pending_firings (org_id, task_id) WHERE status IN ('ready','leased','parked');
+-- The work-item indexes as workitem.IndexDDL renders them for this kind,
+-- naming the table through its schema like every other statement here; a
+-- test asserts each is present.
+CREATE INDEX IF NOT EXISTS idx_pending_firings_ready_next ON public.pending_firings (next_attempt_at, id) WHERE status = 'ready';
+CREATE INDEX IF NOT EXISTS idx_pending_firings_ready_cancel ON public.pending_firings (id) WHERE status = 'ready' AND cancel_requested_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_pending_firings_leased_expiry ON public.pending_firings (lease_expires_at) WHERE status = 'leased';
+CREATE INDEX IF NOT EXISTS idx_pending_firings_parked ON public.pending_firings (org_id, id) WHERE status = 'parked';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_firings_unique_key ON public.pending_firings (org_id, unique_key) WHERE unique_key IS NOT NULL AND status IN ('ready','leased','parked');
 
 
 CREATE SEQUENCE public.pending_firings_id_seq
@@ -1593,12 +1635,6 @@ CREATE INDEX idx_events_org_type_created ON public.events USING btree (org_id, e
 CREATE INDEX idx_events_org_type_entity ON public.events USING btree (org_id, event_type, entity_id) WHERE (entity_id IS NOT NULL);
 
 
-CREATE UNIQUE INDEX idx_pending_firings_dedup ON public.pending_firings USING btree (task_id, trigger_id) WHERE (status = ANY (ARRAY['pending'::text, 'draining'::text]));
-
-
-CREATE INDEX idx_pending_firings_entity_pending ON public.pending_firings USING btree (entity_id, queued_at) WHERE (status = 'pending'::text);
-
-
 -- Repository natural key. source distinguishes providers issuing the same
 -- owner/repo; lower() folds case, since GitHub identifiers are case-insensitive,
 -- so a racing writer conflicts instead of inserting a twin. An expression key
@@ -1909,10 +1945,6 @@ ALTER TABLE ONLY public.org_settings
 
 ALTER TABLE ONLY public.orgs
     ADD CONSTRAINT orgs_owner_user_id_fkey FOREIGN KEY (owner_user_id) REFERENCES public.users(id);
-
-
-ALTER TABLE ONLY public.pending_firings
-    ADD CONSTRAINT pending_firings_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 ALTER TABLE ONLY public.pending_firings
@@ -5586,8 +5618,10 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.entities TO tf_system;
 GRANT SELECT ON TABLE public.entity_links TO tf_system;
 GRANT SELECT, INSERT ON TABLE public.task_events TO tf_system;
 GRANT SELECT, UPDATE ON TABLE public.tasks TO tf_system;
--- Enqueued by the inject signal's gone-compensation; drain is router-side.
-GRANT SELECT, INSERT ON TABLE public.pending_firings TO tf_system;
+-- Enqueued by the inject signal's gone-compensation; the firing worker is
+-- router-side. UPDATE because admission's conflict arm is one: a duplicate
+-- (task, trigger) collapses onto the unsettled row by updating it in place.
+GRANT SELECT, INSERT, UPDATE ON TABLE public.pending_firings TO tf_system;
 GRANT USAGE, SELECT ON SEQUENCE public.pending_firings_id_seq TO tf_system;
 -- SELECT for the owning executor's apply-loop scan, UPDATE for ack. Insert and
 -- the purge reaper are brain-gated, control-side only.

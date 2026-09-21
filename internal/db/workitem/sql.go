@@ -59,10 +59,13 @@ func (k Kind) nowExpr() string {
 }
 
 // ripePredicate and deferredPredicate are the two halves of status='ready',
-// split on the retry time: ripe rows may be claimed now, deferred rows wait
-// for a retry time still ahead. The list filter and the depth gauges both
-// read the partition through these, so what an operator lists as deferred is
-// exactly what the deferred gauge counts.
+// split on whether the row may be claimed now: ripe rows have reached their
+// retry time and pass the kind's claim filter, deferred rows are every other
+// ready row. The list filter and the depth gauges both read the partition
+// through these, so what an operator lists as deferred is exactly what the
+// deferred gauge counts. Both are written over the alias t, which every
+// statement that renders them gives its table, because the claim filter is
+// declared over that alias.
 //
 // The split is narrower than Claim's eligibility, which also takes a ready
 // row whose cancellation was requested, whatever its retry time. Such a row
@@ -70,12 +73,23 @@ func (k Kind) nowExpr() string {
 // it is waiting to be cancelled rather than run, neither half describes it,
 // and a third is not in the contract.
 func (k Kind) ripePredicate() string {
-	return "status = " + quoteLiteral(StatusReady) +
-		" AND (next_attempt_at IS NULL OR next_attempt_at <= " + k.nowExpr() + ")"
+	return "t.status = " + quoteLiteral(StatusReady) + " AND " + k.ripeCondition()
 }
 
 func (k Kind) deferredPredicate() string {
-	return "status = " + quoteLiteral(StatusReady) + " AND next_attempt_at > " + k.nowExpr()
+	return "t.status = " + quoteLiteral(StatusReady) + " AND NOT (" + k.ripeCondition() + ")"
+}
+
+// ripeCondition is what makes a ready row claimable now: its retry time has
+// come, and the kind's claim filter, if it declares one, admits it. Shared by
+// the two predicates above and by the claim's first arm so the three cannot
+// disagree about which ready rows are ripe.
+func (k Kind) ripeCondition() string {
+	cond := "(t.next_attempt_at IS NULL OR t.next_attempt_at <= " + k.nowExpr() + ")"
+	if k.ClaimFilter != "" {
+		cond += " AND (" + k.ClaimFilter + ")"
+	}
+	return cond
 }
 
 // nowPlusExpr is database time offset by a Go-computed duration. The duration

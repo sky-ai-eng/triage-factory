@@ -2,162 +2,178 @@ package db
 
 import (
 	"context"
-	"time"
+	"errors"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-//go:generate go run github.com/vektra/mockery/v2 --name=PendingFiringsStore --output=./mocks --case=underscore --with-expecter
+// ErrNotOnTransaction is returned by a verb that opens its own transaction
+// through the work-item package when it is called on a store bound to a
+// caller's transaction: it cannot nest there, and running it on the pool
+// behind the caller's back would hide a write from the transaction the
+// caller thinks it is in.
+var ErrNotOnTransaction = errors.New("db: this verb opens its own transaction and is not available on a transaction-bound store")
 
-// PendingFiringsStore owns the pending_firings table — the FIFO queue
-// of "intent to auto-delegate" rows the router enqueues whenever an
-// event matches a trigger but the task has earlier queued firings ahead of
-// it. The drain loop pops them in queue order as the task's conversations
-// terminate.
+// PendingFiringsStore owns the pending_firings table — the per-task queue of
+// auto-delegation intents the router admits when a matched trigger cannot
+// fire because its task is busy, on the shared work-item contract
+// (internal/db/workitem) as workkinds.PendingFirings declares it.
 //
-// The queue drains per TASK, matching the gate that fills it. An
-// entity-shaped queue under a task-shaped gate would reintroduce the
-// cross-situation stall it was built to avoid: one task's firing sitting
-// at the head of the entity's FIFO — behind a conversation parked
-// indefinitely — would block every other task's firing behind it.
+// The lifecycle is the contract's: Enqueue admits a ready row, Claim leases
+// rows and hands back receipts, and RenewLease / MarkFired / MarkSkipped /
+// Requeue / DeferWhileTaskBusy are the holder's fenced writes. The per-task
+// gate lives in the claim query itself, as the kind's claim filter: a firing
+// is claimable only while its task holds no live top-level conversation, so
+// a row behind a busy task is deferred rather than ready and becomes ripe
+// when the task frees with no write of anyone's. The operator surface —
+// listing, redrive, cancel — reaches the table through the WorkKindHandle
+// the store also implements, with the package's own reads and controls.
 //
-// All methods take orgID; local mode passes runmode.LocalDefaultOrgID.
-// Postgres impl runs against the admin pool (system-service: the
-// router has no per-user identity and must operate across the org
-// without impersonating any one user) and filters on org_id alongside
-// the RLS policy as defense in depth. SQLite impl asserts orgID
-// equals the local sentinel and otherwise ignores it (single-tenant
-// by design).
+// One firing per (task, trigger) while one is unsettled: admission is keyed
+// under workkinds.PendingFiringKey, and a parked row holds its key. A later
+// event for the same pair collapses onto the parked row rather than minting
+// a new one, exactly as the close obligation behaves in the event queue; the
+// parked row is on the operator panel, where it is redriven (it fires once,
+// from its own triggering event, after the worker's validations) or
+// cancelled.
 //
-// The per-task firing gate is composed at the call site (router) from
-// HasPendingForTask here + ConversationStore's live-conversation read — strict
-// ownership rather than threading a conversation-shaped predicate through this
-// store.
+// All methods take orgID; local mode passes runmode.LocalDefaultOrgID. The
+// Postgres impl runs against the admin pool (the router and the firing
+// worker are system services with no per-user identity) and binds org_id in
+// every statement beside the RLS policy. The SQLite impl asserts the local
+// sentinel on the org-scoped methods; the verbs reached through the
+// WorkKindHandle bind org_id without asserting it, so the handler enforces
+// the sentinel there.
+//
+// The bookkeeping writes — the holder verbs — are exempt from the
+// returned-row rule: each is fire-and-forget from its caller's side, and the
+// next claim reads the state, not this caller.
+//
+// A store bound to a caller's transaction answers Enqueue,
+// HasUnsettledForTask and ListForEntity on that transaction, and refuses
+// the verbs that open their own with ErrNotOnTransaction.
 type PendingFiringsStore interface {
-	// Enqueue inserts a pending firing for (entity, task, trigger).
-	// The partial unique index on (task_id, trigger_id) WHERE
-	// status='pending' enforces dedup: a second enqueue for the same
-	// combo while the first is still pending becomes a no-op via ON
-	// CONFLICT DO NOTHING. Keeping the oldest queued_at preserves
-	// FIFO fairness — a firing that has been waiting longer doesn't
-	// get pushed to the back of the line by a duplicate event.
+	// Enqueue admits a ready firing for (task, trigger) under
+	// workkinds.PendingFiringKey and stamps the task's agent claim in the
+	// same transaction (see AgentClaimStamp). inserted is false when the key
+	// already has an unsettled row — ready, leased or parked — and the claim
+	// stamp is then skipped, since that row's own admission made the
+	// commitment. A stamp refusal is not an error and leaves the firing
+	// committed. Runs on the store's own queryer: a store bound to a
+	// transaction admits inside it. The transaction touches pending_firings
+	// before tasks; every transaction that writes both keeps that order.
 	//
-	// Returns true if a row was newly inserted, false if the conflict
-	// path fired. Callers use this to log enqueue vs collapse.
-	//
-	// userID populates creator_user_id (NOT NULL in the Postgres
-	// schema). The router passes runmode.LocalDefaultUserID today;
-	// a later milestone retrofits the call site to pass the request user
-	// once handler-level claims are wired. SQLite impl ignores
-	// userID — the local schema has no creator column.
-	//
-	// claim rides the same transaction as the insert: a queued firing is a
-	// real commitment (the bot has taken the task, the conversation just
-	// hasn't started), so the claim lands with the row or not at all — see
-	// AgentClaimStamp. It is skipped on the collapse path, where the
-	// already-queued duplicate's own enqueue stamped it. Returns
-	// claimed=true only when the stamp actually moved the claim; a refusal
-	// commits the firing anyway.
-	Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string, claim AgentClaimStamp) (inserted, claimed bool, err error)
+	// Exempt from the returned-row rule: the conflict arm is DO NOTHING on
+	// SQLite, so the row a collapsed admission lands on is another
+	// admission's to have returned, and the two booleans are the only facts
+	// a caller acts on — claimed is about the task row, which no firing row
+	// could carry.
+	Enqueue(ctx context.Context, orgID, entityID, taskID, triggerID, triggeringEventID string, claim AgentClaimStamp) (inserted, claimed bool, err error)
 
-	// PopForTask is a CLAIMING pop: it atomically flips the
-	// oldest 'pending' row for the task to 'draining' (stamping
-	// claimed_at) and returns it, or nil if none. Postgres implements
-	// this as one UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP
-	// LOCKED) statement, so two concurrent drains (different processes,
-	// or a leader-failover overlap within one) can never observe and pop
-	// the same row — the second caller's claim simply finds the row
-	// already 'draining' (excluded from the 'pending' predicate) and
-	// moves on to the next one, or nil.
-	//
-	// The caller owns resolving a popped row to a terminal state
-	// (MarkFired / MarkSkipped) or, on a transient failure, releasing it
-	// back to 'pending' via Release so a future drain retries it. A
-	// 'draining' row whose claimant crashed before resolving it is not
-	// lost: the drain sweeper requeues rows whose claim has gone stale
-	// via RequeueStaleDraining — a drain is a handful of DB round-trips
-	// (Delegate is a pure enqueue), so a minutes-old claim is a dead
-	// drainer, not a slow one. The per-task in-process mutex the router
-	// already holds around the whole pop→decide→mark sequence is still
-	// worth keeping (it avoids needless round-trips reclaiming rows
-	// across goroutines in one process), but is no longer load-bearing
-	// for correctness.
-	PopForTask(ctx context.Context, orgID, taskID string) (*domain.PendingFiring, error)
+	// Claim leases up to n claimable rows across every org (org "" to
+	// workitem.Claim) and reads each leased row's own columns by id in one
+	// statement after the claim. Firings is in claim order. A ready row whose
+	// task holds a live conversation is not claimable (the kind's
+	// ClaimFilter). Rows the claim settled instead (a cancellation request,
+	// a spent budget) are counted, not returned. A non-nil error still
+	// returns the firings of rounds that committed before it.
+	Claim(ctx context.Context, owner workitem.Owner, n int) (FiringClaim, error)
 
-	// Release reverts a 'draining' row back to 'pending' (clearing
-	// claimed_at) after a transient failure (DB read, spawner.Delegate
-	// error, a task-busy fire race) downstream of PopForTask — the
-	// claim didn't pan out, but the intent is still valid and should be
-	// retried by a future drain or the periodic sweeper. Guarded by
-	// status='draining' so it's a no-op on a row that's since reached a
-	// terminal state some other way.
-	//
-	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping —
-	// it drops a lease so another pass can take the row, and the releasing
-	// caller is done with it.
-	Release(ctx context.Context, orgID string, firingID int64) error
+	// RenewLease pushes the lease out to fresh database time plus the kind's
+	// lease, and is the point where a pending cancellation request is
+	// observed and settled: workitem.ErrLeaseLost means the row's next
+	// holder owns it, workitem.ErrCancelled means this call settled it.
+	RenewLease(ctx context.Context, r workitem.Receipt) (workitem.Receipt, error)
 
-	// RequeueStaleDraining releases every 'draining' row whose claim was
-	// stamped before the cutoff (or that has no claimed_at at all — a
-	// legacy wedge) back to 'pending', returning how many it recovered.
-	// This is the crash recovery for the claiming pop: a drainer that
-	// died between PopForTask and MarkFired/MarkSkipped/Release leaves
-	// a row nothing else will ever touch. Deliberately staleness-based
-	// rather than ownership-scoped (contrast conversations/event_queue):
-	// a firing claim is a milliseconds-scale DB transaction, not
-	// long-lived owned work, and redelivery is safe — the (event,
-	// trigger) fence and the one-active-per-task index absorb a
-	// duplicate drain as a clean skip/defer. Called by the drain sweeper
-	// each pass with a generous cutoff.
-	RequeueStaleDraining(ctx context.Context, orgID string, before time.Time) (int, error)
+	// MarkFired records the blueprint run the firing produced and flips the
+	// row done, in one transaction. A stale receipt matches nothing
+	// (workitem.ErrLeaseLost) and writes neither column.
+	MarkFired(ctx context.Context, r workitem.Receipt, blueprintRunID string) error
 
-	// MarkFired transitions a 'draining' firing to 'fired' and records the
-	// blueprint_run that resulted from it — the firing unit, which
-	// fired_run_id FKs to blueprint_runs, and NOT a conversation: the steps'
-	// conversations are minted later, by the dispatcher. Guarded by
-	// status='draining' — only a row PopForTask actually claimed can be
-	// resolved this way — so a stray call against a 'pending' or already-
-	// terminal row is a no-op rather than a silent double-transition.
-	//
-	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping.
-	// The row is retired by the flip and read again only by the resolver's
-	// next pass.
-	MarkFired(ctx context.Context, orgID string, firingID int64, blueprintRunID string) error
+	// MarkSkipped records why the firing did not fire and flips the row
+	// done, in one transaction. reason is one of the
+	// domain.PendingFiringSkip* constants. A stale receipt writes nothing.
+	MarkSkipped(ctx context.Context, r workitem.Receipt, reason string) error
 
-	// MarkSkipped transitions a 'draining' firing to 'skipped_stale'
-	// with a reason describing a definitive stale outcome (task
-	// closed, trigger disabled, breaker tripped, claim changed).
-	// Transient fire-time failures release back to 'pending' via Release
-	// instead. Skipping doesn't halt the drain loop — the next pending
-	// firing for the task is still considered.
-	//
-	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping,
-	// same as MarkFired.
-	MarkSkipped(ctx context.Context, orgID string, firingID int64, reason string) error
+	// Requeue records a failed attempt under a typed outcome: the row returns
+	// to ready with a backoff retry time, or parks when the outcome is
+	// permanent or the budget is spent. parked reports which.
+	Requeue(ctx context.Context, r workitem.Receipt, outcome workitem.Outcome, cause error) (parked bool, err error)
 
-	// HasPendingForTask returns true iff the task has any
-	// pending_firings row in 'pending' OR 'draining' status. The router
-	// composes this with ConversationStore's live-conversation read to
-	// enforce FIFO drainage — a new firing must queue behind older
-	// queued rows OR the task's live conversation. 'draining'
-	// counts as queued intent: a drain mid-flight (popped but not yet
-	// fired) must still close the gate, or a fresh event in that window
-	// would fire immediately and jump the queue.
-	HasPendingForTask(ctx context.Context, orgID, taskID string) (bool, error)
+	// DeferWhileTaskBusy returns the row to ready with its attempt refunded,
+	// through workitem.Defer under the predicate "the task holds a live
+	// conversation" and a retry time of now: the row is ripe at once, and
+	// the claim filter is what holds it until the task is free.
+	// workitem.ErrDeferRefused when the predicate finds no live conversation.
+	DeferWhileTaskBusy(ctx context.Context, r workitem.Receipt) error
 
-	// ListTasksWithPending returns the distinct task IDs that
-	// have at least one pending_firings row in 'pending' status. Used
-	// by the background drain sweeper to bound its work to tasks
-	// that actually need draining.
-	ListTasksWithPending(ctx context.Context, orgID string) ([]string, error)
+	// HasUnsettledForTask reports whether the task has a ready, leased or
+	// parked firing. The router's gate composes it with the live-conversation
+	// read: a new firing queues behind older queued rows or a live
+	// conversation. A parked row keeps the gate closed because it still holds
+	// its key: a later event for the same trigger collapses onto it, and one
+	// for another trigger queues behind it in order.
+	HasUnsettledForTask(ctx context.Context, orgID, taskID string) (bool, error)
 
-	// ListForEntity returns all pending_firings rows for an entity in
-	// queue order (oldest first), regardless of status.
-	//
-	// No production caller today: production reads this table by status
-	// (the drain) and by key (dedup). Kept as the one entity-shaped read —
-	// "everything queued against this pull request, in any status" — that
-	// the router and delegate tests assert through, and that a debug view
-	// of an entity's queue would ask.
+	// ListForEntity returns every row for an entity, oldest first, in any
+	// status. Kept as the one entity-shaped read the router and delegate
+	// tests assert through; no production caller.
 	ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.PendingFiring, error)
+}
+
+// ClaimedFiring is one leased row: the receipt that authorizes its terminal
+// write, and the row as claimed.
+type ClaimedFiring struct {
+	Receipt workitem.Receipt
+	Firing  domain.PendingFiring
+}
+
+// FiringClaim is one Claim call's work. Cancelled, Parked and Reclaimed are
+// workitem.ClaimResult's counts, passed through for the worker's log.
+type FiringClaim struct {
+	Firings   []ClaimedFiring
+	Cancelled int
+	Parked    int
+	Reclaimed int
+}
+
+// PendingFiringRowCols is the kind's own columns for one admission, shared by
+// both dialects so the two produce identical rows. skip_reason and
+// fired_run_id are absent: only the terminal write sets them.
+func PendingFiringRowCols(entityID, taskID, triggerID, triggeringEventID string) map[string]any {
+	return map[string]any{
+		"entity_id":           entityID,
+		"task_id":             taskID,
+		"trigger_id":          triggerID,
+		"triggering_event_id": triggeringEventID,
+	}
+}
+
+// PendingFiringSubject is the WorkSubject both dialects describe a firing
+// with, so the two produce identical subjects. The label is what an operator
+// recognizes: the entity's source id ("owner/repo#18", "SKY-123"), or the
+// bare entity id when the entity row is gone. Fields carry the firing's
+// identity, the handler's name when the join found it, and whichever of
+// fired_run_id or skip_reason the terminal write set.
+func PendingFiringSubject(f domain.PendingFiring, sourceID, title string, triggerName string, triggerFound bool) WorkSubject {
+	label := sourceID
+	if label == "" {
+		label = f.EntityID
+	}
+	fields := map[string]string{
+		"task_id":             f.TaskID,
+		"trigger_id":          f.TriggerID,
+		"triggering_event_id": f.TriggeringEventID,
+	}
+	if triggerFound {
+		fields["trigger"] = triggerName
+	}
+	if f.FiredBlueprintRunID != nil && *f.FiredBlueprintRunID != "" {
+		fields["fired_run_id"] = *f.FiredBlueprintRunID
+	}
+	if f.SkipReason != "" {
+		fields["skip_reason"] = f.SkipReason
+	}
+	return WorkSubject{Label: label, Detail: title, Fields: fields}
 }

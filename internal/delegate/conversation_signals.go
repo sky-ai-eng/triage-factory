@@ -731,7 +731,7 @@ func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.Conversati
 	claim := db.AgentClaimStamp{AgentID: p.ClaimAgentID, ActingTeamID: p.ClaimActingTeamID}
 	if s.getProc(sig.ConversationID) == nil {
 		if s.pendingFirings != nil && p.EntityID != "" && p.TaskID != "" && p.TriggerID != "" && p.TriggeringEventID != "" {
-			if _, _, err := s.pendingFirings.Enqueue(ctx, sig.OrgID, "", p.EntityID, p.TaskID, p.TriggerID, p.TriggeringEventID, claim); err != nil {
+			if _, _, err := s.pendingFirings.Enqueue(ctx, sig.OrgID, p.EntityID, p.TaskID, p.TriggerID, p.TriggeringEventID, claim); err != nil {
 				delegateLog.Error("inject signal gone-compensation: enqueue pending_firing failed", "conversation", sig.ConversationID, "task_id", p.TaskID, "error", err)
 			}
 		}

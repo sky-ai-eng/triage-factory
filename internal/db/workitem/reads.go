@@ -80,8 +80,10 @@ func List(ctx context.Context, q DBTX, k Kind, orgID, status string, limit, offs
 		return nil, 0, fmt.Errorf("workitem: %s list window %d/%d is negative", k.Table, limit, offset)
 	}
 
+	// The table is aliased t because the status predicates, and the claim
+	// filter inside them, are written over that alias.
 	a := newArgs(k.Dialect)
-	where := " WHERE org_id = " + a.bind(orgID)
+	where := " WHERE t.org_id = " + a.bind(orgID)
 	pred, err := k.statusPredicate(status)
 	if err != nil {
 		return nil, 0, err
@@ -91,15 +93,15 @@ func List(ctx context.Context, q DBTX, k Kind, orgID, status string, limit, offs
 	}
 
 	var total int
-	if err := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+k.Table+where, a.vals...).Scan(&total); err != nil {
+	if err := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+k.Table+" t"+where, a.vals...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("workitem: count %s: %w", k.Table, err)
 	}
 	if limit == 0 {
 		return []Item{}, total, nil
 	}
 
-	stmt := "SELECT " + itemColumns + " FROM " + k.Table + where +
-		" ORDER BY id DESC LIMIT " + a.bind(limit) + " OFFSET " + a.bind(offset)
+	stmt := "SELECT " + itemColumns + " FROM " + k.Table + " t" + where +
+		" ORDER BY t.id DESC LIMIT " + a.bind(limit) + " OFFSET " + a.bind(offset)
 	rows, err := q.QueryContext(ctx, stmt, a.vals...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("workitem: list %s: %w", k.Table, err)
@@ -153,7 +155,7 @@ func (k Kind) statusPredicate(status string) (string, error) {
 	case StatusDeferred:
 		return k.deferredPredicate(), nil
 	case StatusLeased, StatusDone, StatusParked, StatusCancelled:
-		return "status = " + quoteLiteral(status), nil
+		return "t.status = " + quoteLiteral(status), nil
 	default:
 		return "", fmt.Errorf("workitem: %s list has unknown status %q", k.Table, status)
 	}
