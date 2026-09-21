@@ -63,6 +63,12 @@ type PendingFiringsStore interface {
 	// committed. Runs on the store's own queryer: a store bound to a
 	// transaction admits inside it. The transaction touches pending_firings
 	// before tasks; every transaction that writes both keeps that order.
+	//
+	// Exempt from the returned-row rule: the conflict arm is DO NOTHING on
+	// SQLite, so the row a collapsed admission lands on is another
+	// admission's to have returned, and the two booleans are the only facts
+	// a caller acts on — claimed is about the task row, which no firing row
+	// could carry.
 	Enqueue(ctx context.Context, orgID, entityID, taskID, triggerID, triggeringEventID string, claim AgentClaimStamp) (inserted, claimed bool, err error)
 
 	// Claim leases up to n claimable rows across every org (org "" to
