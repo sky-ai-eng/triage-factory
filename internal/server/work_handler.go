@@ -434,12 +434,12 @@ func validateIDs(v *httpx.Validation, ids []int64) {
 
 // refuseControl answers 422 for a control the kind does not offer. The kind
 // is real and the routes beside this one answer for it, so it is not a 404;
-// and no role reaches the control, so it is not a 403.
+// and no role reaches the control, so it is not a 403. No field is named:
+// the fault is the kind, not a value in the body.
 func refuseControl(w http.ResponseWriter, k db.WorkKindHandle, control string) {
 	httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
 		Reason:  httpx.ReasonInvalidField,
 		Message: k.Label() + " does not offer " + control,
-		Field:   "ids",
 	})
 }
 

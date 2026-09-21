@@ -275,7 +275,7 @@ func (e *env) q(query string) string {
 }
 
 // pastExpr is a timestamp an hour in the past, in the dialect's storage shape.
-// Tests use it to age a lease without waiting for one.
+// Tests use it to age a lease or an enqueue timestamp without waiting for one.
 func (e *env) pastExpr() string {
 	if e.dialect == workitem.Postgres {
 		return "clock_timestamp() - interval '1 hour'"

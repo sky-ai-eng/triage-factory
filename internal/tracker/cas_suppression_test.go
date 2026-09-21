@@ -186,7 +186,7 @@ func TestRefreshGitHub_FailedCommitSuppressesTransitions(t *testing.T) {
 					evts[0].OrgID, rows[0].OrgID)
 			}
 			if rows[0].Status != domain.QueuedEventStatusReady {
-				t.Errorf("queue row status = %q, want pending", rows[0].Status)
+				t.Errorf("queue row status = %q, want ready", rows[0].Status)
 			}
 		})
 	}
@@ -232,7 +232,7 @@ func TestRefreshGitHub_CommittedEventsRouteWithoutTheBus(t *testing.T) {
 		t.Errorf("queued event_type = %q, want %q", rows[0].EventType, domain.EventGitHubPRReadyForReview)
 	}
 	if rows[0].Status != domain.QueuedEventStatusReady {
-		t.Errorf("queue row status = %q, want pending (waiting for the drain worker)", rows[0].Status)
+		t.Errorf("queue row status = %q, want ready (waiting for the drain worker)", rows[0].Status)
 	}
 }
 

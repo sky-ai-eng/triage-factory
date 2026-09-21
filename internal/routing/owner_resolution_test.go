@@ -428,7 +428,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 			}
 			status, attempts, lastErr := queueRow(t, database)
 			if status != domain.QueuedEventStatusReady {
-				t.Errorf("row after the failed read = %q, want pending — an unresolvable owner must not consume the event", status)
+				t.Errorf("row after the failed read = %q, want ready — an unresolvable owner must not consume the event", status)
 			}
 			if attempts != 1 {
 				t.Errorf("attempts = %d, want 1", attempts)
