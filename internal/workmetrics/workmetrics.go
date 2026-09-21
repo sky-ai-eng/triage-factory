@@ -247,6 +247,24 @@ func NewDepthObserver(provider metric.MeterProvider, kinds []DepthSource) *Depth
 	return d
 }
 
+// Close unregisters the gauge callback, so a stopped observer stops
+// reporting. Run defers it: the depth observer is started with the background
+// brain, and a control pod that loses and re-acquires the lease starts a new
+// one — without this, every earlier observer's callback would keep reporting
+// its last values under the same series and an org that vanished from the
+// live one would never drop. Safe to call more than once.
+func (d *DepthObserver) Close() {
+	d.mu.Lock()
+	reg := d.reg
+	d.reg = nil
+	d.mu.Unlock()
+	if reg != nil {
+		if err := reg.Unregister(); err != nil {
+			log.Error("work depth gauge callback unregister failed", "error", err)
+		}
+	}
+}
+
 // Tick measures every kind once. An org absent from a kind's latest result is
 // dropped, so a removed org's series stops rather than freezing at its last
 // value; a read failure leaves that kind's previous values in place and logs,
@@ -267,10 +285,12 @@ func (d *DepthObserver) Tick(ctx context.Context) {
 	}
 }
 
-// Run ticks until ctx is cancelled. The first measure happens on the first
-// tick rather than at start, so a freshly promoted brain does not run every
-// kind's aggregate inside the promotion callback.
+// Run ticks until ctx is cancelled, then unregisters the gauges. The first
+// measure happens on the first tick rather than at start, so a freshly
+// promoted brain does not run every kind's aggregate inside the promotion
+// callback.
 func (d *DepthObserver) Run(ctx context.Context, interval time.Duration) {
+	defer d.Close()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

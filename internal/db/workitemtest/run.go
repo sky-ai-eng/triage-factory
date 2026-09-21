@@ -38,6 +38,7 @@ func Run(t *testing.T, mk Factory) {
 	t.Run("Backoff", func(t *testing.T) { testBackoff(t) })
 	t.Run("Fairness", func(t *testing.T) { testFairness(t, mk) })
 	t.Run("MeasureByOrgAcrossOrgs", func(t *testing.T) { testMeasureByOrgAcrossOrgs(t, mk) })
+	t.Run("ClaimAcrossOrgsReportsPerOrg", func(t *testing.T) { testClaimAcrossOrgsReportsPerOrg(t, mk) })
 	t.Run("FrozenColumns", func(t *testing.T) { testFrozenColumns(t, mk) })
 	t.Run("FixtureIndexPresence", func(t *testing.T) { testFixtureIndexPresence(t, mk) })
 }
@@ -784,6 +785,47 @@ func testMeasureByOrgAcrossOrgs(t *testing.T, mk Factory) {
 		if _, ok := byOrg[org]; ok {
 			t.Errorf("org %s with no unsettled rows is present in %+v", org, byOrg)
 		}
+	}
+}
+
+// testClaimAcrossOrgsReportsPerOrg pins the observer's rule for a cross-org
+// claim: one round mixing tenants is reported once per org with that org's
+// counts, in a fixed order, with each settlement and budget park beside it.
+func testClaimAcrossOrgsReportsPerOrg(t *testing.T, mk Factory) {
+	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 1, Lease: shortLease}})
+	a, b := e.org, uuid.NewString()
+	if a > b {
+		a, b = b, a
+	}
+	e.admitIn(a, "a-lease")
+	e.admitIn(a, "a-cancel")
+	cancelled := e.admitIn(a, "a-cancel-2")
+	spent := e.admitIn(b, "b-spent")
+	e.admitIn(b, "b-lease")
+	if err := workitem.RequestCancel(e.ctx, e.conn, e.kind, a, cancelled, "operator", "no"); err != nil {
+		t.Fatalf("RequestCancel: %v", err)
+	}
+	// b's first row spends its one attempt and dies, so the cross-org round
+	// below parks it at claim.
+	if got := e.claimIn(workitem.Owner{ID: "w", Epoch: 1}, b, 1); len(got.Claimed) != 1 || got.Claimed[0].ItemID != spent {
+		t.Fatalf("pre-claim in b = %+v, want the spent row", got)
+	}
+	e.expireLease()
+	e.obs.take()
+
+	res := e.claimIn(workitem.Owner{ID: "w", Epoch: 2}, "", 10)
+	if len(res.Claimed) != 3 || res.Cancelled != 1 || res.Parked != 1 {
+		t.Fatalf("cross-org claim = %d leased, %d cancelled, %d parked; want 3/1/1", len(res.Claimed), res.Cancelled, res.Parked)
+	}
+	got := e.obs.take()
+	want := []string{
+		"claimed " + a + " 2/0/1/0",
+		"cancelled " + a,
+		"claimed " + b + " 1/0/0/1",
+		"parked " + b + " " + workitem.ReasonBudgetExhausted,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("observer saw\n  %q\nwant\n  %q", got, want)
 	}
 }
 

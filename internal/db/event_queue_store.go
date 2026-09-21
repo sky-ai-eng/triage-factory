@@ -29,7 +29,9 @@ import (
 // the Postgres impl wires against the admin pool (BYPASSRLS) and keeps
 // org_id bound in every statement as defense in depth. SQLite collapses
 // onto its single connection and asserts the local sentinel org on the
-// org-scoped methods.
+// org-scoped methods of this interface; the operator surface's verbs run
+// through the WorkKindHandle on the package, which binds org_id without
+// asserting it, so the handler enforces the sentinel there.
 //
 // The queue's bookkeeping writes — the holder verbs and the prune — are
 // exempt from the returned-row rule: each is fire-and-forget from its

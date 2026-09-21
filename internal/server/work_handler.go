@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -49,9 +50,21 @@ func (h *workHandler) find(name string) db.WorkKindHandle {
 // resolveOrg reads {org_id} from the path and the caller's claims. A
 // malformed org id names nothing and is a 404 before any store is touched;
 // no session is a 401.
+//
+// Local mode has exactly one org, and its membership gate admits every
+// caller to every org id without reading anything, so the sentinel is
+// checked here: the routes below run the package's reads and controls on
+// the kind's connection with org_id bound by argument, and a well-formed id
+// that is not the local org would otherwise answer an empty page or a zero
+// count as if the org existed.
 func (h *workHandler) resolveOrg(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	orgID = r.PathValue("org_id")
-	if _, err := uuid.Parse(orgID); err != nil {
+	parsed, err := uuid.Parse(orgID)
+	if err != nil {
+		notFound(w, "org")
+		return "", "", false
+	}
+	if runmode.Current() == runmode.ModeLocal && parsed != uuid.MustParse(runmode.LocalDefaultOrgID) {
 		notFound(w, "org")
 		return "", "", false
 	}
@@ -574,6 +587,20 @@ func (h *workHandler) handleSupersede(w http.ResponseWriter, r *http.Request) {
 		v.Invalid("superseded_by", "a row cannot supersede itself")
 	}
 	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	// The replacement must be one of this org's rows of this kind: the column
+	// carries no foreign key, so a supersede pointing at nothing would settle
+	// the parked row against a replacement that does not exist.
+	replacement, err := workitem.Get(r.Context(), k.Conn(), k.Kind(), orgID, req.SupersededBy)
+	if err != nil {
+		internalError(w, "work", err)
+		return
+	}
+	if replacement == nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "superseded_by names no row of this kind in this org", Field: "superseded_by",
+		})
 		return
 	}
 

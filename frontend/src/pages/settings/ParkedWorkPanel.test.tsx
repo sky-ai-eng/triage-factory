@@ -32,6 +32,9 @@ function Harness() {
 let kinds: WorkKind[]
 let rows: WorkItem[]
 let depthOverride: Record<string, Partial<WorkDepth>>
+// Kinds whose depth node answers 500, standing in for a transient fault on
+// one queue while the others are healthy.
+let failingKinds: Set<string>
 let listBodies: { kind: string; body: Record<string, unknown> }[]
 let redriveBodies: { kind: string; ids: number[] }[]
 let cancelBodies: { kind: string; ids: number[]; reason: string }[]
@@ -110,6 +113,17 @@ function installFetch() {
     if (!m) throw new Error(`unexpected fetch ${method} ${path}`)
     const [, name, op] = m
     if (op === 'depth' && method === 'GET') {
+      if (failingKinds.has(name)) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({}),
+          text: async () => '{"errors":[{"reason":"INTERNAL","message":"measure failed"}]}',
+          clone() {
+            return this as unknown as Response
+          },
+        } as unknown as Response
+      }
       return jsonResponse(depthFor(name))
     }
     if (op === 'items/list' && method === 'POST') {
@@ -152,6 +166,7 @@ beforeEach(() => {
   kinds = [kind('event_queue')]
   rows = []
   depthOverride = {}
+  failingKinds = new Set()
   listBodies = []
   redriveBodies = []
   cancelBodies = []
@@ -200,6 +215,44 @@ describe('ParkedWorkPanel', () => {
     expect(screen.getByRole('columnheader', { name: 'Kind' })).toBeInTheDocument()
     expect(screen.getByText('Event routing')).toBeInTheDocument()
     expect(screen.getByText('Pending firings')).toBeInTheDocument()
+  })
+
+  it("keeps a healthy kind's rows and count when another kind fails to load", async () => {
+    kinds = [kind('event_queue'), kind('pending_firings', { label: 'Pending firings' })]
+    rows = [
+      row({ id: 1 }),
+      row({ id: 2, kind: 'pending_firings', subject: { label: 'SKY-12', fields: {} } }),
+    ]
+    depthOverride = { event_queue: { parked: 40 } }
+    failingKinds = new Set(['pending_firings'])
+    render(<Harness />)
+
+    // The healthy kind's rows and its badge count survive; the broken kind
+    // is named in an error line beside them rather than replacing them.
+    expect(await screen.findByText('owner/repo#18')).toBeInTheDocument()
+    expect(screen.getByTestId('badge')).toHaveTextContent('40')
+    expect(screen.getByRole('alert')).toHaveTextContent(/pending firings/i)
+    expect(screen.queryByText('SKY-12')).not.toBeInTheDocument()
+  })
+
+  it('a bulk redrive across kinds refreshes once', async () => {
+    kinds = [kind('event_queue'), kind('pending_firings', { label: 'Pending firings' })]
+    rows = [
+      row({ id: 7 }),
+      row({ id: 3, kind: 'pending_firings', subject: { label: 'SKY-12', fields: {} } }),
+    ]
+    render(<Harness />)
+    await screen.findByText('owner/repo#18')
+    const before = listBodies.length
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /select all parked work/i }))
+    fireEvent.click(screen.getByRole('button', { name: /redrive selected \(2\)/i }))
+
+    await waitFor(() => expect(redriveBodies).toHaveLength(2))
+    await screen.findByText(/nothing parked/i)
+    // One reload after both controls: one list fetch per kind, not one per
+    // control per kind.
+    expect(listBodies.length - before).toBe(kinds.length)
   })
 
   it('still renders a row the kind could not describe', async () => {

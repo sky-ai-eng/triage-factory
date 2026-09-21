@@ -266,8 +266,10 @@ func (s *eventQueueStore) PruneSettled(ctx context.Context, before time.Time) (i
 
 // The store is also the event queue's WorkKindHandle: what the operator
 // surface and the metrics depth observer see of this table. The surface runs
-// the package's own reads and controls on Conn; local is N=1, and the
-// sentinel org the handler binds is the one every row carries.
+// the package's own reads and controls on Conn, which bind org_id by
+// argument and assert nothing about it; the local sentinel is enforced by the
+// handler, since a generic verb reached through the handle cannot call
+// assertLocalOrg. Describe is the store's own and still does.
 var _ db.WorkKindHandle = (*eventQueueStore)(nil)
 
 func (s *eventQueueStore) Name() string          { return workkinds.EventQueueName }

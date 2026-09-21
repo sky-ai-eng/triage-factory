@@ -190,9 +190,9 @@ vocabulary or an opaque id: the kind name, the org id, the typed attempt
 outcome, the park reason, the verb.
 
 Counters are per process, incremented by whichever process committed the
-disposition (in multi mode that is the executor or control pod running the
-kind's worker, and a control pod for the operator controls); `sum` across
-pods in an HA topology.
+disposition: the process running the kind's worker (for `event_queue`, the
+control pod holding the background-brain lease) and the control pod that
+served an operator control. `sum` across pods in an HA topology.
 
 | Metric | Labels | What it counts |
 | --- | --- | --- |

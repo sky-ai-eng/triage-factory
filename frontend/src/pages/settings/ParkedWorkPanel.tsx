@@ -49,9 +49,11 @@ function rowKey(it: WorkItem): string {
 // back on its own. The number is the sum of every kind's parked depth — the
 // org's whole population, not the length of a page.
 export function ParkedWorkBadge({ state }: { state: UseParkedWork }) {
-  if (state.loading || state.error) return <>Parked work</>
+  if (state.loading) return <>Parked work</>
   const n = state.parkedTotal
-  if (n === 0) return <>None parked</>
+  // A kind that failed to load may hold parked rows nobody counted, so with
+  // nothing counted and something broken the badge claims nothing.
+  if (n === 0) return state.error ? <>Parked work</> : <>None parked</>
   return (
     <span className="inline-flex items-center gap-1.5">
       <span className="rounded-full bg-alarm/10 px-2 py-0.5 text-reported font-medium text-alarm">
@@ -74,7 +76,7 @@ export default function ParkedWorkPanel({ state }: { state: UseParkedWork }) {
     hasMore,
     loadMore,
     reload,
-    redrive,
+    redriveMany,
     cancel,
   } = state
   // Selected row keys, and the keys with a control in flight. Two sets rather
@@ -116,10 +118,7 @@ export default function ParkedWorkPanel({ state }: { state: UseParkedWork }) {
     try {
       const byKind = new Map<string, number[]>()
       rows.forEach((it) => byKind.set(it.kind, [...(byKind.get(it.kind) ?? []), it.id]))
-      let moved = 0
-      for (const [kind, ids] of byKind) {
-        moved += await redrive(kind, ids)
-      }
+      const moved = await redriveMany([...byKind].map(([kind, ids]) => ({ kind, ids })))
       if (moved === rows.length) {
         toast.success(`Redrove ${moved} item${moved === 1 ? '' : 's'}`)
       } else {
@@ -182,22 +181,29 @@ export default function ParkedWorkPanel({ state }: { state: UseParkedWork }) {
     </div>
   )
 
+  // One kind's failure is reported beside the others' rows, never in place
+  // of them: a transient fault on one queue must not hide the backlog on
+  // another. The line replaces the table only when there is nothing else to
+  // show.
+  const errorLine = error && (
+    <p className="text-body text-ink-2" role="alert">
+      {error}{' '}
+      <button type="button" onClick={() => void reload()} className="text-warm underline">
+        Retry
+      </button>
+    </p>
+  )
+
   if (loading && items.length === 0) {
     return <p className="text-body text-ink-3">Loading parked work…</p>
   }
-  if (error) {
-    return (
-      <p className="text-body text-ink-2">
-        {error}{' '}
-        <button type="button" onClick={() => void reload()} className="text-warm underline">
-          Retry
-        </button>
-      </p>
-    )
+  if (error && kinds.length === 0) {
+    return errorLine
   }
   if (items.length === 0) {
     return (
       <div className="space-y-3">
+        {errorLine}
         {filter}
         {status === 'parked' ? (
           <>
@@ -218,6 +224,7 @@ export default function ParkedWorkPanel({ state }: { state: UseParkedWork }) {
 
   return (
     <div className="space-y-4">
+      {errorLine}
       <div className="space-y-1.5">
         <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Work that stopped</h2>
         <p className="text-body leading-relaxed text-ink-3">

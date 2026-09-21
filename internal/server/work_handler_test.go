@@ -553,6 +553,15 @@ func TestWorkSupersede_LocalMode(t *testing.T) {
 	if rec := supersede("fixture", "abc", `{"superseded_by":1}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), httpx.ReasonInvalidID) {
 		t.Errorf("malformed id = %d body=%s, want 400 INVALID_ID", rec.Code, rec.Body.String())
 	}
+	// A replacement that is not one of this org's rows is refused before the
+	// write, since the column has no foreign key to refuse it after.
+	another := f.park(t, runmode.LocalDefaultOrgID, "s3")
+	if rec := supersede("fixture", fmt.Sprint(another), `{"superseded_by":999999}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"field":"superseded_by"`) {
+		t.Errorf("unknown replacement = %d body=%s, want 400 on superseded_by", rec.Code, rec.Body.String())
+	}
+	if got := f.status(t, another); got != workitem.StatusParked {
+		t.Errorf("row = %q after a refused supersede, want still parked", got)
+	}
 
 	// The event queue offers no supersede: 422 for every real kind.
 	eq, database := localEventQueueKind(t)
@@ -595,6 +604,48 @@ func TestWorkHandler_UnknownAccessPolicyIsRefused(t *testing.T) {
 	}
 	if got := f.status(t, parked); got != workitem.StatusParked {
 		t.Errorf("row = %q, want untouched", got)
+	}
+}
+
+// TestWorkHandler_LocalModeRefusesForeignOrg pins the sentinel check: local
+// mode's membership gate admits every caller to every well-formed org id, so
+// a foreign id reaching the package's org-bound verbs would answer an empty
+// page or a zero count as if the org existed. It is a 404 at the door.
+func TestWorkHandler_LocalModeRefusesForeignOrg(t *testing.T) {
+	f := newFakeWorkKind(t, "fixture")
+	parked := f.park(t, runmode.LocalDefaultOrgID, "l1")
+	h := localWorkRig(t, f)
+	foreign := uuid.NewString()
+	pv := map[string]string{"kind": "fixture", "id": fmt.Sprint(parked)}
+
+	routes := []struct {
+		name string
+		call func(w http.ResponseWriter, r *http.Request)
+		req  *http.Request
+	}{
+		{"catalogue", h.handleCatalogue, workReq(http.MethodGet, "/", foreign, "u", "", pv)},
+		{"depth", h.handleDepth, workReq(http.MethodGet, "/", foreign, "u", "", pv)},
+		{"list", h.handleItemsList, workReq(http.MethodPost, "/", foreign, "u", `{}`, pv)},
+		{"get", h.handleItemGet, workReq(http.MethodGet, "/", foreign, "u", "", pv)},
+		{"redrive", h.handleRedrive, workReq(http.MethodPost, "/", foreign, "u", fmt.Sprintf(`{"ids":[%d]}`, parked), pv)},
+		{"cancel", h.handleCancel, workReq(http.MethodPost, "/", foreign, "u", fmt.Sprintf(`{"ids":[%d],"reason":"x"}`, parked), pv)},
+		{"supersede", h.handleSupersede, workReq(http.MethodPost, "/", foreign, "u", `{"superseded_by":1}`, pv)},
+	}
+	for _, rt := range routes {
+		rec := httptest.NewRecorder()
+		rt.call(rec, rt.req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s under a foreign org in local mode = %d, want 404; body=%s", rt.name, rec.Code, rec.Body.String())
+		}
+	}
+	if got := f.status(t, parked); got != workitem.StatusParked {
+		t.Errorf("row = %q, want untouched", got)
+	}
+	// The sentinel spelled differently is still the sentinel.
+	rec := httptest.NewRecorder()
+	h.handleCatalogue(rec, workReq(http.MethodGet, "/", strings.ToUpper(runmode.LocalDefaultOrgID), "u", "", pv))
+	if rec.Code != http.StatusOK {
+		t.Errorf("upper-cased sentinel = %d, want 200", rec.Code)
 	}
 }
 
