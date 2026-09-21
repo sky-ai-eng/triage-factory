@@ -32,11 +32,14 @@ import (
 // either finds it committed or repeats it whole.
 //
 // The per-task gate is in the claim query: the kind's claim filter admits a
-// ready row only while its task holds no live top-level conversation. So a
-// fire closes the gate for the task's remaining rows at the next claim with
-// no write of the worker's, a row for the same task already in the batch
-// meets ErrTaskBusy and defers at no cost, and FIFO within a task is the
-// claim's own ORDER BY id.
+// ready row only while its task holds no live top-level conversation and no
+// blueprint run still marked running. The second half is fence (2) stated as
+// a filter: a run is marked terminal only after its last conversation is, and
+// a row claimed between those two writes would only be refused. So a fire
+// closes the gate for the task's remaining rows at the next claim with no
+// write of the worker's, a row for the same task already in the batch meets
+// ErrTaskBusy and defers at no cost, and FIFO within a task is the claim's
+// own ORDER BY id.
 //
 // Nothing here resets, sweeps or renews on a timer. A row whose holder died
 // is reclaimed by the first claim after its lease expires, and the reclaim
@@ -309,15 +312,15 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		// Another run went live on the task between the claim and the
 		// fenced insert. Routine waiting, not a failure: the deferral refunds
 		// the attempt, and the claim filter holds the row until the task
-		// frees. A refused deferral means the index refused but no
-		// conversation is live, which the atomic first-step mint makes
-		// unreachable; the backoff retries it and the budget parks it for a
-		// person if it persists.
+		// frees. The deferral reads the condition the filter negates, so a
+		// refusal means the run that refused the insert ended before that
+		// read: the task is free, and the backoff's retry is the one that
+		// fires.
 		span.SetAttributes(telemetry.Outcome("task_busy"))
 		terminal(func(termCtx context.Context) {
 			derr := r.firings.DeferWhileTaskBusy(termCtx, receipt)
 			if errors.Is(derr, workitem.ErrDeferRefused) {
-				routerLog.WarnContext(termCtx, "firing-queue: task busy at the fenced insert but no conversation is live; requeued with backoff",
+				routerLog.InfoContext(termCtx, "firing-queue: task busy at the fenced insert and free by the deferral; requeued with backoff",
 					"firing_id", f.ID, "task_id", f.TaskID)
 				parked, rerr := r.firings.Requeue(termCtx, receipt, workitem.OutcomeTransient, err)
 				if rerr == nil && parked {

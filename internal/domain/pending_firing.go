@@ -6,8 +6,8 @@ import "time"
 // triggering event arrived because its task was busy — a live conversation,
 // or older firings queued ahead of it. The router admits it, and the firing
 // worker claims it under the shared work-item contract (internal/db/workitem)
-// once the task holds no live conversation, validates it against the world
-// now, and fires it or skips it with a reason.
+// once the task holds no live conversation and no run still marked running,
+// validates it against the world now, and fires it or skips it with a reason.
 //
 // The row is the work-item block plus this kind's own columns: the four
 // identity columns are fixed at admission, and exactly one of SkipReason and

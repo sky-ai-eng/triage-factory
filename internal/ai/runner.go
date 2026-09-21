@@ -257,6 +257,8 @@ func (r *Runner) run(ctx context.Context) {
 		return
 	}
 
+	scores = scoresForPickedTasks(ctx, scores, taskIDs)
+
 	// Reset tasks that were in failed batches back to 'pending' so they
 	// retry next cycle. Without this, a per-batch failure leaves those
 	// tasks marked 'in_progress' forever since UpdateTaskScores only
@@ -320,4 +322,30 @@ func (r *Runner) run(ctx context.Context) {
 		}
 		r.callbacks.OnScoringCompleted(ctx, r.orgID, scoredIDs)
 	}
+}
+
+// scoresForPickedTasks keeps the scores whose id names a task this cycle
+// picked and drops the rest with a warning.
+//
+// The id on a score is the model's echo of the id it was given, so it can come
+// back mangled or invented. The score write is one transaction that admits a
+// re-evaluation row per score under a foreign key to the task: a single id
+// naming no task fails that key and loses every score in the cycle, and every
+// task is then scored again at full cost. The task a dropped score was meant
+// for is left as a batch that omitted it would leave it, for the next cycle's
+// stale reset to return to pending.
+func scoresForPickedTasks(ctx context.Context, scores []TaskScore, taskIDs []string) []TaskScore {
+	picked := make(map[string]struct{}, len(taskIDs))
+	for _, id := range taskIDs {
+		picked[id] = struct{}{}
+	}
+	kept := make([]TaskScore, 0, len(scores))
+	for _, s := range scores {
+		if _, ok := picked[s.ID]; !ok {
+			aiLog.WarnContext(ctx, "dropping a score whose id names no task in this cycle", "score_id", s.ID)
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return kept
 }

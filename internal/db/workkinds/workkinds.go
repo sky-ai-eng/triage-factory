@@ -116,9 +116,9 @@ const (
 // rather than minting a new one, and an operator redrives or cancels it.
 //
 // The claim filter is the per-task gate as the claim query applies it: a
-// firing is claimable only while its task holds no live top-level
-// conversation. A ready row behind a busy task is deferred, not ready, and
-// becomes ripe when the task frees with no write of anyone's.
+// firing is claimable only while its task is not busy (PendingFiringsTaskBusy).
+// A ready row behind a busy task is deferred, not ready, and becomes ripe
+// when the task frees with no write of anyone's.
 //
 // MaxAttempts 5 with the package's default backoff: a fault that survives
 // retries at roughly 5s, 10s, 20s and 40s is one a person has to look at.
@@ -153,20 +153,42 @@ func PendingFirings(d workitem.Dialect) workitem.Kind {
 // the same text.
 func PendingFiringKey(taskID, triggerID string) string { return taskID + ":" + triggerID }
 
-// PendingFiringsClaimFilter is the per-task gate as the claim query applies
-// it: a firing is claimable only while its task holds no live top-level
-// conversation. It is the conversation store's live-conversation predicate
-// applied to the row's task, and each dialect package tests that the two
-// keep answering the same question. Postgres binds the org as well because
-// its conversations table is org-wide; SQLite is one org.
-func PendingFiringsClaimFilter(d workitem.Dialect) string {
-	org := ""
+// PendingFiringsTaskBusy is the condition that holds a firing back, over the
+// alias t: the row's task has a live top-level conversation, or a blueprint
+// run still marked running.
+//
+// The two halves answer for different things and neither implies the other.
+// The conversation half is the gate's own rule — the conversation store's
+// live-conversation predicate applied to the row's task, which each dialect
+// package tests against that store — and it holds for a conversation with no
+// running run behind it, such as one resumed after its run completed. The
+// run half is the fence's: the one-active-run index refuses a second run
+// while one is marked running, and a run is marked terminal only after its
+// last conversation is, so between those two writes the task has no live
+// conversation and still cannot take a firing. A filter without it would
+// claim the row in that window only to have the fenced insert refuse it.
+//
+// Postgres binds the org in both halves because its tables are org-wide;
+// SQLite is one org. The claim filter and the store's deferral predicate are
+// both rendered from this one text, so the two cannot disagree about which
+// tasks are busy.
+func PendingFiringsTaskBusy(d workitem.Dialect) string {
+	convOrg, runOrg := "", ""
 	if d == workitem.Postgres {
-		org = "r.org_id = t.org_id AND "
+		convOrg = "r.org_id = t.org_id AND "
+		runOrg = "b.org_id = t.org_id AND "
 	}
-	return "NOT EXISTS (SELECT 1 FROM conversations r WHERE " + org +
+	return "(EXISTS (SELECT 1 FROM conversations r WHERE " + convOrg +
 		"r.task_id = t.task_id AND r.ended_at IS NULL AND r.parent_conversation_id IS NULL" +
-		" AND (r.status IS NULL OR r.status NOT IN ('completed','failed')))"
+		" AND (r.status IS NULL OR r.status NOT IN ('completed','failed')))" +
+		" OR EXISTS (SELECT 1 FROM blueprint_runs b WHERE " + runOrg +
+		"b.task_id = t.task_id AND b.status = 'running'))"
+}
+
+// PendingFiringsClaimFilter is the per-task gate as the claim query applies
+// it: a firing is claimable only while its task is not busy.
+func PendingFiringsClaimFilter(d workitem.Dialect) string {
+	return "NOT " + PendingFiringsTaskBusy(d)
 }
 
 // The score re-evaluation kind's identity on the work-kind registry, declared

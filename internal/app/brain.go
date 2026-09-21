@@ -68,8 +68,9 @@ func (a *App) startBrain(term int64) {
 
 	// Firing worker: claims the auto-delegation intents the router admitted
 	// while their tasks were busy, under the work-item contract's leases,
-	// once the claim query's own gate — no live conversation on the task —
-	// opens. A conversation terminal wakes it; the scan tick is the floor.
+	// once the claim query's own gate — no live conversation on the task and
+	// no run still marked running — opens. A conversation terminal wakes it;
+	// the scan tick is the floor.
 	// Same single-worker discipline as the event-queue worker below.
 	go a.router.RunFiringQueue(brainCtx, routing.DefaultFiringScanInterval)
 	// Re-derive worker: claims the re-evaluation rows the score write admits

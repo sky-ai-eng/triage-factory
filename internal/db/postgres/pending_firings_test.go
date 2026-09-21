@@ -331,8 +331,12 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, stores db.Stores, orgID, userI
 	}
 
 	return dbtest.PendingFiringsSeeder{
-		Tuple:            tuple,
-		RunForTask:       runForTask,
+		Tuple:      tuple,
+		RunForTask: runForTask,
+		SettleRuns: func(t *testing.T, taskID string) {
+			t.Helper()
+			settlePgRuns(t, h, orgID, taskID)
+		},
 		AgentID:          agentID,
 		TaskClaim:        taskClaim,
 		ClaimTaskForUser: claimTaskForUser,
@@ -368,13 +372,27 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, stores db.Stores, orgID, userI
 
 // seedPgLiveConversation stages a live top-level conversation on the task:
 // a blueprint run of its own (the origin CHECK wants one, and a step
-// conversation names its run), no creator, no terminal status, no end.
+// conversation names its run), no creator, no terminal status, no end. The
+// run is settled once the conversation names it, so the conversation is the
+// only thing holding the task — the shape a conversation resumed after its
+// run completed has, and the one that isolates the conversation half of the
+// firing gate from the run half.
 func seedPgLiveConversation(t *testing.T, h *pgtest.Harness, orgID, userID, taskID, promptID string) string {
 	t.Helper()
 	brID := seedPgBlueprintRun(t, h, orgID, userID, taskID)
 	stepIdx := 0
-	return seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
+	id := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
 		TaskID: taskID, PromptID: promptID, Model: "m", TriggerType: "event",
 		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
 	})
+	settlePgRuns(t, h, orgID, taskID)
+	return id
+}
+
+// settlePgRuns marks every running blueprint_run on the task completed.
+func settlePgRuns(t *testing.T, h *pgtest.Harness, orgID, taskID string) {
+	t.Helper()
+	if _, err := h.AdminDB.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE org_id = $1 AND task_id = $2 AND status = 'running'`, orgID, taskID); err != nil {
+		t.Fatalf("settle blueprint_runs: %v", err)
+	}
 }

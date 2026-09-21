@@ -526,6 +526,55 @@ func TestFiringWorker_SecondFiringDefersAtNoCostThenFiresAfterTheEnd(t *testing.
 	}
 }
 
+// TestFiringWorker_RunStillRunningAfterItsConversationEndsHoldsTheRow: a run
+// is marked terminal only after its last conversation is, and between those
+// two writes the task has no live conversation while the one-active-run index
+// still refuses a second run. A drain landing there must leave the queued
+// firing alone — not claim it into the refusal and charge it an attempt.
+func TestFiringWorker_RunStillRunningAfterItsConversationEndsHoldsTheRow(t *testing.T) {
+	database := newTestDB(t)
+	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+	createTestPrompt(t, database, domain.Prompt{ID: "p-second", Name: "P2", Body: "x", Source: "user"})
+	createTriggerForTestRouting(t, database, domain.EventHandler{
+		ID: "t-second", Kind: domain.EventHandlerKindTrigger,
+		BlueprintID: "p-second", TriggerType: domain.TriggerTypeEvent,
+		EventType:        domain.EventGitHubPRCICheckFailed,
+		BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0),
+		Enabled: true,
+	})
+	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
+	enqueueFiring(t, database, entityID, taskID, "t-second", eventID)
+
+	stub := &stubDelegator{db: database}
+	router := drainRouter(database, sqlitestore.New(database).PendingFirings, stub)
+	drainOnce(t, router) // the first fires, the second defers behind it
+
+	// The conversation reaches its terminal status; its run has not been
+	// marked terminal yet.
+	if _, err := database.Exec(`UPDATE conversations SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE task_id = ?`, taskID); err != nil {
+		t.Fatalf("complete conversation: %v", err)
+	}
+	callsBefore := atomic.LoadInt64(&stub.calls)
+	drainOnce(t, router)
+	second := firingsFor(t, database, entityID)[1]
+	if second.Status != workitem.StatusReady || second.Attempt != 0 || second.LastOutcome != "deferred" {
+		t.Fatalf("second firing inside the window = %+v, want ready, uncharged, still deferred", second)
+	}
+	if calls := atomic.LoadInt64(&stub.calls); calls != callsBefore {
+		t.Fatalf("Delegate calls inside the window = %d, want %d: the row must not be claimed", calls, callsBefore)
+	}
+
+	// The run is marked terminal: the gate opens and the row fires on its
+	// first charged attempt.
+	endTaskConversations(t, database, taskID)
+	drainOnce(t, router)
+	second = firingsFor(t, database, entityID)[1]
+	requireFired(t, second)
+	if second.Attempt != 1 {
+		t.Errorf("second firing charged %d attempts, want 1", second.Attempt)
+	}
+}
+
 // waitFor polls cond for up to two seconds.
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
