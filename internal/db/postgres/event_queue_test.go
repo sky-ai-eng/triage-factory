@@ -264,7 +264,7 @@ func newPgEventQueueSeeder(h *pgtest.Harness, orgID string) dbtest.EventQueueSee
 			// Rewound against the server clock — the one the claim stamped
 			// the lease from and the guard compares against.
 			pgExecOne(t, h, "expire lease",
-				`UPDATE event_queue SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = $1 AND status = 'leased'`, queueID)
+				`UPDATE event_queue SET lease_expires_at = statement_timestamp() - interval '1 hour' WHERE id = $1 AND status = 'leased'`, queueID)
 		},
 		Ripen: func(t *testing.T, queueID int64) {
 			t.Helper()
@@ -273,7 +273,7 @@ func newPgEventQueueSeeder(h *pgtest.Harness, orgID string) dbtest.EventQueueSee
 		RequestCancel: func(t *testing.T, queueID int64) {
 			t.Helper()
 			pgExecOne(t, h, "request cancel",
-				`UPDATE event_queue SET cancel_requested_at = clock_timestamp(), cancel_requested_by = 'operator', cancel_reason = 'test' WHERE id = $1`, queueID)
+				`UPDATE event_queue SET cancel_requested_at = statement_timestamp(), cancel_requested_by = 'operator', cancel_reason = 'test' WHERE id = $1`, queueID)
 		},
 		ClearEntityRef: func(t *testing.T, queueID int64) {
 			t.Helper()

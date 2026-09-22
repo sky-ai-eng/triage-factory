@@ -50,7 +50,7 @@ import (
 // Every way the row can fail to resolve — released, expired, wrong org, wrong
 // conversation, never existed — is one answer: this caller is not the owner.
 //
-// clock_timestamp() rather than now(): the expiry has to be read against
+// statement_timestamp() rather than now(): the expiry has to be read against
 // fresh database time, not the instant the caller's transaction began, or a
 // long transaction's guard would pass on a lease that lapsed while it was
 // open.
@@ -71,7 +71,7 @@ func assertClaimActive(ctx context.Context, q queryer, orgID, conversationID, cl
 	err := q.QueryRowContext(ctx, `
 		SELECT 1 FROM claims
 		WHERE id = $1 AND org_id = $2 AND conversation_id = $3
-		  AND released_at IS NULL AND lease_expires_at > clock_timestamp()
+		  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
 		FOR SHARE
 	`, claimID, orgID, conversationID).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {

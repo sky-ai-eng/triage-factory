@@ -66,7 +66,7 @@ const activeClaimExistsSQL = `EXISTS (
 //
 // SQLite advances 'now' across statements inside a transaction, which is what
 // an expiry guard needs: the reading is taken at the guard, not at BEGIN —
-// the property the Postgres twin gets from clock_timestamp().
+// the property the Postgres twin gets from statement_timestamp().
 const sqliteNowExpr = `strftime('%Y-%m-%d %H:%M:%f', 'now')`
 
 // sqliteNowPlusExpr is sqliteNowExpr offset by a bound modifier — the one

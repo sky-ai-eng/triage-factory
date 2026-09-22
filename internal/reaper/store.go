@@ -120,7 +120,7 @@ var _ Store = (*pgStore)(nil)
 //
 // Both arms read now(), so both are frozen at the sweep's BEGIN and the three
 // UPDATEs below agree on one candidate set. Elsewhere a lease's liveness is
-// read on clock_timestamp(), because it answers for this instant; here the
+// read on statement_timestamp(), because it answers for this instant; here the
 // sweep is the unit, and a claim that lapses between its statements waits for
 // the next tick rather than landing in whichever arm happened to run after
 // it.

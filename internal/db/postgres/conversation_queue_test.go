@@ -1143,7 +1143,7 @@ func TestClaimLease_Postgres(t *testing.T) {
 			SetLease: func(t *testing.T, claimID string, in time.Duration) {
 				t.Helper()
 				if _, err := h.AdminDB.Exec(
-					`UPDATE claims SET lease_expires_at = clock_timestamp() + make_interval(secs => $1) WHERE id = $2`,
+					`UPDATE claims SET lease_expires_at = statement_timestamp() + make_interval(secs => $1) WHERE id = $2`,
 					in.Seconds(), claimID,
 				); err != nil {
 					t.Fatalf("stage lease on %s: %v", claimID, err)
@@ -1154,7 +1154,7 @@ func TestClaimLease_Postgres(t *testing.T) {
 				var expiry sql.NullTime
 				var now time.Time
 				if err := h.AdminDB.QueryRow(
-					`SELECT lease_expires_at, clock_timestamp() FROM claims WHERE id = $1`, claimID,
+					`SELECT lease_expires_at, statement_timestamp() FROM claims WHERE id = $1`, claimID,
 				).Scan(&expiry, &now); err != nil {
 					t.Fatalf("read lease of %s: %v", claimID, err)
 				}
@@ -1175,8 +1175,8 @@ func TestClaimLease_Postgres(t *testing.T) {
 }
 
 // TestClaimFence_Postgres_ReadsFreshDatabaseTime pins the one property only
-// this dialect can get wrong: the fence's expiry guard reads clock_timestamp()
-// rather than now(), which is the transaction's start. A claim whose lease
+// this dialect can get wrong: the fence's expiry guard reads
+// statement_timestamp() rather than now(), which is the transaction's start. A claim whose lease
 // lapses WHILE a long transaction is open must fail that transaction's writes,
 // and against a transaction-start reading it would pass them.
 func TestClaimFence_Postgres_ReadsFreshDatabaseTime(t *testing.T) {
@@ -1195,7 +1195,7 @@ func TestClaimFence_Postgres_ReadsFreshDatabaseTime(t *testing.T) {
 		t.Fatalf("ClaimNextConversation = (%+v, %v)", claimed, err)
 	}
 	if _, err := h.AdminDB.Exec(
-		`UPDATE claims SET lease_expires_at = clock_timestamp() + interval '1 second' WHERE id = $1`, claimed.ClaimID,
+		`UPDATE claims SET lease_expires_at = statement_timestamp() + interval '1 second' WHERE id = $1`, claimed.ClaimID,
 	); err != nil {
 		t.Fatalf("stage a lease about to lapse: %v", err)
 	}
@@ -1214,7 +1214,7 @@ func TestClaimFence_Postgres_ReadsFreshDatabaseTime(t *testing.T) {
 	err = tx.QueryRowContext(ctx, `
 		SELECT 1 FROM claims
 		WHERE id = $1 AND org_id = $2 AND conversation_id = $3
-		  AND released_at IS NULL AND lease_expires_at > clock_timestamp()
+		  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
 		FOR SHARE
 	`, claimed.ClaimID, orgID, conv.ID).Scan(&one)
 	if !errors.Is(err, sql.ErrNoRows) {

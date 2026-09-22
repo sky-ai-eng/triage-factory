@@ -45,7 +45,7 @@ func TestTaskReDeriveStore_Postgres(t *testing.T) {
 				// Rewound against the server clock — the one the claim
 				// stamped the lease from and the guard compares against.
 				pgExecOne(t, h, "expire lease",
-					`UPDATE task_rederive_queue SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = $1 AND status = 'leased'`, id)
+					`UPDATE task_rederive_queue SET lease_expires_at = statement_timestamp() - interval '1 hour' WHERE id = $1 AND status = 'leased'`, id)
 			},
 		}
 	})

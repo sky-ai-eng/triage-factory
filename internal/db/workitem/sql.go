@@ -48,15 +48,12 @@ func (a *args) bind(v any) string {
 	return "?"
 }
 
-// nowExpr is database time at the statement, and the same instant everywhere
-// in it: statement_timestamp() rather than now(), which is transaction start
-// and would let a long transaction's guard read an expiry that has already
-// passed as live, and rather than clock_timestamp(), which advances WITHIN a
-// statement — so two columns a write means to stamp identically, or a
-// predicate and a measurement taken over the same rows, land microseconds
-// apart. It is also what SQLite's 'now' already means (fixed for one step,
-// fresh on the next), which is what lets one assertion hold for both
-// dialects.
+// nowExpr is database time read at the statement: fresh on each one, so a
+// long transaction's guard cannot pass an expiry that has already lapsed, and
+// fixed within one, so the two columns an admit stamps identically and the
+// predicate a measurement is taken over all resolve to a single instant. Both
+// halves are load-bearing, and both dialects hold them — which is what lets
+// one assertion cover them.
 func (k Kind) nowExpr() string {
 	if k.Dialect == Postgres {
 		return "statement_timestamp()"

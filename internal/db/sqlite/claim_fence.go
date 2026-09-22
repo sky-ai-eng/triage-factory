@@ -19,7 +19,7 @@ import (
 // makes presents the lease here. SQLite advances 'now' across statements
 // inside a transaction, so the reading is taken at the guard rather than at
 // BEGIN — the fresh-time property the Postgres twin gets from
-// clock_timestamp().
+// statement_timestamp().
 //
 // The rival owner it guards against here is not a successor executor — local
 // mode has one — but the stop verb. A person stopping a conversation parks the

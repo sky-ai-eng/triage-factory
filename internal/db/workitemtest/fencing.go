@@ -737,7 +737,7 @@ func (e *env) admitDup(key string) (int64, bool) {
 // that stage a column the package would otherwise own.
 func (e *env) nowSQL() string {
 	if e.dialect == workitem.Postgres {
-		return "clock_timestamp()"
+		return "statement_timestamp()"
 	}
 	return `strftime('%Y-%m-%d %H:%M:%f','now')`
 }

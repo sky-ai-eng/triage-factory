@@ -159,15 +159,15 @@ const activeClaimExistsSQL = `EXISTS (
 // refuses one while the expired row is unreleased, so a predicate that treated
 // it as absent would offer work the insert would then reject.
 //
-// clock_timestamp(), never now(): a lease is a question about this instant,
-// and now() is frozen at the start of a transaction that may have begun well
-// before the read. Every predicate deciding lease liveness spells it this
-// way, which is also what makes SQLite's per-statement 'now' the same
-// question rather than a near-miss.
+// statement_timestamp(), never now(): a lease is a question about this
+// instant, and now() is frozen at the start of a transaction that may have
+// begun well before the read. Every lease timestamp spells it this way, which
+// is what makes SQLite's per-statement 'now' the same question rather than a
+// near-miss.
 const liveClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_a
 		WHERE cl_a.conversation_id = r.id AND cl_a.released_at IS NULL
-		  AND cl_a.lease_expires_at > clock_timestamp())`
+		  AND cl_a.lease_expires_at > statement_timestamp())`
 
 // undeliveredInputExistsSQL matches drivable input: a plain user message
 // still awaiting delivery. Injections (subtype 'injection:…', including a
@@ -555,11 +555,11 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	if claimID == "" || !isValidUUID(claimID) || !isValidUUID(conversationID) {
 		return time.Time{}, fmt.Errorf("%w: claim %q on conversation %q", db.ErrClaimReleased, claimID, conversationID)
 	}
-	// clock_timestamp() rather than now(): the guard has to read fresh
+	// statement_timestamp() rather than now(): the guard has to read fresh
 	// database time, not the instant this statement's transaction began, or a
-	// long transaction could renew a lease that lapsed while it was open. The
-	// same expression sets the new expiry, so what is written is measured from
-	// the same clock the guard read.
+	// long transaction could renew a lease that lapsed while it was open. It
+	// is also the reading that is fixed for one statement, so the expiry
+	// written here is measured from the very instant the guard tested.
 	//
 	// The guard's expiry term is what makes a late renewal terminal: an
 	// already-lapsed lease matches nothing, and the caller gets the same
@@ -567,9 +567,9 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	var expiry time.Time
 	err := s.conn.QueryRowContext(ctx, `
 		UPDATE claims
-		SET lease_expires_at = clock_timestamp() + make_interval(secs => $1)
+		SET lease_expires_at = statement_timestamp() + make_interval(secs => $1)
 		WHERE id = $2 AND org_id = $3 AND conversation_id = $4
-		  AND released_at IS NULL AND lease_expires_at > clock_timestamp()
+		  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
 		RETURNING lease_expires_at
 	`, lease.Seconds(), claimID, orgID, conversationID).Scan(&expiry)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -589,9 +589,9 @@ func (s *conversationQueueStore) ExpiredClaimsSystem(ctx context.Context) (int, 
 	var oldestSeconds float64
 	err := s.conn.QueryRowContext(ctx, `
 		SELECT count(*),
-		       COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - min(lease_expires_at))), 0)
+		       COALESCE(EXTRACT(EPOCH FROM (statement_timestamp() - min(lease_expires_at))), 0)
 		FROM claims
-		WHERE released_at IS NULL AND lease_expires_at <= clock_timestamp()
+		WHERE released_at IS NULL AND lease_expires_at <= statement_timestamp()
 	`).Scan(&count, &oldestSeconds)
 	if err != nil {
 		return 0, 0, wrapAdminPoolPermErr(err, "conversation_queue.ExpiredClaimsSystem")
@@ -1136,7 +1136,7 @@ var executorClaimSelectCols = `
 // executor that held it is gone, and what the row records is an engagement
 // waiting to be taken over.
 func claimLeaseLiveSQL(alias string) string {
-	return alias + ".released_at IS NULL AND " + alias + ".lease_expires_at > clock_timestamp()"
+	return alias + ".released_at IS NULL AND " + alias + ".lease_expires_at > statement_timestamp()"
 }
 
 // executorClaimCols is the shared projection behind both operator claim reads,

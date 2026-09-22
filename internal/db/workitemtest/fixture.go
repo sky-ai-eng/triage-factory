@@ -278,7 +278,7 @@ func (e *env) q(query string) string {
 // Tests use it to age a lease or an enqueue timestamp without waiting for one.
 func (e *env) pastExpr() string {
 	if e.dialect == workitem.Postgres {
-		return "clock_timestamp() - interval '1 hour'"
+		return "statement_timestamp() - interval '1 hour'"
 	}
 	return `strftime('%Y-%m-%d %H:%M:%f','now','-1 hours')`
 }
