@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -135,6 +136,18 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 	deadline := s.claimSelfFenceDeadlineOrDefault()
 	lease := s.claimLeaseOrDefault()
 
+	// lastRenewal is the issue time of the most recent renewal the database
+	// accepted, and the watchdog below decides on it rather than on having
+	// been rescheduled. Reset cannot unschedule a callback the runtime has
+	// already dispatched — that is what its false return means, by which
+	// point the callback may be running — so a renewal that succeeds right at
+	// the deadline would otherwise fence a healthy engagement that still owns
+	// its claim. A pointer, not a unix count: the monotonic reading has to
+	// survive the round trip or the comparison is at the mercy of the wall
+	// clock.
+	var lastRenewal atomic.Pointer[time.Time]
+	lastRenewal.Store(&anchor)
+
 	// A separate timer rather than a second case in the select below, and
 	// rather than a check inside the loop body: a renewal call that blocks
 	// past its own deadline — a driver that ignores its context, a
@@ -142,6 +155,9 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 	// goroutine, and that is precisely the failure the fence exists for. The
 	// runtime's timer fires regardless of what this goroutine is doing.
 	watchdog := time.AfterFunc(time.Until(anchor.Add(deadline)), func() {
+		if elapsed := time.Since(*lastRenewal.Load()); elapsed < deadline {
+			return
+		}
 		dispatchLog.Warn("claim lease could not be renewed within the self-fence deadline; fencing this engagement",
 			"conversation", conv.ID, "claim", conv.ClaimID, "deadline", deadline)
 		fence(errClaimSelfFenced)
@@ -167,6 +183,10 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 
 		switch {
 		case err == nil:
+			// Published BEFORE the re-arm, so a callback dispatched in
+			// between reads this renewal and stands down rather than fencing
+			// on the deadline it was armed for.
+			lastRenewal.Store(&issuedAt)
 			// Re-arm from the issue time, so the network delay this call
 			// already spent counts against the next deadline.
 			watchdog.Reset(deadline - time.Since(issuedAt))

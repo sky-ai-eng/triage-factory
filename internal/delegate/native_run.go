@@ -768,11 +768,25 @@ func (s *Spawner) recordNativeResult(
 		return false
 	}
 
-	// Concluded. One last look at the file, exactly as processCompletion
-	// takes: a final turn that wrote after its last tool call is the whole
-	// reason the mirror is not the only read. No row is written when the agent
-	// wrote none — the state is logged instead, because each shape of "no
-	// file" points somewhere different when a run looks wrong afterwards.
+	// Concluded — which is not authority to record a conclusion. The lease
+	// fence cancels this context, and the loop can return a concluded result
+	// out of the window between its last cancellation check and its return.
+	// Everything below then runs on a context detached from that
+	// cancellation, and the database accepts the terminal until the lease has
+	// actually lapsed — so an engagement that can no longer prove it holds
+	// the claim would land a full conclusion anyway. Drop it: the session and
+	// the tree survive, and whoever takes the conversation over concludes it.
+	if leaseFenced(ctx) {
+		delegateLog.Warn("dropping a conclusion produced as the claim lease fenced; the conversation returns to the queue",
+			"conversation", conversationID, "claim", cfg.claimID)
+		return true
+	}
+
+	// One last look at the file: a final turn that wrote after its last tool
+	// call is the whole reason the mirror is not the only read. No row is
+	// written when the agent wrote none — the state is logged instead,
+	// because each shape of "no file" points somewhere different when a run
+	// looks wrong afterwards.
 	if fileState := mirror.settle(ctx); fileState != memoryFilePresent {
 		delegateLog.Debug("no usable memory file at termination (no memory row written)", "conversation", conversationID, "state", fileState)
 	}

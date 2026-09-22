@@ -63,6 +63,22 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 	t.Helper()
 	ctx := context.Background()
 
+	// Every fixture the suite builds is swept on the way out of the subtest
+	// that built it: no claim may be unreleased with no lease. Wrapped here
+	// rather than asserted per subtest so a case added later inherits it —
+	// and on SQLite this sweep IS the enforcement, since ALTER TABLE cannot
+	// add the CHECK Postgres carries.
+	build := mk
+	mk = func(t *testing.T) ClaimLeaseFixture {
+		f := build(t)
+		t.Cleanup(func() {
+			if n := f.LiveClaimsWithoutLease(t); n != 0 {
+				t.Errorf("%d live claims carry no lease at the end of this subtest", n)
+			}
+		})
+		return f
+	}
+
 	claim := func(t *testing.T, f ClaimLeaseFixture, conversationID string) *domain.Conversation {
 		t.Helper()
 		got, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, claimLeaseExecutor, claimLeaseBootEpoch, db.ClaimPlacement{}, testClaimLease)
@@ -88,9 +104,6 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		// is measured from database time, not from the caller's.
 		if drift := expiry.Sub(now.Add(testClaimLease)); drift > time.Second || drift < -time.Second {
 			t.Errorf("lease_expires_at = %s, want within 1s of database now + %s (drift %s)", expiry, testClaimLease, drift)
-		}
-		if n := f.LiveClaimsWithoutLease(t); n != 0 {
-			t.Errorf("%d live claims carry no lease after a mint", n)
 		}
 	})
 
