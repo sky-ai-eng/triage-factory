@@ -85,10 +85,11 @@ type ClaimPlacement struct {
 }
 
 // DefaultClaimLease is how long a minted or renewed claim's authority lasts
-// on database time — TF_CLAIM_TAKEOVER_SEC's default, and the only place the
-// number is spelled. The holder renews well inside it (TF_CLAIM_RENEW_SEC)
-// and fences itself before it lapses (TF_CLAIM_SELF_FENCE_SEC), so a lease
-// that actually expires means the holder is gone.
+// on database time, and the only place the number is spelled — the executor's
+// renewal cadence and self-fence deadline sit beside it in internal/delegate,
+// which reads this one. The holder renews well inside it and fences itself
+// before it lapses, so a lease that actually expires means the holder is
+// gone.
 const DefaultClaimLease = 75 * time.Second
 
 // ConversationQueueStore owns the claim loop — the ONE scan that finds

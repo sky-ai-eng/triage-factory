@@ -114,9 +114,16 @@ var _ Store = (*pgStore)(nil)
 //     not, and nothing but the claim's own expiry can tell.
 //
 // The lease arm is safe against a holder that is still working, because the
-// boot-checked knob ordering puts the holder's self-fence strictly before its
-// lease: a holder whose renewals stopped killed its own cell 30s (at the
-// defaults) before the lease this reads lapsed.
+// claim-lease timings put the holder's self-fence strictly before its lease:
+// a holder whose renewals stopped killed its own cell 30s before the lease
+// this reads lapsed.
+//
+// Both arms read now(), so both are frozen at the sweep's BEGIN and the three
+// UPDATEs below agree on one candidate set. Elsewhere a lease's liveness is
+// read on clock_timestamp(), because it answers for this instant; here the
+// sweep is the unit, and a claim that lapses between its statements waits for
+// the next tick rather than landing in whichever arm happened to run after
+// it.
 const reapCandidateJoin = `
 	FROM conversations r
 	JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
@@ -164,7 +171,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 		// of a reaper throwing it away the instant a host went quiet.
 		parkedBlueprintIDs, parkedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, nil, `
 			UPDATE conversations SET status = 'open', parked_at = COALESCE(parked_at, now()), park_reason = 'system_cancelled',
-				result_summary = 'Stopped: owning blueprint run was cancel-requested under a dead executor (reaper)'
+				result_summary = 'Stopped: owning blueprint run was cancel-requested after its executor engagement was lost (reaper)'
 			WHERE id IN (
 				SELECT r.id `+reapCandidateJoin+`
 				  AND br.cancel_requested = true
@@ -205,7 +212,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 			-- rather than having it relabelled as this failure.
 			UPDATE conversations SET status = 'failed', failure_kind = 'executor_lost', completed_at = now(),
 				ended_at = COALESCE(ended_at, now()), ended_reason = COALESCE(ended_reason, 'failed'),
-				result_summary = 'Failed: executor lost repeatedly and the retry budget (TF_MAX_CLAIM_ATTEMPTS) for this loss episode is exhausted (reaper)'
+				result_summary = 'Failed: the executor engagement was lost repeatedly (no heartbeat, or a lapsed claim lease) and the retry budget (TF_MAX_CLAIM_ATTEMPTS) for this loss episode is exhausted (reaper)'
 			WHERE id IN (
 				SELECT r.id `+reapCandidateJoin+`
 				  AND br.cancel_requested = false
@@ -244,7 +251,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 		_, requeuedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, &maxAttempts, `
 			UPDATE conversations SET
 				preferred_executor_id = NULL,
-				result_summary = 'Requeued: executor heartbeat stale (reaper)'
+				result_summary = 'Requeued: the executor engagement was lost — no heartbeat, or a lapsed claim lease (reaper)'
 			WHERE id IN (
 				SELECT r.id `+reapCandidateJoin+`
 				  AND br.cancel_requested = false

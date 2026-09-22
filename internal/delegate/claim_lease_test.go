@@ -77,13 +77,29 @@ func (f *fakeRenewalStore) seen() []renewalRecord {
 func leaseTestSpawner(t *testing.T, fake *fakeRenewalStore, renew, selfFence, lease time.Duration) *Spawner {
 	t.Helper()
 	s := NewSpawner(nil, db.Stores{ConversationQueue: fake}, nil, nil, "")
-	s.SetClaimLease(renew, selfFence, lease)
+	s.setClaimLease(renew, selfFence, lease)
 	return s
 }
 
 func leaseTestConversation() *domain.Conversation {
 	return &domain.Conversation{
 		ID: "conv-lease", OrgID: runmode.LocalDefaultOrgID, ClaimID: "claim-lease",
+	}
+}
+
+// TestClaimLeaseTimings holds the ordering the three constants have to keep:
+// a holder must have fenced itself before the lease it can no longer prove
+// lapses, and it must have tried to renew well before that. Nothing reads
+// these from the environment, so this is where a change to one of them
+// without the others is caught.
+func TestClaimLeaseTimings(t *testing.T) {
+	if DefaultClaimRenewInterval >= DefaultClaimSelfFenceDeadline {
+		t.Errorf("renew interval %s does not leave room for a retry before the self-fence at %s",
+			DefaultClaimRenewInterval, DefaultClaimSelfFenceDeadline)
+	}
+	if DefaultClaimSelfFenceDeadline >= DefaultClaimLease {
+		t.Errorf("self-fence at %s lands at or after the lease expiry at %s, so a successor could take a conversation its holder is still driving",
+			DefaultClaimSelfFenceDeadline, DefaultClaimLease)
 	}
 }
 
@@ -290,7 +306,7 @@ func TestDispatch_LostLeaseFencesTheEngagementWithoutWriting(t *testing.T) {
 		refuseAfter:            fetchEntered,
 	}
 	fx.s.conversationQueue = fake
-	fx.s.SetClaimLease(20*time.Millisecond, 10*time.Second, 30*time.Second)
+	fx.s.setClaimLease(20*time.Millisecond, 10*time.Second, 30*time.Second)
 
 	conv := fx.conv
 	conv.OrgID = runmode.LocalDefaultOrgID

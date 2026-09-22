@@ -1215,7 +1215,7 @@ const pgConversationColumns = `
 const pgDisplayStatusSQL = `COALESCE(
 		(SELECT cl_d.phase FROM claims cl_d
 		 WHERE cl_d.conversation_id = r.id AND cl_d.released_at IS NULL
-		   AND cl_d.lease_expires_at > now()),
+		   AND cl_d.lease_expires_at > clock_timestamp()),
 		CASE WHEN ` + liveClaimExistsSQL + ` THEN 'running' END,
 		CASE WHEN r.status IS NULL
 		       OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `)

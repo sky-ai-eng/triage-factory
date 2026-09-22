@@ -3,9 +3,6 @@ package delegate
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -13,49 +10,26 @@ import (
 )
 
 // DefaultClaimRenewInterval, DefaultClaimSelfFenceDeadline and
-// DefaultClaimLease are TF_CLAIM_RENEW_SEC, TF_CLAIM_SELF_FENCE_SEC and
-// TF_CLAIM_TAKEOVER_SEC's defaults. The ordering between them is the
-// correctness property — a holder must have stopped before the lease it can
-// no longer prove lapses — and internal/app refuses to boot on a
-// configuration that breaks it.
+// DefaultClaimLease are the per-claim lease timings: how often a holder
+// renews its claim, how long since its last successful renewal it waits
+// before fencing its own engagement, and how long the lease it renews lasts
+// on database time.
 //
-// The lease's default lives in internal/db, where the store that stamps it
-// is: the number is spelled once.
+// Constants, not operator knobs. The ordering between them is a correctness
+// property — a holder must have stopped before the lease it can no longer
+// prove lapses — so moving one without the others configures a takeover that
+// races a live engagement. And none of the three is deployment-shaped: they
+// bound how long a goroutine can go without writing one row, which does not
+// vary with the size of a fleet or the shape of a host. TestClaimLeaseTimings
+// holds the ordering.
+//
+// The lease's value lives in internal/db, where the store that stamps it is:
+// the number is spelled once.
 const (
 	DefaultClaimRenewInterval     = 20 * time.Second
 	DefaultClaimSelfFenceDeadline = 45 * time.Second
 	DefaultClaimLease             = db.DefaultClaimLease
 )
-
-// ParseClaimRenewInterval, ParseClaimSelfFenceDeadline and ParseClaimLease
-// parse TF_CLAIM_RENEW_SEC, TF_CLAIM_SELF_FENCE_SEC and
-// TF_CLAIM_TAKEOVER_SEC. Empty maps to the knob's default; anything else must
-// parse as a positive integer second count. Each knows only its own variable
-// — internal/app cross-validates the ordering between them, mirroring
-// ParseSelfFenceDeadline and internal/lease's per-knob parsers.
-func ParseClaimRenewInterval(raw string) (time.Duration, error) {
-	return parseClaimSeconds("TF_CLAIM_RENEW_SEC", raw, DefaultClaimRenewInterval)
-}
-
-func ParseClaimSelfFenceDeadline(raw string) (time.Duration, error) {
-	return parseClaimSeconds("TF_CLAIM_SELF_FENCE_SEC", raw, DefaultClaimSelfFenceDeadline)
-}
-
-func ParseClaimLease(raw string) (time.Duration, error) {
-	return parseClaimSeconds("TF_CLAIM_TAKEOVER_SEC", raw, DefaultClaimLease)
-}
-
-func parseClaimSeconds(name, raw string, fallback time.Duration) (time.Duration, error) {
-	v := strings.TrimSpace(raw)
-	if v == "" {
-		return fallback, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("invalid %s=%q (want a positive integer number of seconds)", name, raw)
-	}
-	return time.Duration(n) * time.Second, nil
-}
 
 // errClaimLeaseLost and errClaimSelfFenced are the two causes a claim context
 // can be cancelled with, and they are separate because they answer different
@@ -80,11 +54,12 @@ func leaseFenced(ctx context.Context) bool {
 	return errors.Is(cause, errClaimLeaseLost) || errors.Is(cause, errClaimSelfFenced)
 }
 
-// SetClaimLease installs the three claim-lease timings. Zero on any of them
-// falls back to that knob's package default at use time, the same shape
-// SetSelfFenceDeadline has. Set once at startup from internal/app, which has
-// already refused a boot whose ordering is wrong.
-func (s *Spawner) SetClaimLease(renew, selfFence, lease time.Duration) {
+// setClaimLease overrides the three claim-lease timings. Zero on any of them
+// falls back to that timing's package default at use time, the same shape
+// SetSelfFenceDeadline has. Nothing in the running product calls it: the
+// defaults above are the values, and this exists so the renewal loop can be
+// driven at test speed.
+func (s *Spawner) setClaimLease(renew, selfFence, lease time.Duration) {
 	s.mu.Lock()
 	s.claimRenewInterval = renew
 	s.claimSelfFenceDeadline = selfFence

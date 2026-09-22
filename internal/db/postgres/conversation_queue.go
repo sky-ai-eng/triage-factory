@@ -158,10 +158,16 @@ const activeClaimExistsSQL = `EXISTS (
 // second claim exist", and the answer to that is still no: idx_claims_one_active
 // refuses one while the expired row is unreleased, so a predicate that treated
 // it as absent would offer work the insert would then reject.
+//
+// clock_timestamp(), never now(): a lease is a question about this instant,
+// and now() is frozen at the start of a transaction that may have begun well
+// before the read. Every predicate deciding lease liveness spells it this
+// way, which is also what makes SQLite's per-statement 'now' the same
+// question rather than a near-miss.
 const liveClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_a
 		WHERE cl_a.conversation_id = r.id AND cl_a.released_at IS NULL
-		  AND cl_a.lease_expires_at > now())`
+		  AND cl_a.lease_expires_at > clock_timestamp())`
 
 // undeliveredInputExistsSQL matches drivable input: a plain user message
 // still awaiting delivery. Injections (subtype 'injection:…', including a

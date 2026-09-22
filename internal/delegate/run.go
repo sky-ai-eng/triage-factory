@@ -922,6 +922,26 @@ func (s *Spawner) processCompletion(
 		span.End()
 	}()
 
+	// A result in hand is not authority to record it. The lease fence cancels
+	// the step context, and the driver's select races that cancellation
+	// against the turn ending with no priority between them — so a conclusion
+	// that landed as the fence fired arrives here looking like any other. The
+	// writes below run on a context detached from exactly that cancellation,
+	// and the database refuses them only once the lease has actually lapsed,
+	// which leaves the window between the self-fence and expiry: a full
+	// terminal, snapshot and broadcast for an engagement that has already
+	// decided it cannot prove it holds the claim.
+	//
+	// So the result is dropped. Its session and worktree survive (parked), the
+	// lease lapses, and whoever picks the conversation up re-concludes it —
+	// one re-drive, against a write this engagement could not stand behind.
+	if leaseFenced(ctx) {
+		terminal = "fenced"
+		delegateLog.Warn("dropping a completion produced as the claim lease fenced; the conversation returns to the queue",
+			"conversation", conversationID, "claim_id", claimID, "org_id", orgID)
+		return true, true
+	}
+
 	// The key of the workspace (tree + snapshot) this run shares with every
 	// other conversation on its task. Derived from the task the caller already
 	// holds — no DB fetch, so it can't silently fall back to the wrong key on a

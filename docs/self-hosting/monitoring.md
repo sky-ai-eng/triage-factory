@@ -242,13 +242,15 @@ org admin to redrive or cancel; the same rows are `POST
 ### Claims
 
 A **claim** is one executor's engagement with one conversation, and it carries
-a lease (`TF_CLAIM_TAKEOVER_SEC`, default 75s) its holder renews every
-`TF_CLAIM_RENEW_SEC` (20s). A holder that cannot renew for
-`TF_CLAIM_SELF_FENCE_SEC` (45s) kills its own cell and writes nothing more, so
-a claim whose lease has actually lapsed belongs to an engagement that has
-stopped. Both gauges are read from the database by the control pod's
-background brain, deliberately not by any dispatcher: a stuck dispatcher is
-what produces these rows, so it must not be what reports them.
+a 75-second lease its holder renews every 20s. A holder that cannot renew for
+45s kills its own cell and writes nothing more, so a claim whose lease has
+actually lapsed belongs to an engagement that has stopped. The three timings
+are constants, not knobs: their ordering is what makes a takeover safe, so
+they move together or not at all.
+
+Both gauges are read from the database by the control pod's background brain,
+deliberately not by any dispatcher: a stuck dispatcher is what produces these
+rows, so it must not be what reports them.
 
 | Metric | Meaning |
 | -- | -- |
