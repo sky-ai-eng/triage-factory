@@ -1460,6 +1460,12 @@ func runningRunFixture(t *testing.T, database *sql.DB, suffix string) (taskID, c
 func assertRequeueStoppedTheRun(t *testing.T, database *sql.DB, taskID, conversationID, blueprintRunID string) {
 	t.Helper()
 
+	// The route records the stop; nothing holds the fixture's conversation, so
+	// the dispatcher's settlement is what parks it and cancels its run.
+	if _, err := sqlitestore.New(database).ConversationQueue.SettleUnclaimedStopsSystem(context.Background()); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+
 	var convStatus, parkReason string
 	if err := database.QueryRow(
 		`SELECT status, COALESCE(park_reason, '') FROM conversations WHERE id = ?`, conversationID,

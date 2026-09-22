@@ -1197,8 +1197,9 @@ func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id stri
 // holds claims-write privilege and the release rides the child-cancel
 // statement itself; non-nil means q is the RLS app handle (SELECT-only on
 // claims), so the release lands on that admin-backed queryer AFTER the tx
-// work — the same adjacent, janitor-healed split every app-pool terminal
-// write uses for its claim release.
+// work. The children it releases are parked, not terminal, so a release lost
+// between the two commits leaves a claim whose lease lapses and is released
+// like any dead engagement's.
 func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
 	if !isValidUUID(id) {
 		return false, nil
@@ -1264,9 +1265,9 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 	if adjacentClaims != nil && len(parkedChildIDs) > 0 {
 		// Adjacent, not atomic: when the app-side work is composed into a
 		// caller's still-open tx this release can land against a cancel that
-		// later rolls back (an in-flight child with no active claim), and a
-		// crash can leave parked children with dangling claims — both are
-		// the janitor-healed shapes the app-pool claim split already accepts.
+		// later rolls back (an in-flight child with no active claim, which is
+		// simply claimable), and a crash can leave parked children with
+		// claims whose leases lapse and are released as a dead engagement's.
 		return changed, releaseParkedChildClaims(ctx, adjacentClaims, orgID, parkedChildIDs)
 	}
 	return changed, nil
@@ -1292,7 +1293,8 @@ func parkOrphanedChildConversationsWithClaims(ctx context.Context, q queryer, or
 			SET status = 'open',
 			    parked_at = COALESCE(parked_at, now()),
 			    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
-			    result_summary = COALESCE(NULLIF(result_summary, ''), $3)
+			    result_summary = COALESCE(NULLIF(result_summary, ''), $3),
+			    stop_requested_at = NULL, stop_requested_by = NULL
 			WHERE org_id = $1 AND blueprint_run_id = $2 AND status IS NULL
 			RETURNING id
 		)
@@ -1312,7 +1314,8 @@ func parkOrphanedChildConversations(ctx context.Context, q queryer, orgID, bluep
 		SET status = 'open',
 		    parked_at = COALESCE(parked_at, now()),
 		    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
-		    result_summary = COALESCE(NULLIF(result_summary, ''), $3)
+		    result_summary = COALESCE(NULLIF(result_summary, ''), $3),
+		    stop_requested_at = NULL, stop_requested_by = NULL
 		WHERE org_id = $1 AND blueprint_run_id = $2 AND status IS NULL
 		RETURNING id
 	`, orgID, blueprintRunID, "Stopped: owning blueprint run reached a terminal state")

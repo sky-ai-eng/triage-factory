@@ -187,7 +187,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// and a failed conversation is exactly the one a person will want it
 		// from.
 		mirror.settle(ctx)
-		if !s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, creatorUserID, msg, kind) {
+		if !s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, msg, kind) {
 			return false
 		}
 		parked = true
@@ -218,8 +218,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			conversationID: conversationID,
 			namespace:      workspaceKey(task.ID),
 			claudeCwd:      cfg.wtPath,
-			triggerType:    triggerType,
-			creatorUserID:  creatorUserID,
 			claimID:        cfg.claimID,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 			runtime:        domain.ConversationRuntimeSDK,
@@ -641,8 +639,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 				conversationID: conversationID,
 				namespace:      namespace,
 				claudeCwd:      claudeCwd,
-				triggerType:    triggerType,
-				creatorUserID:  creatorUserID,
 				claimID:        cfg.claimID,
 				runtime:        domain.ConversationRuntimeSDK,
 				mirror:         mirror,
@@ -966,8 +962,6 @@ func (s *Spawner) processCompletion(
 			conversationID: conversationID,
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
-			triggerType:    triggerType,
-			creatorUserID:  creatorUserID,
 			claimID:        claimID,
 			reason:         db.ParkIdle(),
 			runtime:        domain.ConversationRuntimeSDK,
@@ -1053,9 +1047,6 @@ func (s *Spawner) processCompletion(
 	// WithoutCancel rather than Background: identical detachment (values
 	// kept, cancellation dropped) while the writes stay inside this
 	// engagement's trace instead of orphaning.
-	// Manual runs wrap in synthetic claims so the UPDATE passes RLS
-	// under tf_app with the creator's identity; event-triggered runs
-	// bypass via the admin pool.
 	bgCtx := context.WithoutCancel(ctx)
 
 	// A queued draft PR / pending review NO LONGER parks the run. The
@@ -1092,20 +1083,11 @@ func (s *Spawner) processCompletion(
 		}
 	}
 
-	var completeErr error
-	var completedRow *domain.Conversation
-	switch {
-	case claimID != "":
-		completedRow, completeErr = s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, claimID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
-	case triggerType == "manual":
-		completeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			r, err := ts.Conversations.Complete(bgCtx, orgID, conversationID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
-			completedRow = r
-			return err
-		})
-	default:
-		completedRow, completeErr = s.conversations.CompleteSystem(bgCtx, orgID, conversationID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
-	}
+	// The terminal goes through the fence alone: it is the holder's write,
+	// and a claimless caller has no engagement to speak for. An empty claimID
+	// is refused by the store as a released claim, which lands in the branch
+	// below and records nothing.
+	completedRow, completeErr := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, claimID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
 	if errors.Is(completeErr, db.ErrClaimReleased) {
 		// A successor owns the conversation, so this result is not the run's
 		// disposition — it is the output of an engagement that lost its

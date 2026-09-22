@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -117,8 +118,8 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, priorOutcomes ...string)
 				t.Fatalf("RequeueConversation (claim %d): %v", i+1, err)
 			}
 		case "cancelled":
-			if ok, err := stores.Conversations.ParkOpen(ctx, orgID, conversationID, db.ParkStopped("user_cancelled", "")); err != nil || !ok {
-				t.Fatalf("ParkOpen (claim %d): ok=%v err=%v", i+1, ok, err)
+			if ok, err := dbtest.HolderPark(stores.Conversations, ctx, orgID, conversationID, db.ParkStopped("user_cancelled", "")); err != nil || !ok {
+				t.Fatalf("park (claim %d): ok=%v err=%v", i+1, ok, err)
 			}
 			if ok, err := stores.Conversations.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
 				t.Fatalf("MarkQueuedForResume (claim %d): ok=%v err=%v", i+1, ok, err)
@@ -488,88 +489,6 @@ func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesClaimsExecutorID(t *te
 	}
 	if epoch != 1 {
 		t.Errorf("re-registered epoch = %d, want 1 (fresh row, no memory of the deleted one)", epoch)
-	}
-}
-
-// TestHealClaimDesyncs_ReleasesTerminalDanglingClaims pins the periodic
-// janitor: a terminal conversation with a dangling active claim gets the
-// claim released (outcome mapped from status), while a healthy engaged conversation
-// and a mid-flight claimless one are both untouched. That last shape used to
-// be the janitor's second arm — under the derived model a released claim on
-// a mid-flight conversation IS the requeue, so there is nothing left to heal
-// about it.
-func TestHealClaimDesyncs_ReleasesTerminalDanglingClaims(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	ctx := context.Background()
-
-	// Crash-after-flip: the conversation committed terminal but its claim
-	// release never landed.
-	terminal := seedReaperFixture(t, h)
-	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = 'completed' WHERE id = $1`, terminal.conversationID)
-
-	// Healthy: mid-flight with a live claim. Seeded BEFORE the claimless
-	// fixture below, because the claim is cross-org and takes the oldest
-	// eligible conversation — a conversation left claimable would be picked up by the
-	// next fixture's claim instead of its own.
-	healthy := seedReaperFixture(t, h)
-
-	// Mid-flight with the claim released: the ordinary claimable state now,
-	// stale placement stamp and all (the next claim re-earns affinity).
-	claimless := seedReaperFixture(t, h)
-	pgtest.MustExec(t, h.AdminDB, `
-		UPDATE claims SET released_at = now(), outcome = 'failed'
-		WHERE conversation_id = $1 AND released_at IS NULL
-	`, claimless.conversationID)
-	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = 'exec-dead' WHERE id = $1`, claimless.conversationID)
-
-	store := reaper.NewPostgresStore(h.AdminDB)
-	released, err := store.HealClaimDesyncs(ctx)
-	if err != nil {
-		t.Fatalf("HealClaimDesyncs: %v", err)
-	}
-	if released != 1 {
-		t.Fatalf("released = %d, want 1", released)
-	}
-
-	var rel bool
-	var outcome string
-	if err := h.AdminDB.QueryRowContext(ctx, `
-		SELECT released_at IS NOT NULL, COALESCE(outcome, '') FROM claims
-		WHERE conversation_id = $1 ORDER BY claimed_at DESC LIMIT 1
-	`, terminal.conversationID).Scan(&rel, &outcome); err != nil {
-		t.Fatalf("read terminal row's claim: %v", err)
-	}
-	if !rel || outcome != "completed" {
-		t.Errorf("terminal row's claim = (released=%v, outcome=%q), want (true, completed)", rel, outcome)
-	}
-
-	var status sql.NullString
-	var pref any
-	if err := h.AdminDB.QueryRowContext(ctx, `
-		SELECT status, preferred_executor_id FROM conversations WHERE id = $1
-	`, claimless.conversationID).Scan(&status, &pref); err != nil {
-		t.Fatalf("read claimless row: %v", err)
-	}
-	if status.Valid {
-		t.Errorf("claimless row status = %q, want none (already claimable)", status.String)
-	}
-
-	var healthyStatus sql.NullString
-	var active int
-	if err := h.AdminDB.QueryRowContext(ctx, `
-		SELECT c.status, (SELECT COUNT(*) FROM claims WHERE conversation_id = c.id AND released_at IS NULL)
-		FROM conversations c WHERE c.id = $1
-	`, healthy.conversationID).Scan(&healthyStatus, &active); err != nil {
-		t.Fatalf("read healthy row: %v", err)
-	}
-	if healthyStatus.Valid || active != 1 {
-		t.Errorf("healthy row = (status=%q, active claims=%d), want (none, 1)", healthyStatus.String, active)
-	}
-
-	// Idempotent: a second sweep finds nothing.
-	if released, err := store.HealClaimDesyncs(ctx); err != nil || released != 0 {
-		t.Errorf("second sweep = (%d, %v), want (0, nil)", released, err)
 	}
 }
 

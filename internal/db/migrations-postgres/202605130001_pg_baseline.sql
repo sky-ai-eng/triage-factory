@@ -1073,6 +1073,14 @@ CREATE TABLE public.conversations (
     -- parked, or resumed since. The model's stop reason lives on
     -- messages.stop_reason. The Go sets are the authority for both vocabularies.
     park_reason text,
+    -- Stop intent. A request path sets these and never touches status; the
+    -- holder, or the dispatcher for a conversation nobody holds, settles the
+    -- stop by parking the row and clears them in the same write. NULL
+    -- stop_requested_by is a system stop (a task closing, a team archive);
+    -- a user id is the person who asked. Every status write clears both.
+    -- Text rather than a users FK: deleting a user must not cascade a stop away.
+    stop_requested_at timestamp with time zone,
+    stop_requested_by text,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
     -- Stamped on park, cleared on resume; the snapshot-retention sweep keys off it.
@@ -3234,6 +3242,8 @@ CREATE INDEX idx_conversations_org_team         ON public.conversations (org_id,
 -- partial on the NULL arm of the needs-driving predicate. The other arm (a
 -- parked 'open' conversation woken by input) is served by idx_messages_undelivered.
 CREATE INDEX idx_conversations_needs_driving ON public.conversations (started_at, id) WHERE (status IS NULL);
+-- Pending stops: the dispatcher's settlement and the claim gate's exclusion.
+CREATE INDEX idx_conversations_stop_requested ON public.conversations USING btree (org_id, id) WHERE (stop_requested_at IS NOT NULL);
 -- The boundary anti-join: "the task's conversations that have already ended".
 -- Partial on the stamped arm because a live task has none of them and the
 -- reads that consult it are asking which rows to exclude.

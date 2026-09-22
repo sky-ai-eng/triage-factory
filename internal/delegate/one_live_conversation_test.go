@@ -126,6 +126,15 @@ func TestDelegate_ReDelegateAfterTeardown_Succeeds(t *testing.T) {
 		runmode.LocalDefaultUserID, StopCauseTaskDelegated); err != nil {
 		t.Fatalf("StopConversationAndCancelBlueprint: %v", err)
 	}
+	// The teardown is a request: until the stop is settled the old run still
+	// holds the task, and a delegate in that window is refused rather than
+	// minting beside it.
+	if _, err := s.Delegate(task, opts); !errors.Is(err, ErrTaskBusy) {
+		t.Fatalf("re-delegate before the stop settled = %v, want ErrTaskBusy", err)
+	}
+	// Nothing holds the queued step, so the dispatcher settles it — and the
+	// run with it, since the teardown raised its cancel.
+	s.settleUnclaimedStops(ctx)
 	if br, err := stores.Blueprints.GetRunSystem(ctx, runmode.LocalDefaultOrgID, first); err != nil || br == nil ||
 		br.Status == domain.BlueprintRunStatusRunning {
 		t.Fatalf("the teardown left the blueprint running (%+v, err=%v); the task would be locked out forever", br, err)

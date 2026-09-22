@@ -440,8 +440,9 @@ type RunController interface {
 	Steer(ctx context.Context, conversationID, text string) error
 	// Cancel signals the run's process to terminate (SIGKILL via the
 	// registered ctx cancel). Reports whether a live handle was found; a
-	// false result means the run has no in-process goroutine and the
-	// caller must take the DB-only terminal path.
+	// false result means the run has no in-process goroutine here, and the
+	// stop intent the caller recorded is delivered by the signal or the
+	// holder's next lease renewal instead.
 	Cancel(conversationID string) (found bool)
 }
 

@@ -255,15 +255,6 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		if got, _ := fx.store.Get(ctx, fx.orgID, fx.conversationID); got.Status != "running" {
 			t.Errorf("status = %q, want running (the refused write must not land)", got.Status)
 		}
-		// The unfenced twin is what a user's cancel uses, and it still works
-		// on the same row — the fence gates the executor, not the person.
-		flipped, err := fx.store.ParkOpenSystem(ctx, fx.orgID, fx.conversationID, db.ParkStopped("user_cancelled", "Run cancelled by user"))
-		if err != nil || !flipped {
-			t.Fatalf("unfenced user cancel = (%v, %v), want it to flip", flipped, err)
-		}
-		if got, _ := fx.store.Get(ctx, fx.orgID, fx.conversationID); got.Status != "open" {
-			t.Errorf("status = %q, want open (a cancel parks; it never writes a terminal of its own)", got.Status)
-		}
 	})
 
 	t.Run("SetSession", func(t *testing.T) {

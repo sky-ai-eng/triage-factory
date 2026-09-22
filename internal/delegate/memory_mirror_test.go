@@ -332,6 +332,7 @@ func TestParkConversationOpen_FilesTheAgentsMemoryFile(t *testing.T) {
 	if fenced := s.parkConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: conversationID,
+		claimID:        holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID),
 		claudeCwd:      cwd,
 		reason:         db.ParkIdle(),
 		runtime:        domain.ConversationRuntimeSDK,
@@ -353,7 +354,7 @@ func TestRecordNativeResult_FailureFilesTheAgentsMemoryFile(t *testing.T) {
 	writeAgentMemory(t, cwd, "the tool host kept dropping; the work so far is on the branch")
 
 	if fenced := s.recordNativeResult(context.Background(), runmode.LocalDefaultOrgID, conversationID, task,
-		runConfig{orgID: runmode.LocalDefaultOrgID, blueprintRunID: "bpr-" + conversationID},
+		runConfig{orgID: runmode.LocalDefaultOrgID, blueprintRunID: "bpr-" + conversationID, claimID: holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID)},
 		"bpr-"+conversationID, cwd, "event", "", time.Now(),
 		agentloop.Result{Kind: agentloop.ResultFailed, FailureKind: domain.ConversationFailureAgentError}, mirror,
 	); fenced {
@@ -378,7 +379,7 @@ func TestProcessCompletion_ConclusionFilesWhatTheLastTurnWrote(t *testing.T) {
 	writeAgentMemory(t, cwd, "what the run actually concluded")
 
 	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
-		"bpr-"+conversationID, "", task, res(`{"outcome":"finish","summary":"done"}`), cwd, mirror, "", "event", "")
+		"bpr-"+conversationID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task, res(`{"outcome":"finish","summary":"done"}`), cwd, mirror, "", "event", "")
 	if parked || fenced {
 		t.Fatalf("processCompletion(finish) = (parked %v, fenced %v), want (false, false)", parked, fenced)
 	}

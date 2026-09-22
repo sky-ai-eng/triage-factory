@@ -73,8 +73,6 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			conversationID: conversationID,
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
-			triggerType:    triggerType,
-			creatorUserID:  creatorUserID,
 			claimID:        cfg.claimID,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 			runtime:        domain.ConversationRuntimeNative,
@@ -729,8 +727,6 @@ func (s *Spawner) recordNativeResult(
 			conversationID: conversationID,
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
-			triggerType:    triggerType,
-			creatorUserID:  creatorUserID,
 			claimID:        cfg.claimID,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 			runtime:        domain.ConversationRuntimeNative,
@@ -747,7 +743,7 @@ func (s *Spawner) recordNativeResult(
 		if result.Err != nil {
 			reason = result.Err.Error()
 		}
-		return s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, creatorUserID, reason, result.FailureKind)
+		return s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, reason, result.FailureKind)
 
 	case agentloop.ResultParked:
 		// The engagement stopped without concluding — a guard before a call,
@@ -759,8 +755,6 @@ func (s *Spawner) recordNativeResult(
 			conversationID: conversationID,
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
-			triggerType:    triggerType,
-			creatorUserID:  creatorUserID,
 			reason:         db.ParkIdle(),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,

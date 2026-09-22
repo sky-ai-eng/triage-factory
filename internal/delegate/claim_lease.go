@@ -32,14 +32,21 @@ const (
 	DefaultClaimLease             = db.DefaultClaimLease
 )
 
-// errClaimLeaseLost and errClaimSelfFenced are the two causes a claim context
-// can be cancelled with, and they are separate because they answer different
-// questions in a log: the first is the database saying this engagement is not
-// the owner, the second is this process saying it can no longer prove it is.
-// Both mean the same thing to every writer downstream — write nothing.
+// errClaimLeaseLost and errClaimSelfFenced are the two lease causes a claim
+// context can be cancelled with, and they are separate because they answer
+// different questions in a log: the first is the database saying this
+// engagement is not the owner, the second is this process saying it can no
+// longer prove it is. Both mean the same thing to every writer downstream —
+// write nothing.
+//
+// errStopRequested is the third cause, and the opposite answer: the renewal
+// read a pending stop off the conversation, so the engagement settles it as a
+// deliberate stop, exactly as it settles a local cancel. The lease is still
+// held, which is what lets that fenced park land.
 var (
 	errClaimLeaseLost  = errors.New("delegate: claim lease lost")
 	errClaimSelfFenced = errors.New("delegate: claim self-fenced after renewal failures")
+	errStopRequested   = errors.New("delegate: stop requested")
 )
 
 // leaseFenced reports whether ctx was cancelled by the claim's lease rather
@@ -126,6 +133,11 @@ func renewalCallTimeout(cadence time.Duration) time.Duration {
 // the runtime returns, the sidecar and jail are torn down on the way out, the
 // subprocess is killed. Killing the cell needs nothing new.
 //
+// A renewal that reads a pending stop cancels the claim context with
+// errStopRequested and keeps renewing: the engagement settles the stop through
+// its fenced park, and that park needs the lease to still be live when it
+// lands. ctx is not the claim context, so the fence does not end this loop.
+//
 // The loop stops when the engagement returns, so a renewal can be in flight
 // at the moment the engagement's own terminal write releases the claim. That
 // renewal is then refused, logged as a lost lease, and fences a context
@@ -166,6 +178,7 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 
 	ticker := time.NewTicker(cadence)
 	defer ticker.Stop()
+	stopObserved := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -178,7 +191,7 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 		// direction a self-fence deadline has to err in.
 		issuedAt := time.Now()
 		callCtx, cancel := context.WithTimeout(ctx, renewalCallTimeout(cadence))
-		expiry, err := s.conversationQueue.RenewClaimLeaseSystem(callCtx, conv.OrgID, conv.ID, conv.ClaimID, lease)
+		renewal, err := s.conversationQueue.RenewClaimLeaseSystem(callCtx, conv.OrgID, conv.ID, conv.ClaimID, lease)
 		cancel()
 
 		switch {
@@ -190,7 +203,13 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 			// Re-arm from the issue time, so the network delay this call
 			// already spent counts against the next deadline.
 			watchdog.Reset(deadline - time.Since(issuedAt))
-			dispatchLog.Debug("claim lease renewed", "conversation", conv.ID, "claim", conv.ClaimID, "expires_at", expiry)
+			dispatchLog.Debug("claim lease renewed", "conversation", conv.ID, "claim", conv.ClaimID, "expires_at", renewal.ExpiresAt)
+			if renewal.StopRequested && !stopObserved {
+				stopObserved = true
+				dispatchLog.Info("claim renewal observed a pending stop; stopping this engagement",
+					"conversation", conv.ID, "claim", conv.ClaimID, "requested_by", renewal.StopRequestedBy)
+				fence(errStopRequested)
+			}
 		case errors.Is(err, db.ErrClaimReleased):
 			// Definite: the lease is gone on database time. A retry cannot
 			// bring authority back, and there may be no successor at all —

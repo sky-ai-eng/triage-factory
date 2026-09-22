@@ -111,7 +111,7 @@ func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, nil, "", "event", "")
 
 	conv := loadConversation(t, s, conversationID)
@@ -137,7 +137,7 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 	before := readTaskStatus(t, database, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		res(`{"outcome":"abort","summary":"investigated the failure","reason":"needs a human to rotate the token"}`),
 		cwd, nil, "", "event", "")
 
@@ -172,7 +172,7 @@ func TestProcessCompletion_AbortMissingReasonFails(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`), cwd, nil, "", "event", "")
 
 	conv := loadConversation(t, s, conversationID)
@@ -195,7 +195,7 @@ func TestProcessCompletion_NoConclusionParksOpen(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		res(`this is not a JSON envelope`), cwd, nil, "", "event", "")
 
 	if !parked {
@@ -221,7 +221,7 @@ func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		res(`{"outcome":"finish"}`), cwd, nil, "", "event", "")
 
 	if parked {
@@ -242,7 +242,7 @@ func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
 // covered elsewhere.
 func TestProcessCompletion_FinishReturnsNotParked(t *testing.T) {
 	s, _, conversationID, taskID := setupAdvanceFixture(t, "pc-finish")
-	if parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "",
+	if parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID),
 		loadTask(t, s, taskID), res(`{"outcome":"finish","summary":"done"}`),
 		t.TempDir(), nil, "", "event", ""); parked {
 		t.Error("processCompletion(finish) = true; want false (terminal, not parked)")

@@ -811,69 +811,86 @@ func TestConversationQueueStore_SQLite_ReturnedRow(t *testing.T) {
 // SQLite impl. Each factory call opens a fresh in-memory DB so subtests don't
 // share state.
 func TestClaimLease_SQLite(t *testing.T) {
-	dbtest.RunClaimLeaseConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture {
-		t.Helper()
-		conn := openSQLiteForTest(t)
-		stores := sqlitestore.New(conn)
+	dbtest.RunClaimLeaseConformance(t, sqliteClaimLeaseFixture)
+}
 
-		seq := 0
-		return dbtest.ClaimLeaseFixture{
-			Stores: stores,
-			OrgID:  runmode.LocalDefaultOrgID,
-			StageStep: func(t *testing.T) (string, string) {
-				t.Helper()
-				seq++
-				conv := stageSqliteStep(t, conn, stores, fmt.Sprintf("rq-lease-%d", seq))
-				return conv.ID, conv.TaskID
-			},
-			SetLease: func(t *testing.T, claimID string, in time.Duration) {
-				t.Helper()
-				// Rendered by strftime, in the layout the column stores, for
-				// the same reason every production stamp is: the fence's `>`
-				// compares one text layout against itself.
-				if _, err := conn.Exec(
-					`UPDATE claims SET lease_expires_at = strftime('%Y-%m-%d %H:%M:%f','now',?) WHERE id = ?`,
-					fmt.Sprintf("%+.3f seconds", in.Seconds()), claimID,
-				); err != nil {
-					t.Fatalf("stage lease on %s: %v", claimID, err)
+// TestStopIntent_SQLite runs the shared stop-intent conformance on the same
+// fixture the claim-lease suite uses.
+func TestStopIntent_SQLite(t *testing.T) {
+	dbtest.RunStopIntentConformance(t, sqliteClaimLeaseFixture)
+}
+
+func sqliteClaimLeaseFixture(t *testing.T) dbtest.ClaimLeaseFixture {
+	t.Helper()
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+
+	seq := 0
+	return dbtest.ClaimLeaseFixture{
+		Stores: stores,
+		OrgID:  runmode.LocalDefaultOrgID,
+		StageStep: func(t *testing.T) (string, string) {
+			t.Helper()
+			seq++
+			conv := stageSqliteStep(t, conn, stores, fmt.Sprintf("rq-lease-%d", seq))
+			return conv.ID, conv.TaskID
+		},
+		SetLease: func(t *testing.T, claimID string, in time.Duration) {
+			t.Helper()
+			// Rendered by strftime, in the layout the column stores, for
+			// the same reason every production stamp is: the fence's `>`
+			// compares one text layout against itself.
+			if _, err := conn.Exec(
+				`UPDATE claims SET lease_expires_at = strftime('%Y-%m-%d %H:%M:%f','now',?) WHERE id = ?`,
+				fmt.Sprintf("%+.3f seconds", in.Seconds()), claimID,
+			); err != nil {
+				t.Fatalf("stage lease on %s: %v", claimID, err)
+			}
+		},
+		Lease: func(t *testing.T, claimID string) (time.Time, time.Time, bool) {
+			t.Helper()
+			// Both readings come back as the stored text and are parsed
+			// under one layout: the column is declared DATETIME, so
+			// letting the driver convert only one of the two would be
+			// comparing its rendering against the engine's.
+			var expiry sql.NullString
+			var now string
+			if err := conn.QueryRow(
+				`SELECT CAST(lease_expires_at AS TEXT), strftime('%Y-%m-%d %H:%M:%f','now') FROM claims WHERE id = ?`, claimID,
+			).Scan(&expiry, &now); err != nil {
+				t.Fatalf("read lease of %s: %v", claimID, err)
+			}
+			const layout = "2006-01-02 15:04:05.000"
+			parse := func(v string) time.Time {
+				parsed, err := time.Parse(layout, v)
+				if err != nil {
+					t.Fatalf("claim %s carries %q, not the layout the fence compares against: %v", claimID, v, err)
 				}
-			},
-			Lease: func(t *testing.T, claimID string) (time.Time, time.Time, bool) {
-				t.Helper()
-				// Both readings come back as the stored text and are parsed
-				// under one layout: the column is declared DATETIME, so
-				// letting the driver convert only one of the two would be
-				// comparing its rendering against the engine's.
-				var expiry sql.NullString
-				var now string
-				if err := conn.QueryRow(
-					`SELECT CAST(lease_expires_at AS TEXT), strftime('%Y-%m-%d %H:%M:%f','now') FROM claims WHERE id = ?`, claimID,
-				).Scan(&expiry, &now); err != nil {
-					t.Fatalf("read lease of %s: %v", claimID, err)
-				}
-				const layout = "2006-01-02 15:04:05.000"
-				parse := func(v string) time.Time {
-					parsed, err := time.Parse(layout, v)
-					if err != nil {
-						t.Fatalf("claim %s carries %q, not the layout the fence compares against: %v", claimID, v, err)
-					}
-					return parsed
-				}
-				if !expiry.Valid {
-					return time.Time{}, parse(now), false
-				}
-				return parse(expiry.String), parse(now), true
-			},
-			LiveClaimsWithoutLease: func(t *testing.T) int {
-				t.Helper()
-				var n int
-				if err := conn.QueryRow(
-					`SELECT COUNT(*) FROM claims WHERE released_at IS NULL AND lease_expires_at IS NULL`,
-				).Scan(&n); err != nil {
-					t.Fatalf("count live claims without a lease: %v", err)
-				}
-				return n
-			},
-		}
-	})
+				return parsed
+			}
+			if !expiry.Valid {
+				return time.Time{}, parse(now), false
+			}
+			return parse(expiry.String), parse(now), true
+		},
+		LiveClaimsWithoutLease: func(t *testing.T) int {
+			t.Helper()
+			var n int
+			if err := conn.QueryRow(
+				`SELECT COUNT(*) FROM claims WHERE released_at IS NULL AND lease_expires_at IS NULL`,
+			).Scan(&n); err != nil {
+				t.Fatalf("count live claims without a lease: %v", err)
+			}
+			return n
+		},
+		StageStaleStopIntent: func(t *testing.T, conversationID, status, by string) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE conversations SET status = ?, stop_requested_at = CURRENT_TIMESTAMP, stop_requested_by = NULLIF(?, '') WHERE id = ?`,
+				status, by, conversationID,
+			); err != nil {
+				t.Fatalf("stage stale stop intent on %s: %v", conversationID, err)
+			}
+		},
+	}
 }

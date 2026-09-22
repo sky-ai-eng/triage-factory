@@ -7,9 +7,10 @@ import "time"
 type ConversationSignalKind string
 
 const (
-	// ConversationSignalCancel hastens a live kill; the DB-only park
-	// write is already the source of truth and already works cross-pod, so
-	// this kind is fire-and-forget — never waited on.
+	// ConversationSignalCancel hastens a live kill; the stop intent it is
+	// inserted beside is the record, and the holder's next lease renewal
+	// reads that intent anyway, so this kind is fire-and-forget — never
+	// waited on.
 	ConversationSignalCancel ConversationSignalKind = "cancel"
 	// ConversationSignalInterrupt stops the conversation's current turn, leaving the process
 	// alive for further input.

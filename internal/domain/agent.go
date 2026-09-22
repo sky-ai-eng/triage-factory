@@ -408,6 +408,15 @@ type Conversation struct {
 	EndedAt     *time.Time
 	EndedReason EndedReason
 
+	// StopRequestedAt / StopRequestedBy are a pending stop: someone asked for
+	// this conversation to stop and neither its holder nor the dispatcher has
+	// settled it yet. Settling parks the row and clears both, so a set
+	// StopRequestedAt on a non-terminal conversation means "stopping". An
+	// empty StopRequestedBy with a set time is a system stop. The actor stays
+	// off the wire: the park_reason the settlement records is what says who.
+	StopRequestedAt *time.Time `json:"stop_requested_at,omitempty"`
+	StopRequestedBy string     `json:"-"`
+
 	WorktreePath  string
 	ResultSummary string
 

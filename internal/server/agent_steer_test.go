@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -151,24 +153,45 @@ func TestHandleMessage_EmptyTextRejected(t *testing.T) {
 	}
 }
 
-// TestHandleAgentStop_ParksAndLeavesBlueprintRunning is the endpoint's whole
-// contract: a conversation with no live process still stops — it parks — and the
-// blueprint behind it is left running and un-cancelled, which is what keeps the
-// parked conversation resumable.
-//
-// The former /cancel took the blueprint terminal with it and /interrupt did
-// not, so `open` meant "resumable" or "dead forever" depending on which button
-// the user pressed. Both paths are gone; this pins the one that replaced them.
-func TestHandleAgentStop_ParksAndLeavesBlueprintRunning(t *testing.T) {
+// TestHandleAgentStop_RecordsTheRequestAndLeavesBlueprintRunning is the
+// endpoint's whole contract: the POST records a stop intent and answers with
+// the conversation carrying it, its status untouched; nothing holds this
+// conversation, so the dispatcher's settlement parks it; and the blueprint
+// behind it is left running and un-cancelled, which is what keeps the parked
+// conversation resumable.
+func TestHandleAgentStop_RecordsTheRequestAndLeavesBlueprintRunning(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	conversationID := seedSteerConversation(t, s.db, "stop", "running")
+	conversationID := seedSteerConversation(t, s.db, "stop", "")
+	execSQL(t, s.db, `UPDATE conversations SET status = NULL WHERE id = ?`, conversationID)
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/stop", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (a conversation with no live process still stops — it parks)", rec.Code)
+	stop := func() map[string]any {
+		t.Helper()
+		rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/stop", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		return body
+	}
+	first := stop()
+	if first["stop_requested_at"] == nil {
+		t.Errorf("response carries no stop_requested_at: %v", first)
+	}
+	if got := first["Status"]; got != "queued" {
+		t.Errorf("response Status = %v, want queued — the request writes no status", got)
+	}
+	// A second POST while the first is pending is the same answer.
+	if second := stop(); second["stop_requested_at"] != first["stop_requested_at"] {
+		t.Errorf("second stop_requested_at = %v, want the first's %v", second["stop_requested_at"], first["stop_requested_at"])
 	}
 
+	if _, err := sqlitestore.New(s.db).ConversationQueue.SettleUnclaimedStopsSystem(context.Background()); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
 	var convStatus, stopReason, bpStatus string
 	var cancelRequested bool
 	if err := s.db.QueryRow(`
@@ -182,6 +205,58 @@ func TestHandleAgentStop_ParksAndLeavesBlueprintRunning(t *testing.T) {
 	}
 	if bpStatus != "running" || cancelRequested {
 		t.Errorf("blueprint = (%q, cancel_requested=%v), want (running, false) — a stop freezes the plan, it does not finalize it", bpStatus, cancelRequested)
+	}
+}
+
+// TestHandleAgentStop_TerminalConflicts: a concluded conversation has nothing
+// to stop, and the answer is the 409 its sibling /message gives.
+func TestHandleAgentStop_TerminalConflicts(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
+	conversationID := seedSteerConversation(t, s.db, "stop-done", "completed")
+
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/stop", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleBlueprintRunCancel_StepCarriesTheIntent: cancelling a run records
+// a stop intent on its step conversation and writes no status of its own; the
+// settlement that follows is what cancels the run.
+func TestHandleBlueprintRunCancel_StepCarriesTheIntent(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
+	conversationID := seedSteerConversation(t, s.db, "bp-cancel", "")
+	// The route addresses a run by uuid, so the fixture's run is re-seated
+	// under one: a copy, the original settled, the step moved across.
+	var oldID string
+	if err := s.db.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, conversationID).Scan(&oldID); err != nil {
+		t.Fatalf("read blueprint run: %v", err)
+	}
+	brID := fixtureUUID("br_bp-cancel")
+	execSQL(t, s.db, `UPDATE blueprint_runs SET status = 'completed' WHERE id = ?`, oldID)
+	execSQL(t, s.db, `
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, step_plan, worktree_path, creator_user_id, started_at)
+		SELECT ?, blueprint_id, task_id, trigger_type, 'running', step_plan, worktree_path, creator_user_id, started_at
+		  FROM blueprint_runs WHERE id = ?`, brID, oldID)
+	execSQL(t, s.db, `UPDATE conversations SET status = NULL, blueprint_run_id = ? WHERE id = ?`, brID, conversationID)
+
+	rec := doJSON(t, s, "POST", "/api/blueprint-runs/"+brID+"/cancel", nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+	var intent bool
+	var convStatus sql.NullString
+	var bpStatus string
+	if err := s.db.QueryRow(`
+		SELECT c.stop_requested_at IS NOT NULL, c.status, br.status
+		  FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
+		 WHERE c.id = ?`, conversationID).Scan(&intent, &convStatus, &bpStatus); err != nil {
+		t.Fatalf("read post-cancel state: %v", err)
+	}
+	if !intent || convStatus.Valid || bpStatus != "running" {
+		t.Errorf("after the cancel = (intent %v, status %v, run %q), want (set, none, running)", intent, convStatus, bpStatus)
 	}
 }
 

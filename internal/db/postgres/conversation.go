@@ -65,17 +65,12 @@ func claimOutcomeForStatus(status string) string {
 // already released (requeue, boot sweep). q must be admin-backed: tf_app
 // has no UPDATE grant on claims.
 //
-// On the non-System paths this release is deliberately ADJACENT to the
-// app-pool conversation flip rather than atomic with it: tf_app's
-// SELECT-only posture on claims is the structural guarantee that no
-// request-path tx can write claims, and it is worth more than
-// single-statement atomicity here. The two commits can therefore land
-// without each other — a rolled-back outer tx leaves an in-flight
-// conversation with no active claim, a crash between the commits leaves a
-// terminal conversation with a dangling one — and both shapes are healed by
-// the claim-desync janitor arms (ConversationQueueStore.ReconcileOrphanedConversations at
-// boot in both modes; the leader reaper's HealClaimDesyncs every tick), so
-// neither can strand a row past a sweep.
+// Every status write that releases a claim does so on the same transaction as
+// the flip, with one exception: MarkQueuedForResume, the app-pool re-arm,
+// releases on the admin pool after its flip commits. A crash between the two
+// leaves a mid-flight conversation holding a live claim, which is not a
+// terminal-with-claim desync: the claim gate treats it as driven until its
+// lease lapses, and expiry handling releases it like any dead engagement's.
 func releaseActiveClaim(ctx context.Context, q queryer, orgID, conversationID, outcome string) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE claims SET released_at = now(), outcome = $1
@@ -84,48 +79,16 @@ func releaseActiveClaim(ctx context.Context, q queryer, orgID, conversationID, o
 	return err
 }
 
-// Complete settles the cost lump and claim release on the admin pool FIRST,
-// then flips + RETURNINGs the conversation on the app pool — non-atomic by
-// design; see releaseActiveClaim for why the split is acceptable (the
-// janitor arms make both crash shapes self-healing). The order matters
-// beyond that: writeConversationReturning's derived columns (total_cost_usd,
-// duration_ms, num_turns, executor_id) come from claims/messages, so they
-// only agree with a follow-up Get if those tables already hold this call's
-// writes by the time the flip runs. Each admin-pool statement commits before
-// the next Go call starts, and Postgres's MVCC guarantees any later
-// transaction — including the app-pool flip below, on a different connection
-// entirely — sees a prior commit regardless of which role made it.
-func (s *conversationStore) Complete(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
-	if err := settleCompletionCostAndClaim(ctx, s.admin, orgID, conversationID, status, costUSD, durationMs, numTurns); err != nil {
-		return nil, err
-	}
-	return completeConversationFlip(ctx, s.q, orgID, conversationID, status, resultSummary, outcome, outcomeReason, failureKind)
-}
-
-func (s *conversationStore) CompleteSystem(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
-	var result *domain.Conversation
-	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := settleCompletionCostAndClaim(ctx, q, orgID, conversationID, status, costUSD, durationMs, numTurns); err != nil {
-			return err
-		}
-		r, err := completeConversationFlip(ctx, q, orgID, conversationID, status, resultSummary, outcome, outcomeReason, failureKind)
-		if err != nil {
-			return err
-		}
-		result = r
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
-// CompleteForClaimSystem is CompleteSystem with the fence in front of it, in
-// the same transaction as both the settlement and the flip. The claim it
-// releases is resolved the same way CompleteSystem resolves it (the
-// conversation's active claim) — which the fence has just proven to be
-// claimID, since only one claim per conversation can be unreleased at a time.
+// CompleteForClaimSystem is the terminal write: the fence, the cost
+// settlement, the claim release and the flip, in one transaction. The claim it
+// releases is resolved as the conversation's active claim — which the fence
+// has just proven to be claimID, since only one claim per conversation can be
+// unreleased at a time.
+//
+// The settlement runs before the flip because the flip RETURNINGs derived
+// columns (total_cost_usd, duration_ms, num_turns, executor_id) read from
+// claims and messages, and they only agree with a follow-up Get if those
+// tables already hold this call's writes.
 func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
@@ -242,12 +205,12 @@ func settleClaimCostLump(ctx context.Context, q queryer, orgID, conversationID, 
 	return nil
 }
 
-// settleCompletionCostAndClaim does everything Complete's terminal write
-// needs to happen BEFORE the conversation flip: locate the active claim,
-// settle the cost lump onto the messages ledger, and release the claim with
-// its telemetry. Split out from the conversations UPDATE (completeConversationFlip)
-// specifically so callers can run it first — see Complete's doc for why the
-// order is load-bearing now that the flip RETURNINGs derived columns.
+// settleCompletionCostAndClaim does everything the terminal write needs to
+// happen BEFORE the conversation flip: locate the active claim, settle the
+// cost lump onto the messages ledger, and release the claim with its
+// telemetry. Split out from the conversations UPDATE (completeConversationFlip)
+// so it can run first — see CompleteForClaimSystem for why the order is
+// load-bearing.
 func settleCompletionCostAndClaim(ctx context.Context, q queryer, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int) error {
 	// The active claim this terminal write releases identifies the
 	// engagement's own message rows (they insert claim-stamped), so the
@@ -272,9 +235,12 @@ func settleCompletionCostAndClaim(ctx context.Context, q queryer, orgID, convers
 // its caller's write — see settleCompletionCostAndClaim's doc.
 func completeConversationFlip(ctx context.Context, q queryer, orgID, conversationID, status, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	// The conversation carries no accounting cache — cost settled as one
-	// lump on the invocation's last message row above. A resume's Complete
+	// lump on the invocation's last message row above. A resume's terminal
 	// stamps its own invocation's lump on its own last row, so nothing
 	// accumulates or doubles.
+	//
+	// A pending stop is cleared rather than honored: the run concluded before
+	// the stop reached it, and the terminal is the truer record.
 	return writeConversationReturning(ctx, q, `
 		UPDATE conversations
 		SET status = $1,
@@ -282,7 +248,9 @@ func completeConversationFlip(ctx context.Context, q queryer, orgID, conversatio
 		    result_summary = $3,
 		    outcome = NULLIF($4, ''),
 		    outcome_reason = NULLIF($5, ''),
-		    failure_kind = NULLIF($6, '')
+		    failure_kind = NULLIF($6, ''),
+		    stop_requested_at = NULL,
+		    stop_requested_by = NULL
 		WHERE org_id = $7 AND id = $8
 		RETURNING *
 	`, status, time.Now().UTC(), resultSummary, outcome, outcomeReason, failureKind, orgID, conversationID)
@@ -299,34 +267,9 @@ func releaseActiveClaimWithTelemetry(ctx context.Context, q queryer, orgID, conv
 	return err
 }
 
-// ParkOpen's release is adjacent, not atomic — see releaseActiveClaim. An
-// 'open' row with a dangling claim needs no janitor arm of its own: the resume
-// flip (MarkQueuedForResume) releases any active claim on its way back to the
-// queue.
-func (s *conversationStore) ParkOpen(ctx context.Context, orgID, conversationID string, park db.Park) (bool, error) {
-	flipped, err := parkOpen(ctx, s.q, orgID, conversationID, park)
-	if err != nil || !flipped {
-		return flipped, err
-	}
-	return true, releaseActiveClaim(ctx, s.admin, orgID, conversationID, park.ClaimOutcome())
-}
-
-func (s *conversationStore) ParkOpenSystem(ctx context.Context, orgID, conversationID string, park db.Park) (bool, error) {
-	var flipped bool
-	err := inTx(ctx, s.admin, func(q queryer) error {
-		var err error
-		flipped, err = parkOpen(ctx, q, orgID, conversationID, park)
-		if err != nil || !flipped {
-			return err
-		}
-		return releaseActiveClaim(ctx, q, orgID, conversationID, park.ClaimOutcome())
-	})
-	return flipped, err
-}
-
-// ParkOpenForClaimSystem is ParkOpenSystem behind the fence — the self-park an
-// executor writes when its own run's ctx is killed. Its unfenced twin serves
-// the user-initiated cancel, which is deliberately not gated on ownership.
+// ParkOpenForClaimSystem is the only park: the fence, the flip and the claim
+// release in one transaction, so a park and its release commit together or
+// not at all.
 func (s *conversationStore) ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park db.Park) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.admin, func(q queryer) error {
@@ -358,7 +301,7 @@ func (s *conversationStore) SettleClaimCostSystem(ctx context.Context, orgID, co
 }
 
 // parkOpen is the one row-write behind every park — see
-// ConversationStore.ParkOpen for what `park` decides.
+// ConversationStore.ParkOpenForClaimSystem for what `park` decides.
 //
 // The exclusion list is the settled set, and the guard is an exclusion — so a
 // status missing from it doesn't refuse, it readmits. An `open` row with
@@ -367,6 +310,12 @@ func (s *conversationStore) SettleClaimCostSystem(ctx context.Context, orgID, co
 //
 // COALESCE on park_reason / result_summary rather than a bare assignment: a
 // park that carries neither must not blank what an earlier one recorded.
+//
+// A pending stop decides the reason whatever the caller passed, because the
+// intent is what records who asked, and every path that delivers a stop —
+// the local cancel, the cross-pod signal, the renewal, an idle turn-end that
+// happens to land first — reaches this write. The derivation is one CASE so a
+// further kind of stop is one more arm.
 func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park db.Park) (bool, error) {
 	// A deliberate stop re-parks an already-parked row; an idle turn-end does
 	// not. Spelled as an extra excluded status rather than two queries.
@@ -378,8 +327,13 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 		UPDATE conversations
 		SET status = 'open',
 		    parked_at = COALESCE(parked_at, $1),
-		    park_reason = COALESCE(NULLIF($2, ''), park_reason),
-		    result_summary = COALESCE(NULLIF($3, ''), result_summary)
+		    park_reason = CASE
+		        WHEN stop_requested_at IS NOT NULL AND stop_requested_by IS NULL THEN 'system_cancelled'
+		        WHEN stop_requested_at IS NOT NULL THEN 'user_cancelled'
+		        ELSE COALESCE(NULLIF($2, ''), park_reason) END,
+		    result_summary = COALESCE(NULLIF($3, ''), result_summary),
+		    stop_requested_at = NULL,
+		    stop_requested_by = NULL
 		WHERE org_id = $4 AND id = $5
 		  AND (status IS NULL
 		       OR status NOT IN (`+conversationTerminalStatusesSQL+reparkGuard+`))
@@ -438,6 +392,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE conversations SET status = NULL,
 		                parked_at = NULL, park_reason = NULL,
+		                stop_requested_at = NULL, stop_requested_by = NULL,
 		                queued_at = now(),
 		                preferred_executor_id = (
 		                    SELECT c.executor_id FROM claims c
@@ -751,9 +706,8 @@ func updateClaimReturning(ctx context.Context, q queryer, updateSQL string, args
 func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) (*domain.ExecutorClaim, error) {
 	// An empty executorID keeps the legacy clear semantics: the live
 	// engagement is over, so its claim releases as requeued. Written out
-	// rather than routed through the shared releaseActiveClaim helper (which
-	// ParkOpen/MarkFailedIfActive also use, unconverted) so this arm can
-	// RETURNING the row it just released.
+	// rather than routed through the shared releaseActiveClaim helper so this
+	// arm can RETURNING the row it just released.
 	if executorID == "" {
 		return updateClaimReturning(ctx, s.admin, `
 			UPDATE claims SET released_at = now(), outcome = 'requeued'
@@ -989,31 +943,7 @@ func setConversationWorktreePath(ctx context.Context, q queryer, orgID, conversa
 	`, path, orgID, conversationID)
 }
 
-// MarkFailedIfActive's release is adjacent, not atomic — see
-// releaseActiveClaim for the crash shapes and the janitor arms that heal
-// them.
-func (s *conversationStore) MarkFailedIfActive(ctx context.Context, orgID, conversationID, failureKind string) (bool, error) {
-	flipped, err := markFailedIfActive(ctx, s.q, orgID, conversationID, failureKind)
-	if err != nil || !flipped {
-		return flipped, err
-	}
-	return true, releaseActiveClaim(ctx, s.admin, orgID, conversationID, "failed")
-}
-
-func (s *conversationStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, conversationID, failureKind string) (bool, error) {
-	var flipped bool
-	err := inTx(ctx, s.admin, func(q queryer) error {
-		var err error
-		flipped, err = markFailedIfActive(ctx, q, orgID, conversationID, failureKind)
-		if err != nil || !flipped {
-			return err
-		}
-		return releaseActiveClaim(ctx, q, orgID, conversationID, "failed")
-	})
-	return flipped, err
-}
-
-// MarkFailedIfActiveForClaimSystem is MarkFailedIfActiveSystem behind the
+// MarkFailedIfActiveForClaimSystem is the infra-failure terminal behind the
 // fence. The two negative answers stay distinct: ok=false is the guarded
 // flip's own "somebody else reached the terminal first", ErrClaimReleased is
 // "you are not the one who gets to decide".
@@ -1038,12 +968,13 @@ func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context
 
 func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, failureKind string) (bool, error) {
 	// 'open' is deliberately failable here — see
-	// ConversationStore.MarkFailedIfActive: a warm 'open' conversation has no
-	// durable snapshot yet, so an infra error reaching failConversation must
-	// terminate it.
+	// ConversationStore.MarkFailedIfActiveForClaimSystem: a warm 'open'
+	// conversation has no durable snapshot yet, so an infra error reaching
+	// failConversation must terminate it.
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, $1),
-		    failure_kind = NULLIF($2, '')
+		    failure_kind = NULLIF($2, ''),
+		    stop_requested_at = NULL, stop_requested_by = NULL
 		WHERE org_id = $3 AND id = $4
 		  AND (status IS NULL
 		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
@@ -1186,7 +1117,8 @@ const pgConversationColumns = `
 	msum.input_tokens, msum.output_tokens, msum.cache_read_tokens, msum.cache_creation_tokens,
 	(rm.source IS DISTINCT FROM 'agent') AS memory_missing,
 	COALESCE(a.display_name, '') AS actor_agent_name,
-	r.ended_at, COALESCE(r.ended_reason, '')
+	r.ended_at, COALESCE(r.ended_reason, ''),
+	r.stop_requested_at, COALESCE(r.stop_requested_by, '')
 `
 
 // pgDisplayStatusSQL is the wire status: a four-rung ladder over state that
@@ -1448,6 +1380,44 @@ func (s *conversationStore) Get(ctx context.Context, orgID, conversationID strin
 
 func (s *conversationStore) GetSystem(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error) {
 	return getConversation(ctx, s.admin, orgID, conversationID)
+}
+
+// RequestStopSystem writes the intent and, when a target is named, the
+// cross-pod cancel signal on one admin-pool transaction. The COALESCEs are the
+// idempotence: a repeated request neither restamps the time nor overwrites who
+// asked first.
+func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string) (bool, error) {
+	requested := false
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		var id string
+		err := q.QueryRowContext(ctx, `
+			UPDATE conversations
+			SET stop_requested_at = COALESCE(stop_requested_at, now()),
+			    stop_requested_by = COALESCE(stop_requested_by, NULLIF($1, ''))
+			WHERE org_id = $2 AND id = $3
+			  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+			RETURNING id
+		`, by, orgID, conversationID).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		requested = true
+		if signalTarget == "" {
+			return nil
+		}
+		_, err = q.ExecContext(ctx, `
+			INSERT INTO conversation_signals (org_id, conversation_id, kind, payload, target, created_at)
+			VALUES ($1::uuid, $2::uuid, $3, NULL, $4, now())
+		`, orgID, conversationID, string(domain.ConversationSignalCancel), signalTarget)
+		return err
+	})
+	if err != nil {
+		return false, wrapAdminPoolPermErr(err, "conversations.RequestStopSystem")
+	}
+	return requested, nil
 }
 
 func (s *conversationStore) LookupOrgForConversationSystem(ctx context.Context, conversationID string) (string, error) {
@@ -2510,7 +2480,7 @@ type conversationScanner interface {
 // destinations for whatever a caller appended to that list — the list read's
 // queue position, today — in the order it appended them.
 func scanConversation(sc conversationScanner, r *domain.Conversation, extra ...any) error {
-	var queuedAt, claimedAt, completedAt, endedAt sql.NullTime
+	var queuedAt, claimedAt, completedAt, endedAt, stopRequestedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var blueprintRunID sql.NullString
@@ -2522,9 +2492,13 @@ func scanConversation(sc conversationScanner, r *domain.Conversation, extra ...a
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName, &endedAt, &endedReason,
+		&stopRequestedAt, &r.StopRequestedBy,
 	}
 	if err := sc.Scan(append(dest, extra...)...); err != nil {
 		return err
+	}
+	if stopRequestedAt.Valid {
+		r.StopRequestedAt = &stopRequestedAt.Time
 	}
 	r.FailureKind = domain.ConversationFailureKind(failureKind)
 	r.ParkReason = domain.ParkReason(parkReason)

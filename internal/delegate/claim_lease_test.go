@@ -42,12 +42,15 @@ type fakeRenewalStore struct {
 	// context — the driver that ignores its deadline, which is exactly the
 	// failure the watchdog's own timer exists for.
 	block chan struct{}
+	// stop, when set, is the stop intent every successful renewal reads back
+	// off the conversation.
+	stop *db.ClaimRenewal
 }
 
-func (f *fakeRenewalStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (time.Time, error) {
+func (f *fakeRenewalStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (db.ClaimRenewal, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, renewalRecord{orgID, conversationID, claimID, lease, time.Now()})
-	block, err, gate := f.block, f.err, f.refuseAfter
+	block, err, gate, stop := f.block, f.err, f.refuseAfter, f.stop
 	f.mu.Unlock()
 	if block != nil {
 		<-block
@@ -60,9 +63,13 @@ func (f *fakeRenewalStore) RenewClaimLeaseSystem(ctx context.Context, orgID, con
 		}
 	}
 	if err != nil {
-		return time.Time{}, err
+		return db.ClaimRenewal{}, err
 	}
-	return time.Now().Add(lease), nil
+	out := db.ClaimRenewal{ExpiresAt: time.Now().Add(lease)}
+	if stop != nil {
+		out.StopRequested, out.StopRequestedBy = stop.StopRequested, stop.StopRequestedBy
+	}
+	return out, nil
 }
 
 func (f *fakeRenewalStore) seen() []renewalRecord {
@@ -342,4 +349,43 @@ func TestDispatch_LostLeaseFencesTheEngagementWithoutWriting(t *testing.T) {
 	if rows := fx.transcript(t); len(rows) != 0 {
 		t.Errorf("transcript = %+v, want nothing written", rows)
 	}
+}
+
+// TestRenewClaimLease_PendingStopCancelsAndKeepsRenewing: a renewal that
+// reads a pending stop cancels the claim context with errStopRequested — a
+// stop, not a lease fence, so the engagement settles it as a deliberate park —
+// and keeps renewing, because that park needs the lease to still be live when
+// it lands.
+func TestRenewClaimLease_PendingStopCancelsAndKeepsRenewing(t *testing.T) {
+	fake := &fakeRenewalStore{stop: &db.ClaimRenewal{StopRequested: true, StopRequestedBy: "user-x"}}
+	s := leaseTestSpawner(t, fake, 10*time.Millisecond, time.Minute, 90*time.Second)
+
+	claimCtx, fence := context.WithCancelCause(context.Background())
+	defer fence(nil)
+	loopCtx, stopLoop := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.renewClaimLease(loopCtx, leaseTestConversation(), time.Now(), fence) }()
+
+	select {
+	case <-claimCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("a renewal reading a pending stop never cancelled the claim context")
+	}
+	if cause := context.Cause(claimCtx); !errors.Is(cause, errStopRequested) {
+		t.Fatalf("cause = %v, want errStopRequested", cause)
+	}
+	if leaseFenced(claimCtx) {
+		t.Error("leaseFenced reads a stop as a lease fence; the engagement would write nothing instead of settling it")
+	}
+
+	seen := len(fake.seen())
+	deadline := time.Now().Add(5 * time.Second)
+	for len(fake.seen()) < seen+3 {
+		if time.Now().After(deadline) {
+			t.Fatal("the loop stopped renewing after the stop; the settling park would find its lease lapsed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stopLoop()
+	<-done
 }

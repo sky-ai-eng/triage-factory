@@ -25,8 +25,8 @@ func AssertBlueprintStepIndexed(conv domain.Conversation) error {
 	return nil
 }
 
-// OrphanedStepCheck is what ReconcileOrphanedConversations' checker arm found:
-// 'running' blueprint_runs holding no conversation at the step their
+// OrphanedStepCheck is what ReconcileOrphanedConversations' checker arms found.
+// The first is 'running' blueprint_runs holding no conversation at the step their
 // current_step_index names. The store counts and samples; the caller logs,
 // because the store layer holds no logger and the finding is the caller's to
 // report.
@@ -51,9 +51,37 @@ type OrphanedStepCheck struct {
 	// Sample is up to OrphanedStepSampleLimit blueprint_run ids, oldest
 	// first — enough to go look, bounded so one log line stays a log line.
 	Sample []string
+
+	// ClaimDesyncs counts terminal conversations still holding an unreleased
+	// claim. Every status write releases its claim on the same transaction as
+	// the flip and a request path writes no status, so this is a broken
+	// invariant too: reported, never repaired.
+	ClaimDesyncs int
+	// ClaimDesyncSample is up to OrphanedStepSampleLimit of those
+	// conversation ids, oldest first.
+	ClaimDesyncSample []string
 }
 
-// OrphanedStepSampleLimit caps OrphanedStepCheck.Sample.
+// ClaimRenewal is what a successful lease renewal answers: the new expiry, and
+// whether a stop is pending on the conversation the claim holds, with who
+// asked ("" for a system stop).
+type ClaimRenewal struct {
+	ExpiresAt       time.Time
+	StopRequested   bool
+	StopRequestedBy string
+}
+
+// SettledStop is one conversation SettleUnclaimedStopsSystem settled.
+// BlueprintRunID is "" when the conversation has no run, or when this
+// settlement did not cancel it (a plain stop, or a run already concluded).
+type SettledStop struct {
+	OrgID, ConversationID string
+	BlueprintRunID        string
+	StepIndex             *int
+}
+
+// OrphanedStepSampleLimit caps OrphanedStepCheck.Sample and
+// OrphanedStepCheck.ClaimDesyncSample.
 const OrphanedStepSampleLimit = 20
 
 // ClaimPlacement configures the placement-aware, two-tier claim (TFAC-587,
@@ -186,7 +214,28 @@ type ConversationQueueStore interface {
 	// split without opening a window where an expired lease renews. Bookkeeping
 	// rather than a domain write, so it is a documented exemption from the
 	// returned-row rule — the expiry it returns IS what it persisted.
-	RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (time.Time, error)
+	//
+	// The same statement reads the conversation's stop intent back, so the
+	// holder learns of a pending stop within one renewal even when the local
+	// cancel handle and the cross-pod signal both missed it.
+	RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (ClaimRenewal, error)
+
+	// SettleUnclaimedStopsSystem parks every stop-requested conversation that
+	// no live claim holds, marks a cancel-requested blueprint run behind one
+	// cancelled, and clears the intent, in one transaction. A terminal
+	// conversation with a stale intent has only the intent cleared. Returns
+	// the conversations settled, with the blueprint runs cancelled, for the
+	// caller's worktree cleanup and its firing wake.
+	//
+	// A plain stop leaves the blueprint running: that is what keeps the parked
+	// step resumable. Only a run whose cancel was already requested is
+	// cancelled, with the columns MarkRunStatusSystem writes for a cancel.
+	//
+	// "No live claim" is released_at alone, not the lease: a claim whose
+	// holder died is released by expiry handling first, and the next pass
+	// settles the row. Cross-org system sweep on the admin pool; concurrent
+	// passes skip each other's rows.
+	SettleUnclaimedStopsSystem(ctx context.Context) ([]SettledStop, error)
 
 	// ExpiredClaimsSystem counts live claims past their expiry across every
 	// org and reports how far past expiry the oldest is. Zero and 0 when
@@ -315,13 +364,10 @@ type ConversationQueueStore interface {
 	// BlueprintStore.MarkRunStatus prevents the desync going forward; this
 	// heals rows already broken at boot.
 	//
-	// It also runs the claim-desync janitor arm (Postgres: healClaimDesyncs;
-	// SQLite mirrors it) for the one shape the app-pool terminal writes can
-	// still strand — a terminal conversation with a dangling active claim,
-	// released with the outcome mapped from its status. The leader reaper
-	// repeats it periodically; here it runs at boot in both modes.
-	//
-	// And it runs one CHECKER, which repairs nothing: a 'running'
+	// And it runs two CHECKERS, which repair nothing. The first counts
+	// terminal conversations still holding an unreleased claim — a shape no
+	// writer produces, since every status write releases its claim on the
+	// same transaction and a request path writes no status. The second: a 'running'
 	// blueprint_run holding no conversation at the step its current_step_index
 	// names is counted and logged at error with a sample of ids. That shape is
 	// unreachable now that a firing commits its run and its first step in one

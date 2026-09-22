@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -234,8 +235,8 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, executorID, 1); err != nil {
 			t.Errorf("Conversations.SetExecutorSystem: %v", err)
 		}
-		if _, err := stores.Conversations.ParkOpenSystem(ctx, orgID, conversationID, db.ParkIdle()); err != nil {
-			t.Errorf("Conversations.ParkOpenSystem: %v", err)
+		if _, err := dbtest.HolderPark(stores.Conversations, ctx, orgID, conversationID, db.ParkIdle()); err != nil {
+			t.Errorf("holder park: %v", err)
 		}
 		if _, err := stores.Conversations.InsertMessageSystem(ctx, orgID, &domain.Message{
 			ConversationID: conversationID, Role: "assistant", Content: "hello",
@@ -251,9 +252,9 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		// The nonzero cost exercises the terminal settle's messages UPDATE
 		// (claims SELECT + newest-row fallback) under the executor role's
 		// grant set.
-		if _, err := stores.Conversations.CompleteSystem(ctx, orgID, conversationID, "completed", 0.01, 1000, 3,
+		if _, err := dbtest.HolderComplete(stores.Conversations, ctx, orgID, conversationID, "completed", 0.01, 1000, 3,
 			"did the thing", "completed", "", ""); err != nil {
-			t.Errorf("Conversations.CompleteSystem: %v", err)
+			t.Errorf("holder complete: %v", err)
 		}
 
 		if _, err := stores.ConversationQueue.ResetProcessingConversations(ctx, executorID, 1); err != nil {

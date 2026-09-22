@@ -159,8 +159,8 @@ func settleClaimCostLump(ctx context.Context, q queryer, conversationID, claimID
 	return nil
 }
 
-// completeConversationReturning does the terminal write Complete/CompleteSystem/
-// CompleteForClaimSystem all share, in the order the RETURNING contract needs:
+// completeConversationReturning does the terminal write CompleteForClaimSystem
+// makes, in the order the RETURNING contract needs:
 // the cost lump and the claim release run FIRST, and the conversations flip —
 // with the full Get-shaped RETURNING — runs LAST. The derived columns
 // (total_cost_usd, duration_ms, num_turns, executor_id) are correlated
@@ -202,7 +202,9 @@ func completeConversationReturning(ctx context.Context, q queryer, conversationI
 		    result_summary = ?,
 		    outcome = ?,
 		    outcome_reason = ?,
-		    failure_kind = ?
+		    failure_kind = ?,
+		    stop_requested_at = NULL,
+		    stop_requested_by = NULL
 		WHERE id = ?
 		RETURNING `+sqliteConversationReturningColumns, status, time.Now().UTC(), resultSummary,
 		nullIfEmpty(outcome), nullIfEmpty(outcomeReason), nullIfEmpty(failureKind),
@@ -217,10 +219,10 @@ func completeConversationReturning(ctx context.Context, q queryer, conversationI
 	return &r, nil
 }
 
-// Complete settles the terminal write on the caller's own transaction — see
+// complete settles the terminal write on the caller's own transaction — see
 // completeConversationReturning for the shared logic and why the statement
-// order inside it matters.
-func (s *conversationStore) Complete(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
+// order inside it matters. CompleteForClaimSystem is its only door.
+func (s *conversationStore) complete(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -239,7 +241,9 @@ func (s *conversationStore) Complete(ctx context.Context, orgID, conversationID,
 	return result, nil
 }
 
-func (s *conversationStore) ParkOpen(ctx context.Context, orgID, conversationID string, park db.Park) (bool, error) {
+// parkAndRelease is the park and its claim release on one transaction;
+// ParkOpenForClaimSystem is its only door.
+func (s *conversationStore) parkAndRelease(ctx context.Context, orgID, conversationID string, park db.Park) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
@@ -256,7 +260,7 @@ func (s *conversationStore) ParkOpen(ctx context.Context, orgID, conversationID 
 }
 
 // parkOpen is the one row-write behind every park — see
-// ConversationStore.ParkOpen for what `park` decides.
+// ConversationStore.ParkOpenForClaimSystem for what `park` decides.
 //
 // The exclusion list is the settled set, and the guard is an exclusion — so a
 // status missing from it doesn't refuse, it readmits. An `open` row with
@@ -264,7 +268,9 @@ func (s *conversationStore) ParkOpen(ctx context.Context, orgID, conversationID 
 // would hand it back to the dispatcher.
 //
 // COALESCE on park_reason / result_summary rather than a bare assignment: a
-// park that carries neither must not blank what an earlier one recorded.
+// park that carries neither must not blank what an earlier one recorded. A
+// pending stop decides the reason whatever the caller passed — see the
+// Postgres twin.
 func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Park) (bool, error) {
 	// A deliberate stop re-parks an already-parked row; an idle turn-end does
 	// not. Spelled as an extra excluded status rather than two queries.
@@ -276,8 +282,13 @@ func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Par
 		UPDATE conversations
 		SET status = 'open',
 		    parked_at = COALESCE(parked_at, ?),
-		    park_reason = COALESCE(NULLIF(?, ''), park_reason),
-		    result_summary = COALESCE(NULLIF(?, ''), result_summary)
+		    park_reason = CASE
+		        WHEN stop_requested_at IS NOT NULL AND stop_requested_by IS NULL THEN 'system_cancelled'
+		        WHEN stop_requested_at IS NOT NULL THEN 'user_cancelled'
+		        ELSE COALESCE(NULLIF(?, ''), park_reason) END,
+		    result_summary = COALESCE(NULLIF(?, ''), result_summary),
+		    stop_requested_at = NULL,
+		    stop_requested_by = NULL
 		WHERE id = ?
 		  AND (status IS NULL
 		       OR status NOT IN (`+conversationTerminalStatusesSQL+reparkGuard+`))
@@ -313,6 +324,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = NULL,
 			                parked_at = NULL, park_reason = NULL,
+			                stop_requested_at = NULL, stop_requested_by = NULL,
 			                queued_at = ?,
 			                preferred_executor_id = (
 			                    SELECT c.executor_id FROM claims c
@@ -505,9 +517,8 @@ func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conver
 	}
 	// An empty executorID keeps the legacy clear semantics: the live
 	// engagement is over, so its claim releases as requeued. Written out
-	// rather than routed through the shared releaseActiveClaim helper (which
-	// ParkOpen/MarkFailedIfActive also use, unconverted) so this arm can
-	// RETURNING the row it just released.
+	// rather than routed through the shared releaseActiveClaim helper so this
+	// arm can RETURNING the row it just released.
 	if executorID == "" {
 		row := s.q.QueryRowContext(ctx, `
 			UPDATE claims SET released_at = ?, outcome = 'requeued'
@@ -550,18 +561,21 @@ func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conver
 	return result, nil
 }
 
-func (s *conversationStore) MarkFailedIfActive(ctx context.Context, orgID, conversationID, failureKind string) (bool, error) {
+// markFailedIfActive is the infra-failure terminal and its claim release on
+// one transaction; MarkFailedIfActiveForClaimSystem is its only door.
+func (s *conversationStore) markFailedIfActive(ctx context.Context, orgID, conversationID, failureKind string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
 	// 'open' is deliberately failable here — see
-	// ConversationStore.MarkFailedIfActive: a warm 'open' run has no durable
+	// ConversationStore.MarkFailedIfActiveForClaimSystem: a warm 'open' run has no durable
 	// snapshot yet, so an infra error reaching failConversation must terminate it.
 	var flipped bool
 	err := inTx(ctx, s.q, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, ?),
-			    failure_kind = ?
+			    failure_kind = ?,
+			    stop_requested_at = NULL, stop_requested_by = NULL
 			WHERE id = ?
 			  AND (status IS NULL
 			       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
@@ -724,7 +738,8 @@ const sqliteConversationColumns = `
 	(SELECT COALESCE(SUM(m.cache_creation_tokens), 0) FROM messages m WHERE m.conversation_id = r.id) AS cache_creation_tokens,
 	(COALESCE(rm.source, '') <> 'agent') AS memory_missing,
 	COALESCE(a.display_name, '') AS actor_agent_name,
-	r.ended_at, COALESCE(r.ended_reason, '')
+	r.ended_at, COALESCE(r.ended_reason, ''),
+	r.stop_requested_at, COALESCE(r.stop_requested_by, '')
 `
 
 // sqliteDisplayStatusSQL is the wire status: the SQLite mirror of the
@@ -818,7 +833,7 @@ const sqliteConversationAttentionSQL = `(
 // allow inside RETURNING. A conversation_memory/agents row that doesn't exist
 // makes the subquery itself yield NULL, matching what the LEFT JOIN yields today.
 //
-// Used by every conversations-row write below (Complete, SetSession,
+// Used by every conversations-row write below (the terminal, SetSession,
 // SetWorktreePath and their System/ForClaimSystem twins) as `RETURNING ` +
 // sqliteConversationReturningColumns, always as the LAST statement of its
 // transaction — see completeConversationReturning for why order matters here.
@@ -845,7 +860,8 @@ const sqliteConversationReturningColumns = `
 	(SELECT COALESCE(SUM(m.cache_creation_tokens), 0) FROM messages m WHERE m.conversation_id = conversations.id) AS cache_creation_tokens,
 	(COALESCE((SELECT rm.source FROM conversation_memory rm WHERE rm.conversation_id = conversations.id), '') <> 'agent') AS memory_missing,
 	COALESCE((SELECT a.display_name FROM agents a WHERE a.id = conversations.actor_agent_id), '') AS actor_agent_name,
-	ended_at, COALESCE(ended_reason, '')
+	ended_at, COALESCE(ended_reason, ''),
+	stop_requested_at, COALESCE(stop_requested_by, '')
 `
 
 // sqliteReturningDisplayStatusSQL is sqliteDisplayStatusSQL rewritten against
@@ -1266,6 +1282,31 @@ func (s *conversationStore) GetSystem(ctx context.Context, orgID, conversationID
 	return s.Get(ctx, orgID, conversationID)
 }
 
+// RequestStopSystem writes the intent alone: local mode has no
+// conversation_signals table, and its holder is reached through the
+// in-process cancel handle, so the signal target is ignored.
+func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conversationID, by, _ string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var id string
+	err := s.q.QueryRowContext(ctx, `
+		UPDATE conversations
+		SET stop_requested_at = COALESCE(stop_requested_at, ?),
+		    stop_requested_by = COALESCE(stop_requested_by, NULLIF(?, ''))
+		WHERE id = ?
+		  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+		RETURNING id
+	`, time.Now().UTC(), by, conversationID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *conversationStore) LookupOrgForConversationSystem(ctx context.Context, conversationID string) (string, error) {
 	var orgID string
 	err := s.q.QueryRowContext(ctx, `SELECT org_id FROM conversations WHERE id = ?`, conversationID).Scan(&orgID)
@@ -1273,14 +1314,6 @@ func (s *conversationStore) LookupOrgForConversationSystem(ctx context.Context, 
 		return "", nil
 	}
 	return orgID, err
-}
-
-func (s *conversationStore) CompleteSystem(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
-	return s.Complete(ctx, orgID, conversationID, status, costUSD, durationMs, numTurns, resultSummary, outcome, outcomeReason, failureKind)
-}
-
-func (s *conversationStore) ParkOpenSystem(ctx context.Context, orgID, conversationID string, park db.Park) (bool, error) {
-	return s.ParkOpen(ctx, orgID, conversationID, park)
 }
 
 // workspaceKeyMembersSQL, workspaceKeyIdleSinceSQL and
@@ -1489,10 +1522,6 @@ func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, co
 	return s.SetWorktreePath(ctx, orgID, conversationID, path)
 }
 
-func (s *conversationStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, conversationID, failureKind string) (bool, error) {
-	return s.MarkFailedIfActive(ctx, orgID, conversationID, failureKind)
-}
-
 func (s *conversationStore) InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error) {
 	return s.InsertMessage(ctx, orgID, msg)
 }
@@ -1504,16 +1533,13 @@ func (s *conversationStore) InsertMessageSystem(ctx context.Context, orgID strin
 // refuses with db.ErrClaimReleased when the claim is gone or released. The
 // write set, the attribution and the resulting rows are the unfenced
 // counterparts' — what the fence adds is only the refusal, and the refusal is
-// not optional at N=1. Local mode has no reaper and no successor executor,
-// but it has the stop verb: a person stopping a conversation parks the row
-// and releases its claim without consulting the engagement, so an engagement
-// that was still bringing its runtime up when the stop landed reaches its next
-// write as the zombie the fence exists to catch. Refusing that write is what
-// keeps the agent from spawning into a conversation its user has stopped.
+// not optional at N=1: an engagement that stalled past its lease is the zombie
+// the fence exists to catch even with no successor executor (see
+// assertClaimActive).
 //
 // Each method wraps its unfenced twin in inTx so the check and the write share
-// one transaction; a twin that opens its own transaction (ParkOpen, Complete,
-// MarkFailedIfActive) nests harmlessly, since inTx passes an existing *sql.Tx
+// one transaction; a twin that opens its own transaction (parkAndRelease,
+// complete, markFailedIfActive) nests harmlessly, since inTx passes an existing *sql.Tx
 // straight through.
 //
 // Two are written out rather than delegated — SetExecutorForClaimSystem and
@@ -1607,7 +1633,7 @@ func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, c
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		r, err := (&conversationStore{q: q}).Complete(ctx, orgID, conversationID, status, costUSD, durationMs, numTurns, resultSummary, outcome, outcomeReason, failureKind)
+		r, err := (&conversationStore{q: q}).complete(ctx, orgID, conversationID, status, costUSD, durationMs, numTurns, resultSummary, outcome, outcomeReason, failureKind)
 		result = r
 		return err
 	})
@@ -1623,7 +1649,7 @@ func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		f, err := (&conversationStore{q: q}).MarkFailedIfActive(ctx, orgID, conversationID, failureKind)
+		f, err := (&conversationStore{q: q}).markFailedIfActive(ctx, orgID, conversationID, failureKind)
 		flipped = f
 		return err
 	})
@@ -1651,7 +1677,7 @@ func (s *conversationStore) ParkOpenForClaimSystem(ctx context.Context, orgID, c
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		f, err := (&conversationStore{q: q}).ParkOpen(ctx, orgID, conversationID, park)
+		f, err := (&conversationStore{q: q}).parkAndRelease(ctx, orgID, conversationID, park)
 		flipped = f
 		return err
 	})
@@ -2428,7 +2454,7 @@ type conversationScanner interface {
 
 // scanConversation scans sqliteConversationColumns into r.
 func scanConversation(sc conversationScanner, r *domain.Conversation) error {
-	var queuedAt, completedAt, endedAt sql.NullTime
+	var queuedAt, completedAt, endedAt, stopRequestedAt sql.NullTime
 	var claimedAt sql.NullString
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
@@ -2441,10 +2467,14 @@ func scanConversation(sc conversationScanner, r *domain.Conversation) error {
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName, &endedAt, &endedReason,
+		&stopRequestedAt, &r.StopRequestedBy,
 	); err != nil {
 		return err
 	}
 	r.EndedReason = domain.EndedReason(endedReason)
+	if stopRequestedAt.Valid {
+		r.StopRequestedAt = &stopRequestedAt.Time
+	}
 	return finalizeConversation(r, queuedAt, claimedAt, completedAt, endedAt, costUSD, durationMs, numTurns, blueprintStep,
 		model, parkReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
 }

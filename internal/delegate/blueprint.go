@@ -397,8 +397,8 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 // cancellation is spelled: from here the claim gate stops handing out this
 // blueprint's steps, and whichever path disposes of the running step finalizes
 // the blueprint 'cancelled' (reactToStepTerminal for a live step,
-// ResumeBlueprintAfterResume for a resumed one,
-// finalizeParkedBlueprintOnCancel for one that had already parked).
+// ResumeBlueprintAfterResume for a resumed one, the dispatcher's stop
+// settlement for one nobody holds).
 //
 // It returns the error rather than swallowing it because what follows a failed
 // signal differs by caller: a blueprint whose signal never committed is one
@@ -428,18 +428,21 @@ func (s *Spawner) requestBlueprintCancel(ctx context.Context, orgID, blueprintRu
 	}
 }
 
-// CancelBlueprintRun cancels every step inside a blueprint run, marks the
-// blueprint_run row cancelled, and lets the active step's runAgent return
-// naturally. Safe to call when the run is already terminal.
+// CancelBlueprintRun asks a blueprint run to end: it raises the run's cancel
+// signal, then records a stop intent on every step conversation that has not
+// concluded. It writes no conversation status and no run status. The step's
+// holder settles its stop through its own fenced park and the reactor behind
+// it finalizes the run 'cancelled'; a step nobody holds — queued, or parked
+// `open` — is settled by the dispatcher, which cancels the run in the same
+// transaction. Safe to call when the run is already terminal.
 //
-// userID identifies the actor for audit. The cancel is always a
-// user-initiated action (user clicked Cancel), so writes route under
-// the user's synthetic claims regardless of the underlying blueprint's
-// original trigger_type. In local mode callers pass
-// runmode.LocalDefaultUserID; multi-mode handlers extract the user
-// from JWT claims.
+// userID is the acting user and becomes each intent's actor, so the settlement
+// records the cancellation as theirs. In local mode callers pass
+// runmode.LocalDefaultUserID; multi-mode handlers extract the user from JWT
+// claims.
 func (s *Spawner) CancelBlueprintRun(orgID, blueprintRunID, userID string) error {
-	cr, err := s.blueprints.GetRunSystem(context.Background(), orgID, blueprintRunID)
+	ctx := context.Background()
+	cr, err := s.blueprints.GetRunSystem(ctx, orgID, blueprintRunID)
 	if err != nil {
 		return fmt.Errorf("load blueprint run: %w", err)
 	}
@@ -450,157 +453,55 @@ func (s *Spawner) CancelBlueprintRun(orgID, blueprintRunID, userID string) error
 		return nil
 	}
 
-	// Raise the DB sequence-cancel signal first (decision #3). From here the
-	// claim stops handing out this blueprint's queued steps, and the dispatcher's
-	// reactor finalizes the blueprint 'cancelled' instead of enqueuing the next
-	// step. This is the durable half of the cancel; the in-memory subprocess kill
-	// below is the active half.
-	s.requestBlueprintCancel(context.Background(), orgID, blueprintRunID)
+	// The run's own intent first. From here the claim gate stops handing out
+	// this blueprint's queued steps, and whichever writer settles a step's
+	// stop reads it and finalizes the run 'cancelled' rather than advancing.
+	s.requestBlueprintCancel(ctx, orgID, blueprintRunID)
 
-	// Kill the active step's subprocess, if one is running. The dispatcher
-	// registers a per-step cancel under the step conversation_id; sweep every active step
-	// run and cancel its handle.
-	//
-	// anyActive tracks whether at least one live subprocess got killed. If
-	// nothing was active — the blueprint is paused on an open/approval step, or a
-	// queued step that was never claimed — no dispatcher goroutine will run the
-	// reactor, so we drive terminateBlueprint ourselves below.
-	var anyActive bool
-	stepIDs, err := s.blueprints.ActiveStepConversationIDsSystem(context.Background(), orgID, blueprintRunID)
+	stepIDs, err := s.blueprints.ActiveStepConversationIDsSystem(ctx, orgID, blueprintRunID)
 	if err != nil {
-		// Couldn't enumerate the active step runs, so we can't target their
-		// subprocess kills — the cancel_requested signal above still stops the
-		// queue from advancing and we finalize the blueprint below, but a
-		// currently-running subprocess will run to completion (then short-circuit
-		// in the reactor on the non-running blueprint). Log so that wasteful execution
-		// is diagnosable.
-		blueprintLog.Warn("list active step conversations failed; a live subprocess may run to completion", "blueprint_run", blueprintRunID, "error", err)
-	} else {
-		s.mu.Lock()
-		for _, conversationID := range stepIDs {
-			if cancel, ok := s.cancels[conversationID]; ok {
-				cancel()
-				anyActive = true
-			}
-		}
-		s.mu.Unlock()
+		// The cancel signal above still keeps the run from advancing, but with
+		// no step carrying an intent nothing settles it, so the caller hears
+		// that the cancel did not take.
+		return fmt.Errorf("list active step conversations: %w", err)
 	}
-
-	if anyActive {
-		// A step subprocess is being killed — its runAgent will return cancelled
-		// and the reactor (seeing cancel_requested) will terminateBlueprint. Avoid
-		// double-marking here so the reactor's MarkRunStatus wins.
-		return nil
-	}
-
-	// No live subprocess: a queued-not-started step (cancels with zero work) or a
-	// parked step. Park every still-active step run so nothing lingers in the
-	// queue, then finalize the blueprint ourselves. The park keeps each step's
-	// workspace; the blueprint terminal below is what records the cancellation.
-	//
-	// Unfenced, deliberately: a user cancelling their blueprint overrides
-	// whoever holds its steps, and this process holds a claim on none of them
-	// (that is the branch condition). Same category as Spawner.Cancel.
-	for _, conversationID := range stepIDs {
-		if _, mErr := s.conversations.ParkOpenSystem(context.Background(), orgID, conversationID, db.ParkStopped(domain.ParkReasonBlueprintCancelled, "Blueprint cancelled by user")); mErr != nil {
-			blueprintLog.Warn("park cancelled step conversation failed", "step_conversation", conversationID, "error", mErr)
+	var errs []error
+	for _, id := range stepIDs {
+		// ErrNoActiveConversation is a step that concluded between the list
+		// and the intent write; the reactor reading its terminal sees the
+		// cancel signal and finalizes the run.
+		if err := s.requestStop(ctx, orgID, id, userID); err != nil && !errors.Is(err, ErrNoActiveConversation) {
+			errs = append(errs, fmt.Errorf("request stop for step conversation %s: %w", id, err))
 		}
 	}
-
-	// Paused blueprint: rebuild just enough cfg for terminateBlueprint's worktree
-	// cleanup (mirrors finalizeParkedBlueprintOnCancel — owner/repo/prNumber
-	// aren't persisted on blueprint_runs, so CleanupPRConfig is skipped).
-	task, err := s.tasks.GetSystem(context.Background(), orgID, cr.TaskID)
-	if err != nil || task == nil {
-		blueprintLog.Warn("load task for paused blueprint_run failed", "blueprint_run", blueprintRunID, "error", err)
-		// User-initiated cancel — write under the cancelling user's
-		// synthetic claims rather than the blueprint's original trigger
-		// identity. Audit shows "user X cancelled this blueprint".
-		var markErr error
-		_, markErr = s.markBlueprintRunStatusAsUser(context.Background(), orgID, userID, blueprintRunID, domain.BlueprintRunStatusCancelled, "user_cancelled", nil)
-		return markErr
-	}
-	cfg := runConfig{orgID: orgID, wtPath: cr.WorktreePath}
-	if task.EntitySource == "github" {
-		cfg.hasWT = true
-	}
-	// User-initiated cancel uses "manual" routing with the cancelling
-	// user's identity regardless of the blueprint's original trigger type.
-	s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
-		domain.BlueprintRunStatusCancelled, "user_cancelled", nil, false)
-	return nil
-}
-
-// finalizeParkedBlueprintOnCancel finalizes the owning blueprint_run when a
-// step run is torn down through the spawner's DB-only path
-// (StopConversationAndCancelBlueprint with no live orchestrator goroutine —
-// the step had parked, so the orchestrator already returned and nothing else
-// will mark the blueprint_run terminal). Without this, a lifecycle teardown of an open-parked step would
-// park only the conversation and strand the blueprint_run in 'running' (and its
-// shared-workspace snapshot in the blob store) for work its task has already
-// finished with.
-//
-// The plain conversation stop deliberately does not call this: there the
-// 'running' blueprint IS the intended state, because it is what keeps the
-// parked step claimable again on resume.
-//
-// It does NOT drain the task's firing queue: its caller already does that from
-// the stop path, and folding the drain in here (via terminateBlueprint) would
-// couple it to the write-pool routing for nothing. So this finalizes the
-// blueprint row + worktree + snapshot only:
-//
-//   - marks the blueprint_run cancelled, routed by userID exactly like
-//     CancelBlueprintRun — a user cancel (non-empty) under the user's
-//     synthetic claims, a system cancel (empty — router cleanup / drain sweep)
-//     through the admin pool;
-//   - runs the shared-worktree cleanup;
-//   - leaves the task's workspace snapshot in place: it is the parked
-//     workspace this cancel just retained, and the retention TTL is what
-//     collects it.
-//
-// This path only runs with no live goroutine, so the blueprint is sequentially
-// paused (no other step is executing) and finalizing the whole blueprint_run on
-// the single cancelled step is correct.
-func (s *Spawner) finalizeParkedBlueprintOnCancel(ctx context.Context, orgID string, conv *domain.Conversation, userID string) {
-	if s.blueprints == nil || conv.BlueprintRunID == "" {
-		return
-	}
-	if cr, err := s.blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID); err == nil && cr != nil &&
-		cr.Status == domain.BlueprintRunStatusRunning {
-		s.finalizeCancelledBlueprintRun(ctx, orgID, cr, conv.BlueprintStepIndex, userID)
-	}
-	// The snapshot deliberately survives: it is the parked workspace the cancel
-	// just retained, and the retention TTL is what collects it.
+	return errors.Join(errs...)
 }
 
 // finalizeCancelledBlueprintRun writes a running blueprint_run's cancelled
-// terminal and cleans the shared worktree behind it. Callers have already
-// established that nothing else is going to reach that terminal — the step
-// they cancelled had no live goroutine, or the run had no live step at all —
-// and have loaded the row to know it is still running.
+// terminal, as a system cancel, and cleans the shared worktree behind it. Its
+// caller is StopBlueprintRun on a run with no step conversation: nothing else
+// is going to reach that terminal, because there is no conversation to carry
+// an intent.
 //
 // abortedAtStep is the step the cancellation landed on, when the caller has
-// one; nil when the run had no step to name. userID routes the status write:
-// a user cancel under that user's synthetic claims, a system cancel (router
-// cleanup, drain rollback) through the admin pool, with the abort reason
-// naming which it was. The cfg is reconstructed rather than carried, because
+// one; nil when the run had no step to name.
+func (s *Spawner) finalizeCancelledBlueprintRun(ctx context.Context, orgID string, cr *domain.BlueprintRun, abortedAtStep *int) {
+	_, _ = s.blueprints.MarkRunStatusSystem(ctx, orgID, cr.ID, domain.BlueprintRunStatusCancelled, "system_cancelled", abortedAtStep)
+	s.cleanupCancelledBlueprintWorktree(ctx, orgID, cr.ID, cr.TaskID, cr.WorktreePath)
+}
+
+// cleanupCancelledBlueprintWorktree reclaims a cancelled run's shared
+// worktree. The cfg is reconstructed rather than carried, because
 // owner/repo/prNumber aren't persisted on blueprint_runs — so CleanupPRConfig
-// is skipped and only the worktree is reclaimed.
-func (s *Spawner) finalizeCancelledBlueprintRun(ctx context.Context, orgID string, cr *domain.BlueprintRun, abortedAtStep *int, userID string) {
-	reason := "user_cancelled"
-	if userID == "" {
-		reason = "system_cancelled"
-	}
-	if userID != "" {
-		_, _ = s.markBlueprintRunStatusAsUser(ctx, orgID, userID, cr.ID, domain.BlueprintRunStatusCancelled, reason, abortedAtStep)
-	} else {
-		_, _ = s.blueprints.MarkRunStatusSystem(ctx, orgID, cr.ID, domain.BlueprintRunStatusCancelled, reason, abortedAtStep)
-	}
-	cfg := runConfig{orgID: orgID, wtPath: cr.WorktreePath}
-	if task, _ := s.tasks.GetSystem(ctx, orgID, cr.TaskID); task != nil && task.EntitySource == "github" {
+// is skipped and only the worktree is reclaimed. The snapshot survives: it is
+// the parked workspace the cancel retained, and the retention TTL collects it.
+// Best-effort; a pod that never held the tree finds nothing to remove.
+func (s *Spawner) cleanupCancelledBlueprintWorktree(ctx context.Context, orgID, blueprintRunID, taskID, worktreePath string) {
+	cfg := runConfig{orgID: orgID, wtPath: worktreePath}
+	if task, _ := s.tasks.GetSystem(ctx, orgID, taskID); task != nil && task.EntitySource == "github" {
 		cfg.hasWT = true
 	}
-	s.runBlueprintWorktreeCleanup(cr.ID, workspaceKey(cr.TaskID), cfg)
+	s.runBlueprintWorktreeCleanup(blueprintRunID, workspaceKey(taskID), cfg)
 }
 
 // markBlueprintRunStatusAsUser writes a blueprint_run status transition under

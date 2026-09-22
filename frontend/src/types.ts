@@ -240,6 +240,11 @@ export interface Conversation {
   // contract: it says nothing about fleet occupancy or other tenants, and in a
   // shared-fleet deployment it can understate the wait.
   queue_position?: number
+  // stop_requested_at is a pending stop: a stop was asked for and neither the
+  // conversation's holder nor the dispatcher has settled it yet. Absent once
+  // settled (the park clears it) or when nobody asked. The run page keeps its
+  // stop controls disabled while it is set on a non-terminal conversation.
+  stop_requested_at?: string
   // Outcome is the parsed terminal-envelope outcome
   // (continue|finish|abort), persisted to conversations.outcome. Empty/absent for
   // an infra-error conversation or a step that ended without a recognized conclusion.

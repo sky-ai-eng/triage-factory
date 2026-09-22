@@ -18,6 +18,16 @@
 // alone and the callers that own a lifecycle one layer up spell their own
 // cancellation (StopConversationAndCancelBlueprint and StopBlueprintRun, below).
 //
+// A stop is a request, and the verbs here write only the request. The row's
+// stop intent (conversations.stop_requested_at/by) is one writer's fact and
+// its status is the holder's, so the two never race: the verb records who
+// asked and hastens the kill, the engagement holding the conversation settles
+// the stop through its own fenced park — status and claim release in one
+// transaction — and the dispatcher settles it for a conversation nobody holds.
+// The claim gate refuses a conversation with a pending stop, so work that is
+// queued, or requeued after its executor died, is never started again behind
+// the user's back.
+//
 // The park keeps the workspace, and the retention TTL is what eventually
 // collects it, because the moment a user kills a wedged run is exactly the
 // moment they are most likely to want the work back. The park does not WAIT
@@ -136,18 +146,17 @@ const (
 	stopNoteBySystem = "Run stopped by the system."
 )
 
-// Stop ends a conversation's work at any phase — clone, fetch, worktree setup,
-// or agent execution — and parks it `open`, resumable. Nothing outside the
-// conversation moves: its blueprint keeps its status and its task keeps its
-// disposition. The goroutine handles cleanup (worktree removal, status update).
+// Stop asks for a conversation's work to end at any phase — clone, fetch,
+// worktree setup, or agent execution — and be parked `open`, resumable.
+// Nothing outside the conversation moves: its blueprint keeps its status and
+// its task keeps its disposition. It returns once the request is recorded; the
+// park lands when the holder or the dispatcher settles it.
 //
-// userID identifies the actor for audit. User-initiated stops
-// (handler-driven) pass the requesting user's ID and the row-mark
-// write routes under that user's synthetic claims. System-initiated
-// stops (router cleanup, pending-firing sweeps) pass "" and the
-// write routes through the admin pool. Local mode handlers pass
-// runmode.LocalDefaultUserID; multi-mode handlers extract from JWT
-// claims.
+// userID identifies the actor: the requesting user for a handler-driven stop,
+// "" for a system stop (router cleanup, pending-firing sweeps). It becomes the
+// intent's actor, and so the park_reason the settlement records. Local mode
+// handlers pass runmode.LocalDefaultUserID; multi-mode handlers extract it
+// from JWT claims.
 func (s *Spawner) Stop(orgID, conversationID, userID string) error {
 	note := stopNoteBySystem
 	if userID != "" {
@@ -157,7 +166,7 @@ func (s *Spawner) Stop(orgID, conversationID, userID string) error {
 }
 
 // StopConversationAndCancelBlueprint stops the conversation its id names and
-// finalizes that conversation's blueprint_run 'cancelled' alongside it. The
+// has that conversation's blueprint_run finalized 'cancelled' alongside it. The
 // name spells both halves because only the first is addressed: the id is a
 // conversation's, and the blueprint_run reached through it is a consequence.
 // That second half belongs to callers that own a lifecycle one layer up and
@@ -224,7 +233,7 @@ func (s *Spawner) StopBlueprintRun(orgID, blueprintRunID string, cause StopCause
 	if err != nil {
 		// The signal is committed, so the run is not forgotten: the claim gate
 		// refuses a cancel-requested blueprint and the reaper finalizes it.
-		// What this call can no longer do is kill the live step now, which is
+		// What this call can no longer do is stop the live step now, which is
 		// the whole reason its caller asked.
 		return fmt.Errorf("list active step conversations: %w", err)
 	}
@@ -239,44 +248,53 @@ func (s *Spawner) StopBlueprintRun(orgID, blueprintRunID string, cause StopCause
 		}
 	}
 	if len(stepIDs) == 0 {
-		// No step was stopped, so nothing is going to carry this run to a
-		// terminal — every path that finalizes a blueprint runs off a step's.
-		// Finalize it here instead of leaving it 'running' with nothing coming,
-		// holding its worktree and its task's one-active-run slot.
-		s.finalizeCancelledBlueprintRun(ctx, orgID, br, nil, "")
+		// No step carries an intent, so nothing is going to carry this run to
+		// a terminal — every path that finalizes a blueprint runs off a
+		// step's. Finalize it here instead of leaving it 'running' with nothing
+		// coming, holding its worktree and its task's one-active-run slot.
+		// There is no conversation to race: this is a run-status write alone.
+		s.finalizeCancelledBlueprintRun(ctx, orgID, br, nil)
 	}
 	return errors.Join(errs...)
 }
 
-// stop is the shared body every stop verb routes through. cancelBlueprint gates the two places
-// the blueprint layer is touched, and nothing else differs — one path, so the
-// stop verb and the lifecycle teardown cannot drift apart in the parts they
-// share. note is the sentence each verb writes onto the transcript.
+// stop is the shared body every stop verb routes through. cancelBlueprint
+// gates the one place the blueprint layer is touched, and nothing else differs
+// — one path, so the stop verb and the lifecycle teardown cannot drift apart
+// in the parts they share. note is the sentence each verb writes onto the
+// transcript.
+//
+// What it writes is the request and nothing else: the stop note, the
+// blueprint's cancel signal when asked, and the stop intent with its hastening
+// cross-pod signal. It never writes the conversation's status, never releases
+// a claim and never finalizes a blueprint. Those are settlement, and settlement
+// belongs to whoever holds the conversation — the engagement through its
+// fenced park, or the dispatcher for a conversation no claim holds — because
+// only a holder can write the status and release the claim in one
+// transaction. A request path that wrote the status too would be a second
+// writer of it, racing the first.
 func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint bool, note string) error {
-	// Preflight: load the run under the caller's identity so a
-	// cross-org conversationID surfaces as "not found" BEFORE we tear anything
-	// down. The cancels map below is keyed only by conversationID, so without
-	// this gate any caller who learns an active conversationID could fire its
-	// goroutine cancel() regardless of which org owns the run — the
-	// goroutine then writes the terminal row under its own captured
-	// cfg.orgID and the cross-org actor is invisible to the audit
-	// trail. User-initiated stops gate via the app pool under the
-	// caller's claims (RLS does the visibility check); system-
-	// initiated stops (router cleanup, drain sweeps) still scope
-	// the read by orgID but go through the admin pool because there
-	// is no user identity to project.
+	ctx := context.Background()
+	// Preflight: load the conversation under the caller's identity so a
+	// cross-org conversationID surfaces as "not found" BEFORE anything is
+	// written or cancelled. The cancels map below is keyed only by
+	// conversationID, so without this gate any caller who learns an active
+	// conversationID could fire its goroutine cancel regardless of which org
+	// owns it. User-initiated stops read on the app pool under the caller's
+	// claims (RLS does the visibility check); system-initiated stops scope the
+	// read by orgID on the admin pool, having no user identity to project.
 	var (
 		conv         *domain.Conversation
 		preflightErr error
 	)
 	if userID != "" {
-		preflightErr = s.tx.SyntheticClaimsWithReadTx(context.Background(), orgID, userID, func(ts db.TxStores) error {
-			r, e := ts.Conversations.Get(context.Background(), orgID, conversationID)
+		preflightErr = s.tx.SyntheticClaimsWithReadTx(ctx, orgID, userID, func(ts db.TxStores) error {
+			r, e := ts.Conversations.Get(ctx, orgID, conversationID)
 			conv = r
 			return e
 		})
 	} else {
-		conv, preflightErr = s.conversations.GetSystem(context.Background(), orgID, conversationID)
+		conv, preflightErr = s.conversations.GetSystem(ctx, orgID, conversationID)
 	}
 	if preflightErr != nil {
 		return fmt.Errorf("load conversation: %w", preflightErr)
@@ -285,25 +303,24 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 		return fmt.Errorf("%w %s", ErrNoActiveConversation, conversationID)
 	}
 	// A run that already concluded has nothing to stop, and saying so here —
-	// rather than letting the park write below discover it — is what keeps a
-	// stale stop a pure no-op. It has to come before the blueprint signal:
-	// a completed step whose blueprint is still advancing would otherwise have
+	// rather than letting the intent write discover it — is what keeps a stale
+	// stop a pure no-op. It has to come before the blueprint signal: a
+	// completed step whose blueprint is still advancing would otherwise have
 	// its NEXT step cancelled by a click aimed at work that had already
 	// finished.
 	if domain.IsTerminalConversationStatus(conv.Status) {
 		return fmt.Errorf("%w %s", ErrNoActiveConversation, conversationID)
 	}
 
-	// The stop's record is a transcript row, not a verdict on the
+	// The stop's record on the transcript is a note, not a verdict on the
 	// conversation. It is the same delivered stop-note the engine writes for
-	// its own park decisions, and it goes in here — one site above the three
-	// arms below (local kill, cross-pod signal, DB-only park), because this
-	// is the only place that knows who asked.
+	// its own park decisions, and it goes in here because this is the only
+	// place that knows who asked.
 	//
-	// Before the kill, deliberately. A resumed model otherwise reads a turn
-	// that stops mid-sentence followed by a new message, with nothing
-	// between them saying a person intervened; writing it first means the
-	// explanation exists even if this pod dies in the next line.
+	// Before the intent and the kill, deliberately. A resumed model otherwise
+	// reads a turn that stops mid-sentence followed by a new message, with
+	// nothing between them saying a person intervened; writing it first means
+	// the explanation exists even if this pod dies in the next line.
 	//
 	// The plain stop verb skips an already-parked conversation: re-stopping a
 	// parked row is a gesture with nothing to stop, so there is nothing to
@@ -318,134 +335,72 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	}
 
 	if cancelBlueprint {
-		// The lifecycle caller's half. Raised FIRST — before anything is
-		// killed and before this call's own write. Two things follow from the
-		// ordering: whichever path disposes of the run (the reactor in the
-		// run's own goroutine, or the DB-only write below) sees
-		// cancel_requested and finalizes the blueprint 'cancelled', and the
-		// claim gate stops handing this blueprint's steps out, so nothing
-		// re-claims the run in the window between the kill and the finalize.
-		s.requestBlueprintCancel(context.Background(), orgID, conv.BlueprintRunID)
+		// The lifecycle caller's half, raised FIRST. The blueprint's
+		// cancel_requested is already an intent: whichever writer settles
+		// this conversation's stop reads it and finalizes the blueprint
+		// 'cancelled' — the reactor behind a live engagement, or the
+		// dispatcher's settlement for a conversation nobody holds — and the
+		// claim gate stops handing this blueprint's steps out in the meantime.
+		s.requestBlueprintCancel(ctx, orgID, conv.BlueprintRunID)
 	}
 
-	// Route the hard-kill through the control seam: at N=1 it resolves the
-	// registered ctx cancel from s.cancels; horizontal scaling swaps it for
-	// a DB-signal to the executor that owns the run. A found handle SIGKILLs
-	// the live process; the goroutine then observes ctx.Err() and tears its
-	// engagement down, and its reactor either freezes the blueprint (the stop
-	// verb) or finalizes it off the signal raised above (the lifecycle
-	// teardown).
-	//
-	// Hastening only. Whether the process is on this pod or another, the kill
-	// is a signal and the park below is the record, so this call's answer
-	// changes nothing about what happens next and is deliberately not branched
-	// on. Returning here on a local handle would hand the park to the dying
-	// goroutine and serialize the user-visible flip behind that goroutine's
-	// workspace capture — the run reporting WORKING for as long as the capture
-	// took, and a follow-up inside that window refused for a row that is not
-	// parked yet.
-	if !s.getController().Cancel(conversationID) {
-		// No local handle. Per the reply-leg contract, the kill is fire-and-
-		// forget cross-pod: the DB-only write below is already the source of
-		// truth and already works cross-pod, so a best-effort signal to a live
-		// remote owner only HASTENS the kill — never waited on, never affects
-		// this call's outcome.
-		s.signalCancelBestEffort(orgID, conversationID, conv.ExecutorID)
-	}
+	return s.requestStop(ctx, orgID, conversationID, userID)
+}
 
-	// Park the run directly via DB, whether or not a process was just killed.
-	// ParkOpen's status-NOT-IN filter handles every non-terminal state, so this
-	// is also a defensive catch for any other "row not terminal" edge case —
-	// including a run already parked `open` with no subprocess to kill.
-	//
-	// We also have to wake the firing worker ourselves: a stop that finds
-	// no goroutine — a run parked `open`, or one owned by another pod — has
-	// no defer to piggy-back on, and a run stopped in that state would leave
-	// the task's queued firings waiting on the worker's scan tick. A second
-	// wake beside a killed goroutine's own is harmless: the wake carries no
-	// work, and the claim is what decides which firing is ripe.
-
-	// User-initiated stop: write under the stopping user's
-	// synthetic claims so RLS sees a legitimate user-attributed
-	// transition. System-initiated stop (router cleanup, drain
-	// sweeps): admin pool, no user attribution. Detached context —
-	// the request that triggered the stop can be gone but the
-	// park still needs to land.
-	//
-	// Unfenced, deliberately: this is an outside actor ending a run, not an
-	// engagement ending itself. The whole point of a stop is to override
-	// whichever executor holds the run — it even signals the remote owner
-	// best-effort above — so gating it on claim ownership would break the
-	// feature. The claim-fenced variants exist for the executor's own
-	// self-park (parkConversationOpen with a claim in scope);
-	// do not route this path through it.
-	//
-	// No snapshot is taken here, and that is a sequencing contract rather than
-	// an absence. The verb's whole job is the fast half: park the row and
-	// release the claim at once, so the user gets a composer the moment they
-	// ask for one. It could not do the other half on a cross-pod stop anyway —
-	// the process registry consulted above is per-pod and control never holds
-	// the worktree — and on a same-pod stop it must not, a capture's duration
-	// being exactly what the user should never wait on.
-	//
-	// The other half is the killed engagement's own teardown, arriving after:
-	// it records that a persist is owed and writes the snapshot (see
-	// parkConversationOpen). Its status flip is then refused by the claim
-	// fence — the release above has already tripped it — and says so at INFO,
-	// the ordinary shape of every stop on both dialects. The two can also land
-	// in the other order, when the kill outruns this verb's park: the
-	// engagement's fenced park succeeds and releases the claim, and the write
-	// below is a deliberate re-park of an already-parked row — a content no-op
-	// the park write permits on purpose, costing one repeated `open` on the
-	// wire, which consumers of that event merge idempotently by contract.
-	//
-	// A follow-up sent before the blob lands is accepted rather than refused as
-	// expired — the pending record names the persist and its writer, which is
-	// what makes parking before the blob exists safe.
-	var (
-		flipped bool
-		err     error
-	)
-	bgCtx := context.Background()
-	// No result summary, on either arm. The summary is the run station's
-	// verdict block, and a stop concluded nothing — the note written above is
-	// the record. The machine code stays: it is claim-layer vocabulary the
-	// claim outcome is derived from, not text anyone reads.
-	park := db.ParkStopped(domain.ParkReasonUserCancelled, "")
-	if userID == "" {
-		park = db.ParkStopped(domain.ParkReasonSystemCancelled, "")
+// requestStop records a stop intent and hastens it. The intent is the record;
+// the local cancel and the cross-pod signal only make the holder notice sooner
+// than its next lease renewal would.
+//
+// The signal is addressed only in multi mode, only when this pod holds no
+// cancel handle for the conversation — a local handle reaches the engagement
+// directly — and only to
+// an owner whose heartbeat is fresh: a signal to a dead executor is never
+// delivered, and that stop is settled by the dispatcher once the dead claim is
+// released. The intent and the signal commit together in the store, so a
+// signal never exists without the intent it hastens.
+//
+// ErrNoActiveConversation when the conversation went terminal between the
+// caller's preflight and this write.
+func (s *Spawner) requestStop(ctx context.Context, orgID, conversationID, userID string) error {
+	target := ""
+	if s.crossPodSignalsWired() && !s.hasLocalCancelHandle(conversationID) {
+		target, _ = s.resolveLiveOwner(ctx, orgID, conversationID)
 	}
-	if userID != "" {
-		err = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, userID, func(ts db.TxStores) error {
-			f, mErr := ts.Conversations.ParkOpen(bgCtx, orgID, conversationID, park)
-			flipped = f
-			return mErr
-		})
-	} else {
-		flipped, err = s.conversations.ParkOpenSystem(bgCtx, orgID, conversationID, park)
-	}
+	requested, err := s.conversations.RequestStopSystem(ctx, orgID, conversationID, userID, target)
 	if err != nil {
-		return fmt.Errorf("park stopped conversation: %w", err)
+		return fmt.Errorf("record stop intent: %w", err)
 	}
-	if !flipped {
+	if !requested {
 		return fmt.Errorf("%w %s", ErrNoActiveConversation, conversationID)
 	}
-	s.broadcastConversationUpdate(orgID, conversationID, "open")
-	if cancelBlueprint {
-		// This DB-only path runs only with no live orchestrator goroutine — the
-		// step had parked (open), so the orchestrator already returned and no
-		// reactor will see the signal raised above. Finalize the blueprint_run
-		// here instead (cancel it, clean the warm worktree) so the row isn't
-		// left 'running' with nothing coming. The snapshot is deliberately NOT
-		// dropped: it is the parked workspace this stop just retained.
-		//
-		// The plain stop verb skips this entirely — a frozen blueprint is the
-		// state it wants, and finalizing here is exactly what used to make a
-		// stopped conversation permanently unresumable.
-		s.finalizeParkedBlueprintOnCancel(bgCtx, orgID, conv, userID)
+	if target != "" {
+		// The doorbell for the signal the store just inserted. It carries no
+		// id: the owner's apply loop rescans its unacked signals on any "new"
+		// wake, and its backstop scan finds the row if this NOTIFY is lost.
+		if nerr := s.notifyCtl(ctx, "new", 0); nerr != nil {
+			delegateLog.Warn("notify tf_ctl for stop signal failed; the owner's backstop scan still finds it",
+				"conversation", conversationID, "error", nerr)
+		}
 	}
-	s.wakeFirings()
+	s.getController().Cancel(conversationID)
 	return nil
+}
+
+// crossPodSignalsWired reports whether the conversation_signals outbox is
+// wired — multi mode only. Without it there is no one to address a signal to.
+func (s *Spawner) crossPodSignalsWired() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conversationSignals != nil
+}
+
+// hasLocalCancelHandle reports whether this pod registered a cancel handle for
+// the conversation — an engagement running here that a local Cancel reaches.
+func (s *Spawner) hasLocalCancelHandle(conversationID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.cancels[conversationID]
+	return ok
 }
 
 // insertStopNote writes the stop onto the transcript: a delivered role=user
@@ -454,14 +409,11 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 // happened; a resumed conversation reads it in place instead of consuming it
 // as input.
 //
-// userID routes the write the same way every other user-attributed write in
-// this file does — synthetic claims for a person, the admin pool for the
-// system — and lands on the row so the transcript records who stopped it.
+// userID routes the write — synthetic claims for a person, the admin pool for
+// the system — and lands on the row so the transcript records who stopped it.
 //
-// Unfenced, for the same reason the park below it is: this is an outside
-// actor ending a run, not an engagement writing about itself, and the whole
-// point of a stop is to override whichever executor holds the conversation.
-// It is why the fenced per-claim variant is not used here.
+// Unfenced: this is a note from the actor asking for the stop, not an
+// engagement writing about itself, and the asker holds no claim to name.
 //
 // Best effort: a stop whose note failed to land is still a stop, and
 // returning an error here would leave a live agent running because its
@@ -522,18 +474,17 @@ func classifyFailureKind(err error) domain.ConversationFailureKind {
 // failConversation records the infra-failure terminal for a run: guarded status flip,
 // a failure row on the transcript, the boundary stamp, breaker + broadcast.
 //
-// claimID names the engagement doing the failing, when there is one in scope
-// — every path that reached the agent has it. The terminal then goes through
-// the claim fence, so an executor that was reaped mid-run cannot bury a
-// successor's live conversation under its own failure. Empty claimID keeps
-// the unfenced behavior for the paths that have no engagement to speak for
-// (cleanup and orchestration entries that never claimed the row).
+// claimID names the engagement doing the failing, and is required: the
+// terminal goes through the claim fence and nowhere else, so an executor that
+// was reaped mid-run cannot bury a successor's live conversation under its own
+// failure. The store refuses an empty claimID as a released claim, which this
+// reports as fenced.
 //
 // Returns fenced: true when the terminal was refused because the claim is
 // released. Nothing was written, and the caller must not go on to react to
 // the conversation's state either — the row it would read belongs to the
 // successor.
-func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, triggerType, creatorUserID, errMsg string, kind domain.ConversationFailureKind) (fenced bool) {
+func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, triggerType, errMsg string, kind domain.ConversationFailureKind) (fenced bool) {
 	delegateLog.Error("conversation failed", "conversation", conversationID, "error", errMsg, "failure_kind", string(kind))
 
 	bgCtx := context.Background()
@@ -550,18 +501,7 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	// Ordering it first also makes the fence's answer arrive before anything
 	// irreversible happens — the flip below only runs for an engagement that
 	// still owns the row.
-	var insertErr error
-	switch {
-	case claimID != "":
-		_, insertErr = s.conversations.InsertMessageForClaimSystem(bgCtx, orgID, claimID, failMsg)
-	case triggerType == "manual":
-		insertErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			_, ierr := ts.Conversations.InsertMessage(bgCtx, orgID, failMsg)
-			return ierr
-		})
-	default:
-		_, insertErr = s.conversations.InsertMessageSystem(bgCtx, orgID, failMsg)
-	}
+	_, insertErr := s.conversations.InsertMessageForClaimSystem(bgCtx, orgID, claimID, failMsg)
 	if errors.Is(insertErr, db.ErrClaimReleased) {
 		// Not this engagement's run to fail anymore. Everything below writes
 		// or broadcasts about a conversation a successor is driving, so the
@@ -578,18 +518,7 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	// Guarded — if a terminal racing path (cancel, natural completion)
 	// reached the row first, leave its status in place rather than
 	// clobbering.
-	var markErr error
-	switch {
-	case claimID != "":
-		_, markErr = s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conversationID, claimID, string(kind))
-	case triggerType == "manual":
-		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			_, mErr := ts.Conversations.MarkFailedIfActive(bgCtx, orgID, conversationID, string(kind))
-			return mErr
-		})
-	default:
-		_, markErr = s.conversations.MarkFailedIfActiveSystem(bgCtx, orgID, conversationID, string(kind))
-	}
+	_, markErr := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conversationID, claimID, string(kind))
 	if errors.Is(markErr, db.ErrClaimReleased) {
 		// The release landed between the two writes. Same answer, same tail
 		// to skip; the failure row already on the transcript is the one
@@ -605,9 +534,9 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 
 	// The boundary, stamped after the terminal it belongs to: a failure ends
 	// the conversation's life as its task's live one, so nothing resumes it
-	// and the memory it may owe has a row to be owed against. Reached only on
-	// the unfenced path — a successor's conversation is not this engagement's
-	// to end. Best-effort: the terminal above is the load-bearing write, and a
+	// and the memory it may owe has a row to be owed against. Reached only
+	// when the fence passed — a successor's conversation is not this
+	// engagement's to end. Best-effort: the terminal above is the load-bearing write, and a
 	// failed stamp must not turn a recorded failure into an error.
 	ended, endErr := s.conversations.EndConversationSystem(bgCtx, orgID, conversationID, domain.EndedFailed)
 	if endErr != nil {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -347,67 +348,71 @@ func TestCrossPodController_LocalHitNeverGoesRemote(t *testing.T) {
 	}
 }
 
-// TestStop_SignalsRemoteOwnerBestEffort: the stop verb's DB-only write is
-// synchronous and unaffected by the cross-pod hastening signal; the signal
-// itself lands asynchronously (fire-and-forget, never waited on).
-func TestStop_SignalsRemoteOwnerBestEffort(t *testing.T) {
+// stopRequestRecorder captures what the stop verb hands RequestStopSystem,
+// the one write it makes, and passes the write through.
+type stopRequestRecorder struct {
+	db.ConversationStore
+	calls []stopRequestCall
+}
+
+type stopRequestCall struct{ by, target string }
+
+func (r *stopRequestRecorder) RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string) (bool, error) {
+	r.calls = append(r.calls, stopRequestCall{by, signalTarget})
+	return r.ConversationStore.RequestStopSystem(ctx, orgID, conversationID, by, signalTarget)
+}
+
+// TestStop_AddressesTheLiveRemoteOwner: with no local handle and a live
+// remote owner, the verb names that owner as the signal target on the same
+// write that records the intent — the store commits the two together — and
+// writes nothing else: no status, no claim release.
+func TestStop_AddressesTheLiveRemoteOwner(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-cancel", "sess", "/tmp/wt")
-	dbtest.SeedActiveClaim(t, database, "r-cancel", "executor-2", 0)
+	markEngaged(t, database, "r-cancel")
+	if _, err := database.Exec(`UPDATE claims SET executor_id = 'executor-2' WHERE conversation_id = 'r-cancel'`); err != nil {
+		t.Fatalf("attribute the claim to the remote executor: %v", err)
+	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeConversationSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
-	s.SetConversationSignals(fakeSignals, nil)
+	s.SetConversationSignals(newFakeConversationSignalStore(), nil)
+	rec := &stopRequestRecorder{ConversationStore: s.conversations}
+	s.conversations = rec
 
 	if err := s.Stop(runmode.LocalDefaultOrgID, "r-cancel", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = 'r-cancel'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
+	if len(rec.calls) != 1 || rec.calls[0] != (stopRequestCall{runmode.LocalDefaultUserID, "executor-2"}) {
+		t.Errorf("RequestStopSystem calls = %+v, want one by the user addressed to executor-2", rec.calls)
 	}
-	if status != "open" {
-		t.Errorf("status = %q, want open (the DB-only park must be synchronous, unaffected by the async hastening signal)", status)
+	if got := storedStatus(t, database, "r-cancel"); got != "" {
+		t.Errorf("status = %q, want none — the request writes no status", got)
 	}
-	sig := fakeSignals.findUnacked(t, "executor-2")
-	if sig.Kind != domain.ConversationSignalCancel {
-		t.Errorf("hastening signal kind = %q, want cancel", sig.Kind)
+	if !hasActiveClaim(t, database, "r-cancel") {
+		t.Error("the request released the remote owner's claim; only the holder settles")
 	}
 }
 
-// TestStop_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic:
-// signalCancelBestEffort must not dereference a nil s.instances — a
-// deployment can wire conversationSignals without an instance store (e.g. a
-// misconfigured role), and the fire-and-forget hastening path must simply
-// no-op rather than panic in its own goroutine.
-func TestStop_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic(t *testing.T) {
+// TestStop_NoInstanceStoreAddressesNobody: without an instance store to
+// confirm liveness against there is no owner to address, and the intent alone
+// is written — the holder's renewal delivers it.
+func TestStop_NoInstanceStoreAddressesNobody(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-cancel-noinst", "sess", "/tmp/wt")
-	dbtest.SeedActiveClaim(t, database, "r-cancel-noinst", "executor-2", 0)
+	markEngaged(t, database, "r-cancel-noinst")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeConversationSignalStore()
 	s.instances = nil
-	s.SetConversationSignals(fakeSignals, nil)
+	s.SetConversationSignals(newFakeConversationSignalStore(), nil)
+	rec := &stopRequestRecorder{ConversationStore: s.conversations}
+	s.conversations = rec
 
 	if err := s.Stop(runmode.LocalDefaultOrgID, "r-cancel-noinst", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = 'r-cancel-noinst'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != "open" {
-		t.Errorf("status = %q, want open", status)
-	}
-	// Give the fire-and-forget goroutine a beat to run (and not panic); it
-	// must never insert a signal without an instance store to confirm
-	// liveness against.
-	time.Sleep(50 * time.Millisecond)
-	sigs, _ := fakeSignals.ListUnackedForTarget(context.Background(), "executor-2")
-	if len(sigs) != 0 {
-		t.Errorf("expected no hastening signal without an instance store, got %d", len(sigs))
+	if len(rec.calls) != 1 || rec.calls[0].target != "" {
+		t.Errorf("RequestStopSystem calls = %+v, want one with no signal target", rec.calls)
 	}
 }
 

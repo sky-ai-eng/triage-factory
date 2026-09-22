@@ -136,7 +136,7 @@ func TestFailConversation_StampsTheFailedBoundary(t *testing.T) {
 	seedConversation(t, database, conversationID, "sess", t.TempDir())
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	if fenced := s.failConversation(runmode.LocalDefaultOrgID, conversationID, "", "", "manual", runmode.LocalDefaultUserID,
+	if fenced := s.failConversation(runmode.LocalDefaultOrgID, conversationID, "", holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), "manual",
 		"the runtime died", domain.ConversationFailureUnclassified); fenced {
 		t.Fatal("failConversation reported fenced; nothing holds a claim on this fixture")
 	}
@@ -156,7 +156,7 @@ func TestFailedConversationRefusesAFollowUpAsEnded(t *testing.T) {
 	const conversationID = "r-failed-ended"
 	seedConversation(t, database, conversationID, "sess", t.TempDir())
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	if fenced := s.failConversation(org, conversationID, "", "", "manual", runmode.LocalDefaultUserID,
+	if fenced := s.failConversation(org, conversationID, "", holderClaimFor(t, s, org, conversationID), "manual",
 		"the runtime died", domain.ConversationFailureUnclassified); fenced {
 		t.Fatal("failConversation reported fenced")
 	}
