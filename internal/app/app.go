@@ -247,6 +247,10 @@ type App struct {
 	// there would have two callbacks reporting the same series. nil when the
 	// brain isn't running.
 	workDepth *workmetrics.DepthObserver
+	// claimGauges is the brain's expired-claim observer, on the same
+	// lifecycle and for the same reason as workDepth above. nil when the
+	// brain isn't running.
+	claimGauges *workmetrics.ClaimObserver
 
 	// shuttingDown latches once Run's blocking listener has unwound and the
 	// dispatch drain has begun (drainDispatches). The executor healthz reads

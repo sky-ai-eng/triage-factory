@@ -108,7 +108,7 @@ func TestFailClaimedConversation_RingsTheMemoryDoorbell(t *testing.T) {
 	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, step0); err != nil {
 		t.Fatalf("force the step mid-flight: %v", err)
 	}
-	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "exec-doorbell", 1, db.ClaimPlacement{})
+	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "exec-doorbell", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}

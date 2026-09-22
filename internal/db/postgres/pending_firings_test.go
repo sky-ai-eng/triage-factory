@@ -355,7 +355,7 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, stores db.Stores, orgID, userI
 			// Rewound against the server clock — the one the claim stamped
 			// the lease from and the guard compares against.
 			pgExecOne(t, h, "expire lease",
-				`UPDATE pending_firings SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = $1 AND status = 'leased'`, firingID)
+				`UPDATE pending_firings SET lease_expires_at = statement_timestamp() - interval '1 hour' WHERE id = $1 AND status = 'leased'`, firingID)
 		},
 		Ripen: func(t *testing.T, firingID int64) {
 			t.Helper()

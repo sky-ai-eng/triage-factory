@@ -86,8 +86,8 @@ func TestTaskStore_AttentionOrder_Postgres(t *testing.T) {
 				t.Helper()
 				var claimID string
 				if err := conn.QueryRow(`
-					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch)
-					VALUES ($1, $2, $3, 'exec-attn', 1) RETURNING id::text
+					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+					VALUES ($1, $2, $3, 'exec-attn', 1, now() + interval '300 seconds') RETURNING id::text
 				`, uuid.New().String(), orgID, conversationID).Scan(&claimID); err != nil {
 					t.Fatalf("seed claim: %v", err)
 				}

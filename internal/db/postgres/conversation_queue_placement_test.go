@@ -93,7 +93,7 @@ func TestPlacementClaim_TierOneExclusiveToOwner(t *testing.T) {
 	}
 
 	// A non-owner (B) must NOT claim a fresh, live-owned conversation.
-	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil {
 		t.Fatalf("B claim: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestPlacementClaim_TierOneExclusiveToOwner(t *testing.T) {
 	}
 
 	// The owner claims it.
-	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
+	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil || got == nil || got.ID != conversationID {
 		t.Fatalf("A claim = (%+v, %v), want conversation %s", got, err, conversationID)
 	}
@@ -122,7 +122,7 @@ func TestPlacementClaim_AgesToSpillover(t *testing.T) {
 	conversationID := stagePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 	backdatePgConversationQueued(t, h, conversationID, 45*time.Second) // > 20s aging window
 
-	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil || got == nil || got.ID != conversationID {
 		t.Fatalf("aged conversation should spill to exec-b: got=(%+v, %v)", got, err)
 	}
@@ -143,7 +143,7 @@ func TestPlacementClaim_DeadPreferredSpillsImmediately(t *testing.T) {
 	// Run is FRESH (not aged), but the owner is dead.
 	backdatePgHeartbeat(t, h, "exec-a", time.Hour)
 
-	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil || got == nil || got.ID != conversationID {
 		t.Fatalf("dead-owner fresh conversation should spill immediately: got=(%+v, %v)", got, err)
 	}
@@ -165,7 +165,7 @@ func TestPlacementClaim_DrainingAndGatedPreferredSpill(t *testing.T) {
 			t.Fatalf("SetDraining: %v", err)
 		}
 		conversationID := stagePgConversationPreferred(t, h, stores, orgID, userID, "exec-drain")
-		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-helper", 1, placementClaimCfg)
+		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-helper", 1, placementClaimCfg, db.DefaultClaimLease)
 		if err != nil || got == nil || got.ID != conversationID {
 			t.Fatalf("draining owner's conversation should spill: got=(%+v, %v)", got, err)
 		}
@@ -175,7 +175,7 @@ func TestPlacementClaim_DrainingAndGatedPreferredSpill(t *testing.T) {
 		registerLiveExecutor(t, stores, "exec-gated")
 		pgtest.MustExec(t, h.AdminDB, `UPDATE instances SET dispatch_gated = true WHERE id = $1`, "exec-gated")
 		conversationID := stagePgConversationPreferred(t, h, stores, orgID, userID, "exec-gated")
-		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-helper", 1, placementClaimCfg)
+		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-helper", 1, placementClaimCfg, db.DefaultClaimLease)
 		if err != nil || got == nil || got.ID != conversationID {
 			t.Fatalf("gated owner's conversation should spill: got=(%+v, %v)", got, err)
 		}
@@ -195,7 +195,7 @@ func TestPlacementClaim_NullPreferredClaimableImmediately(t *testing.T) {
 	registerLiveExecutor(t, stores, "exec-a")
 	conversationID := stagePgConversationPreferred(t, h, stores, orgID, userID, "") // NULL preferred
 
-	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil || got == nil || got.ID != conversationID {
 		t.Fatalf("unowned conversation should be immediately claimable: got=(%+v, %v)", got, err)
 	}
@@ -222,7 +222,7 @@ func TestPlacementClaim_OwnerPrefersOwnFirst(t *testing.T) {
 	// A NEWER own conversation (preferred=A), fresh.
 	own := stagePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 
-	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil || got == nil {
 		t.Fatalf("A claim: (%+v, %v)", got, err)
 	}
@@ -247,7 +247,7 @@ func TestPlacementClaim_DisabledIgnoresPreferred(t *testing.T) {
 	// placement OFF and must still get it (global-oldest, stamp ignored).
 	conversationID := stagePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 
-	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-other", 1, db.ClaimPlacement{})
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-other", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || got == nil || got.ID != conversationID {
 		t.Fatalf("disabled placement must ignore the stamp: got=(%+v, %v)", got, err)
 	}
@@ -266,7 +266,7 @@ func TestPlacementClaim_RequeueClearsPreferred(t *testing.T) {
 	registerLiveExecutor(t, stores, "exec-a")
 	conversationID := stagePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 
-	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil || claimed == nil {
 		t.Fatalf("claim: (%+v, %v)", claimed, err)
 	}
@@ -299,7 +299,7 @@ func TestPlacementClaim_ResumeFollowsTheWarmTree(t *testing.T) {
 
 	// Born unowned, so nothing but the engagement itself can put A on the row.
 	conversationID := stagePgConversationPreferred(t, h, stores, orgID, userID, "")
-	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil || claimed == nil || claimed.ID != conversationID {
 		t.Fatalf("A's first claim = (%+v, %v), want conversation %s", claimed, err, conversationID)
 	}
@@ -321,7 +321,7 @@ func TestPlacementClaim_ResumeFollowsTheWarmTree(t *testing.T) {
 
 	// B is live and idle, and the conversation is claimable — but it is A's
 	// until it ages, because A is where the warm tree is.
-	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil {
 		t.Fatalf("B claim: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestPlacementClaim_ResumeFollowsTheWarmTree(t *testing.T) {
 
 	// A takes it straight back — no aging wait, and the tree it left behind is
 	// seconds old.
-	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
+	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil || got == nil || got.ID != conversationID {
 		t.Fatalf("A's resume claim = (%+v, %v), want conversation %s", got, err, conversationID)
 	}
@@ -340,7 +340,7 @@ func TestPlacementClaim_ResumeFollowsTheWarmTree(t *testing.T) {
 	// on a machine nobody can reach, so the stamp yields immediately.
 	resume(t)
 	backdatePgHeartbeat(t, h, "exec-a", time.Hour)
-	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
+	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil || got == nil || got.ID != conversationID {
 		t.Fatalf("B's claim of a dead executor's resumed conversation = (%+v, %v), want conversation %s", got, err, conversationID)
 	}
@@ -362,7 +362,7 @@ func TestPlacementClaim_ResumeAgesFromTheWake(t *testing.T) {
 	registerLiveExecutor(t, stores, "exec-b")
 
 	conversationID := stagePgConversationPreferred(t, h, stores, orgID, userID, "")
-	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil || claimed == nil || claimed.ID != conversationID {
 		t.Fatalf("A's first claim = (%+v, %v), want conversation %s", claimed, err, conversationID)
 	}
@@ -378,7 +378,7 @@ func TestPlacementClaim_ResumeAgesFromTheWake(t *testing.T) {
 
 	// B is live and idle, and the conversation is far older than the window;
 	// it is still A's, because the window opened at the wake.
-	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil {
 		t.Fatalf("B claim: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestPlacementClaim_ResumeAgesFromTheWake(t *testing.T) {
 	// The wake ages past the window while the mint stamp stays where it was:
 	// now anyone may take it.
 	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET queued_at = now() - interval '21 seconds' WHERE id = $1`, conversationID)
-	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
+	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg, db.DefaultClaimLease)
 	if err != nil || got == nil || got.ID != conversationID {
 		t.Fatalf("B's claim once the wake aged = (%+v, %v), want conversation %s", got, err, conversationID)
 	}

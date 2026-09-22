@@ -1,0 +1,211 @@
+package delegate
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
+
+// DefaultClaimRenewInterval, DefaultClaimSelfFenceDeadline and
+// DefaultClaimLease are the per-claim lease timings: how often a holder
+// renews its claim, how long since its last successful renewal it waits
+// before fencing its own engagement, and how long the lease it renews lasts
+// on database time.
+//
+// Constants, not operator knobs. The ordering between them is a correctness
+// property — a holder must have stopped before the lease it can no longer
+// prove lapses — so moving one without the others configures a takeover that
+// races a live engagement. And none of the three is deployment-shaped: they
+// bound how long a goroutine can go without writing one row, which does not
+// vary with the size of a fleet or the shape of a host. TestClaimLeaseTimings
+// holds the ordering.
+//
+// The lease's value lives in internal/db, where the store that stamps it is:
+// the number is spelled once.
+const (
+	DefaultClaimRenewInterval     = 20 * time.Second
+	DefaultClaimSelfFenceDeadline = 45 * time.Second
+	DefaultClaimLease             = db.DefaultClaimLease
+)
+
+// errClaimLeaseLost and errClaimSelfFenced are the two causes a claim context
+// can be cancelled with, and they are separate because they answer different
+// questions in a log: the first is the database saying this engagement is not
+// the owner, the second is this process saying it can no longer prove it is.
+// Both mean the same thing to every writer downstream — write nothing.
+var (
+	errClaimLeaseLost  = errors.New("delegate: claim lease lost")
+	errClaimSelfFenced = errors.New("delegate: claim self-fenced after renewal failures")
+)
+
+// leaseFenced reports whether ctx was cancelled by the claim's lease rather
+// than by a stop or a shutdown.
+//
+// Every arm that maps a cancelled step context to a deliberate park asks this
+// first, because a lease fence is not a stop and must not be recorded as one.
+// After expiry the park is refused anyway; between the self-fence and expiry
+// it would succeed, and land "stopped by user" on a conversation nobody
+// stopped.
+func leaseFenced(ctx context.Context) bool {
+	cause := context.Cause(ctx)
+	return errors.Is(cause, errClaimLeaseLost) || errors.Is(cause, errClaimSelfFenced)
+}
+
+// setClaimLease overrides the three claim-lease timings. Zero on any of them
+// falls back to that timing's package default at use time, the same shape
+// SetSelfFenceDeadline has. Nothing in the running product calls it: the
+// defaults above are the values, and this exists so the renewal loop can be
+// driven at test speed.
+func (s *Spawner) setClaimLease(renew, selfFence, lease time.Duration) {
+	s.mu.Lock()
+	s.claimRenewInterval = renew
+	s.claimSelfFenceDeadline = selfFence
+	s.claimLease = lease
+	s.mu.Unlock()
+}
+
+func (s *Spawner) claimRenewIntervalOrDefault() time.Duration {
+	s.mu.Lock()
+	d := s.claimRenewInterval
+	s.mu.Unlock()
+	if d <= 0 {
+		return DefaultClaimRenewInterval
+	}
+	return d
+}
+
+func (s *Spawner) claimSelfFenceDeadlineOrDefault() time.Duration {
+	s.mu.Lock()
+	d := s.claimSelfFenceDeadline
+	s.mu.Unlock()
+	if d <= 0 {
+		return DefaultClaimSelfFenceDeadline
+	}
+	return d
+}
+
+func (s *Spawner) claimLeaseOrDefault() time.Duration {
+	s.mu.Lock()
+	d := s.claimLease
+	s.mu.Unlock()
+	if d <= 0 {
+		return DefaultClaimLease
+	}
+	return d
+}
+
+// renewalCallTimeout bounds one renewal round trip. Half the cadence, so a
+// slow call cannot still be outstanding when the next tick comes, and floored
+// at a second so an aggressively short cadence (tests) does not fail healthy
+// calls. It is a bound on the CALL, not on the fence: the watchdog below runs
+// on its own timer precisely so a driver that ignores this deadline cannot
+// stop the fence from firing.
+func renewalCallTimeout(cadence time.Duration) time.Duration {
+	d := cadence / 2
+	if d < time.Second {
+		return time.Second
+	}
+	return d
+}
+
+// renewClaimLease keeps one engagement's claim alive for as long as the
+// engagement runs, and fences it the moment it cannot.
+//
+// anchor is the instant the dispatcher took BEFORE calling
+// ClaimNextConversation — the claim's own acquisition, measured
+// conservatively at request start rather than at response, so network delay
+// can only make the watchdog fire early and never late. Every later re-arm
+// takes the same posture, anchoring on the renewal's issue time.
+//
+// fence is the claim context's cancel. Nothing else holds it: cancelling it
+// cancels the engagement's step context, which is exactly what a stop does —
+// the runtime returns, the sidecar and jail are torn down on the way out, the
+// subprocess is killed. Killing the cell needs nothing new.
+//
+// The loop stops when the engagement returns, so a renewal can be in flight
+// at the moment the engagement's own terminal write releases the claim. That
+// renewal is then refused, logged as a lost lease, and fences a context
+// nothing is using any more. It is accurate — the lease really is gone — and
+// harmless, so it is not special-cased.
+func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation, anchor time.Time, fence context.CancelCauseFunc) {
+	cadence := s.claimRenewIntervalOrDefault()
+	deadline := s.claimSelfFenceDeadlineOrDefault()
+	lease := s.claimLeaseOrDefault()
+
+	// lastRenewal is the issue time of the most recent renewal the database
+	// accepted, and the watchdog below decides on it rather than on having
+	// been rescheduled. Reset cannot unschedule a callback the runtime has
+	// already dispatched — that is what its false return means, by which
+	// point the callback may be running — so a renewal that succeeds right at
+	// the deadline would otherwise fence a healthy engagement that still owns
+	// its claim. A pointer, not a unix count: the monotonic reading has to
+	// survive the round trip or the comparison is at the mercy of the wall
+	// clock.
+	var lastRenewal atomic.Pointer[time.Time]
+	lastRenewal.Store(&anchor)
+
+	// A separate timer rather than a second case in the select below, and
+	// rather than a check inside the loop body: a renewal call that blocks
+	// past its own deadline — a driver that ignores its context, a
+	// black-holed connection — would starve any check sharing this
+	// goroutine, and that is precisely the failure the fence exists for. The
+	// runtime's timer fires regardless of what this goroutine is doing.
+	watchdog := time.AfterFunc(time.Until(anchor.Add(deadline)), func() {
+		if elapsed := time.Since(*lastRenewal.Load()); elapsed < deadline {
+			return
+		}
+		dispatchLog.Warn("claim lease could not be renewed within the self-fence deadline; fencing this engagement",
+			"conversation", conv.ID, "claim", conv.ClaimID, "deadline", deadline)
+		fence(errClaimSelfFenced)
+	})
+	defer watchdog.Stop()
+
+	ticker := time.NewTicker(cadence)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		// Issue time, not response time: time.Since on it can only
+		// over-count the elapsed window, never under-count it, which is the
+		// direction a self-fence deadline has to err in.
+		issuedAt := time.Now()
+		callCtx, cancel := context.WithTimeout(ctx, renewalCallTimeout(cadence))
+		expiry, err := s.conversationQueue.RenewClaimLeaseSystem(callCtx, conv.OrgID, conv.ID, conv.ClaimID, lease)
+		cancel()
+
+		switch {
+		case err == nil:
+			// Published BEFORE the re-arm, so a callback dispatched in
+			// between reads this renewal and stands down rather than fencing
+			// on the deadline it was armed for.
+			lastRenewal.Store(&issuedAt)
+			// Re-arm from the issue time, so the network delay this call
+			// already spent counts against the next deadline.
+			watchdog.Reset(deadline - time.Since(issuedAt))
+			dispatchLog.Debug("claim lease renewed", "conversation", conv.ID, "claim", conv.ClaimID, "expires_at", expiry)
+		case errors.Is(err, db.ErrClaimReleased):
+			// Definite: the lease is gone on database time. A retry cannot
+			// bring authority back, and there may be no successor at all —
+			// expiry alone ends ownership.
+			dispatchLog.Info("claim lease lost; fencing this engagement",
+				"conversation", conv.ID, "claim", conv.ClaimID, "error", err)
+			fence(errClaimLeaseLost)
+			return
+		case ctx.Err() != nil:
+			return
+		default:
+			// Indefinite: a timeout, a connection blip. Keep ticking; the
+			// watchdog decides when persistent failure becomes a fence.
+			dispatchLog.Warn("claim lease renewal failed; retrying on the next tick",
+				"conversation", conv.ID, "claim", conv.ClaimID, "error", err)
+		}
+	}
+}

@@ -109,6 +109,14 @@ type ConversationSeeder struct {
 	// the suite can assert mint/release bookkeeping.
 	ClaimRows func(t *testing.T, conversationID string) []ClaimRow
 
+	// LiveClaimsWithoutLease counts rows breaking the live-claim invariant:
+	// unreleased, and carrying no lease. Every subtest's fixture is swept
+	// with it on the way out, so a mint or release arm that forgets the
+	// column fails where it happened rather than at whatever fenced write
+	// later refuses. Postgres holds the invariant as a CHECK as well; SQLite
+	// cannot add one by ALTER TABLE, so there this sweep IS the enforcement.
+	LiveClaimsWithoutLease func(t *testing.T) int
+
 	// PreferredExecutor reads the conversation's placement affinity stamp
 	// (conversations.preferred_executor_id), "" for SQL NULL. No store read
 	// projects the column — placement is the only consumer and it reads it
@@ -260,6 +268,7 @@ type ConversationSeeder struct {
 // the backend test file.
 func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) {
 	t.Helper()
+	mk = withLiveClaimLeaseSweep(mk)
 
 	t.Run("SeededConversation_GetReturnsIt", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
@@ -5597,3 +5606,21 @@ func seedConversationForTaskTest(t *testing.T, orgID, taskID, status string, see
 const conversationTestPromptID = "p_conversation_test"
 
 func conversationTestPrompt(_ *testing.T) string { return conversationTestPromptID }
+
+// withLiveClaimLeaseSweep wraps a factory so every subtest's fixture is
+// checked for the live-claim invariant when that subtest ends. It hangs off
+// the factory rather than off the suite because each subtest opens a fresh
+// database: a single sweep after the last one would see only that one's rows.
+func withLiveClaimLeaseSweep(mk ConversationStoreFactory) ConversationStoreFactory {
+	return func(t *testing.T) (db.ConversationStore, string, string, ConversationSeeder) {
+		store, orgID, userID, seed := mk(t)
+		if seed.LiveClaimsWithoutLease != nil {
+			t.Cleanup(func() {
+				if n := seed.LiveClaimsWithoutLease(t); n != 0 {
+					t.Errorf("%d live claims carry no lease; a mint or release arm left the invariant broken", n)
+				}
+			})
+		}
+		return store, orgID, userID, seed
+	}
+}

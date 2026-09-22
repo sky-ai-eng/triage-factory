@@ -122,7 +122,7 @@ type blockingClaimStore struct {
 	release   chan struct{}
 }
 
-func (b *blockingClaimStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, p db.ClaimPlacement) (*domain.Conversation, error) {
+func (b *blockingClaimStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, p db.ClaimPlacement, lease time.Duration) (*domain.Conversation, error) {
 	b.enterOnce.Do(func() { close(b.entered) })
 	<-b.release
 	return nil, nil // queue drained: the loop unwinds and RunDispatcher returns

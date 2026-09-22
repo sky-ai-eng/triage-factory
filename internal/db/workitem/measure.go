@@ -107,7 +107,7 @@ func countIf(pred string) string {
 func (k Kind) ageSeconds(pred string) string {
 	oldest := "MIN(CASE WHEN " + pred + " THEN t.first_enqueued_at END)"
 	if k.Dialect == Postgres {
-		return "EXTRACT(EPOCH FROM (clock_timestamp() - " + oldest + "))"
+		return "EXTRACT(EPOCH FROM (statement_timestamp() - " + oldest + "))"
 	}
 	return "(julianday('now') - julianday(" + oldest + ")) * 86400.0"
 }

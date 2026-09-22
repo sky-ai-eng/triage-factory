@@ -23,11 +23,15 @@ const ExitCodeIdentitySuperseded = 3
 
 // buildReaper resolves the fleet-reaper knobs (TF_SELF_FENCE_SEC,
 // TF_REAPER_STALE_SEC, TF_MAX_CLAIM_ATTEMPTS), wires the spawner's partition
-// self-fence deadline and supersession exit hook (every role, every mode —
-// supersession is structurally unreachable outside a shared multi-mode
-// registry, so this is a safe no-op elsewhere), and — for brain-capable
-// roles in multi mode only — constructs the reaper Store startBrain/
-// stopBrain drive. Runs after buildExecution (needs a.spawner).
+// self-fence deadline and its supersession exit hook (every role, every mode
+// — supersession is structurally unreachable outside a shared multi-mode
+// registry, so this is a safe no-op elsewhere), and — for brain-capable roles
+// in multi mode only — constructs the reaper Store startBrain/stopBrain
+// drive. Runs after buildExecution (needs a.spawner).
+//
+// The per-claim lease has the same ordering shape one level finer (renewal →
+// claim fence → lease expiry) but no knobs to resolve: its three timings are
+// constants in internal/delegate, ordered at the point they are declared.
 func (a *App) buildReaper() error {
 	selfFence, err := delegate.ParseSelfFenceDeadline(os.Getenv("TF_SELF_FENCE_SEC"))
 	if err != nil {

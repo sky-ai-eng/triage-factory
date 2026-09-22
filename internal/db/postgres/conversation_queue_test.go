@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func TestConversationQueueStore_Postgres_ClaimCycle(t *testing.T) {
 	bpID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 	// Empty queue.
-	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
+	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || got != nil {
 		t.Fatalf("ClaimNextConversation on empty queue = (%v, %v), want (nil, nil)", got, err)
 	}
 
@@ -44,7 +45,7 @@ func TestConversationQueueStore_Postgres_ClaimCycle(t *testing.T) {
 		PromptID: promptID, CreatorUserID: userID,
 	}).ID
 
-	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{})
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || got == nil {
 		t.Fatalf("ClaimNextConversation: (%v, %v)", got, err)
 	}
@@ -71,7 +72,7 @@ func TestConversationQueueStore_Postgres_ClaimCycle(t *testing.T) {
 	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "transient"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
-	got2, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{})
+	got2, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || got2 == nil || got2.Attempts != 2 {
 		t.Fatalf("re-claim = (%+v, %v), want attempts=2", got2, err)
 	}
@@ -103,7 +104,7 @@ func TestConversationQueueStore_Postgres_ResetProcessingConversations_ScopedToOw
 	}).ID
 
 	// Process A claims and is still live (never crashed).
-	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "process-a", 1, db.ClaimPlacement{})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "process-a", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || claimed == nil || claimed.ID != conversationID {
 		t.Fatalf("process-a claim: got=%v err=%v", claimed, err)
 	}
@@ -157,7 +158,7 @@ func TestConversationQueueStore_Postgres_ResetProcessingConversations_NeverReset
 		PromptID: promptID, CreatorUserID: userID,
 	}).ID
 
-	if _, err := stores.ConversationQueue.ClaimNextConversation(ctx, "process-self", 5, db.ClaimPlacement{}); err != nil {
+	if _, err := stores.ConversationQueue.ClaimNextConversation(ctx, "process-self", 5, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 
@@ -189,7 +190,7 @@ func TestConversationQueueStore_Postgres_CancelRequestedNotClaimed(t *testing.T)
 	if changed, err := stores.Blueprints.RequestRunCancelSystem(ctx, orgID, step.BlueprintRunID); err != nil || !changed {
 		t.Fatalf("RequestRunCancelSystem = (%v, %v)", changed, err)
 	}
-	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
+	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || got != nil {
 		t.Fatalf("ClaimNextConversation on cancel-requested blueprint = (%v, %v), want (nil, nil)", got, err)
 	}
 }
@@ -231,7 +232,7 @@ func TestConversationQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for {
-				conv, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{})
+				conv, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
 				if err != nil {
 					t.Errorf("ClaimNextConversation: %v", err)
 					return
@@ -298,8 +299,8 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 	// it); without one, the claim-desync requeue arm would rightly treat the
 	// row as stranded.
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch)
-		VALUES ($1, $2, $3, 'exec-healthy', 1)
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+		VALUES ($1, $2, $3, 'exec-healthy', 1, now() + interval '300 seconds')
 	`, uuid.New().String(), orgID, healthyID); err != nil {
 		t.Fatalf("seed healthy claim: %v", err)
 	}
@@ -357,8 +358,8 @@ func TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T
 		t.Helper()
 		claimID := uuid.New().String()
 		pgtest.MustExec(t, h.AdminDB, `
-			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch)
-			VALUES ($1, $2, $3, 'exec-ds', 1)
+			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+			VALUES ($1, $2, $3, 'exec-ds', 1, now() + interval '300 seconds')
 		`, claimID, orgID, convID)
 		return claimID
 	}
@@ -732,7 +733,7 @@ func TestConversationQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 	}
 	firstQueuedAt := *queued.QueuedAt
 
-	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
+	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || got == nil {
 		t.Fatalf("ClaimNextConversation: (%v, %v)", got, err)
 	}
 	claimed, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
@@ -786,7 +787,7 @@ func TestConversationQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 			conversationID := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
 				PromptID: promptID, CreatorUserID: userID,
 			}).ID
-			if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
+			if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || got == nil {
 				t.Fatalf("ClaimNextConversation: (%v, %v)", got, err)
 			}
 			// Advance the claim into the setup phase the dispatcher would
@@ -806,7 +807,7 @@ func TestConversationQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 			if after.Status != "queued" {
 				t.Fatalf("status after requeue from phase %q = %q, want queued (a mid-setup phase must not block the requeue)", phase, after.Status)
 			}
-			if reclaimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || reclaimed == nil {
+			if reclaimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || reclaimed == nil {
 				t.Fatalf("re-ClaimNextConversation after requeue from phase %q: (%v, %v)", phase, reclaimed, err)
 			}
 		})
@@ -857,8 +858,8 @@ func TestConversationQueueStore_Postgres_ExecutorClaims(t *testing.T) {
 				}
 				if _, err := h.AdminDB.Exec(`
 					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
-					                    claimed_at, released_at, outcome, peak_mem_mb, cpu_usec)
-					VALUES ($1, $2, $3, $4, 1, $5, $6, NULLIF($7, ''), $8, $9)
+					                    claimed_at, released_at, outcome, peak_mem_mb, cpu_usec, lease_expires_at)
+					VALUES ($1, $2, $3, $4, 1, $5, $6, NULLIF($7, ''), $8, $9, now() + interval '300 seconds')
 				`, claimID, orgID, row.ConversationID, row.ExecutorID, row.ClaimedAt.UTC(), released,
 					row.Outcome, peak, cpu); err != nil {
 					t.Fatalf("insert claim: %v", err)
@@ -1113,4 +1114,115 @@ func TestConversationQueueStore_Postgres_ReturnedRow(t *testing.T) {
 		}
 		return stores.ConversationQueue, stores.Conversations, orgID, scaffold
 	})
+}
+
+// TestClaimLease_Postgres runs the shared claim-lease conformance against the
+// Postgres impl (admin pool, matching production wiring). Each factory call
+// resets the harness so subtests don't share state.
+func TestClaimLease_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+
+	dbtest.RunClaimLeaseConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture {
+		t.Helper()
+		h.Reset(t)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		orgID, userID := seedPgOrgForBlueprints(t, h)
+		bpID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+
+		return dbtest.ClaimLeaseFixture{
+			Stores: stores,
+			OrgID:  orgID,
+			StageStep: func(t *testing.T) (string, string) {
+				t.Helper()
+				taskID := seedPgTask(t, h, orgID, userID)
+				conv := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+					PromptID: promptID, CreatorUserID: userID,
+				})
+				return conv.ID, taskID
+			},
+			SetLease: func(t *testing.T, claimID string, in time.Duration) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(
+					`UPDATE claims SET lease_expires_at = statement_timestamp() + make_interval(secs => $1) WHERE id = $2`,
+					in.Seconds(), claimID,
+				); err != nil {
+					t.Fatalf("stage lease on %s: %v", claimID, err)
+				}
+			},
+			Lease: func(t *testing.T, claimID string) (time.Time, time.Time, bool) {
+				t.Helper()
+				var expiry sql.NullTime
+				var now time.Time
+				if err := h.AdminDB.QueryRow(
+					`SELECT lease_expires_at, statement_timestamp() FROM claims WHERE id = $1`, claimID,
+				).Scan(&expiry, &now); err != nil {
+					t.Fatalf("read lease of %s: %v", claimID, err)
+				}
+				return expiry.Time, now, expiry.Valid
+			},
+			LiveClaimsWithoutLease: func(t *testing.T) int {
+				t.Helper()
+				var n int
+				if err := h.AdminDB.QueryRow(
+					`SELECT COUNT(*) FROM claims WHERE released_at IS NULL AND lease_expires_at IS NULL`,
+				).Scan(&n); err != nil {
+					t.Fatalf("count live claims without a lease: %v", err)
+				}
+				return n
+			},
+		}
+	})
+}
+
+// TestClaimFence_Postgres_ReadsFreshDatabaseTime pins the one property only
+// this dialect can get wrong: the fence's expiry guard reads
+// statement_timestamp() rather than now(), which is the transaction's start. A claim whose lease
+// lapses WHILE a long transaction is open must fail that transaction's writes,
+// and against a transaction-start reading it would pass them.
+func TestClaimFence_Postgres_ReadsFreshDatabaseTime(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	bpID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+	conv := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+		PromptID: promptID, CreatorUserID: userID,
+	})
+
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "fresh-time-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+	if err != nil || claimed == nil {
+		t.Fatalf("ClaimNextConversation = (%+v, %v)", claimed, err)
+	}
+	if _, err := h.AdminDB.Exec(
+		`UPDATE claims SET lease_expires_at = statement_timestamp() + interval '1 second' WHERE id = $1`, claimed.ClaimID,
+	); err != nil {
+		t.Fatalf("stage a lease about to lapse: %v", err)
+	}
+
+	// The sleep runs inside the transaction, so now() is frozen a second and
+	// a half before the guard reads. Only a fresh reading refuses this.
+	tx, err := h.AdminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_sleep(1.5)`); err != nil {
+		t.Fatalf("sleep inside the transaction: %v", err)
+	}
+	var one int
+	err = tx.QueryRowContext(ctx, `
+		SELECT 1 FROM claims
+		WHERE id = $1 AND org_id = $2 AND conversation_id = $3
+		  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
+		FOR SHARE
+	`, claimed.ClaimID, orgID, conv.ID).Scan(&one)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("the fence's predicate matched a lapsed lease inside a long transaction (err %v); it is reading transaction-start time", err)
+	}
+
+	// And the store's own fenced write, on its own connection, agrees.
+	if _, err := stores.Conversations.SetSessionForClaimSystem(ctx, orgID, conv.ID, claimed.ClaimID, "sess-late"); !errors.Is(err, db.ErrClaimReleased) {
+		t.Fatalf("SetSessionForClaimSystem after the lease lapsed = %v, want ErrClaimReleased", err)
+	}
 }

@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -364,6 +366,41 @@ func TestProcessCompletion_FenceTripRecordsNothing(t *testing.T) {
 	}
 }
 
+// TestProcessCompletion_SelfFencedLeaseRecordsNothing: a conclusion produced
+// as the claim's lease fenced is not recorded either, and this one the store
+// cannot catch. The lease has not lapsed yet — fencing early is the whole
+// point of it — so the database would accept this terminal, on a context
+// detached from the cancellation that fenced it. The refusal has to be here.
+func TestProcessCompletion_SelfFencedLeaseRecordsNothing(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-self-lease")
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
+
+	ctx, fence := context.WithCancelCause(context.Background())
+	fence(errClaimSelfFenced)
+
+	parked, fenced := s.processCompletion(ctx, runmode.LocalDefaultOrgID, conversationID,
+		"bpr-"+conversationID, "claim-1", loadTask(t, s, taskID),
+		res(`{"outcome":"finish","summary":"done"}`), t.TempDir(), nil, "", "event", "")
+	if !fenced {
+		t.Fatal("a self-fenced completion reported unfenced; the caller would advance the blueprint off a result nobody owns")
+	}
+	if !parked {
+		t.Error("processCompletion(self-fenced) = parked false; the workspace would be torn down under whoever takes the conversation over")
+	}
+	if stub.completes != 0 {
+		t.Errorf("a self-fenced engagement attempted %d terminal writes, want 0", stub.completes)
+	}
+
+	var status string
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&status); err != nil {
+		t.Fatalf("read run status: %v", err)
+	}
+	if status != "running" {
+		t.Errorf("run status = %q, want running (a self-fenced engagement must leave the row alone)", status)
+	}
+}
+
 // TestFailConversation_FenceTripRecordsNothing: the same for the infra-failure
 // terminal — a fenced-out engagement's crash is not the successor's failure.
 func TestFailConversation_FenceTripRecordsNothing(t *testing.T) {
@@ -508,5 +545,36 @@ func TestParkConversationOpen_ResumeCancelFenceTripRecordsNothing(t *testing.T) 
 	}
 	if status != "running" {
 		t.Errorf("run status = %q, want running (a refused cancellation must leave the row alone)", status)
+	}
+}
+
+// TestRecordNativeResult_SelfFencedLeaseRecordsNothing is the native
+// runtime's half of the same property. The loop checks its context at many
+// points and returns synchronously, so the window is narrower than the SDK
+// driver's select — but it is the same window: a conclusion returned out of
+// the gap between the loop's last cancellation check and its return would be
+// recorded on a detached context that the database still accepts, because
+// the lease has not lapsed.
+func TestRecordNativeResult_SelfFencedLeaseRecordsNothing(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-native-lease")
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
+
+	ctx, fence := context.WithCancelCause(context.Background())
+	fence(errClaimSelfFenced)
+
+	if fenced := s.recordNativeResult(ctx, runmode.LocalDefaultOrgID, conversationID,
+		loadTask(t, s, taskID),
+		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: "claim-1"},
+		"ns-"+conversationID, t.TempDir(), "event", "", time.Now(),
+		agentloop.Result{Kind: agentloop.ResultConcluded, Outcome: domain.ConversationOutcomeFinish, ResultSummary: "done"},
+		nil); !fenced {
+		t.Fatal("a self-fenced conclusion reported unfenced; the caller would advance the blueprint off a result nobody owns")
+	}
+	if stub.completes != 0 {
+		t.Errorf("a self-fenced engagement attempted %d terminal writes, want 0", stub.completes)
+	}
+	if got := storedStatus(t, database, conversationID); got != "running" {
+		t.Errorf("run status = %q, want running (a self-fenced engagement must leave the row alone)", got)
 	}
 }

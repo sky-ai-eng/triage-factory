@@ -139,7 +139,9 @@ item, and logs at info level. Expiry ends authority even if no successor has cla
 Disposition belongs to the next claimer.
 
 For expiry guards, `now()` means fresh database time at the guard, not the start time of a long
-transaction. In Postgres, use `clock_timestamp()`. Validate ownership after acquiring the row lock.
+transaction. In Postgres, use `statement_timestamp()`: fresh for each statement, and fixed within
+one, so two readings taken for a single answer cannot disagree. Validate ownership after acquiring
+the row lock.
 
 - **`SingleTx`:** check again at the final disposition write. Failure rolls back the transaction's
   domain mutations as well as the disposition.

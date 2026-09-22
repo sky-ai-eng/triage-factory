@@ -54,7 +54,8 @@ func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
 	// release the engagement along with the status flip, not leave it for
 	// the janitor.
 	if _, err := conn.Exec(`
-		INSERT INTO claims (id, conversation_id, executor_id) VALUES ('oa-claim', 'oa-child', 'exec-oa')
+		INSERT INTO claims (id, conversation_id, executor_id, lease_expires_at)
+		VALUES ('oa-claim', 'oa-child', 'exec-oa', strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
 	`); err != nil {
 		t.Fatalf("seed oa-child claim: %v", err)
 	}
@@ -205,7 +206,8 @@ func TestReconcileOrphanedConversations(t *testing.T) {
 	// it); without one, the claim-desync requeue arm would rightly treat the
 	// row as stranded.
 	if _, err := conn.Exec(`
-		INSERT INTO claims (id, conversation_id, executor_id) VALUES ('rb-claim', 'rb-child', 'exec-b')
+		INSERT INTO claims (id, conversation_id, executor_id, lease_expires_at)
+		VALUES ('rb-claim', 'rb-child', 'exec-b', strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
 	`); err != nil {
 		t.Fatalf("seed rb-child claim: %v", err)
 	}
@@ -283,7 +285,8 @@ func TestReconcileOrphanedConversations_HealsClaimDesyncs(t *testing.T) {
 	activeClaim := func(claimID, convID string) {
 		t.Helper()
 		if _, err := conn.Exec(`
-			INSERT INTO claims (id, conversation_id, executor_id) VALUES (?, ?, 'exec-ds')
+			INSERT INTO claims (id, conversation_id, executor_id, lease_expires_at)
+			VALUES (?, ?, 'exec-ds', strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
 		`, claimID, convID); err != nil {
 			t.Fatalf("seed claim %s: %v", claimID, err)
 		}

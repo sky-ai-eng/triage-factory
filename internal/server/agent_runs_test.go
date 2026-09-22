@@ -154,7 +154,7 @@ func TestHandleConversations_StatusFilter(t *testing.T) {
 	_ = seedSteerConversation(t, s.db, "stf-done", "completed")
 	// `running` is DERIVED from an unreleased claim, never stored, so the
 	// display ladder only reads it once the row has one.
-	execSQL(t, s.db, `INSERT INTO claims (id, conversation_id, executor_id, boot_epoch) VALUES (?, ?, 'exec-1', 1)`,
+	execSQL(t, s.db, `INSERT INTO claims (id, conversation_id, executor_id, boot_epoch, lease_expires_at) VALUES (?, ?, 'exec-1', 1, strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))`,
 		uuid.New().String(), running)
 
 	live := append([]string{domain.StatusRunning}, domain.AllClaimPhases()...)
@@ -611,7 +611,7 @@ func TestConversationResponse_QueuePositionOnlyWhenQueued(t *testing.T) {
 	// An unreleased claim takes a conversation out of the line entirely — it
 	// is the oldest row here, so a derivation that ranked by start time alone
 	// would hand it position 1.
-	execSQL(t, s.db, `INSERT INTO claims (id, conversation_id, executor_id, boot_epoch) VALUES (?, ?, 'exec-qpos', 1)`,
+	execSQL(t, s.db, `INSERT INTO claims (id, conversation_id, executor_id, boot_epoch, lease_expires_at) VALUES (?, ?, 'exec-qpos', 1, strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))`,
 		uuid.New().String(), claimed)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{})

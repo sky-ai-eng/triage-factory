@@ -5,18 +5,22 @@ import "errors"
 // ErrClaimReleased is the fence trip: an executor engagement tried to write
 // against a claim that is no longer live, so the write was refused.
 //
-// The claim is the executor's title to a conversation. Ownership is meant to
-// end cooperatively — an executor that loses contact with the database
-// self-fences (stops its own sandboxes) strictly before the fleet reaper is
-// allowed to release its claims and requeue the work, so a successor never
-// starts while the predecessor is still running. That guarantee is
-// process-level and clock-based, and the failure modes it does not cover (a
-// stalled process, a clock that jumps, a blocking call that starves the
-// deadline check) all end the same way: a zombie still holding a dead claim,
-// writing into a conversation a successor now drives. Interleaved transcript,
-// spend settled onto the wrong engagement, a terminal status landing on
-// in-flight work — none of it is repairable after the fact, because two
-// authors in one window cannot be told apart.
+// The claim is the executor's title to a conversation, and that title is a
+// LEASE on database time: it carries an expiry, its holder renews it on a
+// timer, and every write the holder makes presents it. Authority ends at the
+// expiry whether or not a successor exists — nobody has to arrive for a dead
+// engagement's writes to stop being accepted. A holder that cannot renew
+// fences its own engagement (kills its cell, writes nothing more) on its own
+// monotonic clock, strictly before the lease it can no longer prove lapses,
+// so the cell is dead before anyone may take the conversation over.
+//
+// What that buys is a guarantee per claim rather than per process. A zombie
+// still holding a dead claim — a stalled process, a clock that jumped, a
+// blocking call that starved a deadline check — writing into a conversation a
+// successor now drives is not repairable after the fact: interleaved
+// transcript, spend settled onto the wrong engagement, a terminal status
+// landing on in-flight work, and two authors in one window that cannot be told
+// apart.
 //
 // So the claim-fenced writes refuse instead. Each validates the named claim
 // with a locking read in its own transaction, which conflicts with the

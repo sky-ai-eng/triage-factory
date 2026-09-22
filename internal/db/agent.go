@@ -360,8 +360,15 @@ type ConversationStore interface {
 	// conversation's ACTIVE claim — an idempotent go-live re-stamp, kept
 	// because it is the one write that runs after the process actually
 	// exists. If an active claim exists its executor_id/boot_epoch are
-	// updated; if none exists one is minted (claimed_at = now) so the
-	// live process is never unattributed. Passing an empty executorID
+	// updated; if none exists one is minted (claimed_at = now, and
+	// lease_expires_at = now + DefaultClaimLease, so the live-claim invariant
+	// holds for it) so the live process is never unattributed.
+	//
+	// Nothing renews a claim minted by that arm: every production engagement
+	// is dispatched and carries its claim id from ClaimNextConversation, so
+	// the arm is reachable only from tests and from a claimless caller no
+	// production path has. Its lease is there to satisfy the invariant, not to
+	// be maintained. Passing an empty executorID
 	// keeps the legacy clear semantics by releasing the active claim
 	// with outcome 'requeued'. Both identity columns always travel
 	// together. The admin pool is the right door because the spawner
@@ -1017,14 +1024,13 @@ type ConversationStore interface {
 	// that isn't there must write nothing at all rather than conjure a row or
 	// land on whichever claim happens to be active.
 	//
-	// It REFUSES a released claim with ErrClaimReleased on Postgres. Local
-	// mode no-ops instead, under the standing N=1 exemption — the write is
-	// equally absent either way, and there is no rival executor for the error
-	// to protect anyone from.
+	// It REFUSES a claim that is no longer live — released, or its lease
+	// lapsed — with ErrClaimReleased. Both dialects: local mode has the stop
+	// verb for a rival owner, so the refusal means something there too.
 	//
-	// Returns the claim row this call wrote. Local mode's no-op arm answers
-	// (nil, nil) — the guard declining, the same shape RecordClaimSandboxStatsSystem
-	// uses for an unknown claim id.
+	// Returns the claim row this call wrote, or (nil, nil) when the fence
+	// passed and the UPDATE still matched nothing — the guard declining, the
+	// same shape RecordClaimSandboxStatsSystem uses for an unknown claim id.
 	SetExecutorForClaimSystem(ctx context.Context, orgID, conversationID, claimID, executorID string, bootEpoch int64) (*domain.ExecutorClaim, error)
 
 	// SetWorktreePathForClaimSystem records where this engagement's workspace

@@ -341,8 +341,8 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	seedChildClaim := func(convID, executor string) {
 		t.Helper()
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch)
-			VALUES ($1, $2, $3, 1)
+			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+			VALUES ($1, $2, $3, 1, now() + interval '300 seconds')
 		`, orgID, convID, executor); err != nil {
 			t.Fatalf("seed claim for %s: %v", convID, err)
 		}

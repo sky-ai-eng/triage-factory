@@ -239,6 +239,34 @@ A parked row is on the Parked work section of the org's settings, for an
 org admin to redrive or cancel; the same rows are `POST
 /api/orgs/{org_id}/work/{kind}/items/list`.
 
+### Claims
+
+A **claim** is one executor's engagement with one conversation, and it carries
+a 75-second lease its holder renews every 20s. A holder that cannot renew for
+45s kills its own cell and writes nothing more, so a claim whose lease has
+actually lapsed belongs to an engagement that has stopped. The three timings
+are constants, not knobs: their ordering is what makes a takeover safe, so
+they move together or not at all.
+
+Both gauges are read from the database by the control pod's background brain,
+deliberately not by any dispatcher: a stuck dispatcher is what produces these
+rows, so it must not be what reports them.
+
+| Metric | Meaning |
+| -- | -- |
+| `tf_claims_expired` | Unreleased claims past their lease. **Zero is the steady state**; a brief nonzero is a dead engagement between its expiry and its recovery. |
+| `tf_claims_oldest_expired_age_seconds` | Seconds past expiry of the oldest such claim. |
+
+One alert, on the age rather than the count, because the count is expected to
+flicker and the age is not:
+
+```
+tf_claims_oldest_expired_age_seconds > 120                                      # for 5m: a dead engagement nobody has released
+```
+
+A claim past expiry for minutes means the recovery that should release it is
+not running.
+
 ### Slack ingest
 
 Per Slack app (`message.channels`/`message.groups` are a firehose, unlike

@@ -260,6 +260,16 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 				t.Fatalf("backdate completed_at of %s: %v", conversationID, err)
 			}
 		},
+		LiveClaimsWithoutLease: func(t *testing.T) int {
+			t.Helper()
+			var n int
+			if err := conn.QueryRow(
+				`SELECT COUNT(*) FROM claims WHERE released_at IS NULL AND lease_expires_at IS NULL`,
+			).Scan(&n); err != nil {
+				t.Fatalf("count live claims without a lease: %v", err)
+			}
+			return n
+		},
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
 			t.Helper()
 			rows, err := conn.Query(`
@@ -668,8 +678,8 @@ func TestConversationStore_SQLite_FenceRefusesAClaimFromAnotherOrg(t *testing.T)
 	mintClaim := func(conversationID, claimOrg string) string {
 		id := uuid.New().String()
 		if _, err := conn.Exec(`
-			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch)
-			VALUES (?, ?, ?, 'exec', 1)
+			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+			VALUES (?, ?, ?, 'exec', 1, strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
 		`, id, claimOrg, conversationID); err != nil {
 			t.Fatalf("seed claim under org %s: %v", claimOrg, err)
 		}

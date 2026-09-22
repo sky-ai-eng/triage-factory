@@ -13,6 +13,14 @@ import (
 // claim must still be live and must be the one holding this conversation, or
 // the engagement write behind it is refused with db.ErrClaimReleased.
 //
+// Live means unreleased AND holding an unexpired lease. Authority is a lease
+// on database time, renewed by the holder on a timer; a holder that cannot
+// renew fences its own engagement before the lease lapses, and every write it
+// makes presents the lease here. SQLite advances 'now' across statements
+// inside a transaction, so the reading is taken at the guard rather than at
+// BEGIN — the fresh-time property the Postgres twin gets from
+// statement_timestamp().
+//
 // The rival owner it guards against here is not a successor executor — local
 // mode has one — but the stop verb. A person stopping a conversation parks the
 // row and releases its claim without asking the engagement, deliberately (see
@@ -46,7 +54,8 @@ func assertClaimActive(ctx context.Context, q queryer, orgID, conversationID, cl
 	err := q.QueryRowContext(ctx, `
 		SELECT 1 FROM claims cl
 		JOIN conversations c ON c.id = cl.conversation_id AND c.org_id = cl.org_id
-		WHERE cl.id = ? AND cl.org_id = ? AND cl.conversation_id = ? AND cl.released_at IS NULL
+		WHERE cl.id = ? AND cl.org_id = ? AND cl.conversation_id = ?
+		  AND cl.released_at IS NULL AND cl.lease_expires_at > `+sqliteNowExpr+`
 	`, claimID, orgID, conversationID).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)

@@ -942,8 +942,17 @@ func testListAndGet(t *testing.T, mk envFactory) {
 	if got.Status != workitem.StatusLeased || got.LeaseOwner != "worker-a" || got.LeaseEpoch == nil || *got.LeaseEpoch != 7 {
 		t.Errorf("leased row = %+v, want its lease columns", got)
 	}
-	if got.LeasedAt == nil || got.LeaseExpiresAt == nil || !got.LeaseExpiresAt.After(*got.LeasedAt) {
-		t.Errorf("lease timestamps = %v/%v, want an expiry after the acquisition", got.LeasedAt, got.LeaseExpiresAt)
+	// Exactly the policy lease, not merely later than the acquisition: both
+	// columns are stamped from one instant in one statement, so a difference
+	// off by a microsecond means the write read database time twice.
+	lease := e.kind.Policy.Lease
+	if lease <= 0 {
+		lease = workitem.DefaultLease
+	}
+	if got.LeasedAt == nil || got.LeaseExpiresAt == nil {
+		t.Errorf("lease timestamps = %v/%v, want both stamped", got.LeasedAt, got.LeaseExpiresAt)
+	} else if d := got.LeaseExpiresAt.Sub(*got.LeasedAt); d != lease {
+		t.Errorf("lease_expires_at - leased_at = %s, want exactly the %s the policy grants", d, lease)
 	}
 	if got.CancelRequestedAt == nil || got.CancelRequestedBy != "operator" || got.CancelReason != "stop" {
 		t.Errorf("cancel columns = %v/%q/%q, want the recorded request", got.CancelRequestedAt, got.CancelRequestedBy, got.CancelReason)

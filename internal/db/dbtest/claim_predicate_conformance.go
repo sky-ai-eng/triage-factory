@@ -101,7 +101,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 
 	claim := func(t *testing.T, h ClaimPredicateHarness) *domain.Conversation {
 		t.Helper()
-		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, predicateExecutorID, predicateBootEpoch, db.ClaimPlacement{})
+		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, predicateExecutorID, predicateBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
 		if err != nil {
 			t.Fatalf("ClaimNextConversation: %v", err)
 		}

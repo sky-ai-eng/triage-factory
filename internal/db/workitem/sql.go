@@ -48,12 +48,15 @@ func (a *args) bind(v any) string {
 	return "?"
 }
 
-// nowExpr is fresh database time at the statement: clock_timestamp() rather
-// than now(), which is transaction start and would let a long transaction's
-// guard read an expiry that has already passed as live.
+// nowExpr is database time read at the statement: fresh on each one, so a
+// long transaction's guard cannot pass an expiry that has already lapsed, and
+// fixed within one, so the two columns an admit stamps identically and the
+// predicate a measurement is taken over all resolve to a single instant. Both
+// halves are load-bearing, and both dialects hold them — which is what lets
+// one assertion cover them.
 func (k Kind) nowExpr() string {
 	if k.Dialect == Postgres {
-		return "clock_timestamp()"
+		return "statement_timestamp()"
 	}
 	return sqliteNowExpr
 }
@@ -97,7 +100,7 @@ func (k Kind) ripeCondition() string {
 // is measured from stays the database's.
 func (k Kind) nowPlusExpr(a *args, d time.Duration) string {
 	if k.Dialect == Postgres {
-		return "clock_timestamp() + make_interval(secs => " + a.bind(d.Seconds()) + ")"
+		return "statement_timestamp() + make_interval(secs => " + a.bind(d.Seconds()) + ")"
 	}
 	return `strftime('%Y-%m-%d %H:%M:%f','now',` + a.bind(sqliteModifier(d)) + `)`
 }

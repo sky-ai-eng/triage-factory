@@ -902,6 +902,11 @@ type ExecutorClaim struct {
 	// which is also the only shape whose sandbox may still be growing.
 	ClaimedAt  time.Time
 	ReleasedAt *time.Time
+	// LeaseExpiresAt is when this engagement's authority ends on database
+	// time. A live claim always carries one and its holder renews it; a
+	// released claim keeps whatever it had, so the row records when the lease
+	// would have lapsed. nil only on a row written before the column existed.
+	LeaseExpiresAt *time.Time
 	// Outcome is how the engagement ended ("completed" | "failed" |
 	// "cancelled" | "requeued" | "parked" | "reaped"); empty while live.
 	Outcome string

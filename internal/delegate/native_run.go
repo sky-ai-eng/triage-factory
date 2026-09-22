@@ -60,8 +60,14 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// after that, so none of them sees it nil.
 	var mirror *memoryMirror
 
-	// The park a stop lands on, wherever the stop catches this engagement.
+	// The park a stop lands on, wherever the stop catches this engagement. A
+	// LEASE fence is not a stop and never reaches the park: this engagement
+	// no longer owns the conversation, so recording a user cancellation on it
+	// would be recording a stop nobody made.
 	stopped := func() engagementDisposition {
+		if leaseFenced(ctx) {
+			return engagementDisposition{fenced: true}
+		}
 		fenced := s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
@@ -710,6 +716,14 @@ func (s *Spawner) recordNativeResult(
 
 	switch result.Kind {
 	case agentloop.ResultCancelled:
+		// A lease fence cancels the loop exactly as a stop does, and the two
+		// must not be recorded the same way: ownership is gone, so this
+		// engagement writes nothing.
+		if leaseFenced(ctx) {
+			delegateLog.Info("engagement fenced by its claim lease; the conversation awaits takeover",
+				"conversation", conversationID, "claim", cfg.claimID)
+			return true
+		}
 		return s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
@@ -754,11 +768,25 @@ func (s *Spawner) recordNativeResult(
 		return false
 	}
 
-	// Concluded. One last look at the file, exactly as processCompletion
-	// takes: a final turn that wrote after its last tool call is the whole
-	// reason the mirror is not the only read. No row is written when the agent
-	// wrote none — the state is logged instead, because each shape of "no
-	// file" points somewhere different when a run looks wrong afterwards.
+	// Concluded — which is not authority to record a conclusion. The lease
+	// fence cancels this context, and the loop can return a concluded result
+	// out of the window between its last cancellation check and its return.
+	// Everything below then runs on a context detached from that
+	// cancellation, and the database accepts the terminal until the lease has
+	// actually lapsed — so an engagement that can no longer prove it holds
+	// the claim would land a full conclusion anyway. Drop it: the session and
+	// the tree survive, and whoever takes the conversation over concludes it.
+	if leaseFenced(ctx) {
+		delegateLog.Warn("dropping a conclusion produced as the claim lease fenced; the conversation returns to the queue",
+			"conversation", conversationID, "claim", cfg.claimID)
+		return true
+	}
+
+	// One last look at the file: a final turn that wrote after its last tool
+	// call is the whole reason the mirror is not the only read. No row is
+	// written when the agent wrote none — the state is logged instead,
+	// because each shape of "no file" points somewhere different when a run
+	// looks wrong afterwards.
 	if fileState := mirror.settle(ctx); fileState != memoryFilePresent {
 		delegateLog.Debug("no usable memory file at termination (no memory row written)", "conversation", conversationID, "state", fileState)
 	}

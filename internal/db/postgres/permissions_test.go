@@ -38,8 +38,8 @@ func TestPermissionStore_Postgres_Conformance(t *testing.T) {
 				t.Helper()
 				id := uuid.New().String()
 				if _, err := h.AdminDB.Exec(`
-					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch)
-					VALUES ($1, $2, $3, 'exec-perms', 0)
+					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+					VALUES ($1, $2, $3, 'exec-perms', 0, now() + interval '300 seconds')
 				`, id, orgID, conversationID); err != nil {
 					t.Fatalf("seed claim: %v", err)
 				}

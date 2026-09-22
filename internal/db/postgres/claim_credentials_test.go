@@ -14,8 +14,8 @@ func seedPgActiveClaim(t *testing.T, h *pgtest.Harness, orgID, conversationID, e
 	t.Helper()
 	var id string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch)
-		VALUES ($1, $2, $3, $4) RETURNING id::text
+		INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+		VALUES ($1, $2, $3, $4, now() + interval '300 seconds') RETURNING id::text
 	`, orgID, conversationID, executorID, bootEpoch).Scan(&id); err != nil {
 		t.Fatalf("seed claim: %v", err)
 	}

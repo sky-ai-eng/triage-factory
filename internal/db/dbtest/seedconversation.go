@@ -190,16 +190,34 @@ func SeedBlueprintRun(tb testing.TB, database *sql.DB, br domain.BlueprintRun) s
 // executor_id/boot_epoch/claimed_at columns seeds one of these instead. The
 // partial unique index allows at most one active claim per conversation —
 // callers seeding a second engagement must release the first.
+//
+// The lease is stamped because a live claim always carries one: a seeded row
+// without it is a claim the fence refuses, which is not the fixture any caller
+// means by "active". SeedExpiredClaimLease is how a test stages the other
+// shape deliberately.
 func SeedActiveClaim(tb testing.TB, database *sql.DB, conversationID, executorID string, bootEpoch int64) string {
 	tb.Helper()
 	id := uuid.New().String()
 	if _, err := database.Exec(`
-		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+		VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f', 'now', '+300.000 seconds'))
 	`, id, runmode.LocalDefaultOrgID, conversationID, executorID, bootEpoch); err != nil {
 		tb.Fatalf("SeedActiveClaim %s: %v", conversationID, err)
 	}
 	return id
+}
+
+// SeedExpiredClaimLease backdates a claim's lease to just past now, staging
+// the dead-engagement shape: unreleased, but with no authority left. The
+// holder of such a claim writes nothing, the display reads it as queued, and
+// the reaper's lease arm releases it.
+func SeedExpiredClaimLease(tb testing.TB, database *sql.DB, claimID string) {
+	tb.Helper()
+	if _, err := database.Exec(`
+		UPDATE claims SET lease_expires_at = strftime('%Y-%m-%d %H:%M:%f', 'now', '-1.000 seconds') WHERE id = ?
+	`, claimID); err != nil {
+		tb.Fatalf("SeedExpiredClaimLease %s: %v", claimID, err)
+	}
 }
 
 // nullIfEmpty maps "" to SQL NULL for nullable / FK columns, mirroring the

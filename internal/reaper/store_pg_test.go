@@ -104,7 +104,7 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, priorOutcomes ...string)
 		// conversation, so a test seeding several fixtures must leave no
 		// older one claimable — assert the identity rather than let a
 		// mis-claim pass silently.
-		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, executorID, 1, db.ClaimPlacement{})
+		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, executorID, 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 		if err != nil || got == nil || got.ID != conversationID {
 			t.Fatalf("ClaimNextConversation (claim %d): got=%v err=%v, want conversation %s", i+1, got, err, conversationID)
 		}
@@ -593,5 +593,81 @@ func TestClaimsExecutorID_HasNoForeignKeyToInstances(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("claims.executor_id has %d foreign key constraint(s), want 0 — a FK here would make GC deletes cascade into (or be blocked by) audit history", count)
+	}
+}
+
+// expireClaimLease backdates a conversation's live claim so its lease has
+// lapsed. It is how a test stages the dead engagement the instance heartbeat
+// cannot see: the process is alive and writing its heartbeat, but the
+// goroutine that held this one conversation is not.
+func expireClaimLease(t *testing.T, h *pgtest.Harness, conversationID string) {
+	t.Helper()
+	pgtest.MustExec(t, h.AdminDB, `
+		UPDATE claims SET lease_expires_at = now() - interval '1 second'
+		WHERE conversation_id = $1 AND released_at IS NULL
+	`, conversationID)
+}
+
+// TestReapDeadExecutors_ReapsAnExpiredLeaseOnALiveInstance pins the second
+// candidate arm. An executor renews one row every few seconds for the whole
+// process, so its heartbeat cannot say whether the goroutine driving one
+// conversation is alive; only that claim's own lease can. A claim past expiry
+// is reaped whatever the instance says, and it is safe to reap because the
+// boot-checked ordering put the holder's self-fence strictly before it.
+func TestReapDeadExecutors_ReapsAnExpiredLeaseOnALiveInstance(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	fx := seedReaperFixture(t, h)
+	// No heartbeat backdating: the instance is registered and fresh.
+	expireClaimLease(t, h, fx.conversationID)
+
+	store := reaper.NewPostgresStore(h.AdminDB)
+	counts, err := store.ReapDeadExecutors(ctx, 30*time.Second, 2)
+	if err != nil {
+		t.Fatalf("ReapDeadExecutors: %v", err)
+	}
+	if counts.Requeued != 1 || counts.Failed != 0 || counts.Cancelled != 0 {
+		t.Fatalf("counts = %+v, want {Requeued:1}: an expired lease is a dead engagement whatever its host is doing", counts)
+	}
+	var outcome string
+	if err := h.AdminDB.QueryRowContext(ctx, `
+		SELECT outcome FROM claims WHERE conversation_id = $1 ORDER BY claimed_at DESC LIMIT 1
+	`, fx.conversationID).Scan(&outcome); err != nil {
+		t.Fatalf("read released claim: %v", err)
+	}
+	if outcome != "reaped" {
+		t.Errorf("released claim outcome = %q, want reaped", outcome)
+	}
+}
+
+// TestReapDeadExecutors_LeavesALiveLeaseOnALiveInstance is the other half:
+// the arm must not widen the sweep. A healthy engagement renewing its lease
+// on a heartbeating host is untouched, however long it has been running —
+// claim age alone stops nothing.
+func TestReapDeadExecutors_LeavesALiveLeaseOnALiveInstance(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	fx := seedReaperFixture(t, h)
+
+	store := reaper.NewPostgresStore(h.AdminDB)
+	counts, err := store.ReapDeadExecutors(ctx, 30*time.Second, 2)
+	if err != nil {
+		t.Fatalf("ReapDeadExecutors: %v", err)
+	}
+	if counts != (reaper.Counts{}) {
+		t.Fatalf("counts = %+v, want nothing reaped", counts)
+	}
+	var active int
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.conversationID,
+	).Scan(&active); err != nil {
+		t.Fatalf("count active claims: %v", err)
+	}
+	if active != 1 {
+		t.Errorf("active claims = %d, want the live engagement still holding its claim", active)
 	}
 }

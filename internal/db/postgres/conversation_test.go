@@ -236,6 +236,16 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 				t.Fatalf("backdate completed_at of %s: %v", conversationID, err)
 			}
 		},
+		LiveClaimsWithoutLease: func(t *testing.T) int {
+			t.Helper()
+			var n int
+			if err := conn.QueryRow(
+				`SELECT COUNT(*) FROM claims WHERE released_at IS NULL AND lease_expires_at IS NULL`,
+			).Scan(&n); err != nil {
+				t.Fatalf("count live claims without a lease: %v", err)
+			}
+			return n
+		},
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
 			t.Helper()
 			rows, err := conn.Query(`

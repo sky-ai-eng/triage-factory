@@ -232,7 +232,7 @@ func (f *parkFleet) parkIdle(t *testing.T, s *Spawner, conv *domain.Conversation
 func (f *parkFleet) claim(t *testing.T, s *Spawner) *domain.Conversation {
 	t.Helper()
 	id, epoch := s.executorIdentity()
-	got, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), id, epoch, s.claimPlacement())
+	got, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), id, epoch, s.claimPlacement(), db.DefaultClaimLease)
 	if err != nil {
 		t.Fatalf("claim by %s: %v", id, err)
 	}
@@ -897,8 +897,8 @@ func TestFleet_Eviction_RoundTripsTheUncommittedDelta(t *testing.T) {
 	yID, yEpoch := f.y.executorIdentity()
 	siblingClaim := uuid.New().String()
 	pgtest.MustExec(t, f.h.AdminDB, `
-		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+		VALUES ($1, $2, $3, $4, $5, now() + interval '300 seconds')
 	`, siblingClaim, f.orgID, sibling, yID, yEpoch)
 	f.x.EvictIdleWorkspaces(context.Background(), after)
 	if !treePresent() {

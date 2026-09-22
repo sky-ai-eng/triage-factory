@@ -471,6 +471,20 @@ type Spawner struct {
 	// startup via SetSelfFenceDeadline; boot refuses a value >=
 	// TF_REAPER_STALE_SEC (internal/app cross-validates both).
 	selfFenceDeadline time.Duration
+	// claimRenewInterval / claimSelfFenceDeadline / claimLease are how often
+	// each engagement renews its claim's lease, the own-monotonic deadline
+	// since the last successful renewal's issue time past which it fences
+	// that one claim, and the lease itself. Zero (the NewSpawner default)
+	// falls back to the package constants at use time, like selfFenceDeadline
+	// above — and that fallback is the product's only path, since the three
+	// are constants and only tests override them.
+	//
+	// Beside selfFenceDeadline rather than replacing it: that one is the
+	// instance-wide fence on the heartbeat, which kills every cell on the
+	// host, and these are the finer per-claim fence next to it.
+	claimRenewInterval     time.Duration
+	claimSelfFenceDeadline time.Duration
+	claimLease             time.Duration
 	// onSupersessionFence is invoked once, synchronously, right after
 	// fenceIdentity kills this instance's live sandboxes on a supersession
 	// (identityFenced) — the second half of fence completion (spec

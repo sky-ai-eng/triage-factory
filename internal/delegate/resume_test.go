@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -429,7 +430,7 @@ func TestFollowUp_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
-	conv, err := s.conversationQueue.ClaimNextConversation(ctx, "test-executor", 1, db.ClaimPlacement{})
+	conv, err := s.conversationQueue.ClaimNextConversation(ctx, "test-executor", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil {
 		t.Fatalf("claim next run: %v", err)
 	}
@@ -437,7 +438,7 @@ func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {
 		t.Fatal("claim next run: nothing claimable (is the row queued under a running blueprint_run?)")
 	}
 	conv.OrgID = runmode.LocalDefaultOrgID
-	s.dispatchClaimedConversation(ctx, conv)
+	s.dispatchClaimedConversation(ctx, conv, time.Now())
 }
 
 // TestDispatchResumeClaim_DeliversRecordedInput proves the delivery half of
@@ -532,7 +533,7 @@ func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 	}
 	// Nothing is claimable any more: the queued follow-up was settled on the
 	// way down, so the retries stop rather than spinning forever.
-	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{})
+	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || claimed != nil {
 		t.Fatalf("ClaimNextConversation after the park = (%v, %v), want nothing claimable", claimed, err)
 	}

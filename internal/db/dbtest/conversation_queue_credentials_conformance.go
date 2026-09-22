@@ -61,7 +61,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 
 	claim := func(t *testing.T, store db.ConversationQueueStore, conversationID string) *domain.Conversation {
 		t.Helper()
-		got, err := store.ClaimNextConversation(ctx, executorID, bootEpoch, db.ClaimPlacement{})
+		got, err := store.ClaimNextConversation(ctx, executorID, bootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
 		if err != nil {
 			t.Fatalf("ClaimNextConversation: %v", err)
 		}

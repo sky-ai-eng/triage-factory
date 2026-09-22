@@ -232,7 +232,12 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 			}
 		}
 		executorID, bootEpoch := s.executorIdentity()
-		conv, err := s.conversationQueue.ClaimNextConversation(ctx, executorID, bootEpoch, s.claimPlacement())
+		// The lease anchor is taken BEFORE the call, not after: the claim's
+		// authority starts on database time the moment the row commits, and a
+		// slow round trip has already spent some of it. Measuring from here
+		// can only make the holder's watchdog fire early.
+		claimedAtLocal := time.Now()
+		conv, err := s.conversationQueue.ClaimNextConversation(ctx, executorID, bootEpoch, s.claimPlacement(), s.claimLeaseOrDefault())
 		if err != nil {
 			<-sem
 			dispatchLog.Warn("claim next conversation failed; retrying on the next scan", "error", err)
@@ -256,7 +261,7 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		go func() {
 			defer s.dispatchWG.Done()
 			defer func() { <-sem }()
-			s.dispatchClaimedConversation(ctx, conv)
+			s.dispatchClaimedConversation(ctx, conv, claimedAtLocal)
 		}()
 	}
 }
@@ -349,7 +354,7 @@ func (s *Spawner) waitForDispatcherStop(ctx context.Context) bool {
 // or finalized to avoid stranding it, so those must not be abortable by a
 // shutdown mid-finalize (the same detached-terminal-write convention the rest of
 // the spawner follows).
-func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.Conversation) {
+func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.Conversation, claimedAt time.Time) {
 	orgID := conv.OrgID
 	startTime := time.Now()
 
@@ -358,6 +363,26 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// never reached the agent at all.
 	ctx, endEngagement := s.beginEngagement(ctx, conv)
 	defer endEngagement()
+
+	// The claim's lease, renewed for as long as this engagement runs and
+	// fenced the moment it cannot be. Started HERE — above the claim gates,
+	// above the sidecar bring-up — because the credentials wait parks an
+	// engagement for up to awaitingCredentialsTimeout, which is longer than
+	// the lease: a loop started after bring-up would watch a claim that had
+	// already expired.
+	//
+	// claimCtx is the fence's handle and nothing else holds it. stepCtx below
+	// derives from it, so a fence cancels exactly what a stop cancels — the
+	// runtime returns, the sidecar and jail are torn down on the way out.
+	// s.cancels keeps holding the plain stepCancel, so Cancel,
+	// killAllLiveSandboxes and the signal apply loop are untouched.
+	claimCtx, claimFence := context.WithCancelCause(ctx)
+	defer claimFence(nil)
+	if s.conversationQueue != nil && conv.ClaimID != "" {
+		leaseCtx, stopLease := context.WithCancel(ctx)
+		defer stopLease()
+		go s.renewClaimLease(leaseCtx, conv, claimedAt, claimFence)
+	}
 
 	// The claim-validity gates: two DB round trips and a queue peek, every one
 	// of which can be the reason a claim took seconds to reach the sandbox, and
@@ -497,7 +522,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 			// The resume path is this same engagement continuing, so it keeps
 			// the root: its own bring-up and rehydrate become children of it.
 			closeGate("resume", nil)
-			s.dispatchResumeClaim(ctx, conv, task, msg, userID)
+			s.dispatchResumeClaim(claimCtx, conv, task, msg, userID)
 			return
 		}
 		// An SDK claim on a finished blueprint that carries no message to
@@ -547,7 +572,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// The deferred deregister is the backstop for the exits between here and
 	// the runtime call; the explicit one after the runtime keeps the handle's
 	// lifetime around the agent exactly as it was.
-	stepCtx, stepCancel := context.WithCancel(ctx)
+	stepCtx, stepCancel := context.WithCancel(claimCtx)
 	s.mu.Lock()
 	s.cancels[conv.ID] = stepCancel
 	s.mu.Unlock()
@@ -558,24 +583,40 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		stepCancel()
 	}()
 
-	// stoppedDuringBringUp is the first question every bring-up exit asks of
+	// disposedDuringBringUp is the first question every bring-up exit asks of
 	// its error: a setup call that returned because stepCtx was cancelled did
-	// not fail, it was stopped, and the stop already decided the disposition.
-	// The park here is the engagement's own half of it, through the fence — on
-	// a user stop the verb has usually parked and released first, and the
-	// refusal is the design working (see markConversationOpen). Without this
-	// the exit would read the cancelled clone as a transient setup failure and
-	// requeue (a no-op against a released claim, but the wrong story in the
-	// trace) or, out of attempts, fail the blueprint behind a conversation the
-	// user merely stopped. No snapshot: nothing this engagement built is a
-	// workspace worth capturing yet, and a cold resume rebuilds from scratch.
+	// not fail, and whatever cancelled it has already decided the
+	// disposition. True means this exit is settled and the caller returns; the
+	// failure ladder below it is for exits that really failed.
 	//
-	// The dispatcher's own shutdown is not a stop and is read first by the
-	// arms that distinguish it; here a cancelled parent means "not ours to
-	// dispose of", so the answer is no.
-	stoppedDuringBringUp := func() bool {
+	// Two cancellations reach here and they are disposed of differently, which
+	// is why the answer cannot be a plain "was it stopped".
+	//
+	// A user stop parks, through the fence. That park is the engagement's own
+	// half of it — on a user stop the verb has usually parked and released
+	// first, and the refusal is the design working (see markConversationOpen).
+	// Without it the exit would read the cancelled clone as a transient setup
+	// failure and requeue (a no-op against a released claim, but the wrong
+	// story in the trace) or, out of attempts, fail the blueprint behind a
+	// conversation the user merely stopped. No snapshot either way: nothing
+	// this engagement built is a workspace worth capturing yet, and a cold
+	// resume rebuilds from scratch.
+	//
+	// A lease fence writes NOTHING, and is read first. Nobody asked for this
+	// engagement to end — it simply stopped owning the conversation — so a
+	// park recorded here would be a user cancellation on a conversation nobody
+	// cancelled, and the disposition belongs to whoever takes it over.
+	//
+	// The dispatcher's own shutdown is neither, and is read before both: a
+	// cancelled parent means "not ours to dispose of", so the answer is no and
+	// the arms that distinguish a shutdown handle it themselves.
+	disposedDuringBringUp := func() bool {
 		if ctx.Err() != nil || stepCtx.Err() == nil {
 			return false
+		}
+		if leaseFenced(stepCtx) {
+			s.endEngagement(conv.ID, engagementFenced)
+			return true
 		}
 		s.endEngagement(conv.ID, engagementCancelled)
 		s.markConversationOpen(stepCtx, liveParkContext{
@@ -596,7 +637,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 			s.endEngagement(conv.ID, engagementShutdown)
 			return // dispatcher shutting down — leave the claimed run for boot reconcile
 		}
-		if stoppedDuringBringUp() {
+		if disposedDuringBringUp() {
 			return
 		}
 		s.failEngagement(conv.ID, err)
@@ -612,7 +653,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		IsEventTriggered: conv.TriggerType == domain.TriggerTypeEvent,
 	})
 	if err != nil {
-		if stoppedDuringBringUp() {
+		if disposedDuringBringUp() {
 			return
 		}
 		s.failEngagement(conv.ID, err)
@@ -661,7 +702,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// fails the blueprint.
 	cfg, err := s.buildStepConfig(stepCtx, orgID, br, *task, *conv, gh, sidecar, localGit)
 	if err != nil {
-		if stoppedDuringBringUp() {
+		if disposedDuringBringUp() {
 			return
 		}
 		s.failEngagement(conv.ID, err)
@@ -847,6 +888,8 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 // did. Any executor may run this — ensureWorkspace warm-reuses the
 // worktree if this IS the executor that parked it, else cold-rehydrates
 // from the durable S3 snapshot.
+// ctx here is the caller's CLAIM context — the one the lease fence cancels —
+// so stepCtx below inherits the fence exactly as it inherits a shutdown.
 func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversation, task *domain.Task, agentMessage, userID string) {
 	orgID := conv.OrgID
 	blueprintRunID := conv.BlueprintRunID
@@ -913,6 +956,13 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		stepCancel()
 	}()
 	if stepCtx.Err() != nil {
+		// A lease fence is not a stop: this engagement no longer owns the
+		// conversation, so it records nothing at all.
+		if leaseFenced(stepCtx) {
+			s.endEngagement(conv.ID, engagementFenced)
+			disposed = true
+			return
+		}
 		// No workspace rehydrated yet, so markConversationOpen (the no-snapshot park)
 		// rather than parkConversationOpen: there is nothing on disk to capture.
 		s.endEngagementIfStopped(conv.ID, ctx, stepCtx)
@@ -958,6 +1008,10 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// already in the store.
 	handBack := func(cause error) {
 		disposed = true
+		if leaseFenced(stepCtx) {
+			s.endEngagement(conv.ID, engagementFenced)
+			return
+		}
 		if stepCtx.Err() != nil {
 			// A stop, not a failure: cause is whatever the bring-up was doing
 			// when the cancel landed, which is not why this engagement ended.
@@ -1082,6 +1136,14 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		mirror:            mirror,
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
+		if leaseFenced(stepCtx) {
+			// Not a stop: the claim's lease is gone, so the conversation's
+			// disposition belongs to whoever takes it over. Nothing written,
+			// and the blueprint left exactly as it is.
+			s.endEngagement(conv.ID, engagementFenced)
+			disposed = true
+			return
+		}
 		// The agent worked in the rehydrated tree before the kill, so this
 		// park snapshots it — the whole point of a stop being a park is that
 		// the work survives the gesture.
