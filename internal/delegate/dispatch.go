@@ -583,26 +583,34 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		stepCancel()
 	}()
 
-	// stoppedDuringBringUp is the first question every bring-up exit asks of
+	// disposedDuringBringUp is the first question every bring-up exit asks of
 	// its error: a setup call that returned because stepCtx was cancelled did
-	// not fail, it was stopped, and the stop already decided the disposition.
-	// The park here is the engagement's own half of it, through the fence — on
-	// a user stop the verb has usually parked and released first, and the
-	// refusal is the design working (see markConversationOpen). Without this
-	// the exit would read the cancelled clone as a transient setup failure and
-	// requeue (a no-op against a released claim, but the wrong story in the
-	// trace) or, out of attempts, fail the blueprint behind a conversation the
-	// user merely stopped. No snapshot: nothing this engagement built is a
-	// workspace worth capturing yet, and a cold resume rebuilds from scratch.
+	// not fail, and whatever cancelled it has already decided the
+	// disposition. True means this exit is settled and the caller returns; the
+	// failure ladder below it is for exits that really failed.
 	//
-	// The dispatcher's own shutdown is not a stop and is read first by the
-	// arms that distinguish it; here a cancelled parent means "not ours to
-	// dispose of", so the answer is no.
+	// Two cancellations reach here and they are disposed of differently, which
+	// is why the answer cannot be a plain "was it stopped".
 	//
-	// A lease fence is read first and is NOT a stop: nothing asked for this
-	// engagement to end, and writing a user cancellation would record a stop
-	// nobody made. It ends the engagement fenced and writes nothing at all.
-	stoppedDuringBringUp := func() bool {
+	// A user stop parks, through the fence. That park is the engagement's own
+	// half of it — on a user stop the verb has usually parked and released
+	// first, and the refusal is the design working (see markConversationOpen).
+	// Without it the exit would read the cancelled clone as a transient setup
+	// failure and requeue (a no-op against a released claim, but the wrong
+	// story in the trace) or, out of attempts, fail the blueprint behind a
+	// conversation the user merely stopped. No snapshot either way: nothing
+	// this engagement built is a workspace worth capturing yet, and a cold
+	// resume rebuilds from scratch.
+	//
+	// A lease fence writes NOTHING, and is read first. Nobody asked for this
+	// engagement to end — it simply stopped owning the conversation — so a
+	// park recorded here would be a user cancellation on a conversation nobody
+	// cancelled, and the disposition belongs to whoever takes it over.
+	//
+	// The dispatcher's own shutdown is neither, and is read before both: a
+	// cancelled parent means "not ours to dispose of", so the answer is no and
+	// the arms that distinguish a shutdown handle it themselves.
+	disposedDuringBringUp := func() bool {
 		if ctx.Err() != nil || stepCtx.Err() == nil {
 			return false
 		}
@@ -629,7 +637,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 			s.endEngagement(conv.ID, engagementShutdown)
 			return // dispatcher shutting down — leave the claimed run for boot reconcile
 		}
-		if stoppedDuringBringUp() {
+		if disposedDuringBringUp() {
 			return
 		}
 		s.failEngagement(conv.ID, err)
@@ -645,7 +653,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		IsEventTriggered: conv.TriggerType == domain.TriggerTypeEvent,
 	})
 	if err != nil {
-		if stoppedDuringBringUp() {
+		if disposedDuringBringUp() {
 			return
 		}
 		s.failEngagement(conv.ID, err)
@@ -694,7 +702,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// fails the blueprint.
 	cfg, err := s.buildStepConfig(stepCtx, orgID, br, *task, *conv, gh, sidecar, localGit)
 	if err != nil {
-		if stoppedDuringBringUp() {
+		if disposedDuringBringUp() {
 			return
 		}
 		s.failEngagement(conv.ID, err)
