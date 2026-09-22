@@ -16,6 +16,15 @@ import (
 // deliberately does not implement ghclient.ScopedResolver, so the local git
 // channel stands down (as it does for every narrow test resolver) and the
 // claim's bring-up reaches the PR fetch with nothing else in the way.
+//
+// The embedded Resolver is nil, so any method this type does not override
+// panics on a nil interface rather than failing a test. BaseURLFor is
+// overridden because the workspace rehydrate reaches it: a bring-up whose
+// cancellation lands one call later than the fetch would otherwise segfault,
+// which says nothing about the behavior under test. It answers empty — this
+// fixture has no git host, only an API server — which is the answer
+// gitHostBaseFor documents as leaving the caller's clone auth inert rather
+// than pointing it at a guessed host.
 type bringUpResolver struct {
 	ghclient.Resolver
 	client *ghclient.Client
@@ -23,6 +32,10 @@ type bringUpResolver struct {
 
 func (r bringUpResolver) ClientFor(context.Context, string, string) (*ghclient.Client, error) {
 	return r.client, nil
+}
+
+func (r bringUpResolver) BaseURLFor(context.Context, string) (string, error) {
+	return "", nil
 }
 
 // TestDispatch_StopDuringBringUpCancelsTheSetupAndParks pins the window this

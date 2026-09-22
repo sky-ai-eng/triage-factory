@@ -31,8 +31,13 @@ type fakeRenewalStore struct {
 	mu    sync.Mutex
 	calls []renewalRecord
 
-	// err, when set, is what every renewal returns.
+	// err, when set, is what every renewal returns once refuseAfter has
+	// opened (immediately, when it is nil).
 	err error
+	// refuseAfter gates err: renewals succeed until it is closed. It exists so
+	// a test can decide WHERE in the engagement the lease is lost, rather than
+	// leaving it to whichever of the ticker and the bring-up wins a race.
+	refuseAfter <-chan struct{}
 	// block, when non-nil, is what the call waits on INSTEAD of honouring its
 	// context — the driver that ignores its deadline, which is exactly the
 	// failure the watchdog's own timer exists for.
@@ -42,10 +47,17 @@ type fakeRenewalStore struct {
 func (f *fakeRenewalStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (time.Time, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, renewalRecord{orgID, conversationID, claimID, lease, time.Now()})
-	block, err := f.block, f.err
+	block, err, gate := f.block, f.err, f.refuseAfter
 	f.mu.Unlock()
 	if block != nil {
 		<-block
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		default:
+			err = nil // not yet: this renewal succeeds
+		}
 	}
 	if err != nil {
 		return time.Time{}, err
@@ -165,26 +177,42 @@ func TestRenewClaimLease_WatchdogFiresThroughABlockedCall(t *testing.T) {
 }
 
 // TestRenewClaimLease_KeepsRenewingPastTheLease is the credentials wait: an
-// engagement parked awaiting its bundle outlives its own lease several times
-// over, and stays alive because the loop started before the wait did.
+// engagement parked awaiting its bundle outlives its own lease many times
+// over, and stays alive because each successful renewal re-arms the watchdog.
+//
+// The three timings are picked against each other rather than for speed. The
+// self-fence is 15 cadences, so a false fence needs fifteen consecutive
+// missed ticks — a loaded machine stalling this goroutine for a few tens of
+// milliseconds cannot produce one, which a tighter margin could. The
+// observation window is several times the self-fence, so the test is still
+// sharp: a loop that stopped re-arming would fence well inside it rather than
+// after it, which is what would make this pass vacuously.
 func TestRenewClaimLease_KeepsRenewingPastTheLease(t *testing.T) {
 	fake := &fakeRenewalStore{}
-	const lease = 60 * time.Millisecond
-	s := leaseTestSpawner(t, fake, 10*time.Millisecond, 40*time.Millisecond, lease)
+	const (
+		cadence   = 20 * time.Millisecond
+		selfFence = 15 * cadence
+		lease     = 50 * time.Millisecond // inert here: the loop only passes it on
+		observe   = 5 * selfFence
+	)
+	if observe <= selfFence {
+		t.Fatal("the observation window must outlast the self-fence, or a broken re-arm goes unnoticed and this passes vacuously")
+	}
+	s := leaseTestSpawner(t, fake, cadence, selfFence, lease)
 
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 	go s.renewClaimLease(ctx, leaseTestConversation(), time.Now(), cancel)
 
-	// Four lease-lengths of waiting. A loop whose watchdog were not re-armed
-	// by its successful renewals would have fenced long before.
 	select {
 	case <-ctx.Done():
 		t.Fatalf("the engagement was fenced while its renewals were succeeding: %v", context.Cause(ctx))
-	case <-time.After(4 * lease):
+	case <-time.After(observe):
 	}
-	if n := len(fake.seen()); n < 4 {
-		t.Errorf("%d renewals across four lease-lengths, want the loop still ticking", n)
+	// Still ticking, not merely un-fenced: a loop that stopped renewing
+	// altogether would also never fence, and that is not the same thing.
+	if n := len(fake.seen()); n < int(observe/cadence)/3 {
+		t.Errorf("%d renewals across %s at a %s cadence; the loop stopped ticking", n, observe, cadence)
 	}
 }
 
@@ -227,25 +255,40 @@ func TestRenewClaimLease_StopsWithTheEngagement(t *testing.T) {
 // setup and records nothing. Not a park, not a terminal — the conversation's
 // disposition belongs to whoever takes it over.
 //
-// It is deliberately the same shape as the user-stop test beside it, because
-// the distinction being pinned is exactly that the two must NOT end the same
-// way: a stop parks with user_cancelled and releases the claim, a lease fence
-// writes nothing at all.
+// It is deliberately the same shape as the user-stop test beside it, and the
+// lease is lost at the same MOMENT that test's stop lands — while the first
+// GitHub request is held open — because the distinction being pinned is
+// exactly that the two must not end the same way from the same place: a stop
+// parks with user_cancelled and releases the claim, a lease fence writes
+// nothing at all.
+//
+// Gating the refusal on that moment is not convenience. Left on the ticker
+// alone, the fence races the bring-up: win it and the engagement exits from a
+// setup call, lose it and every best-effort read ahead of the runtime swallows
+// the cancellation as a warning and the engagement wanders on to code this
+// test is not about. Which exit ran would then be decided by how loaded the
+// machine is.
 func TestDispatch_LostLeaseFencesTheEngagementWithoutWriting(t *testing.T) {
 	fx := newLaunchFixtureWithWorktree(t, "1033", "")
 
 	fetchEntered := make(chan struct{})
+	var enterOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(fetchEntered)
+		enterOnce.Do(func() { close(fetchEntered) })
 		<-r.Context().Done()
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	t.Cleanup(server.Close)
 	fx.s.SetRunCredentialResolvers(bringUpResolver{client: ghclient.NewClient(server.URL, "test-token")}, nil, nil)
 
-	// A renewal that refuses as soon as the loop's first tick lands, on a
-	// cadence short enough to land during the held-open fetch.
-	fake := &fakeRenewalStore{ConversationQueueStore: fx.stores.ConversationQueue, err: db.ErrClaimReleased}
+	// Renewals succeed until bring-up is inside the held-open fetch, then the
+	// next tick is refused. The cadence is short so that tick lands while the
+	// request is still in flight.
+	fake := &fakeRenewalStore{
+		ConversationQueueStore: fx.stores.ConversationQueue,
+		err:                    db.ErrClaimReleased,
+		refuseAfter:            fetchEntered,
+	}
 	fx.s.conversationQueue = fake
 	fx.s.SetClaimLease(20*time.Millisecond, 10*time.Second, 30*time.Second)
 
