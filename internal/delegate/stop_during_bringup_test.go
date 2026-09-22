@@ -60,7 +60,7 @@ func TestDispatch_StopDuringBringUpCancelsTheSetupAndParks(t *testing.T) {
 	dispatched := make(chan struct{})
 	go func() {
 		defer close(dispatched)
-		fx.s.dispatchClaimedConversation(context.Background(), &conv)
+		fx.s.dispatchClaimedConversation(context.Background(), &conv, time.Now())
 	}()
 
 	select {

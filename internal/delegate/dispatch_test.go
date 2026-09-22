@@ -207,7 +207,7 @@ func TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint(t *testing.T) {
 		step0ConversationID, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("queue input on the parked orphan: %v", err)
 	}
-	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "exec-orphan", 1, db.ClaimPlacement{})
+	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "exec-orphan", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}

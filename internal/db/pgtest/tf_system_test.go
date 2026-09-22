@@ -223,7 +223,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			t.Fatalf("Blueprints.AdvanceRunToStepSystem (the reactor's own step mint) = (%v, %v)", advanced, err)
 		}
 
-		claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, executorID, 1, db.ClaimPlacement{})
+		claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, executorID, 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 		if err != nil {
 			t.Fatalf("ConversationQueue.ClaimNextConversation: %v", err)
 		}
@@ -526,8 +526,8 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		// awaiting-credentials wait polls.
 		var claimID string
 		if err := h.AdminDB.QueryRowContext(ctx, `
-			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch)
-			VALUES ($1, $2, $3, 1) RETURNING id
+			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+			VALUES ($1, $2, $3, 1, now() + interval '300 seconds') RETURNING id
 		`, orgID, conversationID, executorID).Scan(&claimID); err != nil {
 			t.Fatalf("seed claim: %v", err)
 		}

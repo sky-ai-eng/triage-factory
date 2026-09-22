@@ -219,7 +219,7 @@ func TestTerminalBlueprintFailures_MarkAndEndTheStep(t *testing.T) {
 			if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, step0); err != nil {
 				t.Fatalf("force the step mid-flight: %v", err)
 			}
-			claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "exec-boundary", 1, db.ClaimPlacement{})
+			claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "exec-boundary", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 			if err != nil {
 				t.Fatalf("claim: %v", err)
 			}
@@ -235,7 +235,7 @@ func TestTerminalBlueprintFailures_MarkAndEndTheStep(t *testing.T) {
 			assertEnded(t, database, step0, domain.EndedFailed)
 
 			// The point of marking it at all: the scan is done with this row.
-			again, err := s.conversationQueue.ClaimNextConversation(context.Background(), "exec-boundary", 1, db.ClaimPlacement{})
+			again, err := s.conversationQueue.ClaimNextConversation(context.Background(), "exec-boundary", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 			if err != nil {
 				t.Fatalf("re-claim: %v", err)
 			}

@@ -74,7 +74,7 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 		seed.StageStep(t)
 		seed.StageStep(t)
 		for i := 0; i < 2; i++ {
-			claimed, err := store.ClaimNextConversation(ctx, "fleet-share-executor", 1, db.ClaimPlacement{})
+			claimed, err := store.ClaimNextConversation(ctx, "fleet-share-executor", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 			if err != nil {
 				t.Fatalf("ClaimNextConversation: %v", err)
 			}

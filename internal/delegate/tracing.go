@@ -39,8 +39,10 @@ const (
 	// engagementNoMessage — a follow-up claim on a finished blueprint that
 	// carried nothing to deliver, parked back.
 	engagementNoMessage = "no_message"
-	// engagementFenced — the claim was released mid-setup and a successor
-	// owns the conversation.
+	// engagementFenced — this engagement no longer owns the conversation:
+	// its claim was released, or its lease lapsed and the holder fenced
+	// itself. Either way nothing is written, because whatever the row says
+	// next is not this engagement's to say.
 	engagementFenced = "fenced"
 	// engagementSetupFailed — setup genuinely failed. The only outcome that
 	// also carries an error status.
@@ -152,14 +154,18 @@ func (s *Spawner) failEngagement(conversationID string, err error) {
 // stopOutcome names why an engagement ended before the agent came up, for
 // the exits that read a cancelled context and park the run.
 //
-// Two different cancellations reach those exits and the code deliberately
-// treats them alike — both mean "stop, and leave the workspace alone" — but
-// they are not the same event and a trace that conflated them would be
+// Three different cancellations reach those exits and the code deliberately
+// treats them alike — all three mean "stop, and leave the workspace alone" —
+// but they are not the same event and a trace that conflated them would be
 // useless for the question they are usually asked about. A user stop is a
 // disposition somebody chose; a dispatcher shutdown is this engagement
-// standing down with the claim intact for the boot reconcile. Reading the
-// PARENT first is what separates them: step is derived from parent, so a
-// shutdown cancels both while a user stop cancels only step.
+// standing down with the claim intact for the boot reconcile; a lease fence
+// is this engagement losing the conversation, which is nobody's decision at
+// all. Reading the PARENT first separates the shutdown: step is derived from
+// parent, so a shutdown cancels both while the other two cancel only step.
+// The lease fence is then told from the user stop by its cause, which is the
+// only place the difference is recorded — and it has to be, because a fenced
+// engagement writes nothing where a stopped one parks.
 //
 // ok is false when neither is cancelled, which is not a stop at all — the
 // caller then leaves the engagement to whichever exit does know (a launch
@@ -169,6 +175,8 @@ func stopOutcome(parent, step context.Context) (outcome string, ok bool) {
 	switch {
 	case parent.Err() != nil:
 		return engagementShutdown, true
+	case leaseFenced(step):
+		return engagementFenced, true
 	case step.Err() != nil:
 		return engagementCancelled, true
 	}

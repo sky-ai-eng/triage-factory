@@ -97,7 +97,7 @@ func newLaunchFixtureWithWorktree(t *testing.T, suffix, wt string) *launchFixtur
 		t.Fatalf("GetRunSystem: (%v, %v)", br, err)
 	}
 
-	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "lf-exec", 1, db.ClaimPlacement{})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "lf-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || claimed == nil {
 		t.Fatalf("ClaimNextConversation: (%v, %v)", claimed, err)
 	}
@@ -213,7 +213,7 @@ func TestPreAgentFailure_HandsTheClaimBackAndDestroysNothing(t *testing.T) {
 		}
 	}
 
-	reclaimed, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), "lf-exec", 1, db.ClaimPlacement{})
+	reclaimed, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), "lf-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || reclaimed == nil || reclaimed.ID != f.conv.ID {
 		t.Fatalf("re-claim after requeue = (%v, %v), want the same conversation", reclaimed, err)
 	}
@@ -278,7 +278,7 @@ func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testin
 	// Nothing is left claimable: the queued follow-up was settled on the way
 	// down, so `open` is a rest state rather than an immediate re-claim that
 	// would make the budget buy nothing.
-	if got, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), "lf-exec", 1, db.ClaimPlacement{}); err != nil || got != nil {
+	if got, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), "lf-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || got != nil {
 		t.Fatalf("ClaimNextConversation after the park = (%v, %v), want nothing claimable", got, err)
 	}
 
@@ -290,7 +290,7 @@ func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testin
 	}); err != nil {
 		t.Fatalf("send the follow-up: %v", err)
 	}
-	reclaimed, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), "lf-exec", 1, db.ClaimPlacement{})
+	reclaimed, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), "lf-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || reclaimed == nil || reclaimed.ID != f.conv.ID {
 		t.Fatalf("re-claim after the follow-up = (%v, %v), want the same conversation", reclaimed, err)
 	}

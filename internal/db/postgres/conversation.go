@@ -779,10 +779,10 @@ func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conver
 			return nil
 		}
 		claim, err = updateClaimReturning(ctx, q, `
-			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at)
-			VALUES ($1, $2, $3, $4, now())
+			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
+			VALUES ($1, $2, $3, $4, now(), now() + make_interval(secs => $5))
 			RETURNING *
-		`, orgID, conversationID, executorID, bootEpoch)
+		`, orgID, conversationID, executorID, bootEpoch, db.DefaultClaimLease.Seconds())
 		if err != nil {
 			return err
 		}
@@ -1190,12 +1190,20 @@ const pgConversationColumns = `
 `
 
 // pgDisplayStatusSQL is the wire status: a four-rung ladder over state that
-// is no longer stored. The active claim's setup sub-state wins
+// is no longer stored. A LIVE claim's setup sub-state wins
 // (fetching/cloning/agent_starting/awaiting_credentials); then the mere
-// existence of an active claim is 'running'; then a conversation matching
+// existence of a live claim is 'running'; then a conversation matching
 // the needs-driving predicate — mid-flight and unclaimed, or parked and
 // woken by input — is 'queued'; and finally the stored column carries the
-// deliberate park and the terminals. The trailing ” is unreachable by
+// deliberate park and the terminals.
+//
+// Live means the lease too, not just released_at: a conversation whose
+// executor died renders 'queued' from the moment its lease lapses, because
+// that is the state a reader can act on correctly — nothing is running it and
+// the system will pick it up. No new status is introduced for "awaiting
+// takeover"; the display vocabulary is a frozen wire contract, and an
+// operator's view of how many such rows exist and for how long is the
+// tf_claims_expired gauge, not a pill in the run list. The trailing ” is unreachable by
 // construction (a conversation is always in exactly one of those states) and
 // exists so NULL can never reach the wire. Every state renders exactly the
 // vocabulary the frozen wire contract already carried.
@@ -1206,8 +1214,9 @@ const pgConversationColumns = `
 // they cannot drift. Requires only the conversation alias `r`.
 const pgDisplayStatusSQL = `COALESCE(
 		(SELECT cl_d.phase FROM claims cl_d
-		 WHERE cl_d.conversation_id = r.id AND cl_d.released_at IS NULL),
-		CASE WHEN ` + activeClaimExistsSQL + ` THEN 'running' END,
+		 WHERE cl_d.conversation_id = r.id AND cl_d.released_at IS NULL
+		   AND cl_d.lease_expires_at > now()),
+		CASE WHEN ` + liveClaimExistsSQL + ` THEN 'running' END,
 		CASE WHEN r.status IS NULL
 		       OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `)
 		     THEN 'queued' END,

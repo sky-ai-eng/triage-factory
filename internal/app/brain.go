@@ -94,6 +94,13 @@ func (a *App) startBrain(term int64) {
 	// unregistered the previous holder's.
 	a.workDepth = workmetrics.NewDepthObserver(otel.GetMeterProvider(), a.workDepthSources())
 	go a.workDepth.Run(brainCtx, workmetrics.DefaultDepthInterval)
+	// Expired-claim gauges: how many unreleased claims are past their lease
+	// and how far past the oldest is — engagements whose executor is gone and
+	// which nobody is driving. Here rather than in the dispatcher on purpose:
+	// a stuck dispatcher is exactly what produces these rows, so it must not
+	// be what reports them.
+	a.claimGauges = workmetrics.NewClaimObserver(otel.GetMeterProvider(), a.stores.ConversationQueue)
+	go a.claimGauges.Run(brainCtx, workmetrics.DefaultDepthInterval)
 	// Durable event-queue drain worker: claims github:/jira: events the
 	// ingestor enqueued under the work-item contract's leases, routes them,
 	// and marks them done under the lease's fence. A failed attempt returns
@@ -261,6 +268,10 @@ func (a *App) stopBrain(reason string) {
 	if a.workDepth != nil {
 		a.workDepth.Close()
 		a.workDepth = nil
+	}
+	if a.claimGauges != nil {
+		a.claimGauges.Close()
+		a.claimGauges = nil
 	}
 	if a.pollerMgr != nil {
 		a.pollerMgr.StopAll()

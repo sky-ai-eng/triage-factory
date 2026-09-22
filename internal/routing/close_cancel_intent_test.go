@@ -108,7 +108,7 @@ func cancelRequested(t *testing.T, database *sql.DB, blueprintRunID string) bool
 // keeps a run nothing killed from being picked back up.
 func claimNext(t *testing.T, database *sql.DB) *domain.Conversation {
 	t.Helper()
-	conv, err := sqlitestore.New(database).ConversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{})
+	conv, err := sqlitestore.New(database).ConversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil {
 		t.Fatalf("ClaimNextConversation: %v", err)
 	}

@@ -50,7 +50,7 @@ func RunConversationQueueReturnedRowConformance(t *testing.T, mk ConversationQue
 		queue, store, orgID, scaffold := mk(t)
 		conversationID := scaffold(t)
 
-		claimed, err := queue.ClaimNextConversation(ctx, "rr-executor", 1, db.ClaimPlacement{})
+		claimed, err := queue.ClaimNextConversation(ctx, "rr-executor", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 		if err != nil || claimed == nil || claimed.ID != conversationID {
 			t.Fatalf("ClaimNextConversation = (%+v, %v), want conversation %s", claimed, err, conversationID)
 		}

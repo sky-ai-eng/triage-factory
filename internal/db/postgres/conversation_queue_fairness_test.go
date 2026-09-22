@@ -63,8 +63,8 @@ func setPgOrgCap(t *testing.T, h *pgtest.Harness, orgID string, cap *int) {
 func forcePgRunning(t *testing.T, h *pgtest.Harness, conversationID string) {
 	t.Helper()
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
-		SELECT $1, org_id, id, 'fairness-fixture-executor', 1, now() FROM conversations WHERE id = $2
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
+		SELECT $1, org_id, id, 'fairness-fixture-executor', 1, now(), now() + interval '300 seconds' FROM conversations WHERE id = $2
 	`, uuid.New().String(), conversationID)
 }
 
@@ -92,7 +92,7 @@ func TestClaimFairness_BurstDoesNotStarveOtherOrg(t *testing.T) {
 	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET started_at = now() - interval '1 hour' WHERE org_id = $1`, a.orgID)
 
 	claim := func() *domain.Conversation {
-		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-1", 1, db.ClaimPlacement{})
+		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-1", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 		if err != nil {
 			t.Fatalf("ClaimNextConversation: %v", err)
 		}
@@ -128,7 +128,7 @@ func TestClaimCap_BlocksAtCapAndReconfiguresLive(t *testing.T) {
 	}
 	setCap := func(n int) { c := n; setPgOrgCap(t, h, a.orgID, &c) }
 	claim := func() *domain.Conversation {
-		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-1", 1, db.ClaimPlacement{})
+		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-1", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
 		if err != nil {
 			t.Fatalf("ClaimNextConversation: %v", err)
 		}
@@ -194,7 +194,7 @@ func TestClaimFairness_ComposesWithinPlacementTiers(t *testing.T) {
 		aTier1 := a.stage(t, stores, "exec-a")
 		bTier1 := b.stage(t, stores, "exec-a")
 
-		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, cfg)
+		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, cfg, db.DefaultClaimLease)
 		if err != nil || got == nil {
 			t.Fatalf("claim: (%+v, %v)", got, err)
 		}
@@ -218,7 +218,7 @@ func TestClaimFairness_ComposesWithinPlacementTiers(t *testing.T) {
 		bTier2 := b.stage(t, stores, "exec-other")
 		pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET started_at = now() - interval '2 minutes' WHERE id = $1`, bTier2)
 
-		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, cfg)
+		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, cfg, db.DefaultClaimLease)
 		if err != nil || got == nil {
 			t.Fatalf("claim: (%+v, %v)", got, err)
 		}

@@ -149,8 +149,8 @@ func TestHandleAgentStatus_ResumabilityOmittedForActiveAndFailed(t *testing.T) {
 				// A claim phase is the coalesced display status, not a stored
 				// one — seed it the way the dispatcher does.
 				execSQL(t, s.db, `UPDATE conversations SET status='running' WHERE id=?`, conversationID)
-				execSQL(t, s.db, `INSERT INTO claims (id, conversation_id, org_id, executor_id, boot_epoch, phase)
-					VALUES (?, ?, 'local-org', 'exec-1', 1, 'cloning')`, "cl_"+conversationID, conversationID)
+				execSQL(t, s.db, `INSERT INTO claims (id, conversation_id, org_id, executor_id, boot_epoch, phase, lease_expires_at)
+					VALUES (?, ?, 'local-org', 'exec-1', 1, 'cloning', strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))`, "cl_"+conversationID, conversationID)
 			}
 
 			got := readConversation(t, s, conversationID)

@@ -213,8 +213,8 @@ func TestHandleReadyz_ActiveRunsCount(t *testing.T) {
 		}
 	}
 	if _, err := s.db.Exec(`
-		INSERT INTO claims (id, conversation_id, executor_id, boot_epoch)
-		VALUES ('claim_readyz_working', 'run_readyz_working', 'readyz-executor', 1)
+		INSERT INTO claims (id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+		VALUES ('claim_readyz_working', 'run_readyz_working', 'readyz-executor', 1, strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
 	`); err != nil {
 		t.Fatalf("seed claim: %v", err)
 	}

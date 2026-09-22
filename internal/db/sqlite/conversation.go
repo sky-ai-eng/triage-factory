@@ -376,12 +376,12 @@ func (s *conversationStore) SetSession(ctx context.Context, orgID, conversationI
 // Used by every claims-row write below (SetExecutorSystem, SetClaimPhaseSystem,
 // SetActiveClaimPhaseSystem, RecordClaimSandboxStatsSystem and their
 // ForClaimSystem twins) as `RETURNING ` + sqliteClaimReturningColumns.
-const sqliteClaimReturningColumns = `
-	id, org_id, conversation_id, claimed_at, released_at, COALESCE(outcome, ''),
+var sqliteClaimReturningColumns = `
+	id, org_id, conversation_id, claimed_at, released_at, lease_expires_at, COALESCE(outcome, ''),
 	peak_mem_mb, cpu_usec,
 	COALESCE(
 		(SELECT v.status FROM conversations v WHERE v.id = claims.conversation_id),
-		CASE WHEN released_at IS NULL THEN 'running' ELSE 'queued' END,
+		CASE WHEN ` + claimLeaseLiveSQL("claims") + ` THEN 'running' ELSE 'queued' END,
 		''),
 	COALESCE((SELECT v.failure_kind FROM conversations v WHERE v.id = claims.conversation_id), '')
 `
@@ -533,9 +533,10 @@ func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conver
 			return nil
 		}
 		row = q.QueryRowContext(ctx, `
-			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
-			VALUES (?, ?, ?, ?, ?, ?)
-			RETURNING `+sqliteClaimReturningColumns, uuid.New().String(), orgID, conversationID, executorID, bootEpoch, time.Now().UTC())
+			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
+			VALUES (?, ?, ?, ?, ?, ?, `+sqliteNowPlusExpr+`)
+			RETURNING `+sqliteClaimReturningColumns, uuid.New().String(), orgID, conversationID, executorID, bootEpoch, time.Now().UTC(),
+			sqliteLeaseModifier(db.DefaultClaimLease))
 		claim, err = scanSqliteExecutorClaimRow(row)
 		if err != nil {
 			return err
@@ -727,16 +728,19 @@ const sqliteConversationColumns = `
 `
 
 // sqliteDisplayStatusSQL is the wire status: the SQLite mirror of the
-// Postgres pgDisplayStatusSQL ladder. The active claim's setup sub-state
-// wins; then the mere existence of an active claim is 'running'; then a
+// Postgres pgDisplayStatusSQL ladder. A LIVE claim's setup sub-state
+// wins; then the mere existence of a live claim is 'running'; then a
 // conversation matching the needs-driving predicate — mid-flight and
 // unclaimed, or parked and woken by input — is 'queued'; and finally the
-// stored column carries the deliberate park and the terminals. The trailing
+// stored column carries the deliberate park and the terminals. Live means the
+// lease too — see the Postgres twin for why an expired claim renders 'queued'
+// rather than a status of its own. The trailing
 // ” is unreachable by construction and exists so NULL can never reach the
 // wire. Requires the conversation alias `r`.
 const sqliteDisplayStatusSQL = `COALESCE(
-		(SELECT cl_d.phase FROM claims cl_d WHERE cl_d.conversation_id = r.id AND cl_d.released_at IS NULL),
-		CASE WHEN ` + activeClaimExistsSQL + ` THEN 'running' END,
+		(SELECT cl_d.phase FROM claims cl_d WHERE cl_d.conversation_id = r.id AND cl_d.released_at IS NULL
+		   AND cl_d.lease_expires_at > ` + sqliteNowExpr + `),
+		CASE WHEN ` + liveClaimExistsSQL + ` THEN 'running' END,
 		CASE WHEN r.status IS NULL
 		       OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `)
 		     THEN 'queued' END,

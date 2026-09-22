@@ -5342,6 +5342,16 @@ REVOKE ALL ON public.conversation_signals FROM anon, authenticated, service_role
 -- claims: one row per executor engagement with a conversation. At most one
 -- active (released_at IS NULL) claim per conversation. Credential columns
 -- stay NULL in local mode.
+--
+-- A claim is live while it is unreleased AND its lease has not lapsed: the
+-- holder renews lease_expires_at on a timer, and every claim-fenced write
+-- presents an unexpired lease. Authority therefore ends on database time,
+-- whether or not anyone has taken the conversation over.
+--
+-- There is no lease generation column, and none is wanted: a claim row is
+-- never re-leased in place. Every acquisition — a successor's, or the same
+-- executor's reacquisition — inserts a new row with a new id, so the claim id
+-- IS the generation and (claim id, lease_expires_at) is the whole receipt.
 CREATE TABLE public.claims (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -5360,6 +5370,11 @@ CREATE TABLE public.claims (
     claimed_at timestamp with time zone DEFAULT now() NOT NULL,
     -- NULL = this claim is live. Stamped once, on release.
     released_at timestamp with time zone,
+    -- Lease expiry on database time. A live claim's authority ends here
+    -- whether or not anyone has taken the conversation over: every
+    -- claim-fenced write and every renewal requires it to be in the future.
+    -- The holder renews it on a timer. Never cleared on release.
+    lease_expires_at timestamp with time zone,
     -- App-validated: 'completed' | 'failed' | 'cancelled' | 'requeued' |
     -- 'parked' | 'reaped'. NULL while live.
     outcome text,
@@ -5379,6 +5394,8 @@ CREATE TABLE public.claims (
 ALTER TABLE ONLY public.claims
     ADD CONSTRAINT claims_pkey PRIMARY KEY (id);
 ALTER TABLE ONLY public.claims
+    ADD CONSTRAINT claims_live_has_lease CHECK (released_at IS NOT NULL OR lease_expires_at IS NOT NULL);
+ALTER TABLE ONLY public.claims
     ADD CONSTRAINT claims_id_org_unique UNIQUE (id, org_id);
 ALTER TABLE ONLY public.claims
     ADD CONSTRAINT claims_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
@@ -5391,6 +5408,8 @@ CREATE INDEX idx_claims_conversation ON public.claims USING btree (conversation_
 -- The credential provisioner's backstop sweep scans live claims parked in
 -- phase='awaiting_credentials'.
 CREATE INDEX idx_claims_active_phase ON public.claims USING btree (phase) WHERE (released_at IS NULL AND phase IS NOT NULL);
+-- Live claims by expiry: the expired-claim reap arm and the expired-claim gauge.
+CREATE INDEX idx_claims_live_expiry ON public.claims USING btree (lease_expires_at) WHERE (released_at IS NULL);
 
 -- App-pool visibility composes through the conversation; writes are
 -- system-side.

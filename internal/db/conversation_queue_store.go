@@ -84,6 +84,13 @@ type ClaimPlacement struct {
 	Liveness time.Duration
 }
 
+// DefaultClaimLease is how long a minted or renewed claim's authority lasts
+// on database time — TF_CLAIM_TAKEOVER_SEC's default, and the only place the
+// number is spelled. The holder renews well inside it (TF_CLAIM_RENEW_SEC)
+// and fences itself before it lapses (TF_CLAIM_SELF_FENCE_SEC), so a lease
+// that actually expires means the holder is gone.
+const DefaultClaimLease = 75 * time.Second
+
 // ConversationQueueStore owns the claim loop — the ONE scan that finds
 // conversations needing to be driven, on every surface. It is the sibling of
 // EventQueueStore: where the event queue feeds the router, this feeds the
@@ -159,7 +166,33 @@ type ConversationQueueStore interface {
 	// conversation's current queue episode rather than its lifetime — see
 	// the dialect implementations' episodeAttemptsSQL for the model, which
 	// the SQL is the definition of.
-	ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, placement ClaimPlacement) (*domain.Conversation, error)
+	//
+	// lease is how long the minted claim's authority lasts before the holder
+	// must have renewed it: lease_expires_at = database now + lease, stamped
+	// in the same statement as the claim row, so there is no window in which
+	// a live claim carries no lease.
+	ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, placement ClaimPlacement, lease time.Duration) (*domain.Conversation, error)
+
+	// RenewClaimLeaseSystem pushes the named claim's expiry out to database
+	// now plus lease. It never extends the old timestamp, so a renewal that
+	// arrives late cannot resurrect authority that already lapsed. Refused
+	// with ErrClaimReleased when the claim is released, expired, or not the
+	// one holding conversationID — one answer for every way this caller is
+	// not the owner, exactly as the fence gives. Returns the new expiry on
+	// database time.
+	//
+	// One statement, and it must stay one: the guard and the write cannot be
+	// split without opening a window where an expired lease renews. Bookkeeping
+	// rather than a domain write, so it is a documented exemption from the
+	// returned-row rule — the expiry it returns IS what it persisted.
+	RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (time.Time, error)
+
+	// ExpiredClaimsSystem counts live claims past their expiry across every
+	// org and reports how far past expiry the oldest is. Zero and 0 when
+	// none. The brain's gauge reads it; nothing in the dispatcher does —
+	// collecting it outside the dispatcher loop is what keeps a stuck
+	// dispatcher from suppressing its own alarm.
+	ExpiredClaimsSystem(ctx context.Context) (count int, oldestPastExpiry time.Duration, err error)
 
 	// RequeueConversation hands a claimed conversation back after a transient
 	// dispatcher failure — a workspace setup hiccup, a runtime that failed to

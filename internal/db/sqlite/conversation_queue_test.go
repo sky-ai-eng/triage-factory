@@ -30,7 +30,7 @@ func TestConversationQueueStore_SQLite_ClaimCycle(t *testing.T) {
 	bpID, taskID, promptID := seedSqliteFiringParents(t, conn, stores, "rq-claim")
 
 	// Empty queue: nothing claimable.
-	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
+	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || got != nil {
 		t.Fatalf("ClaimNextConversation on empty queue = (%v, %v), want (nil, nil)", got, err)
 	}
 
@@ -46,7 +46,7 @@ func TestConversationQueueStore_SQLite_ClaimCycle(t *testing.T) {
 		t.Fatalf("set session_id: %v", err)
 	}
 
-	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{})
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil {
 		t.Fatalf("ClaimNextConversation: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestConversationQueueStore_SQLite_ClaimCycle(t *testing.T) {
 	}
 
 	// Claimed → no longer queued, so a second claim finds nothing.
-	if got2, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || got2 != nil {
+	if got2, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || got2 != nil {
 		t.Fatalf("second ClaimNextConversation = (%v, %v), want (nil, nil)", got2, err)
 	}
 }
@@ -100,7 +100,7 @@ func TestConversationQueueStore_SQLite_CancelRequestedNotClaimed(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("RequestRunCancelSystem = (%v, %v), want (true, nil)", changed, err)
 	}
-	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
+	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || got != nil {
 		t.Fatalf("ClaimNextConversation on cancel-requested blueprint = (%v, %v), want (nil, nil)", got, err)
 	}
 	// Idempotent: re-requesting on an already-flagged running row reports no change.
@@ -123,7 +123,7 @@ func TestConversationQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	convID := stageSqliteStep(t, conn, stores, "rq-reset").ID
 
 	// Claim it → running, attempts=1.
-	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || claimed == nil {
 		t.Fatalf("ClaimNextConversation: (%v, %v)", claimed, err)
 	}
@@ -132,7 +132,7 @@ func TestConversationQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, "transient setup error"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
-	reclaimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{})
+	reclaimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || reclaimed == nil {
 		t.Fatalf("re-ClaimNextConversation: (%v, %v)", reclaimed, err)
 	}
@@ -149,7 +149,7 @@ func TestConversationQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("ResetProcessingConversations reset %d rows, want 1", n)
 	}
-	afterReset, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{})
+	afterReset, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || afterReset == nil {
 		t.Fatalf("ClaimNextConversation after reset: (%v, %v)", afterReset, err)
 	}
@@ -173,7 +173,7 @@ func TestConversationQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
 			org := runmode.LocalDefaultOrgID
 
 			convID := stageSqliteStep(t, conn, stores, "rq-setup-"+phase).ID
-			if claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || claimed == nil {
+			if claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || claimed == nil {
 				t.Fatalf("ClaimNextConversation: (%v, %v)", claimed, err)
 			}
 			// Advance the claim into the setup phase the dispatcher would
@@ -193,7 +193,7 @@ func TestConversationQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
 			if after.Status != "queued" {
 				t.Fatalf("status after requeue from phase %q = %q, want queued (a mid-setup phase must not block the requeue)", phase, after.Status)
 			}
-			if reclaimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || reclaimed == nil {
+			if reclaimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || reclaimed == nil {
 				t.Fatalf("re-ClaimNextConversation after requeue from phase %q: (%v, %v)", phase, reclaimed, err)
 			}
 		})
@@ -231,7 +231,7 @@ func TestConversationQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 		t.Fatalf("ResetProcessingConversations reset %d rows, want 0 (dormant conversation must stay parked)", n)
 	}
 	// And it is not claimable (it's not 'queued').
-	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
+	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || got != nil {
 		t.Fatalf("ClaimNextConversation = (%v, %v), want (nil, nil)", got, err)
 	}
 }
@@ -247,7 +247,7 @@ func TestConversationQueueStore_SQLite_ResetProcessingConversations_ScopedToOwne
 	ctx := context.Background()
 
 	stageSqliteStep(t, conn, stores, "rq-scoped")
-	if _, err := stores.ConversationQueue.ClaimNextConversation(ctx, "instance-a", 3, db.ClaimPlacement{}); err != nil {
+	if _, err := stores.ConversationQueue.ClaimNextConversation(ctx, "instance-a", 3, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 
@@ -461,7 +461,7 @@ func TestConversationQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 	}
 	firstQueuedAt := *queued.QueuedAt
 
-	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
+	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || got == nil {
 		t.Fatalf("ClaimNextConversation: (%v, %v)", got, err)
 	}
 	claimed, err := stores.Conversations.Get(ctx, org, convID)
@@ -536,8 +536,8 @@ func TestConversationQueueStore_SQLite_ExecutorClaims(t *testing.T) {
 				}
 				if _, err := conn.Exec(`
 					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
-					                    claimed_at, released_at, outcome, peak_mem_mb, cpu_usec)
-					VALUES (?, ?, ?, ?, 1, ?, ?, NULLIF(?, ''), ?, ?)
+					                    claimed_at, released_at, outcome, peak_mem_mb, cpu_usec, lease_expires_at)
+					VALUES (?, ?, ?, ?, 1, ?, ?, NULLIF(?, ''), ?, ?, strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
 				`, claimID, org, row.ConversationID, row.ExecutorID, row.ClaimedAt.UTC(), released,
 					row.Outcome, peak, cpu); err != nil {
 					t.Fatalf("insert claim: %v", err)
@@ -804,5 +804,76 @@ func TestConversationQueueStore_SQLite_ReturnedRow(t *testing.T) {
 			return stageSqliteStep(t, conn, stores, fmt.Sprintf("cqrr-%d", next)).ID
 		}
 		return stores.ConversationQueue, stores.Conversations, org, scaffold
+	})
+}
+
+// TestClaimLease_SQLite runs the shared claim-lease conformance against the
+// SQLite impl. Each factory call opens a fresh in-memory DB so subtests don't
+// share state.
+func TestClaimLease_SQLite(t *testing.T) {
+	dbtest.RunClaimLeaseConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+
+		seq := 0
+		return dbtest.ClaimLeaseFixture{
+			Stores: stores,
+			OrgID:  runmode.LocalDefaultOrgID,
+			StageStep: func(t *testing.T) (string, string) {
+				t.Helper()
+				seq++
+				conv := stageSqliteStep(t, conn, stores, fmt.Sprintf("rq-lease-%d", seq))
+				return conv.ID, conv.TaskID
+			},
+			SetLease: func(t *testing.T, claimID string, in time.Duration) {
+				t.Helper()
+				// Rendered by strftime, in the layout the column stores, for
+				// the same reason every production stamp is: the fence's `>`
+				// compares one text layout against itself.
+				if _, err := conn.Exec(
+					`UPDATE claims SET lease_expires_at = strftime('%Y-%m-%d %H:%M:%f','now',?) WHERE id = ?`,
+					fmt.Sprintf("%+.3f seconds", in.Seconds()), claimID,
+				); err != nil {
+					t.Fatalf("stage lease on %s: %v", claimID, err)
+				}
+			},
+			Lease: func(t *testing.T, claimID string) (time.Time, time.Time, bool) {
+				t.Helper()
+				// Both readings come back as the stored text and are parsed
+				// under one layout: the column is declared DATETIME, so
+				// letting the driver convert only one of the two would be
+				// comparing its rendering against the engine's.
+				var expiry sql.NullString
+				var now string
+				if err := conn.QueryRow(
+					`SELECT CAST(lease_expires_at AS TEXT), strftime('%Y-%m-%d %H:%M:%f','now') FROM claims WHERE id = ?`, claimID,
+				).Scan(&expiry, &now); err != nil {
+					t.Fatalf("read lease of %s: %v", claimID, err)
+				}
+				const layout = "2006-01-02 15:04:05.000"
+				parse := func(v string) time.Time {
+					parsed, err := time.Parse(layout, v)
+					if err != nil {
+						t.Fatalf("claim %s carries %q, not the layout the fence compares against: %v", claimID, v, err)
+					}
+					return parsed
+				}
+				if !expiry.Valid {
+					return time.Time{}, parse(now), false
+				}
+				return parse(expiry.String), parse(now), true
+			},
+			LiveClaimsWithoutLease: func(t *testing.T) int {
+				t.Helper()
+				var n int
+				if err := conn.QueryRow(
+					`SELECT COUNT(*) FROM claims WHERE released_at IS NULL AND lease_expires_at IS NULL`,
+				).Scan(&n); err != nil {
+					t.Fatalf("count live claims without a lease: %v", err)
+				}
+				return n
+			},
+		}
 	})
 }

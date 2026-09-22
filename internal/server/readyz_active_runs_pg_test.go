@@ -49,8 +49,8 @@ func TestCountActiveRuns_Postgres(t *testing.T) {
 	done := seed("completed")
 
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch)
-		VALUES ($1, $2, 'readyz-executor', 1)
+		INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+		VALUES ($1, $2, 'readyz-executor', 1, now() + interval '300 seconds')
 	`, orgID, working)
 	// The one row that separates woken from parked.
 	pgtest.MustExec(t, h.AdminDB, `

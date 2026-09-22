@@ -221,8 +221,8 @@ func seedSandboxClaim(
 	}
 	if _, err := conn.Exec(`
 		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
-		                    claimed_at, released_at, outcome, peak_mem_mb, cpu_usec)
-		VALUES (?, ?, ?, ?, 1, ?, ?, NULLIF(?, ''), ?, ?)
+		                    claimed_at, released_at, outcome, peak_mem_mb, cpu_usec, lease_expires_at)
+		VALUES (?, ?, ?, ?, 1, ?, ?, NULLIF(?, ''), ?, ?, strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
 	`, claimID, runmode.LocalDefaultOrgID, conversationID, executorID, claimedAt.UTC(),
 		released, outcome, peak, cpu); err != nil {
 		t.Fatalf("seed claim %s: %v", claimID, err)

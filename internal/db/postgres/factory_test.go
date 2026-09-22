@@ -221,8 +221,8 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			}
 			if status == "running" {
 				if _, err := conn.Exec(`
-					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
-					VALUES ($1, $2, $3, 'factory-seed-executor', 1, now())
+					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
+					VALUES ($1, $2, $3, 'factory-seed-executor', 1, now(), now() + interval '300 seconds')
 				`, uuid.New().String(), orgID, id); err != nil {
 					t.Fatalf("seed claim: %v", err)
 				}

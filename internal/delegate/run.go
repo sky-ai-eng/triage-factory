@@ -203,7 +203,16 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// sessionID and costUSD ride in from the caller because they are only
 	// known once the agent has actually started — the pre-launch cancel below
 	// passes "" and 0 and snapshots a workspace with no transcript to carry.
+	//
+	// A LEASE fence arrives as a cancelled ctx too, and is not a cancel: this
+	// engagement has lost the conversation, so it records nothing. parked
+	// stays true either way — the worktree is the successor's warm cache as
+	// much as a stopped run's.
 	cancelled := func(sessionID string, costUSD float64) bool {
+		if leaseFenced(ctx) {
+			parked = true
+			return true
+		}
 		fenced := s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,

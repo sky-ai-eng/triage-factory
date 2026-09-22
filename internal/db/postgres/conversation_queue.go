@@ -149,6 +149,20 @@ const activeClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_a
 		WHERE cl_a.conversation_id = r.id AND cl_a.released_at IS NULL)`
 
+// liveClaimExistsSQL is the narrower question the DISPLAY asks: is an
+// engagement actually alive on this conversation right now. An unreleased
+// claim whose lease has lapsed answers no — whatever process held it is gone,
+// and the row is waiting to be taken over.
+//
+// It is deliberately not what the ownership predicates read. Those ask "may a
+// second claim exist", and the answer to that is still no: idx_claims_one_active
+// refuses one while the expired row is unreleased, so a predicate that treated
+// it as absent would offer work the insert would then reject.
+const liveClaimExistsSQL = `EXISTS (
+		SELECT 1 FROM claims cl_a
+		WHERE cl_a.conversation_id = r.id AND cl_a.released_at IS NULL
+		  AND cl_a.lease_expires_at > now())`
+
 // undeliveredInputExistsSQL matches drivable input: a plain user message
 // still awaiting delivery. Injections (subtype 'injection:…', including a
 // compaction request — which is inserted delivered anyway) ride whatever
@@ -356,7 +370,7 @@ var conversationQueueClaimReturning = `candidate.id::text, candidate.org_id::tex
 	minted.id::text AS claim_id, minted.claimed_at,
 	` + EpisodeAttemptsSQL("candidate") + ` AS attempts`
 
-func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.Conversation, error) {
+func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement, lease time.Duration) (*domain.Conversation, error) {
 	// One scan, every surface: the needs-driving predicate is type-agnostic
 	// and the blueprint gate for delegation rides alongside it. An empty
 	// queue matches no row and the scan reports ErrNoRows -> (nil, nil).
@@ -402,6 +416,9 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	candidatePredicate := ""
 	tierPrefix := "" // placement tier ordering, prepended to the fairness key
 	args := []any{executorID, bootEpoch}
+	// The lease binds after whatever placement appends, so the placement
+	// predicate below keeps naming $3/$4 literally.
+	leaseArg := func() string { args = append(args, lease.Seconds()); return "$" + strconv.Itoa(len(args)) }
 	if placement.Enabled {
 		// $3 = aging seconds, $4 = liveness seconds. A conversation is claimable by me
 		// when it is mine (tier 1), unowned, aged past the tier-2 window, or
@@ -476,8 +493,11 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			RETURNING conversations.id
 		),
 		minted AS (
-			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at)
-			SELECT candidate.org_id, candidate.id, $1, $2::bigint, now() FROM candidate
+			-- The lease is stamped here, in the statement that mints the row:
+			-- a live claim never exists without one, which is the invariant
+			-- claims_live_has_lease states and every fenced write presents.
+			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
+			SELECT candidate.org_id, candidate.id, $1, $2::bigint, now(), now() + make_interval(secs => ` + leaseArg() + `) FROM candidate
 			RETURNING claims.id, claims.conversation_id, claims.claimed_at
 		)
 		SELECT ` + conversationQueueClaimReturning + `
@@ -519,6 +539,58 @@ func isActiveClaimConflict(err error) bool {
 		return false
 	}
 	return pgErr.Code == "23505" && pgErr.ConstraintName == "idx_claims_one_active"
+}
+
+func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (time.Time, error) {
+	// A malformed id is a caller wiring fault, and the honest answer to it is
+	// the one the fence gives for every other way of not being the owner:
+	// Postgres would otherwise reject the bind (22P02) and the loop would read
+	// a driver error as a transient failure worth retrying forever.
+	if claimID == "" || !isValidUUID(claimID) || !isValidUUID(conversationID) {
+		return time.Time{}, fmt.Errorf("%w: claim %q on conversation %q", db.ErrClaimReleased, claimID, conversationID)
+	}
+	// clock_timestamp() rather than now(): the guard has to read fresh
+	// database time, not the instant this statement's transaction began, or a
+	// long transaction could renew a lease that lapsed while it was open. The
+	// same expression sets the new expiry, so what is written is measured from
+	// the same clock the guard read.
+	//
+	// The guard's expiry term is what makes a late renewal terminal: an
+	// already-lapsed lease matches nothing, and the caller gets the same
+	// ErrClaimReleased a released claim gives. Authority does not come back.
+	var expiry time.Time
+	err := s.conn.QueryRowContext(ctx, `
+		UPDATE claims
+		SET lease_expires_at = clock_timestamp() + make_interval(secs => $1)
+		WHERE id = $2 AND org_id = $3 AND conversation_id = $4
+		  AND released_at IS NULL AND lease_expires_at > clock_timestamp()
+		RETURNING lease_expires_at
+	`, lease.Seconds(), claimID, orgID, conversationID).Scan(&expiry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+	}
+	if err != nil {
+		return time.Time{}, wrapAdminPoolPermErr(err, "conversation_queue.RenewClaimLeaseSystem")
+	}
+	return expiry, nil
+}
+
+func (s *conversationQueueStore) ExpiredClaimsSystem(ctx context.Context) (int, time.Duration, error) {
+	// COALESCE over the aggregate rather than a second statement: with no
+	// matching rows min() is NULL and the subtraction with it, so the whole
+	// expression collapses to the zero the empty case wants.
+	var count int
+	var oldestSeconds float64
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT count(*),
+		       COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - min(lease_expires_at))), 0)
+		FROM claims
+		WHERE released_at IS NULL AND lease_expires_at <= clock_timestamp()
+	`).Scan(&count, &oldestSeconds)
+	if err != nil {
+		return 0, 0, wrapAdminPoolPermErr(err, "conversation_queue.ExpiredClaimsSystem")
+	}
+	return count, time.Duration(oldestSeconds * float64(time.Second)), nil
 }
 
 // RequeueConversation releases the claim FIRST and flips the conversation
@@ -1045,19 +1117,28 @@ func (s *conversationQueueStore) RecentConversationTimingsForOrgSystem(ctx conte
 // FROM clause below: the reads select from the live `claims` table, while a
 // converted write selects from the `updated` CTE its own RETURNING produced —
 // same columns, different row source.
-const executorClaimSelectCols = `
+var executorClaimSelectCols = `
 	c.id::text, c.org_id::text, c.conversation_id::text,
-	c.claimed_at, c.released_at, COALESCE(c.outcome, ''),
+	c.claimed_at, c.released_at, c.lease_expires_at, COALESCE(c.outcome, ''),
 	c.peak_mem_mb, c.cpu_usec,
-	COALESCE(v.status, CASE WHEN c.released_at IS NULL THEN 'running' ELSE 'queued' END, ''),
+	COALESCE(v.status, CASE WHEN ` + claimLeaseLiveSQL("c") + ` THEN 'running' ELSE 'queued' END, ''),
 	COALESCE(v.failure_kind, '')`
+
+// claimLeaseLiveSQL is one claims row's own liveness, for the alias the
+// caller gave it: unreleased AND its lease still in the future. An expired
+// claim renders 'queued' because nothing is driving its conversation — the
+// executor that held it is gone, and what the row records is an engagement
+// waiting to be taken over.
+func claimLeaseLiveSQL(alias string) string {
+	return alias + ".released_at IS NULL AND " + alias + ".lease_expires_at > clock_timestamp()"
+}
 
 // executorClaimCols is the shared projection behind both operator claim reads,
 // so the per-executor list and the single-claim lookup can never drift into
 // disagreeing about the same row. LEFT JOIN on the conversation: the claim is
 // the subject here, and a claim whose conversation is gone must still report
 // its measured cost rather than vanishing from the box's occupancy.
-const executorClaimCols = `
+var executorClaimCols = `
 	SELECT ` + executorClaimSelectCols + `
 	FROM claims c
 	LEFT JOIN conversations v ON v.id = c.conversation_id`
@@ -1122,11 +1203,11 @@ type executorClaimScanner interface {
 
 func scanOneExecutorClaim(row executorClaimScanner) (domain.ExecutorClaim, error) {
 	var c domain.ExecutorClaim
-	var releasedAt sql.NullTime
+	var releasedAt, leaseExpiresAt sql.NullTime
 	var peakMem, cpuUsec sql.NullInt64
 	if err := row.Scan(
 		&c.ID, &c.OrgID, &c.ConversationID,
-		&c.ClaimedAt, &releasedAt, &c.Outcome,
+		&c.ClaimedAt, &releasedAt, &leaseExpiresAt, &c.Outcome,
 		&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
 	); err != nil {
 		return domain.ExecutorClaim{}, err
@@ -1134,6 +1215,10 @@ func scanOneExecutorClaim(row executorClaimScanner) (domain.ExecutorClaim, error
 	if releasedAt.Valid {
 		v := releasedAt.Time
 		c.ReleasedAt = &v
+	}
+	if leaseExpiresAt.Valid {
+		v := leaseExpiresAt.Time
+		c.LeaseExpiresAt = &v
 	}
 	c.PeakMemMB = intPtrFromNull(peakMem)
 	c.CPUUsec = int64PtrFromNull(cpuUsec)

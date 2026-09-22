@@ -60,8 +60,14 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// after that, so none of them sees it nil.
 	var mirror *memoryMirror
 
-	// The park a stop lands on, wherever the stop catches this engagement.
+	// The park a stop lands on, wherever the stop catches this engagement. A
+	// LEASE fence is not a stop and never reaches the park: this engagement
+	// no longer owns the conversation, so recording a user cancellation on it
+	// would be recording a stop nobody made.
 	stopped := func() engagementDisposition {
+		if leaseFenced(ctx) {
+			return engagementDisposition{fenced: true}
+		}
 		fenced := s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
@@ -710,6 +716,14 @@ func (s *Spawner) recordNativeResult(
 
 	switch result.Kind {
 	case agentloop.ResultCancelled:
+		// A lease fence cancels the loop exactly as a stop does, and the two
+		// must not be recorded the same way: ownership is gone, so this
+		// engagement writes nothing.
+		if leaseFenced(ctx) {
+			delegateLog.Info("engagement fenced by its claim lease; the conversation awaits takeover",
+				"conversation", conversationID, "claim", cfg.claimID)
+			return true
+		}
 		return s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,

@@ -131,8 +131,8 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			}
 			if status == "running" {
 				if _, err := conn.Exec(`
-					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
-					VALUES (?, ?, ?, 'factory-seed-executor', 1, CURRENT_TIMESTAMP)
+					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
+					VALUES (?, ?, ?, 'factory-seed-executor', 1, CURRENT_TIMESTAMP, strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
 				`, uuid.New().String(), runmode.LocalDefaultOrgID, id); err != nil {
 					t.Fatalf("seed claim: %v", err)
 				}

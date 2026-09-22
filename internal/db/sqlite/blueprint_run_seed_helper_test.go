@@ -161,8 +161,8 @@ func insertConversationForTest(t *testing.T, conn *sql.DB, conv domain.Conversat
 func insertActiveClaimForTest(t *testing.T, conn *sql.DB, conversationID, executorID string, bootEpoch int64) {
 	t.Helper()
 	if _, err := conn.Exec(`
-		INSERT INTO claims (id, conversation_id, executor_id, boot_epoch)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO claims (id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+		VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
 	`, uuid.New().String(), conversationID, executorID, bootEpoch); err != nil {
 		t.Fatalf("insert claim for %s: %v", conversationID, err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,6 +57,39 @@ const conversationTerminalStatusesSQL = `'completed','failed'`
 const activeClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_a
 		WHERE cl_a.conversation_id = r.id AND cl_a.released_at IS NULL)`
+
+// sqliteNowExpr is fresh database time in the layout the claims table stores
+// its timestamps in, and the ONE spelling every lease comparison on this
+// dialect reads. The layout is load-bearing: both sides of a `>` on
+// lease_expires_at are compared as text, so a second spelling that rendered
+// the same instant differently would silently compare wrong.
+//
+// SQLite advances 'now' across statements inside a transaction, which is what
+// an expiry guard needs: the reading is taken at the guard, not at BEGIN —
+// the property the Postgres twin gets from clock_timestamp().
+const sqliteNowExpr = `strftime('%Y-%m-%d %H:%M:%f', 'now')`
+
+// sqliteNowPlusExpr is sqliteNowExpr offset by a bound modifier — the one
+// spelling every lease STAMP on this dialect is written with, for the reason
+// above: a stamp rendered in a layout the comparisons do not share would pass
+// its own test and fail theirs. The bind takes sqliteLeaseModifier's output.
+const sqliteNowPlusExpr = `strftime('%Y-%m-%d %H:%M:%f', 'now', ?)`
+
+// sqliteLeaseModifier renders a lease as SQLite's signed "NNN.NNN seconds"
+// date-function modifier, the offset sqliteNowPlusExpr binds. Millisecond
+// resolution matches what %f stores.
+func sqliteLeaseModifier(d time.Duration) string {
+	return fmt.Sprintf("%+.3f seconds", d.Seconds())
+}
+
+// liveClaimExistsSQL is the narrower question the DISPLAY asks — an
+// engagement actually alive on this conversation right now. The Postgres twin
+// carries the model, including why the ownership predicates keep reading
+// released_at alone.
+const liveClaimExistsSQL = `EXISTS (
+		SELECT 1 FROM claims cl_a
+		WHERE cl_a.conversation_id = r.id AND cl_a.released_at IS NULL
+		  AND cl_a.lease_expires_at > ` + sqliteNowExpr + `)`
 
 // undeliveredInputExistsSQL matches drivable input: a plain user message
 // still awaiting delivery. Injections ride whatever engagement runs next and
@@ -181,7 +215,7 @@ func insertConversation(ctx context.Context, q queryer, orgID string, conv domai
 	return scanConversationReturning(row)
 }
 
-func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, _ db.ClaimPlacement) (*domain.Conversation, error) {
+func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, _ db.ClaimPlacement, lease time.Duration) (*domain.Conversation, error) {
 	// One scan, every surface: pick the oldest conversation matching the
 	// needs-driving predicate (plus the blueprint gate — a
 	// sequence-cancelled blueprint's step is never claimed) and mint the
@@ -240,10 +274,17 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			return err
 		}
 		claimID := uuid.New().String()
+		// The lease is stamped here, in the statement that mints the row: a
+		// live claim never exists without one, which is what every fenced
+		// write presents and what the conformance suite asserts on this
+		// dialect (SQLite cannot hold it as a CHECK added by ALTER TABLE).
+		// Rendered by strftime rather than formatted in Go so the `>`
+		// comparisons in the fence and the renewal compare one text layout
+		// against itself. claimed_at keeps its Go-side value.
 		if _, err := q.ExecContext(ctx, `
-			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, claimID, claimed.OrgID, claimed.ID, executorID, bootEpoch, claimedAt); err != nil {
+			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
+			VALUES (?, ?, ?, ?, ?, ?, `+sqliteNowPlusExpr+`)
+		`, claimID, claimed.OrgID, claimed.ID, executorID, bootEpoch, claimedAt, sqliteLeaseModifier(lease)); err != nil {
 			return err
 		}
 		claimed.ClaimID = claimID
@@ -812,14 +853,23 @@ func (s *conversationQueueStore) RecentConversationTimingsForOrgSystem(ctx conte
 // No org predicate, and none is possible: this is the deployment-wide operator
 // read. SQLite is N=1, so the distinction is moot locally — the arm exists
 // because the store is one dual-dialect contract with one conformance suite.
-const executorClaimCols = `
+var executorClaimCols = `
 	SELECT c.id, c.org_id, c.conversation_id,
-	       c.claimed_at, c.released_at, COALESCE(c.outcome, ''),
+	       c.claimed_at, c.released_at, c.lease_expires_at, COALESCE(c.outcome, ''),
 	       c.peak_mem_mb, c.cpu_usec,
-	       COALESCE(v.status, CASE WHEN c.released_at IS NULL THEN 'running' ELSE 'queued' END, ''),
+	       COALESCE(v.status, CASE WHEN ` + claimLeaseLiveSQL("c") + ` THEN 'running' ELSE 'queued' END, ''),
 	       COALESCE(v.failure_kind, '')
 	FROM claims c
 	LEFT JOIN conversations v ON v.id = c.conversation_id`
+
+// claimLeaseLiveSQL is one claims row's own liveness, for the alias the
+// caller gave it: unreleased AND its lease still in the future. An expired
+// claim renders 'queued' because nothing is driving its conversation — the
+// executor that held it is gone, and what the row records is an engagement
+// waiting to be taken over.
+func claimLeaseLiveSQL(alias string) string {
+	return alias + ".released_at IS NULL AND " + alias + ".lease_expires_at > " + sqliteNowExpr
+}
 
 func (s *conversationQueueStore) RecentClaimsForExecutorSystem(ctx context.Context, executorID string, limit int) ([]domain.ExecutorClaim, error) {
 	if limit <= 0 {
@@ -853,6 +903,59 @@ func (s *conversationQueueStore) ClaimByIDSystem(ctx context.Context, claimID st
 	return &out[0], nil
 }
 
+func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (time.Time, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return time.Time{}, err
+	}
+	if claimID == "" {
+		return time.Time{}, fmt.Errorf("%w: no claim id supplied", db.ErrClaimReleased)
+	}
+	// One statement, guard and write together: splitting them would open a
+	// window in which an expired lease renews. The guard's expiry term is what
+	// makes a late renewal terminal — an already-lapsed lease matches nothing
+	// and the caller gets the same ErrClaimReleased a released claim gives.
+	// Authority does not come back.
+	//
+	// Both sides of the comparison are strftime-rendered text in the layout
+	// the column stores, so the `>` is one layout against itself.
+	var expiry time.Time
+	err := s.conn.QueryRowContext(ctx, `
+		UPDATE claims
+		SET lease_expires_at = `+sqliteNowPlusExpr+`
+		WHERE id = ? AND org_id = ? AND conversation_id = ?
+		  AND released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
+		RETURNING lease_expires_at
+	`, sqliteLeaseModifier(lease), claimID, orgID, conversationID).Scan(&expiry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return expiry, nil
+}
+
+func (s *conversationQueueStore) ExpiredClaimsSystem(ctx context.Context) (int, time.Duration, error) {
+	// Whole seconds: the %f fraction is dropped because the answer feeds a
+	// gauge, where a sub-second reading says nothing a scrape interval could
+	// act on. COALESCE over the aggregate rather than a second statement —
+	// with no matching rows min() is NULL and so is the subtraction, which
+	// collapses to the zero the empty case wants.
+	var count, oldestSeconds int64
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT COUNT(*),
+		       COALESCE(strftime('%s','now') - strftime('%s', min(lease_expires_at)), 0)
+		FROM claims
+		WHERE released_at IS NULL AND lease_expires_at <= `+sqliteNowExpr).Scan(&count, &oldestSeconds)
+	if err != nil {
+		return 0, 0, err
+	}
+	if oldestSeconds < 0 {
+		oldestSeconds = 0
+	}
+	return int(count), time.Duration(oldestSeconds) * time.Second, nil
+}
+
 func scanSqliteExecutorClaims(rows *sql.Rows) ([]domain.ExecutorClaim, error) {
 	var out []domain.ExecutorClaim
 	for rows.Next() {
@@ -876,11 +979,11 @@ type executorClaimScanner interface {
 
 func scanOneExecutorClaim(row executorClaimScanner) (domain.ExecutorClaim, error) {
 	var c domain.ExecutorClaim
-	var releasedAt sql.NullTime
+	var releasedAt, leaseExpiresAt sql.NullTime
 	var peakMem, cpuUsec sql.NullInt64
 	if err := row.Scan(
 		&c.ID, &c.OrgID, &c.ConversationID,
-		&c.ClaimedAt, &releasedAt, &c.Outcome,
+		&c.ClaimedAt, &releasedAt, &leaseExpiresAt, &c.Outcome,
 		&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
 	); err != nil {
 		return domain.ExecutorClaim{}, err
@@ -888,6 +991,10 @@ func scanOneExecutorClaim(row executorClaimScanner) (domain.ExecutorClaim, error
 	if releasedAt.Valid {
 		v := releasedAt.Time
 		c.ReleasedAt = &v
+	}
+	if leaseExpiresAt.Valid {
+		v := leaseExpiresAt.Time
+		c.LeaseExpiresAt = &v
 	}
 	c.PeakMemMB = intPtrFromNull(peakMem)
 	c.CPUUsec = int64PtrFromNull(cpuUsec)

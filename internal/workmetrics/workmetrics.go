@@ -1,6 +1,9 @@
 // Package workmetrics turns the work-item package's dispositions into
 // OpenTelemetry metrics: one counter per disposition, keyed by kind and org,
-// and per-kind depth gauges read from the table on a ticker.
+// and per-kind depth gauges read from the table on a ticker. It also carries
+// the executor-claim gauges (claims.go), which are the same kind of thing for
+// the same reason — a database-derived count of work nobody is driving,
+// measured on the brain rather than by whatever was supposed to drive it.
 //
 // The workitem package reports every disposition it commits to a
 // Kind.Observer and emits nothing itself; this package is the observer. A

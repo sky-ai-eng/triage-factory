@@ -211,7 +211,7 @@ func TestFleet_ReaperRequeue_DeadExecutorConversationClaimedBySurvivor(t *testin
 	sB := newFleetSpawner(t, h, fx, idB)
 
 	execA, epochA := sA.executorIdentity()
-	claimed, err := fx.stores.ConversationQueue.ClaimNextConversation(ctx, execA, epochA, db.ClaimPlacement{})
+	claimed, err := fx.stores.ConversationQueue.ClaimNextConversation(ctx, execA, epochA, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || claimed == nil || claimed.ID != fx.conversationID {
 		t.Fatalf("A claims: claimed=%v err=%v", claimed, err)
 	}
@@ -230,7 +230,7 @@ func TestFleet_ReaperRequeue_DeadExecutorConversationClaimedBySurvivor(t *testin
 	}
 
 	execB, epochB := sB.executorIdentity()
-	claimedByB, err := fx.stores.ConversationQueue.ClaimNextConversation(ctx, execB, epochB, db.ClaimPlacement{})
+	claimedByB, err := fx.stores.ConversationQueue.ClaimNextConversation(ctx, execB, epochB, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || claimedByB == nil || claimedByB.ID != fx.conversationID {
 		t.Fatalf("B claims after reap: claimed=%v err=%v", claimedByB, err)
 	}
@@ -296,7 +296,7 @@ func TestFleet_Fence_SupersededInstanceStopsClaimingAndKillsSandboxes(t *testing
 		t.Fatal("B must not be affected by A's supersession")
 	}
 	execB, epochB := sB.executorIdentity()
-	claimed, err := fx.stores.ConversationQueue.ClaimNextConversation(ctx, execB, epochB, db.ClaimPlacement{})
+	claimed, err := fx.stores.ConversationQueue.ClaimNextConversation(ctx, execB, epochB, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || claimed == nil {
 		t.Fatalf("B claims after A's fence: claimed=%v err=%v", claimed, err)
 	}

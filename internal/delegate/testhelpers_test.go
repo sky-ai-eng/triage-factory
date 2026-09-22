@@ -203,8 +203,8 @@ func markEngaged(t *testing.T, database *sql.DB, convID string) string {
 	}
 	claimID := uuid.New().String()
 	if _, err := database.Exec(`
-		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
-		VALUES (?, ?, ?, 'test-engagement', 1, CURRENT_TIMESTAMP)
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
+		VALUES (?, ?, ?, 'test-engagement', 1, CURRENT_TIMESTAMP, strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
 	`, claimID, runmode.LocalDefaultOrgID, convID); err != nil {
 		t.Fatalf("mint claim for %s: %v", convID, err)
 	}

@@ -29,10 +29,12 @@ type Counts struct {
 
 // Store is the reaper's persistence seam.
 type Store interface {
-	// ReapDeadExecutors sweeps every conversation claimed/running under an executor
-	// whose registry heartbeat is missing or older than staleThreshold (own
-	// DB time — now() - make_interval, never Go's wall clock, matching
-	// internal/lease's discipline), restricted to conversations whose owning
+	// ReapDeadExecutors sweeps every conversation claimed/running whose
+	// engagement is over — either its executor's registry heartbeat is missing
+	// or older than staleThreshold, or the claim's own lease has lapsed
+	// whatever the instance says (own DB time — now() - make_interval, never
+	// Go's wall clock, matching internal/lease's discipline) — restricted to
+	// conversations whose owning
 	// blueprint_run is still 'running' (spec §4.3's candidate predicate — a
 	// row under an already-terminal blueprint_run belongs to
 	// ConversationQueueStore.ReconcileOrphanedConversations, not here). A draining-but-
@@ -95,13 +97,26 @@ var _ Store = (*pgStore)(nil)
 
 // reapCandidateJoin is the FROM/JOIN/base-WHERE shared by every reaper
 // query below: conversations still mid-flight (status NULL — no outcome was
-// ever written) with a live claim, under a still-running blueprint_run,
-// whose executor's heartbeat row is missing (GC'd, or never registered —
-// defensive) or older than the staleness threshold. The claim join is what
-// makes "a live process died" expressible: a parked or terminal
-// conversation has no engagement to have died. Each caller appends its own
+// ever written) with an unreleased claim, under a still-running
+// blueprint_run, whose engagement is over. Each caller appends its own
 // cancel_requested/episode predicate and SELECTs what it needs. $1 is
 // always the staleness threshold in seconds.
+//
+// The claim join is what makes "a live process died" expressible: a parked or
+// terminal conversation has no engagement to have died. Two arms then say it
+// died, and either is enough.
+//
+//   - Its executor's heartbeat row is missing (GC'd, or never registered —
+//     defensive) or older than the staleness threshold: the whole process is
+//     gone, so every claim it holds is.
+//   - Its own lease lapsed, whatever the instance says: the process may be
+//     alive and heartbeating while the goroutine driving THIS conversation is
+//     not, and nothing but the claim's own expiry can tell.
+//
+// The lease arm is safe against a holder that is still working, because the
+// boot-checked knob ordering puts the holder's self-fence strictly before its
+// lease: a holder whose renewals stopped killed its own cell 30s (at the
+// defaults) before the lease this reads lapsed.
 const reapCandidateJoin = `
 	FROM conversations r
 	JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
@@ -109,7 +124,9 @@ const reapCandidateJoin = `
 	LEFT JOIN instances i ON i.id = cl.executor_id
 	WHERE r.status IS NULL
 	  AND br.status = 'running'
-	  AND (i.id IS NULL OR i.last_heartbeat_at < now() - make_interval(secs => $1))
+	  AND (i.id IS NULL
+	       OR i.last_heartbeat_at < now() - make_interval(secs => $1)
+	       OR cl.lease_expires_at <= now())
 `
 
 // reapEpisodeAttemptsSQL counts the loss episode the claim being reaped
