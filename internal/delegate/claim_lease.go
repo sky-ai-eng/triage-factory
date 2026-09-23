@@ -136,7 +136,8 @@ func renewalCallTimeout(cadence time.Duration) time.Duration {
 // A renewal that reads a pending stop cancels the claim context with
 // errStopRequested and keeps renewing: the engagement settles the stop through
 // its fenced park, and that park needs the lease to still be live when it
-// lands. ctx is not the claim context, so the fence does not end this loop.
+// lands. ctx is not the claim context, so a stop does not end this loop; a
+// fired watchdog does.
 //
 // The loop stops when the engagement returns, so a renewal can be in flight
 // at the moment the engagement's own terminal write releases the claim. That
@@ -160,6 +161,14 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 	var lastRenewal atomic.Pointer[time.Time]
 	lastRenewal.Store(&anchor)
 
+	// A fired watchdog is terminal for this holder, so it ends the loop as
+	// well as the engagement. A renewal that kept going would extend the
+	// lease of an engagement that is tearing down and will write nothing,
+	// holding the conversation from its successor for up to a full lease
+	// after the database came back.
+	ctx, stopRenewing := context.WithCancel(ctx)
+	defer stopRenewing()
+
 	// A separate timer rather than a second case in the select below, and
 	// rather than a check inside the loop body: a renewal call that blocks
 	// past its own deadline — a driver that ignores its context, a
@@ -173,6 +182,7 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 		dispatchLog.Warn("claim lease could not be renewed within the self-fence deadline; fencing this engagement",
 			"conversation", conv.ID, "claim", conv.ClaimID, "deadline", deadline)
 		fence(errClaimSelfFenced)
+		stopRenewing()
 	})
 	defer watchdog.Stop()
 
@@ -184,6 +194,11 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+		// A select with both cases ready picks either; a tick buffered while
+		// the previous call blocked must not outvote the stop.
+		if ctx.Err() != nil {
+			return
 		}
 
 		// Issue time, not response time: time.Since on it can only

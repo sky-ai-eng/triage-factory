@@ -601,7 +601,9 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 
 // stopConversationsOnClosedTask asks the spawner to stop the conversations the close just ended
 // and cancel the blueprints behind them: the stop note on the transcript, the
-// kill signal, and the park. conversationIDs is the then-active set the close
+// stop intent, and the kill signal. The park is the settlement's, written by
+// the conversation's holder or, for one nobody holds, by the dispatcher.
+// conversationIDs is the then-active set the close
 // transaction read and stamped, so this acts on exactly what closed rather
 // than on a second, later read.
 //
@@ -617,7 +619,8 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 // the close transaction owns the other side of. The intent is durable before
 // this runs, so a kill that never lands no longer forgets the conversation:
 // the claim gate refuses to drive a cancel-requested blueprint, and the
-// reaper's cancel arm finalizes it once its executor is gone. What is lost is
+// conversation's next settlement, by its holder or by the dispatcher once no
+// claim holds it, finalizes the blueprint. What is lost is
 // only promptness — a live agent may finish the turn it is on. "no active
 // conversation" from the spawner is expected when a conversation races us to
 // natural completion; the conversation ends up terminal either way.

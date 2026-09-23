@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -161,11 +162,12 @@ func (s *Spawner) failEngagement(conversationID string, err error) {
 // disposition somebody chose; a dispatcher shutdown is this engagement
 // standing down with the claim intact for the boot reconcile; a lease fence
 // is this engagement losing the conversation, which is nobody's decision at
-// all. Reading the PARENT first separates the shutdown: step is derived from
-// parent, so a shutdown cancels both while the other two cancel only step.
-// The lease fence is then told from the user stop by its cause, which is the
-// only place the difference is recorded — and it has to be, because a fenced
-// engagement writes nothing where a stopped one parks.
+// all. The lease fence is read first, by its cause on step, which is the only
+// place the difference is recorded — and it has to be, because a fenced
+// engagement writes nothing where a stopped one parks. The parent then
+// separates the shutdown: step is derived from parent, so a shutdown cancels
+// both while a user stop cancels only step, or cancels the parent with
+// errStopRequested when the claim renewal delivered it.
 //
 // ok is false when neither is cancelled, which is not a stop at all — the
 // caller then leaves the engagement to whichever exit does know (a launch
@@ -173,10 +175,13 @@ func (s *Spawner) failEngagement(conversationID string, err error) {
 // silently claim the end and no-op the real one, since the root ends once.
 func stopOutcome(parent, step context.Context) (outcome string, ok bool) {
 	switch {
-	case parent.Err() != nil:
-		return engagementShutdown, true
 	case leaseFenced(step):
 		return engagementFenced, true
+	// The resume path's parent is the claim context, which a renewal cancels
+	// to deliver a stop. That is a user's stop reaching the engagement, not
+	// the dispatcher standing down.
+	case parent.Err() != nil && !errors.Is(context.Cause(parent), errStopRequested):
+		return engagementShutdown, true
 	case step.Err() != nil:
 		return engagementCancelled, true
 	}

@@ -71,9 +71,17 @@ type ClaimRenewal struct {
 	StopRequestedBy string
 }
 
+// ClaimRef names one claim and the conversation it holds.
+type ClaimRef struct {
+	ClaimID, OrgID, ConversationID string
+}
+
 // SettledStop is one conversation SettleUnclaimedStopsSystem settled.
-// BlueprintRunID is "" when the conversation has no run, or when this
-// settlement did not cancel it (a plain stop, or a run already concluded).
+// BlueprintRunID names a run this settlement cancelled, on exactly one of the
+// conversations it settled under that run, so a caller cleaning up after the
+// cancel does it once. It is "" on every other row: a conversation with no
+// run, a plain stop, a run already concluded, or a second conversation under
+// a run already reported.
 type SettledStop struct {
 	OrgID, ConversationID string
 	BlueprintRunID        string
@@ -232,8 +240,10 @@ type ConversationQueueStore interface {
 	// cancelled, with the columns MarkRunStatusSystem writes for a cancel.
 	//
 	// "No live claim" is released_at alone, not the lease: a claim whose
-	// holder died is released by the reaper (internal/reaper), which leaves a
-	// stop-requested row otherwise untouched, and the next pass settles it.
+	// holder is gone is released by the executor that minted it
+	// (ReleaseExpiredClaimSystem) or, when that executor is gone too, by the
+	// reaper (internal/reaper). Both leave a stop-requested row otherwise
+	// untouched, and the next pass settles it.
 	// Cross-org system sweep on the admin pool; concurrent passes skip each
 	// other's rows.
 	SettleUnclaimedStopsSystem(ctx context.Context) ([]SettledStop, error)
@@ -251,6 +261,22 @@ type ConversationQueueStore interface {
 	// collecting it outside the dispatcher loop is what keeps a stuck
 	// dispatcher from suppressing its own alarm.
 	ExpiredClaimsSystem(ctx context.Context) (count int, oldestPastExpiry time.Duration, err error)
+
+	// ExpiredClaimsOfExecutorSystem lists the live claims one executor boot
+	// minted whose lease has lapsed on database time, oldest first. Only the
+	// executor that minted a claim can tell whether an engagement is still
+	// driving it, so this is the list that executor checks against its own
+	// live engagements before releasing anything.
+	ExpiredClaimsOfExecutorSystem(ctx context.Context, executorID string, bootEpoch int64) ([]ClaimRef, error)
+
+	// ReleaseExpiredClaimSystem releases one claim with outcome 'reaped', and
+	// only while it is still live and its lease has lapsed; false when either
+	// no longer holds. The release is the requeue: a conversation with no live
+	// claim matches the needs-driving predicate again, and a stop pending on
+	// it is settled by the next settlement pass. The caller must have seen
+	// that no engagement of its own drives the claim — the guard here proves
+	// the lease lapsed, not that its holder has finished tearing down.
+	ReleaseExpiredClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (released bool, err error)
 
 	// RequeueConversation hands a claimed conversation back after a transient
 	// dispatcher failure — a workspace setup hiccup, a runtime that failed to

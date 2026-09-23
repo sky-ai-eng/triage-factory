@@ -709,7 +709,10 @@ type BlueprintStore interface {
 	ConversationsForBlueprint(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 
 	// ActiveStepConversationIDs returns the IDs of step conversations on a
-	// blueprint that have not reached a terminal state.
+	// blueprint that have not reached a terminal state, parked `open` steps
+	// included: a cancel records its stop intent on each of them, and a
+	// paused blueprint whose parked step carried none would have nothing to
+	// settle it.
 	ActiveStepConversationIDs(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
 
 	// StepPlanLengths returns how many steps each named blueprint run's frozen

@@ -738,6 +738,12 @@ func (s *Spawner) recordNativeResult(
 		// holds its tree: whatever the agent had written by the time the loop
 		// broke is its account of the work, and a failed conversation is
 		// exactly the one a person will want it from.
+		// The loop checks its context before reporting a failure, and the
+		// lease fence can land after that check. A fenced engagement records
+		// no terminal, failures included.
+		if leaseFenced(ctx) {
+			return true
+		}
 		mirror.settle(ctx)
 		reason := "native agent loop failed"
 		if result.Err != nil {
@@ -750,16 +756,19 @@ func (s *Spawner) recordNativeResult(
 		// or a stop reason only a person can resolve. The conversation is
 		// resumable either way, so the snapshot must exist by the time the
 		// status commits — parkConversationOpen owns that ordering.
-		_ = s.parkConversationOpen(ctx, liveParkContext{
+		if leaseFenced(ctx) {
+			return true
+		}
+		return s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
+			claimID:        cfg.claimID,
 			reason:         db.ParkIdle(),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
 		}, "")
-		return false
 	}
 
 	// Concluded — which is not authority to record a conclusion. The lease

@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -196,6 +197,40 @@ func TestRenewClaimLease_WatchdogFiresThroughABlockedCall(t *testing.T) {
 	}
 	if !leaseFenced(ctx) {
 		t.Error("leaseFenced does not recognise a self-fence")
+	}
+}
+
+// TestRenewClaimLease_SelfFenceEndsTheLoop pins the loser contract's other
+// half: once the watchdog has fenced, the loop stops asking. The database
+// coming back a moment later must not extend the lease of an engagement that
+// is tearing down and will write nothing.
+func TestRenewClaimLease_SelfFenceEndsTheLoop(t *testing.T) {
+	block := make(chan struct{})
+	fake := &fakeRenewalStore{block: block}
+	s := leaseTestSpawner(t, fake, 10*time.Millisecond, 150*time.Millisecond, 90*time.Second)
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.renewClaimLease(context.Background(), leaseTestConversation(), time.Now(), cancel)
+	}()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watchdog never fired while a renewal sat blocked past its deadline")
+	}
+	// The database answers again: the blocked call returns success.
+	close(block)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the loop kept renewing after its watchdog had fenced the engagement")
+	}
+	if n := len(fake.seen()); n != 1 {
+		t.Errorf("%d renewals, want only the one that was in flight when the watchdog fired", n)
 	}
 }
 
@@ -388,4 +423,92 @@ func TestRenewClaimLease_PendingStopCancelsAndKeepsRenewing(t *testing.T) {
 	}
 	stopLoop()
 	<-done
+}
+
+// TestReleaseOwnExpiredClaims_ReleasesOnlyWhatNoEngagementDrives pins the
+// release that ends a fenced engagement's hold. A fenced engagement writes
+// nothing, so its claim outlives it; the executor that minted the claim
+// releases it once the lease has lapsed, but never while an engagement in
+// this process is still on the conversation, which may be a fenced one
+// still tearing down its cell. A stop pending on a released row is then
+// settled by the ordinary settlement.
+func TestReleaseOwnExpiredClaims_ReleasesOnlyWhatNoEngagementDrives(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	const tearingDown, finished = "r-expired-live", "r-expired-done"
+	seedConversation(t, database, tearingDown, "sess-live", "/tmp/wt-live")
+	seedConversation(t, database, finished, "sess-done", "/tmp/wt-done")
+	markEngaged(t, database, tearingDown)
+	markEngaged(t, database, finished)
+	if _, err := database.Exec(
+		`UPDATE claims SET lease_expires_at = strftime('%Y-%m-%d %H:%M:%f','now','-60.000 seconds') WHERE released_at IS NULL`,
+	); err != nil {
+		t.Fatalf("lapse the leases: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE conversations SET stop_requested_at = CURRENT_TIMESTAMP, stop_requested_by = ? WHERE id = ?`,
+		runmode.LocalDefaultUserID, finished,
+	); err != nil {
+		t.Fatalf("stage a pending stop: %v", err)
+	}
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	s.SetExecutorID("test-engagement", 1)
+	s.mu.Lock()
+	s.engagements[tearingDown] = &engagement{}
+	s.mu.Unlock()
+
+	s.releaseOwnExpiredClaims(context.Background())
+	s.settleUnclaimedStops(context.Background())
+
+	if !hasActiveClaim(t, database, tearingDown) {
+		t.Error("released the claim of a conversation an engagement in this process still drives")
+	}
+	if hasActiveClaim(t, database, finished) {
+		t.Fatal("the expired claim no engagement drives is still held; nothing else releases it in local mode")
+	}
+	var outcome string
+	if err := database.QueryRow(`SELECT outcome FROM claims WHERE conversation_id = ?`, finished).Scan(&outcome); err != nil {
+		t.Fatalf("read the released claim: %v", err)
+	}
+	if outcome != "reaped" {
+		t.Errorf("released claim outcome = %q, want reaped — a lost engagement counts toward the claim budget", outcome)
+	}
+	if got := storedStatus(t, database, finished); got != "open" {
+		t.Errorf("status after the release and settlement = %q, want open — the pending stop settles once the claim is gone", got)
+	}
+}
+
+// TestStopOutcome_NamesEachCancellation pins the trace label for each way an
+// engagement's context ends before the agent is live, including the resume
+// path's shape, whose parent is the claim context itself.
+func TestStopOutcome_NamesEachCancellation(t *testing.T) {
+	cancelledWith := func(parent context.Context, cause error) context.Context {
+		ctx, cancel := context.WithCancelCause(parent)
+		cancel(cause)
+		return ctx
+	}
+	live := context.Background()
+	shutdown := cancelledWith(live, context.Canceled)
+	fenced := cancelledWith(live, errClaimSelfFenced)
+	renewalStop := cancelledWith(live, errStopRequested)
+
+	for name, tc := range map[string]struct {
+		parent, step context.Context
+		want         string
+	}{
+		"dispatcher shutdown":        {shutdown, cancelledWith(shutdown, context.Canceled), engagementShutdown},
+		"local stop":                 {live, cancelledWith(live, context.Canceled), engagementCancelled},
+		"lease fence":                {fenced, cancelledWith(fenced, context.Canceled), engagementFenced},
+		"stop delivered by renewal":  {renewalStop, cancelledWith(renewalStop, context.Canceled), engagementCancelled},
+		"lease fence on step itself": {live, cancelledWith(live, errClaimLeaseLost), engagementFenced},
+	} {
+		got, ok := stopOutcome(tc.parent, tc.step)
+		if !ok || got != tc.want {
+			t.Errorf("%s: stopOutcome = (%q, %v), want (%q, true)", name, got, ok, tc.want)
+		}
+	}
+	if _, ok := stopOutcome(live, live); ok {
+		t.Error("stopOutcome named an outcome for a context nobody cancelled")
+	}
 }

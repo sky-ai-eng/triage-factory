@@ -307,6 +307,56 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 	})
 
+	t.Run("OwnExpiredClaim_ListedAndReleasedOnlyOnceLapsed", func(t *testing.T) {
+		// The executor that minted a claim is the one that may release it
+		// once its lease lapses. The list is scoped to that executor boot, and
+		// the release refuses a claim whose lease is still live, so a stale
+		// list entry renewed in between is left alone.
+		f := mk(t)
+		conversationID, _ := f.StageStep(t)
+		conv := claim(t, f, conversationID)
+		q := f.Stores.ConversationQueue
+
+		if got, err := q.ExpiredClaimsOfExecutorSystem(ctx, claimLeaseExecutor, claimLeaseBootEpoch); err != nil || len(got) != 0 {
+			t.Fatalf("ExpiredClaimsOfExecutorSystem with a live lease = (%v, %v), want none", got, err)
+		}
+		if released, err := q.ReleaseExpiredClaimSystem(ctx, f.OrgID, conversationID, conv.ClaimID); err != nil || released {
+			t.Fatalf("ReleaseExpiredClaimSystem on a live lease = (%v, %v), want (false, nil)", released, err)
+		}
+
+		f.SetLease(t, conv.ClaimID, -time.Minute)
+		if got, err := q.ExpiredClaimsOfExecutorSystem(ctx, claimLeaseExecutor, claimLeaseBootEpoch+1); err != nil || len(got) != 0 {
+			t.Errorf("another boot's list = (%v, %v), want none — a claim is released only by the boot that minted it", got, err)
+		}
+		if got, err := q.ExpiredClaimsOfExecutorSystem(ctx, "another-exec", claimLeaseBootEpoch); err != nil || len(got) != 0 {
+			t.Errorf("another executor's list = (%v, %v), want none", got, err)
+		}
+		got, err := q.ExpiredClaimsOfExecutorSystem(ctx, claimLeaseExecutor, claimLeaseBootEpoch)
+		if err != nil {
+			t.Fatalf("ExpiredClaimsOfExecutorSystem: %v", err)
+		}
+		want := db.ClaimRef{ClaimID: conv.ClaimID, OrgID: f.OrgID, ConversationID: conversationID}
+		if len(got) != 1 || got[0] != want {
+			t.Fatalf("ExpiredClaimsOfExecutorSystem = %+v, want [%+v]", got, want)
+		}
+
+		released, err := q.ReleaseExpiredClaimSystem(ctx, f.OrgID, conversationID, conv.ClaimID)
+		if err != nil || !released {
+			t.Fatalf("ReleaseExpiredClaimSystem on a lapsed lease = (%v, %v), want (true, nil)", released, err)
+		}
+		if again, err := q.ReleaseExpiredClaimSystem(ctx, f.OrgID, conversationID, conv.ClaimID); err != nil || again {
+			t.Errorf("a second release = (%v, %v), want (false, nil)", again, err)
+		}
+		// The release is the requeue: the conversation is claimable again.
+		next, err := q.ClaimNextConversation(ctx, claimLeaseExecutor, claimLeaseBootEpoch, db.ClaimPlacement{}, testClaimLease)
+		if err != nil {
+			t.Fatalf("ClaimNextConversation after the release: %v", err)
+		}
+		if next == nil || next.ID != conversationID {
+			t.Errorf("claim after the release = %+v, want conversation %s back on the queue", next, conversationID)
+		}
+	})
+
 	t.Run("ExpiredClaim_DisplaysQueuedAndStillHoldsItsConversation", func(t *testing.T) {
 		// The display says nothing is driving it; the ownership predicates
 		// still say the claim is there. Both are right, and they are

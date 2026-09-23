@@ -1327,7 +1327,7 @@ func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, b
 		SELECT id FROM conversations
 		WHERE blueprint_run_id = ?
 		  AND (status IS NULL
-		       OR status NOT IN (`+conversationTerminalStatusesSQL+`,'open'))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 	`, blueprintRunID)
 	if err != nil {
 		return nil, err

@@ -232,6 +232,22 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			t.Fatalf("ClaimNextConversation = %+v, want the just-minted step", claimed)
 		}
 
+		// The lease verbs every executor runs on every tick and every
+		// engagement. The releases find nothing on a live lease, which still
+		// proves the grants: a missing one is a permission error, not a miss.
+		if _, err := stores.ConversationQueue.RenewClaimLeaseSystem(ctx, orgID, conversationID, claimed.ClaimID, db.DefaultClaimLease); err != nil {
+			t.Errorf("ConversationQueue.RenewClaimLeaseSystem: %v", err)
+		}
+		if _, err := stores.ConversationQueue.ExpiredClaimsOfExecutorSystem(ctx, executorID, 1); err != nil {
+			t.Errorf("ConversationQueue.ExpiredClaimsOfExecutorSystem: %v", err)
+		}
+		if _, err := stores.ConversationQueue.ReleaseExpiredClaimSystem(ctx, orgID, conversationID, claimed.ClaimID); err != nil {
+			t.Errorf("ConversationQueue.ReleaseExpiredClaimSystem: %v", err)
+		}
+		if _, err := stores.ConversationQueue.SettleUnclaimedStopsSystem(ctx); err != nil {
+			t.Errorf("ConversationQueue.SettleUnclaimedStopsSystem: %v", err)
+		}
+
 		if _, err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, executorID, 1); err != nil {
 			t.Errorf("Conversations.SetExecutorSystem: %v", err)
 		}
