@@ -88,6 +88,57 @@ var (
 	ErrNoSuchBlueprintRun    = errors.New("no such blueprint run")
 )
 
+// The two answers CheckTaskUnheld gives when an executor holds a conversation
+// on the task. A caller that replaces a task's run refuses on either before
+// writing anything, because only the holder can stop what it is driving and
+// the replacement would be refused by the one-active-run index anyway. They
+// are separate so the refusal can say whether a stop is already on its way.
+var (
+	ErrTaskHeld     = errors.New("an agent is still running on this task; stop it and try again once it has stopped")
+	ErrTaskStopping = errors.New("the agent on this task is still stopping; try again once it has stopped")
+)
+
+// CheckTaskUnheld reports whether a new run could replace the task's current
+// one in the same request: nil when no live claim holds any conversation on
+// the task, else ErrTaskHeld or ErrTaskStopping. A held row is one whose
+// claim is unreleased, the test the settlement uses, so a row this answers
+// unheld for is one SettleTaskStops will settle.
+func (s *Spawner) CheckTaskUnheld(ctx context.Context, orgID, taskID string) error {
+	if s.conversations == nil {
+		return nil
+	}
+	held, err := s.conversations.HasActiveClaimForTaskSystem(ctx, orgID, taskID)
+	if err != nil || !held {
+		return err
+	}
+	ids, err := s.conversations.ActiveIDsForTaskSystem(ctx, orgID, taskID)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if conv, gerr := s.conversations.GetSystem(ctx, orgID, id); gerr == nil && conv != nil && conv.StopRequestedAt != nil {
+			return ErrTaskStopping
+		}
+	}
+	return ErrTaskHeld
+}
+
+// SettleTaskStops settles, now, the stops pending on the task's conversations
+// that no live claim holds: the dispatcher's settlement, narrowed to one task
+// and run by a caller that has just requested those stops and is about to
+// mint the task's next run. A held conversation is left to its holder.
+func (s *Spawner) SettleTaskStops(ctx context.Context, orgID, taskID string) error {
+	if s.conversationQueue == nil {
+		return nil
+	}
+	settled, err := s.conversationQueue.SettleUnclaimedStopsForTaskSystem(ctx, orgID, taskID)
+	if err != nil {
+		return err
+	}
+	s.afterSettlement(ctx, settled)
+	return nil
+}
+
 // StopCause names the lifecycle event a teardown caller is acting on — the
 // thing that caller knows and the conversation itself does not. It exists so
 // the note a stop leaves on the transcript can say why the work ended rather

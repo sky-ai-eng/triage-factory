@@ -238,6 +238,13 @@ type ConversationQueueStore interface {
 	// other's rows.
 	SettleUnclaimedStopsSystem(ctx context.Context) ([]SettledStop, error)
 
+	// SettleUnclaimedStopsForTaskSystem is SettleUnclaimedStopsSystem over
+	// one task's conversations. It is what lets a route that stops a task's
+	// runs and then mints the next one settle the stops it just requested
+	// instead of waiting for the dispatcher: the same statement, so the
+	// status still has one writer and the claim race is resolved the same way.
+	SettleUnclaimedStopsForTaskSystem(ctx context.Context, orgID, taskID string) ([]SettledStop, error)
+
 	// ExpiredClaimsSystem counts live claims past their expiry across every
 	// org and reports how far past expiry the oldest is. Zero and 0 when
 	// none. The brain's gauge reads it; nothing in the dispatcher does —

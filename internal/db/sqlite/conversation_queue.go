@@ -947,6 +947,19 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 // per-row writes on one transaction; the single connection serializes it
 // against the claim, so no row lock is needed.
 func (s *conversationQueueStore) SettleUnclaimedStopsSystem(ctx context.Context) ([]db.SettledStop, error) {
+	return s.settleUnclaimedStops(ctx, "")
+}
+
+func (s *conversationQueueStore) SettleUnclaimedStopsForTaskSystem(ctx context.Context, orgID, taskID string) ([]db.SettledStop, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	return s.settleUnclaimedStops(ctx, `AND r.task_id = ?`, taskID)
+}
+
+// settleUnclaimedStops runs the settlement over the pending stops scope
+// narrows to; scope is an AND-clause over the victims' alias r, binding args.
+func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope string, args ...any) ([]db.SettledStop, error) {
 	type victim struct {
 		id, orgID, status, by string
 		runID                 sql.NullString
@@ -960,8 +973,9 @@ func (s *conversationQueueStore) SettleUnclaimedStopsSystem(ctx context.Context)
 			FROM conversations r
 			WHERE r.stop_requested_at IS NOT NULL
 			  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)
+			  `+scope+`
 			ORDER BY r.id
-		`)
+		`, args...)
 		if err != nil {
 			return err
 		}

@@ -357,11 +357,12 @@ export default function Factory() {
       // doesn't change how it reads to the user:
       //   - Network error (fetch throws) — caught below.
       //   - Pre-claim rejection — input/state validation failures (entity not
-      //     found, no matching event, viewer) as 400/403/404/409/422. Nothing
-      //     landed on the claim axis; toast and stop.
+      //     found, no matching event, viewer, an agent still running on the
+      //     task) as 400/403/404/409/422. Nothing landed on the claim axis;
+      //     toast and stop.
       //   - Post-claim spawn failure — reason SPAWN_FAILED (422 bad blueprint
-      //     reference, 409 the task already holds a live run, 500 spawn/DB
-      //     fault) AFTER the claim stamped. The task is bot-claimed with no
+      //     reference, 409 another run became active on the task in the gap,
+      //     500 spawn/DB fault) AFTER the claim stamped. The task is bot-claimed with no
       //     run, so refetch (the bot-claimed card must surface immediately) and
       //     tell the user to retry. The reason is the discriminator — pre-claim
       //     faults answer 409 and 500 too, so status alone can't tell the two

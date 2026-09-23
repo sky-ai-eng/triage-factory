@@ -490,12 +490,22 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A conversation an executor holds can only be stopped by that executor,
+	// so the new run could not be minted in this request. Refuse before any
+	// write rather than tear the old run down and then fail to replace it.
+	if s.spawner != nil {
+		if err := s.spawner.CheckTaskUnheld(r.Context(), orgID, id); err != nil {
+			writeTaskHeld(w, err)
+			return
+		}
+	}
+
 	newStatus, ok := s.stampAgentClaim(w, r, orgID, userID, id, req)
 	if !ok {
 		return
 	}
 	// Re-delegating is still a handoff off whatever was in flight: stop the
-	// running conversation before the new run starts. Its artifacts carry —
+	// previous conversation before the new run starts. Its artifacts carry —
 	// the next blueprint pushes to the draft PR the last one opened instead of
 	// opening a second.
 	//
@@ -503,9 +513,20 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 	// order is the invariant: step 0 of the new delegation must never be
 	// minted onto a task whose prior conversation is still un-ended, or the
 	// task momentarily has two live ones and nothing can say which it is about.
+	//
+	// Nothing holds those conversations (checked above), so their stops are
+	// settled here rather than on the dispatcher's next pass: the settlement
+	// cancels the blueprint run the stop marked, which is what frees the
+	// task's one active run for the mint below.
 	cleanupCtx := context.WithoutCancel(r.Context())
 	s.stopTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDelegated)
 	s.endTaskConversations(cleanupCtx, orgID, userID, id, domain.EndedDelegated)
+	if s.spawner != nil {
+		if err := s.spawner.SettleTaskStops(cleanupCtx, orgID, id); err != nil {
+			taskActionLog.Warn("settle the task's stops before re-delegating failed; the dispatcher settles them on its next pass",
+				"task", id, "error", err)
+		}
+	}
 
 	response := map[string]any{"status": newStatus}
 	if s.spawner != nil {
@@ -886,15 +907,15 @@ func writeDelegateSpawnError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
-	// Something else already holds this task's single live engagement. The
-	// route tears the prior one down before it mints, so this is a race — a
-	// second delegate gesture, or an event firing in the window. 409 for the
-	// same fault class every other lost race on this route reports, and no
-	// `field`: nothing the caller sent is wrong.
+	// Something else took this task's single active run between the route's
+	// held check and its mint: an executor claimed the conversation being
+	// replaced, a second delegate gesture minted first, or an event firing
+	// did. 409 for the same fault class every other lost race on this route
+	// reports, and no `field`: nothing the caller sent is wrong.
 	if errors.Is(err, delegate.ErrTaskBusy) {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonSpawnFailed,
-			Message: "another run is already active on this task; refresh and try again",
+			Message: "another run became active on this task; refresh and try again",
 		})
 		return
 	}
@@ -917,6 +938,20 @@ func writeDelegateSpawnError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeDelegateSpawnInternal(w, err)
+}
+
+// writeTaskHeld answers a delegate refused because an executor holds a
+// conversation on the task. 409 with CONFLICT rather than SPAWN_FAILED: the
+// refusal comes before the claim stamp, so nothing landed.
+func writeTaskHeld(w http.ResponseWriter, err error) {
+	if errors.Is(err, delegate.ErrTaskHeld) || errors.Is(err, delegate.ErrTaskStopping) {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: err.Error(),
+		})
+		return
+	}
+	httpx.InternalError(w, "delegate", err)
 }
 
 // writeDelegateSpawnInternal is the 500 arm of the post-claim spawn failure:

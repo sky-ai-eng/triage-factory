@@ -600,12 +600,26 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 // it had its terminal handled by the holder, and this pass only clears the
 // stale intent.
 func (s *conversationQueueStore) SettleUnclaimedStopsSystem(ctx context.Context) ([]db.SettledStop, error) {
+	return s.settleUnclaimedStops(ctx, "")
+}
+
+func (s *conversationQueueStore) SettleUnclaimedStopsForTaskSystem(ctx context.Context, orgID, taskID string) ([]db.SettledStop, error) {
+	if !isValidUUID(orgID) || !isValidUUID(taskID) {
+		return nil, nil
+	}
+	return s.settleUnclaimedStops(ctx, `AND r.org_id = $1 AND r.task_id = $2`, orgID, taskID)
+}
+
+// settleUnclaimedStops runs the settlement over the pending stops scope
+// narrows to; scope is an AND-clause over the victims' alias r, binding args.
+func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope string, args ...any) ([]db.SettledStop, error) {
 	rows, err := s.conn.QueryContext(ctx, `
 		WITH victims AS (
 			SELECT r.id, r.org_id, r.blueprint_run_id, r.blueprint_step_index, r.status, r.stop_requested_by
 			FROM conversations r
 			WHERE r.stop_requested_at IS NOT NULL
 			  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)
+			  `+scope+`
 			ORDER BY r.id
 			FOR UPDATE SKIP LOCKED
 		),
@@ -633,7 +647,7 @@ func (s *conversationQueueStore) SettleUnclaimedStopsSystem(ctx context.Context)
 		)
 		SELECT s.org_id::text, s.id::text, COALESCE(c.id::text, ''), s.blueprint_step_index
 		FROM settled s LEFT JOIN cancelled c ON c.id = s.blueprint_run_id
-	`)
+	`, args...)
 	if err != nil {
 		return nil, wrapAdminPoolPermErr(err, "conversation_queue.SettleUnclaimedStopsSystem")
 	}

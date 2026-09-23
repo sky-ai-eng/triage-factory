@@ -178,11 +178,7 @@ func (s *Spawner) reconcileConversationQueue(ctx context.Context) {
 // after the stop was asked for; a live engagement settles its own.
 //
 // Every executor runs it; concurrent passes skip each other's rows, and a row
-// already settled carries no intent to match. After the store has committed,
-// each settled conversation's status is broadcast, a cancelled run's worktree
-// is cleaned (best-effort: a pod that never held the tree finds nothing), and
-// the firing worker is woken once, since a task whose conversation just went
-// quiet may have firings waiting on it.
+// already settled carries no intent to match.
 func (s *Spawner) settleUnclaimedStops(ctx context.Context) {
 	if s.conversationQueue == nil {
 		return
@@ -192,6 +188,15 @@ func (s *Spawner) settleUnclaimedStops(ctx context.Context) {
 		dispatchLog.Warn("settle unclaimed stops failed; retrying on the next scan", "error", err)
 		return
 	}
+	s.afterSettlement(ctx, settled)
+}
+
+// afterSettlement is the work a committed settlement leaves: each settled
+// conversation's status is broadcast, a cancelled run's worktree is cleaned
+// (best-effort: a pod that never held the tree finds nothing), and the firing
+// worker is woken once, since a task whose conversation just went quiet may
+// have firings waiting on it.
+func (s *Spawner) afterSettlement(ctx context.Context, settled []db.SettledStop) {
 	if len(settled) == 0 {
 		return
 	}

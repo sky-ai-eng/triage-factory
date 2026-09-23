@@ -95,6 +95,10 @@ func TestDelegate_ConcurrentManualDelegates_MintOneConversation(t *testing.T) {
 // load-bearing rather than a courtesy: a parked conversation's blueprint stays
 // 'running' by design, so if a teardown left it there the task would be locked
 // out of every future delegation by a run nothing is driving.
+//
+// It is the delegate route's sequence: nothing holds the old step, so the
+// stop it requests is settled in the same request and the new run mints on
+// the first attempt.
 func TestDelegate_ReDelegateAfterTeardown_Succeeds(t *testing.T) {
 	database := newCostCapTestDB(t)
 	task, bpID := delegatableFixture(t, database, "re-delegate")
@@ -114,9 +118,10 @@ func TestDelegate_ReDelegateAfterTeardown_Succeeds(t *testing.T) {
 		t.Fatalf("re-delegate onto a live task = %v, want ErrTaskBusy", err)
 	}
 
-	// The teardown the route runs before it mints again: stop the live
-	// conversation AND cancel the blueprint behind it.
 	ctx := context.Background()
+	if err := s.CheckTaskUnheld(ctx, runmode.LocalDefaultOrgID, task.ID); err != nil {
+		t.Fatalf("CheckTaskUnheld on a queued, unclaimed step = %v, want nil", err)
+	}
 	stores := sqlitestore.New(database)
 	convs, err := stores.Blueprints.ConversationsForBlueprintSystem(ctx, runmode.LocalDefaultOrgID, first)
 	if err != nil || len(convs) == 0 {
@@ -126,15 +131,9 @@ func TestDelegate_ReDelegateAfterTeardown_Succeeds(t *testing.T) {
 		runmode.LocalDefaultUserID, StopCauseTaskDelegated); err != nil {
 		t.Fatalf("StopConversationAndCancelBlueprint: %v", err)
 	}
-	// The teardown is a request: until the stop is settled the old run still
-	// holds the task, and a delegate in that window is refused rather than
-	// minting beside it.
-	if _, err := s.Delegate(task, opts); !errors.Is(err, ErrTaskBusy) {
-		t.Fatalf("re-delegate before the stop settled = %v, want ErrTaskBusy", err)
+	if err := s.SettleTaskStops(ctx, runmode.LocalDefaultOrgID, task.ID); err != nil {
+		t.Fatalf("SettleTaskStops: %v", err)
 	}
-	// Nothing holds the queued step, so the dispatcher settles it — and the
-	// run with it, since the teardown raised its cancel.
-	s.settleUnclaimedStops(ctx)
 	if br, err := stores.Blueprints.GetRunSystem(ctx, runmode.LocalDefaultOrgID, first); err != nil || br == nil ||
 		br.Status == domain.BlueprintRunStatusRunning {
 		t.Fatalf("the teardown left the blueprint running (%+v, err=%v); the task would be locked out forever", br, err)
@@ -145,5 +144,46 @@ func TestDelegate_ReDelegateAfterTeardown_Succeeds(t *testing.T) {
 	}
 	if n := countBlueprintRuns(t, database, task.ID); n != 2 {
 		t.Errorf("blueprint_runs on the task = %d, want 2 (one torn down, one live)", n)
+	}
+}
+
+// A conversation an executor holds is the one case a re-delegate cannot
+// settle for itself, and the check says whether that holder has been asked
+// to stop yet.
+func TestCheckTaskUnheld_NamesAHeldTaskAndAStoppingOne(t *testing.T) {
+	database := newCostCapTestDB(t)
+	task, bpID := delegatableFixture(t, database, "held")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	ctx := context.Background()
+
+	first, err := s.Delegate(task, DelegateOpts{
+		OrgID: runmode.LocalDefaultOrgID, ExplicitBlueprintID: bpID,
+		TriggerType: "manual", CreatorUserID: runmode.LocalDefaultUserID,
+	})
+	if err != nil {
+		t.Fatalf("Delegate: %v", err)
+	}
+	convs, err := sqlitestore.New(database).Blueprints.ConversationsForBlueprintSystem(ctx, runmode.LocalDefaultOrgID, first)
+	if err != nil || len(convs) == 0 {
+		t.Fatalf("ConversationsForBlueprintSystem = %d conversations, err=%v", len(convs), err)
+	}
+	markEngaged(t, database, convs[0].ID)
+
+	if err := s.CheckTaskUnheld(ctx, runmode.LocalDefaultOrgID, task.ID); !errors.Is(err, ErrTaskHeld) {
+		t.Fatalf("CheckTaskUnheld on a held step = %v, want ErrTaskHeld", err)
+	}
+	if ok, err := s.conversations.RequestStopSystem(ctx, runmode.LocalDefaultOrgID, convs[0].ID, runmode.LocalDefaultUserID, ""); err != nil || !ok {
+		t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
+	}
+	if err := s.CheckTaskUnheld(ctx, runmode.LocalDefaultOrgID, task.ID); !errors.Is(err, ErrTaskStopping) {
+		t.Fatalf("CheckTaskUnheld on a held step with a stop pending = %v, want ErrTaskStopping", err)
+	}
+	// The settlement leaves a held row to its holder, so a re-delegate in
+	// this state would still be refused at the mint.
+	if err := s.SettleTaskStops(ctx, runmode.LocalDefaultOrgID, task.ID); err != nil {
+		t.Fatalf("SettleTaskStops: %v", err)
+	}
+	if got, _ := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, convs[0].ID); got == nil || got.StopRequestedAt == nil {
+		t.Error("the task settlement took a row its holder is still driving")
 	}
 }

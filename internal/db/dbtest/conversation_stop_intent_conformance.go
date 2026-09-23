@@ -373,4 +373,29 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 			t.Error("the settlement released a live claim")
 		}
 	})
+
+	t.Run("SettleForTask_SettlesThatTaskAlone", func(t *testing.T) {
+		f := mk(t)
+		mine, taskID := f.StageStep(t)
+		other, otherTask := f.StageStep(t)
+		if otherTask == taskID {
+			t.Fatal("the fixture staged both steps on one task; the scope is untested")
+		}
+		request(t, f, mine, stopTestUser)
+		request(t, f, other, stopTestUser)
+
+		settled, err := f.Stores.ConversationQueue.SettleUnclaimedStopsForTaskSystem(ctx, f.OrgID, taskID)
+		if err != nil {
+			t.Fatalf("SettleUnclaimedStopsForTaskSystem: %v", err)
+		}
+		if len(settled) != 1 || settled[0].ConversationID != mine {
+			t.Fatalf("settled = %+v, want only %s", settled, mine)
+		}
+		if got := get(t, f, mine); got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonUserCancelled {
+			t.Errorf("the task's step = (%q, %q), want (open, user_cancelled)", got.Status, got.ParkReason)
+		}
+		if got := get(t, f, other); got.StopRequestedAt == nil || got.Status != domain.StatusQueued {
+			t.Errorf("another task's step = (status %q, intent %v), want untouched", got.Status, got.StopRequestedAt)
+		}
+	})
 }
