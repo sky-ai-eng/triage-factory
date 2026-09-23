@@ -452,6 +452,61 @@ func TestReapDeadExecutors_PendingStopIsReleasedToTheSettlement(t *testing.T) {
 	}
 }
 
+// A pending stop under a cancel-requested run is the overlap of the release
+// arm and the cancel arm. The release arm takes it, and the settlement's
+// own run cancel then finalizes the blueprint the cancel arm would have, with
+// the reason the intent names rather than the cancel arm's system one.
+func TestReapDeadExecutors_PendingStopUnderACancelRequestedRunSettlesTheRun(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	fx := seedReaperFixture(t, h)
+	backdateHeartbeat(t, h, fx.executorID, time.Hour)
+	pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET cancel_requested = true WHERE id = $1`, fx.blueprintRunID)
+	if ok, err := stores.Conversations.RequestStopSystem(ctx, fx.orgID, fx.conversationID, fx.userID, ""); err != nil || !ok {
+		t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
+	}
+
+	counts, err := reaper.NewPostgresStore(h.AdminDB).ReapDeadExecutors(ctx, 30*time.Second, 2)
+	if err != nil {
+		t.Fatalf("ReapDeadExecutors: %v", err)
+	}
+	if counts != (reaper.Counts{StopsReleased: 1}) {
+		t.Fatalf("counts = %+v, want {StopsReleased:1}: the cancel arm must not also take the row", counts)
+	}
+	var brStatus string
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM blueprint_runs WHERE id = $1`, fx.blueprintRunID).Scan(&brStatus); err != nil {
+		t.Fatalf("read back blueprint_run: %v", err)
+	}
+	if brStatus != "running" {
+		t.Errorf("blueprint_run after the reap = %q, want running until the settlement", brStatus)
+	}
+
+	settled, err := stores.ConversationQueue.SettleUnclaimedStopsSystem(ctx)
+	if err != nil {
+		t.Fatalf("SettleUnclaimedStopsSystem: %v", err)
+	}
+	if len(settled) != 1 || settled[0].BlueprintRunID != fx.blueprintRunID {
+		t.Fatalf("settled = %+v, want the conversation with its run cancelled", settled)
+	}
+	var abortReason sql.NullString
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status, abort_reason FROM blueprint_runs WHERE id = $1`, fx.blueprintRunID).Scan(&brStatus, &abortReason); err != nil {
+		t.Fatalf("read back blueprint_run: %v", err)
+	}
+	if brStatus != "cancelled" || abortReason.String != string(domain.ParkReasonUserCancelled) {
+		t.Errorf("blueprint_run = (%q, %q), want (cancelled, user_cancelled)", brStatus, abortReason.String)
+	}
+	got, err := stores.Conversations.GetSystem(ctx, fx.orgID, fx.conversationID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSystem: (%v, %v)", got, err)
+	}
+	if got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonUserCancelled {
+		t.Errorf("conversation = (%q, %q), want (open, user_cancelled)", got.Status, got.ParkReason)
+	}
+}
+
 // TestReapDeadExecutors_FreshHeartbeatNeverReaped pins the negative case a
 // draining executor relies on: a claimed conversation under an executor whose
 // heartbeat is still fresh is left completely untouched, regardless of

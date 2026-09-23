@@ -147,6 +147,59 @@ func TestDelegate_ReDelegateAfterTeardown_Succeeds(t *testing.T) {
 	}
 }
 
+// The route's one window: the held check passes, then an executor claims the
+// step before the stop is requested. Replayed in order rather than raced, so
+// the interleaving is the one under test every time. The settlement leaves
+// the now-held row to its holder, the mint is refused by the one-active-run
+// index, and the holder still finds its stop pending: the loser gets a 409
+// and nothing is left half-settled.
+func TestDelegate_ReDelegateLosingTheClaimRaceIsRefusedAtTheMint(t *testing.T) {
+	database := newCostCapTestDB(t)
+	task, bpID := delegatableFixture(t, database, "claim-race")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	ctx := context.Background()
+	opts := DelegateOpts{
+		OrgID: runmode.LocalDefaultOrgID, ExplicitBlueprintID: bpID,
+		TriggerType: "manual", CreatorUserID: runmode.LocalDefaultUserID,
+	}
+
+	first, err := s.Delegate(task, opts)
+	if err != nil {
+		t.Fatalf("first Delegate: %v", err)
+	}
+	stores := sqlitestore.New(database)
+	convs, err := stores.Blueprints.ConversationsForBlueprintSystem(ctx, runmode.LocalDefaultOrgID, first)
+	if err != nil || len(convs) == 0 {
+		t.Fatalf("ConversationsForBlueprintSystem = %d conversations, err=%v", len(convs), err)
+	}
+
+	if err := s.CheckTaskUnheld(ctx, runmode.LocalDefaultOrgID, task.ID); err != nil {
+		t.Fatalf("CheckTaskUnheld before the claim = %v, want nil", err)
+	}
+	markEngaged(t, database, convs[0].ID)
+	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, convs[0].ID,
+		runmode.LocalDefaultUserID, StopCauseTaskDelegated); err != nil {
+		t.Fatalf("StopConversationAndCancelBlueprint: %v", err)
+	}
+	if err := s.SettleTaskStops(ctx, runmode.LocalDefaultOrgID, task.ID); err != nil {
+		t.Fatalf("SettleTaskStops: %v", err)
+	}
+
+	if _, err := s.Delegate(task, opts); !errors.Is(err, ErrTaskBusy) {
+		t.Fatalf("re-delegate after losing the claim race = %v, want ErrTaskBusy", err)
+	}
+	if n := countBlueprintRuns(t, database, task.ID); n != 1 {
+		t.Errorf("blueprint_runs on the task = %d, want the one the holder still drives", n)
+	}
+	got, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, convs[0].ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSystem: (%v, %v)", got, err)
+	}
+	if got.StopRequestedAt == nil || got.Status == domain.StatusOpen {
+		t.Errorf("held step = (status %q, intent %v), want unparked with the stop pending for its holder", got.Status, got.StopRequestedAt)
+	}
+}
+
 // A conversation an executor holds is the one case a re-delegate cannot
 // settle for itself, and the check says whether that holder has been asked
 // to stop yet.
