@@ -150,9 +150,17 @@ func (s *Spawner) reconcileConversationQueue(ctx context.Context) {
 		return
 	}
 	if c > 0 {
-		dispatchLog.Info("boot reconcile: healed orphaned child conversations and conversation↔claim desyncs", "count", c)
+		dispatchLog.Info("boot reconcile: parked orphaned child conversations", "count", c)
 	}
-	// The one finding that is a report rather than a repair. A firing commits
+	// A terminal conversation still holding a live claim. Every status write
+	// releases its claim in the same transaction and a request path writes no
+	// status, so no writer produces this: a nonzero count is a bug report,
+	// left in place so the writer that caused it can be found.
+	if check.ClaimDesyncs > 0 {
+		dispatchLog.Error("boot check: terminal conversations still hold an unreleased claim — every status write releases its claim in the same transaction, so these should not exist",
+			"count", check.ClaimDesyncs, "conversations", check.ClaimDesyncSample)
+	}
+	// The other finding that is a report rather than a repair. A firing commits
 	// its blueprint_run and its first step in one transaction, and an advance
 	// commits its pointer and the step it names in another, so a 'running'
 	// parent with no conversation at the step it points at is a broken
@@ -162,6 +170,60 @@ func (s *Spawner) reconcileConversationQueue(ctx context.Context) {
 		dispatchLog.Error("boot check: blueprint runs are 'running' with no conversation at their current step — a firing and an advance each commit both or neither, so these should not exist",
 			"count", check.Count, "blueprint_runs", check.Sample)
 	}
+}
+
+// settleUnclaimedStops parks every stop-requested conversation no live claim
+// holds, and cancels the blueprint run behind one whose cancel was requested.
+// It is the settlement for work that is queued, parked, or whose executor died
+// after the stop was asked for; a live engagement settles its own.
+//
+// Every executor runs it; concurrent passes skip each other's rows, and a row
+// already settled carries no intent to match.
+func (s *Spawner) settleUnclaimedStops(ctx context.Context) {
+	if s.conversationQueue == nil {
+		return
+	}
+	settled, err := s.conversationQueue.SettleUnclaimedStopsSystem(ctx)
+	if err != nil {
+		dispatchLog.Warn("settle unclaimed stops failed; retrying on the next scan", "error", err)
+		return
+	}
+	s.afterSettlement(ctx, settled)
+}
+
+// afterSettlement is the work a committed settlement leaves: each settled
+// conversation's status is broadcast, a cancelled run's worktree is cleaned
+// (best-effort: a pod that never held the tree finds nothing), and the firing
+// worker is woken once, since a task whose conversation just went quiet may
+// have firings waiting on it.
+func (s *Spawner) afterSettlement(ctx context.Context, settled []db.SettledStop) {
+	if len(settled) == 0 {
+		return
+	}
+	bgCtx := context.WithoutCancel(ctx)
+	for _, st := range settled {
+		dispatchLog.Info("settled a stop on an unclaimed conversation",
+			"conversation", st.ConversationID, "org_id", st.OrgID, "blueprint_run_cancelled", st.BlueprintRunID)
+		// The status the settlement left, read back rather than assumed: a
+		// conversation that concluded before its stop was settled keeps its
+		// terminal and only lost the stale intent.
+		if s.conversations != nil {
+			if conv, gerr := s.conversations.GetSystem(bgCtx, st.OrgID, st.ConversationID); gerr == nil && conv != nil {
+				s.broadcastConversationUpdate(st.OrgID, st.ConversationID, conv.Status)
+			}
+		}
+		if st.BlueprintRunID == "" || s.blueprints == nil {
+			continue
+		}
+		br, gerr := s.blueprints.GetRunSystem(bgCtx, st.OrgID, st.BlueprintRunID)
+		if gerr != nil || br == nil {
+			dispatchLog.Warn("load cancelled blueprint run for worktree cleanup failed",
+				"blueprint_run", st.BlueprintRunID, "error", gerr)
+			continue
+		}
+		s.cleanupCancelledBlueprintWorktree(bgCtx, st.OrgID, br.ID, br.TaskID, br.WorktreePath)
+	}
+	s.wakeFirings()
 }
 
 // drainConversationQueue claims queued runs and hands each to a goroutine, bounded by
@@ -175,6 +237,11 @@ func (s *Spawner) reconcileConversationQueue(ctx context.Context) {
 // semaphore is what keeps a burst of queued steps from fanning into an
 // unbounded number of agent subprocesses on one host.
 func (s *Spawner) drainConversationQueue(ctx context.Context) {
+	// Settlement first, ahead of every gate below: a stop on a conversation
+	// nobody holds needs no capacity to settle, so a full host or a memory
+	// gate must not hold it back.
+	s.settleUnclaimedStops(ctx)
+
 	// Capture the semaphore once and use it for both acquire and release so a
 	// startup-time SetMaxConcurrentRuns can't strand a token on a replaced
 	// channel.
@@ -561,13 +628,11 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// sidecar, the git channel, the fetch and the clone — rather than at the
 	// runtime call. A stop arriving during bring-up resolves this handle and
 	// cancels stepCtx, which every setup call below runs under, so the clone
-	// it interrupts returns and the exits below read the stop. Registered
-	// after bring-up, a stop during it found no handle and took the DB-only
-	// path: the row parked and the claim released while the setup goroutine,
-	// never told, finished the clone and launched an agent into a conversation
-	// its user had already stopped. The window that remains — the claim gate,
-	// the model resolve and the queue peek above — is the same narrow one the
-	// resume path accepts.
+	// it interrupts returns and the exits below read the stop. A stop that
+	// lands in the window above — the claim gate, the model resolve and the
+	// queue peek — finds no handle here, and is delivered instead by the
+	// claim renewal, which reads the intent and cancels claimCtx, the parent
+	// of stepCtx.
 	//
 	// The deferred deregister is the backstop for the exits between here and
 	// the runtime call; the explicit one after the runtime keeps the handle's
@@ -592,13 +657,11 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// Two cancellations reach here and they are disposed of differently, which
 	// is why the answer cannot be a plain "was it stopped".
 	//
-	// A user stop parks, through the fence. That park is the engagement's own
-	// half of it — on a user stop the verb has usually parked and released
-	// first, and the refusal is the design working (see markConversationOpen).
-	// Without it the exit would read the cancelled clone as a transient setup
-	// failure and requeue (a no-op against a released claim, but the wrong
-	// story in the trace) or, out of attempts, fail the blueprint behind a
-	// conversation the user merely stopped. No snapshot either way: nothing
+	// A stop parks, through the fence: this engagement holds the claim, so
+	// it is the one that settles the stop, and the pending intent decides the
+	// reason the park records. Without it the exit would read the cancelled
+	// clone as a transient setup failure and requeue, or, out of attempts,
+	// fail the blueprint behind a conversation the user merely stopped. No snapshot either way: nothing
 	// this engagement built is a workspace worth capturing yet, and a cold
 	// resume rebuilds from scratch.
 	//
@@ -622,8 +685,6 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		s.markConversationOpen(stepCtx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conv.ID,
-			triggerType:    conv.TriggerType,
-			creatorUserID:  conv.CreatorUserID,
 			claimID:        conv.ClaimID,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 			runtime:        conv.Runtime,
@@ -928,7 +989,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 
 	if conv.SessionID == "" || conv.WorktreePath == "" || conv.Model == "" {
 		s.failEngagement(conv.ID, errors.New("resume: claimed conversation missing session/worktree/model"))
-		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", userID, "resume: claimed conversation missing session/worktree/model", domain.ConversationFailureUnclassified)
+		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", "resume: claimed conversation missing session/worktree/model", domain.ConversationFailureUnclassified)
 		return
 	}
 
@@ -942,9 +1003,8 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	namespace := workspaceKey(task.ID)
 
 	// Per-run cancel handle, mirroring dispatchClaimedConversation's own — a
-	// Cancel() arriving in the narrow window before this registers falls
-	// to the DB-only path (the same pre-existing accepted race a fresh
-	// step claim has).
+	// stop arriving in the narrow window before this registers is delivered
+	// by the claim renewal instead, the same as for a fresh step claim.
 	stepCtx, stepCancel := context.WithCancel(ctx)
 	s.mu.Lock()
 	s.cancels[conv.ID] = stepCancel
@@ -1097,7 +1157,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		mirror.settle(stepCtx)
 		s.failEngagement(conv.ID, errors.New("resume: session transcript did not survive"))
 		flushPendingInput()
-		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", userID,
+		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual",
 			"This run's chat session could not be restored (its transcript did not survive — most often the executor was restarted or rebuilt), so the conversation can't be resumed. Start a new request to continue this work.",
 			domain.ConversationFailureSessionLost)
 		return
@@ -1157,12 +1217,12 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	}
 	if rerr != nil {
 		mirror.settle(stepCtx)
-		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", userID, "resume failed: "+rerr.Error(), classifyFailureKind(rerr))
+		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", "resume failed: "+rerr.Error(), classifyFailureKind(rerr))
 		return
 	}
 	if outcome.Completion == nil {
 		mirror.settle(stepCtx)
-		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", userID, "resume produced no completion", domain.ConversationFailureNoResult)
+		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", "resume produced no completion", domain.ConversationFailureNoResult)
 		return
 	}
 
@@ -1197,8 +1257,6 @@ func resumeParkContext(orgID string, conv *domain.Conversation, userID string) l
 	return liveParkContext{
 		orgID:          orgID,
 		conversationID: conv.ID,
-		triggerType:    "manual",
-		creatorUserID:  userID,
 		claimID:        conv.ClaimID,
 		reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 		runtime:        conv.Runtime,

@@ -28,17 +28,16 @@ var ErrInvalidEndedReason = errors.New("db: not an ended_reason (see domain.AllE
 //go:generate go run github.com/vektra/mockery/v2 --name=ConversationStore --output=./mocks --case=underscore --with-expecter
 
 // Park is why a conversation is being parked `open` — the sole input to
-// ConversationStore.ParkOpen, and the sole thing that distinguishes the two
-// ways a conversation stops without concluding.
+// ConversationStore.ParkOpenForClaimSystem, and the sole thing that
+// distinguishes the two ways a conversation stops without concluding.
 //
 // It is a type rather than a pair of strings because the distinction is
-// load-bearing three times over (see ParkOpen) and was previously carried by
-// having two nearly-identical store methods, which is exactly how their
-// predicates drifted apart.
+// load-bearing three times over (see ParkOpenForClaimSystem), and one method
+// deciding all three is what keeps their predicates from drifting apart.
 type Park struct {
 	// Deliberate says whether this park was ASKED FOR rather than arrived at.
 	// It is a field because it is a fact about the park, and the three things
-	// that hang off it (see ParkOpen) are too load-bearing to infer.
+	// that hang off it (see ParkOpenForClaimSystem) are too load-bearing to infer.
 	//
 	// It cannot be inferred from Reason being non-empty, which would make
 	// "someone deliberately stopped this" and "there is a string to display"
@@ -152,7 +151,7 @@ type PRCoherenceTargetQuery struct {
 // Returned-row shapes. The lifecycle writes below split by which
 // table they land on, and the split decides what each returns:
 //
-//   - conversations writes (Complete, SetSession, SetWorktreePath,
+//   - conversations writes (CompleteForClaimSystem, SetSession, SetWorktreePath,
 //     SetSystemBlockForClaimSystem and their System/ForClaimSystem twins)
 //     return (*domain.Conversation, error),
 //     sharing Get's column list and scanner. A miss (no row with that id in
@@ -230,70 +229,6 @@ type ConversationListFilter struct {
 
 type ConversationStore interface {
 	// --- Lifecycle ---
-
-	// Complete finalizes a conversation (status + terminal narrative
-	// fields only — the conversation carries no accounting cache) and
-	// releases the conversation's active claim (if one exists) with an
-	// outcome mapped from status ('failed' releases as 'failed', anything
-	// else as 'completed'), stamping the invocation's reported
-	// duration/turns telemetry onto the released claim.
-	//
-	// costUSD is the invocation's reported total, settled as ONE lump on
-	// the engagement's own newest message row — the newest row attributed
-	// to the claim this call releases (rows insert claim-stamped while the
-	// engagement is live, so the claim locates them). An engagement can bill while
-	// recording no rows of its own (system-prompt/cache overhead on an
-	// errored conversation); a nonzero lump then settles, additively, onto the
-	// conversation's newest existing message row (which may already carry
-	// an earlier invocation's lump) — the ledger is the only spend record.
-	// Totals stay exact; per-row time attribution smears in that corner.
-	// With no message rows at all the lump is unattributable: logged, not
-	// stored. No proration across rows — proration without a pricing table
-	// is confidently wrong.
-	//
-	// outcome / outcomeReason persist the parsed terminal-envelope
-	// outcome and (abort-only) reason; pass "" for both on conversations that
-	// have no agent outcome (cancellation, infra failure).
-	//
-	// failureKind is the machine-readable failure discriminator
-	// (domain.ConversationFailureKind vocabulary) — non-empty only when status
-	// is 'failed' and the caller classified the cause; "" → NULL.
-	//
-	// The model's own stop reason is deliberately absent. It is a per-turn
-	// fact (`end_turn` / `max_tokens` describe ONE assistant turn) and the
-	// runtimes stamp it on the turn that ended, messages.stop_reason; a
-	// terminal write recording it at conversation scope was last-write-wins
-	// over N turns.
-	//
-	// Returns the conversation row as it reads immediately after this call —
-	// same shape as Get, including the claim- and ledger-derived fields, so a
-	// caller never has to re-read to see the cost/duration/turns it just
-	// settled. ErrNoSuchConversation if conversationID names no row in the org.
-	Complete(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error)
-
-	// ParkOpen flips a conversation to `open`: it stopped without concluding. This is
-	// the ONLY writer of that state, and there is deliberately only one —
-	// an idle hibernation and a user's cancel produce the same row, because
-	// they are the same fact about the conversation. Stamps parked_at (only
-	// when unset, so a re-park doesn't restart the snapshot-retention clock on
-	// a workspace that went dormant earlier) and releases the active claim.
-	// Returns ok=false (no error) if the row already reached a terminal state.
-	//
-	// park says WHY, and that is the one input the two callers differ on. It
-	// decides three things at once, so the difference between "the turn ended"
-	// and "someone stopped this" is stated once rather than forked into two
-	// methods that drifted:
-	//
-	//   - the park_reason / result_summary recorded on the row (a Park with no
-	//     reason leaves both untouched rather than blanking them),
-	//   - the outcome the claim releases with — 'parked' for an idle turn-end,
-	//     'cancelled' for a deliberate stop, which is now the ONLY place the
-	//     cancellation of an engagement is recorded,
-	//   - whether an already-parked row counts as a flip. A deliberate stop
-	//     re-parks (the caller has to learn it landed, so it can finalize the
-	//     blueprint); an idle park does not, because the live driver parks on
-	//     every no-conclusion turn and each one would otherwise re-broadcast.
-	ParkOpen(ctx context.Context, orgID, conversationID string, park Park) (bool, error)
 
 	// MarkQueuedForResume is resume-by-enqueue's status flip: the
 	// compare-and-swap over every state a conversation can come to rest on
@@ -389,31 +324,6 @@ type ConversationStore interface {
 	// same shape as Get. ErrNoSuchConversation if conversationID names no row
 	// in the org.
 	SetWorktreePath(ctx context.Context, orgID, conversationID, path string) (*domain.Conversation, error)
-
-	// MarkFailedIfActive flips a conversation to 'failed' iff it hasn't
-	// already reached a terminal state, releasing the active claim (if
-	// any) with outcome 'failed'. The delegate spawner's
-	// failConversation path uses this so a racing terminal write
-	// (cancel, completion) isn't clobbered. Returns
-	// ok=false (no error) if the row is already terminal; the
-	// caller logs and continues — the racing path's terminal
-	// status stands.
-	//
-	// `open` is intentionally NOT in the protected set, and it is safe
-	// because of who can reach an `open` row with this write. A parked
-	// conversation is only ever driven again by a wake that flips it to
-	// `running` before any engagement could fail it, and the engagement
-	// that parked it released its claim in that same park — so its own late
-	// failure meets the claim fence (the ForClaimSystem twin refuses it),
-	// never this predicate. What is left is a claimless writer failing a
-	// conversation it still holds, and there a park that never took a
-	// durable snapshot is not a conversation that can be left resumably open,
-	// so failing it is correct — and the cleanup then tears the worktree
-	// down.
-	//
-	// failureKind is the machine-readable failure discriminator
-	// (domain.ConversationFailureKind vocabulary); "" → NULL (unclassified).
-	MarkFailedIfActive(ctx context.Context, orgID, conversationID, failureKind string) (bool, error)
 
 	// --- Boundaries ---
 	//
@@ -811,9 +721,6 @@ type ConversationStore interface {
 	// pool the statement runs on; SQLite has one connection and the
 	// two variants collapse.
 	GetSystem(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error)
-	// CompleteSystem is Complete's admin-pool twin — see Complete for the
-	// return shape and miss semantics.
-	CompleteSystem(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error)
 	// LookupOrgForConversationSystem returns the owning orgID for the given
 	// conversationID, or the empty string with a nil error if no such
 	// conversation exists. Used by the cmd/exec convident helper to discover the
@@ -822,7 +729,26 @@ type ConversationStore interface {
 	// has been passed in. Routes through the admin pool because the
 	// agent subprocess has no JWT-claims context yet.
 	LookupOrgForConversationSystem(ctx context.Context, conversationID string) (string, error)
-	ParkOpenSystem(ctx context.Context, orgID, conversationID string, park Park) (bool, error)
+
+	// RequestStopSystem records that a stop was asked for. by is the user who
+	// asked, or "" for a system stop. signalTarget is the executor id a
+	// cross-pod cancel signal should be addressed to, or "" for none; on
+	// Postgres a non-empty target inserts the conversation_signals row in the
+	// same transaction, so the intent and its hastening signal commit together
+	// or not at all. SQLite has no signal table and ignores the target.
+	// Idempotent: a second request keeps the first's time and actor.
+	// requested is false, and nothing is written, when the conversation is
+	// terminal. Admin pool: the caller has already resolved visibility under
+	// the requester's claims; this write is ownership bookkeeping, not a
+	// request-scoped mutation.
+	//
+	// It is the only write a request path makes toward a stop, and it never
+	// writes status. The holder settles the stop through its fenced park; the
+	// dispatcher settles it for a conversation no live claim holds
+	// (ConversationQueueStore.SettleUnclaimedStopsSystem). Every status write
+	// either of them makes clears the intent, which is what keeps one writer
+	// of the intent and one of the status and never the two racing.
+	RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string) (requested bool, err error)
 
 	// SetSessionSystem is the claimless door onto sdk_session_id. Every
 	// engagement holds a claim and goes through SetSessionForClaimSystem
@@ -896,8 +822,6 @@ type ConversationStore interface {
 	// and belt read goes through. ErrNoSuchConversation if conversationID names
 	// no row in the org; the empty string is a stored value (see the write).
 	SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error)
-
-	MarkFailedIfActiveSystem(ctx context.Context, orgID, conversationID, failureKind string) (bool, error)
 
 	// EndConversationSystem is EndConversation on the admin pool — see the
 	// app-pool door for the predicate, the return shape and the miss
@@ -1131,44 +1055,123 @@ type ConversationStore interface {
 	// itself resolve.
 	SettleCompactionRequestForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) (*domain.Message, error)
 
-	// CompleteForClaimSystem is Complete driven by the engagement that ran
-	// the invocation: same status flip, cost settlement, and claim release,
-	// refused outright when claimID is already released. The claim it
-	// releases is its own by construction — a fenced call can only reach the
-	// release with the claim it validated.
+	// CompleteForClaimSystem finalizes a conversation (status + terminal narrative
+	// fields only — the conversation carries no accounting cache) and
+	// releases the conversation's active claim (if one exists) with an
+	// outcome mapped from status ('failed' releases as 'failed', anything
+	// else as 'completed'), stamping the invocation's reported
+	// duration/turns telemetry onto the released claim.
 	//
-	// Return shape matches Complete; the fence passing rules out
-	// ErrNoSuchConversation the same way it does for every other
-	// ForClaimSystem write.
+	// costUSD is the invocation's reported total, settled as ONE lump on
+	// the engagement's own newest message row — the newest row attributed
+	// to the claim this call releases (rows insert claim-stamped while the
+	// engagement is live, so the claim locates them). An engagement can bill while
+	// recording no rows of its own (system-prompt/cache overhead on an
+	// errored conversation); a nonzero lump then settles, additively, onto the
+	// conversation's newest existing message row (which may already carry
+	// an earlier invocation's lump) — the ledger is the only spend record.
+	// Totals stay exact; per-row time attribution smears in that corner.
+	// With no message rows at all the lump is unattributable: logged, not
+	// stored. No proration across rows — proration without a pricing table
+	// is confidently wrong.
+	//
+	// outcome / outcomeReason persist the parsed terminal-envelope
+	// outcome and (abort-only) reason; pass "" for both on conversations that
+	// have no agent outcome (cancellation, infra failure).
+	//
+	// failureKind is the machine-readable failure discriminator
+	// (domain.ConversationFailureKind vocabulary) — non-empty only when status
+	// is 'failed' and the caller classified the cause; "" → NULL.
+	//
+	// The model's own stop reason is deliberately absent. It is a per-turn
+	// fact (`end_turn` / `max_tokens` describe ONE assistant turn) and the
+	// runtimes stamp it on the turn that ended, messages.stop_reason; a
+	// terminal write recording it at conversation scope was last-write-wins
+	// over N turns.
+	//
+	// Driven by the engagement that ran the invocation, and refused outright
+	// (ErrClaimReleased) when claimID is no longer live. The claim it
+	// releases is its own by construction — a fenced call can only reach the
+	// release with the claim it validated. A pending stop intent is cleared:
+	// the run concluded before the stop reached it.
+	//
+	// Returns the conversation row as it reads immediately after this call —
+	// same shape as Get, including the claim- and ledger-derived fields, so a
+	// caller never has to re-read to see the cost/duration/turns it just
+	// settled.
+
 	CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error)
 
-	// MarkFailedIfActiveForClaimSystem is MarkFailedIfActive driven by the
-	// engagement: the infra-failure terminal, refused once the engagement
-	// has been fenced out. ok=false keeps its existing meaning (the row was
-	// already terminal); a fenced-out caller gets ErrClaimReleased instead,
-	// which is a different thing and must not be treated as a lost race.
+	// MarkFailedIfActiveForClaimSystem flips a conversation to 'failed' iff it hasn't
+	// already reached a terminal state, releasing the active claim (if
+	// any) with outcome 'failed'. The delegate spawner's
+	// failConversation path uses this so a racing terminal write
+	// (cancel, completion) isn't clobbered. Returns
+	// ok=false (no error) if the row is already terminal; the
+	// caller logs and continues — the racing path's terminal
+	// status stands.
+	//
+	// `open` is intentionally NOT in the protected set, and it is safe
+	// because of who can reach an `open` row with this write. A parked
+	// conversation is only ever driven again by a wake that flips it to
+	// `running` before any engagement could fail it, and the engagement
+	// that parked it released its claim in that same park — so its own late
+	// failure meets the claim fence (the ForClaimSystem twin refuses it),
+	// never this predicate. What is left is a claimless writer failing a
+	// conversation it still holds, and there a park that never took a
+	// durable snapshot is not a conversation that can be left resumably open,
+	// so failing it is correct — and the cleanup then tears the worktree
+	// down.
+	//
+	// failureKind is the machine-readable failure discriminator
+	// (domain.ConversationFailureKind vocabulary); "" → NULL (unclassified).
+	//
+	// Refused once the engagement has been fenced out: ok=false means the row
+	// was already terminal, while a fenced-out caller gets ErrClaimReleased,
+	// which is a different thing and must not be treated as a lost race. A
+	// pending stop intent is cleared with the flip.
 	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error)
 
-	// ParkOpenForClaimSystem is ParkOpen driven by the engagement itself,
-	// refused once it has been fenced out. Every park an executor writes
-	// comes through here, deliberate or not: the self-park on its own
-	// cancelled context, and the idle park a turn that simply ended produces.
+	// ParkOpenForClaimSystem flips a conversation to `open`: it stopped without concluding. This is
+	// the ONLY writer of that state, and there is deliberately only one —
+	// an idle hibernation and a user's cancel produce the same row, because
+	// they are the same fact about the conversation. Stamps parked_at (only
+	// when unset, so a re-park doesn't restart the snapshot-retention clock on
+	// a workspace that went dormant earlier) and releases the active claim.
+	// Returns ok=false (no error) if the row already reached a terminal state.
 	//
-	// The idle one has the weaker story and still needs the fence — a zombie
+	// park says WHY, and that is the one input the two callers differ on. It
+	// decides three things at once, so the difference between "the turn ended"
+	// and "someone stopped this" is stated once rather than forked into two
+	// methods that drifted:
+	//
+	//   - the park_reason / result_summary recorded on the row (a Park with no
+	//     reason leaves both untouched rather than blanking them),
+	//   - the outcome the claim releases with — 'parked' for an idle turn-end,
+	//     'cancelled' for a deliberate stop, which is now the ONLY place the
+	//     cancellation of an engagement is recorded,
+	//   - whether an already-parked row counts as a flip. A deliberate stop
+	//     re-parks (the caller has to learn it landed, so it can finalize the
+	//     blueprint); an idle park does not, because the live driver parks on
+	//     every no-conclusion turn and each one would otherwise re-broadcast.
+	//
+	// A pending stop intent overrides the reason: the row records
+	// user_cancelled when a person asked and system_cancelled when the system
+	// did, and the intent is cleared in the same write. An idle park that lands
+	// while a stop is pending records the stop, which is right — someone asked
+	// for it, and the turn ending is how it was honored.
+	//
+	// Refused (ErrClaimReleased) once the engagement has been fenced out.
+	// Every park comes through here, deliberate or not: the self-park on the
+	// engagement's own cancelled context, and the idle park a turn that simply
+	// ended produces. The idle one still needs the fence — a zombie
 	// idle-parking a conversation a successor is mid-turn on flips a running
-	// conversation to `open` and hands the queue a row somebody is already driving.
-	//
-	// The unfenced twin stays, and is what a USER-initiated cancel uses. That
-	// distinction is the whole reason both exist: a person cancelling a conversation
-	// is deliberately overriding whichever executor holds it, so their write
-	// must not be gated on ownership, while an executor parking itself is
-	// only entitled to end a conversation it still owns. Reaching for the unfenced
-	// version from an engagement path is how the cancel route around this
-	// fence gets rebuilt.
+	// conversation to `open` and hands the queue a row somebody is already
+	// driving.
 	ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park Park) (bool, error)
 
 	// SettleClaimCostSystem lands the spend one engagement reports onto the
-	// messages ledger — the same lump, by the same rule, that Complete settles
+	// messages ledger — the same lump, by the same rule, that CompleteForClaimSystem settles
 	// at a terminal: an overwrite of claimID's newest own model-bearing row,
 	// falling back additively to the conversation's newest row when the
 	// claim streamed no rows. Zero settles nothing. It exists so a park can

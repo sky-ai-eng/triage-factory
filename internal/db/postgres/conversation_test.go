@@ -766,10 +766,10 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 }
 
 // TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims
-// pins the routing the delegate spawner uses for manual-conversation
-// bookkeeping: lifecycle writes (Complete, ParkOpen,
-// MarkQueuedForResume) wrapped in SyntheticClaimsWithTx must pass RLS under
-// tf_app and land the expected status. Mirrors the spawner's per-call-site
+// pins the lifecycle a manual conversation goes through: the holder's park
+// and terminals on the admin pool, and MarkQueuedForResume — the one
+// request-path status write — wrapped in SyntheticClaimsWithTx, which must
+// pass RLS under tf_app and land the expected status. Mirrors the spawner's per-call-site
 // branch:
 //
 //	if triggerType == "manual" {
@@ -828,23 +828,20 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 		BlueprintRunID: lcBlueprintRun,
 	})
 
-	// Drive each lifecycle write through SyntheticClaimsWithTx — the
-	// shape the spawner uses for every manual-conversation bookkeeping point.
-
-	// ParkOpen (park) then MarkQueuedForResume (resume-by-enqueue) — the
-	// open→queued CAS the resume path drives under the user's claims.
-	var parked, requeued bool
+	// The park is the holder's write on the admin pool; the resume that
+	// follows is the one request-path status write, driven under the user's
+	// claims — the open→queued CAS the resume path runs.
+	parked, err := dbtest.HolderPark(stores.Conversations, ctx, orgID, conversationID, db.ParkIdle())
+	if err != nil {
+		t.Fatalf("park: %v", err)
+	}
+	var requeued bool
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		p, mErr := tx.Conversations.ParkOpen(ctx, orgID, conversationID, db.ParkIdle())
-		parked = p
-		if mErr != nil {
-			return mErr
-		}
 		r, mErr := tx.Conversations.MarkQueuedForResume(ctx, orgID, conversationID)
 		requeued = r
 		return mErr
 	}); err != nil {
-		t.Fatalf("ParkOpen/MarkQueuedForResume under synth claims: %v", err)
+		t.Fatalf("MarkQueuedForResume under synth claims: %v", err)
 	}
 	if !parked || !requeued {
 		t.Errorf("park/requeue = (%v, %v), want (true, true)", parked, requeued)
@@ -857,9 +854,9 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 
 	// Complete twice — two invocation cycles, each going live first (the
 	// claim mint) so its streamed row is claim-stamped under RLS, then
-	// settling its own cost lump on that row and stamping its telemetry
-	// onto the claim it releases; the derived totals then ADD across the
-	// cycles.
+	// settling its own cost lump on that row through the holder's terminal
+	// and stamping its telemetry onto the claim it releases; the derived
+	// totals then ADD across the cycles.
 	settle := func(cost float64, durationMs, numTurns int, resultSummary, outcome string) {
 		t.Helper()
 		if _, err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, "exec-lc", 1); err != nil {
@@ -873,11 +870,8 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 		}); err != nil {
 			t.Fatalf("InsertMessage under synth claims: %v", err)
 		}
-		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-			_, err := tx.Conversations.Complete(ctx, orgID, conversationID, "completed", cost, durationMs, numTurns, resultSummary, outcome, "", "")
-			return err
-		}); err != nil {
-			t.Fatalf("Complete under synth claims: %v", err)
+		if _, err := dbtest.HolderComplete(stores.Conversations, ctx, orgID, conversationID, "completed", cost, durationMs, numTurns, resultSummary, outcome, "", ""); err != nil {
+			t.Fatalf("complete: %v", err)
 		}
 	}
 	settle(0.5, 1500, 3, "", "")
@@ -910,16 +904,14 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 		t.Errorf("creator_user_id = %v, want %s", got.CreatorUserID, userID)
 	}
 
-	// MarkFailedIfActive on a terminal row is a no-op (guarded
-	// transition). Verifies the System variant's guard fires even
-	// though we never wrapped in claims for this call (spawner uses
-	// it goroutine-internally with no user identity).
-	failed, err := stores.Conversations.MarkFailedIfActiveSystem(ctx, orgID, conversationID, "")
+	// The failure terminal on a terminal row is a no-op (guarded
+	// transition).
+	failed, err := dbtest.HolderMarkFailed(stores.Conversations, ctx, orgID, conversationID, "")
 	if err != nil {
-		t.Fatalf("MarkFailedIfActiveSystem: %v", err)
+		t.Fatalf("MarkFailedIfActiveForClaimSystem: %v", err)
 	}
 	if failed {
-		t.Errorf("MarkFailedIfActiveSystem on terminal row: flipped=true, want false (guard)")
+		t.Errorf("failure terminal on a terminal row: flipped=true, want false (guard)")
 	}
 }
 
@@ -1219,7 +1211,7 @@ func TestConversationStore_Postgres_ResumeStampsTheWarmExecutorForANonCreator(t 
 	if _, err := stores.Conversations.SetExecutorSystem(ctx, orgID, convID, "exec-warm", 1); err != nil {
 		t.Fatalf("mint the engagement: %v", err)
 	}
-	if ok, err := stores.Conversations.ParkOpenSystem(ctx, orgID, convID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
+	if ok, err := dbtest.HolderPark(stores.Conversations, ctx, orgID, convID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
 		t.Fatalf("park: ok=%v err=%v", ok, err)
 	}
 

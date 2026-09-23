@@ -95,17 +95,10 @@ func RunReaper(ctx context.Context, store Store, interval time.Duration, staleTh
 				reaperLog.Warn("reap sweep failed; retrying next tick", "error", err)
 				continue
 			}
-			if counts.Requeued > 0 || counts.Failed > 0 || counts.Cancelled > 0 {
+			if counts.Requeued > 0 || counts.Failed > 0 || counts.Cancelled > 0 || counts.StopsReleased > 0 {
 				reaperLog.Info("reaped dead-executor conversations",
-					"requeued", counts.Requeued, "failed_executor_lost", counts.Failed, "cancelled", counts.Cancelled)
-			}
-			// Claim-desync janitor: heal the shape the app-pool terminal
-			// writes can strand (see Store.HealClaimDesyncs). Periodic here so
-			// a desync's lifetime is bounded by a tick, not the next restart.
-			if released, herr := store.HealClaimDesyncs(ctx); herr != nil {
-				reaperLog.Warn("claim-desync sweep failed; retrying next tick", "error", herr)
-			} else if released > 0 {
-				reaperLog.Info("healed conversation↔claim desyncs", "released_claims", released)
+					"requeued", counts.Requeued, "failed_executor_lost", counts.Failed, "cancelled", counts.Cancelled,
+					"stops_released", counts.StopsReleased)
 			}
 		}
 	}

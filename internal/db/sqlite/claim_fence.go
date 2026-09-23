@@ -21,13 +21,10 @@ import (
 // BEGIN — the fresh-time property the Postgres twin gets from
 // statement_timestamp().
 //
-// The rival owner it guards against here is not a successor executor — local
-// mode has one — but the stop verb. A person stopping a conversation parks the
-// row and releases its claim without asking the engagement, deliberately (see
-// ConversationStore.ParkOpenForClaimSystem), and an engagement that was still
-// bringing its runtime up when that happened arrives at its next write holding
-// a claim that is settled history. Refusing that write is what keeps the agent
-// from spawning into a conversation the user has already stopped.
+// The rival it guards against here is not a successor executor — local mode
+// has one — but the engagement's own past: an engagement that stalled past its
+// lease holds a claim that is settled history, and its next write must be
+// refused rather than land on a row it no longer owns.
 //
 // The predicate is the Postgres fence's, org included. There the claim's
 // org_id is bound and a composite FK ties (conversation_id, org_id) to the

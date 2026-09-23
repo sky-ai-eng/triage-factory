@@ -1353,48 +1353,6 @@ func (s *Spawner) broadcastConversationUpdate(orgID, conversationID, status stri
 	})
 }
 
-// broadcastConversationResumable is broadcastConversationUpdate's late-workspace arm: the same
-// conversation_update carrying the parked status the row already has, plus the
-// one thing that changed — this conversation's workspace is accounted for, so
-// a follow-up can land now.
-//
-// It closes one window and only that one. A cross-pod stop parks the row and
-// announces `open` from control, before the executor holding the workspace has
-// recorded that it owes a persist for it; between those moments the run read
-// honestly answers "not resumable", and the browser would keep that answer
-// until someone reloaded. The executor's teardown fires this the instant its
-// record lands — when the answer changes, not when the blob appears. Every
-// other park needs nothing of the sort: an engagement parking its own run
-// opens the record before its own flip, so that flip's `open` is already
-// resumable when it reaches a client.
-//
-// The status rides along rather than a new event type because resumability is
-// an attribute of the already-announced park, not a new situation — the same
-// shape broadcastConversationFailed uses for failure_kind, and it makes the field
-// two-way: a retention sweep that collects the snapshot can announce
-// `resumable: false` the same way, disabling an open composer live instead of
-// failing on send. Consumers must therefore merge a repeated `open`
-// idempotently; nothing may read this as a transition.
-//
-// The hub's cross-pod backplane is what puts it in front of a browser attached
-// to some other pod, so the executor emitting it is enough.
-func (s *Spawner) broadcastConversationResumable(orgID, conversationID string) {
-	if s.wsHub != nil {
-		s.wsHub.Broadcast(websocket.Event{
-			Type:           "conversation_update",
-			OrgID:          orgID,
-			ConversationID: conversationID,
-			Data:           map[string]any{"status": domain.StatusOpen, "resumable": true},
-		})
-	}
-	resumable := true
-	s.publishEvent(orgID, domain.EventSystemConversationStatus, events.SystemConversationStatusMetadata{
-		ConversationID: conversationID,
-		Status:         domain.StatusOpen,
-		Resumable:      &resumable,
-	})
-}
-
 // broadcastConversationFailed is broadcastConversationUpdate's failure arm: the same
 // conversation_update event with the machine-readable failure kind
 // alongside the status flip, so the frontend can render kind-specific

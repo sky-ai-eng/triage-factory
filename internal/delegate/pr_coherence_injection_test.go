@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -221,7 +222,7 @@ func TestHandlePRCoherence_SkipsTerminalAndSameTaskDuplicate(t *testing.T) {
 	if _, err := s.database.Exec(`DELETE FROM task_events WHERE task_id = ? AND event_id = ?`, taskID, source.ID); err != nil {
 		t.Fatalf("clear injected marker: %v", err)
 	}
-	if _, err := s.conversations.CompleteSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID, "completed", 0, 0, 0, "", string(domain.ConversationOutcomeFinish), "", ""); err != nil {
+	if _, err := dbtest.HolderComplete(s.conversations, context.Background(), runmode.LocalDefaultOrgID, conversationID, "completed", 0, 0, 0, "", string(domain.ConversationOutcomeFinish), "", ""); err != nil {
 		t.Fatalf("complete conversation: %v", err)
 	}
 	s.HandlePRCoherence(coherenceDisposition(t, source, ""))

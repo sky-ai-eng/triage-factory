@@ -122,7 +122,7 @@ func TestStampExecutor_WritesExecutorID(t *testing.T) {
 
 // TestStop_ActiveConversation_RoutesThroughController verifies the live-run stop
 // path: an active run (a registered cancel handle) is killed via the
-// controller rather than the DB-only path.
+// controller once the intent is recorded.
 func TestStop_ActiveConversation_RoutesThroughController(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-active", "sess", "/tmp/wt") // status running

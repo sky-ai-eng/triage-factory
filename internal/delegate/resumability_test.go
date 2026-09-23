@@ -175,92 +175,11 @@ func TestResumabilityFor_FailedRunIsNotSteerable(t *testing.T) {
 	}
 }
 
-// TestParkConversationOpen_FencedSnapshotAnnouncesResumable closes the residual window a
-// cross-pod stop leaves open. Control parks the row and announces `open`
-// before the executor holding the workspace has recorded that it owes a
-// persist for it, so every watcher reads that park as unresumable — truthfully,
-// at the time. The fenced teardown records the persist and says so on the same
-// conversation_update, and a browser attached to some other pod enables its
-// composer without a reload.
-//
-// The state record is the precondition, not the blob: the wake gate accepts a
-// pending persist, so the announcement is true from the moment the record
-// lands, and waiting for the upload would hold it back for nothing.
-//
-// The status repeats what the row already has; that is the shape the field was
-// chosen for (failure_kind rides the failed status the same way), and it is why
-// consumers must merge a repeated `open` idempotently.
-func TestParkConversationOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s, database, conversationID, _ := setupAdvanceFixture(t, "fenced-resumable")
-	blobs, err := storage.New()
-	if err != nil {
-		t.Fatalf("storage.New: %v", err)
-	}
-	s.SetStorage(blobs)
-	hub, captured := capturingHub(t)
-	s.wsHub = hub
-	pub := &fakeEventPublisher{}
-	s.SetEventPublisher(pub)
-
-	wt := t.TempDir()
-	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "half-finished work")
-	namespace := taskIDForConversation(t, database, conversationID)
-	stub := &fencedConversationStore{ConversationStore: s.conversations}
-	s.conversations = stub
-
-	fenced := s.parkConversationOpen(context.Background(), liveParkContext{
-		orgID:          runmode.LocalDefaultOrgID,
-		conversationID: conversationID,
-		claudeCwd:      wt,
-		namespace:      namespace,
-		triggerType:    "event",
-		claimID:        "claim-1",
-		reason:         db.ParkStopped("user_cancelled", "Cancelled by user"),
-	}, "")
-	if !fenced {
-		t.Fatal("the teardown did not report the fence trip")
-	}
-	// The record is what makes the announcement true and the blob follows it;
-	// both are asserted, because an announcement with neither behind it would
-	// enable a composer over a workspace nobody is producing.
-	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, "claim-1")
-	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, namespace))
-	if err != nil {
-		t.Fatalf("fenced teardown wrote no snapshot: %v", err)
-	}
-	_ = rc.Close()
-
-	frames := captured.conversationUpdates(conversationID)
-	if len(frames) != 1 {
-		t.Fatalf("conversation_update frames = %d, want 1 (the fenced park records no status of its own; this one carries the workspace news)", len(frames))
-	}
-	if got := frames[0]["status"]; got != "open" {
-		t.Errorf("frame status = %v, want open — resumability is an attribute of the park, not a new situation", got)
-	}
-	if got := frames[0]["resumable"]; got != true {
-		t.Errorf("frame resumable = %v, want true", got)
-	}
-
-	published := pub.eventsCopy()
-	if len(published) != 1 {
-		t.Fatalf("published events = %d, want 1", len(published))
-	}
-	meta := decodeConversationStatus(t, published[0].MetadataJSON)
-	if meta.ConversationID != conversationID || meta.Status != "open" {
-		t.Errorf("metadata = %+v, want the parked status for %s", meta, conversationID)
-	}
-	if meta.Resumable == nil || !*meta.Resumable {
-		t.Errorf("metadata Resumable = %v, want true", meta.Resumable)
-	}
-}
-
-// TestParkConversationOpen_FencedWithoutSnapshotAnnouncesNothing is the other side of the
-// branch: a teardown fenced before it had any workspace to capture (a stop
-// during setup) owes no persist, so it has learned nothing a watcher needs —
-// and saying "resumable" there would enable a composer over a workspace that
-// does not exist and never will.
+// TestParkConversationOpen_FencedWithoutSnapshotAnnouncesNothing: a teardown
+// fenced before it had any workspace to capture (a stop during setup) owes no
+// persist and wrote no status, so it has nothing a watcher needs — and saying
+// "resumable" there would enable a composer over a workspace that does not
+// exist and never will.
 func TestParkConversationOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T) {
 	s, _, conversationID, _ := setupAdvanceFixture(t, "fenced-no-snapshot")
 	hub, captured := capturingHub(t)
@@ -272,7 +191,6 @@ func TestParkConversationOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T
 	fenced := s.parkConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: conversationID,
-		triggerType:    "event",
 		claimID:        "claim-1",
 		reason:         db.ParkStopped("user_cancelled", "Cancelled by user"),
 	}, "")
@@ -288,12 +206,11 @@ func TestParkConversationOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T
 	}
 }
 
-// TestParkConversationOpen_FencedIdleParkAnnouncesNothing pins the other refusal the
-// fence raises, and why the announcement is scoped to a deliberate stop.
+// TestParkConversationOpen_FencedIdleParkAnnouncesNothing pins the silence of a
+// refused park that did capture its workspace.
 //
-// An idle park has no outside actor: nobody parked this row on the user's
-// behalf, so a refusal means a successor took the conversation and is running
-// it right now. Repeating `open` there would be a torn-down engagement
+// A refusal means the claim is gone from under this engagement — a successor
+// may be running the conversation right now. Repeating `open` there would be a torn-down engagement
 // reporting a status the row does not have — and the board writes a frame's
 // status onto its card optimistically.
 func TestParkConversationOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
@@ -320,7 +237,6 @@ func TestParkConversationOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
 		conversationID: conversationID,
 		claudeCwd:      wt,
 		namespace:      namespace,
-		triggerType:    "event",
 		claimID:        "claim-1",
 		reason:         db.ParkIdle(),
 	}, "")

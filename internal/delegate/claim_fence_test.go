@@ -407,7 +407,7 @@ func TestFailConversation_FenceTripRecordsNothing(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-fail")
 	s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
 
-	if fenced := s.failConversation(runmode.LocalDefaultOrgID, conversationID, taskID, "claim-1", "event", "", "boom", domain.ConversationFailureCrash); !fenced {
+	if fenced := s.failConversation(runmode.LocalDefaultOrgID, conversationID, taskID, "claim-1", "event", "boom", domain.ConversationFailureCrash); !fenced {
 		t.Fatal("failConversation did not report the fence trip; the dispatcher would react to a run it no longer owns")
 	}
 
@@ -493,7 +493,6 @@ func TestParkConversationOpen_CancelFenceTripRecordsNothing(t *testing.T) {
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: conversationID,
 		claudeCwd:      wt,
-		triggerType:    "event",
 		claimID:        "claim-1",
 		reason:         db.ParkStopped("user_cancelled", "Cancelled by user"),
 	}, "")
@@ -528,7 +527,6 @@ func TestParkConversationOpen_ResumeCancelFenceTripRecordsNothing(t *testing.T) 
 	fenced := s.markConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: conversationID,
-		triggerType:    "manual",
 		claimID:        "claim-1",
 		reason:         db.ParkStopped("user_cancelled", "Run cancelled by user"),
 	})

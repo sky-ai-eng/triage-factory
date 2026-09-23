@@ -39,6 +39,12 @@ type ClaimLeaseFixture struct {
 	// cannot add one by ALTER TABLE, so on that dialect this assertion IS the
 	// enforcement.
 	LiveClaimsWithoutLease func(t *testing.T) int
+
+	// StageStaleStopIntent raw-writes a stored status and a pending stop
+	// intent onto a conversation together. It stages the one shape no store
+	// method produces — a terminal row still carrying an intent — which the
+	// dispatcher's settlement has to clear without touching the status.
+	StageStaleStopIntent func(t *testing.T, conversationID, status, by string)
 }
 
 // ClaimLeaseFactory builds a fresh fixture per subtest.
@@ -128,8 +134,8 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if drift := expiry.Sub(now.Add(testClaimLease)); drift > time.Second || drift < -time.Second {
 			t.Errorf("renewed lease_expires_at = %s, want within 1s of database now + %s (drift %s)", expiry, testClaimLease, drift)
 		}
-		if drift := got.Sub(expiry); drift > time.Second || drift < -time.Second {
-			t.Errorf("RenewClaimLeaseSystem returned %s but the row carries %s", got, expiry)
+		if drift := got.ExpiresAt.Sub(expiry); drift > time.Second || drift < -time.Second {
+			t.Errorf("RenewClaimLeaseSystem returned %s but the row carries %s", got.ExpiresAt, expiry)
 		}
 	})
 

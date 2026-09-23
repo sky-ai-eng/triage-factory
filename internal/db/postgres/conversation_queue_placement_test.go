@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -307,7 +308,7 @@ func TestPlacementClaim_ResumeFollowsTheWarmTree(t *testing.T) {
 	// The stop → "wait, one more thing" → resume flow.
 	resume := func(t *testing.T) {
 		t.Helper()
-		if ok, pErr := stores.Conversations.ParkOpen(ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); pErr != nil || !ok {
+		if ok, pErr := dbtest.HolderPark(stores.Conversations, ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); pErr != nil || !ok {
 			t.Fatalf("park: ok=%v err=%v", ok, pErr)
 		}
 		if ok, mErr := stores.Conversations.MarkQueuedForResume(ctx, orgID, conversationID); mErr != nil || !ok {
@@ -369,7 +370,7 @@ func TestPlacementClaim_ResumeAgesFromTheWake(t *testing.T) {
 	// The conversation is an hour old by the time it is stopped and woken —
 	// the shape of every real resume.
 	backdatePgConversationMint(t, h, conversationID, time.Hour)
-	if ok, pErr := stores.Conversations.ParkOpen(ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); pErr != nil || !ok {
+	if ok, pErr := dbtest.HolderPark(stores.Conversations, ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); pErr != nil || !ok {
 		t.Fatalf("park: ok=%v err=%v", ok, pErr)
 	}
 	if ok, mErr := stores.Conversations.MarkQueuedForResume(ctx, orgID, conversationID); mErr != nil || !ok {

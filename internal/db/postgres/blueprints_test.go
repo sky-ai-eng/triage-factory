@@ -336,8 +336,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 		t.Fatalf("set child running: %v", err)
 	}
 	// The racing dispatcher already claimed the child; the cancel must
-	// release the engagement along with the status flip, not leave it for
-	// the janitor.
+	// release the engagement along with the status flip.
 	seedChildClaim := func(convID, executor string) {
 		t.Helper()
 		if _, err := h.AdminDB.Exec(`
@@ -448,7 +447,7 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	// processCompletion does, and confirm ConversationsForBlueprint surfaces it — the channel the
 	// orchestrator advances on (the successor to the old per-step verdict).
 	stepConversationID := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, blueprintRunID, 0)
-	if _, err := stores.Conversations.CompleteSystem(ctx, orgID, stepConversationID, "completed", 0, 0, 0, "did the thing", "finish", "", ""); err != nil {
+	if _, err := dbtest.HolderComplete(stores.Conversations, ctx, orgID, stepConversationID, "completed", 0, 0, 0, "did the thing", "finish", "", ""); err != nil {
 		t.Fatalf("complete step conversation: %v", err)
 	}
 	stepConversations, err := blueprints.ConversationsForBlueprint(ctx, orgID, blueprintRunID)

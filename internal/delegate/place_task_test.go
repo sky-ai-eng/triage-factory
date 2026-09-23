@@ -76,7 +76,7 @@ func TestMarkConversationOpen_ParkLeavesTheColumnAlone(t *testing.T) {
 	if fenced := s.markConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: conversationID,
-		triggerType:    "manual",
+		claimID:        holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID),
 		reason:         db.ParkIdle(),
 	}); fenced {
 		t.Fatal("the park was fenced out; the fixture's run holds no successor claim")

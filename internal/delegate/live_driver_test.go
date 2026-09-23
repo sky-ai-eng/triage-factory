@@ -203,7 +203,7 @@ func TestDriveLiveConversation_ProcessExitCarriesErr(t *testing.T) {
 func TestDriveLiveConversation_IdleHibernates(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-idle", "sess-idle", "/tmp/wt-idle")
-	markEngaged(t, database, "r-idle")
+	claimID := markEngaged(t, database, "r-idle")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	var taskID string
@@ -212,9 +212,8 @@ func TestDriveLiveConversation_IdleHibernates(t *testing.T) {
 	}
 	proc := newFakeLiveProc("sess-idle")
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrgID, conversationID: "r-idle",
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-idle", claimID: claimID,
 		namespace: "seedbpr-r-idle", claudeCwd: "/tmp/wt-idle",
-		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
 	}
 
 	out := s.driveLiveConversation(context.Background(), park, proc, make(chan *agentproc.Result), make(chan struct{}), 20*time.Millisecond)
@@ -487,7 +486,6 @@ func TestDriveLiveConversation_NoneLeavesTheClaimForCompletion(t *testing.T) {
 	park := liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: "r-none",
 		namespace: "seedbpr-r-none", claudeCwd: "/tmp/wt-none",
-		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
 		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
 	}
 
@@ -541,7 +539,6 @@ func TestDriveLiveConversation_InterruptParksOpenNotTerminal(t *testing.T) {
 	park := liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: "r-pause",
 		namespace: "seedbpr-r-pause", claudeCwd: "/tmp/wt-pause",
-		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
 		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
 	}
 
@@ -658,9 +655,8 @@ func TestDriveLiveConversation_IdleParkSettlesProcessSpend(t *testing.T) {
 	proc := newFakeLiveProc("sess-idle-spend")
 	proc.result = &agentproc.Result{CostUSD: 0.42, NumTurns: 2}
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrgID, conversationID: "r-idle-spend",
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-idle-spend", claimID: claimID,
 		namespace: "seedbpr-r-idle-spend", claudeCwd: "/tmp/wt-idle-spend",
-		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID, claimID: claimID,
 	}
 
 	out := s.driveLiveConversation(context.Background(), park, proc, make(chan *agentproc.Result), make(chan struct{}), 20*time.Millisecond)
@@ -687,10 +683,10 @@ func TestDriveLiveConversation_IdleParkSettlesProcessSpend(t *testing.T) {
 	}
 }
 
-// TestDriveLiveConversation_FencedParkStillSettlesSpend pins the ordering
-// the deliberate stop depends on: control parks the row and releases the
-// claim first, so the killed engagement's own park is refused — and its
-// spend, which nothing else holds, must land on its claim's row anyway.
+// TestDriveLiveConversation_FencedParkStillSettlesSpend pins the ordering a
+// refused park depends on: the claim was released under the engagement, so
+// its own park is refused — and its spend, which nothing else holds, must
+// land on its claim's row anyway.
 func TestDriveLiveConversation_FencedParkStillSettlesSpend(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-fenced-spend", "sess-fenced-spend", "/tmp/wt-fenced-spend")
@@ -709,8 +705,7 @@ func TestDriveLiveConversation_FencedParkStillSettlesSpend(t *testing.T) {
 	proc := newFakeLiveProc("sess-fenced-spend")
 	proc.result = &agentproc.Result{CostUSD: 0.31}
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrgID, conversationID: "r-fenced-spend",
-		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID, claimID: claimID,
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-fenced-spend", claimID: claimID,
 	}
 
 	out := s.driveLiveConversation(context.Background(), park, proc, make(chan *agentproc.Result), make(chan struct{}), 20*time.Millisecond)

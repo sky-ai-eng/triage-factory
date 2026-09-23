@@ -325,14 +325,11 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 	}
 }
 
-// TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs pins the janitor arms
-// for the two shapes the non-atomic app-pool terminal writes can strand: a
-// terminal conversation with a dangling active claim gets the claim released
-// (outcome mapped from status), and an in-flight
-// delegation conversation with no active claim under a running parent goes
-// back to 'queued' with its placement stamp cleared — while a running row
-// with a live claim and a claimless queued row are untouched.
-func TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
+// TestConversationQueueStore_Postgres_ReconcileCountsClaimDesyncs pins the
+// checker: a terminal conversation with a live claim is counted and sampled,
+// and nothing — its claim included — is repaired, because no writer produces
+// the shape. A mid-flight row with no claim is simply claimable and left alone.
+func TestConversationQueueStore_Postgres_ReconcileCountsClaimDesyncs(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -379,12 +376,15 @@ func TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T
 	healthyClaim := activeClaim(healthyID)
 	queuedID := seedChild("")
 
-	n, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
+	n, check, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil {
 		t.Fatalf("ReconcileOrphanedConversations: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("healed count = %d, want 2 (two released claims)", n)
+	if n != 0 {
+		t.Errorf("healed count = %d, want 0 (a desync is counted, never healed)", n)
+	}
+	if check.ClaimDesyncs != 2 || len(check.ClaimDesyncSample) != 2 {
+		t.Errorf("claim desyncs = (%d, %v), want 2 counted and sampled", check.ClaimDesyncs, check.ClaimDesyncSample)
 	}
 
 	claimState := func(id string) (released bool, outcome string) {
@@ -396,11 +396,11 @@ func TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T
 		}
 		return released, outcome
 	}
-	if rel, out := claimState(doneClaim); !rel || out != "completed" {
-		t.Errorf("completed row's claim = (released=%v, outcome=%q), want (true, completed)", rel, out)
+	if rel, _ := claimState(doneClaim); rel {
+		t.Error("completed row's claim was released; the checker repairs nothing")
 	}
-	if rel, out := claimState(failedClaim); !rel || out != "failed" {
-		t.Errorf("failed row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
+	if rel, _ := claimState(failedClaim); rel {
+		t.Error("failed row's claim was released; the checker repairs nothing")
 	}
 	var strandedStatus sql.NullString
 	var pref any
@@ -422,9 +422,9 @@ func TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T
 		t.Errorf("claimless row status = %q, want none (already claimable, nothing to heal)", st)
 	}
 
-	// Idempotent: a second sweep finds nothing.
-	if n2, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
-		t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
+	// Counting is idempotent: a second sweep finds the same two.
+	if n2, check2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 || check2.ClaimDesyncs != 2 {
+		t.Errorf("second sweep = (%d, %d desyncs, %v), want (0, 2, nil)", n2, check2.ClaimDesyncs, err)
 	}
 }
 
@@ -1121,57 +1121,74 @@ func TestConversationQueueStore_Postgres_ReturnedRow(t *testing.T) {
 // resets the harness so subtests don't share state.
 func TestClaimLease_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
+	dbtest.RunClaimLeaseConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
+}
 
-	dbtest.RunClaimLeaseConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture {
-		t.Helper()
-		h.Reset(t)
-		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-		orgID, userID := seedPgOrgForBlueprints(t, h)
-		bpID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+// TestStopIntent_Postgres runs the shared stop-intent conformance on the same
+// fixture the claim-lease suite uses.
+func TestStopIntent_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunStopIntentConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
+}
 
-		return dbtest.ClaimLeaseFixture{
-			Stores: stores,
-			OrgID:  orgID,
-			StageStep: func(t *testing.T) (string, string) {
-				t.Helper()
-				taskID := seedPgTask(t, h, orgID, userID)
-				conv := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
-					PromptID: promptID, CreatorUserID: userID,
-				})
-				return conv.ID, taskID
-			},
-			SetLease: func(t *testing.T, claimID string, in time.Duration) {
-				t.Helper()
-				if _, err := h.AdminDB.Exec(
-					`UPDATE claims SET lease_expires_at = statement_timestamp() + make_interval(secs => $1) WHERE id = $2`,
-					in.Seconds(), claimID,
-				); err != nil {
-					t.Fatalf("stage lease on %s: %v", claimID, err)
-				}
-			},
-			Lease: func(t *testing.T, claimID string) (time.Time, time.Time, bool) {
-				t.Helper()
-				var expiry sql.NullTime
-				var now time.Time
-				if err := h.AdminDB.QueryRow(
-					`SELECT lease_expires_at, statement_timestamp() FROM claims WHERE id = $1`, claimID,
-				).Scan(&expiry, &now); err != nil {
-					t.Fatalf("read lease of %s: %v", claimID, err)
-				}
-				return expiry.Time, now, expiry.Valid
-			},
-			LiveClaimsWithoutLease: func(t *testing.T) int {
-				t.Helper()
-				var n int
-				if err := h.AdminDB.QueryRow(
-					`SELECT COUNT(*) FROM claims WHERE released_at IS NULL AND lease_expires_at IS NULL`,
-				).Scan(&n); err != nil {
-					t.Fatalf("count live claims without a lease: %v", err)
-				}
-				return n
-			},
-		}
-	})
+func pgClaimLeaseFixture(t *testing.T, h *pgtest.Harness) dbtest.ClaimLeaseFixture {
+	t.Helper()
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	bpID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+
+	return dbtest.ClaimLeaseFixture{
+		Stores: stores,
+		OrgID:  orgID,
+		StageStep: func(t *testing.T) (string, string) {
+			t.Helper()
+			taskID := seedPgTask(t, h, orgID, userID)
+			conv := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+				PromptID: promptID, CreatorUserID: userID,
+			})
+			return conv.ID, taskID
+		},
+		SetLease: func(t *testing.T, claimID string, in time.Duration) {
+			t.Helper()
+			if _, err := h.AdminDB.Exec(
+				`UPDATE claims SET lease_expires_at = statement_timestamp() + make_interval(secs => $1) WHERE id = $2`,
+				in.Seconds(), claimID,
+			); err != nil {
+				t.Fatalf("stage lease on %s: %v", claimID, err)
+			}
+		},
+		Lease: func(t *testing.T, claimID string) (time.Time, time.Time, bool) {
+			t.Helper()
+			var expiry sql.NullTime
+			var now time.Time
+			if err := h.AdminDB.QueryRow(
+				`SELECT lease_expires_at, statement_timestamp() FROM claims WHERE id = $1`, claimID,
+			).Scan(&expiry, &now); err != nil {
+				t.Fatalf("read lease of %s: %v", claimID, err)
+			}
+			return expiry.Time, now, expiry.Valid
+		},
+		LiveClaimsWithoutLease: func(t *testing.T) int {
+			t.Helper()
+			var n int
+			if err := h.AdminDB.QueryRow(
+				`SELECT COUNT(*) FROM claims WHERE released_at IS NULL AND lease_expires_at IS NULL`,
+			).Scan(&n); err != nil {
+				t.Fatalf("count live claims without a lease: %v", err)
+			}
+			return n
+		},
+		StageStaleStopIntent: func(t *testing.T, conversationID, status, by string) {
+			t.Helper()
+			if _, err := h.AdminDB.Exec(
+				`UPDATE conversations SET status = $1, stop_requested_at = now(), stop_requested_by = NULLIF($2, '') WHERE id = $3`,
+				status, by, conversationID,
+			); err != nil {
+				t.Fatalf("stage stale stop intent on %s: %v", conversationID, err)
+			}
+		},
+	}
 }
 
 // TestClaimFence_Postgres_ReadsFreshDatabaseTime pins the one property only

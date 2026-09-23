@@ -36,6 +36,8 @@ func TestStopBlueprintRun_TearsDownTheRunItsIDNames(t *testing.T) {
 	if err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, brID, StopCauseTaskClosed); err != nil {
 		t.Fatalf("StopBlueprintRun: %v", err)
 	}
+	// Nothing holds the queued step, so the dispatcher settles its stop.
+	s.settleUnclaimedStops(context.Background())
 
 	var bpStatus string
 	var cancelRequested bool

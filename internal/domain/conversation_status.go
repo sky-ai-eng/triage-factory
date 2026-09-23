@@ -221,7 +221,7 @@ func IsParkReason(reason string) bool {
 	switch ParkReason(reason) {
 	case ParkReasonIdle, ParkReasonUserCancelled, ParkReasonSystemCancelled,
 		ParkReasonBlueprintCancelled, ParkReasonBlueprintTerminal,
-		ParkReasonLaunchFailed, ParkReasonDrained:
+		ParkReasonLaunchFailed, ParkReasonModelNotEnabled, ParkReasonDrained:
 		return true
 	}
 	return false

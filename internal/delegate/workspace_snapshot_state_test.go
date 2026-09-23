@@ -150,7 +150,6 @@ func TestParkConversationOpen_FencedTeardownRecordsWrittenState(t *testing.T) {
 		conversationID: conversationID,
 		claudeCwd:      wt,
 		namespace:      wsKey,
-		triggerType:    "event",
 		claimID:        claimID,
 		reason:         db.ParkStopped("user_cancelled", "Cancelled by user"),
 	}, "")

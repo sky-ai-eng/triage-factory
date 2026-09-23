@@ -48,8 +48,8 @@ func (r bringUpResolver) BaseURLFor(context.Context, string) (string, error) {
 //
 // The fetch is a real HTTP request to a server that holds the connection open
 // until the request's context is cancelled. Registered late, the stop would
-// find no handle and take the DB-only path, the fetch would run to its
-// server-side deadline, and the assertion on how it ended would fail.
+// find no handle to cancel, the fetch would run to its server-side deadline,
+// and the assertion on how it ended would fail.
 func TestDispatch_StopDuringBringUpCancelsTheSetupAndParks(t *testing.T) {
 	fx := newLaunchFixtureWithWorktree(t, "938", "")
 

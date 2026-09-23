@@ -193,7 +193,12 @@ const undeliveredInputExistsSQL = `EXISTS (
 // claim release: a claim reaped mid-setup still has its undelivered prompt
 // row (either arm matches), and a claim reaped mid-engagement has all its input
 // delivered and matches here.
+//
+// A pending stop takes the row out of the queue: nothing may start driving a
+// conversation somebody asked to stop. The dispatcher's settlement parks it
+// instead, and the park clears the intent.
 const needsDrivingSQL = `r.archived_at IS NULL
+	  AND r.stop_requested_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `))`
 
@@ -493,7 +498,8 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		unparked AS (
 			-- Every park column clears together — see the SQLite twin for why
 			-- park_reason in particular must not survive its own park.
-			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL
+			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL,
+			                         stop_requested_at = NULL, stop_requested_by = NULL
 			FROM candidate
 			WHERE conversations.id = candidate.id AND conversations.status IS NOT NULL
 			RETURNING conversations.id
@@ -547,13 +553,13 @@ func isActiveClaimConflict(err error) bool {
 	return pgErr.Code == "23505" && pgErr.ConstraintName == "idx_claims_one_active"
 }
 
-func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (time.Time, error) {
+func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (db.ClaimRenewal, error) {
 	// A malformed id is a caller wiring fault, and the honest answer to it is
 	// the one the fence gives for every other way of not being the owner:
 	// Postgres would otherwise reject the bind (22P02) and the loop would read
 	// a driver error as a transient failure worth retrying forever.
 	if claimID == "" || !isValidUUID(claimID) || !isValidUUID(conversationID) {
-		return time.Time{}, fmt.Errorf("%w: claim %q on conversation %q", db.ErrClaimReleased, claimID, conversationID)
+		return db.ClaimRenewal{}, fmt.Errorf("%w: claim %q on conversation %q", db.ErrClaimReleased, claimID, conversationID)
 	}
 	// statement_timestamp() rather than now(): the guard has to read fresh
 	// database time, not the instant this statement's transaction began, or a
@@ -564,21 +570,102 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	// The guard's expiry term is what makes a late renewal terminal: an
 	// already-lapsed lease matches nothing, and the caller gets the same
 	// ErrClaimReleased a released claim gives. Authority does not come back.
-	var expiry time.Time
+	var out db.ClaimRenewal
 	err := s.conn.QueryRowContext(ctx, `
 		UPDATE claims
 		SET lease_expires_at = statement_timestamp() + make_interval(secs => $1)
 		WHERE id = $2 AND org_id = $3 AND conversation_id = $4
 		  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
-		RETURNING lease_expires_at
-	`, lease.Seconds(), claimID, orgID, conversationID).Scan(&expiry)
+		RETURNING lease_expires_at,
+		          (SELECT r.stop_requested_at IS NOT NULL FROM conversations r WHERE r.id = claims.conversation_id),
+		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
+	`, lease.Seconds(), claimID, orgID, conversationID).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
 	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+		return db.ClaimRenewal{}, fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
 	}
 	if err != nil {
-		return time.Time{}, wrapAdminPoolPermErr(err, "conversation_queue.RenewClaimLeaseSystem")
+		return db.ClaimRenewal{}, wrapAdminPoolPermErr(err, "conversation_queue.RenewClaimLeaseSystem")
 	}
-	return expiry, nil
+	return out, nil
+}
+
+// SettleUnclaimedStopsSystem is one statement so the whole settlement — the
+// park, the run cancel and the intent clear — commits as a unit and can move
+// whole into the claim transaction later. The victims' FOR UPDATE serializes
+// against ClaimNextConversation's FOR UPDATE OF r: whichever commits second
+// re-reads its own predicate and matches nothing.
+//
+// The run cancel keys off the conversation's status as the victims read it
+// (`was`), because a conversation that concluded before the settlement reached
+// it had its terminal handled by the holder, and this pass only clears the
+// stale intent.
+func (s *conversationQueueStore) SettleUnclaimedStopsSystem(ctx context.Context) ([]db.SettledStop, error) {
+	return s.settleUnclaimedStops(ctx, "")
+}
+
+func (s *conversationQueueStore) SettleUnclaimedStopsForTaskSystem(ctx context.Context, orgID, taskID string) ([]db.SettledStop, error) {
+	if !isValidUUID(orgID) || !isValidUUID(taskID) {
+		return nil, nil
+	}
+	return s.settleUnclaimedStops(ctx, `AND r.org_id = $1 AND r.task_id = $2`, orgID, taskID)
+}
+
+// settleUnclaimedStops runs the settlement over the pending stops scope
+// narrows to; scope is an AND-clause over the victims' alias r, binding args.
+func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope string, args ...any) ([]db.SettledStop, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		WITH victims AS (
+			SELECT r.id, r.org_id, r.blueprint_run_id, r.blueprint_step_index, r.status, r.stop_requested_by
+			FROM conversations r
+			WHERE r.stop_requested_at IS NOT NULL
+			  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)
+			  `+scope+`
+			ORDER BY r.id
+			FOR UPDATE SKIP LOCKED
+		),
+		settled AS (
+			UPDATE conversations c
+			SET status = CASE WHEN v.status IN (`+conversationTerminalStatusesSQL+`) THEN v.status ELSE 'open' END,
+			    parked_at = CASE WHEN v.status IN (`+conversationTerminalStatusesSQL+`) THEN c.parked_at ELSE COALESCE(c.parked_at, now()) END,
+			    park_reason = CASE WHEN v.status IN (`+conversationTerminalStatusesSQL+`) THEN c.park_reason
+			                       WHEN v.stop_requested_by IS NULL THEN 'system_cancelled'
+			                       ELSE 'user_cancelled' END,
+			    stop_requested_at = NULL,
+			    stop_requested_by = NULL
+			FROM victims v WHERE c.id = v.id
+			RETURNING c.id, c.org_id, c.blueprint_run_id, c.blueprint_step_index, v.status AS was, v.stop_requested_by
+		),
+		cancelled AS (
+			UPDATE blueprint_runs br
+			SET status = 'cancelled', completed_at = now(),
+			    abort_reason = CASE WHEN s.stop_requested_by IS NULL THEN 'system_cancelled' ELSE 'user_cancelled' END,
+			    aborted_at_step = s.blueprint_step_index
+			FROM settled s
+			WHERE br.id = s.blueprint_run_id AND br.status = 'running' AND br.cancel_requested = true
+			  AND s.was IS DISTINCT FROM 'completed' AND s.was IS DISTINCT FROM 'failed'
+			RETURNING br.id
+		)
+		SELECT s.org_id::text, s.id::text, COALESCE(c.id::text, ''), s.blueprint_step_index
+		FROM settled s LEFT JOIN cancelled c ON c.id = s.blueprint_run_id
+	`, args...)
+	if err != nil {
+		return nil, wrapAdminPoolPermErr(err, "conversation_queue.SettleUnclaimedStopsSystem")
+	}
+	defer rows.Close()
+	var out []db.SettledStop
+	for rows.Next() {
+		var st db.SettledStop
+		var step sql.NullInt64
+		if err := rows.Scan(&st.OrgID, &st.ConversationID, &st.BlueprintRunID, &step); err != nil {
+			return nil, err
+		}
+		if step.Valid {
+			v := int(step.Int64)
+			st.StepIndex = &v
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
 }
 
 func (s *conversationQueueStore) ExpiredClaimsSystem(ctx context.Context) (int, time.Duration, error) {
@@ -867,7 +954,8 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 				SET status = 'open',
 				    parked_at = COALESCE(parked_at, now()),
 				    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
-				    result_summary = COALESCE(NULLIF(result_summary, ''), $1)
+				    result_summary = COALESCE(NULLIF(result_summary, ''), $1),
+				    stop_requested_at = NULL, stop_requested_by = NULL
 				WHERE status IS NULL
 				  AND blueprint_run_id IN (
 				      SELECT id FROM blueprint_runs
@@ -886,22 +974,23 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 			return err
 		}
 
-		// Claim-desync janitor arm (after the blueprint-terminal park, whose
-		// own claim release it therefore never has to redo).
-		released, err := healClaimDesyncs(ctx, q)
-		if err != nil {
-			return err
-		}
-
 		// Orphaned-step CHECKER — the shape the park above cannot see, one
 		// level up: a live parent with no child at the step it is pointing
 		// at. It repairs nothing, and its count stays out of the healed
 		// total, because counting is not healing.
+		var err error
 		check, err = countBlueprintRunsMissingCurrentStep(ctx, q)
 		if err != nil {
 			return err
 		}
-		total = parked + released
+		// Claim-desync CHECKER: a terminal conversation still holding an
+		// unreleased claim. Counted, never repaired, for the same reason.
+		desyncs, err := countClaimDesyncs(ctx, q)
+		if err != nil {
+			return err
+		}
+		check.ClaimDesyncs, check.ClaimDesyncSample = desyncs.ClaimDesyncs, desyncs.ClaimDesyncSample
+		total = parked
 		return nil
 	})
 	if err != nil {
@@ -910,39 +999,36 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 	return total, check, nil
 }
 
-// healClaimDesyncs is the janitor for the one state the app-pool
-// (non-System) terminal writes can still strand a delegation conversation
-// in: a terminal conversation with a still-active claim, because the
-// conversation flip and the claim release commit independently (tf_app holds
-// no claims UPDATE grant, so one atomic tx is structurally unavailable) and
-// the flip can land without the release. Release the claim, outcome mapped
-// from the status the same way the terminal writes map it. Idempotent, and
-// safe to run concurrently with healthy terminal writes.
+// countClaimDesyncs counts terminal conversations still holding an unreleased
+// claim, and samples the oldest few. It writes nothing.
 //
-// The former second arm — an in-flight conversation whose claim released but
-// whose status flip rolled back, requeued by writing 'queued' — no longer
-// exists as a desync at all: a released claim on a mid-flight (status NULL)
-// conversation IS the requeue, so the shape it healed is now the ordinary
-// claimable state.
-func healClaimDesyncs(ctx context.Context, q queryer) (released int, err error) {
-	res, err := q.ExecContext(ctx, `
-		UPDATE claims SET released_at = now(),
-		    outcome = CASE c.status
-		        WHEN 'completed' THEN 'completed'
-		        ELSE 'failed'
-		    END
+// No writer can produce the shape: the holder's terminal and park writes, the
+// dispatcher's stop settlement and the reaper each release the claim on the
+// same transaction as the status flip, and a request path writes no status at
+// all. A nonzero count is therefore a bug report, and a repair here would hide
+// the writer that caused it.
+func countClaimDesyncs(ctx context.Context, q queryer) (db.OrphanedStepCheck, error) {
+	var out db.OrphanedStepCheck
+	rows, err := q.QueryContext(ctx, `
+		SELECT c.id::text, count(*) OVER ()
 		FROM conversations c
-		WHERE claims.conversation_id = c.id AND claims.released_at IS NULL
-		  AND c.status IN (`+conversationTerminalStatusesSQL+`)
-	`)
+		WHERE c.status IN (`+conversationTerminalStatusesSQL+`)
+		  AND EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = c.id AND cl.released_at IS NULL)
+		ORDER BY c.started_at, c.id
+		LIMIT $1
+	`, db.OrphanedStepSampleLimit)
 	if err != nil {
-		return 0, err
+		return out, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, err
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id, &out.ClaimDesyncs); err != nil {
+			return db.OrphanedStepCheck{}, err
+		}
+		out.ClaimDesyncSample = append(out.ClaimDesyncSample, id)
 	}
-	return int(n), nil
+	return out, rows.Err()
 }
 
 // countBlueprintRunsMissingCurrentStep counts 'running' blueprint_runs holding

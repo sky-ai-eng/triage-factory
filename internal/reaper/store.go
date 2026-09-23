@@ -19,12 +19,13 @@ import (
 )
 
 // Counts is the outcome of one ReapDeadExecutors sweep — how many conversations the
-// reaper requeued, terminal-failed, or cancel-finalized. Logged by
-// RunReaper on every non-empty tick.
+// reaper requeued, terminal-failed, cancel-finalized, or released to the
+// dispatcher's stop settlement. Logged by RunReaper on every non-empty tick.
 type Counts struct {
-	Requeued  int
-	Failed    int
-	Cancelled int
+	Requeued      int
+	Failed        int
+	Cancelled     int
+	StopsReleased int
 }
 
 // Store is the reaper's persistence seam.
@@ -49,7 +50,12 @@ type Store interface {
 	// dispatcher's unit exactly (postgres.EpisodeAttemptsSQL, which this
 	// shares rather than re-derives).
 	//
-	// Three disjoint outcomes per candidate:
+	// Four disjoint outcomes per candidate:
+	//   - a stop is pending: release the claim and write nothing else. The
+	//     row is then one no live claim holds, which is exactly what
+	//     ConversationQueueStore.SettleUnclaimedStopsSystem parks, so every
+	//     stop nobody holds settles on that one path, with its derived park
+	//     reason, its run cancel and its broadcast.
 	//   - blueprint_run.cancel_requested: finalize cancelled (conversation +
 	//     blueprint_run), regardless of attempts — the existing
 	//     cancel-finalization semantics, just with no live owner to signal.
@@ -68,21 +74,6 @@ type Store interface {
 	// never touches audit history; a resurrected id simply re-registers at
 	// a fresh boot_epoch 1.
 	DeleteStaleInstances(ctx context.Context, staleAfter time.Duration) (int, error)
-
-	// HealClaimDesyncs runs the janitor arm for the one state the app-pool
-	// terminal writes can still strand a conversation in (their conversation
-	// flip and claim release commit independently): a terminal conversation
-	// with a dangling active claim gets the claim released, outcome mapped
-	// from the status. The same arm runs at boot inside
-	// ConversationQueueStore.ReconcileOrphanedConversations; the periodic repeat here bounds
-	// the desync's lifetime to a reaper tick instead of the next restart.
-	// Idempotent and safe against in-flight healthy writes.
-	//
-	// The former second arm — a mid-flight conversation whose claim released
-	// but whose status flip rolled back, requeued by writing 'queued' — is
-	// no longer a desync at all: a released claim on a mid-flight
-	// conversation IS the requeue.
-	HealClaimDesyncs(ctx context.Context) (released int, err error)
 }
 
 // pgStore is the Postgres implementation.
@@ -157,6 +148,28 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	staleSecs := staleThreshold.Seconds()
 	var out Counts
 	if err := db.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		// 0. A stop is pending: release the claim only. The claim gate
+		// refuses a stop-requested row, so a requeue would only have
+		// relabelled it before the settlement parked it, and a fail would
+		// record a crash loop for a conversation someone asked to stop. This
+		// runs first because the arms below find their candidates through an
+		// unreleased claim, so a row released here is out of their sets.
+		res, err := tx.ExecContext(ctx, `
+			UPDATE claims SET released_at = now(), outcome = 'reaped'
+			WHERE released_at IS NULL AND conversation_id IN (
+				SELECT r.id `+reapCandidateJoin+`
+				  AND r.stop_requested_at IS NOT NULL
+			)
+		`, staleSecs)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		out.StopsReleased = int(n)
+
 		// 1. Cancel-requested candidates: finalize instead of requeuing —
 		// "cancel-requested rows go through the existing cancel finalization
 		// instead of requeue" (spec §4.3). No live owner to signal, so this IS the
@@ -171,6 +184,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 		// of a reaper throwing it away the instant a host went quiet.
 		parkedBlueprintIDs, parkedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, nil, `
 			UPDATE conversations SET status = 'open', parked_at = COALESCE(parked_at, now()), park_reason = 'system_cancelled',
+				stop_requested_at = NULL, stop_requested_by = NULL,
 				result_summary = 'Stopped: owning blueprint run was cancel-requested after its executor engagement was lost (reaper)'
 			WHERE id IN (
 				SELECT r.id `+reapCandidateJoin+`
@@ -212,6 +226,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 			-- rather than having it relabelled as this failure.
 			UPDATE conversations SET status = 'failed', failure_kind = 'executor_lost', completed_at = now(),
 				ended_at = COALESCE(ended_at, now()), ended_reason = COALESCE(ended_reason, 'failed'),
+				stop_requested_at = NULL, stop_requested_by = NULL,
 				result_summary = 'Failed: the executor engagement was lost repeatedly (no heartbeat, or a lapsed claim lease) and the retry budget (TF_MAX_CLAIM_ATTEMPTS) for this loss episode is exhausted (reaper)'
 			WHERE id IN (
 				SELECT r.id `+reapCandidateJoin+`
@@ -311,30 +326,6 @@ func (s *pgStore) DeleteStaleInstances(ctx context.Context, staleAfter time.Dura
 	}
 	n, err := res.RowsAffected()
 	return int(n), err
-}
-
-func (s *pgStore) HealClaimDesyncs(ctx context.Context) (int, error) {
-	// Restates internal/db/postgres's healClaimDesyncs SQL, which is
-	// unexported there — see pgUUIDArray on what this file shares and what
-	// it keeps its own copy of.
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE claims SET released_at = now(),
-		    outcome = CASE c.status
-		        WHEN 'completed' THEN 'completed'
-		        ELSE 'failed'
-		    END
-		FROM conversations c
-		WHERE claims.conversation_id = c.id AND claims.released_at IS NULL
-		  AND c.status IN ('completed','failed')
-	`)
-	if err != nil {
-		return 0, err
-	}
-	rel, err := res.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
-	return int(rel), nil
 }
 
 // pgUUIDArray formats a Go string slice as a Postgres uuid[] literal for

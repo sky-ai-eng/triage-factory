@@ -104,8 +104,10 @@ const undeliveredInputExistsSQL = `EXISTS (
 // needsDrivingSQL is the eligibility predicate, identical for every surface:
 // nobody is driving it, it has not been retired, and it is either mid-flight
 // (fresh mint, or a claim that released without writing an outcome) or
-// parked and woken by new input. A terminal conversation is never eligible.
+// parked and woken by new input. A terminal conversation is never eligible,
+// and neither is one with a pending stop — the settlement parks it instead.
 const needsDrivingSQL = `r.archived_at IS NULL
+	  AND r.stop_requested_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `))`
 
@@ -268,7 +270,8 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		// terminal follows — and the RunStation prints it beside a failed
 		// conversation as "stopped by user" on a conversation nobody stopped.
 		if _, err := q.ExecContext(ctx, `
-			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL
+			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL,
+			                         stop_requested_at = NULL, stop_requested_by = NULL
 			WHERE id = ? AND status IS NOT NULL
 		`, claimed.ID); err != nil {
 			return err
@@ -612,7 +615,8 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 			SET status = 'open',
 			    parked_at = COALESCE(parked_at, ?),
 			    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
-			    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
+			    result_summary = COALESCE(NULLIF(result_summary, ''), ?),
+			    stop_requested_at = NULL, stop_requested_by = NULL
 			WHERE status IS NULL
 			  AND blueprint_run_id IN (
 			      SELECT id FROM blueprint_runs
@@ -648,36 +652,10 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 		return 0, db.OrphanedStepCheck{}, err
 	}
 
-	// Claim-desync janitor arm — the SQLite mirror of the Postgres twin's
-	// healClaimDesyncs (see internal/db/postgres/conversation_queue.go for the one
-	// stranded shape that survives the derived model). SQLite's single
-	// connection makes the non-System terminal writes atomic, so this is
-	// conformance symmetry here rather than a live hazard; it runs after the
-	// blueprint-terminal park above, whose own claim release it therefore
-	// never has to redo.
-	err = inTx(ctx, s.conn, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
-			UPDATE claims SET released_at = ?,
-			    outcome = CASE (SELECT c.status FROM conversations c WHERE c.id = claims.conversation_id)
-			        WHEN 'completed' THEN 'completed'
-			        ELSE 'failed'
-			    END
-			WHERE released_at IS NULL
-			  AND conversation_id IN (
-			      SELECT id FROM conversations WHERE status IN (`+conversationTerminalStatusesSQL+`)
-			  )
-		`, time.Now().UTC())
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		count += int(n)
-
-		return nil
-	})
+	// Claim-desync CHECKER — the SQLite mirror of the Postgres twin's
+	// countClaimDesyncs. It repairs nothing: every status write releases its
+	// claim on the same transaction, so a survivor here is a bug to look at.
+	desyncs, err := countClaimDesyncs(ctx, s.conn)
 	if err != nil {
 		return count, db.OrphanedStepCheck{}, err
 	}
@@ -699,7 +677,35 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 	if err != nil {
 		return count, db.OrphanedStepCheck{}, err
 	}
+	check.ClaimDesyncs, check.ClaimDesyncSample = desyncs.ClaimDesyncs, desyncs.ClaimDesyncSample
 	return count, check, nil
+}
+
+// countClaimDesyncs counts terminal conversations still holding an unreleased
+// claim and samples the oldest few. It writes nothing. Same window-function
+// shape as countBlueprintRunsMissingCurrentStep.
+func countClaimDesyncs(ctx context.Context, q queryer) (db.OrphanedStepCheck, error) {
+	var out db.OrphanedStepCheck
+	rows, err := q.QueryContext(ctx, `
+		SELECT c.id, count(*) OVER ()
+		FROM conversations c
+		WHERE c.status IN (`+conversationTerminalStatusesSQL+`)
+		  AND EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = c.id AND cl.released_at IS NULL)
+		ORDER BY c.started_at, c.id
+		LIMIT ?
+	`, db.OrphanedStepSampleLimit)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id, &out.ClaimDesyncs); err != nil {
+			return db.OrphanedStepCheck{}, err
+		}
+		out.ClaimDesyncSample = append(out.ClaimDesyncSample, id)
+	}
+	return out, rows.Err()
 }
 
 // countBlueprintRunsMissingCurrentStep counts 'running' blueprint_runs holding
@@ -903,12 +909,12 @@ func (s *conversationQueueStore) ClaimByIDSystem(ctx context.Context, claimID st
 	return &out[0], nil
 }
 
-func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (time.Time, error) {
+func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (db.ClaimRenewal, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return time.Time{}, err
+		return db.ClaimRenewal{}, err
 	}
 	if claimID == "" {
-		return time.Time{}, fmt.Errorf("%w: no claim id supplied", db.ErrClaimReleased)
+		return db.ClaimRenewal{}, fmt.Errorf("%w: no claim id supplied", db.ErrClaimReleased)
 	}
 	// One statement, guard and write together: splitting them would open a
 	// window in which an expired lease renews. The guard's expiry term is what
@@ -918,21 +924,125 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	//
 	// Both sides of the comparison are strftime-rendered text in the layout
 	// the column stores, so the `>` is one layout against itself.
-	var expiry time.Time
+	var out db.ClaimRenewal
 	err := s.conn.QueryRowContext(ctx, `
 		UPDATE claims
 		SET lease_expires_at = `+sqliteNowPlusExpr+`
 		WHERE id = ? AND org_id = ? AND conversation_id = ?
 		  AND released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
-		RETURNING lease_expires_at
-	`, sqliteLeaseModifier(lease), claimID, orgID, conversationID).Scan(&expiry)
+		RETURNING lease_expires_at,
+		          (SELECT r.stop_requested_at IS NOT NULL FROM conversations r WHERE r.id = claims.conversation_id),
+		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
+	`, sqliteLeaseModifier(lease), claimID, orgID, conversationID).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
 	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+		return db.ClaimRenewal{}, fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
 	}
 	if err != nil {
-		return time.Time{}, err
+		return db.ClaimRenewal{}, err
 	}
-	return expiry, nil
+	return out, nil
+}
+
+// SettleUnclaimedStopsSystem is the Postgres twin's settlement as a read then
+// per-row writes on one transaction; the single connection serializes it
+// against the claim, so no row lock is needed.
+func (s *conversationQueueStore) SettleUnclaimedStopsSystem(ctx context.Context) ([]db.SettledStop, error) {
+	return s.settleUnclaimedStops(ctx, "")
+}
+
+func (s *conversationQueueStore) SettleUnclaimedStopsForTaskSystem(ctx context.Context, orgID, taskID string) ([]db.SettledStop, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	return s.settleUnclaimedStops(ctx, `AND r.task_id = ?`, taskID)
+}
+
+// settleUnclaimedStops runs the settlement over the pending stops scope
+// narrows to; scope is an AND-clause over the victims' alias r, binding args.
+func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope string, args ...any) ([]db.SettledStop, error) {
+	type victim struct {
+		id, orgID, status, by string
+		runID                 sql.NullString
+		step                  sql.NullInt64
+	}
+	var out []db.SettledStop
+	err := inTx(ctx, s.conn, func(q queryer) error {
+		rows, err := q.QueryContext(ctx, `
+			SELECT r.id, r.org_id, COALESCE(r.status, ''), COALESCE(r.stop_requested_by, ''),
+			       r.blueprint_run_id, r.blueprint_step_index
+			FROM conversations r
+			WHERE r.stop_requested_at IS NOT NULL
+			  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)
+			  `+scope+`
+			ORDER BY r.id
+		`, args...)
+		if err != nil {
+			return err
+		}
+		var victims []victim
+		for rows.Next() {
+			var v victim
+			if err := rows.Scan(&v.id, &v.orgID, &v.status, &v.by, &v.runID, &v.step); err != nil {
+				rows.Close()
+				return err
+			}
+			victims = append(victims, v)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		for _, v := range victims {
+			terminal := v.status == "completed" || v.status == "failed"
+			reason := "user_cancelled"
+			if v.by == "" {
+				reason = "system_cancelled"
+			}
+			if terminal {
+				if _, err := q.ExecContext(ctx, `
+					UPDATE conversations SET stop_requested_at = NULL, stop_requested_by = NULL WHERE id = ?
+				`, v.id); err != nil {
+					return err
+				}
+			} else if _, err := q.ExecContext(ctx, `
+				UPDATE conversations
+				SET status = 'open',
+				    parked_at = COALESCE(parked_at, ?),
+				    park_reason = ?,
+				    stop_requested_at = NULL,
+				    stop_requested_by = NULL
+				WHERE id = ?
+			`, now, reason, v.id); err != nil {
+				return err
+			}
+			st := db.SettledStop{OrgID: v.orgID, ConversationID: v.id}
+			if v.step.Valid {
+				idx := int(v.step.Int64)
+				st.StepIndex = &idx
+			}
+			if !terminal && v.runID.Valid {
+				res, err := q.ExecContext(ctx, `
+					UPDATE blueprint_runs
+					SET status = 'cancelled', completed_at = ?, abort_reason = ?, aborted_at_step = ?
+					WHERE id = ? AND status = 'running' AND cancel_requested = 1
+				`, now, reason, sqliteNullInt(st.StepIndex), v.runID.String)
+				if err != nil {
+					return err
+				}
+				if n, err := res.RowsAffected(); err != nil {
+					return err
+				} else if n > 0 {
+					st.BlueprintRunID = v.runID.String
+				}
+			}
+			out = append(out, st)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (s *conversationQueueStore) ExpiredClaimsSystem(ctx context.Context) (int, time.Duration, error) {

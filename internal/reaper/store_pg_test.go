@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -117,8 +118,8 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, priorOutcomes ...string)
 				t.Fatalf("RequeueConversation (claim %d): %v", i+1, err)
 			}
 		case "cancelled":
-			if ok, err := stores.Conversations.ParkOpen(ctx, orgID, conversationID, db.ParkStopped("user_cancelled", "")); err != nil || !ok {
-				t.Fatalf("ParkOpen (claim %d): ok=%v err=%v", i+1, ok, err)
+			if ok, err := dbtest.HolderPark(stores.Conversations, ctx, orgID, conversationID, db.ParkStopped("user_cancelled", "")); err != nil || !ok {
+				t.Fatalf("park (claim %d): ok=%v err=%v", i+1, ok, err)
 			}
 			if ok, err := stores.Conversations.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
 				t.Fatalf("MarkQueuedForResume (claim %d): ok=%v err=%v", i+1, ok, err)
@@ -397,6 +398,115 @@ func TestReapDeadExecutors_CancelRequestedFinalizesCancelledNotRequeued(t *testi
 	}
 }
 
+// A stop pending on a dead executor's conversation is released, not requeued,
+// failed or parked: the reaper writes nothing on the conversation, and the
+// dispatcher's settlement parks it with the reason the intent names. The
+// result summary is left alone, so the parked row carries no requeue text.
+func TestReapDeadExecutors_PendingStopIsReleasedToTheSettlement(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	fx := seedReaperFixture(t, h)
+	backdateHeartbeat(t, h, fx.executorID, time.Hour)
+	if ok, err := stores.Conversations.RequestStopSystem(ctx, fx.orgID, fx.conversationID, fx.userID, ""); err != nil || !ok {
+		t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
+	}
+
+	counts, err := reaper.NewPostgresStore(h.AdminDB).ReapDeadExecutors(ctx, 30*time.Second, 2)
+	if err != nil {
+		t.Fatalf("ReapDeadExecutors: %v", err)
+	}
+	if counts != (reaper.Counts{StopsReleased: 1}) {
+		t.Fatalf("counts = %+v, want {StopsReleased:1}", counts)
+	}
+	var status, summary sql.NullString
+	var outcome string
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status, result_summary FROM conversations WHERE id = $1`, fx.conversationID).Scan(&status, &summary); err != nil {
+		t.Fatalf("read back conversation: %v", err)
+	}
+	if status.Valid || summary.String != "" {
+		t.Errorf("conversation after the reap = (status %v, summary %q), want untouched", status, summary.String)
+	}
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT outcome FROM claims WHERE conversation_id = $1 AND released_at IS NOT NULL`, fx.conversationID).Scan(&outcome); err != nil {
+		t.Fatalf("read back the released claim: %v", err)
+	}
+	if outcome != "reaped" {
+		t.Errorf("claim outcome = %q, want reaped", outcome)
+	}
+
+	settled, err := stores.ConversationQueue.SettleUnclaimedStopsSystem(ctx)
+	if err != nil {
+		t.Fatalf("SettleUnclaimedStopsSystem: %v", err)
+	}
+	if len(settled) != 1 || settled[0].ConversationID != fx.conversationID {
+		t.Fatalf("settled = %+v, want the reaped conversation", settled)
+	}
+	got, err := stores.Conversations.GetSystem(ctx, fx.orgID, fx.conversationID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSystem: (%v, %v)", got, err)
+	}
+	if got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonUserCancelled || got.ResultSummary != "" {
+		t.Errorf("after the settlement = (status %q, reason %q, summary %q), want (open, user_cancelled, empty)", got.Status, got.ParkReason, got.ResultSummary)
+	}
+}
+
+// A pending stop under a cancel-requested run is the overlap of the release
+// arm and the cancel arm. The release arm takes it, and the settlement's
+// own run cancel then finalizes the blueprint the cancel arm would have, with
+// the reason the intent names rather than the cancel arm's system one.
+func TestReapDeadExecutors_PendingStopUnderACancelRequestedRunSettlesTheRun(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	fx := seedReaperFixture(t, h)
+	backdateHeartbeat(t, h, fx.executorID, time.Hour)
+	pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET cancel_requested = true WHERE id = $1`, fx.blueprintRunID)
+	if ok, err := stores.Conversations.RequestStopSystem(ctx, fx.orgID, fx.conversationID, fx.userID, ""); err != nil || !ok {
+		t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
+	}
+
+	counts, err := reaper.NewPostgresStore(h.AdminDB).ReapDeadExecutors(ctx, 30*time.Second, 2)
+	if err != nil {
+		t.Fatalf("ReapDeadExecutors: %v", err)
+	}
+	if counts != (reaper.Counts{StopsReleased: 1}) {
+		t.Fatalf("counts = %+v, want {StopsReleased:1}: the cancel arm must not also take the row", counts)
+	}
+	var brStatus string
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM blueprint_runs WHERE id = $1`, fx.blueprintRunID).Scan(&brStatus); err != nil {
+		t.Fatalf("read back blueprint_run: %v", err)
+	}
+	if brStatus != "running" {
+		t.Errorf("blueprint_run after the reap = %q, want running until the settlement", brStatus)
+	}
+
+	settled, err := stores.ConversationQueue.SettleUnclaimedStopsSystem(ctx)
+	if err != nil {
+		t.Fatalf("SettleUnclaimedStopsSystem: %v", err)
+	}
+	if len(settled) != 1 || settled[0].BlueprintRunID != fx.blueprintRunID {
+		t.Fatalf("settled = %+v, want the conversation with its run cancelled", settled)
+	}
+	var abortReason sql.NullString
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status, abort_reason FROM blueprint_runs WHERE id = $1`, fx.blueprintRunID).Scan(&brStatus, &abortReason); err != nil {
+		t.Fatalf("read back blueprint_run: %v", err)
+	}
+	if brStatus != "cancelled" || abortReason.String != string(domain.ParkReasonUserCancelled) {
+		t.Errorf("blueprint_run = (%q, %q), want (cancelled, user_cancelled)", brStatus, abortReason.String)
+	}
+	got, err := stores.Conversations.GetSystem(ctx, fx.orgID, fx.conversationID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSystem: (%v, %v)", got, err)
+	}
+	if got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonUserCancelled {
+		t.Errorf("conversation = (%q, %q), want (open, user_cancelled)", got.Status, got.ParkReason)
+	}
+}
+
 // TestReapDeadExecutors_FreshHeartbeatNeverReaped pins the negative case a
 // draining executor relies on: a claimed conversation under an executor whose
 // heartbeat is still fresh is left completely untouched, regardless of
@@ -488,88 +598,6 @@ func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesClaimsExecutorID(t *te
 	}
 	if epoch != 1 {
 		t.Errorf("re-registered epoch = %d, want 1 (fresh row, no memory of the deleted one)", epoch)
-	}
-}
-
-// TestHealClaimDesyncs_ReleasesTerminalDanglingClaims pins the periodic
-// janitor: a terminal conversation with a dangling active claim gets the
-// claim released (outcome mapped from status), while a healthy engaged conversation
-// and a mid-flight claimless one are both untouched. That last shape used to
-// be the janitor's second arm — under the derived model a released claim on
-// a mid-flight conversation IS the requeue, so there is nothing left to heal
-// about it.
-func TestHealClaimDesyncs_ReleasesTerminalDanglingClaims(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	ctx := context.Background()
-
-	// Crash-after-flip: the conversation committed terminal but its claim
-	// release never landed.
-	terminal := seedReaperFixture(t, h)
-	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = 'completed' WHERE id = $1`, terminal.conversationID)
-
-	// Healthy: mid-flight with a live claim. Seeded BEFORE the claimless
-	// fixture below, because the claim is cross-org and takes the oldest
-	// eligible conversation — a conversation left claimable would be picked up by the
-	// next fixture's claim instead of its own.
-	healthy := seedReaperFixture(t, h)
-
-	// Mid-flight with the claim released: the ordinary claimable state now,
-	// stale placement stamp and all (the next claim re-earns affinity).
-	claimless := seedReaperFixture(t, h)
-	pgtest.MustExec(t, h.AdminDB, `
-		UPDATE claims SET released_at = now(), outcome = 'failed'
-		WHERE conversation_id = $1 AND released_at IS NULL
-	`, claimless.conversationID)
-	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = 'exec-dead' WHERE id = $1`, claimless.conversationID)
-
-	store := reaper.NewPostgresStore(h.AdminDB)
-	released, err := store.HealClaimDesyncs(ctx)
-	if err != nil {
-		t.Fatalf("HealClaimDesyncs: %v", err)
-	}
-	if released != 1 {
-		t.Fatalf("released = %d, want 1", released)
-	}
-
-	var rel bool
-	var outcome string
-	if err := h.AdminDB.QueryRowContext(ctx, `
-		SELECT released_at IS NOT NULL, COALESCE(outcome, '') FROM claims
-		WHERE conversation_id = $1 ORDER BY claimed_at DESC LIMIT 1
-	`, terminal.conversationID).Scan(&rel, &outcome); err != nil {
-		t.Fatalf("read terminal row's claim: %v", err)
-	}
-	if !rel || outcome != "completed" {
-		t.Errorf("terminal row's claim = (released=%v, outcome=%q), want (true, completed)", rel, outcome)
-	}
-
-	var status sql.NullString
-	var pref any
-	if err := h.AdminDB.QueryRowContext(ctx, `
-		SELECT status, preferred_executor_id FROM conversations WHERE id = $1
-	`, claimless.conversationID).Scan(&status, &pref); err != nil {
-		t.Fatalf("read claimless row: %v", err)
-	}
-	if status.Valid {
-		t.Errorf("claimless row status = %q, want none (already claimable)", status.String)
-	}
-
-	var healthyStatus sql.NullString
-	var active int
-	if err := h.AdminDB.QueryRowContext(ctx, `
-		SELECT c.status, (SELECT COUNT(*) FROM claims WHERE conversation_id = c.id AND released_at IS NULL)
-		FROM conversations c WHERE c.id = $1
-	`, healthy.conversationID).Scan(&healthyStatus, &active); err != nil {
-		t.Fatalf("read healthy row: %v", err)
-	}
-	if healthyStatus.Valid || active != 1 {
-		t.Errorf("healthy row = (status=%q, active claims=%d), want (none, 1)", healthyStatus.String, active)
-	}
-
-	// Idempotent: a second sweep finds nothing.
-	if released, err := store.HealClaimDesyncs(ctx); err != nil || released != 0 {
-		t.Errorf("second sweep = (%d, %v), want (0, nil)", released, err)
 	}
 }
 

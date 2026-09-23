@@ -38,8 +38,9 @@ func stopNotes(t *testing.T, database *sql.DB, conversationID string) []domain.M
 	return out
 }
 
-// TestStop_DBOnlyPathWritesOneAttributedNote covers the cross-pod shape: no
-// local process handle, so the stop parks the row directly. The note is what
+// TestStop_DBOnlyPathWritesOneAttributedNote covers the unheld shape: no
+// local process handle and no claim, so the dispatcher's settlement parks the
+// row. The note is what
 // the conversation keeps — the summary is deliberately empty, because a stop
 // reached no verdict and the run station renders one whenever a summary
 // exists.
@@ -56,6 +57,7 @@ func TestStop_DBOnlyPathWritesOneAttributedNote(t *testing.T) {
 	if err := s.Stop(runmode.LocalDefaultOrgID, "r-note", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
+	s.settleUnclaimedStops(context.Background())
 
 	notes := stopNotes(t, database, "r-note")
 	if len(notes) != 1 {

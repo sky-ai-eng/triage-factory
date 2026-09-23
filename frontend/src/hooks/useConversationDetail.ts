@@ -571,16 +571,6 @@ export function useConversationDetail(conversationID: string | undefined): Conve
           if (isPermissionTerminalStatus(event.data.status ?? '')) {
             dropConversation(conversationID)
           }
-          // `resumable` rides a status the row may already have — the executor
-          // that holds a cross-pod-stopped workspace reporting that it owes a
-          // persist for it, or (later) a retention sweep collecting one. Apply
-          // it to the held row before the refetch below returns, so the
-          // composer enables (or disables) on the frame rather than on the
-          // round-trip. The refetch is still the authority and overwrites this.
-          const resumable = event.data.resumable
-          if (resumable !== undefined) {
-            setConversation((prev) => (prev ? { ...prev, resumable } : prev))
-          }
           apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
             .then((data) => {
               // Guard the async write against a navigation that landed while the

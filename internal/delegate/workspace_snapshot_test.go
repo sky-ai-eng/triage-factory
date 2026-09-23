@@ -726,9 +726,7 @@ func TestFailRun_LeavesTheWorkspaceSnapshotToItsOwner(t *testing.T) {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 
-	// triggerType "event" so failConversation routes through the admin-pool System
-	// methods (no synthetic-claims tx needed in the fixture).
-	s.failConversation(runmode.LocalDefaultOrgID, conversationID, taskID, "", "event", "", "boom", domain.ConversationFailureUnclassified)
+	s.failConversation(runmode.LocalDefaultOrgID, conversationID, taskID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), "event", "boom", domain.ConversationFailureUnclassified)
 
 	if ok, _ := blobs.Exists(ctx, key); !ok {
 		t.Error("failConversation deleted the task's workspace snapshot; terminateBlueprint owns that blob")

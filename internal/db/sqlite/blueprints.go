@@ -1190,7 +1190,8 @@ func parkOrphanedChildConversations(ctx context.Context, q queryer, blueprintRun
 		SET status = 'open',
 		    parked_at = COALESCE(parked_at, ?),
 		    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
-		    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
+		    result_summary = COALESCE(NULLIF(result_summary, ''), ?),
+		    stop_requested_at = NULL, stop_requested_by = NULL
 		WHERE blueprint_run_id = ? AND status IS NULL
 	`, time.Now().UTC(), "Stopped: owning blueprint run reached a terminal state", blueprintRunID)
 	return err

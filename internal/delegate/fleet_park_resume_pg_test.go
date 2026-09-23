@@ -180,8 +180,6 @@ func (f *parkFleet) engage(t *testing.T, s *Spawner) *liveEngagement {
 			conversationID: claimed.ID,
 			namespace:      f.keyID,
 			claudeCwd:      f.wtPath,
-			triggerType:    claimed.TriggerType,
-			creatorUserID:  f.userID,
 			claimID:        claimed.ClaimID,
 			runtime:        claimed.Runtime,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
@@ -191,15 +189,31 @@ func (f *parkFleet) engage(t *testing.T, s *Spawner) *liveEngagement {
 }
 
 // stopFromControl is the cross-pod stop: the verb runs on a pod with no
-// process handle, parks the row, and hastens the kill with a signal that X's
-// own drain applies. Returns once the kill has reached X's engagement.
+// process handle, records the intent, and hastens the kill with a signal that
+// X's own drain applies. Returns once the kill has reached X's engagement,
+// whose teardown then settles the stop.
 func (f *parkFleet) stopFromControl(t *testing.T, e *liveEngagement) {
+	t.Helper()
+	f.requestStopFromControl(t)
+	f.deliverStop(t, e)
+}
+
+// requestStopFromControl is the verb alone. Only X's signal drain cancels the
+// engagement, so until deliverStop runs the row is exactly what the request
+// path wrote and X's teardown has not started.
+func (f *parkFleet) requestStopFromControl(t *testing.T) {
 	t.Helper()
 	if err := f.control.Stop(f.orgID, f.conversationID, f.userID); err != nil {
 		t.Fatalf("stop from control: %v", err)
 	}
-	// The signal is inserted by a goroutine the verb does not wait on, so
-	// the drain is pumped rather than called once.
+}
+
+// deliverStop pumps X's signal drain until the kill has reached the
+// engagement, whose teardown then settles the stop on its own goroutine.
+func (f *parkFleet) deliverStop(t *testing.T, e *liveEngagement) {
+	t.Helper()
+	// The drain is pumped rather than called once: it is the apply loop's
+	// scan, and the kill it delivers lands on another goroutine.
 	deadline := time.Now().Add(5 * time.Second)
 	for e.ctx.Err() == nil {
 		if time.Now().After(deadline) {
@@ -219,8 +233,6 @@ func (f *parkFleet) parkIdle(t *testing.T, s *Spawner, conv *domain.Conversation
 		conversationID: conv.ID,
 		namespace:      f.keyID,
 		claudeCwd:      cwd,
-		triggerType:    conv.TriggerType,
-		creatorUserID:  f.userID,
 		claimID:        conv.ClaimID,
 		runtime:        conv.Runtime,
 		reason:         db.ParkIdle(),
@@ -497,35 +509,40 @@ func (g *gatedPutStorage) Put(ctx context.Context, key string, r io.Reader) erro
 
 // --- scenarios ---------------------------------------------------------------
 
-// TestFleet_ParkFirst_StopParksBeforeTheExecutorPersists is the instant park
-// and the steer that follows it, across pods: control parks the row the
-// moment the user asks, the executor's teardown arrives after and records the
-// persist it owes, a follow-up typed while that persist is still uploading is
-// queued rather than refused, and the next claim delivers it. The late fenced
-// flip is refused, and refused quietly — it is the ordinary shape of every
-// cross-pod stop.
+// TestFleet_ParkFirst_StopParksBeforeTheExecutorPersists is the settlement
+// and the steer that follows it, across pods: control records the stop, the
+// signal reaches the executor, whose teardown parks the row and releases the
+// claim in one transaction BEFORE it persists the workspace, a follow-up typed
+// while that persist is still uploading is queued rather than refused, and
+// the next claim delivers it.
 func TestFleet_ParkFirst_StopParksBeforeTheExecutorPersists(t *testing.T) {
 	f := seedParkFleet(t)
 	first := f.engage(t, f.x)
 	f.gate.hold()
 
-	f.stopFromControl(t, first)
-	// The verb's own answer, before the executor has done anything: the
-	// board derives IDLE from exactly this read.
-	if got := f.read(t).Status; got != domain.StatusOpen {
-		t.Fatalf("display status after the stop = %q, want open — the flip must not wait on the executor", got)
-	}
-	if f.activeClaims(t) != 0 {
-		t.Error("the claim is still live after the stop; the executor slot stays occupied until the teardown finishes")
+	// Read between the request and its delivery: once X has the kill, its
+	// teardown parks the row and clears the intent concurrently with any read
+	// taken here.
+	f.requestStopFromControl(t)
+	if got := f.read(t); got.StopRequestedAt == nil || got.Status == domain.StatusOpen {
+		t.Errorf("after the request = (status %q, intent %v), want the intent and no park — the request path writes no status", got.Status, got.StopRequestedAt)
 	}
 	if !f.transcriptHas(t, stopNoteByUser) {
 		t.Error("the stop note is not on the transcript")
 	}
+	f.deliverStop(t, first)
 
+	// The executor's settlement is in its upload now: the park and the claim
+	// release have committed, and the persist is what remains.
 	f.awaitUpload(t)
 	f.assertState(t, domain.WorkspaceSnapshotPending, first.conv.ClaimID)
-	if got := f.read(t).Status; got != domain.StatusOpen {
-		t.Errorf("display status during the persist = %q, want open", got)
+	got := f.read(t)
+	if got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonUserCancelled || got.StopRequestedAt != nil {
+		t.Errorf("during the persist = (%q, %q, intent %v), want (open, user_cancelled, cleared) — the settlement parks before it captures",
+			got.Status, got.ParkReason, got.StopRequestedAt)
+	}
+	if f.activeClaims(t) != 0 {
+		t.Error("the claim is still live during the persist; the executor slot stays occupied until the capture finishes")
 	}
 
 	// Steer-after-stop, inside the window.
@@ -545,15 +562,15 @@ func TestFleet_ParkFirst_StopParksBeforeTheExecutorPersists(t *testing.T) {
 
 	f.gate.let()
 	<-first.done
-	if !first.fenced {
-		t.Error("the killed engagement's late flip was not refused; it would re-park a conversation the user already resumed")
+	if first.fenced {
+		t.Error("the holder's settlement was refused; it held the claim when it parked")
 	}
 	f.assertState(t, domain.WorkspaceSnapshotWritten, first.conv.ClaimID)
 	if !f.blobPresent(t) {
 		t.Error("the teardown's blob never landed")
 	}
 	if got := f.read(t).Status; got != domain.StatusQueued {
-		t.Errorf("display status after the refused flip = %q, want queued — the fence is what keeps the resume from being undone", got)
+		t.Errorf("display status after the persist = %q, want queued — the finished capture must not undo the resume", got)
 	}
 
 	// The subsequent claim delivers it.

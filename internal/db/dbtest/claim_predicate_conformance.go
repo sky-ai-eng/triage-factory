@@ -125,7 +125,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	// production primitive that produces each outcome: RequeueConversation
 	// ('requeued'), ResetProcessingConversations ('reaped' — scoped to this
 	// suite's fixed claimant, so it never touches another subtest's claim),
-	// ParkOpen ('parked'), and Complete ('completed' / 'failed'). Each of
+	// the holder's park ('parked'), and its terminal ('completed' / 'failed'). Each of
 	// these already carries the write ReleaseActiveTurnSystem used to make on
 	// the caller's behalf; every subtest that cares about the resulting
 	// conversations.status writes it explicitly afterward via
@@ -139,9 +139,9 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		case "reaped":
 			_, err = h.Stores.ConversationQueue.ResetProcessingConversations(ctx, predicateExecutorID, predicateBootEpoch+1)
 		case "parked":
-			_, err = h.Stores.Conversations.ParkOpen(ctx, orgID, convID, db.ParkIdle())
+			_, err = HolderPark(h.Stores.Conversations, ctx, orgID, convID, db.ParkIdle())
 		case "completed", "failed":
-			_, err = h.Stores.Conversations.Complete(ctx, orgID, convID, outcome, 0, 0, 0, "", "", "", "")
+			_, err = HolderComplete(h.Stores.Conversations, ctx, orgID, convID, outcome, 0, 0, 0, "", "", "", "")
 		default:
 			t.Fatalf("release: unsupported outcome %q", outcome)
 		}
@@ -690,7 +690,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	t.Run("ClaimingAParkedConversationClearsItsParkReason", func(t *testing.T) {
 		h := mk(t)
 		convID := h.StageDelegation(t, "sdk")
-		if _, err := h.Stores.Conversations.ParkOpen(ctx, h.OrgID, convID,
+		if _, err := HolderPark(h.Stores.Conversations, ctx, h.OrgID, convID,
 			db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil {
 			t.Fatalf("park: %v", err)
 		}

@@ -18,11 +18,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot is the incident, pinned:
-// a stop of a run whose process is on THIS pod used to leave the whole park to
-// the dying goroutine, which snapshotted before it flipped, so the run kept
-// reporting WORKING for as long as the capture took and a follow-up in that
-// window was refused for a row that was not parked yet.
+// TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot pins the order a stop's
+// settlement lands in: the killed engagement parks the row and releases its
+// claim, THEN captures the workspace. The other order would leave the run
+// reporting WORKING for as long as the capture took, and a follow-up in that
+// window refused for a row that was not parked yet.
 //
 // The persist is held open at its upload for the whole assertion, so the
 // ordering is a fact rather than a race the test might win. The follow-up goes
@@ -64,7 +64,6 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 			conversationID: conversationID,
 			namespace:      namespace,
 			claudeCwd:      wt,
-			triggerType:    "event",
 			claimID:        killedClaim,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 		}, "")
@@ -73,14 +72,6 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	if err := s.Stop(runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
-	// The verb's own answer, read the instant it returns — the goroutine above
-	// is still inside its teardown.
-	if got := storedStatus(t, database, conversationID); got != "open" {
-		t.Fatalf("status after Stop = %q, want open — the verb must park rather than wait on the teardown", got)
-	}
-	if hasActiveClaim(t, database, conversationID) {
-		t.Error("the claim is still live after Stop; the executor slot stays occupied until the teardown finishes")
-	}
 
 	// Wait until the teardown is inside its upload, so what follows is asserted
 	// against a persist that is provably still running.
@@ -88,6 +79,12 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	case <-held.entered:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the teardown never reached its upload")
+	}
+	if got := storedStatus(t, database, conversationID); got != "open" {
+		t.Fatalf("status during the upload = %q, want open — the settlement parks before it captures", got)
+	}
+	if hasActiveClaim(t, database, conversationID) {
+		t.Error("the claim is still live during the upload; the executor slot stays occupied until the capture finishes")
 	}
 	if ok, err := blobs.Exists(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, namespace)); err != nil || ok {
 		t.Fatalf("blob present (%v, %v) before the upload was released; the window under test does not exist", ok, err)
@@ -107,10 +104,7 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the teardown never finished")
 	}
-	// The teardown's contribution lands either way: the blob, and the record
-	// that says so. (Its own status flip is refused by the fence — the stop
-	// released the claim first — which is the ordinary shape and changes
-	// nothing about the persist.)
+	// The teardown's contribution: the blob, and the record that says so.
 	assertSnapshotPresent(t, s, namespace, true)
 	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, killedClaim)
 }
@@ -148,7 +142,6 @@ func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 		conversationID: conversationID,
 		namespace:      namespace,
 		claudeCwd:      wt,
-		triggerType:    "event",
 		claimID:        claimID,
 		reason:         db.ParkIdle(),
 	}, ""); fenced {
@@ -189,7 +182,6 @@ func TestParkConversationOpen_RetriesALostLifecycleOpen(t *testing.T) {
 		conversationID: conversationID,
 		namespace:      namespace,
 		claudeCwd:      wt,
-		triggerType:    "event",
 		claimID:        claimID,
 		reason:         db.ParkIdle(),
 	}, ""); fenced {

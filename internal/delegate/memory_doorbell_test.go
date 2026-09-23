@@ -78,7 +78,7 @@ func TestFailConversation_RingsTheMemoryDoorbell(t *testing.T) {
 	d := &doorbell{}
 	s.SetOnMemoryOwed(d.ring)
 
-	if fenced := s.failConversation(org, conversationID, "", "", "manual", runmode.LocalDefaultUserID,
+	if fenced := s.failConversation(org, conversationID, "", holderClaimFor(t, s, org, conversationID), "manual",
 		"the runtime died", domain.ConversationFailureUnclassified); fenced {
 		t.Fatal("failConversation reported fenced; nothing holds a claim on this fixture")
 	}
@@ -86,7 +86,7 @@ func TestFailConversation_RingsTheMemoryDoorbell(t *testing.T) {
 
 	// A second failure on the same conversation stamps nothing — the first
 	// boundary is the one that happened — so it rings nothing either.
-	if fenced := s.failConversation(org, conversationID, "", "", "manual", runmode.LocalDefaultUserID,
+	if fenced := s.failConversation(org, conversationID, "", holderClaimFor(t, s, org, conversationID), "manual",
 		"and again", domain.ConversationFailureUnclassified); fenced {
 		t.Fatal("failConversation reported fenced on the second call")
 	}
@@ -130,7 +130,7 @@ func TestBoundaries_RingNothingWithNoDoorbellWired(t *testing.T) {
 	seedConversation(t, database, conversationID, "sess", t.TempDir())
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	if fenced := s.failConversation(org, conversationID, "", "", "manual", runmode.LocalDefaultUserID,
+	if fenced := s.failConversation(org, conversationID, "", holderClaimFor(t, s, org, conversationID), "manual",
 		"the runtime died", domain.ConversationFailureUnclassified); fenced {
 		t.Fatal("failConversation reported fenced")
 	}

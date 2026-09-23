@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -27,7 +28,7 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 	seedDraftPRArtifact(t, s, conversationID)
 
 	task := loadTask(t, s, taskID)
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		res(`{"outcome":"continue","summary":"opened a PR"}`), t.TempDir(), nil, "", "event", "")
 
 	if parked {
@@ -50,7 +51,7 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
 	task := loadTask(t, s, taskID)
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		res(`{"outcome":"abort","summary":"looked into it","reason":"needs a human to rotate the token"}`),
 		t.TempDir(), nil, "", "event", "")
 
@@ -74,7 +75,7 @@ func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
 	task := loadTask(t, s, taskID)
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		res(`{"outcome":"finish","summary":"shipped it"}`), t.TempDir(), nil, "", "event", "")
 
 	if parked {
@@ -98,7 +99,7 @@ func TestProcessCompletion_FailedWritesNoSnapshot(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	errored := res(`the agent runtime blew up`)
 	errored.IsError = true
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		errored, t.TempDir(), nil, "", "event", "")
 
 	if conv := loadConversation(t, s, conversationID); conv.Status != "failed" {
@@ -307,17 +308,17 @@ func TestListReapableSnapshotKeys_SharedTaskNeedsAllPastTTL(t *testing.T) {
 }
 
 // TestParkOpenResuming_StampsAndClearsParkedAt pins the park-timestamp
-// lifecycle: ParkOpen stamps parked_at (so retention keys off the last park),
+// lifecycle: the park stamps parked_at (so retention keys off the last park),
 // the resume-by-enqueue flip clears it (the run is no longer parked).
 func TestParkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
 	s, database, conversationID, _ := setupAdvanceFixture(t, "parked-stamp")
 	ctx := context.Background()
 
-	if _, err := s.conversations.ParkOpen(ctx, runmode.LocalDefaultOrgID, conversationID, db.ParkIdle()); err != nil {
-		t.Fatalf("ParkOpen: %v", err)
+	if _, err := dbtest.HolderPark(s.conversations, ctx, runmode.LocalDefaultOrgID, conversationID, db.ParkIdle()); err != nil {
+		t.Fatalf("park: %v", err)
 	}
 	if !parkedAtSet(t, database, conversationID) {
-		t.Error("ParkOpen did not stamp parked_at")
+		t.Error("the park did not stamp parked_at")
 	}
 
 	if _, err := s.conversations.MarkQueuedForResume(ctx, runmode.LocalDefaultOrgID, conversationID); err != nil {

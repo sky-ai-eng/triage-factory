@@ -542,6 +542,12 @@ func conversationResponse(conv *domain.Conversation, artifactCount int, arts []d
 		out["ended_at"] = *conv.EndedAt
 		out["ended_reason"] = string(conv.EndedReason)
 	}
+	// A pending stop: asked for, not yet settled. Absent rather than null
+	// once settled or never asked, read off presence like ended_at. Who asked
+	// stays off the wire; the park_reason the settlement records says it.
+	if conv.StopRequestedAt != nil {
+		out["stop_requested_at"] = *conv.StopRequestedAt
+	}
 	if artifactCount == 0 || len(arts) > 0 {
 		prCount, reviewCount := domain.UnresolvedArtifactCounts(arts)
 		out["has_unresolved_artifacts"] = prCount > 0 || reviewCount > 0
@@ -678,6 +684,12 @@ func nonNegativeIntParam(v *httpx.Validation, r *http.Request, name string) int 
 // parked conversation resumable. Cancelling a plan is the blueprint endpoint's
 // job; dispositioning work is the task gestures'.
 //
+// The route records the request and answers with the conversation as it then
+// reads: stop_requested_at set, and the status still whatever it was. The
+// park arrives on the conversation_update push when the holder, or the
+// dispatcher for a conversation nobody holds, settles it. A second POST while
+// the first is pending is the same 200 — the request is idempotent.
+//
 // It is the single address for the gesture. The former /cancel and /interrupt
 // are gone rather than aliased: two endpoints is how one gesture grew two
 // meanings of `open` that a user could only tell apart by which button they
@@ -690,7 +702,7 @@ func nonNegativeIntParam(v *httpx.Validation, r *http.Request, name string) int 
 // its sibling /message gives for the same state: the two verbs used to
 // disagree (404 here, 409 there) about one condition on one resource.
 // Anything else Stop returns is an internal fault on the way to stopping a conversation
-// that really was active — a failed read, a failed park — and goes through
+// that really was active — a failed read, a failed intent write — and goes through
 // internalError, which logs it and redacts the detail in multi mode. Reporting
 // those as 404 would tell the user their conversation is gone when it is still running.
 func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) {

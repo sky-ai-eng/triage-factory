@@ -61,16 +61,15 @@ type liveParkContext struct {
 	conversationID string
 	namespace      string // task id — the snapshot/worktree key
 	claudeCwd      string
-	triggerType    string
-	creatorUserID  string
-	// claimID names the engagement writing the park, routing it through the
-	// claim fence. Every park a dispatched run writes carries one — the idle
-	// turn-end as much as the cancel, since a zombie's idle park would flip a
-	// conversation its successor is mid-turn on. Empty is the claimless
-	// caller's unfenced write, and a test fixture's.
+	// claimID names the engagement writing the park, and is required: the
+	// park goes through the claim fence and nowhere else. Every park a
+	// dispatched run writes carries one — the idle turn-end as much as the
+	// cancel, since a zombie's idle park would flip a conversation its
+	// successor is mid-turn on.
 	claimID string
 	// reason is why: db.ParkIdle() for a turn that simply ended,
-	// db.ParkStopped(...) for a cancel. See ConversationStore.ParkOpen.
+	// db.ParkStopped(...) for a cancel. See
+	// ConversationStore.ParkOpenForClaimSystem.
 	reason db.Park
 	// costUSD is the spend this engagement's process reported — the SDK's
 	// running total for the process, which is this claim's own figure since a
@@ -406,68 +405,45 @@ func invalidEnvelopeCorrection() string {
 // guard, then nudges the board + UI. The shared flip for every park:
 // parkConversationOpen (the process is gone — it opens the snapshot record
 // first, then flips, then persists), and the dispatcher's setup-time parks,
-// which have no workspace to snapshot yet. A cancel is a park too
-// (park.reason names the stop). Nil-safe so the no-DB driver tests can
-// exercise the loop.
+// which have no workspace to snapshot yet. A stop is a park too (park.reason
+// names it, and a pending stop intent overrides the reason in the store).
+// Nil-safe so the no-DB driver tests can exercise the loop.
 //
-// Routing has three arms, and which one a park takes says who is speaking. An
-// engagement parking its own run (claimID set) goes through the claim fence,
-// so a zombie executor cannot park a conversation its successor holds — and
-// every dispatched run reaches this with a claim, deliberate stop and idle
-// turn-end alike. The other two arms are what is left when there is no
-// engagement to name: a manual run with no claim writes under the creator's
-// synthetic claims, and everything else is a system write on the admin pool.
-// Neither is zombie-reachable, because a zombie by definition held a claim.
+// It writes through the claim fence and nothing else: a park is the holder's
+// write, in one transaction with its claim release, so a zombie executor
+// cannot park a conversation its successor holds. Every dispatched run
+// reaches this with a claim, deliberate stop and idle turn-end alike, and a
+// park with no claim to name is a caller bug — refused and logged at error,
+// never written unfenced.
 //
-// Returns fenced: true when the fence refused the write because this
-// engagement's claim was released. Nothing was recorded or broadcast, and the
-// caller must not act on the run's state either — it belongs to whoever holds
-// the claim now. Always false on the two unfenced arms.
+// Returns fenced: true when nothing was written because this engagement holds
+// no live claim. Nothing was recorded or broadcast, and the caller must not
+// act on the run's state either — it belongs to whoever holds the claim now,
+// or, for a pending stop, to the dispatcher's settlement.
 func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext) (fenced bool) {
 	if s.conversations == nil {
 		return false // test fixture with no DB wired
+	}
+	if park.claimID == "" {
+		delegateLog.Error("park without a claim id — every park is the holder's fenced write; recording nothing",
+			"conversation", park.conversationID, "org_id", park.orgID)
+		return true
 	}
 	// The same detachment this always had — a park must land even when the
 	// run's ctx is already cancelled, which is the ordinary case here (a user
 	// stop IS a cancel) — expressed as WithoutCancel so the write stays inside
 	// the engagement's trace rather than orphaning into one of its own.
 	bgCtx := context.WithoutCancel(ctx)
-	var flipped bool
-	var err error
-	switch {
-	case park.claimID != "":
-		flipped, err = s.conversations.ParkOpenForClaimSystem(bgCtx, park.orgID, park.conversationID, park.claimID, park.reason)
-	case park.triggerType == "manual":
-		err = s.tx.SyntheticClaimsWithTx(bgCtx, park.orgID, park.creatorUserID, func(ts db.TxStores) error {
-			f, e := ts.Conversations.ParkOpen(bgCtx, park.orgID, park.conversationID, park.reason)
-			flipped = f
-			return e
-		})
-	default:
-		flipped, err = s.conversations.ParkOpenSystem(bgCtx, park.orgID, park.conversationID, park.reason)
-	}
+	flipped, err := s.conversations.ParkOpenForClaimSystem(bgCtx, park.orgID, park.conversationID, park.claimID, park.reason)
 	if errors.Is(err, db.ErrClaimReleased) {
-		// Whoever holds the claim now owns the conversation, so this park is
-		// not this engagement's state to report. The workspace stays too — it
-		// may be the one they are running in.
-		//
-		// A deliberate stop says so at INFO, because there the refusal is the
-		// design working. Control parks the row and releases the claim the
-		// instant the user asks, and this engagement's teardown then arrives
-		// to find the state already recorded by the actor who asked for it —
-		// every cross-pod stop produces exactly one of these. Alarming on it
-		// would train the reader to ignore the line that matters.
-		//
-		// An idle park has no such outside actor, so a refusal there means a
-		// successor really did take the conversation out from under a live
-		// engagement. That keeps ERROR.
-		if park.reason.Deliberate {
-			delegateLog.Info("claim fence refused the park after a deliberate stop — the stopping actor already parked this conversation; recording nothing further",
-				"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID)
-			return true
-		}
-		delegateLog.Error("claim fence refused the park — a successor owns this conversation; recording nothing",
-			"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID, "error", err)
+		// Whoever released the claim — expiry handling after a lapsed lease,
+		// or a successor — owns what happens next, so this park is not this
+		// engagement's state to report. The workspace stays too: it may be the
+		// one a successor is running in. A stop that was pending stays pending
+		// and the dispatcher settles it once no live claim holds the row.
+		delegateLog.Error("claim fence refused the park — this engagement no longer holds the conversation; recording nothing",
+			"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID,
+			"deliberate", park.reason.Deliberate, "error", err)
 		return true
 	}
 	if err != nil {
@@ -505,13 +481,13 @@ func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext
 	// on another pod sees.
 	//
 	// It runs ahead of the flip, so a park the fence goes on to refuse has
-	// filed anyway. That is the point rather than an oversight: the ordinary
-	// refusal here is a cross-pod stop, where control parked the row and
-	// released the claim on the user's behalf and this engagement is the only
-	// thing holding the file. Skipping it there would lose exactly the notes
-	// this mirror exists to keep. The rarer refusal — a successor mid-flight —
-	// is what settle's unconditional write answers: the successor's own ending
-	// re-asserts its file over anything a zombie filed first.
+	// filed anyway. That is the point rather than an oversight: an engagement
+	// whose claim was released under it — a stop the dispatcher will settle
+	// once expiry handling released the claim — is still the only thing
+	// holding the file, and skipping it there would lose exactly the notes this
+	// mirror exists to keep. A successor mid-flight is what settle's
+	// unconditional write answers: the successor's own ending re-asserts its
+	// file over anything a zombie filed first.
 	park.mirror.settle(ctx)
 
 	// The flip does not wait on the capture, and the durable state record is
@@ -534,28 +510,11 @@ func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext
 
 	// Spend lands BEFORE the flip: the `open` broadcast is what makes every
 	// watcher refetch, and the figure has to be on the ledger by then. It
-	// also lands whether or not the flip is refused — a fenced park after a
-	// deliberate stop is the ordinary case, and the engagement is still the
-	// only holder of what its process spent.
+	// also lands whether or not the flip is refused: the engagement is still
+	// the only holder of what its process spent.
 	s.settleEngagementSpend(snapCtx, park)
 
 	fenced = s.markConversationOpen(ctx, park)
-	if fenced && leaseHeld && park.reason.Deliberate {
-		// The one refusal whose `open` is real: control parked this row on the
-		// user's behalf and released the claim before this teardown arrived
-		// (see Spawner.stop), announcing that park while no persist was yet
-		// owed — so a watcher reading the run then saw no workspace anywhere
-		// and disabled its composer. The record opened above is what changes
-		// that answer, so this is the moment to say so, not when the blob
-		// lands.
-		//
-		// Gated on the record having landed, without which there is nothing to
-		// announce. And on a DELIBERATE park: the other refusal — a successor
-		// taking the conversation out from under a live engagement — leaves it
-		// running under someone else, and repeating a parked status there would
-		// be this teardown reporting a state that isn't the row's.
-		s.broadcastConversationResumable(park.orgID, park.conversationID)
-	}
 
 	if willSnapshot {
 		if err := s.persistWorkspaceSnapshot(snapCtx, park.orgID, park.conversationID, park.namespace, park.claimID, park.claudeCwd, sessionID, park.runtime, leaseHeld); err != nil {

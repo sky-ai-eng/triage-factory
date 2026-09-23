@@ -98,3 +98,13 @@ func TestVocabularyAccessorsReturnFreshSlices(t *testing.T) {
 		}
 	}
 }
+
+// Every reason the vocabulary lists has to pass the door that validates one,
+// or a store refuses a park reason the domain says exists.
+func TestAllParkReasons_SatisfyIsParkReason(t *testing.T) {
+	for _, r := range AllParkReasons() {
+		if !IsParkReason(string(r)) {
+			t.Errorf("IsParkReason(%q) = false for a member of AllParkReasons", r)
+		}
+	}
+}

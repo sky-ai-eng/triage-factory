@@ -142,11 +142,10 @@ func (s *Spawner) getController() RunController {
 // crossPodController wraps inProcessController with the outbox-backed
 // cross-pod path: try the local process registry first (byte-identical to
 // today's N=1 behavior, including its exact error), and only on a local
-// miss resolve a remote owner. Cancel is NOT extended here — cancel's
-// cross-pod hastening is fire-and-forget from cancel.go's Spawner.Cancel
-// (the DB-only park write is already the source of
-// truth), so crossPodController.Cancel is a pure passthrough to the local
-// lookup.
+// miss resolve a remote owner. Cancel is NOT extended here — a stop's
+// cross-pod signal commits with its intent in RequestStopSystem (the intent
+// is the record, the signal only hastens), so crossPodController.Cancel is a
+// pure passthrough to the local lookup.
 type crossPodController struct {
 	inProcessController
 }
@@ -252,37 +251,6 @@ func (s *Spawner) routeControlSignal(ctx context.Context, conversationID string,
 		return fmt.Errorf("%s run %s: %w", kind, conversationID, ErrNoLiveProcess)
 	}
 	return nil
-}
-
-// signalCancelBestEffort hastens a live remote kill for a run this pod
-// doesn't own locally — fire-and-forget, per the reply-leg contract's
-// cancel row: the caller's DB-only park write is already
-// the source of truth and already works cross-pod, so a failure or
-// timeout here is never surfaced. No-op when conversationSignals isn't wired
-// (local mode, or multi mode before/without SetConversationSignals).
-func (s *Spawner) signalCancelBestEffort(orgID, conversationID, executorID string) {
-	s.mu.Lock()
-	conversationSignals := s.conversationSignals
-	s.mu.Unlock()
-	if conversationSignals == nil || s.instances == nil || executorID == "" {
-		return
-	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		inst, err := s.instances.Get(ctx, executorID)
-		if err != nil || inst == nil || time.Since(inst.LastHeartbeatAt) > instanceStaleThreshold {
-			return
-		}
-		id, err := conversationSignals.Insert(ctx, orgID, conversationID, domain.ConversationSignalCancel, "", executorID)
-		if err != nil {
-			delegateLog.Warn("cancel hastening signal insert failed (DB-only cancel already recorded)", "conversation", conversationID, "error", err)
-			return
-		}
-		if err := s.notifyCtl(ctx, "new", id); err != nil {
-			delegateLog.Warn("notify tf_ctl for cancel hastening signal failed; the owner's backstop scan still finds it", "signal_id", id, "error", err)
-		}
-	}()
 }
 
 // resolveLiveOwner reports the executor id owning conversationID's live process,

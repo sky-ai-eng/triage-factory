@@ -193,7 +193,7 @@ func TestProcessCompletion_SnapshotLandsBeforeTheTerminalCommits(t *testing.T) {
 		statusAtPut = storedStatus(t, database, conversationID)
 	}})
 
-	s.processCompletion(ctx, org, conversationID, "seedbpr-"+conversationID, "", loadTask(t, s, taskID),
+	s.processCompletion(ctx, org, conversationID, "seedbpr-"+conversationID, holderClaimFor(t, s, org, conversationID), loadTask(t, s, taskID),
 		res(`{"outcome":"finish","summary":"done"}`), t.TempDir(), nil, "sess-snap-order", "event", "")
 
 	if puts != 1 {
@@ -233,7 +233,7 @@ func TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot(t *testing.T
 	writeSession(t, cwd, sessionID, `{"type":"summary"}`)
 	writeFile(t, filepath.Join(cwd, "_tfac", "notes", "build.log"), "the turn's work")
 
-	s.processCompletion(ctx, org, conversationID, "seedbpr-"+conversationID, "", loadTask(t, s, taskID),
+	s.processCompletion(ctx, org, conversationID, "seedbpr-"+conversationID, holderClaimFor(t, s, org, conversationID), loadTask(t, s, taskID),
 		res(`{"outcome":"finish","summary":"done"}`), cwd, nil, sessionID, "event", "")
 
 	// The wake a person can fire the instant the status flips.

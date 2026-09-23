@@ -42,11 +42,10 @@ type ConversationReturnedRowFactory func(t *testing.T) (
 // One seeded conversation carries a single live engagement through the
 // claim-scoped writes in a plausible order (mint, session, worktree, phase,
 // sandbox stats, executor re-stamp, compaction settle) so every
-// ForClaimSystem call has the live claim it fences on; three more seeded
-// conversations each carry Complete/CompleteSystem/CompleteForClaimSystem to
-// its own terminal, since completing releases the claim and only one
-// terminal write is meaningful per engagement. A fifth exercises
-// SetExecutorSystem's release arm (executorID == "") directly.
+// ForClaimSystem call has the live claim it fences on; another carries
+// CompleteForClaimSystem to its own terminal, since completing releases the
+// claim and only one terminal write is meaningful per engagement. A third
+// exercises SetExecutorSystem's release arm (executorID == "") directly.
 func RunConversationReturnedRowConformance(t *testing.T, mk ConversationReturnedRowFactory) {
 	t.Helper()
 
@@ -193,12 +192,6 @@ func RunConversationReturnedRowConformance(t *testing.T, mk ConversationReturned
 		name string
 		call func(store db.ConversationStore, ctx context.Context, orgID, conversationID, claimID string) (*domain.Conversation, error)
 	}{
-		{"Complete", func(store db.ConversationStore, ctx context.Context, orgID, conversationID, _ string) (*domain.Conversation, error) {
-			return store.Complete(ctx, orgID, conversationID, "completed", 0.5, 1000, 2, "done", "finish", "", "")
-		}},
-		{"CompleteSystem", func(store db.ConversationStore, ctx context.Context, orgID, conversationID, _ string) (*domain.Conversation, error) {
-			return store.CompleteSystem(ctx, orgID, conversationID, "completed", 0.5, 1000, 2, "done", "finish", "", "")
-		}},
 		{"CompleteForClaimSystem", func(store db.ConversationStore, ctx context.Context, orgID, conversationID, claimID string) (*domain.Conversation, error) {
 			return store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, "completed", 0.5, 1000, 2, "done", "finish", "", "")
 		}},
@@ -231,9 +224,6 @@ func RunConversationReturnedRowConformance(t *testing.T, mk ConversationReturned
 		ctx := context.Background()
 		missingID := "00000000-0000-4000-8000-000000000000"
 
-		if _, err := store.Complete(ctx, orgID, missingID, "completed", 0, 0, 0, "", "", "", ""); !errors.Is(err, db.ErrNoSuchConversation) {
-			t.Errorf("Complete on a missing conversation id = %v, want db.ErrNoSuchConversation", err)
-		}
 		if _, err := store.SetSession(ctx, orgID, missingID, "sess"); !errors.Is(err, db.ErrNoSuchConversation) {
 			t.Errorf("SetSession on a missing conversation id = %v, want db.ErrNoSuchConversation", err)
 		}
@@ -261,9 +251,9 @@ func RunConversationReturnedRowConformance(t *testing.T, mk ConversationReturned
 // about, so calling it through a single tf_app-bound transaction (the shape
 // NewForTx gives a test — see its doc) trips the same missing UPDATE grant,
 // for a reason that has nothing to do with the conversations-row RETURNING
-// this suite exists to check. Production Complete never hits that: its
+// this suite exists to check. The production terminal never hits that: its
 // settlement genuinely runs on the real admin pool. RunConversationReturnedRowConformance
-// covers Complete/CompleteSystem/CompleteForClaimSystem on the admin pool,
+// covers CompleteForClaimSystem on the admin pool,
 // and its conversations flip shares writeConversationReturning byte-for-byte
 // with SetSession/SetWorktreePath below — proving RLS-visibility for those
 // two is evidence the shared helper works under RLS, which is what this

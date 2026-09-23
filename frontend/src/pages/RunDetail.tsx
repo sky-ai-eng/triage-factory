@@ -4,7 +4,7 @@ import type { BlueprintStep, Conversation } from '../types'
 import { setPresenceView } from '../hooks/useWebSocket'
 import { useConversationDetail } from '../hooks/useConversationDetail'
 import { useOrgHref } from '../hooks/useOrgHref'
-import { isActiveConversation } from '../lib/conversationStatus'
+import { isActiveConversation, isTerminalStatus } from '../lib/conversationStatus'
 import RunStation, {
   type ChainStepLabel,
   type StationActions,
@@ -115,20 +115,22 @@ export default function RunDetail() {
 
   // Stop the conversation: the agent stops, it parks `open`, and its
   // blueprint and task stay exactly where they were — so the composer's offer
-  // to pick the work back up is true. stopPending disables the controls while
-  // the POST is in flight so rapid clicks can't stack requests ahead of the WS
-  // status flip.
+  // to pick the work back up is true. The POST records the request and the
+  // park lands later, on the conversation_update push, when the holder or the
+  // dispatcher settles it. stopPending covers the POST itself; the refetch
+  // after it picks up stop_requested_at, which covers the wait for the park.
   const handleStop = useCallback(async () => {
     if (!conversation || stopPending) return
     setStopPending(true)
     try {
       await apiFetch(`/api/agent/conversations/${conversation.ID}/stop`, { method: 'POST' })
+      softRefresh()
     } catch (err) {
       toast.error(httpErrorMessage(err, 'Could not stop the run.'))
     } finally {
       setStopPending(false)
     }
-  }, [conversation, stopPending])
+  }, [conversation, stopPending, softRefresh])
 
   // Steer a conversation: a free-form message lands on the live process (or
   // wakes an `open` conversation via resume). The backend records +
@@ -214,7 +216,10 @@ export default function RunDetail() {
     onArtifactResolved: softRefresh,
     onMessage: handleMessage,
     onInterrupt: handleStop,
-    stopPending,
+    // A stop asked for and not yet settled disables the controls the same way
+    // the in-flight POST does; a terminal row has no stop controls to disable.
+    stopPending:
+      stopPending || (!!conversation.stop_requested_at && !isTerminalStatus(conversation.Status)),
     onResolvePermission: resolvePermission,
   }
 
