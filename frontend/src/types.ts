@@ -1137,14 +1137,6 @@ export type WSEvent =
         status?: string
         failure_kind?: string
         request_id?: string
-        // resumable rides the parked status when a conversation parked by one pod
-        // becomes resumable on another: a cross-pod stop parks from control
-        // before the executor holding the workspace has recorded that it owes
-        // a persist for it, and this is the executor saying it has — the
-        // moment a follow-up becomes possible, which no status change marks.
-        // The status repeats what the row already has, so consumers must merge
-        // it idempotently: a second `open` is not a transition.
-        resumable?: boolean
       }
     }
   // Artifact reconciliation (TFAC-464): an artifact a conversation produced

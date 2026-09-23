@@ -398,6 +398,60 @@ func TestReapDeadExecutors_CancelRequestedFinalizesCancelledNotRequeued(t *testi
 	}
 }
 
+// A stop pending on a dead executor's conversation is released, not requeued,
+// failed or parked: the reaper writes nothing on the conversation, and the
+// dispatcher's settlement parks it with the reason the intent names. The
+// result summary is left alone, so the parked row carries no requeue text.
+func TestReapDeadExecutors_PendingStopIsReleasedToTheSettlement(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	fx := seedReaperFixture(t, h)
+	backdateHeartbeat(t, h, fx.executorID, time.Hour)
+	if ok, err := stores.Conversations.RequestStopSystem(ctx, fx.orgID, fx.conversationID, fx.userID, ""); err != nil || !ok {
+		t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
+	}
+
+	counts, err := reaper.NewPostgresStore(h.AdminDB).ReapDeadExecutors(ctx, 30*time.Second, 2)
+	if err != nil {
+		t.Fatalf("ReapDeadExecutors: %v", err)
+	}
+	if counts != (reaper.Counts{StopsReleased: 1}) {
+		t.Fatalf("counts = %+v, want {StopsReleased:1}", counts)
+	}
+	var status, summary sql.NullString
+	var outcome string
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status, result_summary FROM conversations WHERE id = $1`, fx.conversationID).Scan(&status, &summary); err != nil {
+		t.Fatalf("read back conversation: %v", err)
+	}
+	if status.Valid || summary.String != "" {
+		t.Errorf("conversation after the reap = (status %v, summary %q), want untouched", status, summary.String)
+	}
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT outcome FROM claims WHERE conversation_id = $1 AND released_at IS NOT NULL`, fx.conversationID).Scan(&outcome); err != nil {
+		t.Fatalf("read back the released claim: %v", err)
+	}
+	if outcome != "reaped" {
+		t.Errorf("claim outcome = %q, want reaped", outcome)
+	}
+
+	settled, err := stores.ConversationQueue.SettleUnclaimedStopsSystem(ctx)
+	if err != nil {
+		t.Fatalf("SettleUnclaimedStopsSystem: %v", err)
+	}
+	if len(settled) != 1 || settled[0].ConversationID != fx.conversationID {
+		t.Fatalf("settled = %+v, want the reaped conversation", settled)
+	}
+	got, err := stores.Conversations.GetSystem(ctx, fx.orgID, fx.conversationID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSystem: (%v, %v)", got, err)
+	}
+	if got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonUserCancelled || got.ResultSummary != "" {
+		t.Errorf("after the settlement = (status %q, reason %q, summary %q), want (open, user_cancelled, empty)", got.Status, got.ParkReason, got.ResultSummary)
+	}
+}
+
 // TestReapDeadExecutors_FreshHeartbeatNeverReaped pins the negative case a
 // draining executor relies on: a claimed conversation under an executor whose
 // heartbeat is still fresh is left completely untouched, regardless of

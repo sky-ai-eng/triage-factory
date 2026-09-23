@@ -3,7 +3,6 @@ import { render, screen, act, waitFor } from '@testing-library/react'
 import { useConversationDetail } from './useConversationDetail'
 import { TelemetryRail } from '../components/runstation/StationInstruments'
 import { stationState } from '../components/runstation/stationStyle'
-import { canResumeConversation, resumeBlockedCopy } from '../lib/conversationStatus'
 import type { Conversation, Message, WSEvent } from '../types'
 import { jsonBody } from '../test/apiResponse'
 
@@ -647,97 +646,6 @@ describe('useConversationDetail transcript reconciliation', () => {
     // Now it is closed out, so the asking stops.
     await tick()
     expect(sinceRequests(fetchMock)).toHaveLength(2)
-  })
-})
-
-// The composer's gate as the user experiences it: a parked conversation
-// whose workspace hadn't landed yet renders the blocked copy, and the announcement that it has
-// landed turns the input back on with no reload.
-function ComposerHarness() {
-  const { conversation } = useConversationDetail(CONVERSATION_ID)
-  if (!conversation) return <div>loading</div>
-  return (
-    <div>
-      {canResumeConversation(conversation) ? 'composer live' : resumeBlockedCopy(conversation)}
-    </div>
-  )
-}
-
-describe('useConversationDetail resumability', () => {
-  // The conversation row read, parked from the second call on: the mount
-  // gets an answer, and every refetch after it hangs. Anything that changes on screen
-  // past that point can only have come from the websocket frame.
-  let parkedRefetch: ReturnType<typeof deferred<Conversation>>
-
-  function mockResumableFetch() {
-    parkedRefetch = deferred<Conversation>()
-    let conversationReads = 0
-    const fetchMock = vi.fn((url: string) => {
-      const [path] = url.split('?')
-      if (path !== `/api/agent/conversations/${CONVERSATION_ID}`) {
-        // Everything else this mount pulls — transcript, artifacts, pending
-        // permissions — is empty here; the conversation row is the whole subject.
-        return Promise.resolve({ ok: true, status: 200, ...jsonBody([]) })
-      }
-      conversationReads++
-      // The conversation row goes through apiJSON now, so the stub has to
-      // answer text() as well — jsonBody awaits the promise, which is what
-      // parks the refetch.
-      const body =
-        conversationReads === 1 ? Promise.resolve(serverConversation) : parkedRefetch.promise
-      return Promise.resolve({ ok: true, status: 200, ...jsonBody(body) })
-    })
-    vi.stubGlobal('fetch', fetchMock)
-    return fetchMock
-  }
-
-  beforeEach(() => {
-    dispatch = null
-    serverMessages = []
-    pendingSince = null
-    failSinceReads = false
-    olderPages = {}
-    firstPageOlderToken = ''
-    serverConversation = conversation({
-      Status: 'open',
-      resumable: false,
-      resume_blocked_reason: 'workspace_expired',
-    })
-  })
-
-  it('turns the composer on when the workspace is announced as accounted for', async () => {
-    mockResumableFetch()
-    render(<ComposerHarness />)
-    // A cross-pod stop parks the row from control, before the executor holding
-    // the workspace has recorded that it owes a persist for it, so this is the
-    // honest state on arrival.
-    expect(await screen.findByText(/workspace expired/i)).toBeInTheDocument()
-
-    // The fenced teardown recorded the persist it owes. Same event, same status
-    // the row already has, one extra field.
-    send({
-      type: 'conversation_update',
-      conversation_id: CONVERSATION_ID,
-      data: { status: 'open', resumable: true },
-    })
-
-    await waitFor(() => expect(screen.getByText('composer live')).toBeInTheDocument())
-  })
-
-  it('leaves the held answer alone when a status frame says nothing about it', async () => {
-    serverConversation = conversation({ Status: 'open', resumable: true })
-    mockResumableFetch()
-    render(<ComposerHarness />)
-    expect(await screen.findByText('composer live')).toBeInTheDocument()
-
-    // Absent is "unchanged", not false — every other status flip on the wire
-    // carries no resumable field and must not close a live composer.
-    send({
-      type: 'conversation_update',
-      conversation_id: CONVERSATION_ID,
-      data: { status: 'open' },
-    })
-    await waitFor(() => expect(screen.getByText('composer live')).toBeInTheDocument())
   })
 })
 

@@ -19,12 +19,13 @@ import (
 )
 
 // Counts is the outcome of one ReapDeadExecutors sweep — how many conversations the
-// reaper requeued, terminal-failed, or cancel-finalized. Logged by
-// RunReaper on every non-empty tick.
+// reaper requeued, terminal-failed, cancel-finalized, or released to the
+// dispatcher's stop settlement. Logged by RunReaper on every non-empty tick.
 type Counts struct {
-	Requeued  int
-	Failed    int
-	Cancelled int
+	Requeued      int
+	Failed        int
+	Cancelled     int
+	StopsReleased int
 }
 
 // Store is the reaper's persistence seam.
@@ -49,7 +50,12 @@ type Store interface {
 	// dispatcher's unit exactly (postgres.EpisodeAttemptsSQL, which this
 	// shares rather than re-derives).
 	//
-	// Three disjoint outcomes per candidate:
+	// Four disjoint outcomes per candidate:
+	//   - a stop is pending: release the claim and write nothing else. The
+	//     row is then one no live claim holds, which is exactly what
+	//     ConversationQueueStore.SettleUnclaimedStopsSystem parks, so every
+	//     stop nobody holds settles on that one path, with its derived park
+	//     reason, its run cancel and its broadcast.
 	//   - blueprint_run.cancel_requested: finalize cancelled (conversation +
 	//     blueprint_run), regardless of attempts — the existing
 	//     cancel-finalization semantics, just with no live owner to signal.
@@ -142,6 +148,28 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	staleSecs := staleThreshold.Seconds()
 	var out Counts
 	if err := db.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		// 0. A stop is pending: release the claim only. The claim gate
+		// refuses a stop-requested row, so a requeue would only have
+		// relabelled it before the settlement parked it, and a fail would
+		// record a crash loop for a conversation someone asked to stop. This
+		// runs first because the arms below find their candidates through an
+		// unreleased claim, so a row released here is out of their sets.
+		res, err := tx.ExecContext(ctx, `
+			UPDATE claims SET released_at = now(), outcome = 'reaped'
+			WHERE released_at IS NULL AND conversation_id IN (
+				SELECT r.id `+reapCandidateJoin+`
+				  AND r.stop_requested_at IS NOT NULL
+			)
+		`, staleSecs)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		out.StopsReleased = int(n)
+
 		// 1. Cancel-requested candidates: finalize instead of requeuing —
 		// "cancel-requested rows go through the existing cancel finalization
 		// instead of requeue" (spec §4.3). No live owner to signal, so this IS the

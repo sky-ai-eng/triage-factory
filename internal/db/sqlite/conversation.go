@@ -1284,7 +1284,8 @@ func (s *conversationStore) GetSystem(ctx context.Context, orgID, conversationID
 
 // RequestStopSystem writes the intent alone: local mode has no
 // conversation_signals table, and its holder is reached through the
-// in-process cancel handle, so the signal target is ignored.
+// in-process cancel handle, so the signal target is ignored. Both columns key
+// on stop_requested_at for the reason the Postgres twin gives.
 func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conversationID, by, _ string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -1293,7 +1294,8 @@ func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conver
 	err := s.q.QueryRowContext(ctx, `
 		UPDATE conversations
 		SET stop_requested_at = COALESCE(stop_requested_at, ?),
-		    stop_requested_by = COALESCE(stop_requested_by, NULLIF(?, ''))
+		    stop_requested_by = CASE WHEN stop_requested_at IS NULL
+		                             THEN NULLIF(?, '') ELSE stop_requested_by END
 		WHERE id = ?
 		  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 		RETURNING id

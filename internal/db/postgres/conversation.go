@@ -1383,9 +1383,10 @@ func (s *conversationStore) GetSystem(ctx context.Context, orgID, conversationID
 }
 
 // RequestStopSystem writes the intent and, when a target is named, the
-// cross-pod cancel signal on one admin-pool transaction. The COALESCEs are the
-// idempotence: a repeated request neither restamps the time nor overwrites who
-// asked first.
+// cross-pod cancel signal on one admin-pool transaction. stop_requested_at is
+// what marks a stop as already asked for, and both columns key on it: a
+// system stop leaves the actor NULL, so COALESCE on the actor would let a
+// later user request claim a stop the system made first.
 func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string) (bool, error) {
 	requested := false
 	err := inTx(ctx, s.admin, func(q queryer) error {
@@ -1393,7 +1394,8 @@ func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conver
 		err := q.QueryRowContext(ctx, `
 			UPDATE conversations
 			SET stop_requested_at = COALESCE(stop_requested_at, now()),
-			    stop_requested_by = COALESCE(stop_requested_by, NULLIF($1, ''))
+			    stop_requested_by = CASE WHEN stop_requested_at IS NULL
+			                             THEN NULLIF($1, '') ELSE stop_requested_by END
 			WHERE org_id = $2 AND id = $3
 			  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 			RETURNING id

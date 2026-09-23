@@ -232,9 +232,10 @@ type ConversationQueueStore interface {
 	// cancelled, with the columns MarkRunStatusSystem writes for a cancel.
 	//
 	// "No live claim" is released_at alone, not the lease: a claim whose
-	// holder died is released by expiry handling first, and the next pass
-	// settles the row. Cross-org system sweep on the admin pool; concurrent
-	// passes skip each other's rows.
+	// holder died is released by the reaper (internal/reaper), which leaves a
+	// stop-requested row otherwise untouched, and the next pass settles it.
+	// Cross-org system sweep on the admin pool; concurrent passes skip each
+	// other's rows.
 	SettleUnclaimedStopsSystem(ctx context.Context) ([]SettledStop, error)
 
 	// ExpiredClaimsSystem counts live claims past their expiry across every

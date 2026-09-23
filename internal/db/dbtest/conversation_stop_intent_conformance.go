@@ -123,6 +123,16 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if first.StopRequestedAt == nil || second.StopRequestedAt == nil || !second.StopRequestedAt.Equal(*first.StopRequestedAt) {
 			t.Errorf("time after a second request = %v, want the first's %v", second.StopRequestedAt, first.StopRequestedAt)
 		}
+
+		// A system stop records no actor, and a user request after it must
+		// not supply one: the park reason is derived from the actor, so the
+		// stop would read as the user's.
+		sys, _ := f.StageStep(t)
+		request(t, f, sys, "")
+		request(t, f, sys, stopTestUser)
+		if got := get(t, f, sys); got.StopRequestedAt == nil || got.StopRequestedBy != "" {
+			t.Errorf("system-first intent after a user request = (%v, %q), want set with no actor", got.StopRequestedAt, got.StopRequestedBy)
+		}
 	})
 
 	t.Run("Request_RefusesATerminalRow", func(t *testing.T) {

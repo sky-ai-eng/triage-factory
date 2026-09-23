@@ -95,9 +95,10 @@ func RunReaper(ctx context.Context, store Store, interval time.Duration, staleTh
 				reaperLog.Warn("reap sweep failed; retrying next tick", "error", err)
 				continue
 			}
-			if counts.Requeued > 0 || counts.Failed > 0 || counts.Cancelled > 0 {
+			if counts.Requeued > 0 || counts.Failed > 0 || counts.Cancelled > 0 || counts.StopsReleased > 0 {
 				reaperLog.Info("reaped dead-executor conversations",
-					"requeued", counts.Requeued, "failed_executor_lost", counts.Failed, "cancelled", counts.Cancelled)
+					"requeued", counts.Requeued, "failed_executor_lost", counts.Failed, "cancelled", counts.Cancelled,
+					"stops_released", counts.StopsReleased)
 			}
 		}
 	}
