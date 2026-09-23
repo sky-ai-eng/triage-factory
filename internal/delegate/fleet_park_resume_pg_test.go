@@ -194,9 +194,24 @@ func (f *parkFleet) engage(t *testing.T, s *Spawner) *liveEngagement {
 // whose teardown then settles the stop.
 func (f *parkFleet) stopFromControl(t *testing.T, e *liveEngagement) {
 	t.Helper()
+	f.requestStopFromControl(t)
+	f.deliverStop(t, e)
+}
+
+// requestStopFromControl is the verb alone. Only X's signal drain cancels the
+// engagement, so until deliverStop runs the row is exactly what the request
+// path wrote and X's teardown has not started.
+func (f *parkFleet) requestStopFromControl(t *testing.T) {
+	t.Helper()
 	if err := f.control.Stop(f.orgID, f.conversationID, f.userID); err != nil {
 		t.Fatalf("stop from control: %v", err)
 	}
+}
+
+// deliverStop pumps X's signal drain until the kill has reached the
+// engagement, whose teardown then settles the stop on its own goroutine.
+func (f *parkFleet) deliverStop(t *testing.T, e *liveEngagement) {
+	t.Helper()
 	// The drain is pumped rather than called once: it is the apply loop's
 	// scan, and the kill it delivers lands on another goroutine.
 	deadline := time.Now().Add(5 * time.Second)
@@ -505,13 +520,17 @@ func TestFleet_ParkFirst_StopParksBeforeTheExecutorPersists(t *testing.T) {
 	first := f.engage(t, f.x)
 	f.gate.hold()
 
-	f.stopFromControl(t, first)
-	if got := f.read(t); got.StopRequestedAt == nil {
-		t.Error("the stop left no intent on the row")
+	// Read between the request and its delivery: once X has the kill, its
+	// teardown parks the row and clears the intent concurrently with any read
+	// taken here.
+	f.requestStopFromControl(t)
+	if got := f.read(t); got.StopRequestedAt == nil || got.Status == domain.StatusOpen {
+		t.Errorf("after the request = (status %q, intent %v), want the intent and no park — the request path writes no status", got.Status, got.StopRequestedAt)
 	}
 	if !f.transcriptHas(t, stopNoteByUser) {
 		t.Error("the stop note is not on the transcript")
 	}
+	f.deliverStop(t, first)
 
 	// The executor's settlement is in its upload now: the park and the claim
 	// release have committed, and the persist is what remains.
