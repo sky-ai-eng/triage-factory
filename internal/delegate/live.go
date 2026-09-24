@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -566,12 +567,12 @@ type activitySink struct {
 	tracker *activityTracker
 	timings activityTimings
 
-	// toolEnds holds the end of each tool call whose result has not arrived,
-	// and toolNames its name, both keyed by tool-use id. Parallel calls in one
-	// message are tracked by the latest begin; the tracker's identity check
-	// makes an earlier call's end a no-op.
-	toolEnds  map[string]func()
+	// pending is the tool calls whose result has not arrived, by tool-use id
+	// in the order their tool_use was read, and toolNames their names.
+	// endTool ends the operation the sink last began for them.
+	pending   []string
 	toolNames map[string]string
+	endTool   func()
 }
 
 func newActivitySink(inner agentproc.Sink, mirror *memoryMirror, tracker *activityTracker, timings activityTimings) *activitySink {
@@ -580,8 +581,8 @@ func newActivitySink(inner agentproc.Sink, mirror *memoryMirror, tracker *activi
 		mirror:    mirror,
 		tracker:   tracker,
 		timings:   timings,
-		toolEnds:  map[string]func(){},
 		toolNames: map[string]string{},
+		endTool:   func() {},
 	}
 }
 
@@ -613,44 +614,61 @@ func (a *activitySink) OnLine() {
 }
 
 func (a *activitySink) OnToolUse(id, name string) {
+	if _, seen := a.toolNames[id]; !seen {
+		a.pending = append(a.pending, id)
+	}
 	a.toolNames[id] = name
-	a.toolEnds[id] = a.tracker.begin("tool:"+name, a.timings.toolCall)
+	a.trackTools()
 }
 
 func (a *activitySink) OnToolResult(id string) {
-	if end, ok := a.toolEnds[id]; ok {
-		end()
+	if _, pending := a.toolNames[id]; !pending {
+		return
 	}
-	delete(a.toolEnds, id)
 	delete(a.toolNames, id)
+	a.pending = slices.DeleteFunc(a.pending, func(p string) bool { return p == id })
+	a.trackTools()
 }
 
 // OnTurnEnd ends every tool call the turn left without a result: the turn is
 // over, so none of them is still running.
 func (a *activitySink) OnTurnEnd() {
-	for id, end := range a.toolEnds {
-		end()
-		delete(a.toolEnds, id)
-		delete(a.toolNames, id)
+	a.pending = a.pending[:0]
+	clear(a.toolNames)
+	a.trackTools()
+}
+
+// trackTools points the tracker at the pending calls, and ends the operation
+// once none is left. The operation is named for the oldest pending call and
+// runs a full tool bound from now, so every tool_use and every result starts
+// it again: the stream does not say whether the calls still pending ran
+// beside the one that returned or were queued behind it, and a queued one
+// starts only now. The watchdog stops the batch once it goes a whole tool
+// bound without a result.
+func (a *activitySink) trackTools() {
+	if len(a.pending) == 0 {
+		a.endTool()
+		a.endTool = func() {}
+		return
 	}
+	a.endTool = a.tracker.begin("tool:"+a.toolNames[a.pending[0]], a.timings.toolCall)
 }
 
 // OnPermission brackets a permission prompt as its own operation. The prompt
-// replaces the gated call's operation while a person decides, and the call is
-// in flight again once they have: an approved tool runs after the wait, and
-// the time it runs is the tool's. A call whose tool_use has not been read yet
-// begins when it is, as any other does.
+// replaces the pending calls' operation while a person decides, and they are
+// in flight again, from then, once the person has: an approved tool runs after
+// the wait, and the time it runs is the tool's. A call whose tool_use has not
+// been read yet begins when it is, as any other does. The reader goroutine is
+// parked in the prompt, so no tool_use or result is read during it.
 //
 // The operation's deadline sits past the prompt's own timeout, so a prompt
 // nobody answers is denied and the agent carries on; the watchdog only stops
 // a wait that outlives its own timeout.
-func (a *activitySink) OnPermission(toolCallID string) func() {
+func (a *activitySink) OnPermission(string) func() {
 	end := a.tracker.begin("permission", a.timings.permission+backstopMargin)
 	return func() {
 		end()
-		if name, pending := a.toolNames[toolCallID]; pending {
-			a.toolEnds[toolCallID] = a.tracker.begin("tool:"+name, a.timings.toolCall)
-		}
+		a.trackTools()
 	}
 }
 

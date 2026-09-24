@@ -252,7 +252,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	// bound fires first and fails the bring-up as the error it is.
 	activity := s.activityFor(conv.ID)
 	netCtx, netSpan := tracer.Start(ctx, "sandbox.network.setup")
-	endNet := activity.begin("sidecar", sidecarOpDeadline)
+	endNet := activity.begin("sidecar_network", sidecarOpDeadline)
 	net, err := sandbox.SetupRunNetwork(netCtx, conv.ID)
 	endNet()
 	recordSpanError(netSpan, err)
@@ -262,7 +262,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		return nil, fmt.Errorf("set up run network: %w", err)
 	}
 	scCtx, scSpan := tracer.Start(ctx, "sandbox.sidecar.launch")
-	endLaunch := activity.begin("sidecar", sidecarOpDeadline)
+	endLaunch := activity.begin("sidecar_launch", sidecarOpDeadline)
 	sc, err := sandbox.LaunchSidecar(scCtx, sandbox.SidecarConfig{ConversationID: conv.ID, SubnetIdx: net.Idx})
 	endLaunch()
 	recordSpanError(scSpan, err)
@@ -348,7 +348,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 
 	// The provisioning inside this call replaces the operation with the
 	// credentials wait for as long as it lasts (sidecarProvisionFor).
-	endBringUp := activity.begin("sidecar", sidecarOpDeadline)
+	endBringUp := activity.begin("sidecar_bringup", sidecarOpDeadline)
 	res, conn, err := agentproc.BringUpRunSidecar(ctx, sc, s.sidecarProvisionFor(orgID, conv.ID), params)
 	endBringUp()
 	if err != nil {

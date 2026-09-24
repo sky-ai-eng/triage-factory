@@ -257,10 +257,10 @@ operation past its own deadline.
 | Operation | Deadline |
 | -- | -- |
 | `provider` | 150s without a byte from the model provider. |
-| `tool:<name>` | 30 minutes for one tool call. |
+| `tool:<name>` | 30 minutes for one tool call. With parallel calls in flight, 30 minutes without one of them returning, named for the oldest still running. |
 | `clone`, `rehydrate` | 10 minutes. |
 | `permission` | 150s waiting on a person to answer a permission prompt. |
-| `sidecar`, `fetch_pr`, `awaiting_credentials`, `snapshot_wait` | 30s past the timeout the operation already has, so its own timeout fires first. `snapshot_wait` is a cold resume waiting on another executor's workspace snapshot, bounded by `TF_SNAPSHOT_WAIT_SEC`. |
+| `sidecar_network`, `sidecar_launch`, `sidecar_bringup`, `fetch_pr`, `awaiting_credentials`, `snapshot_wait` | 30s past the timeout the operation already has, so its own timeout fires first. `snapshot_wait` is a cold resume waiting on another executor's workspace snapshot, bounded by `TF_SNAPSHOT_WAIT_SEC`. |
 
 A stalled engagement is parked `open` with park reason `stalled`, and nothing
 retries it: it stays parked until someone sends it a message, which resumes it.
@@ -281,7 +281,7 @@ pods:
 
 | Metric | Meaning |
 | -- | -- |
-| `tf_engagements_stalled_total{op}` | Engagements the stall watchdog stopped. `op` is the operation in flight cut at its first colon (`provider`, `tool`, `clone`, `rehydrate`, `permission`, `sidecar`, `awaiting_credentials`, `fetch_pr`, `snapshot_wait`), or `idle` when nothing was in flight. |
+| `tf_engagements_stalled_total{op}` | Engagements the stall watchdog stopped. `op` is the operation in flight cut at its first colon (`provider`, `tool`, `clone`, `rehydrate`, `permission`, `sidecar_network`, `sidecar_launch`, `sidecar_bringup`, `awaiting_credentials`, `fetch_pr`, `snapshot_wait`), or `idle` when nothing was in flight. |
 
 The expired-claim alert is on the age rather than the count, because the count
 is expected to flicker and the age is not. Every stall is a conversation that

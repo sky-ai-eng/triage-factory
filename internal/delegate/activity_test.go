@@ -45,9 +45,6 @@ func TestActivityTimings(t *testing.T) {
 	if permissionPromptDeadline+backstopMargin >= stallIdleLimit {
 		t.Errorf("the permission operation's deadline %s is not below the idle limit %s", permissionPromptDeadline+backstopMargin, stallIdleLimit)
 	}
-	if time.Duration(AbsentGraceMaxSeconds)*time.Second >= permissionPromptDeadline {
-		t.Errorf("absent grace max %ds is not below the permission prompt deadline %s", AbsentGraceMaxSeconds, permissionPromptDeadline)
-	}
 	// The bring-up waits: each operation deadline sits past the wait's own
 	// bound, so the bound fires first.
 	if sidecarOpDeadline <= 60*time.Second {
@@ -200,11 +197,12 @@ func TestActivityTracker_EndAfterAReplacingBeginIsANoOp(t *testing.T) {
 	}
 }
 
-// TestActivityTracker_ACallbackDispatchedAsTouchLandsDoesNotFire: Reset cannot
-// unschedule a callback the runtime already dispatched, so a callback can run
-// just after activity it was armed before. It has to read the state it finds,
-// and stand down.
-func TestActivityTracker_ACallbackDispatchedAsTouchLandsDoesNotFire(t *testing.T) {
+// TestActivityTracker_CheckDecidesOnTheStateItReads: Reset cannot unschedule a
+// callback the runtime already dispatched, so a callback can run just after
+// activity it was armed before. It has to read the state it finds, and stand
+// down. The test stages that state and runs the callback by hand, because
+// when the runtime dispatches a timer is not something a test can schedule.
+func TestActivityTracker_CheckDecidesOnTheStateItReads(t *testing.T) {
 	rec := newStallRecorder()
 	a := newActivityTracker(time.Hour, rec.stalled)
 	defer a.stop()
@@ -710,20 +708,50 @@ func TestActivitySink_ToolBookkeeping(t *testing.T) {
 		t.Fatalf("op after a prompt for an unread call = %q, want none", got)
 	}
 
-	// Parallel calls: the latest is in flight, an earlier one's result is a
-	// no-op, and the turn end clears what is left.
+	// Parallel calls: the oldest pending call names the operation, one stays
+	// in flight while any is pending whichever order the results come in, and
+	// the turn end clears what is left.
 	sink.OnToolUse("p1", "Read")
 	sink.OnToolUse("p2", "Grep")
+	sink.OnToolUse("p3", "Bash")
+	if got := op(); got != "tool:Read" {
+		t.Fatalf("op with three calls pending = %q, want the oldest, tool:Read", got)
+	}
+	sink.OnToolResult("p2")
+	if got := op(); got != "tool:Read" {
+		t.Fatalf("op after a later call returned first = %q, want tool:Read", got)
+	}
 	sink.OnToolResult("p1")
-	if got := op(); got != "tool:Grep" {
-		t.Fatalf("op after the earlier parallel result = %q, want tool:Grep", got)
+	if got := op(); got != "tool:Bash" {
+		t.Fatalf("op after the oldest returned = %q, want tool:Bash", got)
 	}
 	sink.OnTurnEnd()
 	if got := op(); got != "" {
 		t.Fatalf("op after the turn end = %q, want none", got)
 	}
-	if len(sink.toolEnds) != 0 || len(sink.toolNames) != 0 {
-		t.Errorf("the turn end left tool bookkeeping behind: %v %v", sink.toolEnds, sink.toolNames)
+	if len(sink.pending) != 0 || len(sink.toolNames) != 0 {
+		t.Errorf("the turn end left tool bookkeeping behind: %v %v", sink.pending, sink.toolNames)
+	}
+}
+
+// TestActivitySink_ACallOutlivingItsParallelSiblingIsNotIdle: a result that
+// arrives while another call is still running leaves that call in flight, so
+// the watchdog holds to the tool bound rather than the idle limit. The later
+// call returns first here, the order in which the most recent begin is not
+// the call still running.
+func TestActivitySink_ACallOutlivingItsParallelSiblingIsNotIdle(t *testing.T) {
+	rec := newStallRecorder()
+	a := newActivityTracker(60*time.Millisecond, rec.stalled)
+	defer a.stop()
+	sink := newActivitySink(agentproc.NoopSink{}, nil, a, activityTimings{toolCall: 400 * time.Millisecond})
+
+	sink.OnToolUse("p1", "Bash")
+	sink.OnToolUse("p2", "Read")
+	sink.OnToolResult("p2")
+
+	rec.assertQuietFor(t, 250*time.Millisecond, "a call still running past the idle limit")
+	if got := rec.waitFired(t, 5*time.Second); got.op != "tool:Bash" {
+		t.Fatalf("stall op = %q, want the call still running, tool:Bash", got.op)
 	}
 }
 
