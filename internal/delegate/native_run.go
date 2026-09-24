@@ -63,12 +63,13 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// The park a stop lands on, wherever the stop catches this engagement. A
 	// LEASE fence is not a stop and never reaches the park: this engagement
 	// no longer owns the conversation, so recording a user cancellation on it
-	// would be recording a stop nobody made.
+	// would be recording a stop nobody made. Neither is the dispatcher
+	// shutting down, which hands the conversation back instead.
 	stopped := func() engagementDisposition {
 		if leaseFenced(ctx) {
 			return engagementDisposition{fenced: true}
 		}
-		fenced := s.parkConversationOpen(ctx, liveParkContext{
+		park := liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
 			namespace:      namespace,
@@ -77,8 +78,11 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			reason:         db.ParkStopped(stopParkReason(ctx), ""),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
-		}, "")
-		return engagementDisposition{fenced: fenced}
+		}
+		if shutdownCancelled(ctx) {
+			return engagementDisposition{fenced: s.handBackOnShutdown(ctx, park, ""), handedBack: true}
+		}
+		return engagementDisposition{fenced: s.parkConversationOpen(ctx, park, "")}
 	}
 	// launchFailed is every pre-agent exit. A cancelled ctx is read first: a
 	// user who stopped the run during bring-up asked for exactly the park the
@@ -261,9 +265,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		ExecutorChanged:     s.executorChangedSince(ctx, orgID, conversationID, cfg.claimID, cfg.workspace),
 	})
 
-	return engagementDisposition{
-		fenced: s.recordNativeResult(ctx, orgID, conversationID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, mirror),
-	}
+	return s.recordNativeResult(ctx, orgID, conversationID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, mirror)
 }
 
 // executorChangedSince reports whether the engagement before this one ran on
@@ -695,9 +697,11 @@ func nativeBashMemBudgetMB(ceilingMB int) int {
 // crash-loss window bounded to the current engagement and lets the next
 // claim cold-rehydrate on another executor.
 //
-// Returns fenced: true when the engagement's writes were refused because its
-// claim is released. Nothing further is recorded and nothing is reacted to —
-// a successor owns the conversation's disposition now.
+// The disposition is fenced when the engagement's writes were refused because
+// its claim is released: nothing further is recorded and nothing is reacted
+// to — a successor owns the conversation's disposition now. It is handedBack
+// when the dispatcher's shutdown cancelled the loop and the claim went back
+// to the queue.
 func (s *Spawner) recordNativeResult(
 	ctx context.Context,
 	orgID, conversationID string,
@@ -707,7 +711,7 @@ func (s *Spawner) recordNativeResult(
 	startTime time.Time,
 	result agentloop.Result,
 	mirror *memoryMirror,
-) (fenced bool) {
+) engagementDisposition {
 	// A fence trip inside the loop (a transcript insert, a drain flush)
 	// surfaces as the engagement's failure. It is not a failure to record:
 	// the refusal IS the record, and writing a terminal here is exactly what
@@ -715,7 +719,7 @@ func (s *Spawner) recordNativeResult(
 	if result.Err != nil && errors.Is(result.Err, db.ErrClaimReleased) {
 		delegateLog.Error("engagement fenced out mid-flight; a successor owns the conversation",
 			"conversation", conversationID, "claim", cfg.claimID, "error", result.Err)
-		return true
+		return engagementDisposition{fenced: true}
 	}
 
 	switch result.Kind {
@@ -726,9 +730,9 @@ func (s *Spawner) recordNativeResult(
 		if leaseFenced(ctx) {
 			delegateLog.Info("engagement fenced by its claim lease; the conversation awaits takeover",
 				"conversation", conversationID, "claim", cfg.claimID)
-			return true
+			return engagementDisposition{fenced: true}
 		}
-		return s.parkConversationOpen(ctx, liveParkContext{
+		park := liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
 			namespace:      namespace,
@@ -737,7 +741,15 @@ func (s *Spawner) recordNativeResult(
 			reason:         db.ParkStopped(stopParkReason(ctx), ""),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
-		}, "")
+		}
+		// Nor is a shutdown a stop. The loop's transcript is already whole
+		// up to the turn it was on — the next claim's repair pass answers a
+		// tool call this cancel cut off — so handing the claim back with a
+		// snapshot of the tree is all a successor needs to carry on.
+		if shutdownCancelled(ctx) {
+			return engagementDisposition{fenced: s.handBackOnShutdown(ctx, park, ""), handedBack: true}
+		}
+		return engagementDisposition{fenced: s.parkConversationOpen(ctx, park, "")}
 
 	case agentloop.ResultFailed:
 		// The failure ends the engagement, and this is the last moment anyone
@@ -748,14 +760,14 @@ func (s *Spawner) recordNativeResult(
 		// lease fence can land after that check. A fenced engagement records
 		// no terminal, failures included.
 		if leaseFenced(ctx) {
-			return true
+			return engagementDisposition{fenced: true}
 		}
 		mirror.settle(ctx)
 		reason := "native agent loop failed"
 		if result.Err != nil {
 			reason = result.Err.Error()
 		}
-		return s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, reason, result.FailureKind)
+		return engagementDisposition{fenced: s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, reason, result.FailureKind)}
 
 	case agentloop.ResultParked:
 		// The engagement stopped without concluding — a guard before a call,
@@ -763,9 +775,9 @@ func (s *Spawner) recordNativeResult(
 		// resumable either way, so the snapshot must exist by the time the
 		// status commits — parkConversationOpen owns that ordering.
 		if leaseFenced(ctx) {
-			return true
+			return engagementDisposition{fenced: true}
 		}
-		return s.parkConversationOpen(ctx, liveParkContext{
+		return engagementDisposition{fenced: s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
 			namespace:      namespace,
@@ -774,7 +786,7 @@ func (s *Spawner) recordNativeResult(
 			reason:         db.ParkIdle(),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
-		}, "")
+		}, "")}
 	}
 
 	// Concluded — which is not authority to record a conclusion. The lease
@@ -788,7 +800,7 @@ func (s *Spawner) recordNativeResult(
 	if leaseFenced(ctx) {
 		delegateLog.Warn("dropping a conclusion produced as the claim lease fenced; the conversation returns to the queue",
 			"conversation", conversationID, "claim", cfg.claimID)
-		return true
+		return engagementDisposition{fenced: true}
 	}
 
 	// One last look at the file: a final turn that wrote after its last tool
@@ -827,7 +839,7 @@ func (s *Spawner) recordNativeResult(
 		if errors.Is(err, db.ErrClaimReleased) {
 			delegateLog.Error("engagement fenced out at conclusion; a successor owns the conversation",
 				"conversation", conversationID, "claim", cfg.claimID)
-			return true
+			return engagementDisposition{fenced: true}
 		}
 		delegateLog.Warn("record completion for conversation failed", "conversation", conversationID, "error", err)
 	}
@@ -839,5 +851,5 @@ func (s *Spawner) recordNativeResult(
 	s.updateBreakerCounter(task.ID, triggerType, "completed")
 	s.broadcastConversationUpdate(orgID, conversationID, broadcastStatus)
 	toast.Success(s.wsHub, orgID, fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
-	return false
+	return engagementDisposition{}
 }

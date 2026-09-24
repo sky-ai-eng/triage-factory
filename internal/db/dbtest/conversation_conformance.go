@@ -4053,7 +4053,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("ListParkedWorktreePathsSystem_FiltersByStatusAndWorktree", func(t *testing.T) {
+	t.Run("ListResumableWorktreePathsSystem_FiltersByStatusAndWorktree", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 
@@ -4076,6 +4076,13 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.SetWorktreePath(ctx, orgID, running, "/tmp/triagefactory-runs/running"); err != nil {
 			t.Fatalf("set worktree (running): %v", err)
 		}
+		// mid-flight (stored status NULL) WITH a worktree → included: an
+		// engagement was driving it when the process stopped, and the next
+		// claim continues it in this tree.
+		midFlight := seedConversationForTest(t, orgID, seed, "")
+		if _, err := store.SetWorktreePath(ctx, orgID, midFlight, "/tmp/triagefactory-runs/mid-flight"); err != nil {
+			t.Fatalf("set worktree (mid-flight): %v", err)
+		}
 		// open WITH a worktree but under an already-terminal blueprint_run →
 		// excluded: a parked conversation under a terminal parent is not
 		// resumable, so its worktree must not be preserved (else the boot
@@ -4092,16 +4099,19 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		seed.SetBlueprintRunStatus(t, orphanBR, "cancelled")
 
-		paths, err := store.ListParkedWorktreePathsSystem(ctx, orgID)
+		paths, err := store.ListResumableWorktreePathsSystem(ctx, orgID)
 		if err != nil {
-			t.Fatalf("ListParkedWorktreePathsSystem: %v", err)
+			t.Fatalf("ListResumableWorktreePathsSystem: %v", err)
 		}
 		got := map[string]bool{}
 		for _, p := range paths {
 			got[p] = true
 		}
 		if !got["/tmp/triagefactory-runs/open"] {
-			t.Error("open worktree missing from ListParkedWorktreePathsSystem")
+			t.Error("open worktree missing from ListResumableWorktreePathsSystem")
+		}
+		if !got["/tmp/triagefactory-runs/mid-flight"] {
+			t.Error("mid-flight worktree missing from ListResumableWorktreePathsSystem")
 		}
 		if got["/tmp/triagefactory-runs/completed"] {
 			t.Error("completed worktree leaked — status filter failed (completed conversations no longer park)")
@@ -4112,8 +4122,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got["/tmp/triagefactory-runs/orphan"] {
 			t.Error("parked worktree under a terminal blueprint_run leaked — running-parent filter failed")
 		}
-		if len(got) != 1 {
-			t.Errorf("got %d parked paths, want 1 (%v)", len(got), paths)
+		if len(got) != 2 {
+			t.Errorf("got %d resumable paths, want 2 (%v)", len(got), paths)
 		}
 	})
 

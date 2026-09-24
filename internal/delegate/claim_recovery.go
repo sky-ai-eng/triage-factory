@@ -214,8 +214,11 @@ func (s *Spawner) disposeOfLostConversation(ctx context.Context, conv *domain.Co
 // way out of a clean shutdown, after the dispatcher and its dispatches have
 // been joined: a conversation whose engagement was cancelled by the shutdown
 // is claimable at once, and spends neither budget, instead of waiting out its
-// lease and counting as a loss. An engagement still registered keeps its
-// claim — it may yet write — and is found later as the loss it then is.
+// lease and counting as a loss. An engagement whose runtime came up has
+// already handed its own claim back (handBackOnShutdown); what is left here
+// is the engagements that stood down before that, at a gate or in bring-up.
+// An engagement still registered keeps its claim — it may yet write — and is
+// found later as the loss it then is.
 //
 // Only once the claim loop has provably stopped: a claim minted after the
 // check would have no engagement registered yet, and releasing it would hand

@@ -713,9 +713,12 @@ type freshWorkspaceBuilder func(ctx context.Context) (string, error)
 //     seeds and authenticates the bare the git delta replays onto; its zero
 //     value is the non-git run-root.
 //   - waited, then rehydrated — the snapshot is not there YET. A park flips the
-//     conversation's status before writing the blob, so this is the ordinary
-//     reading of a healthy run for as long as the capture takes; the lifecycle
-//     record says a persist is in flight and awaitSnapshotBlob waits it out.
+//     conversation's status (a shutdown hand-back releases its claim) before
+//     writing the blob, so this is the ordinary reading of a healthy run for as
+//     long as the capture takes; the lifecycle record says a persist is in
+//     flight and awaitSnapshotBlob waits it out. That holds when an earlier
+//     blob is already under the key too: the key is the task's, so the blob
+//     there is an earlier persist's, and the one in flight outranks it.
 //   - fresh — no persist is coming (it failed, its writer died, or the wait
 //     gave up). A native conversation is rebuilt from nothing and told so, its
 //     continuity being the transcript rather than the tree. An SDK
@@ -786,12 +789,28 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	defer func() { endOp() }()
 
 	rc, err := blobs.Get(opCtx, snapshotKey(orgID, keyID))
+	if err == nil && s.snapshotPersistPending(ctx, orgID, keyID) {
+		// A blob is here and a newer one is being written: the key is the
+		// task's, so this one is an earlier persist's — the last step boundary
+		// or park — and the one in flight is the engagement that just let go
+		// of this conversation, a shutdown hand-back or a park moments ago. A
+		// claim that lands inside that window must wait for it, or it restores
+		// the earlier tree and the work since is gone.
+		_ = rc.Close()
+		endOp()
+		endWait := activity.begin("snapshot_wait", s.snapshotWait()+backstopMargin)
+		_, waited := s.awaitSnapshotBlob(ctx, orgID, keyID, true)
+		endWait()
+		span.SetAttributes(telemetry.SnapshotWaitedMs(waited.Milliseconds()))
+		opCtx, endOp = beginRehydrate()
+		rc, err = blobs.Get(opCtx, snapshotKey(orgID, keyID))
+	}
 	if errors.Is(err, storage.ErrNotFound) {
 		// Not there yet, or not there at all — the lifecycle record is what
 		// separates those, and the wait is where that question is asked.
 		endOp()
 		endWait := activity.begin("snapshot_wait", s.snapshotWait()+backstopMargin)
-		appeared, waited := s.awaitSnapshotBlob(ctx, orgID, keyID)
+		appeared, waited := s.awaitSnapshotBlob(ctx, orgID, keyID, false)
 		endWait()
 		span.SetAttributes(telemetry.SnapshotWaitedMs(waited.Milliseconds()))
 		if !appeared {

@@ -166,7 +166,11 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 	if s.reportCapacity.Load() {
 		sem := s.semaphore()
 		maxRuns, activeRuns := cap(sem), len(sem)
-		gated := s.dispatchMemGated()
+		// Gated is "admits no new dispatch", and an executor whose claim loop
+		// has stopped admits none: the heartbeat outlives the loop through a
+		// shutdown drain, and reporting it gated is what stops placement
+		// holding queued work for a pod that will never claim it.
+		gated := s.dispatchMemGated() || !s.dispatcherRunning.Load()
 		hb.MaxRuns = &maxRuns
 		hb.ActiveRuns = &activeRuns
 		hb.DispatchGated = &gated

@@ -101,6 +101,9 @@ func TestHeartbeatOnce_TracksGateTransition(t *testing.T) {
 	stores := testSpawnerStores(database)
 	s := NewSpawner(database, stores, nil, nil, "")
 	s.SetDispatchMemFloor(4096)
+	// The memory gate in isolation: a claim loop that is not running reads
+	// as gated on its own (TestHeartbeatOnce_AStoppedClaimLoopReportsGated).
+	s.dispatcherRunning.Store(true)
 
 	low := true
 	s.mu.Lock()
@@ -140,6 +143,45 @@ func TestHeartbeatOnce_TracksGateTransition(t *testing.T) {
 	}
 	if got.DispatchGated == nil || *got.DispatchGated {
 		t.Errorf("DispatchGated = %v, want false once memory recovers", got.DispatchGated)
+	}
+}
+
+// TestHeartbeatOnce_AStoppedClaimLoopReportsGated pins what a draining
+// executor tells placement: the heartbeat outlives the claim loop through a
+// shutdown drain, and while it does the row must say the pod admits nothing,
+// or queued work preferring it waits out the aging window for nobody.
+func TestHeartbeatOnce_AStoppedClaimLoopReportsGated(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := testSpawnerStores(database)
+	s := NewSpawner(database, stores, nil, nil, "")
+
+	ctx := context.Background()
+	const id = "hb-stopped-loop"
+	epoch, err := stores.Instances.Register(ctx, id, domain.InstanceRoleExecutor, "test-version", "")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	s.SetExecutorID(id, epoch)
+
+	gated := func() bool {
+		t.Helper()
+		if !s.heartbeatOnce(ctx) {
+			t.Fatal("heartbeatOnce reported the loop should stop")
+		}
+		inst, err := stores.Instances.Get(ctx, id)
+		if err != nil || inst == nil || inst.DispatchGated == nil {
+			t.Fatalf("Get(%s) = (%+v, %v), want a row with dispatch_gated set", id, inst, err)
+		}
+		return *inst.DispatchGated
+	}
+
+	s.dispatcherRunning.Store(true)
+	if gated() {
+		t.Error("a running claim loop with no memory floor reported gated")
+	}
+	s.dispatcherRunning.Store(false)
+	if !gated() {
+		t.Error("a stopped claim loop reported ungated; placement would keep reserving work for it")
 	}
 }
 

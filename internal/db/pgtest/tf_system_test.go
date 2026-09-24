@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -290,6 +291,11 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 		if _, err := stores.ConversationQueue.ReleaseOwnClaimsOnShutdownSystem(ctx, executorID, 1, []string{conversationID}); err != nil {
 			t.Errorf("ConversationQueue.ReleaseOwnClaimsOnShutdownSystem: %v", err)
+		}
+		// A released claim is the fence's answer, not a grant failure: the
+		// statement ran under tf_system and found nothing live to release.
+		if err := stores.ConversationQueue.ReleaseClaimOnShutdownSystem(ctx, orgID, conversationID, uuid.NewString()); err != nil && !errors.Is(err, db.ErrClaimReleased) {
+			t.Errorf("ConversationQueue.ReleaseClaimOnShutdownSystem: %v", err)
 		}
 	})
 

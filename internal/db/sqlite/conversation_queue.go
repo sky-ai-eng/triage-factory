@@ -1265,6 +1265,14 @@ func (s *conversationQueueStore) ReleaseOwnClaimsOnShutdownSystem(ctx context.Co
 			if err != nil {
 				return err
 			}
+			if n == 0 {
+				continue
+			}
+			if _, err := q.ExecContext(ctx, `
+				UPDATE conversations SET preferred_executor_id = NULL WHERE id = ?
+			`, id); err != nil {
+				return err
+			}
 			count += int(n)
 		}
 		return nil
@@ -1273,6 +1281,27 @@ func (s *conversationQueueStore) ReleaseOwnClaimsOnShutdownSystem(ctx context.Co
 		return 0, err
 	}
 	return count, nil
+}
+
+func (s *conversationQueueStore) ReleaseClaimOnShutdownSystem(ctx context.Context, orgID, conversationID, claimID string) error {
+	return inTx(ctx, s.conn, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE claims SET released_at = ?, outcome = 'requeued_shutdown'
+			WHERE id = ? AND org_id = ? AND conversation_id = ? AND released_at IS NULL
+		`, time.Now().UTC(), claimID, orgID, conversationID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n == 0 {
+			return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+		}
+		_, err = q.ExecContext(ctx, `
+			UPDATE conversations SET preferred_executor_id = NULL WHERE id = ?
+		`, conversationID)
+		return err
+	})
 }
 
 // StrandedBlueprintRunsSystem measures the grace on this process's clock,

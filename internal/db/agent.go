@@ -453,20 +453,21 @@ type ConversationStore interface {
 	// disposition cascade to enumerate the conversations to stop.
 	ActiveIDsForTask(ctx context.Context, orgID, taskID string) ([]string, error)
 
-	// ListParkedWorktreePathsSystem returns the worktree_path of every
-	// conversation parked in `open` with a non-empty
-	// worktree_path, via the admin pool in Postgres (the startup sweep
-	// reads it before any JWT-claims context exists). Read at startup so
-	// the worktree-cleanup sweep preserves a parked conversation's warm workspace
-	// (worktree dir + session JSONL) as the fast resume path. A swept
-	// entry still resumes via snapshot rehydrate, so this is an
+	// ListResumableWorktreePathsSystem returns the worktree_path of every
+	// conversation the next claim or message continues — parked in `open`, or
+	// left mid-flight by an engagement the process stopped under — with a
+	// non-empty worktree_path, via the admin pool in Postgres (the startup
+	// sweep reads it before any JWT-claims context exists). Read at startup so
+	// the worktree-cleanup sweep preserves such a conversation's warm
+	// workspace (worktree dir + session JSONL) as the fast resume path. A
+	// swept entry still resumes via snapshot rehydrate, so this is an
 	// optimization, not a correctness gate.
 	//
 	// The sweep keys off filepath.Base of each path, which is the run tree's
 	// directory name — the workspace key, i.e. the task id. Returning whole
 	// paths rather than keys is what keeps that the caller's business: this
 	// answers with what the rows actually recorded.
-	ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error)
+	ListResumableWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error)
 
 	// NewestWorktreePathForTaskSystem returns the worktree_path of the task's
 	// newest top-level conversation that recorded one, or "" when no

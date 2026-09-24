@@ -48,11 +48,18 @@ const (
 // same reason: the engagement still holds its claim and settles it through
 // its fenced park, which is why leaseFenced does not match it. It differs
 // from a requested stop only in the reason the park records (stopParkReason).
+//
+// errDispatcherShutdown is the last: the dispatcher this engagement runs
+// under is stopping with the process. Nobody asked for the conversation to
+// stop, so it is handed back to the queue rather than parked — see
+// handBackOnShutdown. The lease is still held here too, which is what lets
+// the hand-back's fenced release land.
 var (
-	errClaimLeaseLost  = errors.New("delegate: claim lease lost")
-	errClaimSelfFenced = errors.New("delegate: claim self-fenced after renewal failures")
-	errStopRequested   = errors.New("delegate: stop requested")
-	errStalled         = errors.New("delegate: engagement stalled")
+	errClaimLeaseLost     = errors.New("delegate: claim lease lost")
+	errClaimSelfFenced    = errors.New("delegate: claim self-fenced after renewal failures")
+	errStopRequested      = errors.New("delegate: stop requested")
+	errStalled            = errors.New("delegate: engagement stalled")
+	errDispatcherShutdown = errors.New("delegate: dispatcher shutting down")
 )
 
 // leaseFenced reports whether ctx was cancelled by the claim's lease rather
@@ -66,6 +73,17 @@ var (
 func leaseFenced(ctx context.Context) bool {
 	cause := context.Cause(ctx)
 	return errors.Is(cause, errClaimLeaseLost) || errors.Is(cause, errClaimSelfFenced)
+}
+
+// shutdownCancelled reports whether ctx was cancelled because the dispatcher
+// is shutting down, and by nothing that got there first.
+//
+// First cancel wins, and that is the rule the runtimes need: a stop that
+// landed before the shutdown was a person's request and parks as one, while
+// a stop that lands after is still pending as an intent when the claim goes
+// back, and the next dispatcher's settlement parks it.
+func shutdownCancelled(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), errDispatcherShutdown)
 }
 
 // setClaimLease overrides the three claim-lease timings. Zero on any of them

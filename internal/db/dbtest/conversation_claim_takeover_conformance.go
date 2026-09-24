@@ -212,6 +212,47 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 	})
 
+	t.Run("ShutdownHandBack_ReleasesTheNamedClaimAndLeavesTheConversationMidFlight", func(t *testing.T) {
+		f := mk(t)
+		c := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
+		bystander := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
+		q := f.Stores.ConversationQueue
+
+		if err := q.ReleaseClaimOnShutdownSystem(ctx, f.OrgID, c.ID, c.ClaimID); err != nil {
+			t.Fatalf("ReleaseClaimOnShutdownSystem: %v", err)
+		}
+		if released, outcome := claimState(t, f, c.ClaimID); !released || outcome != "requeued_shutdown" {
+			t.Errorf("handed-back claim = (released %v, %q), want (true, requeued_shutdown)", released, outcome)
+		}
+		if released, _ := claimState(t, f, bystander.ClaimID); released {
+			t.Error("another engagement's claim was released")
+		}
+		if got := get(t, f, c.ID); got.Status != domain.StatusQueued {
+			t.Errorf("status after the hand-back = %q, want %q — the conversation is mid-flight, not parked", got.Status, domain.StatusQueued)
+		}
+
+		// The fence: a second hand-back, or one naming a claim that is not
+		// this conversation's, writes nothing and says why.
+		if err := q.ReleaseClaimOnShutdownSystem(ctx, f.OrgID, c.ID, c.ClaimID); !errors.Is(err, db.ErrClaimReleased) {
+			t.Errorf("repeat hand-back = %v, want ErrClaimReleased", err)
+		}
+		if err := q.ReleaseClaimOnShutdownSystem(ctx, f.OrgID, c.ID, bystander.ClaimID); !errors.Is(err, db.ErrClaimReleased) {
+			t.Errorf("hand-back naming another conversation's claim = %v, want ErrClaimReleased", err)
+		}
+		if released, _ := claimState(t, f, bystander.ClaimID); released {
+			t.Error("a mismatched hand-back released the claim it named")
+		}
+
+		// Claimable at once, and charged to neither budget.
+		next, err := q.ClaimNextConversation(ctx, takeoverOtherExecutor, 1, db.ClaimPlacement{}, testClaimLease)
+		if err != nil || next == nil || next.ID != c.ID {
+			t.Fatalf("claim after the hand-back = (%+v, %v), want conversation %s", next, err, c.ID)
+		}
+		if next.LostEngagements != 0 || next.SetupFailures != 0 || next.Attempts != 2 {
+			t.Errorf("claim after a hand-back = (lost %d, setup %d, attempts %d), want (0, 0, 2)", next.LostEngagements, next.SetupFailures, next.Attempts)
+		}
+	})
+
 	t.Run("BootReset_ReleasesAPriorBootsClaimWhateverTheRowsState", func(t *testing.T) {
 		f := mk(t)
 		open := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch-1)

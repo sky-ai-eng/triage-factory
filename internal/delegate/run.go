@@ -146,7 +146,7 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 // its claim was released out from under it. Nothing was recorded and nothing
 // may be — the caller must stop too, rather than reacting to a terminal that
 // belongs to whoever owns the conversation now.
-func (s *Spawner) runAgent(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string) (fenced bool) {
+func (s *Spawner) runAgent(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string) engagementDisposition {
 	orgID := cfg.orgID
 
 	// The config is built, so whatever this engagement was going to write about
@@ -202,12 +202,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		return true
 	}
 
-	// cancelled parks this run and folds a fence trip the same way. This is
-	// the path a partition self-fence trip drives every live run down, so a
-	// late self-fence lands here first. parked is set unconditionally, not
-	// just on a fence trip: a cancel is a park, so the worktree stays as the
-	// warm resume cache exactly like a turn-end park's does. A stall is a
-	// cancel too, and stopParkReason names it.
+	// cancelled parks this run and folds a fence trip the same way. parked is
+	// set unconditionally, not just on a fence trip: a cancel is a park, so
+	// the worktree stays as the warm resume cache exactly like a turn-end
+	// park's does. A stall is a cancel too, and stopParkReason names it. The
+	// dispatcher shutting down is not: the conversation is handed back rather
+	// than parked, and the next claim resumes the session in the same tree.
 	//
 	// sessionID and costUSD ride in from the caller because they are only
 	// known once the agent has actually started — the pre-launch cancel below
@@ -217,12 +217,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// engagement has lost the conversation, so it records nothing. parked
 	// stays true either way — the worktree is the successor's warm cache as
 	// much as a stopped run's.
-	cancelled := func(sessionID string, costUSD float64) bool {
+	cancelled := func(sessionID string, costUSD float64) engagementDisposition {
+		parked = true
 		if leaseFenced(ctx) {
-			parked = true
-			return true
+			return engagementDisposition{fenced: true}
 		}
-		fenced := s.parkConversationOpen(ctx, liveParkContext{
+		park := liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
 			namespace:      workspaceKey(task.ID),
@@ -232,9 +232,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			runtime:        domain.ConversationRuntimeSDK,
 			costUSD:        costUSD,
 			mirror:         mirror,
-		}, sessionID)
-		parked = true
-		return fenced
+		}
+		if shutdownCancelled(ctx) {
+			return engagementDisposition{fenced: s.handBackOnShutdown(ctx, park, sessionID), handedBack: true}
+		}
+		return engagementDisposition{fenced: s.parkConversationOpen(ctx, park, sessionID)}
 	}
 
 	// Initial cwd for the child claude. Always the run-root: the worktree
@@ -344,7 +346,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 
 	selfBin, err := os.Executable()
 	if err != nil {
-		return fail("failed to resolve own binary path: "+err.Error(), domain.ConversationFailureUnclassified)
+		return engagementDisposition{fenced: fail("failed to resolve own binary path: "+err.Error(), domain.ConversationFailureUnclassified)}
 	}
 
 	// Load the primary event's metadata so the task context can carry the
@@ -416,13 +418,13 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// user cancel is, and only one of the two parks with a cancel recorded.
 	if s.persistSystemBlock(ctx, orgID, conversationID, cfg.claimID, systemBlock) {
 		parked = true
-		return true
+		return engagementDisposition{fenced: true}
 	}
 	if s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting) {
 		// Fenced out before the runtime came up: nothing to write, no process
 		// to kill. The workspace stays for whoever owns the conversation now.
 		parked = true
-		return true
+		return engagementDisposition{fenced: true}
 	}
 
 	extraEnv := []string{
@@ -537,7 +539,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		RunURL:           publishedRunURL,
 	})
 	if err != nil {
-		return fail(err.Error(), domain.ConversationFailureUnclassified)
+		return engagementDisposition{fenced: fail(err.Error(), domain.ConversationFailureUnclassified)}
 	}
 	defer func() { _ = localSbx.Close() }()
 
@@ -610,9 +612,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			// interleave with its. Nothing to record, nothing to kill.
 			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "conversation", conversationID, "claim", cfg.claimID)
 			parked = true
-			return true
+			return engagementDisposition{fenced: true}
 		}
-		return fail("failed to open the conversation: "+err.Error(), domain.ConversationFailureUnclassified)
+		return engagementDisposition{fenced: fail("failed to open the conversation: "+err.Error(), domain.ConversationFailureUnclassified)}
 	}
 
 	// Off-allowlist tool calls route to one of two dispositions, chosen once
@@ -679,7 +681,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// startup sweep, a deleted one that turned out to be in use is not.
 	if sink.fenceTripped() || out.fenced {
 		parked = true
-		return true
+		return engagementDisposition{fenced: true}
 	}
 
 	// The stream is over and the row is about to come to rest — parked, or
@@ -701,22 +703,23 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// fast resume path.
 	if out.hibernated {
 		parked = true
-		return
+		return engagementDisposition{}
 	}
 
 	if out.result != nil {
+		var fenced bool
 		parked, fenced = s.processCompletion(ctx, orgID, conversationID, cfg.blueprintRunID, cfg.claimID, task, out.result, claudeCwd, mirror, out.sessionID, triggerType, creatorUserID)
-		return fenced
+		return engagementDisposition{fenced: fenced}
 	}
 
 	if out.err != nil {
 		if ctx.Err() != nil {
 			return cancelled(out.sessionID, out.costUSD)
 		}
-		return fail(fmt.Sprintf("%v\nstderr: %s", out.err, out.stderr), classifyFailureKind(out.err))
+		return engagementDisposition{fenced: fail(fmt.Sprintf("%v\nstderr: %s", out.err, out.stderr), classifyFailureKind(out.err))}
 	}
 
-	return fail("agent runtime exited cleanly without producing a result event", domain.ConversationFailureNoResult)
+	return engagementDisposition{fenced: fail("agent runtime exited cleanly without producing a result event", domain.ConversationFailureNoResult)}
 }
 
 // composeLaunchTurn puts the launch's first user message on opts and records

@@ -137,7 +137,23 @@ func (a *App) startWorkers(ctx context.Context) {
 	// Instance-registry heartbeat: every role renews its fleet registry row
 	// on a timer (liveness + version/role visibility; capacity fields only
 	// on executor-capable roles — see SetReportCapacity).
-	go a.spawner.RunInstanceHeartbeat(ctx, delegate.DefaultInstanceHeartbeatInterval)
+	//
+	// It outlives ctx by the length of the shutdown drain, and Run stops it
+	// once the drain returns: a process still handing its engagements back is
+	// alive, and saying so is what lets a successor keep waiting on the
+	// workspace snapshot it is uploading (snapshotWriterAlive). The same
+	// heartbeats report the pod gated once its claim loop has stopped, so
+	// placement stops reserving queued work for it.
+	hbCtx, cancelHeartbeat := context.WithCancel(context.WithoutCancel(ctx))
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		a.spawner.RunInstanceHeartbeat(hbCtx, delegate.DefaultInstanceHeartbeatInterval)
+	}()
+	a.stopHeartbeat = func() {
+		cancelHeartbeat()
+		<-heartbeatDone
+	}
 
 	// Fleet telemetry sampler (TFAC-589): every role writes one instance_stats
 	// row a minute (cpu/load/mem/oom deployment-wide; claim-scoped fields only
@@ -193,10 +209,11 @@ func (a *App) startWorkers(ctx context.Context) {
 }
 
 // cleanupWorktrees removes orphaned worktrees from crashed conversations.
-// Parked `open` conversations are preserved whole — their worktree dir
-// and ~/.claude/projects session JSONL are the warm resume cache. A load
-// failure just forgoes that optimization; those conversations still resume
-// by rehydrating from snapshot.
+// Conversations that will be continued — parked `open`, or mid-flight when
+// the process stopped — are preserved whole: their worktree dir and
+// ~/.claude/projects session JSONL are the warm resume cache. A load failure
+// just forgoes that optimization; those conversations still resume by
+// rehydrating from snapshot.
 //
 // Non-local modes get the worktree-dir + bare-repo sweep but skip
 // ~/.claude/projects entirely: the preserve set is keyed by the synthetic
@@ -208,10 +225,10 @@ func (a *App) cleanupWorktrees(ctx context.Context) {
 	}
 
 	preserveWorktrees := map[string]bool{}
-	if parkedPaths, perr := a.stores.Conversations.ListParkedWorktreePathsSystem(ctx, runmode.LocalDefaultOrgID); perr != nil {
-		serverLog.Warn("load parked worktree paths failed; parked workspaces will rehydrate from snapshot rather than reuse the warm cache", "error", perr)
+	if resumable, perr := a.stores.Conversations.ListResumableWorktreePathsSystem(ctx, runmode.LocalDefaultOrgID); perr != nil {
+		serverLog.Warn("load resumable worktree paths failed; those workspaces will rehydrate from snapshot rather than reuse the warm cache", "error", perr)
 	} else {
-		for _, p := range parkedPaths {
+		for _, p := range resumable {
 			preserveWorktrees[filepath.Base(p)] = true
 		}
 	}

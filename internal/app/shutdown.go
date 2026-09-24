@@ -7,9 +7,10 @@ import (
 
 // shutdownDrainTimeout bounds how long shutdown waits for in-flight dispatches
 // before the pools close under them. A backstop, not a budget: the wait is for
-// already-cancelled goroutines to unwind and land their terminal write, which
-// takes seconds, so reaching this deadline means something is wrong rather than
-// something is slow.
+// already-cancelled goroutines to unwind — hand their conversations back and
+// upload the workspace snapshots that go with them, or land a terminal write —
+// which takes seconds, so reaching this deadline means something is wrong
+// rather than something is slow.
 //
 // Bounded rather than indefinite, because the orchestrator's grace period is
 // the real ceiling — a SIGKILL truncates the write whether or not we are still
@@ -44,12 +45,13 @@ func (a *App) drainDispatches(ctx context.Context) {
 		return
 	}
 	a.awaitDispatches(a.spawner.WaitForDispatches, shutdownDrainTimeout)
-	// After the join, whether or not it finished: a claim whose engagement
-	// returned is handed back as a deliberate stop, claimable at once and
-	// charged to no budget, while one whose engagement is still running keeps
-	// its claim and is found later as the loss it then is. Bounded inside
-	// (delegate.ShutdownClaimReleaseTimeout); a failure is logged and the
-	// process exits anyway.
+	// After the join, whether or not it finished. An engagement whose runtime
+	// came up hands its own claim back on the way out; this catches the ones
+	// that stood down before it did, and releases their claims the same way —
+	// claimable at once and charged to no budget. One whose engagement is
+	// still running keeps its claim and is found later as the loss it then
+	// is. Bounded inside (delegate.ShutdownClaimReleaseTimeout); a failure is
+	// logged and the process exits anyway.
 	a.spawner.ReleaseOwnClaimsOnShutdown()
 }
 

@@ -854,11 +854,9 @@ func (s *conversationQueueStore) ReleaseExpiredClaimSystem(ctx context.Context, 
 // a claim under its holder's fence read (FOR SHARE) is skipped rather than
 // waited on; the guard is re-evaluated on the locked row, so a renewal that
 // committed first leaves it live. The preferred-executor clear that follows
-// takes each conversation's lock with SKIP LOCKED too: a writer that locks a
-// conversation before its claim (a run's terminal parking its children) would
-// otherwise wait on the claim this transaction holds while this one waited on
-// the conversation, and the stamp is advisory, so a row somebody else holds
-// keeps it.
+// skips locked conversations too (see clearPreferredExecutor) — a run's
+// terminal parking its children is a writer that locks a conversation before
+// its claim.
 func (s *conversationQueueStore) TakeOverExpiredClaimsSystem(ctx context.Context, executorID string, bootEpoch int64, limit int) ([]db.ClaimRef, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -895,18 +893,7 @@ func (s *conversationQueueStore) TakeOverExpiredClaimsSystem(ctx context.Context
 		if err := rows.Close(); err != nil {
 			return err
 		}
-		if len(ids) == 0 {
-			return nil
-		}
-		_, err = q.ExecContext(ctx, `
-			UPDATE conversations SET preferred_executor_id = NULL
-			WHERE id IN (
-				SELECT id FROM conversations
-				WHERE id = ANY($1::uuid[]) AND preferred_executor_id IS NOT NULL
-				FOR UPDATE SKIP LOCKED
-			)
-		`, pgUUIDArray(ids))
-		return err
+		return clearPreferredExecutor(ctx, q, ids)
 	})
 	if err != nil {
 		return nil, wrapAdminPoolPermErr(err, "conversation_queue.TakeOverExpiredClaimsSystem")
@@ -946,16 +933,82 @@ func (s *conversationQueueStore) ReleaseOwnClaimsOnShutdownSystem(ctx context.Co
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	res, err := s.conn.ExecContext(ctx, `
-		UPDATE claims SET released_at = now(), outcome = 'requeued_shutdown'
-		WHERE executor_id = $1 AND boot_epoch = $2 AND released_at IS NULL
-		  AND conversation_id = ANY($3::uuid[])
-	`, executorID, bootEpoch, pgUUIDArray(ids))
+	var released []string
+	err := inTx(ctx, s.conn, func(q queryer) error {
+		rows, err := q.QueryContext(ctx, `
+			UPDATE claims SET released_at = now(), outcome = 'requeued_shutdown'
+			WHERE executor_id = $1 AND boot_epoch = $2 AND released_at IS NULL
+			  AND conversation_id = ANY($3::uuid[])
+			RETURNING conversation_id::text
+		`, executorID, bootEpoch, pgUUIDArray(ids))
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			released = append(released, id)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		return clearPreferredExecutor(ctx, q, released)
+	})
 	if err != nil {
 		return 0, wrapAdminPoolPermErr(err, "conversation_queue.ReleaseOwnClaimsOnShutdownSystem")
 	}
-	n, err := res.RowsAffected()
-	return int(n), err
+	return len(released), nil
+}
+
+// ReleaseClaimOnShutdownSystem releases the claim and then clears the stamp,
+// in that order, the order RequeueConversation takes.
+func (s *conversationQueueStore) ReleaseClaimOnShutdownSystem(ctx context.Context, orgID, conversationID, claimID string) error {
+	if !isValidUUID(orgID) || !isValidUUID(conversationID) || !isValidUUID(claimID) {
+		return fmt.Errorf("%w: claim %q on conversation %q", db.ErrClaimReleased, claimID, conversationID)
+	}
+	err := inTx(ctx, s.conn, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE claims SET released_at = now(), outcome = 'requeued_shutdown'
+			WHERE id = $1 AND org_id = $2 AND conversation_id = $3 AND released_at IS NULL
+		`, claimID, orgID, conversationID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n == 0 {
+			return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+		}
+		return clearPreferredExecutor(ctx, q, []string{conversationID})
+	})
+	if err != nil && !errors.Is(err, db.ErrClaimReleased) {
+		return wrapAdminPoolPermErr(err, "conversation_queue.ReleaseClaimOnShutdownSystem")
+	}
+	return err
+}
+
+// clearPreferredExecutor drops the placement stamp on conversations whose
+// claim a transaction just released. Each row's lock is taken with SKIP
+// LOCKED: the claim is already locked by the caller, and a writer that locks
+// a conversation before its claim would otherwise wait on this transaction
+// while this one waited on it. The stamp is advisory, so a row somebody else
+// holds keeps it.
+func clearPreferredExecutor(ctx context.Context, q queryer, conversationIDs []string) error {
+	if len(conversationIDs) == 0 {
+		return nil
+	}
+	_, err := q.ExecContext(ctx, `
+		UPDATE conversations SET preferred_executor_id = NULL
+		WHERE id IN (
+			SELECT id FROM conversations
+			WHERE id = ANY($1::uuid[]) AND preferred_executor_id IS NOT NULL
+			FOR UPDATE SKIP LOCKED
+		)
+	`, pgUUIDArray(conversationIDs))
+	return err
 }
 
 // StrandedBlueprintRunsSystem measures the grace on database time, against

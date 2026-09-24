@@ -444,8 +444,8 @@ sharing `conversation.id`, told apart by `claim.attempt`.
 
 The root's `outcome` says how the attempt ended, and the distinctions are the
 ones you actually filter on: `agent_live` reached the agent; `cancelled` was
-stopped by someone; `shutdown` stood down because its executor was going away,
-leaving the claim for the shutdown release to hand back; `fenced` lost the
+stopped by someone; `shutdown` stood down before its agent came up because its
+executor was going away, and its conversation went back to the queue; `fenced` lost the
 conversation to a successor; `loss_budget_spent` failed the conversation without
 running it, because its engagements had been lost `TF_MAX_CLAIM_ATTEMPTS` times
 in a row; `setup_failed` is the only one that also carries an error status, so
@@ -818,8 +818,8 @@ fenced executor stays `200`-but-`fenced:true` so the HEALTHCHECK doesn't kill it
 before it can quiesce.
 
 `shutting_down` is the exception, and it outranks even the `fenced` override: it
-latches on SIGTERM while the pod finishes dispatches it already claimed, and a
-pod on its way out is never ready. Seeing `503` with `shutting_down:true` and a
+latches on SIGTERM while the pod hands back the conversations it had claimed,
+and a pod on its way out is never ready. Seeing `503` with `shutting_down:true` and a
 non-zero `active_runs` is a healthy graceful shutdown in progress, not a fault —
 see [Rolling restarts](scaling.md#rolling-restarts).
 

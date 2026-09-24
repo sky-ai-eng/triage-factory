@@ -446,54 +446,7 @@ func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext
 // out, which threw away the one thing a user who just killed a wedged run is
 // likely to want back. A stop is a park with a reason attached.
 func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext, sessionID string) (fenced bool) {
-	// Before anything else this park writes: the agent's memory file, one last
-	// time. A park is an ending it may have written right up to, and the
-	// snapshot below is not a substitute — it puts the file where only an
-	// executor holding this tree can read it, while the row is what a handler
-	// on another pod sees.
-	//
-	// It runs ahead of the flip, so a park the fence goes on to refuse has
-	// filed anyway. That is the point rather than an oversight: an engagement
-	// whose claim was released under it — a stop the dispatcher will settle
-	// once expiry handling released the claim — is still the only thing
-	// holding the file, and skipping it there would lose exactly the notes this
-	// mirror exists to keep. A successor mid-flight is what settle's
-	// unconditional write answers: the successor's own ending re-asserts its
-	// file over anything a zombie filed first.
-	park.mirror.settle(ctx)
-
-	// The flip does not wait on the capture, and the durable state record is
-	// what makes that safe. It is opened FIRST — before the flip, never after —
-	// so no observer can see a row that says resumable with neither a blob nor
-	// an account of one: the record names a persist in flight and who owes it,
-	// which the wake gate reads as recoverable (see workspaceRecoverable).
-	// Reversed, the window between flip and record would answer "expired" for a
-	// workspace that is being written.
-	//
-	// Everything the snapshot costs — a git capture, a tar, a blob PUT —
-	// therefore falls after the status a person is watching. Best-effort as
-	// ever, and skipped entirely with no workspace to capture (a cancel during
-	// setup), which the persist would reject anyway. A record that could not be
-	// opened does not hold up the park either: the flip goes ahead and the
-	// persist below retries the open on its own way through.
-	snapCtx := context.WithoutCancel(ctx)
-	willSnapshot := park.claudeCwd != "" && park.namespace != "" && s.Storage() != nil
-	leaseHeld := willSnapshot && s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)
-
-	// Spend lands BEFORE the flip: the `open` broadcast is what makes every
-	// watcher refetch, and the figure has to be on the ledger by then. It
-	// also lands whether or not the flip is refused: the engagement is still
-	// the only holder of what its process spent.
-	s.settleEngagementSpend(snapCtx, park)
-
-	fenced = s.markConversationOpen(ctx, park)
-
-	if willSnapshot {
-		if err := s.persistWorkspaceSnapshot(snapCtx, park.orgID, park.conversationID, park.namespace, park.claimID, park.claudeCwd, sessionID, park.runtime, leaseHeld); err != nil {
-			delegateLog.Warn("snapshot workspace after parking open failed", "conversation", park.conversationID, "error", err)
-		}
-	}
-	if fenced {
+	if s.leaveConversation(ctx, park, sessionID, s.markConversationOpen) {
 		return true
 	}
 	// Only the idle park toasts. A deliberate stop terminates the blueprint
@@ -503,6 +456,112 @@ func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext
 	if !park.reason.Deliberate {
 		toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortConversationID(park.conversationID)))
 	}
+	return false
+}
+
+// handBackOnShutdown is the park an engagement takes when its dispatcher is
+// shutting down: everything a park does, except that the conversation is not
+// flipped `open`. Its claim is released 'requeued_shutdown' and the row stays
+// mid-flight, so the next claim — on any executor — continues it at once,
+// charged to neither budget: the native loop replays its transcript, the SDK
+// resumes its session, and the workspace is this engagement's own, warm on the
+// same host or rebuilt from the snapshot taken here. park.reason is not read.
+//
+// Parking instead would record a stop nobody made, and a parked conversation
+// waits for a message nobody is going to send.
+func (s *Spawner) handBackOnShutdown(ctx context.Context, park liveParkContext, sessionID string) (fenced bool) {
+	return s.leaveConversation(ctx, park, sessionID, s.releaseClaimOnShutdown)
+}
+
+// leaveConversation is the ordered ending both of the above share, and
+// release is the one step where they differ: the write that lets go of the
+// claim. It returns release's answer — fenced when the engagement no longer
+// held the claim, so nothing was written and the caller must not act on the
+// conversation's state.
+func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, sessionID string, release func(context.Context, liveParkContext) bool) (fenced bool) {
+	// Before anything else this ending writes: the agent's memory file, one
+	// last time. It is an ending the agent may have written right up to, and
+	// the snapshot below is not a substitute — it puts the file where only an
+	// executor holding this tree can read it, while the row is what a handler
+	// on another pod sees.
+	//
+	// It runs ahead of the release, so an ending the fence goes on to refuse
+	// has filed anyway. That is the point rather than an oversight: an
+	// engagement whose claim was released under it — a stop the dispatcher
+	// will settle once expiry handling released the claim — is still the only
+	// thing holding the file, and skipping it there would lose exactly the
+	// notes this mirror exists to keep. A successor mid-flight is what
+	// settle's unconditional write answers: the successor's own ending
+	// re-asserts its file over anything a zombie filed first.
+	park.mirror.settle(ctx)
+
+	// The release does not wait on the capture, and the durable state record
+	// is what makes that safe. It is opened FIRST — before the release, never
+	// after — so no observer can see a row that says resumable with neither a
+	// blob nor an account of one: the record names a persist in flight and who
+	// owes it, which the wake gate reads as recoverable (see
+	// workspaceRecoverable) and the next claim waits on (see ensureWorkspace).
+	// Reversed, the window between release and record would answer "expired"
+	// for a workspace that is being written.
+	//
+	// Everything the snapshot costs — a git capture, a tar, a blob PUT —
+	// therefore falls after the release. For a park that is the status a
+	// person is watching; for a shutdown it is the claim, which must be back
+	// before the process's grace period can run out, or the conversation waits
+	// out its lease and is counted as lost. Best-effort as ever, and skipped
+	// entirely with no workspace to capture (a cancel during setup), which the
+	// persist would reject anyway. A record that could not be opened does not
+	// hold up the release either: the persist below retries the open on its
+	// own way through.
+	snapCtx := context.WithoutCancel(ctx)
+	willSnapshot := park.claudeCwd != "" && park.namespace != "" && s.Storage() != nil
+	leaseHeld := willSnapshot && s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)
+
+	// Spend lands BEFORE the release: the broadcast after it is what makes
+	// every watcher refetch, and the figure has to be on the ledger by then.
+	// It also lands whether or not the release is refused: the engagement is
+	// still the only holder of what its process spent.
+	s.settleEngagementSpend(snapCtx, park)
+
+	fenced = release(ctx, park)
+
+	if willSnapshot {
+		if err := s.persistWorkspaceSnapshot(snapCtx, park.orgID, park.conversationID, park.namespace, park.claimID, park.claudeCwd, sessionID, park.runtime, leaseHeld); err != nil {
+			delegateLog.Warn("snapshot workspace on leaving the conversation failed", "conversation", park.conversationID, "error", err)
+		}
+	}
+	return fenced
+}
+
+// releaseClaimOnShutdown hands the engagement's claim back as a clean
+// shutdown and leaves the conversation mid-flight. The write is fenced like a
+// park's, and for the same reason: a successor that already holds the
+// conversation owns it, and this engagement records nothing.
+func (s *Spawner) releaseClaimOnShutdown(ctx context.Context, park liveParkContext) (fenced bool) {
+	if s.conversationQueue == nil {
+		return false // test fixture with no DB wired
+	}
+	if park.claimID == "" {
+		delegateLog.Error("shutdown hand-back without a claim id — every release is the holder's fenced write; recording nothing",
+			"conversation", park.conversationID, "org_id", park.orgID)
+		return true
+	}
+	err := s.conversationQueue.ReleaseClaimOnShutdownSystem(context.WithoutCancel(ctx), park.orgID, park.conversationID, park.claimID)
+	if errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Error("claim fence refused the shutdown hand-back — this engagement no longer holds the conversation; recording nothing",
+			"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID, "error", err)
+		return true
+	}
+	if err != nil {
+		// The claim is still live, so the conversation is not lost: it is
+		// taken over once the lease lapses, counted as a lost engagement.
+		delegateLog.Warn("shutdown hand-back failed; the conversation is taken over after its claim lease",
+			"conversation", park.conversationID, "claim_id", park.claimID, "error", err)
+		return false
+	}
+	delegateLog.Info("handed the conversation back on shutdown; the next claim continues it",
+		"conversation", park.conversationID, "claim_id", park.claimID)
+	s.broadcastConversationUpdate(park.orgID, park.conversationID, domain.StatusQueued)
 	return false
 }
 

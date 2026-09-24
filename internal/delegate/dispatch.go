@@ -508,8 +508,16 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// runtime returns, the sidecar and jail are torn down on the way out.
 	// s.cancels keeps holding the plain stepCancel, so Cancel,
 	// killAllLiveSandboxes and the signal apply loop are untouched.
-	claimCtx, claimFence := context.WithCancelCause(ctx)
+	//
+	// The dispatcher's own cancellation reaches claimCtx as a cause rather
+	// than by plain propagation, so the runtimes below can tell a shutdown
+	// from a stop (shutdownCancelled). Plain propagation would hand every
+	// child the parent's cause, context.Canceled, which is also what a stop's
+	// stepCancel leaves.
+	claimCtx, claimFence := context.WithCancelCause(context.WithoutCancel(ctx))
 	defer claimFence(nil)
+	stopShutdownRelay := context.AfterFunc(ctx, func() { claimFence(errDispatcherShutdown) })
+	defer stopShutdownRelay()
 
 	// The stall watchdog, on its own timer beside the lease loop and cancelling
 	// the same handle. The lease proves this executor can still reach the
@@ -786,11 +794,17 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// park recorded here would be a user cancellation on a conversation nobody
 	// cancelled, and the disposition belongs to whoever takes it over.
 	//
-	// The dispatcher's own shutdown is neither, and is read before both: a
-	// cancelled parent means "not ours to dispose of", so the answer is no and
-	// the arms that distinguish a shutdown handle it themselves.
+	// The dispatcher's own shutdown is neither, and is read before both. It
+	// writes nothing either: the claim stays live for the shutdown release,
+	// which hands it back charged to no budget once this engagement returns.
+	// Read as a setup failure instead, the interrupted clone would spend the
+	// setup budget on a deploy.
 	disposedDuringBringUp := func() bool {
-		if ctx.Err() != nil || stepCtx.Err() == nil {
+		if ctx.Err() != nil {
+			s.endEngagement(conv.ID, engagementShutdown)
+			return true
+		}
+		if stepCtx.Err() == nil {
 			return false
 		}
 		if leaseFenced(stepCtx) {
@@ -824,10 +838,6 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 
 	sidecar, err := s.bringUpRunSidecar(stepCtx, orgID, conv, *task)
 	if err != nil {
-		if ctx.Err() != nil {
-			s.endEngagement(conv.ID, engagementShutdown)
-			return // dispatcher shutting down — leave the claim for the shutdown release
-		}
 		if disposedDuringBringUp() {
 			return
 		}
@@ -1001,7 +1011,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	if conv.Runtime == domain.ConversationRuntimeNative {
 		disp = s.runNativeAgent(stepCtx, conv.ID, *task, mission, cfg, time.Now(), conv.Model, conv.TriggerType, conv.CreatorUserID)
 	} else {
-		disp = engagementDisposition{fenced: s.runAgent(stepCtx, conv.ID, *task, mission, cfg, time.Now(), conv.Model, conv.TriggerType, conv.CreatorUserID, conv.SessionID)}
+		disp = s.runAgent(stepCtx, conv.ID, *task, mission, cfg, time.Now(), conv.Model, conv.TriggerType, conv.CreatorUserID, conv.SessionID)
 	}
 
 	// A stop during bring-up produces neither of the dispositions below — both
@@ -1030,6 +1040,14 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		// it only lands as the engagement's outcome when the claim was taken
 		// before the runtime ever came up.
 		s.endEngagement(conv.ID, engagementFenced)
+		stepParked = true
+		return
+	}
+	// Handed back at shutdown: the conversation is mid-flight and the next
+	// claim continues it, so there is no terminal to react to. The staged
+	// dirs stay for the same reason a parked step's do; on a host that is
+	// going away the next boot's sweep reclaims them.
+	if disp.handedBack {
 		stepParked = true
 		return
 	}
@@ -1154,7 +1172,14 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		}
 		// No workspace rehydrated yet, so markConversationOpen (the no-snapshot park)
 		// rather than parkConversationOpen: there is nothing on disk to capture.
+		// A shutdown is handed back the same way, and the queued message stays
+		// undelivered for the next claim to resume with.
 		s.endEngagementIfStopped(conv.ID, ctx, stepCtx)
+		if shutdownCancelled(stepCtx) {
+			s.releaseClaimOnShutdown(ctx, resumeParkContext(stepCtx, orgID, conv, userID))
+			disposed = true
+			return
+		}
 		disposed = s.markConversationOpen(ctx, resumeParkContext(stepCtx, orgID, conv, userID))
 		return
 	}
@@ -1204,7 +1229,13 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		if stepCtx.Err() != nil {
 			// A stop, not a failure: cause is whatever the bring-up was doing
 			// when the cancel landed, which is not why this engagement ended.
+			// A shutdown is neither, and hands the claim back with the queued
+			// message still undelivered.
 			s.endEngagementIfStopped(conv.ID, ctx, stepCtx)
+			if shutdownCancelled(stepCtx) {
+				s.releaseClaimOnShutdown(ctx, resumeParkContext(stepCtx, orgID, conv, userID))
+				return
+			}
 			disposed = s.markConversationOpen(ctx, resumeParkContext(stepCtx, orgID, conv, userID))
 			return
 		}
@@ -1340,6 +1371,14 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		park.namespace, park.claudeCwd, park.mirror = namespace, resumeCwd, mirror
 		if outcome != nil {
 			park.costUSD = outcome.CostUSD
+		}
+		// A shutdown snapshots the same way and hands the claim back instead.
+		// The message was delivered, so the next claim takes the step path
+		// and resumes the session from what it already holds.
+		if shutdownCancelled(stepCtx) {
+			s.handBackOnShutdown(ctx, park, conv.SessionID)
+			disposed = true
+			return
 		}
 		disposed = s.parkConversationOpen(ctx, park, conv.SessionID)
 		return
@@ -2072,6 +2111,13 @@ type engagementDisposition struct {
 	// successor owns the conversation. Nothing was written and nothing may be
 	// reacted to — the row now describes somebody else's work.
 	fenced bool
+	// handedBack means the dispatcher shut down under this engagement, and
+	// the engagement let go of the conversation without recording anything
+	// about it: its claim is released 'requeued_shutdown' (or left for the
+	// shutdown release to), the conversation stays mid-flight, and the next
+	// claim continues it. Like fenced, nothing may be reacted to — there is
+	// no terminal, and the row is about to be somebody else's.
+	handedBack bool
 	// launchErr means the engagement never reached the agent's first turn:
 	// workspace setup, the jail, the tool host, the opening turn. Nothing was
 	// recorded, so there is nothing to react to and nothing lost by trying

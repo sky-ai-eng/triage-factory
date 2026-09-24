@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -214,7 +215,7 @@ func TestAwaitSnapshotBlob_TakesABlobThatAlreadyLanded(t *testing.T) {
 	seedSnapshotState(t, s, namespace, "claim-vanished", domain.WorkspaceSnapshotPending)
 	putTestSnapshot(t, s, namespace)
 
-	appeared, _ := s.awaitSnapshotBlob(context.Background(), runmode.LocalDefaultOrgID, namespace)
+	appeared, _ := s.awaitSnapshotBlob(context.Background(), runmode.LocalDefaultOrgID, namespace, false)
 	if !appeared {
 		t.Error("the wait reported no snapshot while one was in the store; a resume would rebuild over work that survived")
 	}
@@ -369,6 +370,68 @@ func TestEnsureWorkspace_WaitsOutAnInFlightPersist(t *testing.T) {
 	}
 	if got != worktree.RunRoot(namespace) {
 		t.Errorf("cwd = %q, want the run root for %s", got, namespace)
+	}
+}
+
+// TestEnsureWorkspace_AnInFlightPersistOutranksAnEarlierBlob is the shape a
+// shutdown hand-back produces: the key already holds an earlier snapshot (the
+// last step boundary), the engagement that let go is still uploading a newer
+// one, and the successor's claim lands inside that window. It must wait for
+// the newer blob rather than restore the earlier tree and lose the work since.
+func TestEnsureWorkspace_AnInFlightPersistOutranksAnEarlierBlob(t *testing.T) {
+	isolateRunNamespace(t)
+	setupGitTestEnv(t)
+	s, database, conversationID, _ := setupAdvanceFixture(t, "wait-supersede")
+	wireBlobStore(t, s)
+	s.snapshotWaitPollInterval = 5 * time.Millisecond
+	s.SetSnapshotWaitTimeout(10 * time.Second)
+	namespace := taskIDForConversation(t, database, conversationID)
+	markNative(t, database, conversationID)
+
+	earlierTree := t.TempDir()
+	writeFile(t, filepath.Join(earlierTree, "_tfac", "notes.txt"), "as of the last step boundary")
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID,
+		namespace, "claim-earlier", earlierTree, "", domain.ConversationRuntimeNative); err != nil {
+		t.Fatalf("earlier snapshot: %v", err)
+	}
+
+	const writerClaim = "claim-handed-back"
+	seedSnapshotState(t, s, namespace, writerClaim, domain.WorkspaceSnapshotPending)
+	stageClaim(t, database, conversationID, writerClaim, "exec-leaving")
+	stageInstance(t, database, "exec-leaving", time.Now())
+
+	const newer = "the work since, stored on the way out"
+	writerTree := t.TempDir()
+	writeFile(t, filepath.Join(writerTree, "_tfac", "notes.txt"), newer)
+	persisted := make(chan error, 1)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		persisted <- s.persistWorkspaceSnapshot(context.Background(), runmode.LocalDefaultOrgID, conversationID,
+			namespace, writerClaim, writerTree, "", domain.ConversationRuntimeNative, true)
+	}()
+	t.Cleanup(func() {
+		if err := <-persisted; err != nil {
+			t.Errorf("the writer's persist failed, so the wait ended for the wrong reason: %v", err)
+		}
+	})
+
+	conv := &domain.Conversation{
+		ID: conversationID, TaskID: namespace, Runtime: domain.ConversationRuntimeNative,
+		WorktreePath: filepath.Join(t.TempDir(), "on-the-executor-that-left"),
+	}
+	got, prov, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, failingFreshBuilder(t))
+	if err != nil {
+		t.Fatalf("ensureWorkspace: %v", err)
+	}
+	if prov != domain.WorkspaceProvenanceRehydrated {
+		t.Errorf("provenance = %q, want rehydrated", prov)
+	}
+	body, err := os.ReadFile(filepath.Join(got, "_tfac", "notes.txt"))
+	if err != nil {
+		t.Fatalf("read the rehydrated notes: %v", err)
+	}
+	if string(body) != newer {
+		t.Errorf("rehydrated notes = %q, want %q — the claim restored the earlier snapshot instead of waiting for the one in flight", body, newer)
 	}
 }
 

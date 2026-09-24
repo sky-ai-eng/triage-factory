@@ -368,8 +368,19 @@ type ConversationQueueStore interface {
 	// live claims this executor boot minted on the named conversations: the
 	// ones whose engagements the caller has seen return. A deliberate stop is
 	// not a loss: it spends neither budget, and the conversation is claimable
-	// at once rather than after its lease lapses. Returns the count released.
+	// at once rather than after its lease lapses. The released conversations'
+	// preferred_executor_id is cleared in the same transaction, since the
+	// stamp names an executor that is leaving. Returns the count released.
 	ReleaseOwnClaimsOnShutdownSystem(ctx context.Context, executorID string, bootEpoch int64, conversationIDs []string) (int, error)
+
+	// ReleaseClaimOnShutdownSystem is one engagement handing its own claim
+	// back because its executor is shutting down: the claim is released as
+	// 'requeued_shutdown' and the conversation is left mid-flight, so it is
+	// claimable at once and the next claim continues it. Fenced on claimID
+	// like every holder write: ErrClaimReleased when the claim is no longer
+	// live. preferred_executor_id is cleared in the same transaction, for the
+	// reason ReleaseOwnClaimsOnShutdownSystem clears it.
+	ReleaseClaimOnShutdownSystem(ctx context.Context, orgID, conversationID, claimID string) error
 
 	// StrandedBlueprintRunsSystem returns running blueprint runs whose current
 	// step's conversation reached completed or failed more than grace ago and

@@ -578,7 +578,7 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 		loadTask(t, s, taskID),
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: claimID, blueprintRunID: namespace},
 		namespace, wtPath, "manual", runmode.LocalDefaultUserID, time.Now(),
-		agentloop.Result{Kind: agentloop.ResultCancelled, Err: context.Canceled}, nil); fenced {
+		agentloop.Result{Kind: agentloop.ResultCancelled, Err: context.Canceled}, nil).fenced; fenced {
 		t.Fatal("the executor's teardown reported a fence trip while holding the claim")
 	}
 
@@ -665,7 +665,7 @@ func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 			Kind:        agentloop.ResultFailed,
 			FailureKind: domain.ConversationFailureAgentError,
 			Err:         errors.New("tool host is unusable: broken pipe"),
-		}, nil); fenced {
+		}, nil).fenced; fenced {
 		t.Fatal("recordNativeResult reported a fence trip on an unfenced store")
 	}
 
@@ -864,7 +864,7 @@ func TestRecordNativeResult_ParkedSettlesThroughTheClaim(t *testing.T) {
 		loadTask(t, s, taskID),
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: claimID, blueprintRunID: namespace},
 		namespace, t.TempDir(), "manual", runmode.LocalDefaultUserID, time.Now(),
-		agentloop.Result{Kind: agentloop.ResultParked}, nil); fenced {
+		agentloop.Result{Kind: agentloop.ResultParked}, nil).fenced; fenced {
 		t.Fatal("the guard park reported a fence trip while holding the claim")
 	}
 
@@ -902,7 +902,7 @@ func TestRecordNativeResult_FencedEngagementRecordsNoTerminal(t *testing.T) {
 				loadTask(t, s, taskID),
 				runConfig{orgID: runmode.LocalDefaultOrgID, claimID: claimID, blueprintRunID: namespace},
 				namespace, t.TempDir(), "manual", runmode.LocalDefaultUserID, time.Now(),
-				agentloop.Result{Kind: kind, FailureKind: domain.ConversationFailureAgentError, Err: errors.New("cut short")}, nil); !fenced {
+				agentloop.Result{Kind: kind, FailureKind: domain.ConversationFailureAgentError, Err: errors.New("cut short")}, nil).fenced; !fenced {
 				t.Fatal("a fenced engagement did not report the fence")
 			}
 			if got := storedStatus(t, database, conversationID); got != "" {

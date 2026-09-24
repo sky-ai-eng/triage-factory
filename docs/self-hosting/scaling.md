@@ -63,42 +63,65 @@ Each executor's container HEALTHCHECK hits its localhost `GET /healthz` — see
 
 ## Rolling restarts
 
-An executor that is asked to stop finishes what it already claimed before it
-goes. On SIGTERM it stops claiming new work, its `GET /healthz` flips to 503
-with `shutting_down: true`, and only then does it wait — up to 15s — for
-in-flight dispatches to return. The ordering is the point: a draining executor
-answers its probe rather than refusing connections, so an orchestrator sees a
-pod that is leaving instead of one that has already gone.
+An executor that is asked to stop hands its conversations to the rest of the
+fleet, including ones whose agent is mid-turn. On SIGTERM it stops claiming new
+work, its `GET /healthz` flips to 503 with `shutting_down: true`, and every
+in-flight engagement is cancelled: an agent's model call or tool call is cut off
+where it is. The ordering is the point: a draining executor answers its probe
+rather than refusing connections, so an orchestrator sees a pod that is leaving
+instead of one that has already gone.
 
-The wait exists because a dispatch's last act is un-cancellable by design — the
-blueprint it just ran must be advanced or finalized, so that write deliberately
-ignores the shutdown. Closing the database pools underneath it turns a completed
-agent turn into a failed write, and the conversation is re-run, which costs an
-API bill for work already done.
+Each cancelled engagement then hands its conversation back rather than stopping
+it:
 
-Once the wait returns, the executor hands back every claim whose dispatch has
-finished. A conversation it was driving is claimable by another executor at
-once, and a restart does not count against its `TF_MAX_CLAIM_ATTEMPTS` budget —
-that budget is for engagements that were lost, and a deliberate stop is not
-one.
+1. It files the agent's memory file and settles what the engagement spent.
+2. It releases its claim. The conversation stays in flight, so another
+   executor can claim it at once, and a restart does not count against its
+   `TF_MAX_CLAIM_ATTEMPTS` budget: that budget is for engagements that were
+   lost, and a deliberate stop is not one.
+3. It uploads a snapshot of the workspace, uncommitted and untracked files
+   included.
+
+The executor waits up to 15s for those hand-backs, and for any dispatch whose
+agent had just finished: that dispatch's last act is advancing or finalizing
+its blueprint, which deliberately ignores the shutdown. Closing the database
+pools underneath it would turn a completed agent turn into a failed write, and
+the conversation would re-run. An engagement that was still being set up
+(cloning, starting its sandbox) hands back nothing itself; once the wait
+returns, the executor releases its claim the same way.
+
+The executor that picks a conversation up continues it. It waits for the
+snapshot if the upload is still running (the leaving pod keeps heartbeating
+until it exits, which is how the successor knows the upload is still coming),
+restores the workspace from it, and resumes the transcript. A tool call the
+shutdown cut off is answered as interrupted, with the result unknown, so the
+agent checks the state before repeating it. The model call in flight is simply
+made again. In local mode the same process picks the conversation up on its
+next boot, in the same working tree.
 
 Two things to set alongside it:
 
-- **A termination grace period of at least 30s.** A SIGKILL truncates the write
-  whether or not TF is still waiting. The shutdown sequence is bounded at 25s
-  (15s drain, then 5s to stop the healthz listener and 5s to flush traces), so
-  the compose default of 30s covers it with room to spare. If the drain
-  deadline does expire, TF logs one WARN naming it and closes anyway. A
-  dispatch still running then keeps its claim, which another executor takes
-  over once its 75s lease lapses (or the executor's own next boot releases),
-  and that does count as a lost engagement. Reaching the deadline at all means
-  something is wrong: the wait is for already-cancelled goroutines to unwind,
-  which takes seconds.
-- **Drain first for a long turn.** The shutdown wait is bounded by work already
-  claimed, and an agent turn can outlast any sane grace period. To retire an
-  executor cleanly, mark it draining (it stops claiming while live runs finish
-  or park at their turn end), wait for `active_runs` on its healthz to reach 0,
-  then stop it.
+- **A termination grace period of at least 30s.** The shutdown sequence is
+  bounded at 25s (15s drain, then 5s to stop the healthz listener and 5s to
+  flush traces), so the compose default of 30s covers it with room to spare.
+  If the drain deadline expires, TF logs one WARN naming it and closes anyway.
+  A snapshot upload cut off by the exit leaves the successor with the previous
+  snapshot (the last step boundary or park), and the agent is told its
+  workspace was restored to that point. A dispatch that had not yet released
+  its claim keeps it; another executor takes the claim over once its 75s lease
+  lapses, and that counts as a lost engagement.
+- **Drain first to avoid interrupting turns.** A hand-back costs the turn in
+  flight and nothing before it. To retire an executor without cutting any turn
+  off, mark it draining (it stops claiming while live runs finish or park at
+  their turn end), wait for `active_runs` on its healthz to reach 0, then stop
+  it.
+
+An executor that dies without SIGTERM (SIGKILL, a lost node) hands nothing
+back. Its claims are taken over once their 75s leases lapse, each counted as a
+lost engagement, and the workspace comes back from the last snapshot taken
+before the loss, or from what was pushed to the remote if there is none. The
+transcript is intact either way, so the agent continues from where it was and
+is told what its workspace lost.
 
 Control pods claim nothing, so none of this applies to them: they shut down on
 their HTTP server's own graceful drain.
