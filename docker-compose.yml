@@ -132,6 +132,12 @@ services:
     # most-exposed machine class, running agent workloads — never holds
     # a superuser DSN.
     image: supabase/postgres:15.14.1.121
+    # The backing services (this, gotrue, seaweedfs) restart on the same
+    # policy as the TF services that depend on them. A daemon restart or
+    # host reboot brings back only containers that carry a policy, and it
+    # does so without consulting depends_on — so a TF pod would come back
+    # alone and retry against a hostname nothing on the network answers for.
+    restart: unless-stopped
     environment:
       # `${VAR:?msg}` makes compose fail-fast if .env wasn't filled in,
       # so the stack never boots with empty/placeholder passwords.
@@ -227,6 +233,7 @@ services:
 
   gotrue:
     image: supabase/gotrue:v2.189.0
+    restart: unless-stopped
     environment:
       GOTRUE_DB_DRIVER: postgres
       # supabase_auth_admin is pre-provisioned by the supabase/postgres
@@ -334,6 +341,7 @@ services:
   # so they stay JSON-safe inside the config.
   seaweedfs:
     image: chrislusf/seaweedfs:4.36
+    restart: unless-stopped
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
