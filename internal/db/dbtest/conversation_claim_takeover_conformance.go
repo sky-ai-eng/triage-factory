@@ -391,6 +391,20 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		f.SetStoredStatus(t, held.ID, "completed")
 		f.BackdateConclusion(t, held.ID, 2*grace)
 
+		// Resumed and failed again just now, on the infra-failure terminal:
+		// it keeps the first conclusion's completed_at, so only the fresh
+		// release says a reactor may still be on its way.
+		resumed := conclude(t, "failed")
+		f.BackdateConclusion(t, resumed.ID, 2*grace)
+		f.SetStoredStatus(t, resumed.ID, "")
+		again, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, claimLeaseExecutor, claimLeaseBootEpoch, db.ClaimPlacement{}, testClaimLease)
+		if err != nil || again == nil || again.ID != resumed.ID {
+			t.Fatalf("re-claim of the resumed step = (%+v, %v), want %s", again, err, resumed.ID)
+		}
+		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, resumed.ID, again.ClaimID, string(domain.ConversationFailureUnclassified)); err != nil || !ok {
+			t.Fatalf("MarkFailedIfActiveForClaimSystem(resumed) = (%v, %v)", ok, err)
+		}
+
 		got, err := f.Stores.ConversationQueue.StrandedBlueprintRunsSystem(ctx, grace, 100)
 		if err != nil {
 			t.Fatalf("StrandedBlueprintRunsSystem: %v", err)
@@ -409,7 +423,7 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 				t.Errorf("stranded run of %s = %+v, want org %s and its own run", c.ID, r, f.OrgID)
 			}
 		}
-		for name, c := range map[string]*domain.Conversation{"inside the grace": fresh, "open": parked, "claimed": held} {
+		for name, c := range map[string]*domain.Conversation{"inside the grace": fresh, "open": parked, "claimed": held, "resumed and failed again": resumed} {
 			if _, ok := found[c.ID]; ok {
 				t.Errorf("a %s step's run was reported stranded", name)
 			}
