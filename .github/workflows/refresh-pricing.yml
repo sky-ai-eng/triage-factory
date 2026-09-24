@@ -76,6 +76,9 @@ jobs:
           cache: true
 
       - name: Refresh pricing snapshot
+        # An explicit bash shell runs with -o pipefail; the default shell does
+        # not, so a refusal from the script would exit through tee as success.
+        shell: bash
         run: ./scripts/refresh-pricing.sh 2>&1 | tee /tmp/refresh.log
 
       - name: Verify (pricing gate)
