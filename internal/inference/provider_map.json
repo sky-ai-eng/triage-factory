@@ -1,5 +1,6 @@
 {
  "ai21": "unsupported",
+ "aihubmix": "unsupported",
  "amazon_nova": "unsupported",
  "anthropic": "anthropic",
  "anyscale": "unsupported",
@@ -57,11 +58,14 @@
  "perplexity": "unsupported",
  "pinstripes": "unsupported",
  "publicai": "unsupported",
+ "qwen_ai_platform": "unsupported",
+ "qwencloud": "unsupported",
  "replicate": "unsupported",
  "sagemaker": "unsupported",
  "sambanova": "unsupported",
  "sarvam": "unsupported",
  "scaleway": "unsupported",
+ "scx-ai": "unsupported",
  "snowflake": "unsupported",
  "tencent": "unsupported",
  "tensormesh": "unsupported",
@@ -88,5 +92,6 @@
  "wandb": "unsupported",
  "watsonx": "unsupported",
  "xai": "xai",
+ "xiaomi_mimo": "unsupported",
  "zai": "unsupported"
 }

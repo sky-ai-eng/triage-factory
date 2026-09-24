@@ -17,16 +17,19 @@ func approxEqual(a, b float64) bool { return math.Abs(a-b) <= epsilon*math.Max(1
 type expectedPrice struct {
 	input, output               float64
 	cacheRead, cache5m, cache1h float64
+	// readMultiple is the cache-read rate as a fraction of input. It is a
+	// per-model column because the family does not share one value.
+	readMultiple float64
 }
 
 // anthropicPublicPrices mirrors https://www.anthropic.com/pricing (standard
-// tier, ≤200k context). The prompt-cache economics are the same across the
-// family: cache read = 0.1× input, 5-minute write = 1.25× input, 1-hour write
-// = 2× input.
+// tier, ≤200k context). Cache writes are the same across the family: 5-minute
+// write = 1.25× input, 1-hour write = 2× input. Cache read is 0.1× input on
+// most models and 0.05× on Opus 5.5, so each row states its own.
 var anthropicPublicPrices = map[string]expectedPrice{
-	"claude-sonnet-4-5": {input: 3e-06, output: 1.5e-05, cacheRead: 3e-07, cache5m: 3.75e-06, cache1h: 6e-06},
-	"claude-opus-4-1":   {input: 1.5e-05, output: 7.5e-05, cacheRead: 1.5e-06, cache5m: 1.875e-05, cache1h: 3e-05},
-	"claude-haiku-4-5":  {input: 1e-06, output: 5e-06, cacheRead: 1e-07, cache5m: 1.25e-06, cache1h: 2e-06},
+	"claude-sonnet-4-5": {input: 3e-06, output: 1.5e-05, cacheRead: 3e-07, cache5m: 3.75e-06, cache1h: 6e-06, readMultiple: 0.1},
+	"claude-opus-5-5":   {input: 4e-06, output: 2e-05, cacheRead: 2e-07, cache5m: 5e-06, cache1h: 8e-06, readMultiple: 0.05},
+	"claude-haiku-4-5":  {input: 1e-06, output: 5e-06, cacheRead: 1e-07, cache5m: 1.25e-06, cache1h: 2e-06, readMultiple: 0.1},
 }
 
 func TestPricingProvenance(t *testing.T) {
@@ -72,8 +75,8 @@ func TestPricing_VerificationGate(t *testing.T) {
 
 			// The prompt-cache multipliers must hold against the snapshot's own
 			// input rate — the load-bearing check the ticket calls out.
-			if !approxEqual(want.cacheRead, 0.1*want.input) {
-				t.Errorf("cache-read multiplier: want 0.1x input, got %g/%g", want.cacheRead, want.input)
+			if !approxEqual(want.cacheRead, want.readMultiple*want.input) {
+				t.Errorf("cache-read multiplier: want %gx input, got %g/%g", want.readMultiple, want.cacheRead, want.input)
 			}
 			if !approxEqual(want.cache5m, 1.25*want.input) {
 				t.Errorf("5m cache-write multiplier: want 1.25x input, got %g/%g", want.cache5m, want.input)
@@ -241,27 +244,60 @@ func TestUsageFromBifrost(t *testing.T) {
 	}
 }
 
+// TestModelWindow pins the lookup rules compaction depends on. Expected windows
+// are read from the snapshot itself, because the numbers are upstream's data and
+// change on the refresh cadence; what this package owns is how a model id
+// resolves to an entry.
 func TestModelWindow(t *testing.T) {
-	cases := []struct {
-		model string
-		want  int
-		ok    bool
-	}{
-		// The Claude family the native loop drives today.
-		{"claude-sonnet-4-5", 200000, true},
-		{"claude-haiku-4-5", 200000, true},
-		// Bedrock region-prefix strip, same rule as pricing lookup.
-		{"us.anthropic.claude-sonnet-4-5-20250929-v1:0", 200000, true},
-		// Unknown model: the caller must not guess a window.
-		{"some-model-nobody-heard-of", 0, false},
-		// A datasheet entry that carries no max_input_tokens.
-		{"azure/container", 0, false},
+	table, err := loadPricing()
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range cases {
-		got, ok := ModelWindow(c.model)
-		if ok != c.ok || got != c.want {
-			t.Errorf("ModelWindow(%q) = (%d, %v), want (%d, %v)", c.model, got, ok, c.want, c.ok)
+	snapshotWindow := func(key string) int {
+		t.Helper()
+		p, ok := table[key]
+		if !ok || p.MaxInputTokens == nil || *p.MaxInputTokens <= 0 {
+			t.Fatalf("snapshot entry %q must exist and carry max_input_tokens", key)
 		}
+		return int(*p.MaxInputTokens)
+	}
+
+	const base = "claude-haiku-4-5"
+	want := snapshotWindow(base)
+
+	// A known model returns its datasheet window.
+	if got, ok := ModelWindow(base); !ok || got != want {
+		t.Errorf("ModelWindow(%q) = (%d, %v), want (%d, true)", base, got, ok, want)
+	}
+
+	// A region-prefixed id absent from the table resolves to its unprefixed
+	// entry, the same rule as pricing lookup.
+	prefixed := "global." + base
+	if _, ok := table[prefixed]; ok {
+		t.Fatalf("%q must be absent from the snapshot for this case to exercise the prefix strip", prefixed)
+	}
+	if got, ok := ModelWindow(prefixed); !ok || got != want {
+		t.Errorf("ModelWindow(%q) = (%d, %v), want (%d, true)", prefixed, got, ok, want)
+	}
+
+	// An unknown model is not found: the caller must not guess a window.
+	if got, ok := ModelWindow("some-model-nobody-heard-of"); ok || got != 0 {
+		t.Errorf("unknown model = (%d, %v), want (0, false)", got, ok)
+	}
+
+	// An entry with no max_input_tokens is not found either.
+	var noWindow string
+	for k, p := range table {
+		if p.MaxInputTokens == nil {
+			noWindow = k
+			break
+		}
+	}
+	if noWindow == "" {
+		t.Skip("snapshot has no entry without max_input_tokens")
+	}
+	if got, ok := ModelWindow(noWindow); ok || got != 0 {
+		t.Errorf("ModelWindow(%q) with no window = (%d, %v), want (0, false)", noWindow, got, ok)
 	}
 }
 

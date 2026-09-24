@@ -12,13 +12,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
 )
 
-// The compaction battery. The fixtures use claude-sonnet-4-5 (window 200000,
-// threshold 0.80 → trip at 160000) and drive the engine end to end through
-// the scripted harness, so every property is asserted as an observable row
-// sequence: what flipped, what survived, what ordered where, what the
-// provider was actually sent.
+// The compaction battery. The fixtures run under testParams' model and drive
+// the engine end to end through the scripted harness, so every property is
+// asserted as an observable row sequence: what flipped, what survived, what
+// ordered where, what the provider was actually sent.
 
-const overThreshold = 165000
+// overThreshold is an occupancy just past the trip for testParams' model. It
+// is read from the datasheet window rather than written as a number, because
+// that window is upstream data the daily pricing refresh can change.
+var overThreshold = func() int {
+	window, ok := inference.ModelWindow(testParams().Model)
+	if !ok {
+		panic("testParams' model must carry a datasheet window")
+	}
+	return int(DefaultCompactionThreshold*float64(window)) + 5000
+}()
 
 // usedAssistant is a prior turn carrying the stamped usage the occupancy
 // derivation reads. at controls warmth: recent = cache live, old = cold.
