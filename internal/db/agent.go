@@ -748,6 +748,12 @@ type ConversationStore interface {
 	// (ConversationQueueStore.SettleUnclaimedStopsSystem). Every status write
 	// either of them makes clears the intent, which is what keeps one writer
 	// of the intent and one of the status and never the two racing.
+	//
+	// An exemption from the returned-row rule: the answer a caller needs is
+	// whether the request landed, and a terminal row, which is the only miss,
+	// is a refusal rather than a row to show. A caller that renders the
+	// conversation afterwards reads it, and should, because the holder may
+	// already have settled the stop by then.
 	RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string) (requested bool, err error)
 
 	// SetSessionSystem is the claimless door onto sdk_session_id. Every

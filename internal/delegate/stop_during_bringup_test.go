@@ -119,3 +119,53 @@ func TestDispatch_StopDuringBringUpCancelsTheSetupAndParks(t *testing.T) {
 		t.Error("the cancel handle outlived the engagement")
 	}
 }
+
+// TestDispatch_BlueprintCancelDuringBringUpEndsTheRun is the same window with
+// a blueprint cancel behind the stop. The engagement's park settles the step
+// and clears its intent, so the dispatcher's settlement never sees it: the
+// run reaches 'cancelled' through this engagement or it stays 'running',
+// holding its worktree and its task's one-active-run slot.
+func TestDispatch_BlueprintCancelDuringBringUpEndsTheRun(t *testing.T) {
+	fx := newLaunchFixtureWithWorktree(t, "938", "")
+
+	fetchEntered := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(fetchEntered)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	fx.s.SetRunCredentialResolvers(bringUpResolver{client: ghclient.NewClient(server.URL, "test-token")}, nil, nil)
+
+	conv := fx.conv
+	conv.OrgID = runmode.LocalDefaultOrgID
+	dispatched := make(chan struct{})
+	go func() {
+		defer close(dispatched)
+		fx.s.dispatchClaimedConversation(context.Background(), &conv, time.Now())
+	}()
+
+	select {
+	case <-fetchEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("bring-up never reached the PR fetch")
+	}
+	if err := fx.s.CancelBlueprintRun(runmode.LocalDefaultOrgID, conv.BlueprintRunID, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("cancel blueprint during bring-up: %v", err)
+	}
+	select {
+	case <-dispatched:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the engagement did not return after its setup was cancelled")
+	}
+
+	if got := fx.storedStatus(t); got != "open" {
+		t.Errorf("status = %q, want open (a stop is a park)", got)
+	}
+	if got := fx.blueprintStatus(t); got != "cancelled" {
+		t.Errorf("blueprint status = %q, want cancelled — the engagement settled the step and nothing else will end the run", got)
+	}
+}

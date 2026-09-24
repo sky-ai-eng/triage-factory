@@ -1198,8 +1198,10 @@ func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id stri
 // statement itself; non-nil means q is the RLS app handle (SELECT-only on
 // claims), so the release lands on that admin-backed queryer AFTER the tx
 // work. The children it releases are parked, not terminal, so a release lost
-// between the two commits leaves a claim whose lease lapses and is released
-// like any dead engagement's.
+// between the two commits leaves a claim whose lease lapses and which the
+// executor that minted it then releases (ReleaseExpiredClaimSystem). The
+// reaper does not: it looks only at conversations still queued under a
+// running blueprint.
 func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
 	if !isValidUUID(id) {
 		return false, nil
@@ -1267,7 +1269,8 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 		// caller's still-open tx this release can land against a cancel that
 		// later rolls back (an in-flight child with no active claim, which is
 		// simply claimable), and a crash can leave parked children with
-		// claims whose leases lapse and are released as a dead engagement's.
+		// claims whose leases lapse, which only the executor that minted them
+		// releases.
 		return changed, releaseParkedChildClaims(ctx, adjacentClaims, orgID, parkedChildIDs)
 	}
 	return changed, nil
@@ -1437,7 +1440,7 @@ func blueprintActiveStepConversationIDs(ctx context.Context, q queryer, orgID, b
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND blueprint_run_id = $2
 		  AND (status IS NULL
-		       OR status NOT IN (`+conversationTerminalStatusesSQL+`,'open'))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 	`, orgID, blueprintRunID)
 	if err != nil {
 		return nil, err

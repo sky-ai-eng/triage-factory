@@ -509,7 +509,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			-- a live claim never exists without one, which is the invariant
 			-- claims_live_has_lease states and every fenced write presents.
 			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
-			SELECT candidate.org_id, candidate.id, $1, $2::bigint, now(), now() + make_interval(secs => ` + leaseArg() + `) FROM candidate
+			SELECT candidate.org_id, candidate.id, $1, $2::bigint, now(), statement_timestamp() + make_interval(secs => ` + leaseArg() + `) FROM candidate
 			RETURNING claims.id, claims.conversation_id, claims.claimed_at
 		)
 		SELECT ` + conversationQueueClaimReturning + `
@@ -645,7 +645,10 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 			  AND s.was IS DISTINCT FROM 'completed' AND s.was IS DISTINCT FROM 'failed'
 			RETURNING br.id
 		)
-		SELECT s.org_id::text, s.id::text, COALESCE(c.id::text, ''), s.blueprint_step_index
+		SELECT s.org_id::text, s.id::text,
+		       CASE WHEN row_number() OVER (PARTITION BY s.blueprint_run_id ORDER BY s.id) = 1
+		            THEN COALESCE(c.id::text, '') ELSE '' END,
+		       s.blueprint_step_index
 		FROM settled s LEFT JOIN cancelled c ON c.id = s.blueprint_run_id
 	`, args...)
 	if err != nil {
@@ -684,6 +687,48 @@ func (s *conversationQueueStore) ExpiredClaimsSystem(ctx context.Context) (int, 
 		return 0, 0, wrapAdminPoolPermErr(err, "conversation_queue.ExpiredClaimsSystem")
 	}
 	return count, time.Duration(oldestSeconds * float64(time.Second)), nil
+}
+
+func (s *conversationQueueStore) ExpiredClaimsOfExecutorSystem(ctx context.Context, executorID string, bootEpoch int64) ([]db.ClaimRef, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT id::text, org_id::text, conversation_id::text
+		FROM claims
+		WHERE executor_id = $1 AND boot_epoch = $2
+		  AND released_at IS NULL AND lease_expires_at <= statement_timestamp()
+		ORDER BY lease_expires_at, id
+	`, executorID, bootEpoch)
+	if err != nil {
+		return nil, wrapAdminPoolPermErr(err, "conversation_queue.ExpiredClaimsOfExecutorSystem")
+	}
+	defer rows.Close()
+	var out []db.ClaimRef
+	for rows.Next() {
+		var c db.ClaimRef
+		if err := rows.Scan(&c.ClaimID, &c.OrgID, &c.ConversationID); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationQueueStore) ReleaseExpiredClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (bool, error) {
+	if !isValidUUID(orgID) || !isValidUUID(conversationID) || !isValidUUID(claimID) {
+		return false, nil
+	}
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE claims SET released_at = now(), outcome = 'reaped'
+		WHERE id = $1 AND org_id = $2 AND conversation_id = $3
+		  AND released_at IS NULL AND lease_expires_at <= statement_timestamp()
+	`, claimID, orgID, conversationID)
+	if err != nil {
+		return false, wrapAdminPoolPermErr(err, "conversation_queue.ReleaseExpiredClaimSystem")
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 // RequeueConversation releases the claim FIRST and flips the conversation
@@ -1113,7 +1158,7 @@ const conversationTimingClaimLateral = `
 	LEFT JOIN LATERAL (
 		SELECT MAX(c2.claimed_at) AS claimed_at,
 		       (ARRAY_AGG(c2.executor_id ORDER BY c2.claimed_at DESC))[1] AS executor_id,
-		       COUNT(*) FILTER (WHERE c2.released_at IS NULL) > 0 AS has_active,
+		       COUNT(*) FILTER (WHERE c2.released_at IS NULL AND c2.lease_expires_at > statement_timestamp()) > 0 AS has_active,
 		       SUM(c2.duration_ms)::bigint AS duration_ms
 		FROM claims c2
 		WHERE c2.conversation_id = r.id
@@ -1122,7 +1167,8 @@ const conversationTimingClaimLateral = `
 // conversationTimingStatusSQL is the timing projection's status: the stored outcome
 // when there is one, else the derived in-flight state. The percentile read
 // buckets by failure kind, so a mid-flight row must still name itself
-// rather than scan as NULL.
+// rather than scan as NULL. A claim whose lease has lapsed is not running,
+// for the same reason the display ladder says so (liveClaimExistsSQL).
 const conversationTimingStatusSQL = `COALESCE(r.status, CASE WHEN cl.has_active THEN 'running' ELSE 'queued' END)`
 
 func (s *conversationQueueStore) RecentConversationTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.ConversationTiming, error) {

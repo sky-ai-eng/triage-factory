@@ -170,12 +170,13 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 	}
 
 	// Force-stop the conversations. StopConversationAndCancelBlueprint with an
-	// empty userID hard-kills a live process or parks one that has none, and
-	// cancels the blueprint behind it — an archived team's work is over, so a
+	// empty userID records a system stop and a cancel on the blueprint behind
+	// it, and kills a live process this pod holds; the holder or the
+	// dispatcher settles each stop — an archived team's work is over, so a
 	// frozen 'running' blueprint would hold a worktree nobody can resume. All
 	// on the admin pool. A per-conversation error is a benign race (the
 	// conversation reached terminal on its own) — log and keep going so one
-	// stuck conversation can't strand the rest; count only the ones we stopped.
+	// stuck conversation can't strand the rest; count only the stops recorded.
 	cancelledRuns := 0
 	if sp := th.spawnerRuntime(); sp != nil {
 		for _, conversationID := range conversationIDs {

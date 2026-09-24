@@ -1227,15 +1227,8 @@ func TestClaimFence_Postgres_ReadsFreshDatabaseTime(t *testing.T) {
 	if _, err := tx.ExecContext(ctx, `SELECT pg_sleep(1.5)`); err != nil {
 		t.Fatalf("sleep inside the transaction: %v", err)
 	}
-	var one int
-	err = tx.QueryRowContext(ctx, `
-		SELECT 1 FROM claims
-		WHERE id = $1 AND org_id = $2 AND conversation_id = $3
-		  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
-		FOR SHARE
-	`, claimed.ClaimID, orgID, conv.ID).Scan(&one)
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("the fence's predicate matched a lapsed lease inside a long transaction (err %v); it is reading transaction-start time", err)
+	if err := pgstore.AssertClaimActiveInTx(ctx, tx, orgID, conv.ID, claimed.ClaimID); !errors.Is(err, db.ErrClaimReleased) {
+		t.Fatalf("the fence admitted a lapsed lease inside a long transaction (err %v); it is reading transaction-start time", err)
 	}
 
 	// And the store's own fenced write, on its own connection, agrees.

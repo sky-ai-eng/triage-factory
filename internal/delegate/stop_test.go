@@ -232,14 +232,25 @@ func TestStopConversationAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *te
 //
 // The verb itself writes requests only: the run's cancel signal and a stop
 // intent on its step. The dispatcher's settlement, finding the step unheld,
-// parks it and cancels the run in one transaction.
+// parks it and cancels the run in one transaction. A paused blueprint, its
+// step parked `open`, takes the same path: nothing holds that step either,
+// and without an intent on it nothing would ever end the run.
 func TestCancelBlueprintRun_RecordsIntentAndTheSettlementCancels(t *testing.T) {
+	for name, stage := range map[string]string{
+		"queued": `UPDATE conversations SET status = NULL WHERE id = ?`,
+		"parked": `UPDATE conversations SET status = 'open', park_reason = 'idle' WHERE id = ?`,
+	} {
+		t.Run(name, func(t *testing.T) { testCancelBlueprintRunSettles(t, stage) })
+	}
+}
+
+func testCancelBlueprintRunSettles(t *testing.T, stage string) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	const conversationID = "r-bp-cancel"
 	seedConversation(t, database, conversationID, "sess-bp-cancel", "/tmp/wt-bp-cancel")
-	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, conversationID); err != nil {
-		t.Fatalf("stage the step queued: %v", err)
+	if _, err := database.Exec(stage, conversationID); err != nil {
+		t.Fatalf("stage the step: %v", err)
 	}
 	brID := "seedbpr-" + conversationID
 
@@ -256,9 +267,6 @@ func TestCancelBlueprintRun_RecordsIntentAndTheSettlementCancels(t *testing.T) {
 	}
 	if bpStatus != "running" || !cancelRequested {
 		t.Errorf("blueprint_run after the request = (%q, cancel_requested=%v), want (running, true) — the verb writes no run status", bpStatus, cancelRequested)
-	}
-	if got := storedStatus(t, database, conversationID); got != "" {
-		t.Errorf("step status after the request = %q, want none — the verb writes no conversation status", got)
 	}
 	var intent bool
 	if err := database.QueryRow(`SELECT stop_requested_at IS NOT NULL FROM conversations WHERE id = ?`, conversationID).Scan(&intent); err != nil {
@@ -831,5 +839,78 @@ func TestReconcileConversationQueue_CountsAClaimDesyncAndRepairsNothing(t *testi
 	}
 	if got := storedStatus(t, database, "r-desync"); got != "completed" {
 		t.Errorf("status = %q, want completed (untouched)", got)
+	}
+}
+
+// TestRecordNativeResult_ParkedSettlesThroughTheClaim pins the guard park:
+// a loop that stops without concluding parks the conversation idle and
+// releases its claim in the same write. A park that skipped the claim would
+// write nothing, leave the row held until its lease lapsed, and hand it to a
+// successor that trips the same guard.
+func TestRecordNativeResult_ParkedSettlesThroughTheClaim(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "native-guard-park")
+	blobs, err := storage.New()
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	s.SetStorage(blobs)
+	markNative(t, database, conversationID)
+	claimID := markEngaged(t, database, conversationID)
+	namespace := blueprintRunIDForConversation(t, database, conversationID)
+
+	if fenced := s.recordNativeResult(context.Background(), runmode.LocalDefaultOrgID, conversationID,
+		loadTask(t, s, taskID),
+		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: claimID, blueprintRunID: namespace},
+		namespace, t.TempDir(), "manual", runmode.LocalDefaultUserID, time.Now(),
+		agentloop.Result{Kind: agentloop.ResultParked}, nil); fenced {
+		t.Fatal("the guard park reported a fence trip while holding the claim")
+	}
+
+	var status, parkReason string
+	if err := database.QueryRow(
+		`SELECT COALESCE(status, ''), COALESCE(park_reason, '') FROM conversations WHERE id = ?`, conversationID,
+	).Scan(&status, &parkReason); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != "open" || parkReason != string(domain.ParkReasonIdle) {
+		t.Errorf("after the guard park = (%q, %q), want (open, idle)", status, parkReason)
+	}
+	if hasActiveClaim(t, database, conversationID) {
+		t.Error("the guard park left the claim live; the park and the release are one write")
+	}
+}
+
+// TestRecordNativeResult_FencedEngagementRecordsNoTerminal pins the loser
+// contract on the two arms that do not pass through a cancellation: a failure
+// or a guard park reported after the lease fenced writes nothing, even though
+// the database would still accept the write until the lease lapses.
+func TestRecordNativeResult_FencedEngagementRecordsNoTerminal(t *testing.T) {
+	for name, kind := range map[string]agentloop.ResultKind{"failed": agentloop.ResultFailed, "parked": agentloop.ResultParked} {
+		t.Run(name, func(t *testing.T) {
+			paths.SetForTest(t, t.TempDir())
+			setupGitTestEnv(t)
+			s, database, conversationID, taskID := setupAdvanceFixture(t, "native-fenced")
+			markNative(t, database, conversationID)
+			claimID := markEngaged(t, database, conversationID)
+			namespace := blueprintRunIDForConversation(t, database, conversationID)
+
+			ctx, fence := context.WithCancelCause(context.Background())
+			fence(errClaimSelfFenced)
+			if fenced := s.recordNativeResult(ctx, runmode.LocalDefaultOrgID, conversationID,
+				loadTask(t, s, taskID),
+				runConfig{orgID: runmode.LocalDefaultOrgID, claimID: claimID, blueprintRunID: namespace},
+				namespace, t.TempDir(), "manual", runmode.LocalDefaultUserID, time.Now(),
+				agentloop.Result{Kind: kind, FailureKind: domain.ConversationFailureAgentError, Err: errors.New("cut short")}, nil); !fenced {
+				t.Fatal("a fenced engagement did not report the fence")
+			}
+			if got := storedStatus(t, database, conversationID); got != "" {
+				t.Errorf("status = %q, want none — a fenced engagement records no terminal", got)
+			}
+			if !hasActiveClaim(t, database, conversationID) {
+				t.Error("a fenced engagement released its claim; release belongs to whoever takes it over")
+			}
+		})
 	}
 }

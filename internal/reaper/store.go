@@ -153,7 +153,11 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 		// relabelled it before the settlement parked it, and a fail would
 		// record a crash loop for a conversation someone asked to stop. This
 		// runs first because the arms below find their candidates through an
-		// unreleased claim, so a row released here is out of their sets.
+		// unreleased claim, so a row released here is out of their sets. They
+		// also exclude a stop-pending row outright: each statement reads rows
+		// as of its own start, so a stop committed after this one would
+		// otherwise reach an arm below and be failed or relabelled. That row
+		// is released on the next tick.
 		res, err := tx.ExecContext(ctx, `
 			UPDATE claims SET released_at = now(), outcome = 'reaped'
 			WHERE released_at IS NULL AND conversation_id IN (
@@ -188,6 +192,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 				result_summary = 'Stopped: owning blueprint run was cancel-requested after its executor engagement was lost (reaper)'
 			WHERE id IN (
 				SELECT r.id `+reapCandidateJoin+`
+				AND r.stop_requested_at IS NULL
 				  AND br.cancel_requested = true
 			)
 			RETURNING blueprint_run_id, id
@@ -230,6 +235,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 				result_summary = 'Failed: the executor engagement was lost repeatedly (no heartbeat, or a lapsed claim lease) and the retry budget (TF_MAX_CLAIM_ATTEMPTS) for this loss episode is exhausted (reaper)'
 			WHERE id IN (
 				SELECT r.id `+reapCandidateJoin+`
+				AND r.stop_requested_at IS NULL
 				  AND br.cancel_requested = false
 				  AND `+reapEpisodeAttemptsSQL+` >= $2
 			)
@@ -269,6 +275,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 				result_summary = 'Requeued: the executor engagement was lost — no heartbeat, or a lapsed claim lease (reaper)'
 			WHERE id IN (
 				SELECT r.id `+reapCandidateJoin+`
+				AND r.stop_requested_at IS NULL
 				  AND br.cancel_requested = false
 				  AND `+reapEpisodeAttemptsSQL+` < $2
 			)

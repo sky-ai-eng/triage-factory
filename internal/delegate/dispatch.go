@@ -191,6 +191,49 @@ func (s *Spawner) settleUnclaimedStops(ctx context.Context) {
 	s.afterSettlement(ctx, settled)
 }
 
+// releaseOwnExpiredClaims releases every claim this executor boot minted
+// whose lease has lapsed and which no engagement in this process still
+// drives. A fenced engagement writes nothing, its own release included, so
+// without this its claim holds the conversation until something outside the
+// engagement lets it go. The process that minted the claim is the one place
+// that can tell a finished engagement from one still tearing down, which is
+// what makes the release safe here without a heartbeat to consult, and why
+// it is the only release a local install has short of a restart.
+//
+// The live-engagement check and the release are not atomic, and need not be:
+// an engagement registers before its claim can expire (the lease is minted
+// fresh and the registration is the goroutine's first act), and a claim whose
+// engagement has already deregistered is never re-entered by it.
+func (s *Spawner) releaseOwnExpiredClaims(ctx context.Context) {
+	if s.conversationQueue == nil {
+		return
+	}
+	executorID, bootEpoch := s.executorIdentity()
+	if executorID == "" {
+		return
+	}
+	expired, err := s.conversationQueue.ExpiredClaimsOfExecutorSystem(ctx, executorID, bootEpoch)
+	if err != nil {
+		dispatchLog.Warn("list this executor's expired claims failed; retrying on the next scan", "error", err)
+		return
+	}
+	for _, c := range expired {
+		if s.engagementFor(c.ConversationID) != nil {
+			continue
+		}
+		released, err := s.conversationQueue.ReleaseExpiredClaimSystem(ctx, c.OrgID, c.ConversationID, c.ClaimID)
+		if err != nil {
+			dispatchLog.Warn("release expired claim failed; retrying on the next scan",
+				"conversation", c.ConversationID, "claim", c.ClaimID, "error", err)
+			continue
+		}
+		if released {
+			dispatchLog.Warn("released an expired claim no engagement drives; the conversation returns to the queue",
+				"conversation", c.ConversationID, "claim", c.ClaimID, "org_id", c.OrgID)
+		}
+	}
+}
+
 // afterSettlement is the work a committed settlement leaves: each settled
 // conversation's status is broadcast, a cancelled run's worktree is cleaned
 // (best-effort: a pod that never held the tree finds nothing), and the firing
@@ -239,7 +282,9 @@ func (s *Spawner) afterSettlement(ctx context.Context, settled []db.SettledStop)
 func (s *Spawner) drainConversationQueue(ctx context.Context) {
 	// Settlement first, ahead of every gate below: a stop on a conversation
 	// nobody holds needs no capacity to settle, so a full host or a memory
-	// gate must not hold it back.
+	// gate must not hold it back. The expired-claim release runs before it
+	// so a stop on a conversation whose engagement fenced settles this pass.
+	s.releaseOwnExpiredClaims(ctx)
 	s.settleUnclaimedStops(ctx)
 
 	// Capture the semaphore once and use it for both acquire and release so a
@@ -470,12 +515,32 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// and this fires solely if a later edit adds one that forgets to.
 	defer closeGate(engagementNotStarted, nil)
 
+	// The gates run on the dispatcher's context, not claimCtx, so a stop the
+	// renewal delivers mid-gate is read by the bring-up exits below rather
+	// than mistaken here for a failed read. A lease fence is different: it
+	// can land while a gate read is blocked, and the database accepts a
+	// terminal until the lease has actually lapsed, so every gate exit that
+	// writes asks first.
+	fencedAtGate := func() bool {
+		if !leaseFenced(claimCtx) {
+			return false
+		}
+		closeGate(engagementFenced, nil)
+		s.endEngagement(conv.ID, engagementFenced)
+		dispatchLog.Info("engagement fenced by its claim lease before bring-up; the conversation awaits takeover",
+			"conversation", conv.ID, "claim", conv.ClaimID)
+		return true
+	}
+
 	br, err := s.blueprints.GetRunSystem(gateCtx, orgID, conv.BlueprintRunID)
 	if err != nil || br == nil {
 		if ctx.Err() != nil {
 			closeGate(engagementShutdown, nil)
 			s.endEngagement(conv.ID, engagementShutdown)
 			return // dispatcher shutting down — leave the claimed run for boot reconcile
+		}
+		if fencedAtGate() {
+			return
 		}
 		// The owning blueprint_run is gone — nothing to drive. Fail the orphaned
 		// run so it leaves the queue rather than re-claiming forever.
@@ -489,6 +554,9 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		if ctx.Err() != nil {
 			closeGate(engagementShutdown, nil)
 			s.endEngagement(conv.ID, engagementShutdown)
+			return
+		}
+		if fencedAtGate() {
 			return
 		}
 		closeGate("task_missing", err)
@@ -512,6 +580,9 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// park a follow-up on concluded work the instant it was claimed — the exact
 	// silent, permanent failure that widening the gate is meant to end.
 	if !blueprintDrivableForClaim(br, conv.BlueprintStepIndex) {
+		if fencedAtGate() {
+			return
+		}
 		closeGate(engagementCancelled, nil)
 		s.endEngagement(conv.ID, engagementCancelled)
 		if _, mErr := s.conversations.ParkOpenForClaimSystem(context.WithoutCancel(ctx), orgID, conv.ID, conv.ClaimID, db.ParkStopped(domain.ParkReasonBlueprintCancelled, "Blueprint cancelled by user")); errors.Is(mErr, db.ErrClaimReleased) {
@@ -552,6 +623,9 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// message names the model.
 	model, err := s.modelForClaim(ctx, orgID, br, *conv)
 	if err != nil {
+		if fencedAtGate() {
+			return
+		}
 		s.failEngagement(conv.ID, err)
 		// An enable-set refusal is settled, not transient: every retry re-reads
 		// the same rows and refuses again, so the retry ladder would spend the
@@ -604,6 +678,9 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		// transcript, so a re-claim with nothing new to say is just the loop
 		// continuing, which is what it should do.
 		if br.Status != domain.BlueprintRunStatusRunning {
+			if fencedAtGate() {
+				return
+			}
 			closeGate(engagementNoMessage, nil)
 			s.endEngagement(conv.ID, engagementNoMessage)
 			if _, mErr := s.conversations.ParkOpenForClaimSystem(context.WithoutCancel(ctx), orgID, conv.ID, conv.ClaimID, db.ParkIdle()); mErr != nil {
@@ -682,13 +759,27 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 			return true
 		}
 		s.endEngagement(conv.ID, engagementCancelled)
-		s.markConversationOpen(stepCtx, liveParkContext{
+		if s.markConversationOpen(stepCtx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conv.ID,
 			claimID:        conv.ClaimID,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 			runtime:        conv.Runtime,
-		})
+		}) {
+			return true
+		}
+		// The park is this step's settlement, and nothing else is going to
+		// read it: the dispatcher settles only stops nobody holds, and this
+		// engagement cleared the intent it would have looked for. A stop that
+		// came with a blueprint cancel ends the run here or not at all.
+		parked := *conv
+		parked.Status = "open"
+		s.reactToStepTerminal(ctx, orgID, br, parked, runConfig{
+			orgID:  orgID,
+			teamID: conv.TeamID,
+			wtPath: br.WorktreePath,
+			hasWT:  br.WorktreePath != "" && task.EntitySource == "github",
+		}, startTime)
 		return true
 	}
 

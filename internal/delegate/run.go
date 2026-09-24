@@ -182,6 +182,14 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// conversation now (see the mid-stream trip below for why deleting it is
 	// the worse mistake). Returns what runAgent returns.
 	fail := func(msg string, kind domain.ConversationFailureKind) bool {
+		// A failure observed as the lease fenced (a read cut short by the
+		// cancelled context, a process killed before it produced a result)
+		// is the fence's doing, not the work's, and the database still
+		// accepts a terminal until the lease actually lapses.
+		if leaseFenced(ctx) {
+			parked = true
+			return true
+		}
 		// The last moment this engagement holds its tree. Whatever the agent
 		// had written by the time the run broke is its account of the work,
 		// and a failed conversation is exactly the one a person will want it

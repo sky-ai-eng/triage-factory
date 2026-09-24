@@ -308,8 +308,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 }
 
 // RequeueConversation releases the claim FIRST and flips the conversation
-// row SECOND, in that order — the reverse of ConversationStore.Complete's
-// prep-then-flip split, but the same reason drives it: the returned row's
+// row SECOND, in that order, because the returned row's
 // derived display status (sqliteReturningDisplayStatusSQL, folded into
 // sqliteConversationReturningColumns) reads 'queued' only once no active
 // claim remains, so the release has to be visible to the LAST statement's
@@ -764,9 +763,11 @@ const conversationTimingClaimCols = `
 // conversationTimingStatusSQL is the timing projection's status: the stored outcome
 // when there is one, else the derived in-flight state. The percentile read
 // buckets by failure kind, so a mid-flight row must still name itself
-// rather than scan as NULL.
+// rather than scan as NULL. A claim whose lease has lapsed is not running,
+// for the same reason the display ladder says so (liveClaimExistsSQL).
 const conversationTimingStatusSQL = `COALESCE(status, CASE WHEN EXISTS (
-		SELECT 1 FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL)
+		SELECT 1 FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL
+		  AND cl.lease_expires_at > ` + sqliteNowExpr + `)
 	THEN 'running' ELSE 'queued' END)`
 
 func (s *conversationQueueStore) RecentConversationTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.ConversationTiming, error) {
@@ -1064,6 +1065,48 @@ func (s *conversationQueueStore) ExpiredClaimsSystem(ctx context.Context) (int, 
 		oldestSeconds = 0
 	}
 	return int(count), time.Duration(oldestSeconds) * time.Second, nil
+}
+
+func (s *conversationQueueStore) ExpiredClaimsOfExecutorSystem(ctx context.Context, executorID string, bootEpoch int64) ([]db.ClaimRef, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT id, org_id, conversation_id
+		FROM claims
+		WHERE executor_id = ? AND boot_epoch = ?
+		  AND released_at IS NULL AND lease_expires_at <= `+sqliteNowExpr+`
+		ORDER BY lease_expires_at, id
+	`, executorID, bootEpoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []db.ClaimRef
+	for rows.Next() {
+		var c db.ClaimRef
+		if err := rows.Scan(&c.ClaimID, &c.OrgID, &c.ConversationID); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationQueueStore) ReleaseExpiredClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE claims SET released_at = ?, outcome = 'reaped'
+		WHERE id = ? AND org_id = ? AND conversation_id = ?
+		  AND released_at IS NULL AND lease_expires_at <= `+sqliteNowExpr+`
+	`, time.Now().UTC(), claimID, orgID, conversationID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 func scanSqliteExecutorClaims(rows *sql.Rows) ([]domain.ExecutorClaim, error) {

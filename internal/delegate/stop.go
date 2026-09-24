@@ -282,10 +282,10 @@ func (s *Spawner) StopBlueprintRun(orgID, blueprintRunID string, cause StopCause
 
 	stepIDs, err := s.blueprints.ActiveStepConversationIDsSystem(ctx, orgID, blueprintRunID)
 	if err != nil {
-		// The signal is committed, so the run is not forgotten: the claim gate
-		// refuses a cancel-requested blueprint and the reaper finalizes it.
-		// What this call can no longer do is stop the live step now, which is
-		// the whole reason its caller asked.
+		// The signal is committed, so the claim gate hands out none of this
+		// blueprint's queued steps. What this call cannot do without the list
+		// is record the step stops that carry the run to its terminal, so the
+		// caller hears that the stop did not take.
 		return fmt.Errorf("list active step conversations: %w", err)
 	}
 	var errs []error

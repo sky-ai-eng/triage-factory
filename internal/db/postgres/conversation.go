@@ -734,7 +734,7 @@ func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conver
 		}
 		claim, err = updateClaimReturning(ctx, q, `
 			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
-			VALUES ($1, $2, $3, $4, now(), now() + make_interval(secs => $5))
+			VALUES ($1, $2, $3, $4, now(), statement_timestamp() + make_interval(secs => $5))
 			RETURNING *
 		`, orgID, conversationID, executorID, bootEpoch, db.DefaultClaimLease.Seconds())
 		if err != nil {
