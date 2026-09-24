@@ -360,9 +360,9 @@ type stopRequestRecorder struct {
 
 type stopRequestCall struct{ by, target string }
 
-func (r *stopRequestRecorder) RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string) (bool, error) {
+func (r *stopRequestRecorder) RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string, reason domain.ParkReason) (bool, error) {
 	r.calls = append(r.calls, stopRequestCall{by, signalTarget})
-	return r.ConversationStore.RequestStopSystem(ctx, orgID, conversationID, by, signalTarget)
+	return r.ConversationStore.RequestStopSystem(ctx, orgID, conversationID, by, signalTarget, reason)
 }
 
 // TestStop_AddressesTheLiveRemoteOwner: with no local handle and a live

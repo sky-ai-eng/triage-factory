@@ -280,7 +280,7 @@ func (r *recordingSink) OnMessage(m *domain.Message) error {
 func TestMemoryMirror_SDKToolRowsFileTheFile(t *testing.T) {
 	s, conversationID, task, cwd, mirror, counting := mirrorFixture(t, "mirror-sdk-hook")
 	inner := &recordingSink{}
-	sink := newActivitySink(inner, make(chan struct{}, 8), mirror)
+	sink := newActivitySink(inner, mirror, nil, activityTimings{})
 
 	writeAgentMemory(t, cwd, "what the agent worked out")
 
@@ -310,7 +310,7 @@ func TestMemoryMirror_SDKToolRowsFileTheFile(t *testing.T) {
 func TestMemoryMirror_SDKFencedRowFilesNothing(t *testing.T) {
 	_, conversationID, _, cwd, mirror, counting := mirrorFixture(t, "mirror-sdk-fenced")
 	inner := &recordingSink{err: db.ErrClaimReleased}
-	sink := newActivitySink(inner, make(chan struct{}, 8), mirror)
+	sink := newActivitySink(inner, mirror, nil, activityTimings{})
 
 	writeAgentMemory(t, cwd, "notes from an engagement that lost its claim")
 	if err := sink.OnMessage(&domain.Message{ConversationID: conversationID, Role: "tool", Content: "ok"}); err == nil {

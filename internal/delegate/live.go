@@ -29,7 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
+	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -99,9 +99,8 @@ type liveParkContext struct {
 //     processCompletion (finalize / advance / fail-with-reason / park open).
 //     The process is already closed.
 //   - hibernated true    → the driver parked the conversation open itself
-//     (snapshot written, status flipped): a paused turn, or a process quiet
-//     past the idle backstop. The caller returns dormant, keeping the
-//     worktree.
+//     (snapshot written, status flipped) after a paused turn with nothing
+//     queued behind it. The caller returns dormant, keeping the worktree.
 //   - fenced true       → a park this driver tried to write was refused: the
 //     engagement's claim is gone and a successor owns the conversation. Not
 //     hibernated, because nothing was parked; the caller records nothing at
@@ -134,8 +133,7 @@ type liveRunSpec struct {
 	// it to the activity sink, which checks it on every tool row. The same
 	// mirror is on park, so the engagement's ending sees whatever the last
 	// tool call did not.
-	mirror      *memoryMirror
-	idleTimeout time.Duration // <=0 disables the idle backstop (the bounded resume)
+	mirror *memoryMirror
 }
 
 // resultsBufferDepth sizes the OnResult channel runLiveAndDrive hands the
@@ -156,11 +154,10 @@ const resultsBufferDepth = maxCompletionRetries + 5
 // Shared by the initial run path and the resume path so every run executes
 // uniformly as a LiveRun.
 func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOutcome {
-	// Buffered so the reader goroutine's OnResult / activity callbacks never
-	// block on a driver that's momentarily not selecting (both use a
-	// non-blocking send, but a buffer keeps the common case lock-free).
+	// Buffered so the reader goroutine's OnResult callback never blocks on a
+	// driver that's momentarily not selecting (it uses a non-blocking send,
+	// but a buffer keeps the common case lock-free).
 	results := make(chan *agentproc.Result, resultsBufferDepth)
-	activity := make(chan struct{}, 64)
 
 	spec.opts.OnResult = func(r *agentproc.Result) {
 		// The driver consumes a result per turn: a conclusion closes the
@@ -179,7 +176,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 		default:
 		}
 	}
-	sink := newActivitySink(spec.sink, activity, spec.mirror)
+	sink := newActivitySink(spec.sink, spec.mirror, s.activityFor(spec.park.conversationID), s.resolvedActivityTimings())
 
 	lr, err := agentproc.RunInteractive(ctx, spec.opts, sink, spec.perms)
 	if err != nil {
@@ -191,7 +188,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	// the lease layer horizontal scaling adds builds on this column).
 	s.stampExecutor(spec.park.orgID, spec.park.conversationID, spec.park.claimID)
 
-	out := s.driveLiveConversation(ctx, spec.park, lr, results, activity, spec.idleTimeout)
+	out := s.driveLiveConversation(ctx, spec.park, lr, results)
 	// Capture the final session id / stderr off the (now-closed) process for
 	// the caller's completion + failure paths.
 	out.sessionID = lr.SessionID()
@@ -227,9 +224,9 @@ func foldAccounting(classified, merged *agentproc.Result) *agentproc.Result {
 
 // processSpend is the spend a live process has reported so far: the running
 // total the newest turn-end carried, zero before the first. Read at the
-// moment the driver lets go of the process — an idle or paused park, a
-// cancel — so the engagement's figure rides into the park rather than dying
-// with the process.
+// moment the driver lets go of the process — a paused park, a cancel — so
+// the engagement's figure rides into the park rather than dying with the
+// process.
 func processSpend(proc liveProc) float64 {
 	if r := proc.Result(); r != nil {
 		return r.CostUSD
@@ -263,26 +260,17 @@ func processSpend(proc liveProc) float64 {
 // with nothing queued the process closes and the conversation parks open,
 // and a queued steer is read next.
 //
-// The idle timer is the backstop against a process that has stopped
-// producing without ending its turn: it resets on every stream activity, so
-// a slow-but-working agent never trips it, and a genuinely quiet one is
-// closed and parked. idleTimeout<=0 disables it — the bounded resume runs
-// without one, so a turn there is bounded by the process itself (its result,
-// its exit, or a stop), never by a clock.
-//
-// The idle window is armed at entry (process spawn). The first stream event —
-// typically system/init, sub-second — resets it, so idleTimeout is effectively
-// the grace a *no-output* process gets before parking; keep it well above
-// agent-startup latency (the 5-min default is; a tiny injected value will
-// park before the first turn, which is exactly what the idle test leans on).
+// A process that has stopped producing without ending its turn is the
+// engagement's stall watchdog's to decide (activity.go), not this loop's: the
+// watchdog knows whether a tool call is in flight, which the stream cannot
+// say, and it stops a stall by cancelling ctx, so the driver leaves through
+// the same arm a user's stop takes. The same holds for the fresh run and the
+// resume alike.
 //
 // Pulled out from runLiveAndDrive so it can be driven with a fake proc +
 // hand-fed channels in tests, without spawning a subprocess.
-func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContext, proc liveProc, results <-chan *agentproc.Result, activity <-chan struct{}, idleTimeout time.Duration) liveOutcome {
-	idle, idleC := newIdleTimer(idleTimeout)
-	if idle != nil {
-		defer idle.Stop()
-	}
+func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContext, proc liveProc, results <-chan *agentproc.Result) liveOutcome {
+	tracker := s.activityFor(park.conversationID)
 	invalidAttempts := 0
 
 	for {
@@ -307,7 +295,6 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 				if proc.QueuedTurns() > 0 {
 					// The pause has a steered turn behind it, and the process
 					// starts it next.
-					resetIdleTimer(idle, idleTimeout)
 					continue
 				}
 				_ = proc.Close()
@@ -348,14 +335,13 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 					_ = proc.Close()
 					return liveOutcome{err: fmt.Errorf("re-prompt invalid completion envelope: %w", err)}
 				}
-				resetIdleTimer(idle, idleTimeout) // sending is activity
+				tracker.touch()
 
 			case turnNone:
 				if proc.QueuedTurns() > 0 {
 					// The turn ended, but a message steered in while it ran is
 					// queued and starts the next one — the conversation is
 					// still being driven, under the same claim.
-					resetIdleTimer(idle, idleTimeout)
 					continue
 				}
 				// The turn ended without a conclusion and nothing is queued
@@ -367,20 +353,6 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 				_ = proc.Close()
 				return liveOutcome{result: r}
 			}
-
-		case <-activity:
-			resetIdleTimer(idle, idleTimeout)
-
-		case <-idleC:
-			// Quiet past the threshold with no turn-end in sight — the process
-			// has stopped producing. Close it and park the run open to a
-			// durable resume.
-			_ = proc.Close()
-			park.costUSD = processSpend(proc)
-			if s.parkConversationOpen(ctx, park, proc.SessionID()) {
-				return liveOutcome{fenced: true, costUSD: park.costUSD}
-			}
-			return liveOutcome{hibernated: true, costUSD: park.costUSD}
 
 		case <-proc.Done():
 			// The process exited on its own (crash, or a Close from elsewhere).
@@ -460,8 +432,8 @@ func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext
 }
 
 // parkConversationOpen records a run as `open` when its process is gone — a
-// turn ended without a conclusion, the live driver closed a paused or quiet
-// process, or someone cancelled it. It flips the status via
+// turn ended without a conclusion, the live driver closed a paused process,
+// or someone (a person, or the stall watchdog) stopped it. It flips the status via
 // markConversationOpen and then snapshots the workspace (the cold-resume
 // backstop) so a resume that lands without the worktree can rebuild it. The
 // process is closed before this is reached, always: a status that reads open
@@ -574,60 +546,51 @@ func (s *Spawner) runOneShot(ctx context.Context, opts agentproc.RunOptions, sin
 	return out
 }
 
-// newIdleTimer returns a started idle timer and its fire channel, or
-// (nil, nil) when hibernation is disabled (d<=0) — a nil channel never
-// selects, so the driver's idle case is simply unreachable then.
-func newIdleTimer(d time.Duration) (*time.Timer, <-chan time.Time) {
-	if d <= 0 {
-		return nil, nil
-	}
-	t := time.NewTimer(d)
-	return t, t.C
-}
-
-// resetIdleTimer re-arms an idle timer on stream activity, draining a
-// concurrently-fired tick so the next idle window is the full timeout. A nil
-// timer (hibernation disabled) is a no-op.
-func resetIdleTimer(t *time.Timer, d time.Duration) {
-	if t == nil {
-		return
-	}
-	if !t.Stop() {
-		select {
-		case <-t.C:
-		default:
-		}
-	}
-	t.Reset(d)
-}
-
-// activitySink decorates a Sink so the driver's idle timer resets on every
-// stream message — the signal that the agent is actively working. The
-// non-blocking bump means a wedged driver never back-pressures the reader
-// goroutine that owns the sink.
+// activitySink decorates a Sink so the engagement's stall tracker hears the
+// stream as it is read: every line is activity, a tool_use is an operation
+// in flight until its result, and a permission prompt is an operation of its
+// own. It learns this through agentproc.StreamObserver, per line rather than
+// per flushed message, because a message still streaming and a tool still
+// running produce no Sink call at all.
 //
 // It is also where the SDK runtime mirrors the agent's memory file, on every
 // tool row the stream produces. The stream is the only place this runtime
 // learns that the agent did something: there is no per-call hook to hang the
 // check on the way the native loop has one, and a tool row IS a resolved tool
 // call (internal/agentproc/stream.go emits one per result).
+//
+// The observer methods run on the reader goroutine, which owns the tool
+// bookkeeping below; nothing else touches it.
 type activitySink struct {
-	inner    agentproc.Sink
-	activity chan<- struct{}
-	mirror   *memoryMirror
+	inner   agentproc.Sink
+	mirror  *memoryMirror
+	tracker *activityTracker
+	timings activityTimings
+
+	// pending is the tool calls whose result has not arrived, by tool-use id
+	// in the order their tool_use was read, and toolNames their names.
+	// endTool ends the operation the sink last began for them.
+	pending   []string
+	toolNames map[string]string
+	endTool   func()
 }
 
-func newActivitySink(inner agentproc.Sink, activity chan<- struct{}, mirror *memoryMirror) activitySink {
-	return activitySink{inner: inner, activity: activity, mirror: mirror}
+func newActivitySink(inner agentproc.Sink, mirror *memoryMirror, tracker *activityTracker, timings activityTimings) *activitySink {
+	return &activitySink{
+		inner:     inner,
+		mirror:    mirror,
+		tracker:   tracker,
+		timings:   timings,
+		toolNames: map[string]string{},
+		endTool:   func() {},
+	}
 }
 
-func (a activitySink) OnSession(id string) error {
-	a.bump()
+func (a *activitySink) OnSession(id string) error {
 	return a.inner.OnSession(id)
 }
 
-func (a activitySink) OnMessage(m *domain.Message) error {
-	a.bump()
+func (a *activitySink) OnMessage(m *domain.Message) error {
 	if err := a.inner.OnMessage(m); err != nil {
 		// The row did not land, so this one is not a moment to file anything.
 		// It matters most for the fence — a refused write means a successor
@@ -637,17 +600,81 @@ func (a activitySink) OnMessage(m *domain.Message) error {
 		return err
 	}
 	if m != nil && m.Role == "tool" {
-		a.mirror.check(context.Background())
+		// The reader goroutine has no caller context to bound this by, so it
+		// gets its own: a check that blocks would stall the stream.
+		ctx, cancel := context.WithTimeout(context.Background(), detachedWriteDeadline)
+		a.mirror.check(ctx)
+		cancel()
 	}
 	return nil
 }
 
-func (a activitySink) bump() {
-	select {
-	case a.activity <- struct{}{}:
-	default:
+func (a *activitySink) OnLine() {
+	a.tracker.touch()
+}
+
+func (a *activitySink) OnToolUse(id, name string) {
+	if _, seen := a.toolNames[id]; !seen {
+		a.pending = append(a.pending, id)
+	}
+	a.toolNames[id] = name
+	a.trackTools()
+}
+
+func (a *activitySink) OnToolResult(id string) {
+	if _, pending := a.toolNames[id]; !pending {
+		return
+	}
+	delete(a.toolNames, id)
+	a.pending = slices.DeleteFunc(a.pending, func(p string) bool { return p == id })
+	a.trackTools()
+}
+
+// OnTurnEnd ends every tool call the turn left without a result: the turn is
+// over, so none of them is still running.
+func (a *activitySink) OnTurnEnd() {
+	a.pending = a.pending[:0]
+	clear(a.toolNames)
+	a.trackTools()
+}
+
+// trackTools points the tracker at the pending calls, and ends the operation
+// once none is left. The operation is named for the oldest pending call and
+// runs a full tool bound from now, so every tool_use and every result starts
+// it again: the stream does not say whether the calls still pending ran
+// beside the one that returned or were queued behind it, and a queued one
+// starts only now. The watchdog stops the batch once it goes a whole tool
+// bound without a result.
+func (a *activitySink) trackTools() {
+	if len(a.pending) == 0 {
+		a.endTool()
+		a.endTool = func() {}
+		return
+	}
+	a.endTool = a.tracker.begin("tool:"+a.toolNames[a.pending[0]], a.timings.toolCall)
+}
+
+// OnPermission brackets a permission prompt as its own operation. The prompt
+// replaces the pending calls' operation while a person decides, and they are
+// in flight again, from then, once the person has: an approved tool runs after
+// the wait, and the time it runs is the tool's. A call whose tool_use has not
+// been read yet begins when it is, as any other does. The reader goroutine is
+// parked in the prompt, so no tool_use or result is read during it.
+//
+// The operation's deadline sits past the prompt's own timeout, so a prompt
+// nobody answers is denied and the agent carries on; the watchdog only stops
+// a wait that outlives its own timeout.
+func (a *activitySink) OnPermission(string) func() {
+	end := a.tracker.begin("permission", a.timings.permission+backstopMargin)
+	return func() {
+		end()
+		a.trackTools()
 	}
 }
 
-// Compile-time check that activitySink satisfies the Sink contract.
-var _ agentproc.Sink = activitySink{}
+// Compile-time checks that activitySink satisfies the Sink contract and the
+// observer the reader looks for.
+var (
+	_ agentproc.Sink           = (*activitySink)(nil)
+	_ agentproc.StreamObserver = (*activitySink)(nil)
+)

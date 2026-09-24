@@ -228,15 +228,6 @@ func (s *Spawner) noteCapAcquireImmediate(capN int) {
 	}
 }
 
-// DefaultIdleHibernateTimeout is how long a live run may go quiet — no
-// stream activity, no turn end — before the driver gives up on it and parks
-// the conversation to a durable resume. A backstop against a process that
-// has stopped producing, not a between-turns keep-alive: the process is
-// closed the moment a turn ends with nothing queued behind it, so this only
-// ever fires on a turn that went silent. Tunable via SetIdleHibernateTimeout
-// (tests inject a short value).
-const DefaultIdleHibernateTimeout = 5 * time.Minute
-
 // liveRunHandle wraps a run's live agent process plus the identity a
 // control op needs to reach it. Held in s.procs for the lifetime of the
 // run's live execution; the driver registers it when the process spawns
@@ -379,25 +370,6 @@ func (s *Spawner) semaphore() chan struct{} {
 	return s.runSem
 }
 
-// SetIdleHibernateTimeout overrides the idle-hibernation threshold. Tests
-// inject a short value to drive the idle path deterministically.
-func (s *Spawner) SetIdleHibernateTimeout(d time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.idleHibernateTimeout = d
-}
-
-// idleTimeout returns the effective idle-hibernation threshold, falling
-// back to the default when unset.
-func (s *Spawner) idleTimeout() time.Duration {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.idleHibernateTimeout > 0 {
-		return s.idleHibernateTimeout
-	}
-	return DefaultIdleHibernateTimeout
-}
-
 // SetAwaitingCredentialsTimeout overrides the awaiting-credentials wait's
 // deadline and poll cadence (TFAC-614). Tests inject short values to drive
 // the timeout/requeue path deterministically without waiting out the real
@@ -471,7 +443,12 @@ func (c inProcessController) Steer(ctx context.Context, conversationID, text str
 	if h == nil {
 		return fmt.Errorf("steer run %s: %w", conversationID, ErrNoLiveProcess)
 	}
-	return steerSendError(conversationID, h.lr.Send(ctx, text))
+	err := h.lr.Send(ctx, text)
+	if err == nil {
+		// A turn sent into the process is activity for its engagement.
+		c.s.activityFor(conversationID).touch()
+	}
+	return steerSendError(conversationID, err)
 }
 
 // steerSendError is what a steer reports of the process's answer. A process

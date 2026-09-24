@@ -73,6 +73,9 @@ const SANDBOXES: FleetSandboxes = {
       status: 'failed',
       failure_kind: 'memory_limit',
       outcome: 'failed',
+      // A released claim keeps its last reading; the table must not show it.
+      last_activity_at: '2026-07-30T11:01:30Z',
+      current_op: 'provider',
     },
     {
       id: UNMEASURED_CLAIM,
@@ -82,6 +85,9 @@ const SANDBOXES: FleetSandboxes = {
       live: true,
       duration_seconds: 1800,
       status: 'running',
+      // Three minutes before the read's generated_at.
+      last_activity_at: '2026-07-30T11:57:00Z',
+      current_op: 'tool:bash',
     },
   ],
 }
@@ -168,6 +174,16 @@ async function renderFleet() {
   await screen.findByRole('button', { name: 'sandboxes on executor-alpha-01' })
 }
 
+// sandboxRow scopes queries to one claim's row of the breakdown table, found
+// by its run id's copy button.
+function sandboxRow(conversationId: string) {
+  const row = within(screen.getByRole('table'))
+    .getByRole('button', { name: `copy run id ${conversationId}` })
+    .closest('tr')
+  if (!row) throw new Error(`no table row for ${conversationId}`)
+  return within(row)
+}
+
 const sandboxUrls = () => requests.filter((u) => u.includes('/sandboxes'))
 const seriesUrls = () => requests.filter((u) => u.includes('/series'))
 
@@ -213,7 +229,21 @@ describe('Fleet sandbox breakdown', () => {
     // The live, unmeasured claim is listed all the same, with dashes where
     // nothing was measured — absent means "not measured", never zero.
     expect(table.getByText('live')).toBeInTheDocument()
-    expect(table.getAllByText('—')).toHaveLength(3)
+    expect(sandboxRow('run-cccccccc-dddd').getAllByText('—')).toHaveLength(3)
+  })
+
+  it('shows a live claim’s idle readout and a dash for a released one', async () => {
+    const user = userEvent.setup()
+    await renderFleet()
+    await user.click(screen.getByRole('button', { name: 'sandboxes on executor-alpha-01' }))
+    await screen.findByText('2 most recent')
+
+    expect(within(screen.getByRole('table')).getByText('idle')).toBeInTheDocument()
+    expect(sandboxRow('run-cccccccc-dddd').getByText('3m 0s · tool:bash')).toBeInTheDocument()
+
+    const released = sandboxRow('run-aaaaaaaa-bbbb')
+    expect(released.getByText('—')).toBeInTheDocument()
+    expect(released.queryByText(/provider/)).not.toBeInTheDocument()
   })
 
   it('collapsing stops the breakdown from refetching', async () => {

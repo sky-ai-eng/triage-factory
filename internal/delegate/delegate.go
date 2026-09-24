@@ -667,7 +667,11 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	// a direct call to GitHub — it crosses the run's sidecar REST proxy — so
 	// the span covers a hop the outbound-client instrumentation cannot see.
 	fetchCtx, fetchSpan := tracer.Start(ctx, "engagement.fetch")
+	// The GitHub client bounds the call itself; the watchdog's operation is
+	// the backstop behind that bound.
+	endFetch := s.activityFor(conversationID).begin("fetch_pr", fetchPROpDeadline)
 	pr, err := ghClient.GetPR(fetchCtx, owner, repo, prNumber, false)
+	endFetch()
 	recordSpanError(fetchSpan, err)
 	fetchSpan.End()
 	if err != nil {
@@ -738,11 +742,20 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	// CleanupPRConfig reclaims via filepath.Base(wtPath), so it follows this
 	// key automatically.
 	cloneCtx, cloneSpan := tracer.Start(ctx, "engagement.clone")
+	// A clone that cannot finish in its bound is a setup failure, and the
+	// timeout surfaces as the error it is for the bring-up ladder to requeue.
+	// The watchdog's operation is the backstop for a clone that ignores its
+	// context.
+	timings := s.resolvedActivityTimings()
+	cloneCtx, cancelClone := context.WithTimeout(cloneCtx, timings.workspaceOp)
+	endClone := s.activityFor(conversationID).begin("clone", timings.workspaceOp)
 	wtPath, err := worktree.CreateForPR(cloneCtx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, rootKey,
 		worktree.WithCloneAuth(cloneAuth),
 		// Refresh origin/<base> at materialization so `pr diff` frames against a
 		// current base instead of a clone-time-frozen ref (TFAC-505).
 		worktree.WithBaseBranch(pr.BaseRef))
+	endClone()
+	cancelClone()
 	recordSpanError(cloneSpan, err)
 	cloneSpan.End()
 	if err != nil {

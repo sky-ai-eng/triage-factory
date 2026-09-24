@@ -205,8 +205,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// cancelled parks this run and folds a fence trip the same way. This is
 	// the path a partition self-fence trip drives every live run down, so a
 	// late self-fence lands here first. parked is set unconditionally, not
-	// just on a fence trip: a cancel is a park now, so the worktree stays as
-	// the warm resume cache exactly like an idle hibernation's does.
+	// just on a fence trip: a cancel is a park, so the worktree stays as the
+	// warm resume cache exactly like a turn-end park's does. A stall is a
+	// cancel too, and stopParkReason names it.
 	//
 	// sessionID and costUSD ride in from the caller because they are only
 	// known once the agent has actually started — the pre-launch cancel below
@@ -227,7 +228,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			namespace:      workspaceKey(task.ID),
 			claudeCwd:      cfg.wtPath,
 			claimID:        cfg.claimID,
-			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+			reason:         db.ParkStopped(stopParkReason(ctx), ""),
 			runtime:        domain.ConversationRuntimeSDK,
 			costUSD:        costUSD,
 			mirror:         mirror,
@@ -651,11 +652,10 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 				runtime:        domain.ConversationRuntimeSDK,
 				mirror:         mirror,
 			},
-			opts:        baseOpts,
-			perms:       perms,
-			sink:        sink,
-			mirror:      mirror,
-			idleTimeout: s.idleTimeout(),
+			opts:   baseOpts,
+			perms:  perms,
+			sink:   sink,
+			mirror: mirror,
 		})
 	} else {
 		out = s.runOneShot(ctx, baseOpts, sink)
@@ -696,9 +696,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		s.assertResumeCoordinates(context.WithoutCancel(ctx), orgID, conversationID, resumeCheckRest)
 	}
 
-	// The driver parked the run itself (status `open`, snapshot written) — a
-	// paused turn, or the idle backstop — a dormant disposition, so keep the
-	// warm worktree as the fast resume path.
+	// The driver parked the run itself (status `open`, snapshot written) after
+	// a paused turn — a dormant disposition, so keep the warm worktree as the
+	// fast resume path.
 	if out.hibernated {
 		parked = true
 		return

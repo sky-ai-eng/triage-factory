@@ -185,6 +185,10 @@ const (
 	// changes nothing — the fix is a person picking a model, and a park that
 	// says "the runtime could not start" sends them looking at the runtime.
 	ParkReasonModelNotEnabled ParkReason = "model_not_enabled"
+	// ParkReasonStalled — the engagement's stall watchdog stopped it: idle past
+	// its limit with nothing in flight, or an operation outlived its own
+	// deadline. Nothing retries it; a message resumes it.
+	ParkReasonStalled ParkReason = "stalled"
 	// ParkReasonDrained — the executor holding this conversation is draining
 	// (scale-down). A forward seam: no writer yet, and the one that lands is
 	// the drain trigger internal/delegate/workspace_snapshot.go documents.
@@ -208,6 +212,7 @@ func AllParkReasons() []ParkReason {
 		ParkReasonBlueprintTerminal,
 		ParkReasonLaunchFailed,
 		ParkReasonModelNotEnabled,
+		ParkReasonStalled,
 		ParkReasonDrained,
 	}
 }
@@ -220,7 +225,8 @@ func IsParkReason(reason string) bool {
 	switch ParkReason(reason) {
 	case ParkReasonIdle, ParkReasonUserCancelled, ParkReasonSystemCancelled,
 		ParkReasonBlueprintCancelled, ParkReasonBlueprintTerminal,
-		ParkReasonLaunchFailed, ParkReasonModelNotEnabled, ParkReasonDrained:
+		ParkReasonLaunchFailed, ParkReasonModelNotEnabled, ParkReasonStalled,
+		ParkReasonDrained:
 		return true
 	}
 	return false

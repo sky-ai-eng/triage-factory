@@ -7,6 +7,7 @@ import {
   activeProse,
   canResumeConversation,
   chainPosition,
+  claimIdleReadout,
   completionGloss,
   completionKind,
   isActiveStatus,
@@ -358,5 +359,25 @@ describe('queueDwellMs', () => {
   it('clamps clock skew to zero rather than going negative', () => {
     const conversation = base({ Status: 'queued', QueuedAt: '2026-07-16T10:00:05Z' })
     expect(queueDwellMs(conversation, T('2026-07-16T10:00:00Z'))).toBe(0)
+  })
+})
+
+describe('claimIdleReadout', () => {
+  const now = T('2026-07-16T10:03:00Z')
+
+  it('reads the idle duration, then the operation in flight', () => {
+    expect(claimIdleReadout('2026-07-16T10:00:00Z', 'tool:bash', now)).toBe('3m 0s · tool:bash')
+  })
+
+  it('reads the idle duration alone with nothing in flight', () => {
+    expect(claimIdleReadout('2026-07-16T10:00:00Z', undefined, now)).toBe('3m 0s')
+  })
+
+  it('is null without a stamp, whatever the operation', () => {
+    expect(claimIdleReadout(undefined, 'provider', now)).toBeNull()
+  })
+
+  it('clamps clock skew to zero rather than going negative', () => {
+    expect(claimIdleReadout('2026-07-16T10:03:05Z', 'provider', now)).toBe('0s · provider')
   })
 })

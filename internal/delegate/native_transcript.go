@@ -20,6 +20,10 @@ import (
 // rather than one that spans the engagement; a write refused with
 // db.ErrClaimReleased surfaces through the engine as the engagement's
 // failure, and recordNativeResult recognizes it as a fence-out.
+//
+// Every successful write is activity for the engagement's stall watchdog:
+// a row that landed through the claim fence is the engagement getting
+// somewhere.
 type nativeTranscript struct {
 	spawner      *Spawner
 	orgID        string
@@ -48,7 +52,11 @@ func (t *nativeTranscript) ListForAssembly(ctx context.Context, orgID, conversat
 }
 
 func (t *nativeTranscript) MarkDelivered(ctx context.Context, orgID, conversationID string, ids []int, subtype string) error {
-	return t.spawner.conversations.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, t.claimID, ids, subtype)
+	if err := t.spawner.conversations.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, t.claimID, ids, subtype); err != nil {
+		return err
+	}
+	t.spawner.activityFor(t.conversation).touch()
+	return nil
 }
 
 // Insert appends a row and broadcasts it. The row is attributed to this
@@ -59,6 +67,7 @@ func (t *nativeTranscript) Insert(ctx context.Context, orgID string, msg *domain
 		return 0, fmt.Errorf("insert message: %w", err)
 	}
 	msg.ID = int(id)
+	t.spawner.activityFor(t.conversation).touch()
 	// An undelivered row written by the loop is machine-minted input — the
 	// opening turn, a repair notice — and rendering it would show the user a
 	// message nobody typed and the model has not been shown yet.
@@ -81,6 +90,7 @@ func (t *nativeTranscript) Compact(ctx context.Context, orgID, conversationID st
 	if err := t.spawner.conversations.CompactForClaimSystem(ctx, orgID, conversationID, t.claimID, replyRow, resultRow, inactiveIDs); err != nil {
 		return err
 	}
+	t.spawner.activityFor(t.conversation).touch()
 	if replyRow != nil {
 		t.spawner.broadcastMessage(orgID, t.conversation, replyRow)
 	}
@@ -89,9 +99,12 @@ func (t *nativeTranscript) Compact(ctx context.Context, orgID, conversationID st
 }
 
 func (t *nativeTranscript) SettleCompactionRequest(ctx context.Context, orgID, conversationID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) error {
-	_, err := t.spawner.conversations.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, t.claimID,
-		requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUSD, reason)
-	return err
+	if _, err := t.spawner.conversations.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, t.claimID,
+		requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUSD, reason); err != nil {
+		return err
+	}
+	t.spawner.activityFor(t.conversation).touch()
+	return nil
 }
 
 // spendGuard is the native loop's pre-call spend arm. It reuses the

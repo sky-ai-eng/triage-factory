@@ -736,6 +736,9 @@ type ConversationStore interface {
 	// Postgres a non-empty target inserts the conversation_signals row in the
 	// same transaction, so the intent and its hastening signal commit together
 	// or not at all. SQLite has no signal table and ignores the target.
+	// reason is the park reason the stop settles as, or "" to derive it from
+	// the actor as before; it keys on stop_requested_at like the actor, so a
+	// second request keeps the first's time, actor and reason.
 	// Idempotent: a second request keeps the first's time and actor.
 	// requested is false, and nothing is written, when the conversation is
 	// terminal. Admin pool: the caller has already resolved visibility under
@@ -754,7 +757,7 @@ type ConversationStore interface {
 	// is a refusal rather than a row to show. A caller that renders the
 	// conversation afterwards reads it, and should, because the holder may
 	// already have settled the stop by then.
-	RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string) (requested bool, err error)
+	RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string, reason domain.ParkReason) (requested bool, err error)
 
 	// SetSessionSystem is the claimless door onto sdk_session_id. Every
 	// engagement holds a claim and goes through SetSessionForClaimSystem
@@ -1140,7 +1143,7 @@ type ConversationStore interface {
 
 	// ParkOpenForClaimSystem flips a conversation to `open`: it stopped without concluding. This is
 	// the ONLY writer of that state, and there is deliberately only one —
-	// an idle hibernation and a user's cancel produce the same row, because
+	// a turn that ended idle and a user's cancel produce the same row, because
 	// they are the same fact about the conversation. Stamps parked_at (only
 	// when unset, so a re-park doesn't restart the snapshot-retention clock on
 	// a workspace that went dormant earlier) and releases the active claim.

@@ -32,6 +32,11 @@ const (
 	// up, either by cancelling the claim outright or by racing a cancel
 	// against it. The run is parked, not failed. Anticipated, never an error.
 	engagementCancelled = "cancelled"
+	// engagementStalled — the stall watchdog stopped this run before the
+	// agent came up: a setup operation outlived its deadline, or nothing
+	// happened for the idle limit. Parked like a cancel, and anticipated
+	// in the same way; the stall counter is where a rash of them shows.
+	engagementStalled = "stalled"
 	// engagementShutdown — the dispatcher's own context ended mid-setup, so
 	// this engagement stood down and left the claim for the shutdown release
 	// to hand back. Distinct from engagementCancelled because the run is
@@ -183,14 +188,23 @@ func stopOutcome(parent, step context.Context) (outcome string, ok bool) {
 	case leaseFenced(step):
 		return engagementFenced, true
 	// The resume path's parent is the claim context, which a renewal cancels
-	// to deliver a stop. That is a user's stop reaching the engagement, not
-	// the dispatcher standing down.
-	case parent.Err() != nil && !errors.Is(context.Cause(parent), errStopRequested):
+	// to deliver a stop and the stall watchdog cancels to stop a stall.
+	// Neither is the dispatcher standing down.
+	case parent.Err() != nil && !errors.Is(context.Cause(parent), errStopRequested) && !errors.Is(context.Cause(parent), errStalled):
 		return engagementShutdown, true
 	case step.Err() != nil:
-		return engagementCancelled, true
+		return cancelOutcome(step), true
 	}
 	return "", false
+}
+
+// cancelOutcome names a stop that ended an engagement before the agent came
+// up: the watchdog's, or anyone else's.
+func cancelOutcome(step context.Context) string {
+	if errors.Is(context.Cause(step), errStalled) {
+		return engagementStalled
+	}
+	return engagementCancelled
 }
 
 // endEngagementIfStopped closes conversationID's root when a cancellation is what

@@ -144,7 +144,7 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if got := takeOver(t, f, 100); len(got) != 1 {
 			t.Fatalf("taken over = %v, want the one expired claim", got)
 		}
-		if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, c.ID, c.ClaimID, testClaimLease); !errors.Is(err, db.ErrClaimReleased) {
+		if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, c.ID, c.ClaimID, testClaimLease, 0, ""); !errors.Is(err, db.ErrClaimReleased) {
 			t.Errorf("renewal after the takeover = %v, want ErrClaimReleased", err)
 		}
 	})

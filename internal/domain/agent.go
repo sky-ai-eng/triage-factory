@@ -416,6 +416,17 @@ type Conversation struct {
 	// off the wire: the park_reason the settlement records is what says who.
 	StopRequestedAt *time.Time `json:"stop_requested_at,omitempty"`
 	StopRequestedBy string     `json:"-"`
+	// StopRequestedReason is the park reason the pending stop settles as when
+	// the requester's identity does not decide it (a stall). Empty derives
+	// the reason from StopRequestedBy.
+	StopRequestedReason string `json:"-"`
+
+	// ClaimLastActivityAt / ClaimCurrentOp are the live claim's activity as
+	// its last renewal stamped it: when the engagement last did anything the
+	// stall watchdog counts, and the operation it had in flight then. Both
+	// empty with no live claim, or before its first renewal.
+	ClaimLastActivityAt *time.Time `json:"claim_last_activity_at,omitempty"`
+	ClaimCurrentOp      string     `json:"claim_current_op,omitempty"`
 
 	WorktreePath  string
 	ResultSummary string
@@ -936,6 +947,12 @@ type ExecutorClaim struct {
 	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
 	// "reaped" | "requeued_shutdown"); empty while live.
 	Outcome string
+	// LastActivityAt / CurrentOp are what the holder's last renewal stamped:
+	// when the engagement last did anything the stall watchdog counts as
+	// activity, on database time, and the operation it had in flight then
+	// ("" for none). nil before the first renewal.
+	LastActivityAt *time.Time
+	CurrentOp      string
 
 	// PeakMemMB / CPUUsec are the claim's end-state actuals, read from the
 	// jail's cgroup at teardown. These are the billing-grade record; a

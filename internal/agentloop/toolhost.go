@@ -146,8 +146,10 @@ func DialToolHost(socketPath string, timeout time.Duration) (ToolHost, error) {
 
 // defaultToolCallTimeout bounds one round trip when the caller names none.
 // Well above any tool's own timeout: this catches a host that died or wedged,
-// not a slow command.
-const defaultToolCallTimeout = 30 * time.Minute
+// not a slow command. It sits a minute above the stall watchdog's 30-minute
+// bound on one tool call (internal/delegate), so a tool that is merely slow
+// is stopped as a stall and parked, never failed as a dead socket.
+const defaultToolCallTimeout = 31 * time.Minute
 
 func (h *socketToolHost) Close() error {
 	h.mu.Lock()

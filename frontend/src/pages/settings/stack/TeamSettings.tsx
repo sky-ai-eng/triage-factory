@@ -122,7 +122,7 @@ const BASE_BRANCH_PUSH_LABELS: Record<string, string> = Object.fromEntries(
 // permission_absent_grace_{min,max}_seconds fields are preferred and these only
 // apply against a server too old to send them. Keep in sync with the source of
 // truth: delegate.AbsentGrace{Min,Max}Seconds in internal/delegate/permissions.go
-// (max = DefaultIdleHibernateTimeout/2 − 1s). If that constant changes, this stale
+// (max = permissionPromptDeadline − 1s). If that constant changes, this stale
 // fallback only affects users on an older server that doesn't advertise bounds.
 const GRACE_MIN_FALLBACK = 1
 const GRACE_MAX_FALLBACK = 149

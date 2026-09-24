@@ -232,8 +232,41 @@ type Engine struct {
 	// the package defaults.
 	Retry RetryPolicy
 
+	// Activity, when set, is told where the loop blocks: each provider
+	// attempt and each tool call dispatched into the jail is an operation
+	// with the bound ActivityBounds names for it, and every persisted row is
+	// activity. Optional.
+	Activity       Activity
+	ActivityBounds ActivityBounds
+
 	// Log receives operational messages. Optional.
 	Log Logger
+}
+
+// Activity, when set, is told where the loop blocks. Every method is
+// called from the loop's goroutine and must not block.
+type Activity interface {
+	Begin(name string, bound time.Duration) (end func())
+	Progress(bound time.Duration)
+	Touch()
+}
+
+// ActivityBounds are the deadlines the loop reports its operations with. The
+// caller owns the values; the loop only carries them to Activity.
+type ActivityBounds struct {
+	// Provider bounds one provider attempt's wait for its next byte: the
+	// first, and each one after it as the stream progresses.
+	Provider time.Duration
+	// Tool bounds one tool call dispatched into the jail.
+	Tool time.Duration
+}
+
+// beginActivity reports an operation to Activity, or does nothing.
+func (e *Engine) beginActivity(name string, bound time.Duration) (end func()) {
+	if e.Activity == nil {
+		return func() {}
+	}
+	return e.Activity.Begin(name, bound)
 }
 
 // Logger is the minimal logging surface the engine needs, satisfied by

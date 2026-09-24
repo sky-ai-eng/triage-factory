@@ -96,7 +96,7 @@ type Spawner struct {
 	claimCredentials db.ClaimCredentialsStore
 	// awaitingCredentialsTimeout overrides awaitingCredentialsTimeout (the
 	// package default) when > 0 — tests inject a short value via
-	// SetAwaitingCredentialsTimeout, mirroring idleHibernateTimeout.
+	// SetAwaitingCredentialsTimeout.
 	awaitingCredentialsTimeoutOverride time.Duration
 	// awaitingCredentialsPollInterval overrides the package default poll
 	// cadence when > 0, same override shape.
@@ -326,6 +326,14 @@ type Spawner struct {
 	// ordinary untraced case, and every reader is nil-safe. Guarded by mu
 	// like cancels beside it.
 	engagements map[string]*engagement
+	// activity holds each dispatching engagement's stall tracker, keyed by
+	// conversation id beside engagements, so the transcript writers and the
+	// stream sink reach it without new plumbing. Guarded by mu.
+	activity map[string]*activityTracker
+	// activityTimingsOverride replaces the stall watchdog's bounds field by
+	// field when set; zero keeps each constant. Only tests set it, through
+	// setActivityTimings.
+	activityTimingsOverride activityTimings
 
 	dispatchWake   chan struct{}  // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
 	firingWaker    FiringWaker    // nil-safe; set post-construction via SetFiringWaker
@@ -405,11 +413,6 @@ type Spawner struct {
 	// before the dispatcher starts. Each drain acquires a slot before
 	// claiming and the run goroutine releases it on terminal.
 	runSem chan struct{}
-	// idleHibernateTimeout is how long a live run may go quiet (no stream
-	// activity) before it hibernates to a durable resume. Zero means use
-	// DefaultIdleHibernateTimeout; tests inject a short value via
-	// SetIdleHibernateTimeout. Read through idleTimeout().
-	idleHibernateTimeout time.Duration
 	// permPresencePoll is how often the TFAC-392 presence-gated permission wait
 	// re-checks for an answer-capable, focused tab. Zero means use
 	// defaultPresencePollInterval; tests inject a short value via
@@ -597,6 +600,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		model:                 model,
 		cancels:               make(map[string]context.CancelFunc),
 		engagements:           make(map[string]*engagement),
+		activity:              make(map[string]*activityTracker),
 		dispatchWake:          make(chan struct{}, 1),
 		procs:                 make(map[string]*liveRunHandle),
 		permPending:           make(map[string]*pendingPermission),

@@ -768,16 +768,37 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	if blobs == nil {
 		return "", "", fmt.Errorf("worktree %q missing and no blob store to rehydrate from", conv.WorktreePath)
 	}
-	rc, err := blobs.Get(ctx, snapshotKey(orgID, keyID))
+
+	// Past the warm check the tree is rebuilt from the store: one workspace
+	// operation, bounded so a store or a git replay that stops answering
+	// fails the rebuild as the error it is, and tracked so the watchdog backs
+	// that bound up. The wait for an in-flight persist is not part of it — it
+	// has a bound of its own, which an operator sets — and the fresh-build
+	// rung reports its own operations.
+	timings := s.resolvedActivityTimings()
+	activity := s.activityFor(conv.ID)
+	beginRehydrate := func() (context.Context, func()) {
+		opCtx, cancel := context.WithTimeout(ctx, timings.workspaceOp)
+		end := activity.begin("rehydrate", timings.workspaceOp)
+		return opCtx, func() { end(); cancel() }
+	}
+	opCtx, endOp := beginRehydrate()
+	defer func() { endOp() }()
+
+	rc, err := blobs.Get(opCtx, snapshotKey(orgID, keyID))
 	if errors.Is(err, storage.ErrNotFound) {
 		// Not there yet, or not there at all — the lifecycle record is what
 		// separates those, and the wait is where that question is asked.
+		endOp()
+		endWait := activity.begin("snapshot_wait", s.snapshotWait()+backstopMargin)
 		appeared, waited := s.awaitSnapshotBlob(ctx, orgID, keyID)
+		endWait()
 		span.SetAttributes(telemetry.SnapshotWaitedMs(waited.Milliseconds()))
 		if !appeared {
 			return s.workspaceFromNothing(ctx, orgID, conv, keyID, fresh)
 		}
-		rc, err = blobs.Get(ctx, snapshotKey(orgID, keyID))
+		opCtx, endOp = beginRehydrate()
+		rc, err = blobs.Get(opCtx, snapshotKey(orgID, keyID))
 		if err != nil {
 			// It existed a moment ago and now does not read: a successor's
 			// discard, or a store fault. Either way there is nothing to
@@ -795,7 +816,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	// Rebuild at the deterministic, host-local run-root for this key (equal to
 	// conv.WorktreePath on the same host; a fresh path after landing elsewhere).
 	wtDir := worktree.RunRoot(keyID)
-	if rErr := s.rehydrateFromSnapshot(ctx, wtDir, seed, rc); rErr != nil {
+	if rErr := s.rehydrateFromSnapshot(opCtx, wtDir, seed, rc); rErr != nil {
 		return "", "", rErr
 	}
 	s.restampWorktreePath(ctx, orgID, conv, wtDir)

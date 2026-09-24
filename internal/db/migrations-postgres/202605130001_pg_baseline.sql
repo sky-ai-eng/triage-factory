@@ -1081,6 +1081,10 @@ CREATE TABLE public.conversations (
     -- Text rather than a users FK: deleting a user must not cascade a stop away.
     stop_requested_at timestamp with time zone,
     stop_requested_by text,
+    -- The park reason a stop settles as, when it is not the requester's
+    -- identity that decides it. NULL derives the reason from stop_requested_by
+    -- as above. Set only with stop_requested_at, cleared with it.
+    stop_requested_reason text,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
     -- Stamped on park, cleared on resume; the snapshot-retention sweep keys off it.
@@ -5398,6 +5402,11 @@ CREATE TABLE public.claims (
     -- figure includes the gVisor sentry's systrap overhead.
     peak_mem_mb integer,
     cpu_usec bigint,
+    -- When the engagement last did anything the stall watchdog counts as
+    -- activity, on database time; and the operation it had in flight at the
+    -- last renewal, or NULL. Stamped by the renewal only.
+    last_activity_at timestamp with time zone,
+    current_op text,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 

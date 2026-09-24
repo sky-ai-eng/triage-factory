@@ -1283,7 +1283,7 @@ func TestSettleUnclaimedStops_Postgres_NoDeadlockAgainstARunsTerminal(t *testing
 		if _, err := stores.Blueprints.RequestRunCancelSystem(ctx, orgID, conv.BlueprintRunID); err != nil {
 			t.Fatalf("iteration %d: RequestRunCancelSystem: %v", i, err)
 		}
-		if ok, err := stores.Conversations.RequestStopSystem(ctx, orgID, conv.ID, userID, ""); err != nil || !ok {
+		if ok, err := stores.Conversations.RequestStopSystem(ctx, orgID, conv.ID, userID, "", ""); err != nil || !ok {
 			t.Fatalf("iteration %d: RequestStopSystem = (%v, %v)", i, ok, err)
 		}
 
